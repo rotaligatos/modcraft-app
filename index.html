@@ -391,6 +391,8 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
         <button class="btn" onclick="goStage(1)"><i class="ti ti-arrow-left"></i>Back</button>
         <button class="btn btn-primary" style="flex:1;justify-content:center" onclick="openPrint()"><i class="ti ti-file-export"></i>Generate final quotation</button>
       </div>
+      <!-- Final Quotation cost adjustment cards — populated by renderFQCards() on stage 2 entry -->
+      <div id="fq-cards-wrap" style="margin-top:6px"></div>
     </div>
   </div>
 </div>
@@ -1081,7 +1083,7 @@ var currentUserCompany = 'World Class Laminate, Inc.';
 var COMPANIES = ['World Class Laminate, Inc.', 'Module Systems and Services, Inc.', 'Cebu World Laminate, Inc.'];
 var dashWidgets = {kpis:true,chart:true,pipeline:true,team:true,followed:true};
 var appLogoData = null;
-var quotationLogoData = null;
+var companyLogos = {};   // keyed by company name — one logo per company
 var qBondIns = {
   enabled: false,
   surety:      { active:false, basis:0,    insuredPct:0, premiumPct:0 },
@@ -1089,6 +1091,23 @@ var qBondIns = {
   performance: { active:false, insuredPct:0, premiumPct:0 },
   insurances:  []
 };
+// ── Final Quotation (Stage 2) independent state ───────────────────────────
+var fqVatApproved = true;
+var fqDiscPct = 0;
+var fqDiscApproved = false;
+var fqPremApproved = false;
+var fqCustomCF = null;
+var fqCustomCFApproved = false;
+var fqBondIns = {
+  enabled: false,
+  surety:      { active:false, basis:0,    insuredPct:0, premiumPct:0 },
+  thirdParty:  { active:false, insuredPct:0, premiumPct:0 },
+  performance: { active:false, insuredPct:0, premiumPct:0 },
+  insurances:  []
+};
+var fqInstRateOverride = null;
+var fqAssmRateOverride = null;
+var modalCtx = 's1';  // 's1' = Stage 1, 'fq' = Final Quotation
 // ── Google Auth & Sheets config ──────────────────────────────────────────
 var GOOG_CLIENT_ID='605710112392-vgvmr9e66b8himis6ka118cdq5er6393.apps.googleusercontent.com';
 var SHEETS_ID='1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o';
@@ -1599,6 +1618,7 @@ function goStage(n) {
   el("s2-wrap").style.display = n===2?"block":"none";
   el("s1btn").classList.toggle("active",n===1);
   el("s2btn").classList.toggle("active",n===2);
+  if(n===2) initFinalQuotation();
 }
 function doApprove() {
   var name=el("cl-name")?el("cl-name").value:"";
@@ -1624,17 +1644,26 @@ function confirmRevise() {
   closeModal("ov-revise"); goStage(1);
 }
 function onNonVat() {
+  modalCtx='s1';
   document.querySelectorAll("[name='vat']")[0].checked=true;
   openModal("ov-vat");
 }
 function confirmVat() {
   if(!checkPin(el("vat-pin").value)){ el("vat-err").style.display="block"; return; }
-  qVatApproved=false; el("vat-ok-tag").style.display="inline";
-  document.querySelectorAll("[name='vat']")[1].checked=true;
-  closeModal("ov-vat"); recalc();
+  if(modalCtx==='fq'){
+    fqVatApproved=false;
+    var fqTag=el('fq-vat-ok-tag'); if(fqTag) fqTag.style.display='inline';
+    var fqRadios=document.querySelectorAll("[name='fq-vat']"); if(fqRadios[1]) fqRadios[1].checked=true;
+    closeModal("ov-vat"); recalcFQ();
+  } else {
+    qVatApproved=false; el("vat-ok-tag").style.display="inline";
+    document.querySelectorAll("[name='vat']")[1].checked=true;
+    closeModal("ov-vat"); recalc();
+  }
 }
 function onDiscInput() { qDiscApproved=false; el("disc-ok-msg").style.display="none"; el("disc-req-btn").innerHTML='<i class="ti ti-send"></i>Request'; el("disc-req-btn").className="btn btn-amber"; }
 function onDiscRequest() {
+  modalCtx='s1';
   var d=parseFloat(el("disc-inp").value);
   if(!d||d<=0){alert("Enter a valid discount %."); return;}
   el("disc-desc").textContent="A discount of "+d+"% has been requested. Approval required.";
@@ -1642,14 +1671,26 @@ function onDiscRequest() {
 }
 function confirmDisc() {
   if(!checkPin(el("disc-pin").value)){el("disc-err").style.display="block";return;}
-  qDiscPct=parseFloat(el("disc-inp").value); qDiscApproved=true;
-  el("disc-ok-msg").style.display="flex"; el("disc-ok-txt").textContent=qDiscPct+"% discount approved";
-  el("disc-req-btn").innerHTML='<i class="ti ti-check"></i>Approved'; el("disc-req-btn").className="btn btn-success";
-  closeModal("ov-disc"); recalc();
+  if(modalCtx==='fq'){
+    fqDiscPct=parseFloat(el("fq-disc-inp").value)||0; fqDiscApproved=true;
+    var fqDok=el('fq-disc-ok-msg'); if(fqDok) fqDok.style.display="flex";
+    var fqDtxt=el('fq-disc-ok-txt'); if(fqDtxt) fqDtxt.textContent=fqDiscPct+"% discount approved";
+    var fqDBtn=el('fq-disc-req-btn'); if(fqDBtn){fqDBtn.innerHTML='<i class="ti ti-check"></i>Approved';fqDBtn.className="btn btn-success";}
+    closeModal("ov-disc"); recalcFQ();
+  } else {
+    qDiscPct=parseFloat(el("disc-inp").value); qDiscApproved=true;
+    el("disc-ok-msg").style.display="flex"; el("disc-ok-txt").textContent=qDiscPct+"% discount approved";
+    el("disc-req-btn").innerHTML='<i class="ti ti-check"></i>Approved'; el("disc-req-btn").className="btn btn-success";
+    closeModal("ov-disc"); recalc();
+  }
 }
 function confirmPremium() {
   if(!checkPin(el("prem-pin").value)){el("prem-err").style.display="block";return;}
-  qPremApproved=true; closeModal("ov-premium"); checkSchedule(); recalc();
+  if(modalCtx==='fq'){
+    fqPremApproved=true; closeModal("ov-premium"); checkFQSchedule(); recalcFQ();
+  } else {
+    qPremApproved=true; closeModal("ov-premium"); checkSchedule(); recalc();
+  }
 }
 
 function addPiece() {
@@ -1706,10 +1747,28 @@ function openPrint() {
   var pNi=svcStr.indexOf("Installation")>=0;
   var pNa=svcStr.indexOf("Assembly")>=0||pNi;
   var mobSel=el("mob-area");
-  var pMobBase=pNi?(mobSel?parseInt(mobSel.value)||3500:3500):0;
-  var pInstBase=pNi?(CF.installCostPerUnit||1200)*totU:0;
-  var pAssmBase=pNa?(CF.assemblyCostPerUnit||850)*totU:0;  // always include assembly when required
-  var grandFabSvc=totVal+pMobBase+pInstBase+pAssmBase;  // assembly included in total, not shown as line
+  var useFQ=(qStage===2);
+  var fqMobSel=el('fq-mob-area');
+  var pCF=(useFQ&&fqCustomCFApproved&&fqCustomCF)?fqCustomCF:((qCustomCFApproved&&qCustomCF)?qCustomCF:CF);
+  var pMobBase=pNi?((useFQ&&fqMobSel&&fqMobSel.value)?parseInt(fqMobSel.value)||0:(mobSel?parseInt(mobSel.value)||3500:3500)):0;
+  var pInstRate=(useFQ&&fqInstRateOverride!==null)?fqInstRateOverride:(pCF.installCostPerUnit||CF.installCostPerUnit||1200);
+  var pAssmRate=(useFQ&&fqAssmRateOverride!==null)?fqAssmRateOverride:(pCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850);
+  var pInstBase=pNi?pInstRate*totU:0;
+  var pAssmBase=pNa?pAssmRate*totU:0;
+  var pBondState=useFQ?fqBondIns:qBondIns;
+  var pVatApp=useFQ?fqVatApproved:qVatApproved;
+  var pDiscApp=useFQ?fqDiscApproved:qDiscApproved;
+  var pDiscPct2=useFQ?fqDiscPct:qDiscPct;
+  var pPremApp=useFQ?fqPremApproved:qPremApproved;
+  var preFabSvc=totVal+pMobBase+pInstBase+pAssmBase;
+  var pTempVat=pVatApp?preFabSvc*0.12:0;
+  var pBiCosts=calcBondInsCosts(preFabSvc+pTempVat,pBondState);
+  var pAfterBi=preFabSvc+pBiCosts.total;
+  var pDiscAmt=(pDiscApp&&pDiscPct2)?pAfterBi*pDiscPct2/100:0;
+  var pAfterDisc=pAfterBi-pDiscAmt;
+  var pVatAmt=pVatApp?pAfterDisc*0.12:0;
+  var pPremAmt=pPremApp?pAfterDisc*(CF.holidayPremium/100):0;
+  var grandFabSvc=useFQ?(pAfterDisc+pVatAmt+pPremAmt):preFabSvc;
   var thS='background:#f5c518;font-weight:bold;padding:7px 9px;border:1px solid #ccc;text-align:center;font-size:11px';
   var tdS='padding:7px 9px;border:1px solid #ddd;font-size:11px;vertical-align:top';
   var itemRows="";
@@ -1739,9 +1798,11 @@ function openPrint() {
   var pType=el("cl-type")?el("cl-type").value:"Direct";
   var pCoName=getCompanyName(pType);
   var pCoColor=pCoName.indexOf("Module")>=0?"#c0392b":pCoName.indexOf("World Class")>=0?"#1a6e3c":"#2e3a8c";
-  var printLogoHtml=quotationLogoData
-    ?'<img src="'+quotationLogoData+'" style="max-height:70px;max-width:240px;object-fit:contain">'
-    :'<div style="font-size:20px;font-weight:900;color:'+pCoColor+';font-family:Arial Black,sans-serif;line-height:1.3">'+pCoName+'</div>';
+  var pNameColor=pCoName.indexOf("Cebu")>=0?pCoColor:"#000000";
+  var pLogo=companyLogos[pCoName]||null;
+  var printLogoHtml=pLogo
+    ?'<img src="'+pLogo+'" style="max-height:70px;max-width:240px;object-fit:contain">'
+    :'<div style="font-size:20px;font-weight:900;color:'+pNameColor+';font-family:Arial Black,sans-serif;line-height:1.3">'+pCoName+'</div>';
   var body='<div style="border-bottom:3px solid '+pCoColor+';padding-bottom:12px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center">'
     + '<div>'+printLogoHtml+'</div>'
     + '<div style="text-align:right;font-size:12px"><b>DATE:</b> '+new Date().toLocaleDateString("en-US",{month:"short",day:"2-digit",year:"numeric"})+'<br><b>Quotation #:</b> '+qSerial+'<br>'+(qRevisedFrom?'<b>Revised from:</b> '+qRevisedFrom+'<br>':'')+'<b>Valid until:</b> '+exp+'</div></div>'
@@ -1752,6 +1813,10 @@ function openPrint() {
     + '<tr style="background:#f5f5f5"><td colspan="3" style="'+tdS+';text-align:right;font-weight:bold">Fabrication subtotal</td><td style="'+tdS+';text-align:center;font-weight:bold">'+totU+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(totVal)+'</td></tr>'
     + (pNi?'<tr><td colspan="4" style="'+tdS+'">Mobilization</td><td style="'+tdS+';text-align:right">'+fmtMoney(pMobBase)+'</td></tr>':'')
     + (pNi?'<tr><td style="'+tdS+'">Installation</td><td colspan="3" style="'+tdS+'"></td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(pInstBase+pAssmBase)+'</td></tr>':'')
+    + (useFQ&&pBiCosts.total>0?'<tr><td colspan="4" style="'+tdS+'">Bond &amp; Insurance</td><td style="'+tdS+';text-align:right">'+fmtMoney(pBiCosts.total)+'</td></tr>':'')
+    + (useFQ&&pDiscApp&&pDiscAmt?'<tr style="color:#0f6e56"><td colspan="4" style="'+tdS+'">Discount ('+pDiscPct2+'%)</td><td style="'+tdS+';text-align:right">−'+fmtMoney(pDiscAmt)+'</td></tr>':'')
+    + (useFQ&&pVatApp?'<tr><td colspan="4" style="'+tdS+'">VAT (12%)</td><td style="'+tdS+';text-align:right">'+fmtMoney(pVatAmt)+'</td></tr>':'')
+    + (useFQ&&pPremApp?'<tr style="color:#ba7517"><td colspan="4" style="'+tdS+'">Holiday / Weekend Premium</td><td style="'+tdS+';text-align:right">'+fmtMoney(pPremAmt)+'</td></tr>':'')
     + '<tr style="background:#fff8dc"><td colspan="3" style="'+tdS+';text-align:right;font-weight:bold">GRAND TOTAL</td><td style="'+tdS+';text-align:center;font-weight:bold">'+totU+'</td><td style="'+tdS+';text-align:right;font-weight:bold;font-size:12px">'+fmtMoney(grandFabSvc)+'</td></tr>'
     + '</tbody></table>'
     + '<div style="display:flex;justify-content:space-between;align-items:center;margin:14px 0"><b style="font-size:13px">TOTAL COST:</b><div style="border:2px solid #000;padding:8px 24px;min-width:200px;text-align:center;font-weight:bold;font-size:16px;text-decoration:underline">'+fmtMoney(grandFabSvc)+'</div></div>'
@@ -1766,32 +1831,45 @@ function openPrint() {
 
 // ── Quotation custom pricing override ────────────────────────────────────
 function openCustomCF() {
+  modalCtx='s1';
   var src=(qCustomCFApproved&&qCustomCF)?qCustomCF:CF;
-  el("ccf-buf").value=src.buf;
-  el("ccf-markup").value=src.markup;
-  el("ccf-fab").value=src.fabContingency;
-  el("ccf-mob").value=src.mobContingency;
+  el("ccf-buf").value=src.buf; el("ccf-markup").value=src.markup;
+  el("ccf-fab").value=src.fabContingency; el("ccf-mob").value=src.mobContingency;
   el("ccf-inst").value=src.instContingency;
-  el("ccf-def-buf").textContent="(global: "+CF.buf+"%)";
-  el("ccf-def-markup").textContent="(global: "+CF.markup+"%)";
-  el("ccf-def-fab").textContent="(global: "+CF.fabContingency+"%)";
-  el("ccf-def-mob").textContent="(global: "+CF.mobContingency+"%)";
+  el("ccf-def-buf").textContent="(global: "+CF.buf+"%)"; el("ccf-def-markup").textContent="(global: "+CF.markup+"%)";
+  el("ccf-def-fab").textContent="(global: "+CF.fabContingency+"%)"; el("ccf-def-mob").textContent="(global: "+CF.mobContingency+"%)";
+  el("ccf-def-inst").textContent="(global: "+CF.instContingency+"%)";
+  openModal("ov-custom-cf");
+}
+function fqOpenCustomCF() {
+  modalCtx='fq';
+  var src=(fqCustomCFApproved&&fqCustomCF)?fqCustomCF:CF;
+  el("ccf-buf").value=src.buf; el("ccf-markup").value=src.markup;
+  el("ccf-fab").value=src.fabContingency; el("ccf-mob").value=src.mobContingency;
+  el("ccf-inst").value=src.instContingency;
+  el("ccf-def-buf").textContent="(global: "+CF.buf+"%)"; el("ccf-def-markup").textContent="(global: "+CF.markup+"%)";
+  el("ccf-def-fab").textContent="(global: "+CF.fabContingency+"%)"; el("ccf-def-mob").textContent="(global: "+CF.mobContingency+"%)";
   el("ccf-def-inst").textContent="(global: "+CF.instContingency+"%)";
   openModal("ov-custom-cf");
 }
 function confirmCustomCF() {
   if(!checkPin(el("ccf-pin").value)){el("ccf-err").style.display="block";return;}
-  qCustomCF={
+  var cfObj={
     buf:parseFloat(el("ccf-buf").value)||CF.buf,
     markup:parseFloat(el("ccf-markup").value)||CF.markup,
     fabContingency:parseFloat(el("ccf-fab").value)||CF.fabContingency,
     mobContingency:parseFloat(el("ccf-mob").value)||CF.mobContingency,
     instContingency:parseFloat(el("ccf-inst").value)||CF.instContingency
   };
-  qCustomCFApproved=true;
-  closeModal("ov-custom-cf");
-  renderCustomCFStatus();
-  recalc();
+  if(modalCtx==='fq'){
+    fqCustomCF=cfObj; fqCustomCFApproved=true;
+    closeModal("ov-custom-cf");
+    renderFQCFStatus(); recalcFQ();
+  } else {
+    qCustomCF=cfObj; qCustomCFApproved=true;
+    closeModal("ov-custom-cf");
+    renderCustomCFStatus(); recalc();
+  }
 }
 function resetCustomCF() {
   qCustomCF=null; qCustomCFApproved=false;
@@ -2514,50 +2592,53 @@ function resetAppLogo() {
   updateAppLogo();
   renderLogoUploadCard();
 }
-function uploadQuotationLogo() {
+function uploadCompanyLogo(idx) {
+  var coName=COMPANIES[idx];
   var inp=document.createElement("input"); inp.type="file"; inp.accept="image/*";
   inp.onchange=function(e){
     var f=e.target.files[0]; if(!f) return;
     var r=new FileReader();
-    r.onload=function(ev){
-      quotationLogoData=ev.target.result;
-      renderLogoUploadCard();
-    };
+    r.onload=function(ev){ companyLogos[coName]=ev.target.result; renderLogoUploadCard(); };
     r.readAsDataURL(f);
   };
   inp.click();
 }
-function resetQuotationLogo() {
-  quotationLogoData=null;
+function resetCompanyLogo(idx) {
+  var coName=COMPANIES[idx];
+  delete companyLogos[coName];
   renderLogoUploadCard();
 }
 function renderLogoUploadCard() {
   var body=el("logo-upload-body"); if(!body) return;
-  function previewBox(dataUrl, label) {
-    if(!dataUrl) return '<div style="width:120px;height:60px;border:1.5px dashed #ccc;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text2)">No logo set<br>(using default)</div>';
-    return '<img src="'+dataUrl+'" style="max-width:160px;max-height:70px;object-fit:contain;border:0.5px solid var(--border);border-radius:6px;padding:6px;background:#fff">';
+  function previewBox(dataUrl) {
+    if(!dataUrl) return '<div style="height:54px;border:1.5px dashed #ccc;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text2);margin-bottom:8px">No logo — uses company name text</div>';
+    return '<img src="'+dataUrl+'" style="max-width:100%;max-height:60px;object-fit:contain;border:0.5px solid var(--border);border-radius:6px;padding:6px;background:#fff;display:block;margin-bottom:8px">';
+  }
+  var coCards='';
+  for(var ci=0;ci<COMPANIES.length;ci++){
+    var cName=COMPANIES[ci];
+    var coColor=cName.indexOf("Module")>=0?"#c0392b":cName.indexOf("World Class")>=0?"#1a6e3c":"#2e3a8c";
+    var cLogo=companyLogos[cName]||null;
+    coCards+='<div style="border:.5px solid var(--border);border-radius:10px;padding:14px">'
+      +'<div style="font-size:12px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:6px;color:'+coColor+'"><i class="ti ti-building"></i>'+cName+'</div>'
+      +previewBox(cLogo)
+      +'<div style="display:flex;gap:8px">'
+      +'<button class="btn btn-primary" onclick="uploadCompanyLogo('+ci+')" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Upload</button>'
+      +(cLogo?'<button class="btn btn-danger" onclick="resetCompanyLogo('+ci+')" style="font-size:12px;padding:5px 12px"><i class="ti ti-trash"></i>Remove</button>':'')
+      +'</div></div>';
   }
   body.innerHTML=
-    '<div class="g2">'
-    // App logo section
-    +'<div style="border:.5px solid var(--border);border-radius:10px;padding:16px">'
-    +'<div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:10px;display:flex;align-items:center;gap:6px"><i class="ti ti-device-desktop"></i>App logo (topbar)</div>'
-    +'<div class="alert alert-info" style="font-size:11px;margin-bottom:10px"><i class="ti ti-info-circle"></i>Replaces the topbar logo. Shown to all users. Recommended: PNG/SVG, transparent background, height ~40px.</div>'
-    +'<div style="margin-bottom:10px">'+previewBox(appLogoData,'App Logo')+'</div>'
+    '<div style="border:.5px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px">'
+    +'<div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:8px;display:flex;align-items:center;gap:6px"><i class="ti ti-device-desktop"></i>App logo (topbar)</div>'
+    +'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+    +previewBox(appLogoData)
     +'<div style="display:flex;gap:8px">'
-    +'<button class="btn btn-primary" onclick="uploadAppLogo()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Upload image</button>'
-    +(appLogoData?'<button class="btn btn-danger" onclick="resetAppLogo()" style="font-size:12px;padding:5px 12px"><i class="ti ti-refresh"></i>Reset to default</button>':'')
-    +'</div></div>'
-    // Quotation logo section
-    +'<div style="border:.5px solid var(--border);border-radius:10px;padding:16px">'
-    +'<div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:10px;display:flex;align-items:center;gap:6px"><i class="ti ti-file-invoice"></i>Quotation logo (print header)</div>'
-    +'<div class="alert alert-info" style="font-size:11px;margin-bottom:10px"><i class="ti ti-info-circle"></i>Replaces the company name in printed quotations. If not set, the company name (from Company branding above) is used.</div>'
-    +'<div style="margin-bottom:10px">'+previewBox(quotationLogoData,'Quotation Logo')+'</div>'
-    +'<div style="display:flex;gap:8px">'
-    +'<button class="btn btn-primary" onclick="uploadQuotationLogo()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Upload image</button>'
-    +(quotationLogoData?'<button class="btn btn-danger" onclick="resetQuotationLogo()" style="font-size:12px;padding:5px 12px"><i class="ti ti-refresh"></i>Reset to default</button>':'')
-    +'</div></div>'
-    +'</div>';
+    +'<button class="btn btn-primary" onclick="uploadAppLogo()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Upload</button>'
+    +(appLogoData?'<button class="btn btn-danger" onclick="resetAppLogo()" style="font-size:12px;padding:5px 12px"><i class="ti ti-refresh"></i>Reset</button>':'')
+    +'</div></div></div>'
+    +'<div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;display:flex;align-items:center;gap:5px"><i class="ti ti-file-invoice"></i>Quotation print logo — per company</div>'
+    +'<div class="alert alert-info" style="margin-bottom:12px;font-size:11px"><i class="ti ti-info-circle"></i>Upload a logo for each company. Used in the print header. If none is set, the company name is printed in text.</div>'
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px">'+coCards+'</div>';
 }
 function renderSettings() {
   setStTab("company");
@@ -3090,20 +3171,21 @@ function renderDirectory() {
 }
 
 // ── Bond & Insurance ─────────────────────────────────────────────────────
-function calcBondInsCosts(totalWithVat) {
+function calcBondInsCosts(totalWithVat, bondState) {
+  var bs = bondState || qBondIns;
   var result={performance:0,thirdParty:0,surety:0,insurances:0,total:0};
-  if(!qBondIns.enabled) return result;
-  if(qBondIns.performance.active){
-    result.performance=totalWithVat*(qBondIns.performance.insuredPct/100)*(qBondIns.performance.premiumPct/100);
+  if(!bs.enabled) return result;
+  if(bs.performance.active){
+    result.performance=totalWithVat*(bs.performance.insuredPct/100)*(bs.performance.premiumPct/100);
   }
-  if(qBondIns.thirdParty.active){
-    result.thirdParty=totalWithVat*(qBondIns.thirdParty.insuredPct/100)*(qBondIns.thirdParty.premiumPct/100);
+  if(bs.thirdParty.active){
+    result.thirdParty=totalWithVat*(bs.thirdParty.insuredPct/100)*(bs.thirdParty.premiumPct/100);
   }
-  if(qBondIns.surety.active){
-    result.surety=(qBondIns.surety.basis||0)*(qBondIns.surety.insuredPct/100)*(qBondIns.surety.premiumPct/100);
+  if(bs.surety.active){
+    result.surety=(bs.surety.basis||0)*(bs.surety.insuredPct/100)*(bs.surety.premiumPct/100);
   }
-  for(var i=0;i<qBondIns.insurances.length;i++){
-    result.insurances+=(parseFloat(qBondIns.insurances[i].cost)||0);
+  for(var i=0;i<bs.insurances.length;i++){
+    result.insurances+=(parseFloat(bs.insurances[i].cost)||0);
   }
   result.total=result.performance+result.thirdParty+result.surety+result.insurances;
   return result;
@@ -3193,6 +3275,389 @@ function renderBondIns(){
   h+='<button class="btn" onclick="qBondIns.insurances.push({type:\'\',cost:0});renderBondIns()" style="font-size:12px;margin-top:4px"><i class="ti ti-plus"></i>Add insurance</button>';
 
   body.innerHTML=h;
+}
+
+// ── Final Quotation (Stage 2) functions ──────────────────────────────────
+function initFinalQuotation() {
+  // Deep-copy Stage 1 state into FQ state so values pre-populate but are independent
+  fqVatApproved  = qVatApproved;
+  fqDiscPct      = qDiscPct;
+  fqDiscApproved = qDiscApproved;
+  fqPremApproved = qPremApproved;
+  fqCustomCF     = qCustomCF  ? JSON.parse(JSON.stringify(qCustomCF))  : null;
+  fqCustomCFApproved = qCustomCFApproved;
+  fqBondIns      = JSON.parse(JSON.stringify(qBondIns));
+  fqInstRateOverride = null;
+  fqAssmRateOverride = null;
+  renderFQCards();
+}
+
+function populateFQMobSelect() {
+  var sel=el('fq-mob-area'); if(!sel) return;
+  var s1Val=el('mob-area')?el('mob-area').value:'';
+  var opts='';
+  for(var i=0;i<MOB_LOCATIONS.length;i++){
+    var t=calcMobTotal(i);
+    opts+='<option value="'+t+'"'+(String(t)===String(s1Val)||(!s1Val&&i===0)?' selected':'')+'>'+MOB_LOCATIONS[i].name+' — '+fmtMoney(t)+'</option>';
+  }
+  sel.innerHTML=opts;
+}
+
+function renderFQCards() {
+  var wrap=el('fq-cards-wrap'); if(!wrap) return;
+  var svcStr=el('cl-service')?el('cl-service').value:'';
+  var ni=svcStr.indexOf('Installation')>=0;
+  var na=svcStr.indexOf('Assembly')>=0||ni;
+  var aCF=CF;
+  var s1InstRate=aCF.installCostPerUnit||1200;
+  var s1AssmRate=aCF.assemblyCostPerUnit||850;
+  var instRate=fqInstRateOverride!==null?fqInstRateOverride:s1InstRate;
+  var assmRate=fqAssmRateOverride!==null?fqAssmRateOverride:s1AssmRate;
+  var totU=getTotU();
+
+  var h='<div class="dvdr" style="margin:14px 0 12px"><span>Final Quotation — Cost Adjustments</span></div>';
+
+  // ── Mobilization ──
+  if(ni){
+    h+='<div class="card">'
+      +'<div class="card-head"><h3><i class="ti ti-truck"></i>Mobilization</h3></div>'
+      +'<div class="card-body">'
+      +'<label class="fld">Installation region</label>'
+      +'<select id="fq-mob-area" onchange="recalcFQ()"></select>'
+      +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 0 0;color:var(--text2)">'
+      +'<span>Base mobilization cost</span><span id="fq-mob-disp" style="font-weight:500;color:var(--text)"></span></div>'
+      +'</div></div>';
+  }
+
+  // ── Installation & Assembly rates ──
+  if(ni||na){
+    h+='<div class="card">'
+      +'<div class="card-head"><h3><i class="ti ti-home-check"></i>Installation &amp; Assembly rates</h3>'
+      +'<span style="font-size:11px;color:var(--text2)">Pre-filled from Stage 1 — adjust independently</span></div>'
+      +'<div class="card-body"><div class="g2">';
+    if(ni){
+      h+='<div><label class="fld">Installation cost per unit (₱)</label>'
+        +'<input type="number" id="fq-inst-rate" value="'+instRate+'" min="0" oninput="fqInstRateOverride=parseFloat(this.value)||null;recalcFQ()" style="height:36px">'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+totU+' units × ₱'+fmtNum(instRate)+' = '+fmtMoney(instRate*totU)+'</div></div>';
+    }
+    if(na){
+      h+='<div><label class="fld">Assembly cost per unit (₱)</label>'
+        +'<input type="number" id="fq-assm-rate" value="'+assmRate+'" min="0" oninput="fqAssmRateOverride=parseFloat(this.value)||null;recalcFQ()" style="height:36px">'
+        +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+totU+' units × ₱'+fmtNum(assmRate)+' = '+fmtMoney(assmRate*totU)+'</div></div>';
+    }
+    h+='</div></div></div>';
+  }
+
+  // ── Scheduling & timeline ──
+  var s1FabDate=el('fab-date')?el('fab-date').value:'';
+  var s1InstDate=el('inst-date')?el('inst-date').value:'';
+  h+='<div class="card">'
+    +'<div class="card-head"><h3><i class="ti ti-calendar-event"></i>Scheduling &amp; timeline</h3></div>'
+    +'<div class="card-body"><div class="g2">'
+    +'<div><label class="fld">Target fabrication start date</label><input type="date" id="fq-fab-date" value="'+s1FabDate+'" onchange="checkFQSchedule()"></div>'
+    +'<div><label class="fld">Preferred installation date</label><input type="date" id="fq-inst-date" value="'+s1InstDate+'" onchange="checkFQSchedule()"></div>'
+    +'</div>'
+    +'<div id="fq-sched-alerts"></div>'
+    +'<div id="fq-prem-row" style="display:none">'
+    +'<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i><span>Date(s) fall on a PH holiday or weekend. A <strong>'+CF.holidayPremium+'%</strong> premium applies. <button class="btn btn-amber" style="margin-left:8px;font-size:11px;padding:3px 8px" onclick="modalCtx=\'fq\';openModal(\'ov-premium\')">Request approval</button></span></div></div>'
+    +'<div id="fq-prem-ok" style="display:none"><div class="alert alert-success"><i class="ti ti-circle-check"></i>Premium approved for final quotation.</div></div>'
+    +'</div></div>';
+
+  // ── Pricing adjustments ──
+  h+='<div class="card">'
+    +'<div class="card-head"><h3><i class="ti ti-adjustments"></i>Pricing adjustments</h3></div>'
+    +'<div class="card-body"><div class="g2">'
+    +'<div><label class="fld">VAT treatment <span class="pill pill-teal" style="font-size:10px;margin-left:4px">Default: Vatable</span></label>'
+    +'<div style="display:flex;gap:16px;margin-top:6px;align-items:center;flex-wrap:wrap">'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fq-vat" value="y" '+(fqVatApproved?'checked':'')+' onchange="recalcFQ()"> Vatable (12%)</label>'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fq-vat" value="n" '+(!fqVatApproved?'checked':'')+' onchange="fqOnNonVat()"> Non-vatable</label>'
+    +'<span class="pill pill-amber" id="fq-vat-ok-tag" style="display:'+(!fqVatApproved?'inline':'none')+'">Approved</span>'
+    +'</div></div>'
+    +'<div><label class="fld">Discount request</label>'
+    +'<div style="display:flex;gap:8px;margin-top:4px;align-items:flex-start">'
+    +'<div style="position:relative;flex:1"><input type="number" id="fq-disc-inp" value="'+(fqDiscPct||'')+'" placeholder="0" style="padding-right:24px" oninput="fqOnDiscInput()"><span style="position:absolute;right:9px;top:50%;transform:translateY(-50%);font-size:12px;color:var(--text2)">%</span></div>'
+    +'<button id="fq-disc-req-btn" class="btn '+(fqDiscApproved?'btn-success':'btn-amber')+'" onclick="fqOnDiscRequest()" style="white-space:nowrap"><i class="ti ti-'+(fqDiscApproved?'check':'send')+'"></i>'+(fqDiscApproved?'Approved':'Request')+'</button>'
+    +'</div>'
+    +'<div id="fq-disc-ok-msg" style="display:'+(fqDiscApproved?'flex':'none')+';font-size:12px;color:var(--teal);margin-top:5px;align-items:center;gap:4px"><i class="ti ti-circle-check"></i><span id="fq-disc-ok-txt">'+(fqDiscApproved?fqDiscPct+'% discount approved':'')+'</span></div>'
+    +'</div></div></div></div>';
+
+  // ── Cost factor override ──
+  var cfStatus=fqCustomCFApproved?'Override active':'Global defaults';
+  var cfPillCls=fqCustomCFApproved?'pill-amber':'pill-muted';
+  h+='<div class="card">'
+    +'<div class="card-head">'
+    +'<h3><i class="ti ti-adjustments-alt"></i>Cost factor override <span class="pill '+cfPillCls+'" id="fq-ccf-status-pill" style="font-size:10px;margin-left:6px">'+cfStatus+'</span></h3>'
+    +'<button class="btn btn-amber" onclick="fqOpenCustomCF()" style="font-size:12px;padding:4px 10px"><i class="ti ti-lock"></i>Request override</button>'
+    +'</div>'
+    +'<div class="card-body" id="fq-ccf-body">'
+    +(fqCustomCFApproved&&fqCustomCF
+      ?'<div style="font-size:12px;color:var(--amber);margin-bottom:4px;display:flex;align-items:center;gap:4px"><i class="ti ti-adjustments-alt"></i><strong>Override active</strong></div>'
+       +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;color:var(--amber)">'
+       +'<span>Buffer: '+fqCustomCF.buf+'%</span><span>Markup: '+fqCustomCF.markup+'%</span>'
+       +'<span>Fab: '+fqCustomCF.fabContingency+'%</span><span>Mob: '+fqCustomCF.mobContingency+'%</span>'
+       +'<span>Inst: '+fqCustomCF.instContingency+'%</span></div>'
+       +'<button class="btn" onclick="fqResetCustomCF()" style="font-size:11px;padding:3px 8px;margin-top:8px"><i class="ti ti-refresh"></i>Reset to global</button>'
+      :'<div style="font-size:13px;color:var(--text2)">Using global cost factors. Override requires Supervisor/Manager approval.</div>')
+    +'</div></div>';
+
+  // ── Bond & Insurance ──
+  h+='<div class="card">'
+    +'<div class="card-head" style="background:#f0f4ff;border-color:#c0cee8">'
+    +'<h3 style="color:#1a3c5e"><i class="ti ti-shield-check"></i>Bond &amp; Insurance</h3>'
+    +'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:400">'
+    +'<input type="checkbox" id="fq-bond-ins-toggle" '+(fqBondIns.enabled?'checked':'')+' onchange="toggleFQBondIns()" style="width:16px;height:16px;cursor:pointer">'
+    +'<span id="fq-bond-ins-toggle-lbl" style="color:'+(fqBondIns.enabled?'var(--teal)':'var(--text2)')+'">'+(fqBondIns.enabled?'Activated':'Activate pricing')+'</span>'
+    +'</label></div>'
+    +'<div class="card-body" id="fq-bond-ins-body" style="display:'+(fqBondIns.enabled?'block':'none')+'"></div>'
+    +'</div>';
+
+  // ── Quotation Summary ──
+  h+='<div class="card">'
+    +'<div class="card-head"><h3><i class="ti ti-receipt-2"></i>Final quotation summary</h3></div>'
+    +'<div class="card-body">'
+    +'<div id="fq-sum-lines"></div>'
+    +'<div class="admin-warn" id="fq-admin-box">'
+    +'<div class="lbl"><i class="ti ti-eye-off"></i>Admin view — hidden from client</div>'
+    +'<div id="fq-admin-rows"></div>'
+    +'</div>'
+    +'<div style="border-top:.5px solid var(--border);padding-top:10px;margin-top:6px" id="fq-sum-totals"></div>'
+    +'</div></div>';
+
+  wrap.innerHTML=h;
+
+  // Post-render: populate mob selector and render bond form if active
+  if(ni) populateFQMobSelect();
+  if(fqBondIns.enabled) renderFQBondIns();
+  recalcFQ();
+}
+
+function fqOnNonVat() {
+  modalCtx='fq';
+  var fqRadios=document.querySelectorAll("[name='fq-vat']");
+  if(fqRadios[0]) fqRadios[0].checked=true;
+  openModal('ov-vat');
+}
+function fqOnDiscInput() {
+  fqDiscApproved=false;
+  var dOk=el('fq-disc-ok-msg'); if(dOk) dOk.style.display='none';
+  var dBtn=el('fq-disc-req-btn'); if(dBtn){dBtn.innerHTML='<i class="ti ti-send"></i>Request';dBtn.className='btn btn-amber';}
+}
+function fqOnDiscRequest() {
+  modalCtx='fq';
+  var d=parseFloat(el('fq-disc-inp')?el('fq-disc-inp').value:0);
+  if(!d||d<=0){alert('Enter a valid discount %.'); return;}
+  var dd=el('disc-desc'); if(dd) dd.textContent='A discount of '+d+'% has been requested. Approval required.';
+  openModal('ov-disc');
+}
+function fqResetCustomCF() {
+  fqCustomCF=null; fqCustomCFApproved=false;
+  renderFQCFStatus(); recalcFQ();
+}
+function renderFQCFStatus() {
+  var pill=el('fq-ccf-status-pill');
+  var body=el('fq-ccf-body');
+  if(pill) { pill.textContent=fqCustomCFApproved?'Override active':'Global defaults'; pill.className='pill '+(fqCustomCFApproved?'pill-amber':'pill-muted'); }
+  if(body) {
+    if(fqCustomCFApproved&&fqCustomCF){
+      body.innerHTML='<div style="font-size:12px;color:var(--amber);margin-bottom:4px;display:flex;align-items:center;gap:4px"><i class="ti ti-adjustments-alt"></i><strong>Override active</strong></div>'
+        +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;color:var(--amber)">'
+        +'<span>Buffer: '+fqCustomCF.buf+'%</span><span>Markup: '+fqCustomCF.markup+'%</span>'
+        +'<span>Fab: '+fqCustomCF.fabContingency+'%</span><span>Mob: '+fqCustomCF.mobContingency+'%</span>'
+        +'<span>Inst: '+fqCustomCF.instContingency+'%</span></div>'
+        +'<button class="btn" onclick="fqResetCustomCF()" style="font-size:11px;padding:3px 8px;margin-top:8px"><i class="ti ti-refresh"></i>Reset to global</button>';
+    } else {
+      body.innerHTML='<div style="font-size:13px;color:var(--text2)">Using global cost factors. Override requires Supervisor/Manager approval.</div>';
+    }
+  }
+}
+
+function fmtNum(n){ return Number(n).toLocaleString('en-PH'); }
+
+function toggleFQBondIns(){
+  var chk=el('fq-bond-ins-toggle');
+  fqBondIns.enabled=chk?chk.checked:false;
+  var body=el('fq-bond-ins-body'); if(body) body.style.display=fqBondIns.enabled?'block':'none';
+  var lbl=el('fq-bond-ins-toggle-lbl');
+  if(lbl){lbl.textContent=fqBondIns.enabled?'Activated':'Activate pricing';lbl.style.color=fqBondIns.enabled?'var(--teal)':'var(--text2)';}
+  if(fqBondIns.enabled) renderFQBondIns();
+  recalcFQ();
+}
+
+function renderFQBondIns(){
+  var body=el('fq-bond-ins-body'); if(!body) return;
+  var pctInput=function(id,val,onch,ph){
+    return '<div style="position:relative;width:90px"><input type="number" id="'+id+'" value="'+(val||'')+'" placeholder="'+ph+'" min="0" max="100" step="0.01" oninput="'+onch+';recalcFQ()" style="height:32px;font-size:12px;padding-right:20px;width:100%"><span style="position:absolute;right:7px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--text2)">%</span></div>';
+  };
+  var rowS='display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;border-bottom:.5px solid var(--border)';
+  var h='<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;padding:4px 0 8px;display:flex;align-items:center;gap:5px"><i class="ti ti-certificate"></i>Bonds</div>';
+
+  // Performance Bond
+  h+='<div style="'+rowS+'">'
+    +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;min-width:220px">'
+    +'<input type="checkbox" '+(fqBondIns.performance.active?'checked':'')+' onchange="fqBondIns.performance.active=this.checked;renderFQBondIns();recalcFQ()" style="width:15px;height:15px;cursor:pointer">'
+    +'<span style="font-size:13px;font-weight:500">Performance Bond</span></label>';
+  if(fqBondIns.performance.active){
+    h+='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+      +'<div style="font-size:11px;color:var(--text2)">Insured&nbsp;%</div>'+pctInput('fq-pb-ins',fqBondIns.performance.insuredPct,"fqBondIns.performance.insuredPct=parseFloat(this.value)||0","e.g. 100")
+      +'<div style="font-size:11px;color:var(--text2)">Premium&nbsp;%</div>'+pctInput('fq-pb-prem',fqBondIns.performance.premiumPct,"fqBondIns.performance.premiumPct=parseFloat(this.value)||0","e.g. 1.5")
+      +'<div style="font-size:12px;color:var(--text2);min-width:120px">Basis: Total w/ VAT</div></div>';
+  }
+  h+='</div>';
+
+  // Third Party Liability Bond
+  h+='<div style="'+rowS+'">'
+    +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;min-width:220px">'
+    +'<input type="checkbox" '+(fqBondIns.thirdParty.active?'checked':'')+' onchange="fqBondIns.thirdParty.active=this.checked;renderFQBondIns();recalcFQ()" style="width:15px;height:15px;cursor:pointer">'
+    +'<span style="font-size:13px;font-weight:500">Third Party Liability Bond</span></label>';
+  if(fqBondIns.thirdParty.active){
+    h+='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+      +'<div style="font-size:11px;color:var(--text2)">Insured&nbsp;%</div>'+pctInput('fq-tp-ins',fqBondIns.thirdParty.insuredPct,"fqBondIns.thirdParty.insuredPct=parseFloat(this.value)||0","e.g. 100")
+      +'<div style="font-size:11px;color:var(--text2)">Premium&nbsp;%</div>'+pctInput('fq-tp-prem',fqBondIns.thirdParty.premiumPct,"fqBondIns.thirdParty.premiumPct=parseFloat(this.value)||0","e.g. 1.5")
+      +'<div style="font-size:12px;color:var(--text2);min-width:120px">Basis: Total w/ VAT</div></div>';
+  }
+  h+='</div>';
+
+  // Surety Bond
+  h+='<div style="'+rowS+'">'
+    +'<label style="display:flex;align-items:center;gap:6px;cursor:pointer;min-width:220px">'
+    +'<input type="checkbox" '+(fqBondIns.surety.active?'checked':'')+' onchange="fqBondIns.surety.active=this.checked;renderFQBondIns();recalcFQ()" style="width:15px;height:15px;cursor:pointer">'
+    +'<span style="font-size:13px;font-weight:500">Surety / Employer\'s Liability Bond</span></label>';
+  if(fqBondIns.surety.active){
+    h+='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+      +'<div style="font-size:11px;color:var(--text2)">Basis&nbsp;(₱)</div>'
+      +'<input type="number" value="'+(fqBondIns.surety.basis||'')+'" placeholder="Contract amount" min="0" oninput="fqBondIns.surety.basis=parseFloat(this.value)||0;recalcFQ()" style="height:32px;font-size:12px;width:140px">'
+      +'<div style="font-size:11px;color:var(--text2)">Insured&nbsp;%</div>'+pctInput('fq-su-ins',fqBondIns.surety.insuredPct,"fqBondIns.surety.insuredPct=parseFloat(this.value)||0","e.g. 100")
+      +'<div style="font-size:11px;color:var(--text2)">Premium&nbsp;%</div>'+pctInput('fq-su-prem',fqBondIns.surety.premiumPct,"fqBondIns.surety.premiumPct=parseFloat(this.value)||0","e.g. 1.5")
+      +'</div>';
+  }
+  h+='</div>';
+
+  // Insurance
+  h+='<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;padding:14px 0 8px;display:flex;align-items:center;gap:5px"><i class="ti ti-heart-rate-monitor"></i>Insurance</div>';
+  for(var i=0;i<fqBondIns.insurances.length;i++){
+    var ins=fqBondIns.insurances[i];
+    h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">'
+      +'<input type="text" value="'+ins.type+'" placeholder="Type of insurance" oninput="fqBondIns.insurances['+i+'].type=this.value;recalcFQ()" style="height:34px;font-size:13px;flex:1;min-width:180px">'
+      +'<div style="position:relative"><input type="number" value="'+(ins.cost||'')+'" placeholder="Cost" min="0" oninput="fqBondIns.insurances['+i+'].cost=parseFloat(this.value)||0;recalcFQ()" style="height:34px;font-size:13px;padding-left:18px;width:140px"><span style="position:absolute;left:7px;top:50%;transform:translateY(-50%);font-size:12px;color:var(--text2)">₱</span></div>'
+      +'<button class="btn" onclick="fqBondIns.insurances.splice('+i+',1);renderFQBondIns();recalcFQ()" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+      +'</div>';
+  }
+  h+='<button class="btn" onclick="fqBondIns.insurances.push({type:\'\',cost:0});renderFQBondIns()" style="font-size:12px;margin-top:4px"><i class="ti ti-plus"></i>Add insurance</button>';
+  body.innerHTML=h;
+}
+
+function checkFQSchedule() {
+  var fd=el('fq-fab-date')?el('fq-fab-date').value:'';
+  var id=el('fq-inst-date')?el('fq-inst-date').value:'';
+  var out=''; var needPrem=false;
+  if(fd){
+    if(isHoliday(fd)){out+=alertHtml('error','<i class="ti ti-alert-circle"></i>'+fd+' is a PH holiday ('+( PH_HOL_NAMES[fd]||'Holiday')+'). Premium required.');needPrem=true;}
+    else if(isWeekend(fd)){out+=alertHtml('warn','<i class="ti ti-alert-triangle"></i>'+fd+' is a weekend. Premium applies.');needPrem=true;}
+    else{out+=alertHtml('success','<i class="ti ti-circle-check"></i>Fabrication date '+fd+' is available.');}
+  }
+  if(id){
+    if(isHoliday(id)){out+=alertHtml('error','<i class="ti ti-alert-circle"></i>'+id+' is a PH holiday. Premium required.');needPrem=true;}
+    else if(isWeekend(id)){out+=alertHtml('warn','<i class="ti ti-alert-triangle"></i>'+id+' is a rest day. Premium applies.');needPrem=true;}
+    else{out+=alertHtml('success','<i class="ti ti-circle-check"></i>Installation date '+id+' is available.');}
+  }
+  html('fq-sched-alerts',out);
+  var pr=el('fq-prem-row'); if(pr) pr.style.display=(needPrem&&!fqPremApproved)?'block':'none';
+  var po=el('fq-prem-ok');  if(po) po.style.display=fqPremApproved?'block':'none';
+}
+
+function recalcFQ() {
+  var aCF=(fqCustomCFApproved&&fqCustomCF)?fqCustomCF:CF;
+  var buf=aCF.buf, markup=aCF.markup, cf=aCF.fabContingency, cm=aCF.mobContingency, ci=aCF.instContingency, vat=CF.vatRate;
+  var svc=el('cl-service')?el('cl-service').value:'';
+  var ni=svc.indexOf('Installation')>=0;
+  var na=svc.indexOf('Assembly')>=0||ni;
+
+  var fabBase=0;
+  for(var a=0;a<qAreas.length;a++) fabBase+=getAreaSubtotal(a);
+  var totU=getTotU();
+  var fabC=fabBase*(1+cf/100);
+
+  var fqMobSel=el('fq-mob-area');
+  var mobBase=ni?(fqMobSel?parseInt(fqMobSel.value)||0:0):0;
+  if(el('fq-mob-disp')) el('fq-mob-disp').textContent=fmtMoney(mobBase);
+  var mobC=mobBase*(1+cm/100);
+
+  var instRate=fqInstRateOverride!==null?fqInstRateOverride:(aCF.installCostPerUnit||CF.installCostPerUnit||1200);
+  var assmRate=fqAssmRateOverride!==null?fqAssmRateOverride:(aCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850);
+  var instBase=ni?instRate*totU:0;
+  var assmBase=na?assmRate*totU:0;
+  var instC=(instBase+assmBase)*(1+ci/100);
+
+  var subBM=fabC+mobC+instC;
+  var bufAmt=subBM*buf/100;
+  var mkAmt=(subBM+bufAmt)*markup/100;
+  var preDisc=subBM+bufAmt+mkAmt;
+  var dA=(fqDiscApproved&&fqDiscPct)?preDisc*fqDiscPct/100:0;
+  var afterD=preDisc-dA;
+  var fqVatRadio=document.querySelector("[name='fq-vat']:checked");
+  var vatOn=fqVatRadio?fqVatRadio.value==='y':fqVatApproved;
+  var tempVat=vatOn?afterD*vat/100:0;
+  var totalForBonds=afterD+tempVat;
+  var biCosts=calcBondInsCosts(totalForBonds,fqBondIns);
+  var afterDWithBonds=afterD+biCosts.total;
+  var vatAmt=vatOn?afterDWithBonds*vat/100:0;
+  var premRate=CF.holidayPremium;
+  var premAmt=fqPremApproved?afterDWithBonds*premRate/100:0;
+  var grand=afterDWithBonds+vatAmt+premAmt;
+
+  // Summary lines
+  var lines='';
+  for(var a=0;a<qAreas.length;a++){
+    var area=qAreas[a]; var sub=getAreaSubtotal(a);
+    lines+='<div style="margin-bottom:6px"><div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;padding:5px 0 3px;display:flex;align-items:center;gap:4px"><i class="ti ti-layout-2" style="font-size:11px"></i>'+area.name+'</div>';
+    if(qFabMode==='carcass'){
+      for(var i=0;i<area.items.length;i++){var it=area.items[i];lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>'+it.type+' <span style="color:var(--text2)">×'+it.qty+'</span></span><span>'+fmtMoney((CARCASS_PRICES[it.type]||0)*it.qty)+'</span></div>';}
+    }
+    if(qAreas.length>1) lines+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;color:var(--text2)"><span style="padding-left:10px">'+area.name+' subtotal</span><span style="font-weight:500">'+fmtMoney(sub)+'</span></div>';
+    lines+='</div>';
+  }
+  if(ni||na){
+    lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px"><div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;padding:5px 0 3px;display:flex;align-items:center;gap:4px"><i class="ti ti-tool" style="font-size:11px"></i>Service charges</div>';
+    if(ni) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span><i class="ti ti-truck" style="font-size:11px;color:var(--text2)"></i> Mobilization</span><span>'+fmtMoney(mobBase)+'</span></div>'
+      +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span><i class="ti ti-home-check" style="font-size:11px;color:var(--text2)"></i> Installation <span style="font-size:11px;color:var(--text2);padding-left:4px">'+totU+' × '+fmtMoney(instRate)+'</span></span><span>'+fmtMoney(instBase)+'</span></div>';
+    if(na) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span><i class="ti ti-armchair" style="font-size:11px;color:var(--text2)"></i> Assembly <span style="font-size:11px;color:var(--text2);padding-left:4px">'+totU+' × '+fmtMoney(assmRate)+'</span></span><span>'+fmtMoney(assmBase)+'</span></div>';
+    lines+='</div>';
+  }
+  if(fqBondIns.enabled&&biCosts.total>0){
+    lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px"><div style="font-size:11px;font-weight:600;color:#1a3c5e;text-transform:uppercase;letter-spacing:.04em;padding:5px 0 3px;display:flex;align-items:center;gap:4px"><i class="ti ti-shield-check" style="font-size:11px"></i>Bond &amp; Insurance</div>';
+    if(fqBondIns.performance.active&&biCosts.performance>0) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>Performance Bond</span><span>'+fmtMoney(biCosts.performance)+'</span></div>';
+    if(fqBondIns.thirdParty.active&&biCosts.thirdParty>0) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>Third Party Liability Bond</span><span>'+fmtMoney(biCosts.thirdParty)+'</span></div>';
+    if(fqBondIns.surety.active&&biCosts.surety>0) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>Surety Bond</span><span>'+fmtMoney(biCosts.surety)+'</span></div>';
+    for(var bi=0;bi<fqBondIns.insurances.length;bi++){var ins=fqBondIns.insurances[bi];if(ins.type&&ins.cost>0)lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>'+ins.type+'</span><span>'+fmtMoney(ins.cost)+'</span></div>';}
+    lines+='</div>';
+  }
+  html('fq-sum-lines',lines);
+
+  // Admin rows
+  var arows='';
+  if(fqCustomCFApproved) arows+='<div style="font-size:11px;color:var(--amber);margin-bottom:6px;display:flex;align-items:center;gap:4px"><i class="ti ti-adjustments-alt"></i><strong>Custom pricing override active</strong></div>';
+  var adminItems=[['Fab. contingency ('+cf+'%)',fabC-fabBase],ni?['Mob. contingency ('+cm+'%)',mobC-mobBase]:null,(ni||na)?['Install contingency ('+ci+'%)',instC-(instBase+assmBase)]:null,['Buffer ('+buf+'%)',bufAmt],['Markup ('+markup+'%)',mkAmt]];
+  for(var i=0;i<adminItems.length;i++){if(!adminItems[i])continue;arows+='<div class="admin-row"><span>'+adminItems[i][0]+'</span><span>'+fmtMoney(adminItems[i][1])+'</span></div>';}
+  html('fq-admin-rows',arows);
+
+  // Totals
+  var tot='<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-bottom:10px;padding-bottom:10px;border-bottom:.5px solid var(--border)">';
+  tot+='<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2)"><span><i class="ti ti-armchair" style="font-size:10px"></i> Fabrication</span><span>'+fmtMoney(fabBase)+'</span></div>';
+  if(ni) tot+='<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2)"><span><i class="ti ti-truck" style="font-size:10px"></i> Mobilization</span><span>'+fmtMoney(mobBase)+'</span></div>';
+  if(ni) tot+='<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2)"><span><i class="ti ti-home-check" style="font-size:10px"></i> Installation <span style="font-size:10px;opacity:.7">('+totU+' × '+fmtMoney(instRate)+')</span></span><span>'+fmtMoney(instBase)+'</span></div>';
+  if(na) tot+='<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2)"><span><i class="ti ti-armchair" style="font-size:10px"></i> Assembly <span style="font-size:10px;opacity:.7">('+totU+' × '+fmtMoney(assmRate)+')</span></span><span>'+fmtMoney(assmBase)+'</span></div>';
+  if(fqBondIns.enabled&&biCosts.total>0) tot+='<div style="display:flex;justify-content:space-between;font-size:12px;color:#1a3c5e"><span><i class="ti ti-shield-check" style="font-size:10px"></i> Bond &amp; Insurance</span><span>'+fmtMoney(biCosts.total)+'</span></div>';
+  tot+='</div>';
+  tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--text2)"><span>Subtotal</span><span>'+fmtMoney(preDisc)+'</span></div>';
+  if(fqDiscApproved&&dA) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--teal)"><span>Discount ('+fqDiscPct+'%)</span><span>−'+fmtMoney(dA)+'</span></div>';
+  if(fqBondIns.enabled&&biCosts.total>0) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:#1a3c5e"><span><i class="ti ti-shield-check" style="font-size:11px"></i> Bond &amp; Insurance</span><span>+'+fmtMoney(biCosts.total)+'</span></div>';
+  if(vatOn) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--text2)"><span>VAT (12%)</span><span>'+fmtMoney(vatAmt)+'</span></div>';
+  else tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0"><span style="color:var(--text2)">VAT</span><span class="pill pill-muted">Non-vatable</span></div>';
+  if(fqPremApproved) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--amber)"><span>Premium ('+premRate+'%)</span><span>'+fmtMoney(premAmt)+'</span></div>';
+  tot+='<div style="display:flex;justify-content:space-between;align-items:center;padding-top:10px;border-top:.5px solid var(--border);margin-top:6px">'
+    +'<div><div style="font-weight:500;font-size:15px">Final quotation total</div><div style="font-size:11px;color:var(--text2)">Valid until '+expDate()+'</div></div>'
+    +'<div style="font-weight:500;font-size:22px;color:var(--navy)">'+fmtMoney(grand)+'</div></div>';
+  html('fq-sum-totals',tot);
 }
 
 // ── Google Auth ───────────────────────────────────────────────────────────
