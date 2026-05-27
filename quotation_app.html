@@ -4667,30 +4667,36 @@ function loadPriceDatabase(showFeedback) {
   if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Loading price database…</div>';}
   priceDbGet('Services!A:C')
     .then(function(data){
+      if(data.error) throw new Error(data.error.message||'API error on Services');
       var rows=(data.values||[]).slice(1);
       dbServices=rows.filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       return priceDbGet('Materials!A:C');
     })
     .then(function(data){
+      if(data.error) throw new Error(data.error.message||'API error on Materials');
       var rows=(data.values||[]).slice(1);
       dbMaterials=rows.filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       return priceDbGet('Hardware!A:C');
     })
     .then(function(data){
+      if(data.error) throw new Error(data.error.message||'API error on Hardware');
       var rows=(data.values||[]).slice(1);
       dbHardware=rows.filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       return priceDbGet('CabinetTemplates!A:F');
     })
     .then(function(data){
+      if(data.error) throw new Error(data.error.message||'API error on CabinetTemplates');
       var rows=(data.values||[]).slice(1);
       dbTemplates=rows.filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
       dbLoaded=true;
-      if(showFeedback) renderPriceDbSettings();
-      if(qFabMode==='bom') renderItems();
+      renderPriceDbSettings(); // always refresh settings panel counts
+      if(qFabMode==='bom') renderItems(); // refresh BOM dropdowns
     })
-    .catch(function(){
+    .catch(function(err){
       dbLoaded=false;
-      if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i> Could not load price database. Check the Google Sheets ID and sharing permissions.</div>';}
+      var msg=err&&err.message?err.message:'Check the Google Sheets ID and sharing permissions.';
+      var s=el('db-status-row');
+      if(s) s.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i> Could not load price database: '+msg+'. Make sure the sheet is shared with your Google account and the sheet tabs (Services, Materials, Hardware, CabinetTemplates) exist — run <b>Init DB</b> if not.</div>';
     });
 }
 
@@ -4708,37 +4714,59 @@ function importPriceDbExcel(targetSheet, skipRows, colMap) {
       try {
         var wb=XLSX.read(ev.target.result,{type:'binary'});
         var ws=wb.Sheets[wb.SheetNames[0]];
-        var data=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+        var raw=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
         var rows=[];
-        for(var i=skipRows;i<data.length;i++){
-          var r=data[i];
+        for(var i=skipRows;i<raw.length;i++){
+          var r=raw[i];
           var name=String(r[colMap.name]||'').trim();
           var unit=String(r[colMap.unit]||'pc').trim()||'pc';
           var price=parseFloat(r[colMap.price])||0;
-          // Skip empty, placeholder, or zero-price rows
-          if(!name||name==='—'||name==='-'||price===0) continue;
+          // Skip completely empty or dash-placeholder rows (keep zero-price named items)
+          if(!name||name==='—'||name==='-') continue;
           rows.push([name,unit,price]);
         }
-        if(!rows.length){alert('No valid data rows found in the file.');return;}
+        if(!rows.length){alert('No valid data rows found in the file.\n\nCheck that the file has data starting after row '+skipRows+'.');return;}
         var s=el('db-status-row');
-        if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Uploading '+rows.length+' items to <b>'+targetSheet+'</b> sheet…</div>';
-        // Overwrite the entire sheet (clear + write)
-        var values=[['Name','Unit','Price']].concat(rows);
-        fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID+'/values/'+encodeURIComponent(targetSheet+'!A:C')+'?valueInputOption=USER_ENTERED',{
-          method:'PUT',
-          headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
-          body:JSON.stringify({range:targetSheet+'!A:C',majorDimension:'ROWS',values:values})
-        }).then(function(r){return r.json();})
-        .then(function(){
-          var s2=el('db-status-row');
-          if(s2) s2.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Imported <b>'+rows.length+'</b> items into <b>'+targetSheet+'</b> from <b>'+file.name+'</b>.</div>';
-          loadPriceDatabase(false);
-          renderPriceDbSettings();
-        })
-        .catch(function(err){
-          var s3=el('db-status-row');
-          if(s3) s3.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i> Upload failed: '+err+'</div>';
-        });
+        if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Preparing — ensuring <b>'+targetSheet+'</b> sheet exists…</div>';
+
+        // Step 1: ensure the sheet tab exists (create it if missing)
+        fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID,{headers:{Authorization:'Bearer '+gToken}})
+          .then(function(r){
+            if(!r.ok) throw new Error('Cannot access price database (HTTP '+r.status+'). Check the Google Sheet ID and sharing permissions.');
+            return r.json();
+          })
+          .then(function(meta){
+            var existing=(meta.sheets||[]).map(function(sh){return sh.properties.title;});
+            if(existing.indexOf(targetSheet)>=0) return; // already exists
+            if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Creating <b>'+targetSheet+'</b> sheet tab…</div>';
+            return priceDbBatchUpdate([{addSheet:{properties:{title:targetSheet}}}])
+              .then(function(res){ if(res.error) throw new Error(res.error.message||'Could not create sheet'); });
+          })
+          .then(function(){
+            // Step 2: overwrite the sheet with header + data rows
+            if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Uploading <b>'+rows.length+'</b> items to <b>'+targetSheet+'</b>…</div>';
+            var values=[['Name','Unit','Price']].concat(rows);
+            return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID+'/values/'+encodeURIComponent(targetSheet+'!A:C')+'?valueInputOption=USER_ENTERED',{
+              method:'PUT',
+              headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
+              body:JSON.stringify({range:targetSheet+'!A:C',majorDimension:'ROWS',values:values})
+            }).then(function(r){
+              if(!r.ok) throw new Error('Write failed (HTTP '+r.status+')');
+              return r.json();
+            }).then(function(res){
+              if(res.error) throw new Error(res.error.message||'API error writing data');
+              return res;
+            });
+          })
+          .then(function(){
+            if(s) s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Imported <b>'+rows.length+'</b> items into <b>'+targetSheet+'</b> from <b>'+file.name+'</b>. Reloading database…</div>';
+            // Reload with feedback so item counts update in the UI
+            loadPriceDatabase(true);
+          })
+          .catch(function(err){
+            if(s) s.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i> Import failed: '+(err.message||err)+'</div>';
+          });
+
       } catch(err){alert('Error reading file: '+err.message);}
     };
     reader.readAsBinaryString(file);
