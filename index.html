@@ -1106,10 +1106,10 @@ var DEMO_USERS = [
 ];
 
 var NOTIFS = [
-  {id:1,type:"nonvat",from:"Jose Reyes",client:"SM Prime",serial:"QT-260318-7741",amount:1850000,msg:"Client requests non-vatable transaction.",date:"May 20, 2026",status:"pending"},
-  {id:2,type:"discount",from:"Ana Cruz",client:"Verde Residences",serial:"QT-260203-3312",amount:412000,reqDisc:8,msg:"Client requests 8% discount.",date:"May 21, 2026",status:"pending"},
-  {id:3,type:"holiday",from:"Jose Reyes",client:"Richmont",serial:"QT-260115-4821",msg:"Fabrication date falls on Dec 25 (Christmas). Premium required.",date:"May 22, 2026",status:"approved",by:"Maria Santos"},
-  {id:4,type:"revision",from:"Ana Cruz",client:"SM Prime",serial:"QT-260318-7741",msg:"Request to revise approved final quotation.",date:"May 23, 2026",status:"rejected",by:"Maria Santos"}
+  {id:1,type:"nonvat",from:"Jose Reyes",client:"SM Prime",serial:"QT-260318-7741",amount:1850000,msg:"Client requests non-vatable transaction.",date:"May 20, 2026",status:"pending",company:"World Class Laminate, Inc."},
+  {id:2,type:"discount",from:"Ana Cruz",client:"Verde Residences",serial:"QT-260203-3312",amount:412000,reqDisc:8,msg:"Client requests 8% discount.",date:"May 21, 2026",status:"pending",company:"World Class Laminate, Inc."},
+  {id:3,type:"holiday",from:"Jose Reyes",client:"Richmont",serial:"QT-260115-4821",msg:"Fabrication date falls on Dec 25 (Christmas). Premium required.",date:"May 22, 2026",status:"approved",by:"Maria Santos",company:"World Class Laminate, Inc."},
+  {id:4,type:"revision",from:"Ana Cruz",client:"SM Prime",serial:"QT-260318-7741",msg:"Request to revise approved final quotation.",date:"May 23, 2026",status:"rejected",by:"Maria Santos",company:"World Class Laminate, Inc."}
 ];
 
 // ── Report / Export config ─────────────────────────────────────────────────
@@ -1135,7 +1135,10 @@ var customKPIs = []; // [{label,value,id}]
 // ── Users sheet state ─────────────────────────────────────────────────────
 var sheetUsers = []; // live from User Roles sheet
 var currentUserAcc = {Dashboard:true,KPI:true,Reports:true,'Profit/Revenue':true,Quotations:true,Analytics:true,Approvals:true,Schedule:true};
-var deviceBindingEnabled = false; // loaded from User Roles!O1
+var deviceBindingEnabled = false; // loaded from User Roles!O1 (header row)
+var currentDelegateTo = ''; // email of user this account has delegated approvals to
+var currentDelegateActive = false; // whether delegation is currently on
+var currentReceiveAll = false; // whether this user receives requests from all companies
 
 // ── Services & unit options ───────────────────────────────────────────────
 var SERVICES = [
@@ -3433,28 +3436,98 @@ function exportReportToPPT() {
 }
 
 // ── Approvals ─────────────────────────────────────────────────────────────
+
+// Load sheetUsers silently on app start so routing works without visiting Users page
+function loadSheetUsersBackground(){
+  if(!gToken) return;
+  sheetsGet('User Roles!A:Q')
+    .then(function(data){ sheetUsers=parseUserRows(data.values||[]); })
+    .catch(function(){});
+}
+
+// Return the subset of notifs the current user is allowed to see based on role/company/delegation
+function filterApprovalsByRouting(notifs){
+  var role=currentRole;
+  // Admin always sees everything
+  if(role==='Admin') return notifs;
+  // Manager with "receive all companies" sees everything
+  if(role==='Manager'&&currentReceiveAll) return notifs;
+
+  // Non-approvers: Staff / Team Lead see nothing
+  if(role==='Staff'||role==='Team Lead') return [];
+
+  // Build the set of companies this user can see
+  var visibleCos=[];
+  var seeAll=false;
+
+  if(role==='Manager') visibleCos.push(currentUserCompany.toLowerCase());
+
+  // Check if current user is an active delegate for any Manager/Admin
+  if(gUser&&gUser.email){
+    var me=gUser.email.toLowerCase();
+    for(var i=0;i<sheetUsers.length;i++){
+      var u=sheetUsers[i];
+      if(u.delegateActive&&u.delegateTo&&u.delegateTo.toLowerCase()===me){
+        if(u.receiveAll){ seeAll=true; break; }
+        if(u.company) visibleCos.push(u.company.toLowerCase());
+      }
+    }
+  }
+
+  if(seeAll) return notifs;
+
+  // Supervisor with no delegation and not delegated-to sees nothing
+  if(!visibleCos.length) return [];
+
+  return notifs.filter(function(n){
+    if(!n.company) return true; // no company tag = visible to all approvers
+    return visibleCos.indexOf(n.company.toLowerCase())>=0;
+  });
+}
+
 function renderApprovals() {
-  var pending=0; for(var i=0;i<NOTIFS.length;i++){if(NOTIFS[i].status==="pending")pending++;}
+  var visible=filterApprovalsByRouting(NOTIFS);
+  var pending=0; for(var i=0;i<visible.length;i++){if(visible[i].status==="pending")pending++;}
   el("notif-cnt").textContent=pending; el("notif-cnt").style.display=pending?"flex":"none";
+
+  // Delegation context banner
+  var banner='';
+  if(gUser&&gUser.email){
+    var me=gUser.email.toLowerCase();
+    var delegatingFor=[];
+    for(var i=0;i<sheetUsers.length;i++){
+      var u=sheetUsers[i];
+      if(u.delegateActive&&u.delegateTo&&u.delegateTo.toLowerCase()===me) delegatingFor.push(u.name);
+    }
+    if(delegatingFor.length){
+      banner='<div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-transfer"></i>'
+        +'You are currently acting as delegate for: <b>'+delegatingFor.join(', ')+'</b></div>';
+    }
+  }
+
   var h="";
-  for(var i=0;i<NOTIFS.length;i++){
-    var n=NOTIFS[i];
+  for(var i=0;i<visible.length;i++){
+    var n=visible[i];
+    // Find original index in NOTIFS for action callbacks
+    var origIdx=NOTIFS.indexOf(n);
     var tc=n.type==="nonvat"?"coral":n.type==="revision"?"navy":"amber";
     var tl=n.type==="nonvat"?"Non-VAT":n.type==="discount"?"Discount":n.type==="holiday"?"Holiday Premium":"Revision";
     var sc=n.status==="pending"?"amber":n.status==="approved"?"teal":"coral";
     var sl=n.status.charAt(0).toUpperCase()+n.status.slice(1);
     h+='<div style="background:#fff;border:.5px solid '+(n.status==="pending"?"#f5d78e":"var(--border)")+';border-radius:12px;padding:16px 20px;margin-bottom:12px">'
       +'<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">'
-      +'<div><div style="display:flex;gap:6px;margin-bottom:6px"><span class="pill pill-'+tc+'">'+tl+'</span><span class="pill pill-'+sc+'">'+sl+'</span></div>'
+      +'<div><div style="display:flex;gap:6px;margin-bottom:6px"><span class="pill pill-'+tc+'">'+tl+'</span><span class="pill pill-'+sc+'">'+sl+'</span>'
+      +(n.company?'<span class="pill pill-muted" style="font-size:10px">'+n.company+'</span>':'')
+      +'</div>'
       +'<div style="font-weight:500;font-size:14px;margin-bottom:2px">'+n.client+' · '+n.serial+'</div>'
       +'<div style="font-size:12px;color:var(--text2);margin-bottom:4px">By: '+n.from+' · '+n.date+'</div>'
       +'<div style="font-size:13px">'+n.msg+'</div>'
       +(n.by?'<div style="font-size:12px;color:'+(n.status==="approved"?"var(--teal)":"var(--coral)")+';margin-top:4px">Actioned by: '+n.by+'</div>':'')
       +'</div>'
-      +(n.status==="pending"?'<button class="btn btn-amber" onclick="openApprovalAction('+i+')" style="align-self:flex-start"><i class="ti ti-check"></i>Action</button>':'')
+      +(n.status==="pending"?'<button class="btn btn-amber" onclick="openApprovalAction('+origIdx+')" style="align-self:flex-start"><i class="ti ti-check"></i>Action</button>':'')
       +'</div></div>';
   }
-  html("approvals-wrap",h||'<div style="color:var(--text2);padding:20px">No approval requests.</div>');
+  html("approvals-wrap",banner+(h||'<div style="color:var(--text2);padding:20px">No approval requests.</div>'));
 }
 function openApprovalAction(idx) {
   var n=NOTIFS[idx];
@@ -3802,28 +3875,35 @@ function getDefaultAcc(pos,key){
 function getDefaultAccObj(pos){var o={};for(var k=0;k<ACC_KEYS.length;k++)o[ACC_KEYS[k]]=getDefaultAcc(pos,ACC_KEYS[k]);return o;}
 function parseAccBool(v){return v===true||String(v).toUpperCase()==='TRUE'||v==='yes'||v==='1';}
 
+function parseUserRows(rows){
+  var out=[];
+  for(var i=1;i<rows.length;i++){
+    var r=rows[i]; if(!r||!r.length) continue;
+    var isNew=r[0]&&r[0].indexOf('@')<0&&r[1]&&r[1].indexOf('@')>=0;
+    var name,email,pos,active,company,mac,acc={},delegateTo='',delegateActive=false,receiveAll=false;
+    if(isNew){
+      name=r[0]||''; email=r[1]||''; pos=r[2]||'Staff'; active=(r[3]||'yes').toLowerCase()==='yes'; company=r[4]||''; mac=r[5]||'';
+      for(var k=0;k<ACC_KEYS.length;k++) acc[ACC_KEYS[k]]=r[6+k]!==undefined?parseAccBool(r[6+k]):getDefaultAcc(pos,ACC_KEYS[k]);
+      delegateTo=(r[14]||'').trim();
+      delegateActive=parseAccBool(r[15]||'');
+      receiveAll=parseAccBool(r[16]||'');
+    } else {
+      email=r[0]||''; pos=r[1]||'Staff'; active=(r[2]||'yes').toLowerCase()==='yes'; company=r[3]||''; name=email.split('@')[0]; mac='';
+      acc=getDefaultAccObj(pos);
+    }
+    if(!email) continue;
+    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,rowIdx:i+1});
+  }
+  return out;
+}
+
 function loadUsersFromSheet(){
   var wrap=el('users-wrap');
   if(!gToken){if(wrap)wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Please sign in to manage users.</div>';return;}
   if(wrap)wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text2);font-size:13px"><i class="ti ti-loader" style="font-size:18px"></i> Loading users…</div>';
-  sheetsGet('User Roles!A:N')
+  sheetsGet('User Roles!A:Q')
     .then(function(data){
-      var rows=data.values||[];
-      sheetUsers=[];
-      for(var i=1;i<rows.length;i++){
-        var r=rows[i]; if(!r||!r.length) continue;
-        var isNew=r[0]&&r[0].indexOf('@')<0&&r[1]&&r[1].indexOf('@')>=0;
-        var name,email,pos,active,company,mac,acc={};
-        if(isNew){
-          name=r[0]||''; email=r[1]||''; pos=r[2]||'Staff'; active=(r[3]||'yes').toLowerCase()==='yes'; company=r[4]||''; mac=r[5]||'';
-          for(var k=0;k<ACC_KEYS.length;k++) acc[ACC_KEYS[k]]=r[6+k]!==undefined?parseAccBool(r[6+k]):getDefaultAcc(pos,ACC_KEYS[k]);
-        } else {
-          email=r[0]||''; pos=r[1]||'Staff'; active=(r[2]||'yes').toLowerCase()==='yes'; company=r[3]||''; name=email.split('@')[0]; mac='';
-          acc=getDefaultAccObj(pos);
-        }
-        if(!email) continue;
-        sheetUsers.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,rowIdx:i+1});
-      }
+      sheetUsers=parseUserRows(data.values||[]);
       renderUsers();
     })
     .catch(function(){if(wrap)wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Could not load users. Check sheet permissions.</div>';});
@@ -3839,15 +3919,53 @@ function renderUsers(){
     for(var j=0;j<posOpts.length;j++) posHtml+='<option'+(u.pos===posOpts[j]?' selected':'')+'>'+posOpts[j]+'</option>';
     var accHtml='';
     for(var j=0;j<ACC_KEYS.length;j++) accHtml+='<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer"><input type="checkbox" id="u'+i+'a'+j+'" '+(u.acc[ACC_KEYS[j]]?'checked':'')+'>'+ACC_KEYS[j]+'</label>';
+
+    // Delegation section — Manager/Admin can delegate; Supervisor shows read-only indicator if delegated to
+    var delHtml='';
+    var canDelegate=(u.pos==='Manager'||u.pos==='Admin');
+    if(canDelegate){
+      var dOpts='<option value="">— Not delegating —</option>';
+      for(var d=0;d<sheetUsers.length;d++){
+        var du=sheetUsers[d];
+        if(du.email===u.email) continue;
+        if(du.pos==='Supervisor'||du.pos==='Manager'||du.pos==='Admin'){
+          dOpts+='<option value="'+du.email+'"'+(u.delegateTo===du.email?' selected':'')+'>'+du.name+' ('+du.pos+')</option>';
+        }
+      }
+      delHtml='<div class="dvdr" style="margin:10px 0 8px"><span>Approval delegation</span></div>'
+        +'<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:10px">'
+        +'<div style="flex:2;min-width:200px"><label class="fld" style="margin-top:0">Delegate approvals to</label>'
+        +'<select id="u'+i+'dt" style="height:28px;font-size:12px">'+dOpts+'</select></div>'
+        +'<div style="display:flex;gap:16px;align-items:center;padding-bottom:6px">'
+        +'<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
+        +'<input type="checkbox" id="u'+i+'da" '+(u.delegateActive?'checked':'')+'>Delegation active</label>'
+        +'<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
+        +'<input type="checkbox" id="u'+i+'ra" '+(u.receiveAll?'checked':'')+'>Receive from all companies</label>'
+        +'</div></div>';
+    } else if(u.pos==='Supervisor'){
+      for(var d=0;d<sheetUsers.length;d++){
+        if(sheetUsers[d].delegateTo===u.email&&sheetUsers[d].delegateActive){
+          delHtml='<div style="margin:8px 0 10px;padding:8px 12px;background:#e0f2ec;border:.5px solid #a8d5c2;border-radius:6px;font-size:12px;color:var(--teal)">'
+            +'<i class="ti ti-shield-check"></i> Currently receiving delegated approvals from <b>'+sheetUsers[d].name+'</b></div>';
+          break;
+        }
+      }
+    }
+
     h+='<div style="background:#fff;border:.5px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:12px;opacity:'+(u.active?1:.6)+'">'
       +'<div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">'
       +'<div style="width:42px;height:42px;border-radius:50%;background:'+(u.active?'#e6edf5':'#eee')+';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:'+(u.active?'var(--navy)':'var(--muted)')+'">'+ini+'</div>'
       +'<div style="flex:1;min-width:240px">'
-      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"><span style="font-size:15px;font-weight:500">'+u.name+'</span><span class="pill pill-'+pc+'">'+u.pos+'</span><span class="pill pill-'+(u.active?'teal':'muted')+'">'+(u.active?'Active':'Inactive')+'</span></div>'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">'
+      +'<span style="font-size:15px;font-weight:500">'+u.name+'</span>'
+      +'<span class="pill pill-'+pc+'">'+u.pos+'</span>'
+      +'<span class="pill pill-'+(u.active?'teal':'muted')+'">'+(u.active?'Active':'Inactive')+'</span>'
+      +(u.delegateActive&&u.delegateTo?'<span class="pill pill-navy" style="font-size:10px"><i class="ti ti-transfer"></i> Delegating</span>':'')
+      +'</div>'
       +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px;margin-bottom:10px">'
       +'<div><label class="fld" style="margin-top:0">Full name</label><input id="u'+i+'nm" value="'+u.name+'" style="height:28px;font-size:12px"></div>'
       +'<div><label class="fld" style="margin-top:0">Email</label><input id="u'+i+'em" value="'+u.email+'" style="height:28px;font-size:12px"></div>'
-      +'<div><label class="fld" style="margin-top:0">MAC address</label><input id="u'+i+'mc" value="'+u.mac+'" style="height:28px;font-size:12px;font-family:monospace"></div>'
+      +'<div><label class="fld" style="margin-top:0">Device ID</label><input id="u'+i+'mc" value="'+u.mac+'" style="height:28px;font-size:12px;font-family:monospace" placeholder="mc-xxxxxx-…"></div>'
       +'</div>'
       +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-bottom:10px">'
       +'<div><label class="fld" style="margin-top:0">Position</label><select id="u'+i+'ps" style="height:28px;font-size:12px">'+posHtml+'</select></div>'
@@ -3855,6 +3973,7 @@ function renderUsers(){
       +'</div>'
       +'<div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Feature access</div>'
       +'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">'+accHtml+'</div>'
+      +delHtml
       +'<button class="btn btn-primary" onclick="saveUserRow('+i+')" style="font-size:12px;padding:5px 12px"><i class="ti ti-device-floppy"></i> Save changes</button>'
       +'</div>'
       +'<div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0">'
@@ -3876,13 +3995,19 @@ function saveUserRow(i){
   if(!email||email.indexOf('@')<0){alert('Please enter a valid email.');return;}
   var acc={};
   for(var k=0;k<ACC_KEYS.length;k++){var cb=el('u'+i+'a'+k);acc[ACC_KEYS[k]]=cb?cb.checked:u.acc[ACC_KEYS[k]];}
+  // Delegation fields — only Manager/Admin have the UI inputs; preserve existing values for others
+  var canDelegate=(pos==='Manager'||pos==='Admin');
+  var delegateTo=canDelegate?((el('u'+i+'dt')||{}).value||''):u.delegateTo||'';
+  var delegateActive=canDelegate?(el('u'+i+'da')?el('u'+i+'da').checked:u.delegateActive):u.delegateActive;
+  var receiveAll=canDelegate?(el('u'+i+'ra')?el('u'+i+'ra').checked:u.receiveAll):u.receiveAll;
   var row=[name.trim(),email.trim().toLowerCase(),pos,u.active?'yes':'no',co.trim(),mac.trim(),
     acc['Dashboard']?'TRUE':'FALSE',acc['KPI']?'TRUE':'FALSE',acc['Reports']?'TRUE':'FALSE',
     acc['Profit/Revenue']?'TRUE':'FALSE',acc['Quotations']?'TRUE':'FALSE',acc['Analytics']?'TRUE':'FALSE',
-    acc['Approvals']?'TRUE':'FALSE',acc['Schedule']?'TRUE':'FALSE'];
-  sheetsUpdate('User Roles!A'+u.rowIdx+':N'+u.rowIdx,[row])
+    acc['Approvals']?'TRUE':'FALSE',acc['Schedule']?'TRUE':'FALSE',
+    delegateTo, delegateActive?'TRUE':'FALSE', receiveAll?'TRUE':'FALSE'];
+  sheetsUpdate('User Roles!A'+u.rowIdx+':Q'+u.rowIdx,[row])
     .then(function(){
-      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,rowIdx:u.rowIdx};
+      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,rowIdx:u.rowIdx};
       renderUsers(); showToast('User saved.');
     })
     .catch(function(){alert('Failed to save. Check sheet permissions.');});
@@ -3899,7 +4024,7 @@ function toggleUserActive(i){
 function removeUserRow(i){
   var u=sheetUsers[i];
   if(!confirm('Remove '+u.name+' ('+u.email+')? They will no longer be able to sign in.')) return;
-  sheetsClear('User Roles!A'+u.rowIdx+':N'+u.rowIdx)
+  sheetsClear('User Roles!A'+u.rowIdx+':Q'+u.rowIdx)
     .then(function(){sheetUsers.splice(i,1); renderUsers(); showToast('User removed.');})
     .catch(function(){alert('Failed to remove. Check sheet permissions.');});
 }
@@ -4979,7 +5104,7 @@ function gSignIn(){
 }
 function gCheckRole(){
   var ls=el('login-status'); if(ls){ls.textContent='Loading your permissions...';ls.style.color='#666';}
-  sheetsGet('User Roles!A:O')
+  sheetsGet('User Roles!A:Q')
     .then(function(data){
       var rows=data.values||[];
       // Read device binding setting from header row column O (index 14)
@@ -4996,8 +5121,12 @@ function gCheckRole(){
           if(active==='yes'||active===''){
             role=roleVal;
             if(company) currentUserCompany=company;
-            if(isNew){for(var k=0;k<ACC_KEYS.length;k++) currentUserAcc[ACC_KEYS[k]]=r[6+k]!==undefined?parseAccBool(r[6+k]):getDefaultAcc(roleVal,ACC_KEYS[k]);}
-            else{currentUserAcc=getDefaultAccObj(roleVal);}
+            if(isNew){
+              for(var k=0;k<ACC_KEYS.length;k++) currentUserAcc[ACC_KEYS[k]]=r[6+k]!==undefined?parseAccBool(r[6+k]):getDefaultAcc(roleVal,ACC_KEYS[k]);
+              currentDelegateTo=(r[14]||'').trim();
+              currentDelegateActive=parseAccBool(r[15]||'');
+              currentReceiveAll=parseAccBool(r[16]||'');
+            } else {currentUserAcc=getDefaultAccObj(roleVal);}
           }
           break;
         }
@@ -5050,6 +5179,7 @@ function gShowApp(){
   renderDashboard();
   initQuotation();
   loadPriceDatabase(false);
+  loadSheetUsersBackground();
 }
 function gSignOut(){
   if(gToken&&typeof google!=='undefined') google.accounts.oauth2.revoke(gToken,function(){});
