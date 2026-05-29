@@ -138,6 +138,7 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
     <button class="nav-btn" data-pg="directory"><i class="ti ti-folders"></i>Directory</button>
     <button class="nav-btn" data-pg="settings"><i class="ti ti-settings"></i>Settings</button>
     <button class="nav-btn" data-pg="users"><i class="ti ti-users"></i>Users</button>
+    <button class="nav-btn" data-pg="production"><i class="ti ti-cpu"></i>Production</button>
     <button class="nav-btn" data-pg="help" style="color:var(--teal)"><i class="ti ti-help-circle"></i>Help</button>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
@@ -613,6 +614,7 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
     <button class="tab" onclick="setStTab('carcass')">Carcass pricing</button>
     <button class="tab" onclick="setStTab('services')">Services</button>
     <button class="tab" onclick="setStTab('database')">Price Database</button>
+    <button class="tab" onclick="setStTab('production')"><i class="ti ti-cpu" style="font-size:11px"></i> Production</button>
   </div>
 
   <!-- NETWORK & DEPLOYMENT TAB -->
@@ -811,6 +813,7 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
       </div>
     </div>
   </div>
+  <div id="st-production" style="display:none"></div>
 </div>
 
 <!-- USERS -->
@@ -852,6 +855,18 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
       </div>
     </div>
   </div>
+</div>
+
+<!-- PRODUCTION -->
+<div class="page" id="page-production">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px">
+    <div>
+      <h2 style="font-size:20px;font-weight:500">Production — Fabrication AI</h2>
+      <p style="color:var(--text2);font-size:13px;margin-top:2px">Upload shop drawings or cutting lists — AI extracts components, services &amp; BOM</p>
+    </div>
+    <button class="btn" onclick="navigate('settings');setTimeout(function(){setStTab('production')},150)"><i class="ti ti-settings"></i>Production settings</button>
+  </div>
+  <div id="prod-wrap"></div>
 </div>
 
 <!-- ====== MODALS ====== -->
@@ -1224,6 +1239,38 @@ var COMPANIES = ['World Class Laminate, Inc.', 'Module Systems and Services, Inc
 var dashWidgets = {kpis:true,chart:true,pipeline:true,team:true,followed:true};
 var appLogoData = null;
 var companyLogos = {};   // keyed by company name — one logo per company
+
+// ── Production / Fabrication AI ──────────────────────────────────────────
+var prodSettings = {
+  claudeKey: '',
+  kerf: 3,
+  woodgrainDir: 'length',
+  ebtWastage: 5,
+  ebtLegend: [
+    {pos:'T',desc:'Top edge'},
+    {pos:'B',desc:'Bottom edge'},
+    {pos:'L',desc:'Left edge'},
+    {pos:'R',desc:'Right edge'}
+  ],
+  boardSizes: [
+    {material:'PB/MDF/Plywood', sizes:[{w:1220,h:2440}]},
+    {material:'Compact Laminate', sizes:[{w:1525,h:1830},{w:1830,h:1830},{w:1525,h:2135},{w:1830,h:2135}]}
+  ]
+};
+var prodState = {
+  file: null,
+  fileName: '',
+  fileType: 'shop-drawing',
+  analyzing: false,
+  result: null
+};
+function loadProdSettings(){
+  try{var s=localStorage.getItem('mc_prod');if(s){var p=JSON.parse(s);for(var k in p)prodSettings[k]=p[k];}}catch(e){}
+}
+function saveProdSettings(){
+  try{localStorage.setItem('mc_prod',JSON.stringify(prodSettings));}catch(e){}
+}
+loadProdSettings();
 var qBondIns = {
   enabled: false,
   surety:      { active:false, basis:0,    insuredPct:0, premiumPct:0 },
@@ -1307,6 +1354,7 @@ function navigate(pg) {
   else if(pg==="settings") { stTab="company"; renderSettings(); }
   else if(pg==="quotation") initQuotation();
   else if(pg==="help") renderHelp();
+  else if(pg==="production") renderProductionPage();
 }
 document.querySelectorAll("[data-pg]").forEach(function(b){
   b.addEventListener("click",function(){ navigate(this.getAttribute("data-pg")); });
@@ -3608,7 +3656,7 @@ function doApprovalAction(idx, action) {
 // ── Settings ──────────────────────────────────────────────────────────────
 function setStTab(t) {
   stTab=t;
-  var tabs=["company","network","security","schedule","pricing","validity","carcass","services","database"];
+  var tabs=["company","network","security","schedule","pricing","validity","carcass","services","database","production"];
   for(var i=0;i<tabs.length;i++){var e=el("st-"+tabs[i]);if(e)e.style.display=tabs[i]===t?"block":"none";}
   document.querySelectorAll("#page-settings .tab").forEach(function(b,i){b.classList.toggle("active",tabs[i]===t);});
   if(t==="carcass") renderCarcassSettings();
@@ -3617,6 +3665,7 @@ function setStTab(t) {
   if(t==="network") renderNetworkTab();
   if(t==="database") renderPriceDbSettings();
   if(t==="security") renderSecuritySettings();
+  if(t==="production") renderProductionSettings();
 }
 // ── Logo management (Admin only) ──────────────────────────────────────────
 function updateAppLogo() {
@@ -5745,6 +5794,547 @@ function gLogToSheets(action){
   if(!gToken||!gUser) return;
   var now=new Date().toLocaleString('en-PH',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});
   sheetsAppend('Activity Log!A:E',[[now,gUser.email||'',action,qSerial,'']]).catch(function(){});
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ── Production / Fabrication AI ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+
+function renderProductionSettings() {
+  var w = el('st-production'); if(!w) return;
+  var ebtHtml = '';
+  for(var i=0;i<prodSettings.ebtLegend.length;i++){
+    var e=prodSettings.ebtLegend[i];
+    ebtHtml+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">'
+      +'<div style="width:30px;height:30px;background:var(--navy);color:#fff;border-radius:4px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">'+e.pos+'</div>'
+      +'<input type="text" value="'+escHtml(e.desc)+'" id="prod-ebt-'+e.pos+'" style="flex:1;height:30px;font-size:12px" placeholder="Description">'
+      +'</div>';
+  }
+  var bsHtml='';
+  for(var m=0;m<prodSettings.boardSizes.length;m++){
+    var mat=prodSettings.boardSizes[m];
+    bsHtml+='<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:6px">'+escHtml(mat.material)+'</div>';
+    for(var s=0;s<mat.sizes.length;s++){
+      var sz=mat.sizes[s];
+      bsHtml+='<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">'
+        +'<input type="number" value="'+sz.w+'" id="prod-bs-'+m+'-'+s+'-w" style="width:80px;height:28px;font-size:12px;text-align:center" min="100" max="3600">'
+        +'<span style="font-size:12px;color:var(--text2)">×</span>'
+        +'<input type="number" value="'+sz.h+'" id="prod-bs-'+m+'-'+s+'-h" style="width:80px;height:28px;font-size:12px;text-align:center" min="100" max="4800">'
+        +'<span style="font-size:12px;color:var(--text2)">mm</span>'
+        +(mat.sizes.length>1?'<button class="btn btn-danger" style="padding:2px 8px;font-size:11px" onclick="prodRemoveBoardSize('+m+','+s+')"><i class="ti ti-trash"></i></button>':'')
+        +'</div>';
+    }
+    bsHtml+='<button class="btn" style="font-size:11px;padding:4px 10px;margin-top:4px" onclick="prodAddBoardSize('+m+')"><i class="ti ti-plus"></i>Add size</button></div>';
+  }
+  w.innerHTML='<div class="card"><div class="card-head"><h3><i class="ti ti-cpu"></i>Production &amp; Fabrication AI</h3></div><div class="card-body">'
+    +'<div class="alert alert-info" style="margin-bottom:14px"><i class="ti ti-info-circle"></i>'
+    +'<div><b>How to get your Claude API key:</b><br>'
+    +'1. Go to <a href="https://console.anthropic.com" target="_blank" style="color:var(--navy)">console.anthropic.com</a> — separate account from your claude.ai subscription<br>'
+    +'2. Add billing (pay-per-use, ~₱1–₱6 per PDF analysis using claude-sonnet-4-5)<br>'
+    +'3. Create an API key — it starts with <code style="font-size:11px;background:#e6edf5;padding:1px 5px;border-radius:3px">sk-ant-api…</code></div></div>'
+    +'<label class="fld" style="margin-top:0">Claude API Key</label>'
+    +'<div style="display:flex;gap:6px">'
+    +'<input type="password" id="prod-key" value="'+escHtml(prodSettings.claudeKey)+'" placeholder="sk-ant-api03-..." autocomplete="off" style="font-family:monospace;font-size:12px">'
+    +'<button class="btn" onclick="var i=el(\'prod-key\');i.type=i.type===\'password\'?\'text\':\'password\'" style="flex-shrink:0;padding:0 12px"><i class="ti ti-eye"></i></button>'
+    +'</div>'
+    +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px">'
+    +'<div><label class="fld">Kerf size (mm)</label>'
+    +'<input type="number" id="prod-kerf" value="'+prodSettings.kerf+'" min="0" max="10" step="0.5" style="height:32px;font-size:12px"></div>'
+    +'<div><label class="fld">Woodgrain direction default</label>'
+    +'<select id="prod-wgd" style="height:32px;font-size:12px">'
+    +'<option value="length"'+(prodSettings.woodgrainDir==='length'?' selected':'')+'>Along length (long side)</option>'
+    +'<option value="width"'+(prodSettings.woodgrainDir==='width'?' selected':'')+'>Along width (short side)</option>'
+    +'</select></div>'
+    +'<div><label class="fld">EBT wastage allowance (%)</label>'
+    +'<input type="number" id="prod-ebt-waste" value="'+prodSettings.ebtWastage+'" min="0" max="50" style="height:32px;font-size:12px"></div>'
+    +'</div>'
+    +'<div class="dvdr"><span>EBT edge position legend</span></div>'
+    +'<p style="font-size:11px;color:var(--text2);margin-bottom:10px">Define what each edge code means — used in cutting lists and the future cut optimizer.</p>'
+    +ebtHtml
+    +'<div class="dvdr"><span>Standard board sizes per material</span></div>'
+    +'<p style="font-size:11px;color:var(--text2);margin-bottom:10px">Used for BOM sheet count computation. Multiple sizes allowed per material.</p>'
+    +bsHtml
+    +'<div style="margin-top:16px;display:flex;gap:8px">'
+    +'<button class="btn btn-primary" onclick="saveProductionSettings()"><i class="ti ti-device-floppy"></i>Save production settings</button>'
+    +'<span id="prod-save-msg" style="font-size:12px;color:var(--teal);align-self:center;display:none"><i class="ti ti-check"></i> Saved</span>'
+    +'</div></div></div>';
+}
+
+function saveProductionSettings() {
+  var key=(el('prod-key')||{}).value||'';
+  var kerf=parseFloat((el('prod-kerf')||{}).value)||3;
+  var wgd=(el('prod-wgd')||{}).value||'length';
+  var waste=parseFloat((el('prod-ebt-waste')||{}).value)||5;
+  var legend=['T','B','L','R'];
+  var ebt=[];
+  for(var i=0;i<legend.length;i++){
+    var inp=el('prod-ebt-'+legend[i]);
+    ebt.push({pos:legend[i],desc:inp?inp.value:prodSettings.ebtLegend[i].desc});
+  }
+  var bs=[];
+  for(var m=0;m<prodSettings.boardSizes.length;m++){
+    var mat=prodSettings.boardSizes[m];
+    var sizes=[];
+    for(var s=0;s<mat.sizes.length;s++){
+      var wEl=el('prod-bs-'+m+'-'+s+'-w');
+      var hEl=el('prod-bs-'+m+'-'+s+'-h');
+      if(wEl&&hEl) sizes.push({w:parseFloat(wEl.value)||1220,h:parseFloat(hEl.value)||2440});
+    }
+    if(sizes.length) bs.push({material:mat.material,sizes:sizes});
+  }
+  prodSettings.claudeKey=key;
+  prodSettings.kerf=kerf;
+  prodSettings.woodgrainDir=wgd;
+  prodSettings.ebtWastage=waste;
+  prodSettings.ebtLegend=ebt;
+  if(bs.length) prodSettings.boardSizes=bs;
+  saveProdSettings();
+  var msg=el('prod-save-msg');
+  if(msg){msg.style.display='inline';setTimeout(function(){msg.style.display='none';},2000);}
+}
+
+function prodAddBoardSize(mi) {
+  saveProductionSettings();
+  prodSettings.boardSizes[mi].sizes.push({w:1220,h:2440});
+  saveProdSettings();
+  renderProductionSettings();
+}
+function prodRemoveBoardSize(mi,si) {
+  saveProductionSettings();
+  prodSettings.boardSizes[mi].sizes.splice(si,1);
+  saveProdSettings();
+  renderProductionSettings();
+}
+
+// ── Production page ───────────────────────────────────────────────────────
+function renderProductionPage() {
+  var w=el('prod-wrap'); if(!w) return;
+  var noKey=!prodSettings.claudeKey;
+  var fileLabelHtml='';
+  if(prodState.file){
+    fileLabelHtml='<div style="display:flex;align-items:center;gap:8px;margin-top:10px;background:#e0f2ec;border-radius:8px;padding:8px 12px">'
+      +'<i class="ti ti-file-check" style="color:var(--teal)"></i>'
+      +'<span style="font-size:13px;color:var(--teal);font-weight:500">'+escHtml(prodState.fileName)+'</span>'
+      +'<button class="btn btn-danger" style="margin-left:auto;padding:3px 8px;font-size:11px" onclick="prodClearFile()"><i class="ti ti-x"></i>Remove</button>'
+      +'</div>';
+  }
+  var canAnalyze=prodState.file&&!prodState.analyzing&&!noKey;
+  var btnHtml=prodState.analyzing
+    ?'<button class="btn btn-primary" disabled style="min-width:160px"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i>Analyzing…</button>'
+    +'<span style="font-size:12px;color:var(--text2);align-self:center">This may take 20–60 seconds…</span>'
+    :'<button class="btn btn-primary" onclick="callClaudeProduction()" '+(canAnalyze?'':'disabled')+' style="min-width:160px"><i class="ti ti-robot"></i>Analyze with AI</button>';
+  var resultHtml=prodState.result?prodBuildResultHtml(prodState.result):'';
+  w.innerHTML=(noKey?'<div class="alert alert-warn" style="margin-bottom:14px"><i class="ti ti-alert-triangle"></i>No Claude API key configured. <a href="#" onclick="navigate(\'settings\');setTimeout(function(){setStTab(\'production\')},150);return false" style="font-weight:500">Set it in Settings → Production</a>.</div>':'')
+    +'<div class="card" style="margin-bottom:14px">'
+    +'<div class="card-head"><h3><i class="ti ti-upload"></i>Upload file for analysis</h3></div>'
+    +'<div class="card-body">'
+    +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-bottom:12px">'
+    +'<div><label class="fld" style="margin-top:0">File type</label>'
+    +'<select id="prod-ftype" style="height:32px;font-size:12px" onchange="prodState.fileType=this.value">'
+    +'<option value="shop-drawing"'+(prodState.fileType==='shop-drawing'?' selected':'')+'>Shop Drawing (PDF → Cutting List)</option>'
+    +'<option value="technical-drawing"'+(prodState.fileType==='technical-drawing'?' selected':'')+'>Technical Drawing (PDF → Cutting List)</option>'
+    +'<option value="cutting-list"'+(prodState.fileType==='cutting-list'?' selected':'')+'>Cutting List (Excel/PDF → Services &amp; BOM)</option>'
+    +'</select></div>'
+    +'<div><label class="fld" style="margin-top:0">Link to quotation (optional)</label>'
+    +'<input type="text" id="prod-qlink" placeholder="Quotation #, client name, or project…" style="height:32px;font-size:12px">'
+    +'</div></div>'
+    +'<div id="prod-dropzone" style="border:2px dashed var(--border);border-radius:10px;padding:32px;text-align:center;cursor:pointer;transition:border-color .15s;background:#fafaf8" onclick="prodPickFile()" ondragover="event.preventDefault();this.style.borderColor=\'var(--teal)\'" ondragleave="this.style.borderColor=\'var(--border)\'" ondrop="event.preventDefault();this.style.borderColor=\'var(--border)\';prodHandleFiles(event.dataTransfer.files)">'
+    +'<i class="ti ti-cloud-upload" style="font-size:36px;color:var(--text2);display:block;margin-bottom:10px"></i>'
+    +'<div style="font-size:14px;font-weight:500;color:var(--text2)">Click to browse or drop a file here</div>'
+    +'<div style="font-size:11px;color:var(--muted);margin-top:4px">Accepts: PDF (.pdf) · Excel (.xlsx, .xls)</div>'
+    +'</div>'
+    +fileLabelHtml
+    +'</div></div>'
+    +'<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">'+btnHtml+'</div>'
+    +resultHtml;
+  if(!el('prod-spin-style')){
+    var st=document.createElement('style');
+    st.id='prod-spin-style';
+    st.textContent='@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}';
+    document.head.appendChild(st);
+  }
+}
+
+function prodPickFile(){
+  var inp=document.createElement('input');
+  inp.type='file'; inp.accept='.pdf,.xlsx,.xls';
+  inp.onchange=function(e){if(e.target.files&&e.target.files[0])prodHandleFiles(e.target.files);};
+  inp.click();
+}
+function prodHandleFiles(files){
+  if(!files||!files.length) return;
+  var f=files[0];
+  var ext=f.name.split('.').pop().toLowerCase();
+  if(['pdf','xlsx','xls'].indexOf(ext)<0){alert('Please upload a PDF or Excel (.xlsx/.xls) file.');return;}
+  prodState.file=f; prodState.fileName=f.name; prodState.result=null;
+  renderProductionPage();
+}
+function prodClearFile(){
+  prodState.file=null; prodState.fileName=''; prodState.result=null;
+  renderProductionPage();
+}
+
+// ── Claude API call ───────────────────────────────────────────────────────
+function callClaudeProduction(){
+  if(!prodState.file||!prodSettings.claudeKey||prodState.analyzing) return;
+  prodState.analyzing=true; renderProductionPage();
+  var f=prodState.file;
+  var ext=f.name.split('.').pop().toLowerCase();
+  var isPdf=ext==='pdf';
+  var reader=new FileReader();
+  reader.onerror=function(){
+    prodState.analyzing=false;
+    prodState.result={error:'Could not read the uploaded file.'};
+    renderProductionPage();
+  };
+  reader.onload=function(e){
+    if(isPdf){
+      var dataUrl=e.target.result;
+      var base64=dataUrl.indexOf(',')>=0?dataUrl.split(',')[1]:dataUrl;
+      prodSendPdf(base64);
+    } else {
+      try{
+        var arr=new Uint8Array(e.target.result);
+        var wb=XLSX.read(arr,{type:'array'});
+        var text='';
+        wb.SheetNames.forEach(function(name){
+          text+='=== Sheet: '+name+' ===\n';
+          text+=XLSX.utils.sheet_to_csv(wb.Sheets[name])+'\n\n';
+        });
+        prodSendText(text);
+      }catch(err){
+        prodState.analyzing=false;
+        prodState.result={error:'Could not read Excel file: '+(err.message||err)};
+        renderProductionPage();
+      }
+    }
+  };
+  if(isPdf) reader.readAsDataURL(f);
+  else reader.readAsArrayBuffer(f);
+}
+
+function prodBuildPrompt(){
+  var ftMap={'shop-drawing':'shop drawing','technical-drawing':'technical drawing','cutting-list':'cutting list'};
+  var ftDesc=ftMap[prodState.fileType]||'drawing';
+  var ebtDesc=prodSettings.ebtLegend.map(function(e){return e.pos+'='+e.desc;}).join(', ');
+  var bsDesc=prodSettings.boardSizes.map(function(m){
+    return m.material+': '+m.sizes.map(function(s){return s.w+'×'+s.h+'mm';}).join(', ');
+  }).join('; ');
+  return 'You are a furniture manufacturing specialist. Analyze this '+ftDesc+' of modular furniture.\n\n'
+    +'Return ONLY valid JSON — no markdown code blocks, no explanation text before or after — just the raw JSON object.\n\n'
+    +'Required JSON structure:\n'
+    +'{\n'
+    +'  "summary": "brief description of the furniture item(s)",\n'
+    +'  "projectName": "project or client name if visible, else empty string",\n'
+    +'  "components": [\n'
+    +'    {\n'
+    +'      "area": "area or room name, or General",\n'
+    +'      "name": "component name e.g. Left Side Panel",\n'
+    +'      "material": "PB | MDF | Plywood | Compact Laminate",\n'
+    +'      "color": "color or finish name e.g. Pearl White",\n'
+    +'      "texture": "stipple matte | supermatte | crosscut | woodgrain | softwood | hardwood | textile | stone | or empty string",\n'
+    +'      "thickness": 18,\n'
+    +'      "length": 720,\n'
+    +'      "width": 560,\n'
+    +'      "qty": 2,\n'
+    +'      "faces": 2,\n'
+    +'      "grain": "length | width | none",\n'
+    +'      "ebt": "TBLR combination e.g. TL or TBLR or none",\n'
+    +'      "notes": ""\n'
+    +'    }\n'
+    +'  ],\n'
+    +'  "hardware": [\n'
+    +'    { "name": "hardware name", "qty": 4, "unit": "pcs", "notes": "" }\n'
+    +'  ],\n'
+    +'  "holeSchedule": [\n'
+    +'    { "component": "component name", "holeType": "shelf pin | hinge | cam lock | dowel | handle", "qty": 8, "diameter": 5, "position": "description", "notes": "" }\n'
+    +'  ]\n'
+    +'}\n\n'
+    +'Production settings to apply:\n'
+    +'- Kerf: '+prodSettings.kerf+'mm per cut\n'
+    +'- Woodgrain direction default: along '+prodSettings.woodgrainDir+'\n'
+    +'- EBT position codes: '+ebtDesc+'\n'
+    +'- Standard board sizes: '+bsDesc+'\n'
+    +'- EBT wastage allowance: '+prodSettings.ebtWastage+'%\n\n'
+    +'Rules:\n'
+    +'- All dimensions in millimeters (mm), as-manufactured (before kerf adjustment)\n'
+    +'- Include ALL panels and components visible or implied in the drawing\n'
+    +'- For woodgrain materials, use grain direction from settings unless drawing specifies otherwise\n'
+    +'- Assign EBT codes based on visible edge treatment; if not specified use standard cabinet-making practice\n'
+    +'- 2-face melamine board unless drawing says otherwise';
+}
+
+function prodApiCall(bodyObj){
+  return fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{
+      'content-type':'application/json',
+      'x-api-key':prodSettings.claudeKey,
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true'
+    },
+    body:JSON.stringify(bodyObj)
+  }).then(function(r){
+    if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
+    return r.json();
+  }).then(function(data){
+    var text=(data.content&&data.content[0]&&data.content[0].text)||'';
+    return prodParseResponse(text);
+  });
+}
+
+function prodSendPdf(base64){
+  var prompt=prodBuildPrompt();
+  prodApiCall({
+    model:'claude-sonnet-4-5',
+    max_tokens:8000,
+    messages:[{role:'user',content:[
+      {type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}},
+      {type:'text',text:prompt}
+    ]}]
+  }).then(function(result){
+    prodState.analyzing=false; prodState.result=result; renderProductionPage();
+  }).catch(function(err){
+    prodState.analyzing=false; prodState.result={error:err.message||'API call failed'}; renderProductionPage();
+  });
+}
+
+function prodSendText(csvText){
+  var prompt=prodBuildPrompt();
+  prodApiCall({
+    model:'claude-sonnet-4-5',
+    max_tokens:8000,
+    messages:[{role:'user',content:'Here is the cutting list file content (CSV format):\n\n'+csvText+'\n\n---\n\n'+prompt}]
+  }).then(function(result){
+    prodState.analyzing=false; prodState.result=result; renderProductionPage();
+  }).catch(function(err){
+    prodState.analyzing=false; prodState.result={error:err.message||'API call failed'}; renderProductionPage();
+  });
+}
+
+function prodParseResponse(text){
+  var json=text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```\s*$/,'');
+  var s=json.indexOf('{'); var e=json.lastIndexOf('}');
+  if(s>=0&&e>s) json=json.substring(s,e+1);
+  try{
+    var r=JSON.parse(json);
+    r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
+    r._bom=prodComputeBom(r.components||[]);
+    return r;
+  }catch(err){
+    return {error:'Could not parse AI response. Please try again.\n\nRaw output preview:\n'+text.substring(0,400)};
+  }
+}
+
+function prodComputeServices(comps,holes){
+  var cutLM=0; var ebtLM=0;
+  var waste=1+(prodSettings.ebtWastage||0)/100;
+  for(var i=0;i<comps.length;i++){
+    var c=comps[i];
+    var l=(c.length||0)/1000; var w=(c.width||0)/1000; var qty=c.qty||1;
+    cutLM+=(l+w)*qty;
+    var ebt=(c.ebt||'').toUpperCase();
+    if(ebt.indexOf('T')>=0) ebtLM+=w*qty*waste;
+    if(ebt.indexOf('B')>=0) ebtLM+=w*qty*waste;
+    if(ebt.indexOf('L')>=0) ebtLM+=l*qty*waste;
+    if(ebt.indexOf('R')>=0) ebtLM+=l*qty*waste;
+  }
+  var totalHoles=0;
+  for(var h=0;h<holes.length;h++) totalHoles+=(holes[h].qty||0);
+  return {cuttingLM:Math.round(cutLM*100)/100,edgebandingLM:Math.round(ebtLM*100)/100,holeCount:totalHoles};
+}
+
+function prodComputeBom(comps){
+  var groups={};
+  for(var i=0;i<comps.length;i++){
+    var c=comps[i];
+    var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0].join('|');
+    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,totalAreaMm2:0};
+    groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*(c.qty||1);
+  }
+  var bom=[]; var keys=Object.keys(groups);
+  for(var j=0;j<keys.length;j++){
+    var g=groups[keys[j]];
+    var boardW=1220; var boardH=2440;
+    for(var m=0;m<prodSettings.boardSizes.length;m++){
+      var bs=prodSettings.boardSizes[m];
+      if(g.material&&bs.material&&g.material.toLowerCase().indexOf(bs.material.split('/')[0].toLowerCase())>=0){
+        if(bs.sizes&&bs.sizes.length){boardW=bs.sizes[0].w;boardH=bs.sizes[0].h;}
+        break;
+      }
+    }
+    var boardArea=boardW*boardH;
+    var waste=1+(prodSettings.ebtWastage||0)/100;
+    var adjusted=g.totalAreaMm2*waste;
+    var needed=Math.ceil(adjusted/boardArea);
+    bom.push({
+      material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,
+      totalArea:Math.round(g.totalAreaMm2/10000)/100,
+      boardSize:boardW+'×'+boardH+'mm',boardsNeeded:needed
+    });
+  }
+  return bom;
+}
+
+function prodBuildResultHtml(result){
+  if(result.error){
+    return '<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Analysis failed:</b><br><pre style="font-size:11px;white-space:pre-wrap;margin-top:4px">'+escHtml(result.error)+'</pre></div></div>';
+  }
+  var comps=result.components||[];
+  var hw=result.hardware||[];
+  var holes=result.holeSchedule||[];
+  var svc=result._services||{};
+  var bom=result._bom||[];
+  var totalPieces=comps.reduce(function(s,c){return s+(c.qty||0);},0);
+  var kpis=[
+    {l:'Components',v:comps.length,i:'ti-packages'},
+    {l:'Total pieces',v:totalPieces,i:'ti-stack-2'},
+    {l:'Cutting',v:(svc.cuttingLM||0).toFixed(1)+' lm',i:'ti-cut'},
+    {l:'Edgebanding',v:(svc.edgebandingLM||0).toFixed(1)+' lm',i:'ti-border-style-2'},
+    {l:'Holes',v:svc.holeCount||0,i:'ti-circle-dot'},
+    {l:'Board types',v:bom.length,i:'ti-layout-board'}
+  ];
+  var kpiHtml='<div class="kpi-grid" style="margin-bottom:14px">';
+  for(var k=0;k<kpis.length;k++) kpiHtml+='<div class="kpi"><div class="lbl"><i class="ti '+kpis[k].i+'"></i> '+kpis[k].l+'</div><div class="val" style="font-size:18px">'+kpis[k].v+'</div></div>';
+  kpiHtml+='</div>';
+  var ctRows='';
+  for(var i=0;i<comps.length;i++){
+    var c=comps[i];
+    ctRows+='<tr>'
+      +'<td style="font-size:11px;color:var(--text2)">'+escHtml(c.area||'—')+'</td>'
+      +'<td style="font-weight:500">'+escHtml(c.name||'')+'</td>'
+      +'<td>'+escHtml(c.material||'—')+'</td>'
+      +'<td style="font-size:11px">'+escHtml(c.color||'—')+'<br><span style="color:var(--text2)">'+escHtml(c.texture||'')+'</span></td>'
+      +'<td style="text-align:right">'+c.thickness+'</td>'
+      +'<td style="text-align:right">'+c.length+'</td>'
+      +'<td style="text-align:right">'+c.width+'</td>'
+      +'<td style="text-align:center;font-weight:600">'+c.qty+'</td>'
+      +'<td style="text-align:center;font-size:11px">'+(c.faces||2)+'F<br>'+escHtml(c.ebt||'—')+'</td>'
+      +'<td style="font-size:11px;color:var(--text2)">'+escHtml(c.grain||'')+'</td>'
+      +'</tr>';
+  }
+  var compHtml='<div class="card" style="margin-bottom:14px">'
+    +'<div class="card-head"><h3><i class="ti ti-packages"></i>Cutting List — '+comps.length+' components, '+totalPieces+' pieces</h3>'
+    +'<button class="btn" style="font-size:11px" onclick="prodExportExcel()"><i class="ti ti-file-spreadsheet"></i>Export Excel</button>'
+    +'</div>'
+    +'<div style="overflow-x:auto"><table class="data">'
+    +'<thead><tr><th>Area</th><th>Component</th><th>Material</th><th>Color / Texture</th><th style="text-align:right">Thk</th><th style="text-align:right">L (mm)</th><th style="text-align:right">W (mm)</th><th style="text-align:center">Qty</th><th style="text-align:center">F / EBT</th><th>Grain</th></tr></thead>'
+    +'<tbody>'+ctRows+'</tbody>'
+    +'</table></div></div>';
+  var svcHtml='<div class="card" style="margin-bottom:14px">'
+    +'<div class="card-head"><h3><i class="ti ti-settings-2"></i>Services summary</h3></div>'
+    +'<div class="card-body"><div class="kpi-grid">'
+    +'<div class="kpi"><div class="lbl">Panel cutting</div><div class="val" style="font-size:18px">'+(svc.cuttingLM||0).toFixed(1)+'</div><div class="sub">linear meters</div></div>'
+    +'<div class="kpi"><div class="lbl">Edgebanding</div><div class="val" style="font-size:18px">'+(svc.edgebandingLM||0).toFixed(1)+'</div><div class="sub">lm · incl. '+prodSettings.ebtWastage+'% wastage</div></div>'
+    +'<div class="kpi"><div class="lbl">Hole boring</div><div class="val" style="font-size:18px">'+(svc.holeCount||0)+'</div><div class="sub">holes total</div></div>'
+    +'</div></div></div>';
+  var bomRows='';
+  for(var b=0;b<bom.length;b++){
+    var bm=bom[b];
+    bomRows+='<tr>'
+      +'<td>'+escHtml(bm.material)+'</td>'
+      +'<td>'+escHtml(bm.color)+'</td>'
+      +'<td style="font-size:11px;color:var(--text2)">'+escHtml(bm.texture)+'</td>'
+      +'<td style="text-align:right">'+bm.thickness+'mm</td>'
+      +'<td style="text-align:right">'+bm.totalArea+' m²</td>'
+      +'<td style="font-size:11px;color:var(--text2)">'+bm.boardSize+'</td>'
+      +'<td style="text-align:right;font-weight:600">'+bm.boardsNeeded+'</td>'
+      +'</tr>';
+  }
+  var bomHtml='<div class="card" style="margin-bottom:14px">'
+    +'<div class="card-head"><h3><i class="ti ti-layout-board"></i>Bill of Materials — boards needed</h3></div>'
+    +'<div style="overflow-x:auto"><table class="data">'
+    +'<thead><tr><th>Material</th><th>Color</th><th>Texture</th><th style="text-align:right">Thickness</th><th style="text-align:right">Total area</th><th>Board size</th><th style="text-align:right">Sheets needed</th></tr></thead>'
+    +'<tbody>'+bomRows+'</tbody>'
+    +'</table></div></div>';
+  var hwHtml='';
+  if(hw.length){
+    var hwRows='';
+    for(var h=0;h<hw.length;h++) hwRows+='<tr><td>'+escHtml(hw[h].name)+'</td><td style="text-align:right">'+hw[h].qty+'</td><td>'+escHtml(hw[h].unit)+'</td><td style="font-size:11px;color:var(--text2)">'+escHtml(hw[h].notes||'')+'</td></tr>';
+    hwHtml='<div class="card" style="margin-bottom:14px">'
+      +'<div class="card-head"><h3><i class="ti ti-tool"></i>Hardware list</h3></div>'
+      +'<div style="overflow-x:auto"><table class="data"><thead><tr><th>Hardware</th><th style="text-align:right">Qty</th><th>Unit</th><th>Notes</th></tr></thead><tbody>'+hwRows+'</tbody></table></div></div>';
+  }
+  var holeHtml='';
+  if(holes.length){
+    var holeRows='';
+    for(var hi=0;hi<holes.length;hi++){
+      var ho=holes[hi];
+      holeRows+='<tr><td>'+escHtml(ho.component)+'</td><td>'+escHtml(ho.holeType)+'</td><td style="text-align:right">'+ho.qty+'</td><td style="text-align:right">'+ho.diameter+'mm</td><td style="font-size:11px">'+escHtml(ho.position)+'</td><td style="font-size:11px;color:var(--text2)">'+escHtml(ho.notes||'')+'</td></tr>';
+    }
+    holeHtml='<div class="card" style="margin-bottom:14px">'
+      +'<div class="card-head"><h3><i class="ti ti-circle-dot"></i>Hole schedule</h3></div>'
+      +'<div style="overflow-x:auto"><table class="data"><thead><tr><th>Component</th><th>Hole type</th><th style="text-align:right">Qty</th><th style="text-align:right">Ø</th><th>Position</th><th>Notes</th></tr></thead><tbody>'+holeRows+'</tbody></table></div></div>';
+  }
+  var actHtml='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">'
+    +'<button class="btn btn-primary" onclick="prodExportExcel()"><i class="ti ti-file-spreadsheet"></i>Export Excel</button>'
+    +'<button class="btn btn-success" onclick="prodReflectToQuotation()"><i class="ti ti-transfer"></i>Reflect to quotation</button>'
+    +'<button class="btn" onclick="prodClearFile()"><i class="ti ti-refresh"></i>New analysis</button>'
+    +'</div>';
+  return '<div class="alert alert-success" style="margin-bottom:14px"><i class="ti ti-circle-check"></i><b>Analysis complete!</b>'+(result.summary?' '+escHtml(result.summary):'')+'</div>'
+    +actHtml+kpiHtml+compHtml+svcHtml+bomHtml+hwHtml+holeHtml;
+}
+
+function prodExportExcel(){
+  var r=prodState.result; if(!r||r.error) return;
+  var wb=XLSX.utils.book_new();
+  var comps=r.components||[]; var hw=r.hardware||[]; var holes=r.holeSchedule||[];
+  var svc=r._services||{}; var bom=r._bom||[];
+  var cd=[['Area','Component','Material','Color','Texture','Thickness (mm)','Length (mm)','Width (mm)','Qty','Faces','Grain','EBT','Notes']];
+  for(var i=0;i<comps.length;i++){var c=comps[i];cd.push([c.area||'',c.name||'',c.material||'',c.color||'',c.texture||'',c.thickness||0,c.length||0,c.width||0,c.qty||1,c.faces||2,c.grain||'',c.ebt||'',c.notes||'']);}
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cd),'Cutting List');
+  var sd=[['Service','Quantity','Unit'],['Panel cutting',svc.cuttingLM||0,'lm'],['Edgebanding (incl. '+prodSettings.ebtWastage+'% wastage)',svc.edgebandingLM||0,'lm'],['Hole boring',svc.holeCount||0,'holes']];
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sd),'Services Summary');
+  var bd=[['Material','Color','Texture','Thickness (mm)','Total Area (sqm)','Board Size','Sheets Needed']];
+  for(var b=0;b<bom.length;b++){var bm=bom[b];bd.push([bm.material,bm.color,bm.texture,bm.thickness,bm.totalArea,bm.boardSize,bm.boardsNeeded]);}
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(bd),'Bill of Materials');
+  if(hw.length){
+    var hwd=[['Hardware','Qty','Unit','Notes']];
+    for(var h=0;h<hw.length;h++) hwd.push([hw[h].name,hw[h].qty,hw[h].unit,hw[h].notes||'']);
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(hwd),'Hardware');
+  }
+  if(holes.length){
+    var hsd=[['Component','Hole Type','Qty','Diameter (mm)','Position','Notes']];
+    for(var hi=0;hi<holes.length;hi++){var ho=holes[hi];hsd.push([ho.component,ho.holeType,ho.qty,ho.diameter,ho.position,ho.notes||'']);}
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(hsd),'Hole Schedule');
+  }
+  var fname=(prodState.fileName.replace(/\.[^.]+$/,'')||'production')+'_cutting_list.xlsx';
+  XLSX.writeFile(wb,fname);
+}
+
+function prodReflectToQuotation(){
+  var r=prodState.result;
+  if(!r||r.error||!r._services){alert('No analysis results available to reflect.');return;}
+  if(!confirm('Reflect extracted services and materials to the current quotation?\n\nThis will add items to Area 1 in services mode. Existing items will not be removed. Material unit prices must be filled in manually.')) return;
+  qFabMode='services';
+  if(!qAreas.length) qAreas.push({name:'Area 1',items:[],svcItems:[],matItems:[],bomItems:[]});
+  var area=qAreas[0];
+  if(!area.svcItems) area.svcItems=[];
+  if(!area.matItems) area.matItems=[];
+  var svc=r._services;
+  function svcPrice(name){for(var i=0;i<SERVICES.length;i++){if(SERVICES[i].name===name)return SERVICES[i].price;}return 0;}
+  if(svc.cuttingLM>0) area.svcItems.push({type:'Panel cutting',unit:'lm',qty:Math.round(svc.cuttingLM*10)/10,price:svcPrice('Panel cutting')});
+  if(svc.edgebandingLM>0) area.svcItems.push({type:'Edgebanding',unit:'lm',qty:Math.round(svc.edgebandingLM*10)/10,price:svcPrice('Edgebanding')});
+  if(svc.holeCount>0) area.svcItems.push({type:'Boring/drilling',unit:'hole',qty:svc.holeCount,price:svcPrice('Boring/drilling')});
+  var bom=r._bom||[];
+  for(var b=0;b<bom.length;b++){
+    var bm=bom[b];
+    area.matItems.push({
+      name:bm.material+' '+bm.color+(bm.texture?' ('+bm.texture+')':'')+' '+bm.thickness+'mm',
+      qty:bm.boardsNeeded,unit:'sheet',price:0
+    });
+  }
+  navigate('quotation');
+  setTimeout(function(){
+    var ftEl=el('fab-mode-select');
+    if(ftEl){ftEl.value='services';qFabMode='services';}
+    renderItems();
+    setTimeout(function(){alert('✓ Services and materials reflected to quotation.\nPlease fill in the unit price for each material row.');},200);
+  },300);
+}
+
+function escHtml(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 initGoogleAuth();
