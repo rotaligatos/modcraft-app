@@ -6250,7 +6250,7 @@ function prodSendPdf(base64){
   var prompt=prodBuildPrompt();
   prodApiCall({
     model:'claude-sonnet-4-5',
-    max_tokens:8000,
+    max_tokens:8192,
     messages:[{role:'user',content:[
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}},
       {type:'text',text:prompt}
@@ -6693,8 +6693,39 @@ function prodExportCollada(){
   setTimeout(function(){URL.revokeObjectURL(url);},1000);
 }
 
+function prodRepairJson(s){
+  var depth=0,inStr=false,esc=false,lastRootClose=-1;
+  for(var i=0;i<s.length;i++){
+    var c=s[i];
+    if(esc){esc=false;continue;}
+    if(c==='\\'&&inStr){esc=true;continue;}
+    if(c==='"'){inStr=!inStr;continue;}
+    if(inStr) continue;
+    if(c==='{')depth++;
+    else if(c==='}'){depth--;if(depth===0)lastRootClose=i;}
+    else if(c==='[')depth++;
+    else if(c===']'&&depth>0)depth--;
+  }
+  if(lastRootClose>0) return s.substring(0,lastRootClose+1);
+  var stack=[],inStr2=false,esc2=false;
+  for(var j=0;j<s.length;j++){
+    var d=s[j];
+    if(esc2){esc2=false;continue;}
+    if(d==='\\'&&inStr2){esc2=true;continue;}
+    if(d==='"'){inStr2=!inStr2;continue;}
+    if(inStr2) continue;
+    if(d==='{')stack.push('}');
+    else if(d==='[')stack.push(']');
+    else if((d==='}'||d===']')&&stack.length&&stack[stack.length-1]===d)stack.pop();
+  }
+  var repaired=s.replace(/,\s*$/,'');
+  while(stack.length) repaired+=stack.pop();
+  return repaired;
+}
 function prodParseResponse(text){
-  var json=text.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```\s*$/,'');
+  var json=text.trim()
+    .replace(/^```(?:json)?\r?\n?/i,'')
+    .replace(/\r?\n?```\s*$/,'');
   var s=json.indexOf('{'); var e=json.lastIndexOf('}');
   if(s>=0&&e>s) json=json.substring(s,e+1);
   try{
@@ -6702,8 +6733,18 @@ function prodParseResponse(text){
     r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
     r._bom=prodComputeBom(r.components||[]);
     return r;
-  }catch(err){
-    return {error:'Could not parse AI response. Please try again.\n\nRaw output preview:\n'+text.substring(0,400)};
+  }catch(err1){
+    try{
+      var repaired=prodRepairJson(json);
+      var r2=JSON.parse(repaired);
+      r2._truncated=true;
+      r2._services=prodComputeServices(r2.components||[],r2.holeSchedule||[]);
+      r2._bom=prodComputeBom(r2.components||[]);
+      return r2;
+    }catch(err2){
+      var tail=text.length>300?'\n...\n'+text.substring(text.length-200):'';
+      return {error:'Could not parse AI response. Error: '+err1.message+'\n\nRaw output (first 500 chars):\n'+text.substring(0,500)+tail};
+    }
   }
 }
 
@@ -6819,6 +6860,7 @@ function prodBuildResultHtml(result){
   if(result.error){
     return '<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Analysis failed:</b><br><pre style="font-size:11px;white-space:pre-wrap;margin-top:4px">'+escHtml(result.error)+'</pre></div></div>';
   }
+  var truncWarn=result._truncated?'<div class="alert alert-warn" style="margin-bottom:12px"><i class="ti ti-alert-triangle"></i><div><b>Partial result — response was cut off at the token limit.</b><br>Some components may be missing. For large projects with many panels, try splitting the drawing into sections and analyzing each separately.</div></div>':'';
   prodBuildSummary(result);
   var comps=result.components||[];
   var hw=result.hardware||[];
@@ -6826,7 +6868,7 @@ function prodBuildResultHtml(result){
   var svc=result._services||{};
   var bom=result._bom||[];
   var totalPieces=comps.reduce(function(s,c){return s+(c.qty||0);},0);
-  var kpiHtml='<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;margin-bottom:16px;align-items:start">'
+  var kpiHtml=truncWarn+'<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;margin-bottom:16px;align-items:start">'
     +'<div>'
     +'<div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Project</div>'
     +'<div class="kpi" style="text-align:center"><div class="lbl"><i class="ti ti-box"></i> Carcass units</div><div class="val" style="font-size:30px;color:var(--navy)">'+(result.carcassCount||0)+'</div><div class="sub">furniture pieces</div></div>'
