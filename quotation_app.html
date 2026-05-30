@@ -1265,7 +1265,9 @@ var prodState = {
   fileType: 'shop-drawing',
   analyzing: false,
   result: null,
-  summary: null
+  summary: null,
+  phase: 'upload',
+  elevationResult: null
 };
 // ── Demo data (used when AI is OFF — no API cost) ─────────────────────────
 var PROD_MOCK_RESULT = {
@@ -1291,6 +1293,20 @@ var PROD_MOCK_RESULT = {
     {component:'Left Side Panel',holeType:'cam lock',qty:4,diameter:15,position:'Top/bottom panel connections',notes:''}
   ],
   carcassCount:1
+};
+var PROD_MOCK_ELEVATION = {
+  summary:'Demo elevation — kitchen 2700mm wide with 3 base + 3 upper cabinets',
+  projectName:'Demo Project',area:'Kitchen',
+  totalWidth:2700,totalHeight:2100,countertopHeight:900,upperCabinetClearance:450,
+  units:[
+    {id:1,label:'BC-1',type:'Base Cabinet',position:0,width:900,height:720,depth:600,material:'PB',color:'White',doors:2,drawers:0,shelves:1,handleType:'bar',isUpperCabinet:false,notes:''},
+    {id:2,label:'BC-2',type:'Base Cabinet',position:900,width:900,height:720,depth:600,material:'PB',color:'White',doors:2,drawers:0,shelves:1,handleType:'bar',isUpperCabinet:false,notes:''},
+    {id:3,label:'BC-3',type:'Base Cabinet',position:1800,width:900,height:720,depth:600,material:'PB',color:'White',doors:2,drawers:0,shelves:1,handleType:'bar',isUpperCabinet:false,notes:''},
+    {id:4,label:'UC-1',type:'Upper Cabinet',position:0,width:900,height:630,depth:350,material:'PB',color:'White',doors:2,drawers:0,shelves:1,handleType:'bar',isUpperCabinet:true,notes:''},
+    {id:5,label:'UC-2',type:'Upper Cabinet',position:900,width:900,height:630,depth:350,material:'PB',color:'White',doors:2,drawers:0,shelves:1,handleType:'bar',isUpperCabinet:true,notes:''},
+    {id:6,label:'UC-3',type:'Upper Cabinet',position:1800,width:900,height:630,depth:350,material:'PB',color:'White',doors:2,drawers:0,shelves:1,handleType:'bar',isUpperCabinet:true,notes:''}
+  ],
+  carcassCount:6,notes:''
 };
 function prodToggleAI() {
   prodSettings.aiEnabled=!prodSettings.aiEnabled;
@@ -6020,7 +6036,13 @@ function renderProductionPage() {
     +'<span style="font-size:12px;color:var(--text2);align-self:center">This may take 20–60 seconds…</span>'
     :'<button class="btn btn-primary" onclick="callClaudeProduction()" '+(canAnalyze?'':'disabled')+' style="min-width:160px"><i class="ti ti-'+(aiOn?'robot':'circle-dashed')+'"></i>'+(aiOn?'Analyze with AI':'Load demo data')+'</button>'
     +(aiOn?'':' <span style="font-size:11px;color:var(--amber);align-self:center"><i class="ti ti-info-circle"></i> AI off — no API cost</span>');
-  var resultHtml=prodState.result?prodBuildResultHtml(prodState.result):'';
+  if(prodState.phase==='review'&&prodState.elevationResult){
+    w.innerHTML=prodRenderShopDrawing(prodState.elevationResult);
+    if(!el('prod-spin-style')){var st=document.createElement('style');st.id='prod-spin-style';st.textContent='@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}';document.head.appendChild(st);}
+    return;
+  }
+  var showResult=prodState.result&&(prodState.phase==='cutting-list'||prodState.fileType!=='elevation-drawing');
+  var resultHtml=showResult?prodBuildResultHtml(prodState.result):'';
   w.innerHTML=(noKey?'<div class="alert alert-warn" style="margin-bottom:14px"><i class="ti ti-alert-triangle"></i>No Claude API key configured. <a href="#" onclick="navigate(\'settings\');setTimeout(function(){setStTab(\'production\')},150);return false" style="font-weight:500">Set it in Settings → Production</a>.</div>':'')
     +'<div class="card" style="margin-bottom:14px">'
     +'<div class="card-head"><h3><i class="ti ti-upload"></i>Upload file for analysis</h3></div>'
@@ -6028,6 +6050,7 @@ function renderProductionPage() {
     +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin-bottom:12px">'
     +'<div><label class="fld" style="margin-top:0">File type</label>'
     +'<select id="prod-ftype" style="height:32px;font-size:12px" onchange="prodState.fileType=this.value">'
+    +'<option value="elevation-drawing"'+(prodState.fileType==='elevation-drawing'?' selected':'')+'>Elevation Drawing (PDF → Shop Drawing → Cutting List)</option>'
     +'<option value="shop-drawing"'+(prodState.fileType==='shop-drawing'?' selected':'')+'>Shop Drawing (PDF → Cutting List)</option>'
     +'<option value="technical-drawing"'+(prodState.fileType==='technical-drawing'?' selected':'')+'>Technical Drawing (PDF → Cutting List)</option>'
     +'<option value="cutting-list"'+(prodState.fileType==='cutting-list'?' selected':'')+'>Cutting List (Excel/PDF → Services &amp; BOM)</option>'
@@ -6064,10 +6087,12 @@ function prodHandleFiles(files){
   var ext=f.name.split('.').pop().toLowerCase();
   if(['pdf','xlsx','xls'].indexOf(ext)<0){alert('Please upload a PDF or Excel (.xlsx/.xls) file.');return;}
   prodState.file=f; prodState.fileName=f.name; prodState.result=null;
+  prodState.elevationResult=null; prodState.phase='upload'; prodState.summary=null;
   renderProductionPage();
 }
 function prodClearFile(){
   prodState.file=null; prodState.fileName=''; prodState.result=null;
+  prodState.elevationResult=null; prodState.phase='upload'; prodState.summary=null;
   renderProductionPage();
 }
 
@@ -6078,10 +6103,15 @@ function callClaudeProduction(){
   if(prodSettings.aiEnabled===false){
     prodState.analyzing=true; renderProductionPage();
     setTimeout(function(){
-      var r=JSON.parse(JSON.stringify(PROD_MOCK_RESULT));
-      r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
-      r._bom=prodComputeBom(r.components||[]);
-      prodState.result=r; prodState.analyzing=false; renderProductionPage();
+      if(prodState.fileType==='elevation-drawing'){
+        prodState.elevationResult=JSON.parse(JSON.stringify(PROD_MOCK_ELEVATION));
+        prodState.phase='review'; prodState.analyzing=false; renderProductionPage();
+      } else {
+        var r=JSON.parse(JSON.stringify(PROD_MOCK_RESULT));
+        r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
+        r._bom=prodComputeBom(r.components||[]);
+        prodState.result=r; prodState.analyzing=false; renderProductionPage();
+      }
     },600);
     return;
   }
@@ -6100,7 +6130,8 @@ function callClaudeProduction(){
     if(isPdf){
       var dataUrl=e.target.result;
       var base64=dataUrl.indexOf(',')>=0?dataUrl.split(',')[1]:dataUrl;
-      prodSendPdf(base64);
+      if(prodState.fileType==='elevation-drawing') prodSendElevation(base64);
+      else prodSendPdf(base64);
     } else {
       try{
         var arr=new Uint8Array(e.target.result);
@@ -6223,6 +6254,307 @@ function prodSendText(csvText){
   }).catch(function(err){
     prodState.analyzing=false; prodState.result={error:err.message||'API call failed'}; renderProductionPage();
   });
+}
+
+// ── Elevation Phase 1: analyze elevation drawing ─────────────────────────
+function prodBuildElevationPrompt(){
+  return 'You are a furniture manufacturing specialist. Analyze this elevation drawing.\n\n'
+    +'Return ONLY valid JSON — no markdown, no explanation — just the raw JSON object.\n\n'
+    +'Required JSON structure:\n'
+    +'{\n'
+    +'  "summary": "brief description",\n'
+    +'  "projectName": "project or client name if visible, else empty",\n'
+    +'  "area": "room or area name",\n'
+    +'  "totalWidth": 2700,\n'
+    +'  "totalHeight": 2100,\n'
+    +'  "countertopHeight": 900,\n'
+    +'  "upperCabinetClearance": 450,\n'
+    +'  "units": [\n'
+    +'    {\n'
+    +'      "id": 1,\n'
+    +'      "label": "BC-1",\n'
+    +'      "type": "Base Cabinet | Tall Cabinet | Upper Cabinet | Drawer Cabinet | Corner Cabinet | Open Shelf",\n'
+    +'      "position": 0,\n'
+    +'      "width": 900,\n'
+    +'      "height": 720,\n'
+    +'      "depth": 600,\n'
+    +'      "material": "PB | MDF | Plywood | Compact Laminate",\n'
+    +'      "color": "White",\n'
+    +'      "doors": 2,\n'
+    +'      "drawers": 0,\n'
+    +'      "shelves": 1,\n'
+    +'      "handleType": "bar | knob | integrated | none",\n'
+    +'      "isUpperCabinet": false,\n'
+    +'      "notes": ""\n'
+    +'    }\n'
+    +'  ],\n'
+    +'  "carcassCount": 3,\n'
+    +'  "notes": ""\n'
+    +'}\n\n'
+    +'Rules:\n'
+    +'- All dimensions in mm\n'
+    +'- position = distance from left wall to left edge of unit\n'
+    +'- isUpperCabinet: true for wall-mounted upper units, false for floor-standing\n'
+    +'- countertopHeight: floor to countertop surface (typically 900mm)\n'
+    +'- upperCabinetClearance: gap between countertop and bottom of upper cabinets (typically 450-600mm)\n'
+    +'- Label units sequentially: BC-1, BC-2 for base; UC-1, UC-2 for upper; TC-1 for tall\n'
+    +'- carcassCount: total number of individual cabinet boxes';
+}
+
+function prodSendElevation(base64){
+  var prompt=prodBuildElevationPrompt();
+  prodApiCall({
+    model:'claude-sonnet-4-5',
+    max_tokens:4000,
+    messages:[{role:'user',content:[
+      {type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}},
+      {type:'text',text:prompt}
+    ]}]
+  }).then(function(er){
+    prodState.elevationResult=er; prodState.phase='review';
+    prodState.analyzing=false; renderProductionPage();
+  }).catch(function(err){
+    prodState.analyzing=false; prodState.result={error:err.message||'Elevation analysis failed'}; renderProductionPage();
+  });
+}
+
+function prodApproveElevation(){
+  var er=prodState.elevationResult; if(!er) return;
+  if(prodSettings.aiEnabled===false){
+    prodState.analyzing=true; renderProductionPage();
+    setTimeout(function(){
+      var r=JSON.parse(JSON.stringify(PROD_MOCK_RESULT));
+      r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
+      r._bom=prodComputeBom(r.components||[]);
+      r.carcassCount=er.carcassCount||er.units.length;
+      prodState.result=r; prodState.phase='cutting-list';
+      prodState.analyzing=false; renderProductionPage();
+    },800);
+    return;
+  }
+  if(!prodSettings.claudeKey) return;
+  prodState.analyzing=true; renderProductionPage();
+  var ebtDesc=prodSettings.ebtLegend.map(function(e){return e.pos+'='+e.desc;}).join(', ');
+  var prompt='You are a furniture manufacturing specialist. Generate a complete cutting list from these approved cabinet units.\n\n'
+    +'Cabinet units:\n'+JSON.stringify(er.units,null,2)+'\n\n'
+    +'Return ONLY valid JSON using the same structure as a cutting list analysis:\n'
+    +'{\n'
+    +'  "summary": "'+escHtml(er.summary)+'",\n'
+    +'  "projectName": "'+escHtml(er.projectName||'')+'",\n'
+    +'  "carcassCount": '+(er.carcassCount||er.units.length)+',\n'
+    +'  "components": [ { "area", "name", "material", "color", "texture", "thickness", "length", "width", "qty", "faces", "grain", "ebt", "notes" } ],\n'
+    +'  "hardware": [ { "name", "qty", "unit", "notes" } ],\n'
+    +'  "holeSchedule": [ { "component", "holeType", "qty", "diameter", "position", "notes" } ]\n'
+    +'}\n\n'
+    +'Rules:\n'
+    +'- EBT codes: '+ebtDesc+'\n'
+    +'- All dimensions in mm\n'
+    +'- Standard construction: 18mm carcass panels, 9mm back panels\n'
+    +'- Include cam locks, hinges, shelf pins in hardware\n'
+    +'- Use area="'+escHtml(er.area||'General')+'" for all components\n'
+    +'- Consolidate identical hardware items';
+  prodApiCall({
+    model:'claude-sonnet-4-5',
+    max_tokens:8000,
+    messages:[{role:'user',content:prompt}]
+  }).then(function(result){
+    result.carcassCount=er.carcassCount||er.units.length;
+    prodState.result=result; prodState.phase='cutting-list';
+    prodState.analyzing=false; renderProductionPage();
+  }).catch(function(err){
+    prodState.analyzing=false; prodState.result={error:err.message||'Cutting list generation failed'}; renderProductionPage();
+  });
+}
+
+// ── Shop drawing SVG generators ───────────────────────────────────────────
+function prodSvgFront(er){
+  var units=er.units||[]; var tw=er.totalWidth||2700; var th=er.totalHeight||2400;
+  var LM=55,RM=20,TM=22,BM=70,avail=700;
+  var sc=Math.min((avail-LM-RM)/tw,0.28);
+  var cw=LM+tw*sc+RM; var yFloor=TM+th*sc; var ch=yFloor+BM;
+  var svg='<svg width="'+cw+'" height="'+ch+'" xmlns="http://www.w3.org/2000/svg" style="font-family:Arial,sans-serif;display:block">';
+  svg+='<text x="'+LM+'" y="14" font-size="10" font-weight="700" fill="#1a2a4a">FRONT ELEVATION</text>';
+  svg+='<line x1="'+LM+'" y1="'+yFloor+'" x2="'+(LM+tw*sc)+'" y2="'+yFloor+'" stroke="#bbb" stroke-width="0.8" stroke-dasharray="5,3"/>';
+  var ctH=(er.countertopHeight||900)*sc; var ucCl=(er.upperCabinetClearance||450)*sc;
+  for(var i=0;i<units.length;i++){
+    var u=units[i]; var x=LM+u.position*sc; var w=u.width*sc; var h=u.height*sc;
+    var y=u.isUpperCabinet?yFloor-ctH-ucCl-h:yFloor-h;
+    var tkH=u.isUpperCabinet?0:Math.min(15,h*0.14);
+    svg+='<rect x="'+(x+1)+'" y="'+(y+1)+'" width="'+(w-2)+'" height="'+(h-2)+'" fill="#fafaf8" stroke="#2a3a5a" stroke-width="1.4" rx="1"/>';
+    if(tkH>0) svg+='<rect x="'+(x+Math.min(8,w*0.06))+'" y="'+(y+h-tkH)+'" width="'+(w-Math.min(16,w*0.12))+'" height="'+tkH+'" fill="#ececea" stroke="#aaa" stroke-width="0.5"/>';
+    var bodyH=h-tkH; var drH=(u.drawers||0)>0?bodyH*0.28*(u.drawers||0):0;
+    if((u.drawers||0)>0){
+      var dH=bodyH*0.28;
+      for(var d=0;d<u.drawers;d++){
+        var dy=y+bodyH-dH*(d+1);
+        svg+='<rect x="'+(x+3)+'" y="'+(dy+2)+'" width="'+(w-6)+'" height="'+(dH-3)+'" fill="#f0efe8" stroke="#666" stroke-width="0.7" rx="1"/>';
+        svg+='<line x1="'+(x+w/2-w*0.1)+'" y1="'+(dy+dH/2)+'" x2="'+(x+w/2+w*0.1)+'" y2="'+(dy+dH/2)+'" stroke="#555" stroke-width="1.4" stroke-linecap="round"/>';
+      }
+    }
+    var doorTop=y; var doorH=bodyH-drH;
+    if((u.doors||0)>0){
+      var dw=w/u.doors;
+      for(var dd=0;dd<u.doors;dd++){
+        var dx=x+dd*dw;
+        svg+='<rect x="'+(dx+2.5)+'" y="'+(doorTop+2.5)+'" width="'+(dw-5)+'" height="'+(doorH-2.5)+'" fill="#f8f8f5" stroke="#666" stroke-width="0.7" rx="1"/>';
+        svg+='<line x1="'+(dx+dw/2-dw*0.18)+'" y1="'+(doorTop+doorH*0.32)+'" x2="'+(dx+dw/2+dw*0.18)+'" y2="'+(doorTop+doorH*0.32)+'" stroke="#555" stroke-width="1.4" stroke-linecap="round"/>';
+      }
+    }
+    svg+='<text x="'+(x+w/2)+'" y="'+(y+h/2+3)+'" text-anchor="middle" font-size="8" fill="#888">'+escHtml(u.label)+'</text>';
+    var dy1=yFloor+14;
+    svg+='<line x1="'+x+'" y1="'+(yFloor+3)+'" x2="'+x+'" y2="'+(dy1+2)+'" stroke="#999" stroke-width="0.5"/>';
+    svg+='<line x1="'+(x+w)+'" y1="'+(yFloor+3)+'" x2="'+(x+w)+'" y2="'+(dy1+2)+'" stroke="#999" stroke-width="0.5"/>';
+    svg+='<line x1="'+(x+4)+'" y1="'+dy1+'" x2="'+(x+w-4)+'" y2="'+dy1+'" stroke="#999" stroke-width="0.7"/>';
+    svg+='<polygon points="'+x+','+dy1+' '+(x+5)+','+(dy1-2)+' '+(x+5)+','+(dy1+2)+'" fill="#999"/>';
+    svg+='<polygon points="'+(x+w)+','+dy1+' '+(x+w-5)+','+(dy1-2)+' '+(x+w-5)+','+(dy1+2)+'" fill="#999"/>';
+    svg+='<text x="'+(x+w/2)+'" y="'+(dy1+11)+'" text-anchor="middle" font-size="7.5" fill="#777">'+u.width+'</text>';
+  }
+  var od=yFloor+40;
+  svg+='<line x1="'+LM+'" y1="'+od+'" x2="'+(LM+tw*sc)+'" y2="'+od+'" stroke="#444" stroke-width="1"/>';
+  svg+='<polygon points="'+LM+','+od+' '+(LM+7)+','+(od-3)+' '+(LM+7)+','+(od+3)+'" fill="#444"/>';
+  svg+='<polygon points="'+(LM+tw*sc)+','+od+' '+(LM+tw*sc-7)+','+(od-3)+' '+(LM+tw*sc-7)+','+(od+3)+'" fill="#444"/>';
+  svg+='<text x="'+(LM+tw*sc/2)+'" y="'+(od+12)+'" text-anchor="middle" font-size="9" fill="#333" font-weight="600">'+tw+' mm</text>';
+  var hx=LM-20; var mid=TM+th*sc/2;
+  svg+='<line x1="'+hx+'" y1="'+(TM+th*sc)+'" x2="'+hx+'" y2="'+TM+'" stroke="#444" stroke-width="1"/>';
+  svg+='<polygon points="'+hx+','+(TM+th*sc)+' '+(hx-3)+','+(TM+th*sc-7)+' '+(hx+3)+','+(TM+th*sc-7)+'" fill="#444"/>';
+  svg+='<polygon points="'+hx+','+TM+' '+(hx-3)+','+(TM+7)+' '+(hx+3)+','+(TM+7)+'" fill="#444"/>';
+  svg+='<text x="'+(hx-4)+'" y="'+mid+'" text-anchor="middle" font-size="9" fill="#333" font-weight="600" transform="rotate(-90,'+(hx-4)+','+mid+')">'+th+' mm</text>';
+  svg+='</svg>';
+  return svg;
+}
+
+function prodSvgSide(er,side){
+  var units=er.units||[]; var maxD=0;
+  for(var i=0;i<units.length;i++) maxD=Math.max(maxD,units[i].depth||600);
+  var depth=maxD||600; var th=er.totalHeight||2400;
+  var LM=20,RM=40,TM=22,BM=40;
+  var sc=Math.min(200/depth,0.3);
+  var cw=LM+depth*sc+RM; var yFloor=TM+th*sc; var ch=yFloor+BM;
+  var svg='<svg width="'+cw+'" height="'+ch+'" xmlns="http://www.w3.org/2000/svg" style="font-family:Arial,sans-serif;display:block">';
+  svg+='<text x="'+LM+'" y="14" font-size="10" font-weight="700" fill="#1a2a4a">'+(side==='R'?'RIGHT':'LEFT')+' SIDE</text>';
+  var ctH=(er.countertopHeight||900)*sc; var ucCl=(er.upperCabinetClearance||450)*sc;
+  var baseH=0; for(var j=0;j<units.length;j++) if(!units[j].isUpperCabinet) baseH=Math.max(baseH,units[j].height||720);
+  var upperH=0; var upperD=350;
+  for(var j=0;j<units.length;j++) if(units[j].isUpperCabinet){upperH=Math.max(upperH,units[j].height||630);upperD=units[j].depth||350;}
+  if(baseH>0){
+    svg+='<rect x="'+LM+'" y="'+(yFloor-baseH*sc)+'" width="'+(depth*sc)+'" height="'+(baseH*sc)+'" fill="#fafaf8" stroke="#2a3a5a" stroke-width="1.4" rx="1"/>';
+  }
+  if(upperH>0){
+    var ux=LM+(depth-upperD)*sc; var uw=upperD*sc; var uy=yFloor-ctH-ucCl-upperH*sc;
+    svg+='<rect x="'+ux+'" y="'+uy+'" width="'+uw+'" height="'+(upperH*sc)+'" fill="#fafaf8" stroke="#2a3a5a" stroke-width="1.4" rx="1"/>';
+  }
+  svg+='<line x1="'+LM+'" y1="'+yFloor+'" x2="'+(LM+depth*sc)+'" y2="'+yFloor+'" stroke="#bbb" stroke-width="0.8" stroke-dasharray="5,3"/>';
+  var dx=LM+depth*sc+12;
+  svg+='<line x1="'+dx+'" y1="'+yFloor+'" x2="'+dx+'" y2="'+TM+'" stroke="#444" stroke-width="1"/>';
+  svg+='<text x="'+(dx+12)+'" y="'+(TM+th*sc/2)+'" text-anchor="middle" font-size="8" fill="#555" transform="rotate(90,'+(dx+12)+','+(TM+th*sc/2)+')">'+th+' mm</text>';
+  svg+='</svg>';
+  return svg;
+}
+
+function prodSvgIso(er){
+  var units=er.units||[]; if(!units.length) return '';
+  var sc=0.09; var cos30=Math.cos(Math.PI/6); var sin30=0.5;
+  function ipx(x,y,z){return (x-z)*cos30*sc;}
+  function ipy(x,y,z){return -y*sc+(x+z)*sin30*sc;}
+  var tw=er.totalWidth||2700; var th=er.totalHeight||2400;
+  var maxD=0; for(var i=0;i<units.length;i++) maxD=Math.max(maxD,units[i].depth||600);
+  var ox=maxD*cos30*sc+20; var oy=(th+(tw+maxD)*sin30)*sc+30;
+  var cw=Math.ceil((tw+maxD)*cos30*sc+60); var ch=Math.ceil(oy+20);
+  var ctH=er.countertopHeight||900; var ucCl=er.upperCabinetClearance||450;
+  var svg='<svg width="'+cw+'" height="'+ch+'" xmlns="http://www.w3.org/2000/svg" style="font-family:Arial,sans-serif;display:block">';
+  svg+='<text x="10" y="14" font-size="10" font-weight="700" fill="#1a2a4a">PERSPECTIVE</text>';
+  for(var i=0;i<units.length;i++){
+    var u=units[i];
+    var bx=u.position; var bw=u.width; var bd=u.depth||600; var bh=u.height;
+    var by0=u.isUpperCabinet?ctH+ucCl:0;
+    var faces=[
+      {pts:[[bx,by0+bh,0],[bx+bw,by0+bh,0],[bx+bw,by0,0],[bx,by0,0]],fill:'#e8e8e0',stroke:'#2a3a5a'},
+      {pts:[[bx,by0+bh,0],[bx+bw,by0+bh,0],[bx+bw,by0+bh,bd],[bx,by0+bh,bd]],fill:'#d0d0c8',stroke:'#2a3a5a'},
+      {pts:[[bx+bw,by0+bh,0],[bx+bw,by0,0],[bx+bw,by0,bd],[bx+bw,by0+bh,bd]],fill:'#c0c0b8',stroke:'#2a3a5a'}
+    ];
+    for(var f=0;f<faces.length;f++){
+      var face=faces[f]; var pts='';
+      for(var p=0;p<face.pts.length;p++){var pt=face.pts[p];pts+=(ox+ipx(pt[0],pt[1],pt[2]))+','+(oy+ipy(pt[0],pt[1],pt[2]))+' ';}
+      svg+='<polygon points="'+pts.trim()+'" fill="'+face.fill+'" stroke="'+face.stroke+'" stroke-width="0.8"/>';
+    }
+    svg+='<text x="'+(ox+ipx(bx+bw/2,by0+bh/2,0))+'" y="'+(oy+ipy(bx+bw/2,by0+bh/2,0)+3)+'" text-anchor="middle" font-size="7" fill="#555">'+escHtml(u.label)+'</text>';
+  }
+  svg+='</svg>';
+  return svg;
+}
+
+function prodRenderShopDrawing(er){
+  var unitRows='';
+  var us=er.units||[];
+  for(var i=0;i<us.length;i++){
+    var u=us[i];
+    unitRows+='<tr><td style="font-weight:600">'+escHtml(u.label)+'</td>'
+      +'<td>'+escHtml(u.type)+'</td>'
+      +'<td style="text-align:right">'+u.width+'</td>'
+      +'<td style="text-align:right">'+u.height+'</td>'
+      +'<td style="text-align:right">'+u.depth+'</td>'
+      +'<td>'+escHtml(u.color||'')+'</td>'
+      +'<td style="text-align:center">'+(u.doors||0)+'D / '+(u.drawers||0)+'Dr</td>'
+      +'<td style="font-size:11px;color:var(--text2)">'+escHtml(u.notes||'')+'</td></tr>';
+  }
+  return '<div class="card" style="margin-bottom:14px">'
+    +'<div class="card-head"><h3><i class="ti ti-drafting-compass"></i>Shop Drawing — '+escHtml(er.summary||'')+'</h3>'
+    +'<div style="display:flex;gap:6px">'
+    +'<button class="btn" style="font-size:11px" onclick="window.print()"><i class="ti ti-printer"></i>Print / PDF</button>'
+    +'<button class="btn" style="font-size:11px" onclick="prodExportCollada()"><i class="ti ti-box"></i>Export COLLADA (.dae)</button>'
+    +'</div></div>'
+    +'<div class="card-body">'
+    +'<div style="display:grid;grid-template-columns:1fr auto auto;gap:12px;margin-bottom:12px;overflow-x:auto">'
+    +'<div><div style="font-size:10px;font-weight:600;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Front elevation</div>'+prodSvgFront(er)+'</div>'
+    +'<div><div style="font-size:10px;font-weight:600;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Right side</div>'+prodSvgSide(er,'R')+'</div>'
+    +'<div><div style="font-size:10px;font-weight:600;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Left side</div>'+prodSvgSide(er,'L')+'</div>'
+    +'</div>'
+    +'<div style="margin-bottom:12px"><div style="font-size:10px;font-weight:600;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">Perspective</div>'+prodSvgIso(er)+'</div>'
+    +'<div style="overflow-x:auto"><table class="data" style="font-size:12px">'
+    +'<thead><tr><th>Label</th><th>Type</th><th style="text-align:right">W (mm)</th><th style="text-align:right">H (mm)</th><th style="text-align:right">D (mm)</th><th>Color</th><th>Doors/Drawers</th><th>Notes</th></tr></thead>'
+    +'<tbody>'+unitRows+'</tbody></table></div>'
+    +'</div></div>'
+    +'<div class="alert alert-info" style="margin-bottom:14px"><i class="ti ti-info-circle"></i>'
+    +'Review the shop drawing above. If dimensions and layout are correct, click <b>Generate cutting list</b> to produce panel schedules, BOM, and services.</div>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">'
+    +(prodState.analyzing
+      ?'<button class="btn btn-primary" disabled style="min-width:200px"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i>Generating cutting list…</button>'
+      :'<button class="btn btn-primary" style="min-width:200px" onclick="prodApproveElevation()"><i class="ti ti-check"></i>Looks correct — Generate cutting list</button>'
+      +'<button class="btn btn-danger" style="font-size:12px" onclick="prodClearFile()"><i class="ti ti-x"></i>Start over</button>')
+    +'</div>';
+}
+
+function prodExportCollada(){
+  var er=prodState.elevationResult; if(!er) return;
+  var units=er.units||[];
+  var xml='<?xml version="1.0" encoding="utf-8"?>\n'
+    +'<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">\n'
+    +'<asset><created>'+new Date().toISOString()+'</created><unit name="millimeter" meter="0.001"/><up_axis>Y_UP</up_axis></asset>\n'
+    +'<library_visual_scenes><visual_scene id="scene" name="Scene">\n';
+  for(var i=0;i<units.length;i++){
+    var u=units[i];
+    var ctH=er.countertopHeight||900; var ucCl=er.upperCabinetClearance||450;
+    var tx=u.position+(u.width/2); var ty=u.isUpperCabinet?(ctH+ucCl+(u.height/2)):u.height/2; var tz=u.depth/2;
+    xml+='<node id="node_'+i+'" name="'+escHtml(u.label)+'">\n';
+    xml+='<translate>'+tx+' '+ty+' '+tz+'</translate>\n';
+    xml+='<instance_geometry url="#box_'+i+'"></instance_geometry>\n</node>\n';
+  }
+  xml+='</visual_scene></library_visual_scenes>\n<library_geometries>\n';
+  for(var i=0;i<units.length;i++){
+    var u=units[i]; var hw=u.width/2; var hh=u.height/2; var hd=u.depth/2;
+    xml+='<geometry id="box_'+i+'" name="'+escHtml(u.label)+'"><mesh><source id="pos_'+i+'">'
+      +'<float_array id="fa_'+i+'" count="24">'+(-hw)+' '+(-hh)+' '+(-hd)+' '+(hw)+' '+(-hh)+' '+(-hd)+' '+(hw)+' '+(hh)+' '+(-hd)+' '+(-hw)+' '+(hh)+' '+(-hd)+' '
+      +(-hw)+' '+(-hh)+' '+(hd)+' '+(hw)+' '+(-hh)+' '+(hd)+' '+(hw)+' '+(hh)+' '+(hd)+' '+(-hw)+' '+(hh)+' '+(hd)
+      +'</float_array><technique_common><accessor source="#fa_'+i+'" count="8" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>'
+      +'<vertices id="verts_'+i+'"><input semantic="POSITION" source="#pos_'+i+'"/></vertices>'
+      +'<polylist count="6"><input semantic="VERTEX" source="#verts_'+i+'" offset="0"/><vcount>4 4 4 4 4 4</vcount><p>0 1 2 3 4 5 6 7 0 3 7 4 1 5 6 2 3 2 6 7 0 4 5 1</p></polylist>'
+      +'</mesh></geometry>\n';
+  }
+  xml+='</library_geometries>\n</COLLADA>';
+  var blob=new Blob([xml],{type:'application/xml'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a'); a.href=url; a.download=(er.projectName||'shop_drawing')+'.dae'; a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);},1000);
 }
 
 function prodParseResponse(text){
@@ -6358,18 +6690,24 @@ function prodBuildResultHtml(result){
   var svc=result._services||{};
   var bom=result._bom||[];
   var totalPieces=comps.reduce(function(s,c){return s+(c.qty||0);},0);
-  var kpis=[
-    {l:'Carcass units',v:result.carcassCount||0,i:'ti-box'},
-    {l:'Components',v:comps.length,i:'ti-packages'},
-    {l:'Total pieces',v:totalPieces,i:'ti-stack-2'},
-    {l:'Cutting',v:(svc.cuttingLM||0).toFixed(1)+' lm',i:'ti-cut'},
-    {l:'Edgebanding',v:(svc.edgebandingLM||0).toFixed(1)+' lm',i:'ti-border-style-2'},
-    {l:'Holes',v:svc.holeCount||0,i:'ti-circle-dot'},
-    {l:'Board types',v:bom.length,i:'ti-layout-board'}
-  ];
-  var kpiHtml='<div class="kpi-grid" style="margin-bottom:14px">';
-  for(var k=0;k<kpis.length;k++) kpiHtml+='<div class="kpi"><div class="lbl"><i class="ti '+kpis[k].i+'"></i> '+kpis[k].l+'</div><div class="val" style="font-size:18px">'+kpis[k].v+'</div></div>';
-  kpiHtml+='</div>';
+  var kpiHtml='<div style="display:grid;grid-template-columns:160px 1fr;gap:12px;margin-bottom:16px;align-items:start">'
+    +'<div>'
+    +'<div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Project</div>'
+    +'<div class="kpi" style="text-align:center"><div class="lbl"><i class="ti ti-box"></i> Carcass units</div><div class="val" style="font-size:30px;color:var(--navy)">'+(result.carcassCount||0)+'</div><div class="sub">furniture pieces</div></div>'
+    +(result.projectName?'<div style="font-size:11px;color:var(--text2);margin-top:6px;text-align:center;line-height:1.3"><i class="ti ti-tag"></i> '+escHtml(result.projectName)+'</div>':'')
+    +'</div>'
+    +'<div>'
+    +'<div style="font-size:10px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Fabrication totals — panels &amp; materials</div>'
+    +'<div class="kpi-grid">'
+    +'<div class="kpi"><div class="lbl"><i class="ti ti-packages"></i> Panels</div><div class="val" style="font-size:18px">'+comps.length+'</div><div class="sub">individual parts</div></div>'
+    +'<div class="kpi"><div class="lbl"><i class="ti ti-stack-2"></i> Total pcs</div><div class="val" style="font-size:18px">'+totalPieces+'</div></div>'
+    +'<div class="kpi"><div class="lbl"><i class="ti ti-cut"></i> Cutting</div><div class="val" style="font-size:18px">'+(svc.cuttingLM||0).toFixed(1)+' lm</div></div>'
+    +'<div class="kpi"><div class="lbl"><i class="ti ti-border-style-2"></i> Edgebanding</div><div class="val" style="font-size:18px">'+(svc.edgebandingLM||0).toFixed(1)+' lm</div></div>'
+    +'<div class="kpi"><div class="lbl"><i class="ti ti-circle-dot"></i> Holes</div><div class="val" style="font-size:18px">'+(svc.holeCount||0)+'</div></div>'
+    +'<div class="kpi"><div class="lbl"><i class="ti ti-layout-board"></i> Board types</div><div class="val" style="font-size:18px">'+bom.length+'</div></div>'
+    +'</div>'
+    +'</div>'
+    +'</div>';
   var sortedComps=comps.slice().sort(function(a,b){
     var aArea=(a.area||'General').toLowerCase(); var bArea=(b.area||'General').toLowerCase();
     if(aArea<bArea) return -1; if(aArea>bArea) return 1;
