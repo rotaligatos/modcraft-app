@@ -6686,10 +6686,13 @@ function callClaudeProduction(){
 function prodBuildPrompt(){
   var ftMap={'shop-drawing':'shop drawing','technical-drawing':'technical drawing','cutting-list':'cutting list'};
   var ftDesc=ftMap[prodState.fileType]||'drawing';
+  var isCuttingList=prodState.fileType==='cutting-list';
+  var isDrawing=!isCuttingList;
   var ebtDesc=prodSettings.ebtLegend.map(function(e){return (e.code||e.pos)+'='+(e.desc||'')+(e.condition?' ('+e.condition+')':'');}).join(', ');
   var bsDesc=prodSettings.boardSizes.map(function(m){
     return m.material+': '+m.sizes.map(function(s){return s.w+'×'+s.h+'mm';}).join(', ');
   }).join('; ');
+  var wasteMult=(1+(prodSettings.ebtWastage||0)/100).toFixed(3);
   return 'You are a furniture manufacturing specialist. Analyze this '+ftDesc+' of modular furniture.\n\n'
     +'Return ONLY valid JSON — no markdown code blocks, no explanation text before or after — just the raw JSON object.\n\n'
     +'Required JSON structure:\n'
@@ -6709,7 +6712,7 @@ function prodBuildPrompt(){
     +'      "qty": 2,\n'
     +'      "faces": 2,\n'
     +'      "grain": "length | width | none",\n'
-    +'      "ebt": "TBLR combination e.g. TL or TBLR or none",\n'
+    +'      "ebt": "use standard EBT codes: N/A | 4s | 1s | 2s | 1s/1l | 1s/2l | 2s/1l | 1l | 2l — or empty string if unknown",\n'
     +'      "notes": ""\n'
     +'    }\n'
     +'  ],\n'
@@ -6721,21 +6724,32 @@ function prodBuildPrompt(){
     +'  ],\n'
     +'  "carcassCount": 1\n'
     +'}\n\n'
-    +'Production settings to apply:\n'
+    +'Settings:\n'
     +'- Kerf: '+prodSettings.kerf+'mm per cut\n'
     +'- Woodgrain direction: along '+prodState.woodgrainDir+'\n'
-    +'- EBT position codes: '+ebtDesc+'\n'
+    +'- EBT codes legend: '+ebtDesc+'\n'
     +'- Standard board sizes: '+bsDesc+'\n'
-    +'- EBT wastage allowance: '+prodSettings.ebtWastage+'%\n\n'
-    +'Rules:\n'
+    +'- EBT wastage allowance: '+prodSettings.ebtWastage+'% (multiplier: '+wasteMult+')\n\n'
+    +'EBT assignment rules:\n'
+    +(isCuttingList
+      ? '- This is a CUTTING LIST. First check if an EBT/edgebanding column already exists in the data.\n'
+        +'  • If EBT codes ARE present: extract each component\'s code and map to the nearest standard code from the legend above.\n'
+        +'  • If EBT codes are NOT present in the file: set ebt to empty string "" — do NOT guess; the user will assign codes manually.\n'
+      : '- This is a '+ftDesc.toUpperCase()+'. Infer EBT placement from visible edge treatments, exposed faces, and standard cabinet-making practice.\n'
+        +'  • Exposed visible faces (front, top of base cabinets, sides if open) → apply appropriate code.\n'
+        +'  • Back panels, internal hidden edges, and faces against walls → typically N/A.\n'
+        +'  • Use the EBT legend codes and conditions above as the reference for what each code means.\n'
+    )
+    +'- "short side" (s) = the width dimension of the panel; "long side" (l) = the length dimension\n'
+    +'- Example: a door visible on all 4 edges → 4s; a shelf visible on front edge only → 1l\n\n'
+    +'General rules:\n'
     +'- All dimensions in millimeters (mm), as-manufactured (before kerf adjustment)\n'
-    +'- Include ALL panels and components visible or implied in the drawing\n'
+    +'- Include ALL panels and components visible or implied\n'
     +'- For woodgrain materials, use grain direction from settings unless drawing specifies otherwise\n'
-    +'- Assign EBT codes based on visible edge treatment; if not specified use standard cabinet-making practice\n'
-    +'- 2-face melamine board unless drawing says otherwise\n'
-    +'- If edgebanding tape/trim type is specified or implied (e.g. "PVC 1mm×22mm Oak", "ABS 0.4mm×22mm White", "edge tape 22×1"), add it to hardware with unit "lm" and estimate qty from total edge lengths in components\n'
-    +'- Consolidate hardware: sum quantities for identical items (e.g. all hinges of same size = one hardware row)\n'
-    +'- carcassCount: count the total number of discrete carcass units (individual cabinet boxes or furniture pieces) — e.g. a kitchen set with 3 base cabinets = 3';
+    +'- 2-face melamine board unless stated otherwise\n'
+    +'- If edgebanding tape/trim type is specified or implied (e.g. "PVC 1mm×22mm Oak", "ABS 0.4mm", "edge tape"), add to hardware with unit "lm". Estimate qty as: sum of all edged edge lengths in meters × '+wasteMult+' (wastage already applied)\n'
+    +'- Consolidate hardware: sum quantities for identical items\n'
+    +'- carcassCount: total number of discrete cabinet boxes or furniture pieces';
 }
 
 function prodApiCall(bodyObj){
@@ -6866,22 +6880,27 @@ function prodApproveElevation(){
   if(!prodSettings.claudeKey) return;
   prodState.analyzing=true; renderProductionPage();
   var ebtDesc=prodSettings.ebtLegend.map(function(e){return (e.code||e.pos)+'='+(e.desc||'')+(e.condition?' ('+e.condition+')':'');}).join(', ');
+  var wasteMult2=(1+(prodSettings.ebtWastage||0)/100).toFixed(3);
   var prompt='You are a furniture manufacturing specialist. Generate a complete cutting list from these approved cabinet units.\n\n'
     +'Cabinet units:\n'+JSON.stringify(er.units,null,2)+'\n\n'
     +'Return ONLY valid JSON using the same structure as a cutting list analysis:\n'
     +'{\n'
     +'  "summary": "'+escHtml(er.summary)+'",\n'
     +'  "projectName": "'+escHtml(er.projectName||'')+'",\n'
-    +'  "carcassCount": '+( er.carcassCount||er.units.length)+',\n'
+    +'  "carcassCount": '+(er.carcassCount||er.units.length)+',\n'
     +'  "components": [ { "area", "name", "material", "color", "texture", "thickness", "length", "width", "qty", "faces", "grain", "ebt", "notes" } ],\n'
     +'  "hardware": [ { "name", "qty", "unit", "notes" } ],\n'
     +'  "holeSchedule": [ { "component", "holeType", "qty", "diameter", "position", "notes" } ]\n'
     +'}\n\n'
     +'Rules:\n'
-    +'- EBT codes: '+ebtDesc+'\n'
-    +'- All dimensions in mm\n'
-    +'- Standard construction: 18mm carcass panels, 9mm back panels\n'
+    +'- EBT codes legend: '+ebtDesc+'\n'
+    +'- "short side" (s) = width dimension; "long side" (l) = length dimension\n'
+    +'- Assign EBT based on exposed/visible edges per standard cabinet practice and the conditions in the legend above\n'
+    +'- Exposed visible faces (doors, front-facing edges, open sides) → apply appropriate code; hidden/internal edges → N/A\n'
+    +'- Example: door = 4s; shelf front edge only = 1l; side panel front+top = 1s/1l\n'
+    +'- All dimensions in mm; standard construction: 18mm carcass panels, 9mm back panels\n'
     +'- Include cam locks, hinges, shelf pins in hardware\n'
+    +'- For edgebanding tape: estimate qty as total edge lengths in meters × '+wasteMult2+' (wastage included), unit "lm"\n'
     +'- Use area="'+escHtml(er.area||'General')+'" for all components\n'
     +'- Consolidate identical hardware items';
   prodApiCall({
