@@ -231,6 +231,9 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
       <button class="btn btn-danger" id="revise-btn" style="display:none;font-size:12px;padding:4px 10px" onclick="openRevise()"><i class="ti ti-edit"></i>Revise</button>
     </div>
   </div>
+  <!-- Options bar — hidden until options are created -->
+  <div id="q-options-bar" style="display:none;background:#f8faff;border-bottom:.5px solid var(--border);padding:0 20px;margin:0 -20px"></div>
+
   <div style="max-width:800px;margin:16px auto">
     <!-- Stage 1 -->
     <div id="s1-wrap">
@@ -1212,6 +1215,16 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
   </div>
 </div>
 
+<div class="overlay" id="ov-option-approve">
+  <div class="modal" style="max-width:400px">
+    <div class="modal-head"><h3><i class="ti ti-versions"></i>Which option was approved?</h3><button class="modal-close" onclick="closeModal('ov-option-approve')">×</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--text2);margin-bottom:14px">Select the option the client approved. All other options will be archived.</p>
+      <div id="ov-option-approve-body" style="display:flex;flex-direction:column;gap:8px"></div>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="ov-unlock">
   <div class="modal">
     <div class="modal-head"><h3><i class="ti ti-lock-open"></i>Request unlock</h3><button class="modal-close" onclick="closeModal('ov-unlock')">×</button></div>
@@ -1438,6 +1451,9 @@ var qApproved = false;
 var qSaved = false;       // true once Stage 1 Save Draft is clicked (gates Lock & Send)
 var qSerial = makeSerial();
 var qRevisedFrom = "";
+var qOptionsList = [];      // [{id, label, snapshot, status:'active'|'approved'|'archived', grand}]
+var qBaseSerial = '';       // base serial without option suffix
+var qActiveOptionId = 0;    // 0 = no options, 1+ = current option number
 var qVatApproved = true;
 var qDiscApproved = false;
 var qDiscPct = 0;
@@ -1755,9 +1771,10 @@ function populateMobSelect() {
   sel.innerHTML=opts;
 }
 function initQuotation() {
-  qDriveLinks={};
+  qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
   var qdl=el('q-drive-links'); if(qdl) qdl.innerHTML='';
   var fqdl=el('fq-drive-links'); if(fqdl) fqdl.innerHTML='';
+  renderOptionBar();
   el("q-serial").textContent=qSerial;
   el("q-status").textContent="Draft"; el("q-status").className="pill pill-amber";
   var ss=el("sent-status"); if(ss) ss.style.display="none";
@@ -2905,7 +2922,8 @@ function recalc(fast) {
   var premAmt=qPremApproved?afterDWithBonds*premRate/100:0;
   var grand=afterDWithBonds+vatAmt+premAmt;
   // Cache for openPrint()
-  _pCalc={stage:1,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBaseRaw,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:!!qVatApproved,discOn:!!(qDiscApproved&&dA),discPct:qDiscPct||0,premOn:!!qPremApproved,ni:ni,na:na};
+  _pCalc={stage:1,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBaseRaw,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,biCosts:biCosts,bondState:qBondIns,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:!!qVatApproved,discOn:!!(qDiscApproved&&dA),discPct:qDiscPct||0,premOn:!!qPremApproved,ni:ni,na:na};
+  updateBondInsCostDisplay(biCosts);
 
   if(el("mob-disp")) el("mob-disp").textContent=fmtMoney(mobBaseRaw);
   // Live-update mat/hw/svc amounts in form (avoids re-render so focused inputs keep focus)
@@ -3160,6 +3178,14 @@ function goStage(n) {
 function doApprove() {
   var name=(el("cl-name")?el("cl-name").value:"")+(el("cl-bizname")?el("cl-bizname").value:"");
   if(!name.trim()){alert("Please fill in the client or business name first.");return;}
+  // If multiple active options exist, ask which one was approved
+  var activeOpts=qOptionsList.filter(function(o){return o.status==='active';});
+  if(activeOpts.length>1){
+    // Save current state back to option before showing modal
+    var cur=qOptionsList.find(function(o){return o.id===qActiveOptionId;});
+    if(cur){cur.snapshot=captureQuotationSnapshot();cur.grand=_pCalc.grand||0;}
+    openOptionApproveModal(); return;
+  }
   qApproved=true;
   el("q-status").textContent="Approved"; el("q-status").className="pill pill-teal";
   el("s2btn").style.opacity="1"; el("s2btn").style.cursor="pointer";
@@ -3173,10 +3199,9 @@ function confirmRevise() {
   var pin = el("revise-pin").value;
   if(!checkPin(pin)) { el("revise-err").style.display="block"; return; }
   var old=qSerial;
-  // Save the current (pre-revision) state to Drive before changing the serial
   saveQuotationToDrive('final','Revision v'+old);
   qSerial=makeSerial(); qApproved=false; qRevisedFrom=old;
-  qDriveLinks={}; // fresh links for the new revision serial
+  qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
   var qdl=el('q-drive-links'); if(qdl) qdl.innerHTML='';
   var fqdl=el('fq-drive-links'); if(fqdl) fqdl.innerHTML='';
   el("q-serial").textContent=qSerial;
@@ -5448,6 +5473,152 @@ function renderNetworkTab() {
   }
   if(el("net-compare")) el("net-compare").innerHTML=tHtml;
 }
+// ── Quotation Options (variants) ─────────────────────────────────────────
+function getDisplaySerial(){
+  return (qActiveOptionId&&qBaseSerial)?(qBaseSerial+'-'+qActiveOptionId):qSerial;
+}
+function captureQuotationSnapshot(){
+  return {
+    areas:JSON.parse(JSON.stringify(qAreas)),
+    fabMode:qFabMode,
+    assembly:JSON.parse(JSON.stringify(qAssembly)),
+    siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
+    cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
+    designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
+    bondIns:JSON.parse(JSON.stringify(qBondIns)),
+    customCF:qCustomCF?JSON.parse(JSON.stringify(qCustomCF)):null,
+    customCFApproved:qCustomCFApproved,
+    outMarkup:qOutMarkup,outContingency:qOutContingency,outBuffer:qOutBuffer,
+    vatApproved:qVatApproved,discApproved:qDiscApproved,discPct:qDiscPct,premApproved:qPremApproved
+  };
+}
+function restoreQuotationSnapshot(snap){
+  qAreas=JSON.parse(JSON.stringify(snap.areas));
+  qFabMode=snap.fabMode;
+  qAssembly=JSON.parse(JSON.stringify(snap.assembly));
+  qSiteVisit=JSON.parse(JSON.stringify(snap.siteVisit));
+  qCuttingList=JSON.parse(JSON.stringify(snap.cuttingList));
+  qDesignCharge=JSON.parse(JSON.stringify(snap.designCharge));
+  qBondIns=JSON.parse(JSON.stringify(snap.bondIns));
+  qCustomCF=snap.customCF?JSON.parse(JSON.stringify(snap.customCF)):null;
+  qCustomCFApproved=snap.customCFApproved;
+  qOutMarkup=snap.outMarkup;qOutContingency=snap.outContingency;qOutBuffer=snap.outBuffer;
+  qVatApproved=snap.vatApproved;qDiscApproved=snap.discApproved;qDiscPct=snap.discPct;qPremApproved=snap.premApproved;
+}
+function syncOptionUI(){
+  // Sync DOM/UI elements after restoring a snapshot
+  var fabRads=document.querySelectorAll('[name="fab-mode"]');
+  for(var i=0;i<fabRads.length;i++) fabRads[i].checked=(fabRads[i].value===qFabMode);
+  if(el('assm-toggle')) el('assm-toggle').checked=qAssembly.enabled;
+  if(el('assm-body')) el('assm-body').style.display=qAssembly.enabled?'block':'none';
+  if(el('cl-charge-toggle')) el('cl-charge-toggle').checked=qCuttingList.enabled;
+  if(el('cl-charge-body')) el('cl-charge-body').style.display=qCuttingList.enabled?'block':'none';
+  if(el('dc-charge-toggle')) el('dc-charge-toggle').checked=qDesignCharge.enabled;
+  if(el('dc-charge-body')) el('dc-charge-body').style.display=qDesignCharge.enabled?'block':'none';
+  if(el('bond-ins-toggle')) el('bond-ins-toggle').checked=qBondIns.enabled;
+  if(el('bond-ins-body')) el('bond-ins-body').style.display=qBondIns.enabled?'block':'none';
+  var vatRads=document.querySelectorAll('[name="vat"]');
+  for(var i=0;i<vatRads.length;i++) vatRads[i].checked=(vatRads[i].value===(qVatApproved?'y':'n'));
+  if(typeof renderCustomCFStatus==='function') renderCustomCFStatus();
+  if(typeof initOutRatesCard==='function') initOutRatesCard();
+  if(typeof initSiteVisitCard==='function') initSiteVisitCard();
+  if(typeof renderBondIns==='function'&&qBondIns.enabled) renderBondIns();
+}
+function createNewOption(){
+  // First time: snapshot current state as Option 1
+  if(!qOptionsList.length){
+    qBaseSerial=qSerial;
+    qOptionsList=[{id:1,label:'Option 1',snapshot:captureQuotationSnapshot(),status:'active',grand:_pCalc.grand||0}];
+    qActiveOptionId=1;
+  }
+  // Save current option state
+  var cur=qOptionsList.find(function(o){return o.id===qActiveOptionId;});
+  if(cur){cur.snapshot=captureQuotationSnapshot();cur.grand=_pCalc.grand||0;}
+  // Create new option as copy of current
+  var maxId=0;
+  for(var i=0;i<qOptionsList.length;i++) if(qOptionsList[i].id>maxId) maxId=qOptionsList[i].id;
+  var newId=maxId+1;
+  var newSnap=captureQuotationSnapshot();
+  qOptionsList.push({id:newId,label:'Option '+newId,snapshot:newSnap,status:'active',grand:_pCalc.grand||0});
+  switchToOption(newId);
+}
+function switchToOption(optId){
+  // Save current option state before switching
+  if(qActiveOptionId>0){
+    var cur=qOptionsList.find(function(o){return o.id===qActiveOptionId;});
+    if(cur){cur.snapshot=captureQuotationSnapshot();cur.grand=_pCalc.grand||0;}
+  }
+  var newOpt=qOptionsList.find(function(o){return o.id===optId;});
+  if(!newOpt) return;
+  qActiveOptionId=optId;
+  restoreQuotationSnapshot(newOpt.snapshot);
+  syncOptionUI();
+  renderItems();
+  recalc();
+  renderOptionBar();
+  // Update serial display
+  var qs=el('q-serial'); if(qs) qs.textContent=getDisplaySerial();
+}
+function renderOptionBar(){
+  var bar=el('q-options-bar'); if(!bar) return;
+  if(!qOptionsList.length){bar.style.display='none';bar.innerHTML='';return;}
+  bar.style.display='block';
+  var active=qOptionsList.filter(function(o){return o.status!=='archived';});
+  var h='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 0">'
+    +'<span style="font-size:11px;color:var(--text2);font-weight:600;letter-spacing:.04em;text-transform:uppercase">Options:</span>';
+  for(var i=0;i<active.length;i++){
+    var opt=active[i]; var isCur=(opt.id===qActiveOptionId); var isApproved=(opt.status==='approved');
+    h+='<button onclick="switchToOption('+opt.id+')" style="padding:5px 13px;border-radius:20px;font-size:12px;cursor:pointer;border:1.5px solid '
+      +(isCur?'var(--navy)':isApproved?'var(--teal)':'var(--border)')+';background:'
+      +(isCur?'var(--navy)':isApproved?'var(--teal)':'#fff')+';color:'+(isCur||isApproved?'#fff':'var(--text)')+';">'
+      +'<b>'+escHtml(opt.label)+'</b>'+(opt.grand?' <span style="opacity:.75;font-size:11px">'+fmtMoney(opt.grand)+'</span>':'')
+      +(isApproved?' <span style="font-size:10px">✓ Approved</span>':'')+'</button>';
+  }
+  var archived=qOptionsList.filter(function(o){return o.status==='archived';}).length;
+  if(archived) h+='<span style="font-size:11px;color:var(--muted)">'+archived+' archived</span>';
+  h+='<button onclick="createNewOption()" style="padding:5px 12px;border-radius:20px;font-size:12px;border:1.5px dashed var(--border);background:#fff;cursor:pointer;color:var(--text2)">'
+    +'<i class="ti ti-plus" style="font-size:11px"></i> New Option</button></div>';
+  bar.innerHTML=h;
+}
+function openOptionApproveModal(){
+  var active=qOptionsList.filter(function(o){return o.status==='active';});
+  var h='';
+  for(var i=0;i<active.length;i++){
+    var opt=active[i];
+    h+='<button onclick="confirmOptionApprove('+opt.id+')" class="btn" style="justify-content:space-between;padding:12px 16px;border:1.5px solid var(--border)">'
+      +'<span style="font-weight:600;font-size:14px">'+escHtml(opt.label)+'</span>'
+      +'<span style="color:var(--text2);font-size:13px">'+fmtMoney(opt.grand||0)+'</span>'
+      +'</button>';
+  }
+  var ob=el('ov-option-approve-body'); if(ob) ob.innerHTML=h;
+  openModal('ov-option-approve');
+}
+function confirmOptionApprove(optId){
+  closeModal('ov-option-approve');
+  switchToOption(optId);
+  // Mark approved / archive others
+  for(var i=0;i<qOptionsList.length;i++){
+    if(qOptionsList[i].id===optId) qOptionsList[i].status='approved';
+    else if(qOptionsList[i].status==='active') qOptionsList[i].status='archived';
+  }
+  renderOptionBar();
+  // Save archived options to Drive
+  var archivedList=qOptionsList.filter(function(o){return o.status==='archived';});
+  for(var i=0;i<archivedList.length;i++){
+    var ao=archivedList[i];
+    restoreQuotationSnapshot(ao.snapshot);
+    saveQuotationToDrive('archive-'+ao.id, ao.label+' (Archived)');
+    restoreQuotationSnapshot(qOptionsList.find(function(o){return o.id===optId;}).snapshot);
+  }
+  // Proceed with normal approval
+  qApproved=true;
+  el("q-status").textContent="Approved"; el("q-status").className="pill pill-teal";
+  el("s2btn").style.opacity="1"; el("s2btn").style.cursor="pointer";
+  el("revise-btn").style.display="inline-flex";
+  logActivity("Option "+optId+" ("+qOptionsList.find(function(o){return o.id===optId;}).label+") approved — Stage 2 unlocked");
+  updateLockUI();
+  goStage(2);
+}
 // ── Lock / Send / Unlock ──────────────────────────────────────────────────
 function saveDraftS1() {
   qSaved=true;
@@ -5654,19 +5825,43 @@ function renderDirectory() {
     var p=list[i];
     var sc=p.status==="Closed"?"teal":p.status==="On-going"?"amber":"muted";
     var fol=qFollowed[p.id];
+    var isCurrentQuot=(p.id===(qBaseSerial||qSerial));
+    var optCount=isCurrentQuot?qOptionsList.filter(function(o){return o.status!=='archived';}).length:(p.options||0);
     h+='<tr>'
       +'<td style="text-align:center"><button onclick="toggleFollow(\''+p.id+'\')" style="background:none;border:none;cursor:pointer;padding:4px;font-size:16px;color:'+(fol?"var(--amber)":"#ccc")+'" title="'+(fol?"Unfollow":"Follow")+'"><i class="ti ti-star'+(fol?"-filled":"")+'" style="font-size:15px"></i></button></td>'
-      +'<td style="font-family:monospace;font-size:11px;color:var(--text2)">'+p.id+'</td>'
+      +'<td style="font-family:monospace;font-size:11px;color:var(--text2)">'+p.id+(optCount>1?' <span class="pill pill-navy" style="font-size:10px;vertical-align:middle">'+optCount+' opts</span>':'')+'</td>'
       +'<td style="font-weight:500">'+p.client+'</td>'
       +'<td style="font-size:12px;color:var(--text2)">'+p.type+'</td>'
       +'<td style="font-weight:500">'+fmtMoney(p.value)+'</td>'
       +'<td style="font-size:12px;color:var(--text2)">'+p.user+'</td>'
       +'<td style="font-size:12px;color:var(--text2)">'+p.created+'</td>'
       +'<td><span class="pill pill-'+sc+'">'+p.status+'</span></td>'
-      +'<td><button class="btn" style="font-size:11px;padding:3px 8px;color:var(--navy)" onclick="navigate(\'quotation\')"><i class="ti ti-eye"></i>Open</button></td>'
+      +'<td style="white-space:nowrap">'
+      +'<button class="btn" style="font-size:11px;padding:3px 8px;color:var(--navy)" onclick="navigate(\'quotation\')"><i class="ti ti-eye"></i>Open</button> '
+      +'<button class="btn" style="font-size:11px;padding:3px 8px;color:var(--teal)" onclick="openNewOptionFromDir(\''+p.id+'\')" title="Create a new option variant for this quotation"><i class="ti ti-layers-difference"></i>New Option</button>'
+      +'</td>'
       +'</tr>';
   }
   html("dir-table",h||'<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text2)">No quotations found.</td></tr>');
+}
+
+function openNewOptionFromDir(quotId){
+  // Switch to quotation page without resetting, then create a new option variant
+  document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active');});
+  document.querySelectorAll('.nav-btn').forEach(function(b){b.classList.remove('active');});
+  var pg=el('page-quotation'); if(pg) pg.classList.add('active');
+  document.querySelectorAll("[data-pg='quotation']").forEach(function(b){b.classList.add('active');});
+  createNewOption();
+  // Inform user which quotation the option belongs to
+  var base=qBaseSerial||qSerial;
+  var t=el('drive-toast');
+  if(t){
+    t.innerHTML='<i class="ti ti-layers-difference" style="font-size:16px;color:var(--teal);flex-shrink:0"></i>'
+      +'<span><b>New option created</b><br><span style="font-size:12px;color:var(--text2)">Variant added to '+escHtml(base)+'</span></span>';
+    t.style.display='flex';
+    clearTimeout(t._timer);
+    t._timer=setTimeout(function(){t.style.display='none';},5000);
+  }
 }
 
 // ── Bond & Insurance ─────────────────────────────────────────────────────
@@ -5688,6 +5883,33 @@ function calcBondInsCosts(totalWithVat, bondState) {
   }
   result.total=result.performance+result.thirdParty+result.surety+result.insurances;
   return result;
+}
+
+function updateBondInsCostDisplay(biCosts){
+  var div=el('bi-cost-summary'); if(!div||!biCosts) return;
+  if(!biCosts.total){div.innerHTML='';return;}
+  var h='<div style="background:#f0f4ff;border:.5px solid #c0cee8;border-radius:7px;padding:10px 12px;margin-top:10px">'
+    +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;display:flex;align-items:center;gap:5px"><i class="ti ti-calculator"></i>Computed cost</div>';
+  if(biCosts.performance>0) h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Performance Bond</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.performance)+'</span></div>';
+  if(biCosts.thirdParty>0)  h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Third Party Liability</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.thirdParty)+'</span></div>';
+  if(biCosts.surety>0)      h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Surety Bond</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.surety)+'</span></div>';
+  if(biCosts.insurances>0)  h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Insurance</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.insurances)+'</span></div>';
+  h+='<div style="display:flex;justify-content:space-between;font-size:13px;border-top:.5px solid #c0cee8;margin-top:5px;padding-top:5px"><span style="font-weight:600;color:var(--navy)">Total</span><span style="font-weight:700;color:var(--navy)">'+fmtMoney(biCosts.total)+'</span></div>';
+  h+='</div>';
+  div.innerHTML=h;
+}
+function updateFQBondInsCostDisplay(biCosts){
+  var div=el('fq-bi-cost-summary'); if(!div||!biCosts) return;
+  if(!biCosts.total){div.innerHTML='';return;}
+  var h='<div style="background:#f0f4ff;border:.5px solid #c0cee8;border-radius:7px;padding:10px 12px;margin-top:10px">'
+    +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;display:flex;align-items:center;gap:5px"><i class="ti ti-calculator"></i>Computed cost</div>';
+  if(biCosts.performance>0) h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Performance Bond</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.performance)+'</span></div>';
+  if(biCosts.thirdParty>0)  h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Third Party Liability</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.thirdParty)+'</span></div>';
+  if(biCosts.surety>0)      h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Surety Bond</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.surety)+'</span></div>';
+  if(biCosts.insurances>0)  h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--text2)">Insurance</span><span style="font-weight:600;color:var(--navy)">'+fmtMoney(biCosts.insurances)+'</span></div>';
+  h+='<div style="display:flex;justify-content:space-between;font-size:13px;border-top:.5px solid #c0cee8;margin-top:5px;padding-top:5px"><span style="font-weight:600;color:var(--navy)">Total</span><span style="font-weight:700;color:var(--navy)">'+fmtMoney(biCosts.total)+'</span></div>';
+  h+='</div>';
+  div.innerHTML=h;
 }
 
 function toggleBondIns(){
@@ -5772,8 +5994,9 @@ function renderBondIns(){
       +'</div>';
   }
   h+='<button class="btn" onclick="qBondIns.insurances.push({type:\'\',cost:0});renderBondIns()" style="font-size:12px;margin-top:4px"><i class="ti ti-plus"></i>Add insurance</button>';
-
+  h+='<div id="bi-cost-summary"></div>';
   body.innerHTML=h;
+  if(_pCalc&&_pCalc.biCosts) updateBondInsCostDisplay(_pCalc.biCosts);
 }
 
 // ── Final Quotation (Stage 2) functions ──────────────────────────────────
@@ -6114,7 +6337,9 @@ function renderFQBondIns(){
       +'</div>';
   }
   h+='<button class="btn" onclick="fqBondIns.insurances.push({type:\'\',cost:0});renderFQBondIns()" style="font-size:12px;margin-top:4px"><i class="ti ti-plus"></i>Add insurance</button>';
+  h+='<div id="fq-bi-cost-summary"></div>';
   body.innerHTML=h;
+  if(_pCalc&&_pCalc.biCosts&&_pCalc.stage===2) updateFQBondInsCostDisplay(_pCalc.biCosts);
 }
 
 function checkFQSchedule() {
@@ -6186,6 +6411,7 @@ function recalcFQ() {
   var grand=afterDWithBonds+vatAmt+premAmt;
   // Cache for openPrint()
   _pCalc={stage:2,fabBaseRaw:fabBase,outsourceBase:0,outsourceFinal:0,mobBase:mobBase,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:vatOn,discOn:!!(fqDiscApproved&&dA),discPct:fqDiscPct||0,premOn:!!fqPremApproved,ni:ni,na:na};
+  updateFQBondInsCostDisplay(biCosts);
 
   // Summary lines
   var lines='';
