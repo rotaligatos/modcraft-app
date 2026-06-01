@@ -7294,8 +7294,27 @@ function _drivePost(path,body){
   return fetch('https://www.googleapis.com/drive/v3/'+path,{method:'POST',headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json();});
 }
 function ensureDriveFolder(){
-  gDriveFolderId=DRIVE_FOLDER_ID;
-  return Promise.resolve(DRIVE_FOLDER_ID);
+  if(gDriveFolderId) return Promise.resolve(gDriveFolderId);
+  var cached=null;try{cached=localStorage.getItem('mc_drive_folder_id');}catch(e){}
+  if(cached){gDriveFolderId=cached;return Promise.resolve(cached);}
+  // Find or create a personal "Modcraft Quotations" folder in the signed-in user's Drive
+  var q=encodeURIComponent("name='Modcraft Quotations' and mimeType='application/vnd.google-apps.folder' and trashed=false");
+  return _driveGet('files?q='+q+'&fields=files(id,name)&spaces=drive')
+    .then(function(d){
+      if(d.files&&d.files.length){
+        var id=d.files[0].id;
+        gDriveFolderId=id;
+        try{localStorage.setItem('mc_drive_folder_id',id);}catch(e){}
+        return id;
+      }
+      return _drivePost('files',{name:'Modcraft Quotations',mimeType:'application/vnd.google-apps.folder'})
+        .then(function(r){
+          if(!r||!r.id) throw new Error('Could not create Drive folder');
+          gDriveFolderId=r.id;
+          try{localStorage.setItem('mc_drive_folder_id',r.id);}catch(e){}
+          return r.id;
+        });
+    });
 }
 function _driveMultipart(method,url,meta,htmlContent){
   var b='mc_b_'+Date.now();
@@ -8048,40 +8067,44 @@ function saveQuotationJson(callback){
   var serial=state.baseSerial||state.serial;
   var cn=(state.client.bizname||state.client.name||'Client').replace(/[<>:"/\\|?*]/g,'-').substring(0,30).trim();
   var fileName=serial+' — '+cn+' — state.json';
-  var folderId=DRIVE_FOLDER_ID;
-  var qEsc=fileName.replace(/'/g,"\\'");
-  var q=encodeURIComponent("name='"+qEsc+"' and '"+folderId+"' in parents and trashed=false");
-  _driveGet('files?q='+q+'&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true')
-    .then(function(d){
-      var existId=d.files&&d.files.length?d.files[0].id:null;
-      var meta={name:fileName,mimeType:'application/json'};
-      if(!existId) meta.parents=[folderId];
-      var url=existId
-        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id&supportsAllDrives=true'
-        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id&supportsAllDrives=true';
-      var b='mc_json_'+Date.now();
-      var body='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'+JSON.stringify(meta)
-        +'\r\n--'+b+'\r\nContent-Type: application/json\r\n\r\n'+json+'\r\n--'+b+'--';
-      return fetch(url,{method:existId?'PATCH':'POST',headers:{Authorization:'Bearer '+gToken,'Content-Type':'multipart/related; boundary='+b},body:body})
-        .then(function(r){return r.json();});
-    })
-    .then(function(){if(callback)callback();})
-    .catch(function(e){console.warn('JSON state save failed',e);if(callback)callback();});
+  ensureDriveFolder().then(function(folderId){
+    var qEsc=fileName.replace(/'/g,"\\'");
+    var q=encodeURIComponent("name='"+qEsc+"' and '"+folderId+"' in parents and trashed=false");
+    return _driveGet('files?q='+q+'&fields=files(id)')
+      .then(function(d){
+        var existId=d.files&&d.files.length?d.files[0].id:null;
+        var meta={name:fileName,mimeType:'application/json'};
+        if(!existId) meta.parents=[folderId];
+        var url=existId
+          ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id'
+          :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+        var b='mc_json_'+Date.now();
+        var body='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'+JSON.stringify(meta)
+          +'\r\n--'+b+'\r\nContent-Type: application/json\r\n\r\n'+json+'\r\n--'+b+'--';
+        return fetch(url,{method:existId?'PATCH':'POST',headers:{Authorization:'Bearer '+gToken,'Content-Type':'multipart/related; boundary='+b},body:body})
+          .then(function(r){return r.json();});
+      });
+  }).then(function(){if(callback)callback();})
+  .catch(function(e){
+    console.warn('JSON state save failed',e);
+    showSheetsToast(false,'Quotation state not saved to Drive — '+escHtml(e&&e.message?e.message:'check permissions'));
+    if(callback)callback();
+  });
 }
 function loadQuotationJson(serial,callback){
   if(!gToken){alert('Please sign in to load quotations from Google Drive.');return;}
-  var folderId=DRIVE_FOLDER_ID;
-  var q=encodeURIComponent("name contains '"+serial+"' and name contains 'state.json' and '"+folderId+"' in parents and trashed=false");
-  _driveGet('files?q='+q+'&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true')
-    .then(function(d){
-      if(!d.files||!d.files.length){alert('No saved state found for '+serial+'.\nMake sure the quotation was saved as draft or locked at least once.');if(callback)callback(null);return;}
-      var fileId=d.files[0].id;
-      return fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media&supportsAllDrives=true',{
-        headers:{Authorization:'Bearer '+gToken}
-      }).then(function(r){return r.json();});
-    })
-    .then(function(state){if(state&&callback)callback(state);})
-    .catch(function(e){console.warn('Load state failed',e);alert('Failed to load quotation. Please try again.');if(callback)callback(null);});
+  ensureDriveFolder().then(function(folderId){
+    var q=encodeURIComponent("name contains '"+serial+"' and name contains 'state.json' and '"+folderId+"' in parents and trashed=false");
+    return _driveGet('files?q='+q+'&fields=files(id,name)')
+      .then(function(d){
+        if(!d.files||!d.files.length){alert('No saved state found for '+serial+'.\nMake sure the quotation was saved as draft or locked at least once.');if(callback)callback(null);return;}
+        var fileId=d.files[0].id;
+        return fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',{
+          headers:{Authorization:'Bearer '+gToken}
+        }).then(function(r){return r.json();})
+          .then(function(state){if(state&&callback)callback(state);});
+      });
+  }).catch(function(e){console.warn('Load state failed',e);alert('Failed to load quotation. Please try again.');if(callback)callback(null);});
 }
 function restoreFullQuotationState(state){
   if(!state) return;
