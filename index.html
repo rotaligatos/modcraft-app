@@ -6297,7 +6297,8 @@ function renderDirectory(){
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var ser=r[0];
-        var baseS=ser.replace(/-\d+$/,''); // strip option suffix
+        var baseM=ser.match(/^(QT-\d{6}-\d{4})/);
+        var baseS=baseM?baseM[1]:ser; // strip option suffix (e.g. -1, -2) but not 4-digit serial part
         if(seen[baseS]){
           // Update if newer or higher status
           var prev=seen[baseS];
@@ -7339,11 +7340,11 @@ function saveQuotationToDrive(typeKey,typeLabel){
         return _driveMultipart(existId?'PATCH':'POST',url,meta,htmlContent);
       });
   }).then(function(r){
-    if(!r||!r.id){console.warn('Drive save error',r);return;}
+    if(!r||!r.id){console.warn('Drive save error',r);showSheetsToast(false,'Drive save failed — '+(r&&r.error&&r.error.message?r.error.message:'check folder permissions'));return;}
     qDriveLinks[typeKey]={id:r.id,webViewLink:r.webViewLink,name:r.name};
     renderDriveLinks();
     showDriveToast(r.webViewLink,typeLabel);
-  }).catch(function(err){console.warn('Drive save failed',err);});
+  }).catch(function(err){console.warn('Drive save failed',err);showSheetsToast(false,'Drive save failed — '+escHtml(err&&err.message?err.message:'network error'));});
 }
 function renderDriveLinks(){
   var map={draft:{el:'q-drive-links',label:'Draft'},
@@ -7378,14 +7379,17 @@ function showSheetsToast(success, msg){
 function verifyDatabaseConnection(){
   if(!gToken){alert('Please sign in first to test the database connection.');return;}
   var btn=el('db-verify-btn');if(btn){btn.innerHTML='<i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Testing…';btn.disabled=true;}
-  sheetsGet('Quotations!A1').then(function(d){
-    var ok=!d.error;
+  Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1')]).then(function(res){
+    var qOk=!res[0].error, cOk=!res[1].error;
     var status=el('db-status');
     if(status){
-      if(ok){
-        status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div><b>Google Sheets connected</b> — Quotations tab found. Data is saving correctly.</div></div>';
+      if(qOk&&cOk){
+        status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div><b>All tabs connected</b> — Quotations and Clients tabs found. Data is saving correctly.</div></div>';
       } else {
-        status.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Quotations tab missing</b> — '+(d.error&&d.error.message?d.error.message:'Unknown error')+'. Save a quotation once to auto-create it.</div></div>';
+        var missing=[];
+        if(!qOk) missing.push('Quotations');
+        if(!cOk) missing.push('Clients');
+        status.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i><div><b>Missing sheet '+(missing.length>1?'tabs':'tab')+': '+missing.join(', ')+'</b> — not yet created in the spreadsheet. <button class="btn btn-primary" onclick="setupMissingSheetTabs()" style="font-size:11px;padding:3px 10px;margin-left:6px"><i class="ti ti-table-plus"></i> Create missing tabs</button></div></div>';
       }
     }
     if(btn){btn.innerHTML='<i class="ti ti-database"></i> Test connection';btn.disabled=false;}
@@ -7393,6 +7397,24 @@ function verifyDatabaseConnection(){
     var status=el('db-status');
     if(status) status.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Connection failed</b> — '+escHtml(e.message||'Network error')+'</div></div>';
     if(btn){btn.innerHTML='<i class="ti ti-database"></i> Test connection';btn.disabled=false;}
+  });
+}
+function setupMissingSheetTabs(){
+  if(!gToken) return;
+  var status=el('db-status');
+  if(status) status.innerHTML='<div class="alert alert-info"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Creating missing tabs…</div>';
+  var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service']];
+  var CLI_HDR=[['ID','Contact Name','Business Name','Contact No','Email','Address','City','Account Type','Segment','Segment Group','Segment Custom','Notes']];
+  Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1')]).then(function(res){
+    var tasks=[];
+    if(res[0].error) tasks.push(sheetsCreateTab('Quotations').then(function(){return sheetsAppend('Quotations!A:M',QUOT_HDR);}));
+    if(res[1].error) tasks.push(sheetsCreateTab('Clients').then(function(){return sheetsAppend('Clients!A:L',CLI_HDR);}));
+    if(!tasks.length){if(status) status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div>All tabs already exist — nothing to create.</div></div>';return Promise.resolve();}
+    return Promise.all(tasks);
+  }).then(function(){
+    if(status) status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div><b>Done!</b> Missing tabs created. Click <b>Test connection</b> to verify.</div></div>';
+  }).catch(function(e){
+    if(status) status.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Setup failed</b> — '+escHtml(e.message||'Unknown error')+'. Check you are signed in and the sheet is shared with your account.</div></div>';
   });
 }
 function showDriveToast(url,label){
@@ -7885,8 +7907,14 @@ function gSaveClient(client){
   var row=[client.id,client.name,client.bizname,client.contact,client.email,client.address,client.city||'',client.type,client.segment,client.segmentGroup,client.segmentCustom,client.notes||''];
   var header=[['ID','Contact Name','Business Name','Contact No','Email','Address','City','Account Type','Segment','Segment Group','Segment Custom','Notes']];
   sheetsGet('Clients!A:A').then(function(d){
+    if(d.error){
+      return sheetsCreateTab('Clients').then(function(){
+        return sheetsAppend('Clients!A:L',header).then(function(){
+          return sheetsAppend('Clients!A:L',[row]);
+        });
+      });
+    }
     var vals=d.values||[];
-    // Auto-create header if sheet is empty
     if(!vals||vals.length===0){
       return sheetsAppend('Clients!A:L',header).then(function(){
         return sheetsAppend('Clients!A:L',[row]);
@@ -7925,7 +7953,8 @@ function gSaveQuotation(){
   var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq];
   // Store in session memory immediately so directory shows it without waiting for Sheets
   var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service'];
-  sessionQuotations[serial]={id:serial,baseSerial:serial.replace(/-\d+$/,''),created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount};
+  var _bsM=serial.match(/^(QT-\d{6}-\d{4})/);
+  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount};
   sheetsGet('Quotations!A:A').then(function(d){
     if(d.error){
       return sheetsCreateTab('Quotations').then(function(){
