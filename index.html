@@ -1769,6 +1769,7 @@ var gRefreshPromise=null;      // in-flight silent token refresh
 var gRefreshResolve=null, gRefreshReject=null;
 var DRIVE_FOLDER_ID='1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB'; // Shared Drive folder — all users
 var gDriveFolderId=null;
+var gQuotFolderCache={};  // { baseSerial: folderId } — per-quotation Drive subfolder IDs
 var qDriveLinks={};        // {typeKey:{id,webViewLink,name}} for this quotation
 var dirData=[];            // directory rows loaded from Sheets
 var dirLoading=false;
@@ -7415,17 +7416,49 @@ function ensureDriveFolder(){
         });
     });
 }
-function _driveMultipart(method,url,meta,htmlContent){
-  var b='mc_b_'+Date.now();
-  var body='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
-    +JSON.stringify(meta)+'\r\n--'+b+'\r\nContent-Type: text/html\r\n\r\n'
-    +htmlContent+'\r\n--'+b+'--';
-  return gApiFetch(url,{method:method,headers:{'Content-Type':'multipart/related; boundary='+b},body:body});
+// ── Drive: per-quotation subfolder ───────────────────────────────────────
+// Finds or creates Modcraft Quotations/{serial}/ and caches the folder ID.
+function ensureQuotationFolder(serial,parentId){
+  if(gQuotFolderCache[serial]) return Promise.resolve(gQuotFolderCache[serial]);
+  var qry=encodeURIComponent("name='"+serial+"' and mimeType='application/vnd.google-apps.folder' and '"+parentId+"' in parents and trashed=false");
+  return _driveGet('files?q='+qry+'&fields=files(id,name)')
+    .then(function(d){
+      if(d.files&&d.files.length){
+        gQuotFolderCache[serial]=d.files[0].id;
+        return d.files[0].id;
+      }
+      return _drivePost('files',{name:serial,mimeType:'application/vnd.google-apps.folder',parents:[parentId]})
+        .then(function(r){
+          if(!r||!r.id) throw new Error('Could not create folder for '+serial);
+          gQuotFolderCache[serial]=r.id;
+          return r.id;
+        });
+    });
+}
+// Generic file upsert inside a Drive folder (finds existing by name, patches or creates).
+function _driveUpsertFile(folderId,fileName,mimeType,content){
+  var qry=encodeURIComponent("name='"+fileName.replace(/'/g,"\\'")+"' and '"+folderId+"' in parents and trashed=false");
+  return _driveGet('files?q='+qry+'&fields=files(id)')
+    .then(function(d){
+      var existId=d.files&&d.files.length?d.files[0].id:null;
+      var meta={name:fileName,mimeType:mimeType};
+      if(!existId) meta.parents=[folderId];
+      var url=existId
+        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,webViewLink,name'
+        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name';
+      var b='mc_mp_'+Date.now();
+      var body='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
+        +JSON.stringify(meta)+'\r\n--'+b+'\r\nContent-Type: '+mimeType+'\r\n\r\n'
+        +content+'\r\n--'+b+'--';
+      return gApiFetch(url,{method:existId?'PATCH':'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body:body});
+    });
+}
+function driveClientName(){
+  var cn=((el('cl-bizname')&&el('cl-bizname').value)||'').trim()||(el('cl-name')&&el('cl-name').value||'').trim()||'Client';
+  return cn.replace(/[<>:"/\\|?*]/g,'-').substring(0,35).trim();
 }
 function driveFileName(typeLabel){
-  var cn=((el('cl-bizname')&&el('cl-bizname').value)||'').trim()||(el('cl-name')&&el('cl-name').value||'').trim()||'Client';
-  cn=cn.replace(/[<>:"/\\|?*]/g,'-').substring(0,35).trim();
-  return qSerial+' — '+cn+' — '+typeLabel+'.html';
+  return qSerial+' — '+driveClientName()+' — '+typeLabel+'.html';
 }
 function buildFullQuotationHtml(typeLabel){
   var body=_buildPrintBody();
@@ -7439,29 +7472,37 @@ function buildFullQuotationHtml(typeLabel){
     +'<p style="font-size:9px;color:#bbb;text-align:right;margin:6px 0 0">Saved to Google Drive · '+new Date().toLocaleString()+'</p>'
     +'</body></html>';
 }
+// Save an HTML copy of this quotation into Modcraft Quotations/{baseSerial}/
 function saveQuotationToDrive(typeKey,typeLabel){
-  if(!gToken){console.log('Drive save skipped: not signed in');return;}
+  if(!gToken) return;
+  var baseSerial=qBaseSerial||qSerial;
   var fileName=driveFileName(typeLabel);
   var htmlContent=buildFullQuotationHtml(typeLabel);
-  ensureDriveFolder().then(function(folderId){
-    var qEsc=fileName.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    var q=encodeURIComponent("name='"+qEsc+"' and '"+folderId+"' in parents and trashed=false");
-    return _driveGet('files?q='+q+'&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true')
-      .then(function(d){
-        var existId=d.files&&d.files.length?d.files[0].id:null;
-        var meta={name:fileName,mimeType:'text/html'};
-        if(!existId) meta.parents=[folderId];
-        var url=existId
-          ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,webViewLink,name&supportsAllDrives=true'
-          :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name&supportsAllDrives=true';
-        return _driveMultipart(existId?'PATCH':'POST',url,meta,htmlContent);
-      });
-  }).then(function(r){
-    if(!r||!r.id){console.warn('Drive HTML save skipped:',r&&r.error&&r.error.message);return;} // non-critical — data is already safe in Sheets
-    qDriveLinks[typeKey]={id:r.id,webViewLink:r.webViewLink,name:r.name};
-    renderDriveLinks();
-    showDriveToast(r.webViewLink,typeLabel);
-  }).catch(function(err){console.warn('Drive HTML save skipped:',err&&err.message);});  // non-critical — data is already safe in Sheets
+  ensureDriveFolder()
+    .then(function(rootId){ return ensureQuotationFolder(baseSerial,rootId); })
+    .then(function(quotFolderId){ return _driveUpsertFile(quotFolderId,fileName,'text/html',htmlContent); })
+    .then(function(r){
+      if(!r||!r.id){console.warn('Drive HTML save skipped:',r&&r.error&&r.error.message);return;}
+      qDriveLinks[typeKey]={id:r.id,webViewLink:r.webViewLink,name:r.name};
+      renderDriveLinks();
+      showDriveToast(r.webViewLink,typeLabel);
+    })
+    .catch(function(err){console.warn('Drive HTML save skipped:',err&&err.message);});
+}
+// Save a JSON state backup into Modcraft Quotations/{baseSerial}/ — belt-and-suspenders alongside Sheets.
+function saveQuotationStateToDrive(serial,json){
+  if(!gToken) return;
+  var baseSerial=(serial.match(/^(QT-\d{6}-\d{4})/)||[,''])[1]||serial;
+  var cn=driveClientName();
+  var fileName=baseSerial+' — '+cn+' — state.json';
+  ensureDriveFolder()
+    .then(function(rootId){ return ensureQuotationFolder(baseSerial,rootId); })
+    .then(function(quotFolderId){ return _driveUpsertFile(quotFolderId,fileName,'application/json',json); })
+    .then(function(r){
+      if(r&&r.id) console.log('Drive state backup saved:',r.name);
+      else console.warn('Drive state backup skipped:',r&&r.error&&r.error.message);
+    })
+    .catch(function(err){console.warn('Drive state backup skipped:',err&&err.message);});
 }
 function renderDriveLinks(){
   var map={draft:{el:'q-drive-links',label:'Draft'},
@@ -8273,7 +8314,10 @@ function saveQuotationJson(callback){
     for(var i=1;i<vals.length;i++){if(vals[i][0]===serial){rowIdx=i+1;break;}}
     if(rowIdx>0){return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]);}
     else{return sheetsAppend('Quotation State!A:K',[row]);}
-  }).then(function(){if(callback)callback();})
+  }).then(function(){
+    saveQuotationStateToDrive(serial,json); // belt-and-suspenders Drive backup — non-blocking
+    if(callback)callback();
+  })
   .catch(function(e){
     console.warn('State save failed',e);
     showSheetsToast(false,'Quotation state not saved — '+escHtml(e&&e.message?e.message:'check connection'));
