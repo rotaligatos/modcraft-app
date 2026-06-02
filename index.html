@@ -862,7 +862,7 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
         <button id="db-verify-btn" class="btn btn-primary" onclick="verifyDatabaseConnection()" style="font-size:12px"><i class="ti ti-database"></i>Test connection</button>
         <a href="https://docs.google.com/spreadsheets/d/1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o/edit" target="_blank" class="btn" style="font-size:12px"><i class="ti ti-table"></i>Open Google Sheets</a>
-        <a href="https://drive.google.com/drive/folders/1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB" target="_blank" class="btn" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Open Drive folder</a>
+        <button class="btn" onclick="openModcraftDriveFolder()" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Open Drive folder</button>
       </div>
       <div id="db-status"></div>
       <div style="font-size:11px;color:var(--text2);margin-top:8px">
@@ -7491,12 +7491,33 @@ function saveQuotationToDrive(typeKey,typeLabel){
     .then(function(rootId){ return ensureQuotationFolder(baseSerial,rootId); })
     .then(function(quotFolderId){ return _driveUpsertFile(quotFolderId,fileName,'text/html',htmlContent); })
     .then(function(r){
-      if(!r||!r.id){console.warn('Drive HTML save skipped:',r&&r.error&&r.error.message);return;}
+      if(!r||!r.id){
+        console.warn('Drive HTML save failed:',r&&r.error&&r.error.message);
+        _showDriveWarning(r&&r.error&&r.error.message);
+        return;
+      }
       qDriveLinks[typeKey]={id:r.id,webViewLink:r.webViewLink,name:r.name};
       renderDriveLinks();
       showDriveToast(r.webViewLink,typeLabel);
     })
-    .catch(function(err){console.warn('Drive HTML save skipped:',err&&err.message);});
+    .catch(function(err){
+      console.warn('Drive save failed:',err&&err.message);
+      if(!(err&&err.message==='SESSION_EXPIRED')) _showDriveWarning(err&&err.message);
+    });
+}
+// Amber toast — Drive failed but data is safe in Sheets. Throttled: max once per 60s.
+var _driveWarnAt=0;
+function _showDriveWarning(msg){
+  if(Date.now()-_driveWarnAt<60000) return; // don't spam
+  _driveWarnAt=Date.now();
+  var t=el('drive-toast'); if(!t) return;
+  t.innerHTML='<i class="ti ti-brand-google-drive" style="font-size:16px;color:var(--amber);flex-shrink:0"></i>'
+    +'<span style="color:var(--amber)"><b>Drive backup skipped</b> — '
+    +escHtml(msg&&msg.length<80?msg:'Check Settings → Test connection to diagnose.')
+    +'<br><span style="font-size:11px">Your data is safe in Google Sheets. <a href="#" onclick="navigate(\'settings\');return false" style="color:var(--amber)">Settings → Test connection</a> to fix Drive.</span></span>';
+  t.style.display='flex';
+  clearTimeout(t._timer);
+  t._timer=setTimeout(function(){t.style.display='none';},12000);
 }
 // Save a JSON state backup into Modcraft Quotations/{baseSerial}/ — belt-and-suspenders alongside Sheets.
 function saveQuotationStateToDrive(serial,json){
@@ -7508,10 +7529,13 @@ function saveQuotationStateToDrive(serial,json){
     .then(function(rootId){ return ensureQuotationFolder(baseSerial,rootId); })
     .then(function(quotFolderId){ return _driveUpsertFile(quotFolderId,fileName,'application/json',json); })
     .then(function(r){
-      if(r&&r.id) console.log('Drive state backup saved:',r.name);
-      else console.warn('Drive state backup skipped:',r&&r.error&&r.error.message);
+      if(r&&r.id){ console.log('Drive state backup saved:',r.name); }
+      else { console.warn('Drive state backup failed:',r&&r.error&&r.error.message); _showDriveWarning(r&&r.error&&r.error.message); }
     })
-    .catch(function(err){console.warn('Drive state backup skipped:',err&&err.message);});
+    .catch(function(err){
+      console.warn('Drive state backup failed:',err&&err.message);
+      if(!(err&&err.message==='SESSION_EXPIRED')) _showDriveWarning(err&&err.message);
+    });
 }
 function renderDriveLinks(){
   var map={draft:{el:'q-drive-links',label:'Draft'},
@@ -7543,29 +7567,74 @@ function showSheetsToast(success, msg){
   clearTimeout(t._timer);
   t._timer=setTimeout(function(){t.style.display='none';},success?5000:10000);
 }
+function openModcraftDriveFolder(){
+  // Open the real Modcraft Quotations folder (cached) or fall back to My Drive root
+  var id=gDriveFolderId;
+  try{if(!id) id=localStorage.getItem('mc_drive_folder_id');}catch(e){}
+  window.open(id?'https://drive.google.com/drive/folders/'+id:'https://drive.google.com/drive/my-drive','_blank');
+}
 function verifyDatabaseConnection(){
   if(!gToken){alert('Please sign in first to test the database connection.');return;}
   var btn=el('db-verify-btn');if(btn){btn.innerHTML='<i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Testing…';btn.disabled=true;}
-  Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1'),sheetsGet('Quotation State!A1')]).then(function(res){
+  var status=el('db-status');
+  // Test Sheets tabs + Drive access in parallel
+  Promise.all([
+    sheetsGet('Quotations!A1'),
+    sheetsGet('Clients!A1'),
+    sheetsGet('Quotation State!A1'),
+    _driveGet('files?pageSize=1&fields=files(id)&spaces=drive') // minimal Drive API call
+  ]).then(function(res){
     var qOk=!res[0].error, cOk=!res[1].error, sOk=!res[2].error;
-    var status=el('db-status');
-    if(status){
-      if(qOk&&cOk&&sOk){
-        status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div><b>All tabs connected</b> — Quotations, Clients and Quotation State tabs found. Data is saving correctly.</div></div>';
+    var driveOk=!res[3].error;
+    var html='';
+    // Sheets status
+    if(qOk&&cOk&&sOk){
+      html+='<div class="alert alert-success" style="margin-bottom:8px"><i class="ti ti-circle-check"></i><div><b>Google Sheets ✓</b> — Quotations, Clients and Quotation State tabs all found.</div></div>';
+    } else {
+      var missing=[];
+      if(!qOk) missing.push('Quotations');
+      if(!cOk) missing.push('Clients');
+      if(!sOk) missing.push('Quotation State');
+      html+='<div class="alert alert-warn" style="margin-bottom:8px"><i class="ti ti-alert-triangle"></i><div><b>Missing tabs: '+missing.join(', ')+'</b> <button class="btn btn-primary" onclick="setupMissingSheetTabs()" style="font-size:11px;padding:3px 10px;margin-left:6px"><i class="ti ti-table-plus"></i> Create missing tabs</button></div></div>';
+    }
+    // Drive status
+    if(driveOk){
+      // Also verify the cached folder actually exists (clears stale id1-type cache)
+      var cachedId=gDriveFolderId;try{if(!cachedId)cachedId=localStorage.getItem('mc_drive_folder_id');}catch(e){}
+      if(cachedId){
+        _driveGet('files/'+cachedId+'?fields=id,name').then(function(d){
+          var fOk=d&&d.id;
+          if(!fOk){
+            // Stale folder ID — clear it so it gets recreated on next save
+            gDriveFolderId=null; gDriveFolderPromise=null;
+            try{localStorage.removeItem('mc_drive_folder_id');}catch(e){}
+          }
+          if(status){
+            html+='<div class="alert alert-'+(fOk?'success':'warn')+'" style="margin-bottom:8px"><i class="ti ti-brand-google-drive"></i><div>'+(fOk?'<b>Google Drive ✓</b> — Modcraft Quotations folder found. <button class="btn" onclick="openModcraftDriveFolder()" style="font-size:11px;padding:3px 10px;margin-left:6px"><i class="ti ti-external-link"></i> Open folder</button>':'<b>Cached Drive folder not found</b> — stale ID cleared. It will be re-created on the next save.')+'</div></div>';
+            status.innerHTML=html;
+          }
+        }).catch(function(){if(status){html+='<div class="alert alert-warn" style="margin-bottom:8px"><i class="ti ti-brand-google-drive"></i><div>Could not verify Drive folder.</div></div>';status.innerHTML=html;}});
       } else {
-        var missing=[];
-        if(!qOk) missing.push('Quotations');
-        if(!cOk) missing.push('Clients');
-        if(!sOk) missing.push('Quotation State');
-        status.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i><div><b>Missing sheet '+(missing.length>1?'tabs':'tab')+': '+missing.join(', ')+'</b> — not yet created in the spreadsheet. <button class="btn btn-primary" onclick="setupMissingSheetTabs()" style="font-size:11px;padding:3px 10px;margin-left:6px"><i class="ti ti-table-plus"></i> Create missing tabs</button></div></div>';
+        html+='<div class="alert alert-info" style="margin-bottom:8px"><i class="ti ti-brand-google-drive"></i><div><b>Google Drive ✓</b> — Accessible. "Modcraft Quotations" folder will be created on your first save/lock.</div></div>';
+        if(status) status.innerHTML=html;
       }
+    } else {
+      var errMsg=res[3].error&&res[3].error.message?res[3].error.message:'';
+      var is403=res[3].error&&(res[3].error.code===403||/forbidden|permission|scope/i.test(errMsg));
+      html+='<div class="alert alert-error" style="margin-bottom:8px"><i class="ti ti-brand-google-drive"></i><div><b>Google Drive ✗</b> — '+(is403?'Drive access not authorized. Click Re-authorize to grant Drive permission.':escHtml(errMsg||'Drive not accessible.'))+' <button class="btn btn-primary" onclick="gReauthorizeDrive()" style="font-size:11px;padding:3px 10px;margin-left:6px"><i class="ti ti-refresh"></i> Re-authorize Drive</button></div></div>';
+      if(status) status.innerHTML=html;
     }
     if(btn){btn.innerHTML='<i class="ti ti-database"></i> Test connection';btn.disabled=false;}
   }).catch(function(e){
-    var status=el('db-status');
     if(status) status.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Connection failed</b> — '+escHtml(e.message||'Network error')+'</div></div>';
     if(btn){btn.innerHTML='<i class="ti ti-database"></i> Test connection';btn.disabled=false;}
   });
+}
+// Force fresh Drive consent — use when Drive scope was not previously granted
+function gReauthorizeDrive(){
+  if(!gTokenClient){alert('Auth not initialized.');return;}
+  gToken=null; gTokenExpiry=0; // force re-auth
+  gTokenClient.requestAccessToken({prompt:'consent'}); // prompt:'consent' forces re-showing the scope grant screen
 }
 function setupMissingSheetTabs(){
   if(!gToken) return;
