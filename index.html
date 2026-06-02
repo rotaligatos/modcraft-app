@@ -1769,7 +1769,9 @@ var gRefreshPromise=null;      // in-flight silent token refresh
 var gRefreshResolve=null, gRefreshReject=null;
 var DRIVE_FOLDER_ID='1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB'; // Shared Drive folder — all users
 var gDriveFolderId=null;
-var gQuotFolderCache={};  // { baseSerial: folderId } — per-quotation Drive subfolder IDs
+var gDriveFolderPromise=null;          // in-flight root folder lookup/create
+var gQuotFolderCache={};               // { baseSerial: folderId }
+var gQuotFolderPromise={};             // { baseSerial: Promise } — in-flight subfolder create
 var qDriveLinks={};        // {typeKey:{id,webViewLink,name}} for this quotation
 var dirData=[];            // directory rows loaded from Sheets
 var dirLoading=false;
@@ -7397,9 +7399,10 @@ function ensureDriveFolder(){
   if(gDriveFolderId) return Promise.resolve(gDriveFolderId);
   var cached=null;try{cached=localStorage.getItem('mc_drive_folder_id');}catch(e){}
   if(cached){gDriveFolderId=cached;return Promise.resolve(cached);}
-  // Find or create a personal "Modcraft Quotations" folder in the signed-in user's Drive
+  // Return the in-flight promise if another call is already creating the folder
+  if(gDriveFolderPromise) return gDriveFolderPromise;
   var q=encodeURIComponent("name='Modcraft Quotations' and mimeType='application/vnd.google-apps.folder' and trashed=false");
-  return _driveGet('files?q='+q+'&fields=files(id,name)&spaces=drive')
+  gDriveFolderPromise=_driveGet('files?q='+q+'&fields=files(id,name)&spaces=drive')
     .then(function(d){
       if(d.files&&d.files.length){
         var id=d.files[0].id;
@@ -7414,14 +7417,18 @@ function ensureDriveFolder(){
           try{localStorage.setItem('mc_drive_folder_id',r.id);}catch(e){}
           return r.id;
         });
-    });
+    }).then(function(id){gDriveFolderPromise=null;return id;})
+    .catch(function(e){gDriveFolderPromise=null;throw e;});
+  return gDriveFolderPromise;
 }
 // ── Drive: per-quotation subfolder ───────────────────────────────────────
 // Finds or creates Modcraft Quotations/{serial}/ and caches the folder ID.
 function ensureQuotationFolder(serial,parentId){
   if(gQuotFolderCache[serial]) return Promise.resolve(gQuotFolderCache[serial]);
+  // Return in-flight promise if another parallel save is already creating this folder
+  if(gQuotFolderPromise[serial]) return gQuotFolderPromise[serial];
   var qry=encodeURIComponent("name='"+serial+"' and mimeType='application/vnd.google-apps.folder' and '"+parentId+"' in parents and trashed=false");
-  return _driveGet('files?q='+qry+'&fields=files(id,name)')
+  gQuotFolderPromise[serial]=_driveGet('files?q='+qry+'&fields=files(id,name)')
     .then(function(d){
       if(d.files&&d.files.length){
         gQuotFolderCache[serial]=d.files[0].id;
@@ -7433,7 +7440,9 @@ function ensureQuotationFolder(serial,parentId){
           gQuotFolderCache[serial]=r.id;
           return r.id;
         });
-    });
+    }).then(function(id){delete gQuotFolderPromise[serial];return id;})
+    .catch(function(e){delete gQuotFolderPromise[serial];throw e;});
+  return gQuotFolderPromise[serial];
 }
 // Generic file upsert inside a Drive folder (finds existing by name, patches or creates).
 function _driveUpsertFile(folderId,fileName,mimeType,content){
