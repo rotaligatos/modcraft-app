@@ -1760,6 +1760,10 @@ var dbLoaded=false;
 var gToken=null;
 var gUser=null;
 var gTokenClient=null;
+var gTokenExpiry=0;            // epoch ms when current token should be treated as expired
+var gSessionExpired=false;     // true once a refresh has failed and user must re-auth
+var gRefreshPromise=null;      // in-flight silent token refresh
+var gRefreshResolve=null, gRefreshReject=null;
 var DRIVE_FOLDER_ID='1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB'; // Shared Drive folder — all users
 var gDriveFolderId=null;
 var qDriveLinks={};        // {typeKey:{id,webViewLink,name}} for this quotation
@@ -6290,6 +6294,9 @@ function renderDirectory(){
     var wrap=el('dir-table');
     if(wrap) wrap.innerHTML='<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite;font-size:20px"></i> Loading...</td></tr>';
     sheetsGet('Quotations!A:M').then(function(d){
+      if(d.error){ // Quotations tab not created yet — no quotations saved so far. Show empty, not demo.
+        dirData=[]; dirLoading=false; renderDirectoryTable(); return;
+      }
       var rows=d.values||[];
       dirData=[];
       // Deduplicate by base serial (options share same base serial)
@@ -6315,8 +6322,10 @@ function renderDirectory(){
       }
       dirLoading=false;
       renderDirectoryTable();
-    }).catch(function(){
-      dirData=DEMO_PROJS.slice();
+    }).catch(function(e){
+      // Auth/network failure — DO NOT show demo projects. Keep empty/cached and warn.
+      console.warn('Directory load failed',e);
+      if(!(e&&e.message==='SESSION_EXPIRED')) showSheetsToast(false,'Could not load projects — check your connection. Your saved data is safe.');
       dirLoading=false;
       renderDirectoryTable();
     });
@@ -7129,11 +7138,18 @@ function initGoogleAuth(){
     scope:'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
     callback:function(resp){
       if(resp.error){
+        // A failed SILENT refresh lands here too — reject the pending refresh so callers surface it
+        if(gRefreshReject){var rj=gRefreshReject;gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null;rj(new Error(resp.error));return;}
         var ls=el('login-status'); if(ls){ls.textContent='Sign-in failed. Please try again.';ls.style.color='#d85a30';}
         var btn=el('signin-btn'); if(btn){btn.disabled=false;btn.innerHTML=gSignInBtnHtml();}
         return;
       }
       gToken=resp.access_token;
+      // Treat token as expired 2 min before Google's stated lifetime, so we refresh proactively
+      gTokenExpiry=Date.now()+(((parseInt(resp.expires_in,10)||3600)-120)*1000);
+      gSessionExpired=false; hideSessionBanner();
+      // If this was a silent refresh (user already known), just resolve it — don't re-run role lookup
+      if(gRefreshResolve){var r=gRefreshResolve;gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null;r(gToken);if(gUser)return;}
       var ls=el('login-status'); if(ls){ls.textContent='Verifying your account...';ls.style.color='#666';}
       fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+gToken}})
         .then(function(r){return r.json();})
@@ -7142,7 +7158,17 @@ function initGoogleAuth(){
     }
   });
 }
+function gInIframe(){ try{ return window.self!==window.top; }catch(e){ return true; } }
 function gSignIn(){
+  // Google sign-in does not work reliably inside an iframe (e.g. embedded in a Google Site).
+  // If embedded, open the app in its own tab where authentication — and saving — work.
+  if(gInIframe()){
+    var url=window.location.href;
+    window.open(url,'_blank','noopener');
+    var ls0=el('login-status');
+    if(ls0){ls0.innerHTML='For sign-in to work, the app must run in its own tab. <a href="'+url+'" target="_blank" rel="noopener" style="color:#1a3c5e;font-weight:600">Open Modcraft in a new tab ↗</a>';ls0.style.color='#d85a30';}
+    return;
+  }
   var btn=el('signin-btn');
   if(btn){btn.disabled=true;btn.innerHTML='<span style="color:#888">Signing in...</span>';}
   if(!gTokenClient){
@@ -7251,39 +7277,86 @@ function gSignOut(){
 
 // ── Sheets tab creation ───────────────────────────────────────────────────
 function sheetsCreateTab(title){
-  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+':batchUpdate',{
+  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+':batchUpdate',{
     method:'POST',
-    headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({requests:[{addSheet:{properties:{title:title}}}]})
-  }).then(function(r){return r.json();}).catch(function(){});
+  });
 }
 
+// ── Token lifecycle + auth-aware fetch ────────────────────────────────────
+function gValidToken(){ return !!gToken && Date.now() < gTokenExpiry; }
+// Silently refresh the access token (no popup). Resolves with new token or rejects.
+function gRefreshToken(){
+  if(gRefreshPromise) return gRefreshPromise;
+  if(!gTokenClient) return Promise.reject(new Error('NO_TOKEN_CLIENT'));
+  gRefreshPromise=new Promise(function(resolve,reject){
+    gRefreshResolve=resolve; gRefreshReject=reject;
+    try{ gTokenClient.requestAccessToken({prompt:''}); }
+    catch(e){ gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null; reject(e); return; }
+    setTimeout(function(){
+      if(gRefreshReject){var rj=gRefreshReject;gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null;rj(new Error('REFRESH_TIMEOUT'));}
+    },12000);
+  });
+  return gRefreshPromise;
+}
+function gOnSessionExpired(){ gSessionExpired=true; showSessionBanner(); }
+function showSessionBanner(){
+  var b=el('session-banner');
+  if(!b){
+    b=document.createElement('div'); b.id='session-banner';
+    b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;background:#d85a30;color:#fff;padding:10px 16px;font-size:13px;display:flex;align-items:center;justify-content:center;gap:12px;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+    document.body.appendChild(b);
+  }
+  b.innerHTML='<i class="ti ti-alert-triangle"></i><span>Your Google session expired. Your data is safe — please sign in again to keep saving.</span>'
+    +'<button onclick="gSignIn()" style="background:#fff;color:#d85a30;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600;cursor:pointer">Sign in again</button>';
+  b.style.display='flex';
+}
+function hideSessionBanner(){ var b=el('session-banner'); if(b) b.style.display='none'; }
+// Auth-aware fetch: ensures a valid token, retries once on 401 via silent refresh,
+// and on persistent auth failure shows the banner and throws so callers never treat it as success.
+function _gExpire(){ gOnSessionExpired(); throw new Error('SESSION_EXPIRED'); }
+function gApiFetch(url,opts,_retried){
+  opts=opts||{}; opts.headers=opts.headers||{};
+  // Proactively refresh if the token is missing/expired; any refresh failure = expired session
+  var pre=gValidToken()?Promise.resolve(gToken):gRefreshToken().catch(_gExpire);
+  return pre.then(function(tok){
+    opts.headers.Authorization='Bearer '+tok;
+    return fetch(url,opts);
+  }).then(function(r){
+    if(r.status===401){
+      if(_retried) _gExpire();                 // already retried once → give up
+      return gRefreshToken().then(function(){ return gApiFetch(url,opts,true); }, _gExpire);
+    }
+    return r.json();
+  });
+}
 // ── Google Sheets helpers ─────────────────────────────────────────────────
 function sheetsGet(range){
-  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range),{
-    headers:{Authorization:'Bearer '+gToken}
-  }).then(function(r){return r.json();});
+  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range),{});
 }
+// Writes must surface failures (permission/quota/etc.) — throw on any error so callers don't show a false "saved".
+function _sheetsThrowOnError(j){ if(j&&j.error) throw new Error(j.error.message||'Google Sheets write failed'); return j; }
 function sheetsAppend(range,values){
-  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+':append?valueInputOption=USER_ENTERED',{
+  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+':append?valueInputOption=USER_ENTERED',{
     method:'POST',
-    headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({values:values})
-  }).then(function(r){return r.json();});
+  }).then(_sheetsThrowOnError);
 }
 function sheetsUpdate(range,values){
-  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+'?valueInputOption=USER_ENTERED',{
+  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+'?valueInputOption=USER_ENTERED',{
     method:'PUT',
-    headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({range:range,majorDimension:'ROWS',values:values})
-  }).then(function(r){return r.json();});
+  }).then(_sheetsThrowOnError);
 }
 function sheetsClear(range){
-  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+':clear',{
+  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+':clear',{
     method:'POST',
-    headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json'},
     body:'{}'
-  }).then(function(r){return r.json();});
+  }).then(_sheetsThrowOnError);
 }
 
 // ── Google Drive – Quotation Save ────────────────────────────────────────
@@ -7896,18 +7969,24 @@ function renderPriceDbSettings() {
 
 // ── Clients sheet ─────────────────────────────────────────────────────────
 function gLoadClients(callback){
+  // Only show sample/demo data when genuinely not signed in. Never use demo to mask a failed read.
   if(!gToken){liveClients=DEMO_CLIENTS.slice();if(callback)callback();return;}
   sheetsGet('Clients!A:L').then(function(d){
+    if(d.error){
+      // Clients tab not created yet (e.g. 400) — no clients saved so far. Show empty, not demo.
+      if(!clientsSheetLoaded) liveClients=[];
+      clientsSheetLoaded=true; if(callback)callback(); return;
+    }
     var rows=d.values||[];
-    if(rows.length<=1){liveClients=DEMO_CLIENTS.slice();clientsSheetLoaded=true;if(callback)callback();return;}
-    liveClients=[];
+    var parsed=[];
     for(var i=1;i<rows.length;i++){
       var r=rows[i];if(!r||(!r[1]&&!r[2])) continue;
-      liveClients.push({id:parseInt(r[0])||i,name:r[1]||'',bizname:r[2]||'',contact:r[3]||'',email:r[4]||'',address:r[5]||'',city:r[6]||'',type:r[7]||'Direct',segment:r[8]||'',segmentGroup:r[9]||'',segmentCustom:r[10]||'',notes:r[11]||'',txns:[]});
+      parsed.push({id:parseInt(r[0])||i,name:r[1]||'',bizname:r[2]||'',contact:r[3]||'',email:r[4]||'',address:r[5]||'',city:r[6]||'',type:r[7]||'Direct',segment:r[8]||'',segmentGroup:r[9]||'',segmentCustom:r[10]||'',notes:r[11]||'',txns:[]});
     }
+    liveClients=parsed; // real data (may be empty if no clients yet — that's correct, not "lost")
     // Load transactions from Quotations sheet
     sheetsGet('Quotations!A:L').then(function(qd){
-      var qrows=qd.values||[];
+      var qrows=(qd&&!qd.error&&qd.values)?qd.values:[];
       for(var qi=1;qi<qrows.length;qi++){
         var qr=qrows[qi];if(!qr||!qr[0]) continue;
         var qclient=(qr[2]||'').toLowerCase();
@@ -7922,7 +8001,14 @@ function gLoadClients(callback){
       clientsSheetLoaded=true;
       if(callback)callback();
     }).catch(function(){clientsSheetLoaded=true;if(callback)callback();});
-  }).catch(function(){liveClients=DEMO_CLIENTS.slice();clientsSheetLoaded=true;if(callback)callback();});
+  }).catch(function(e){
+    // Auth/network failure — DO NOT replace real data with demo. Keep what we have and warn.
+    console.warn('Clients load failed',e);
+    if(e&&e.message==='SESSION_EXPIRED'){ /* banner already shown by gApiFetch */ }
+    else { showSheetsToast(false,'Could not load clients — check your connection. Your saved data is safe.'); }
+    clientsSheetLoaded=true;
+    if(callback)callback();
+  });
 }
 function gSaveClient(client){
   if(!gToken||!gUser) return;
