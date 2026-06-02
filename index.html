@@ -7398,16 +7398,17 @@ function showSheetsToast(success, msg){
 function verifyDatabaseConnection(){
   if(!gToken){alert('Please sign in first to test the database connection.');return;}
   var btn=el('db-verify-btn');if(btn){btn.innerHTML='<i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Testing…';btn.disabled=true;}
-  Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1')]).then(function(res){
-    var qOk=!res[0].error, cOk=!res[1].error;
+  Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1'),sheetsGet('Quotation State!A1')]).then(function(res){
+    var qOk=!res[0].error, cOk=!res[1].error, sOk=!res[2].error;
     var status=el('db-status');
     if(status){
-      if(qOk&&cOk){
-        status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div><b>All tabs connected</b> — Quotations and Clients tabs found. Data is saving correctly.</div></div>';
+      if(qOk&&cOk&&sOk){
+        status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div><b>All tabs connected</b> — Quotations, Clients and Quotation State tabs found. Data is saving correctly.</div></div>';
       } else {
         var missing=[];
         if(!qOk) missing.push('Quotations');
         if(!cOk) missing.push('Clients');
+        if(!sOk) missing.push('Quotation State');
         status.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i><div><b>Missing sheet '+(missing.length>1?'tabs':'tab')+': '+missing.join(', ')+'</b> — not yet created in the spreadsheet. <button class="btn btn-primary" onclick="setupMissingSheetTabs()" style="font-size:11px;padding:3px 10px;margin-left:6px"><i class="ti ti-table-plus"></i> Create missing tabs</button></div></div>';
       }
     }
@@ -7424,10 +7425,12 @@ function setupMissingSheetTabs(){
   if(status) status.innerHTML='<div class="alert alert-info"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Creating missing tabs…</div>';
   var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service']];
   var CLI_HDR=[['ID','Contact Name','Business Name','Contact No','Email','Address','City','Account Type','Segment','Segment Group','Segment Custom','Notes']];
-  Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1')]).then(function(res){
+  var STATE_HDR=[['Serial','State JSON (chunked across columns B–K — do not edit manually)']];
+  Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1'),sheetsGet('Quotation State!A1')]).then(function(res){
     var tasks=[];
     if(res[0].error) tasks.push(sheetsCreateTab('Quotations').then(function(){return sheetsAppend('Quotations!A:M',QUOT_HDR);}));
     if(res[1].error) tasks.push(sheetsCreateTab('Clients').then(function(){return sheetsAppend('Clients!A:L',CLI_HDR);}));
+    if(res[2].error) tasks.push(sheetsCreateTab('Quotation State').then(function(){return sheetsAppend('Quotation State!A1:K1',STATE_HDR);}));
     if(!tasks.length){if(status) status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div>All tabs already exist — nothing to create.</div></div>';return Promise.resolve();}
     return Promise.all(tasks);
   }).then(function(){
@@ -8060,51 +8063,70 @@ function getFullQuotationState(){
     savedBy:gUser?(gUser.email||''):''
   };
 }
+// State stored in the "Quotation State" tab of the main Sheet (no server / no Drive needed).
+// JSON is chunked across columns B..K (45k chars each) to stay under the 50k/cell limit.
+var QSTATE_CHUNK=45000, QSTATE_COLS=10; // 10 chunks ≈ 450 KB capacity
+function _qstateRow(serial,json){
+  var chunks=[];
+  for(var ci=0;ci<json.length;ci+=QSTATE_CHUNK){chunks.push(json.substr(ci,QSTATE_CHUNK));}
+  while(chunks.length<QSTATE_COLS) chunks.push(''); // pad so stale chunks get cleared on update
+  return [serial].concat(chunks.slice(0,QSTATE_COLS));
+}
 function saveQuotationJson(callback){
   if(!gToken){if(callback)callback();return;}
   var state=getFullQuotationState();
-  var json=JSON.stringify(state);
   var serial=state.baseSerial||state.serial;
-  var cn=(state.client.bizname||state.client.name||'Client').replace(/[<>:"/\\|?*]/g,'-').substring(0,30).trim();
-  var fileName=serial+' — '+cn+' — state.json';
-  ensureDriveFolder().then(function(folderId){
-    var qEsc=fileName.replace(/'/g,"\\'");
-    var q=encodeURIComponent("name='"+qEsc+"' and '"+folderId+"' in parents and trashed=false");
-    return _driveGet('files?q='+q+'&fields=files(id)')
-      .then(function(d){
-        var existId=d.files&&d.files.length?d.files[0].id:null;
-        var meta={name:fileName,mimeType:'application/json'};
-        if(!existId) meta.parents=[folderId];
-        var url=existId
-          ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id'
-          :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
-        var b='mc_json_'+Date.now();
-        var body='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'+JSON.stringify(meta)
-          +'\r\n--'+b+'\r\nContent-Type: application/json\r\n\r\n'+json+'\r\n--'+b+'--';
-        return fetch(url,{method:existId?'PATCH':'POST',headers:{Authorization:'Bearer '+gToken,'Content-Type':'multipart/related; boundary='+b},body:body})
-          .then(function(r){return r.json();});
+  var json=JSON.stringify(state);
+  var row=_qstateRow(serial,json);
+  var header=[['Serial','State JSON (chunked across columns B–K — do not edit manually)']];
+  if(json.length>QSTATE_CHUNK*QSTATE_COLS){
+    showSheetsToast(false,'Quotation '+serial+' is too large to save state. Contact support.');
+    if(callback)callback();return;
+  }
+  sheetsGet('Quotation State!A:A').then(function(d){
+    if(d.error){
+      return sheetsCreateTab('Quotation State').then(function(){
+        return sheetsAppend('Quotation State!A1:K1',header).then(function(){
+          return sheetsAppend('Quotation State!A:K',[row]);
+        });
       });
+    }
+    var vals=d.values||[];
+    if(!vals||vals.length===0){
+      return sheetsAppend('Quotation State!A1:K1',header).then(function(){
+        return sheetsAppend('Quotation State!A:K',[row]);
+      });
+    }
+    var rowIdx=-1;
+    for(var i=1;i<vals.length;i++){if(vals[i][0]===serial){rowIdx=i+1;break;}}
+    if(rowIdx>0){return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]);}
+    else{return sheetsAppend('Quotation State!A:K',[row]);}
   }).then(function(){if(callback)callback();})
   .catch(function(e){
-    console.warn('JSON state save failed',e);
-    showSheetsToast(false,'Quotation state not saved to Drive — '+escHtml(e&&e.message?e.message:'check permissions'));
+    console.warn('State save failed',e);
+    showSheetsToast(false,'Quotation state not saved — '+escHtml(e&&e.message?e.message:'check connection'));
     if(callback)callback();
   });
 }
 function loadQuotationJson(serial,callback){
-  if(!gToken){alert('Please sign in to load quotations from Google Drive.');return;}
-  ensureDriveFolder().then(function(folderId){
-    var q=encodeURIComponent("name contains '"+serial+"' and name contains 'state.json' and '"+folderId+"' in parents and trashed=false");
-    return _driveGet('files?q='+q+'&fields=files(id,name)')
-      .then(function(d){
-        if(!d.files||!d.files.length){alert('No saved state found for '+serial+'.\nMake sure the quotation was saved as draft or locked at least once.');if(callback)callback(null);return;}
-        var fileId=d.files[0].id;
-        return fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media',{
-          headers:{Authorization:'Bearer '+gToken}
-        }).then(function(r){return r.json();})
-          .then(function(state){if(state&&callback)callback(state);});
-      });
-  }).catch(function(e){console.warn('Load state failed',e);alert('Failed to load quotation. Please try again.');if(callback)callback(null);});
+  if(!gToken){alert('Please sign in to load quotations.');return;}
+  sheetsGet('Quotation State!A:K').then(function(d){
+    if(d.error){alert('Quotation State sheet not found. Save the quotation once to create it.');if(callback)callback(null);return;}
+    var vals=d.values||[];
+    for(var i=1;i<vals.length;i++){
+      if(vals[i][0]===serial){
+        var json=(vals[i].slice(1)).join(''); // reassemble chunked JSON from columns B..K
+        try{var state=JSON.parse(json);if(callback)callback(state);return;}
+        catch(e){alert('Saved state for '+serial+' is corrupted.');if(callback)callback(null);return;}
+      }
+    }
+    alert('No saved state found for '+serial+'.\nSave or lock the quotation at least once to store its state.');
+    if(callback)callback(null);
+  }).catch(function(e){
+    console.warn('Load state failed',e);
+    alert('Failed to load quotation state. Check your connection.');
+    if(callback)callback(null);
+  });
 }
 function restoreFullQuotationState(state){
   if(!state) return;
