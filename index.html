@@ -861,6 +861,7 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
       <div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-info-circle"></i><div>All quotation and client data is stored in <b>Google Sheets</b> and <b>Google Drive</b>. Updating the app code never affects this data — it persists permanently in your Google account.</div></div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
         <button id="db-verify-btn" class="btn btn-primary" onclick="verifyDatabaseConnection()" style="font-size:12px"><i class="ti ti-database"></i>Test connection</button>
+        <button class="btn" onclick="runDriveDiagnostics()" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Drive diagnostics</button>
         <a href="https://docs.google.com/spreadsheets/d/1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o/edit" target="_blank" class="btn" style="font-size:12px"><i class="ti ti-table"></i>Open Google Sheets</a>
         <button class="btn" onclick="openModcraftDriveFolder()" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Open Drive folder</button>
       </div>
@@ -7448,20 +7449,21 @@ function ensureDriveFolder(){
 }
 // ── Drive: per-quotation subfolder ───────────────────────────────────────
 // Finds or creates Modcraft Quotations/{serial}/ and caches the folder ID.
+// Drive flags required for accessing folders shared from another user's account
+var _DRIVE_FLAGS='supportsAllDrives=true&includeItemsFromAllDrives=true';
 function ensureQuotationFolder(serial,parentId){
   if(gQuotFolderCache[serial]) return Promise.resolve(gQuotFolderCache[serial]);
-  // Return in-flight promise if another parallel save is already creating this folder
   if(gQuotFolderPromise[serial]) return gQuotFolderPromise[serial];
   var qry=encodeURIComponent("name='"+serial+"' and mimeType='application/vnd.google-apps.folder' and '"+parentId+"' in parents and trashed=false");
-  gQuotFolderPromise[serial]=_driveGet('files?q='+qry+'&fields=files(id,name)')
+  gQuotFolderPromise[serial]=_driveGet('files?q='+qry+'&fields=files(id,name)&'+_DRIVE_FLAGS)
     .then(function(d){
       if(d.files&&d.files.length){
         gQuotFolderCache[serial]=d.files[0].id;
         return d.files[0].id;
       }
-      return _drivePost('files',{name:serial,mimeType:'application/vnd.google-apps.folder',parents:[parentId]})
+      return _drivePost('files?supportsAllDrives=true',{name:serial,mimeType:'application/vnd.google-apps.folder',parents:[parentId]})
         .then(function(r){
-          if(!r||!r.id) throw new Error('Could not create folder for '+serial);
+          if(!r||!r.id) throw new Error('Could not create folder for '+serial+(r&&r.error?' — '+r.error.message:''));
           gQuotFolderCache[serial]=r.id;
           return r.id;
         });
@@ -7469,17 +7471,17 @@ function ensureQuotationFolder(serial,parentId){
     .catch(function(e){delete gQuotFolderPromise[serial];throw e;});
   return gQuotFolderPromise[serial];
 }
-// Generic file upsert inside a Drive folder (finds existing by name, patches or creates).
+// Generic file upsert inside a Drive folder — works for shared & team drive folders
 function _driveUpsertFile(folderId,fileName,mimeType,content){
   var qry=encodeURIComponent("name='"+fileName.replace(/'/g,"\\'")+"' and '"+folderId+"' in parents and trashed=false");
-  return _driveGet('files?q='+qry+'&fields=files(id)')
+  return _driveGet('files?q='+qry+'&fields=files(id)&'+_DRIVE_FLAGS)
     .then(function(d){
       var existId=d.files&&d.files.length?d.files[0].id:null;
       var meta={name:fileName,mimeType:mimeType};
       if(!existId) meta.parents=[folderId];
       var url=existId
-        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,webViewLink,name'
-        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name';
+        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,webViewLink,name&supportsAllDrives=true'
+        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name&supportsAllDrives=true';
       var b='mc_mp_'+Date.now();
       var body='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
         +JSON.stringify(meta)+'\r\n--'+b+'\r\nContent-Type: '+mimeType+'\r\n\r\n'
@@ -7531,18 +7533,19 @@ function saveQuotationToDrive(typeKey,typeLabel){
     });
 }
 // Amber toast — Drive failed but data is safe in Sheets. Throttled: max once per 60s.
-var _driveWarnAt=0;
+var _driveWarnAt=0; var _lastDriveError='';
 function _showDriveWarning(msg){
+  _lastDriveError=msg||'unknown error';
   if(Date.now()-_driveWarnAt<60000) return; // don't spam
   _driveWarnAt=Date.now();
   var t=el('drive-toast'); if(!t) return;
   t.innerHTML='<i class="ti ti-brand-google-drive" style="font-size:16px;color:var(--amber);flex-shrink:0"></i>'
-    +'<span style="color:var(--amber)"><b>Drive backup skipped</b> — '
-    +escHtml(msg&&msg.length<80?msg:'Check Settings → Test connection to diagnose.')
-    +'<br><span style="font-size:11px">Your data is safe in Google Sheets. <a href="#" onclick="navigate(\'settings\');return false" style="color:var(--amber)">Settings → Test connection</a> to fix Drive.</span></span>';
+    +'<span style="color:var(--amber)"><b>Drive backup skipped</b><br>'
+    +'<span style="font-size:11px">'+escHtml(_lastDriveError)+'</span><br>'
+    +'<span style="font-size:11px">Data is safe in Sheets. <a href="#" onclick="navigate(\'settings\');setTimeout(function(){runDriveDiagnostics();},200);return false" style="color:var(--amber);font-weight:600">Run Drive diagnostics</a></span></span>';
   t.style.display='flex';
   clearTimeout(t._timer);
-  t._timer=setTimeout(function(){t.style.display='none';},12000);
+  t._timer=setTimeout(function(){t.style.display='none';},15000);
 }
 // Save a JSON state backup into Modcraft Quotations/{baseSerial}/ — belt-and-suspenders alongside Sheets.
 function saveQuotationStateToDrive(serial,json){
@@ -7653,6 +7656,55 @@ function verifyDatabaseConnection(){
   }).catch(function(e){
     if(status) status.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Connection failed</b> — '+escHtml(e.message||'Network error')+'</div></div>';
     if(btn){btn.innerHTML='<i class="ti ti-database"></i> Test connection';btn.disabled=false;}
+  });
+}
+function runDriveDiagnostics(){
+  if(!gToken){alert('Please sign in first.');return;}
+  var s=el('db-status'); if(!s) return;
+  var fid=sharedDriveFolderId||(function(){try{return localStorage.getItem('mc_drive_folder_id');}catch(e){return null;}}());
+  s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Running Drive diagnostics…</div>';
+  var steps=[];
+  function row(ok,label,detail){
+    steps.push('<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:.5px solid var(--border);font-size:12px">'
+      +'<span style="color:'+(ok?'var(--green)':'var(--coral)')+';">'+(ok?'✓':'✗')+'</span>'
+      +'<div><b>'+label+'</b>'+(detail?'<br><span style="color:var(--text2)">'+escHtml(detail)+'</span>':'')+'</div></div>');
+  }
+  // Step 1: Drive API access
+  _driveGet('files?pageSize=1&fields=files(id)&spaces=drive')
+  .then(function(d1){
+    row(!d1.error,'Drive API access'+(d1.error?' FAILED':''),d1.error?d1.error.message:'Signed in with Drive scope ✓');
+    if(d1.error) throw new Error('Drive API: '+d1.error.message);
+    // Step 2: folder configured?
+    row(!!fid,'Shared folder configured',fid?'Folder ID: '+fid:'No shared folder ID set — go to Shared Drive folder card and paste folder ID');
+    if(!fid) throw new Error('No shared folder ID configured');
+    // Step 3: can list files in the folder?
+    return _driveGet('files?q='+encodeURIComponent("'"+fid+"' in parents and trashed=false")+'&pageSize=1&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true');
+  })
+  .then(function(d2){
+    row(!d2.error,'Can READ folder ID: '+fid,d2.error?d2.error.message:'Folder is accessible and readable');
+    if(d2.error) throw new Error('Folder read: '+d2.error.message);
+    // Step 4: try creating a test subfolder
+    return _drivePost('files',{name:'__modcraft_test__',mimeType:'application/vnd.google-apps.folder',parents:[fid]});
+  })
+  .then(function(d3){
+    var ok=!!(d3&&d3.id);
+    row(ok,'Can CREATE subfolders inside shared folder',ok?'Write access confirmed (test folder created)':'Error: '+(d3&&d3.error?d3.error.message:'No ID returned'));
+    if(!ok) throw new Error('Subfolder create: '+(d3&&d3.error?d3.error.message:'failed'));
+    // Step 5: clean up test folder
+    return _driveGet('files/'+d3.id+'?fields=id').then(function(){
+      // delete it
+      return gApiFetch('https://www.googleapis.com/drive/v3/files/'+d3.id,{method:'DELETE'});
+    }).catch(function(){});
+  })
+  .then(function(){
+    row(true,'Drive setup complete','All checks passed — quotation files will save correctly');
+    s.innerHTML='<div style="border:.5px solid var(--border);border-radius:8px;overflow:hidden"><div style="padding:10px 14px;background:#fafaf8;font-size:12px;font-weight:600">Drive diagnostics</div><div style="padding:8px 14px">'+steps.join('')+'</div></div>';
+  })
+  .catch(function(e){
+    if(steps.length===0) row(false,'Drive API access',e.message);
+    s.innerHTML='<div style="border:.5px solid var(--border);border-radius:8px;overflow:hidden"><div style="padding:10px 14px;background:#fce8e1;font-size:12px;font-weight:600;color:var(--coral)">Drive diagnostics — issue found</div><div style="padding:8px 14px">'+steps.join('')+'</div>'
+      +(e.message.indexOf('No shared folder')>-1?'<div style="padding:10px 14px;background:#fdf2e0;font-size:12px;color:var(--amber)"><b>Action needed:</b> Scroll down to the "Shared Drive folder" card, paste the folder ID from Google Drive, and click "Test &amp; save folder".</div>':e.message.indexOf('read')>-1||e.message.indexOf('403')>-1?'<div style="padding:10px 14px;background:#fdf2e0;font-size:12px;color:var(--amber)"><b>Action needed:</b> The folder exists but you do not have Editor access. Ask <b>wcli-it-admin</b> to share the folder with your account as <b>Editor</b>.</div>':'')
+      +'</div>';
   });
 }
 function testSharedDriveFolder(){
