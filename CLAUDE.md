@@ -27,9 +27,12 @@ A single-file HTML quotation management app for **World Class Laminate, Inc. / R
 | `Activity log` | Audit trail |
 | `Quotation Items` | Line items detail |
 
-## Google Drive structure (per signed-in user's My Drive)
+## Google Drive structure (Shared/Team Drive under wcli-it-admin)
+- **Shared folder ID:** `1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB` (Team Drive — all users have Editor access)
+- Stored in Settings sheet as `sharedDriveFolderId` and loaded at login for all users
+- All Drive API calls use `supportsAllDrives=true` (required for Team Drive folders — missing this causes "File not found" errors on writes)
 ```
-Modcraft Quotations/          ← created automatically on first save
+Modcraft Quotations/          ← Team Drive folder under wcli-it-admin
   QT-260601-4083/             ← one subfolder per quotation serial
     QT-260601-4083 — Client — state.json     ← full data backup
     QT-260601-4083 — Client — Draft.html
