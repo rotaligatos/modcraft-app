@@ -271,6 +271,10 @@ These were all built before the current session — do NOT re-implement or overw
 9. **Race condition** — in-flight promise guards on folder creation
 10. **False "Database save failed" on lock** — was Drive HTML save failing; now silent (data in Sheets is safe)
 
+## What was changed on 2026-06-03
+1. **Quotation preview print buttons** — removed the separate "Download PDF" and "Print" buttons from the top toolbar; replaced with a single "Print / Save PDF" button (navy, same as the old bottom button)
+2. **Removed bottom Print/Save PDF button** — the duplicate button at the bottom of the preview body HTML was removed; only the top toolbar button remains
+
 ## Known remaining areas to watch
 - **Carcass pricing tab** in Settings — not yet verified as persisted through `gSaveAppSettings`
 - **Drive saves in Google Sites embed** — token refresh via `prompt:''` is blocked in iframes; users must re-auth via banner ~hourly
