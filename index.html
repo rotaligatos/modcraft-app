@@ -34,6 +34,9 @@ input[type=checkbox],input[type=radio]{width:auto;height:auto}
 .btn:hover{background:#f4f4f2}
 #s1-wrap.q-locked input,#s1-wrap.q-locked select,#s1-wrap.q-locked textarea{background:#f5f5f3!important;color:var(--text2)!important;cursor:not-allowed!important;pointer-events:none}
 #s1-wrap.q-locked button:disabled{opacity:.35;cursor:not-allowed}
+.col-resize-handle{position:absolute;right:-2px;top:0;width:6px;height:100%;cursor:col-resize;z-index:2;user-select:none}
+.col-resize-handle:hover{background:rgba(26,60,94,.2)}
+th{position:relative;white-space:nowrap}
 .btn-primary{background:var(--navy);color:#fff;border-color:var(--navy)}
 .btn-primary:hover{background:#1e4872;color:#fff}
 .btn-amber{background:var(--amber);color:#fff;border-color:var(--amber)}
@@ -1820,11 +1823,20 @@ var DIR_COLS=[
   {key:'user',    label:'Assigned',      always:false},
   {key:'created', label:'Created',       always:false},
   {key:'stage',   label:'Stage',         always:false},
-  {key:'options', label:'Options',       always:false},
-  {key:'status',  label:'Status',        always:true}
+  {key:'options',        label:'Options',           always:false},
+  {key:'status',         label:'Status',            always:true},
+  {key:'initLockedAt',   label:'Initial Locked',    always:false},
+  {key:'initApprovedAt', label:'Initial Approved',  always:false},
+  {key:'finalLockedAt',  label:'Final Locked',      always:false},
+  {key:'closedAt',       label:'Final Approved',    always:false}
 ];
-var dirColPrefs={serial:true,client:true,contact:false,segment:false,type:true,value:true,user:true,created:true,stage:true,options:true,status:true};
-try{var _dcp=localStorage.getItem('mc_dir_cols');if(_dcp)dirColPrefs=JSON.parse(_dcp);}catch(e){}
+var dirColPrefs={serial:true,client:true,contact:false,segment:false,type:true,value:true,user:true,created:true,stage:true,options:true,status:true,initLockedAt:false,initApprovedAt:false,finalLockedAt:false,closedAt:false};
+try{var _dcp=localStorage.getItem('mc_dir_cols');if(_dcp)dirColPrefs=Object.assign(dirColPrefs,JSON.parse(_dcp));}catch(e){}
+var dirColWidths={};
+try{var _dcw=localStorage.getItem('mc_dir_col_widths');if(_dcw)dirColWidths=JSON.parse(_dcw);}catch(e){}
+var _colResizing=null;
+// ── Quotation lifecycle timestamps ──────────────────────────────────────────
+var qInitLockedAt='', qInitApprovedAt='', fqLockedAt='', qClosedAt='';
 
 // ── Utility ────────────────────────────────────────────────────────────────
 function makeSerial() {
@@ -1847,6 +1859,21 @@ function addWorkdays(s, n) {
   return d.toISOString().split("T")[0];
 }
 function fmtMoney(v) { return "₱" + Number(v).toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtDT(s){
+  if(!s) return '—';
+  var d=new Date(s);
+  if(isNaN(d.getTime())){
+    // plain date string YYYY-MM-DD
+    var p=s.split('-'); if(p.length===3) return p[1]+'/'+p[2]+'/'+p[0].slice(2);
+    return s;
+  }
+  var mo=String(d.getMonth()+1).padStart(2,'0');
+  var dy=String(d.getDate()).padStart(2,'0');
+  var yr=String(d.getFullYear()).slice(2);
+  var hr=String(d.getHours()).padStart(2,'0');
+  var mn=String(d.getMinutes()).padStart(2,'0');
+  return mo+'/'+dy+'/'+yr+' '+hr+':'+mn;
+}
 function fmtK(v) { return v>=1e6 ? "₱"+(v/1e6).toFixed(1)+"M" : v>=1e3 ? "₱"+(v/1e3).toFixed(0)+"K" : "₱"+v; }
 function expDate() { return addDays(new Date().toISOString().split("T")[0], 30); }
 function el(id) { return document.getElementById(id); }
@@ -1934,6 +1961,7 @@ function initQuotation() {
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}]}];
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus='';
+  qInitLockedAt=''; qInitApprovedAt=''; fqLockedAt=''; qClosedAt='';
   qLog=[]; qPieces=[]; _pCalc={};
   qVatApproved=true; qDiscApproved=false; qDiscPct=0; qPremApproved=false;
   qCustomCF=null; qCustomCFApproved=false;
@@ -3477,6 +3505,7 @@ function goStage(n) {
 }
 function doCloseProject(){
   if(!confirm('Mark this project as Closed?\n\nThis means the project is complete. No further edits or new options can be created.\n\nThis cannot be undone without manager unlock.')) return;
+  qClosedAt=new Date().toISOString();
   logActivity('Project closed.');
   var statusEl=el('q-status');
   if(statusEl){statusEl.textContent='Closed';statusEl.className='pill pill-teal';}
@@ -3512,13 +3541,13 @@ function doApprove() {
     if(cur){cur.snapshot=captureQuotationSnapshot();cur.grand=_pCalc.grand||0;}
     openOptionApproveModal(); return;
   }
-  qApproved=true;
+  qApproved=true; qInitApprovedAt=qInitApprovedAt||new Date().toISOString();
   el("q-status").textContent="Approved"; el("q-status").className="pill pill-teal";
   el("s2btn").style.opacity="1"; el("s2btn").style.cursor="pointer";
   el("revise-btn").style.display="inline-flex";
   var cpb=el('close-project-btn'); if(cpb) cpb.style.display='inline-flex';
   logActivity("Quotation approved — Stage 2 unlocked");
-  updateLockUI();
+  gSaveQuotation(); updateLockUI();
   goStage(2);
 }
 function openRevise() { openModal("ov-revise"); }
@@ -5892,6 +5921,7 @@ function restoreQuotationSnapshot(snap){
   qOutMarkup=snap.outMarkup;qOutContingency=snap.outContingency;qOutBuffer=snap.outBuffer;
   qVatApproved=snap.vatApproved;qDiscApproved=snap.discApproved;qDiscPct=snap.discPct;qPremApproved=snap.premApproved;
   if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';}
+  if(snap.initLockedAt!==undefined){qInitLockedAt=snap.initLockedAt||'';qInitApprovedAt=snap.initApprovedAt||'';fqLockedAt=snap.finalLockedAt||'';qClosedAt=snap.closedAt||'';}
 }
 function syncOptionUI(){
   // Sync DOM/UI elements after restoring a snapshot
@@ -6042,13 +6072,13 @@ function confirmOptionApprove(optId){
     restoreQuotationSnapshot(qOptionsList.find(function(o){return o.id===optId;}).snapshot);
   }
   // Proceed with normal approval
-  qApproved=true;
+  qApproved=true; qInitApprovedAt=qInitApprovedAt||new Date().toISOString();
   el("q-status").textContent="Approved"; el("q-status").className="pill pill-teal";
   el("s2btn").style.opacity="1"; el("s2btn").style.cursor="pointer";
   el("revise-btn").style.display="inline-flex";
   var cpb2=el('close-project-btn'); if(cpb2) cpb2.style.display='inline-flex';
   logActivity("Option "+optId+" ("+qOptionsList.find(function(o){return o.id===optId;}).label+") approved — Stage 2 unlocked");
-  updateLockUI();
+  gSaveQuotation(); updateLockUI();
   goStage(2);
 }
 // ── Lock / Send / Unlock ──────────────────────────────────────────────────
@@ -6066,7 +6096,7 @@ function doLock() {
 }
 function doLockOnly(){
   if(qLocked) return;
-  qLocked=true; qSentStatus='Not sent';
+  qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
   // Also mark the current option object as locked
   if(qActiveOptionId>0){var _lo=qOptionsList.find(function(o){return o.id===qActiveOptionId;});if(_lo){_lo.locked=true;_lo.saved=true;}}
   logActivity('Quotation locked.');
@@ -6160,12 +6190,13 @@ function confirmSend(via) {
   var em=el("cl-email")?el("cl-email").value:"";
   var stage=modalCtx==='fq'?'Final quotation':'Quotation';
   if(modalCtx==='fq'){
-    fqLocked=true; fqSentStatus=sentTxt;
+    fqLocked=true; fqSentStatus=sentTxt; fqLockedAt=new Date().toISOString();
     logActivity(stage+" locked. "+sentTxt+".");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
+    gSaveQuotation();
   } else {
-    qLocked=true; qSentStatus=sentTxt;
+    qLocked=true; qSentStatus=sentTxt; qInitLockedAt=qInitLockedAt||new Date().toISOString();
     logActivity(stage+" locked. "+sentTxt+".");
     gSaveQuotation(); updateLockUI(); updateSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -6197,12 +6228,13 @@ function confirmSend(via) {
 function skipSend() {
   closeModal("ov-lock");
   if(modalCtx==='fq'){
-    fqLocked=true; fqSentStatus="Not sent";
+    fqLocked=true; fqSentStatus="Not sent"; fqLockedAt=new Date().toISOString();
     logActivity("Final quotation locked. Not sent to client.");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
+    gSaveQuotation();
   } else {
-    qLocked=true; qSentStatus="Not sent";
+    qLocked=true; qSentStatus="Not sent"; qInitLockedAt=qInitLockedAt||new Date().toISOString();
     logActivity("Quotation locked. Not sent to client.");
     gSaveQuotation(); updateLockUI(); updateSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -6354,7 +6386,7 @@ function renderDirectory(){
     dirLoading=true;
     var wrap=el('dir-table');
     if(wrap) wrap.innerHTML='<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite;font-size:20px"></i> Loading...</td></tr>';
-    sheetsGet('Quotations!A:M').then(function(d){
+    sheetsGet('Quotations!A:Q').then(function(d){
       if(d.error){ // Quotations tab not created yet — no quotations saved so far. Show empty, not demo.
         dirData=[]; dirLoading=false; renderDirectoryTable(); return;
       }
@@ -6377,7 +6409,8 @@ function renderDirectory(){
           contact:r[4]||'',type:r[12]||'',
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,
           user:r[7]||'',segment:r[8]||'',status:r[5]||'Draft',locked:r[9]==='Yes',
-          stage:r[10]||'Initial',options:parseInt(r[11])||1};
+          stage:r[10]||'Initial',options:parseInt(r[11])||1,
+          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||''};
         dirData.push(entry);
         seen[baseS]=entry;
       }
@@ -6414,6 +6447,29 @@ function toggleDirColPanel(){
 function saveDirColPrefs(){
   try{localStorage.setItem('mc_dir_cols',JSON.stringify(dirColPrefs));}catch(e){}
 }
+function saveDirColWidths(){
+  try{localStorage.setItem('mc_dir_col_widths',JSON.stringify(dirColWidths));}catch(e){}
+}
+function startColResize(e,colKey){
+  e.preventDefault(); e.stopPropagation();
+  var th=e.target.closest('th');
+  _colResizing={col:colKey,th:th,startX:e.clientX,startW:th.offsetWidth};
+  document.addEventListener('mousemove',_onColResizeMove);
+  document.addEventListener('mouseup',_onColResizeUp);
+}
+function _onColResizeMove(e){
+  if(!_colResizing) return;
+  var newW=Math.max(40,_colResizing.startW+(e.clientX-_colResizing.startX));
+  _colResizing.th.style.width=newW+'px';
+}
+function _onColResizeUp(e){
+  if(!_colResizing) return;
+  dirColWidths[_colResizing.col]=Math.max(40,_colResizing.startW+(e.clientX-_colResizing.startX));
+  saveDirColWidths();
+  document.removeEventListener('mousemove',_onColResizeMove);
+  document.removeEventListener('mouseup',_onColResizeUp);
+  _colResizing=null;
+}
 function renderDirectoryTable(){
   var search=(el("dir-search")?el("dir-search").value:"").toLowerCase();
   var statusF=el("dir-status-filter")?el("dir-status-filter").value:"";
@@ -6442,19 +6498,28 @@ function renderDirectoryTable(){
     return dirAsc?r:-r;
   });
   var cnt=el("dir-count"); if(cnt) cnt.textContent=list.length+" quotation"+(list.length===1?"":"s");
-  // Build dynamic header
-  var th='<tr><th style="cursor:pointer" onclick="setDirSort(\'follow\')"><i class="ti ti-star" style="font-size:12px"></i></th>';
-  if(dirColPrefs.serial) th+='<th style="cursor:pointer" onclick="setDirSort(\'id\')">Serial <i class="ti ti-arrows-sort" style="font-size:10px"></i></th>';
-  if(dirColPrefs.client) th+='<th style="cursor:pointer" onclick="setDirSort(\'client\')">Client <i class="ti ti-arrows-sort" style="font-size:10px"></i></th>';
-  if(dirColPrefs.contact) th+='<th>Contact</th>';
-  if(dirColPrefs.segment) th+='<th>Business Type</th>';
-  if(dirColPrefs.type) th+='<th>Service</th>';
-  if(dirColPrefs.value) th+='<th style="cursor:pointer" onclick="setDirSort(\'value\')">Value <i class="ti ti-arrows-sort" style="font-size:10px"></i></th>';
-  if(dirColPrefs.user) th+='<th style="cursor:pointer" onclick="setDirSort(\'user\')">Assigned <i class="ti ti-arrows-sort" style="font-size:10px"></i></th>';
-  if(dirColPrefs.created) th+='<th style="cursor:pointer" onclick="setDirSort(\'date\')">Created <i class="ti ti-arrows-sort" style="font-size:10px"></i></th>';
-  if(dirColPrefs.stage) th+='<th>Stage</th>';
-  if(dirColPrefs.options) th+='<th>Options</th>';
-  if(dirColPrefs.status) th+='<th>Status</th>';
+  // Build dynamic header with resize handles
+  function _th(key,label,sortKey){
+    var w=dirColWidths[key]?'width:'+dirColWidths[key]+'px;':'';
+    var sort=sortKey?'cursor:pointer" onclick="setDirSort(\''+sortKey+'\')':'';
+    return '<th style="'+w+sort+'">'+label+'<div class="col-resize-handle" onmousedown="startColResize(event,\''+key+'\')" onclick="event.stopPropagation()"></div></th>';
+  }
+  var th='<tr><th style="width:36px"><i class="ti ti-star" style="font-size:12px"></i></th>';
+  if(dirColPrefs.serial)        th+=_th('serial','Serial <i class="ti ti-arrows-sort" style="font-size:10px"></i>','id');
+  if(dirColPrefs.client)        th+=_th('client','Client <i class="ti ti-arrows-sort" style="font-size:10px"></i>','client');
+  if(dirColPrefs.contact)       th+=_th('contact','Contact','');
+  if(dirColPrefs.segment)       th+=_th('segment','Business Type','');
+  if(dirColPrefs.type)          th+=_th('type','Service','');
+  if(dirColPrefs.value)         th+=_th('value','Value <i class="ti ti-arrows-sort" style="font-size:10px"></i>','value');
+  if(dirColPrefs.user)          th+=_th('user','Assigned <i class="ti ti-arrows-sort" style="font-size:10px"></i>','user');
+  if(dirColPrefs.created)       th+=_th('created','Created <i class="ti ti-arrows-sort" style="font-size:10px"></i>','date');
+  if(dirColPrefs.stage)         th+=_th('stage','Stage','');
+  if(dirColPrefs.options)       th+=_th('options','Options','');
+  if(dirColPrefs.status)        th+=_th('status','Status','');
+  if(dirColPrefs.initLockedAt)  th+=_th('initLockedAt','Initial Locked','');
+  if(dirColPrefs.initApprovedAt)th+=_th('initApprovedAt','Initial Approved','');
+  if(dirColPrefs.finalLockedAt) th+=_th('finalLockedAt','Final Locked','');
+  if(dirColPrefs.closedAt)      th+=_th('closedAt','Final Approved','');
   th+='<th></th></tr>';
   // Build rows
   var h="";
@@ -6467,17 +6532,21 @@ function renderDirectoryTable(){
     var optCount=isCurrentQuot?qOptionsList.filter(function(o){return o.status!=='archived';}).length:(p.options||1);
     h+='<tr style="cursor:pointer" onclick="openQuotationFromDir(\''+p.id+'\')">';
     h+='<td style="text-align:center" onclick="event.stopPropagation()"><button onclick="toggleFollow(\''+p.id+'\')" style="background:none;border:none;cursor:pointer;padding:4px;color:'+(fol?"var(--amber)":"#ccc")+'"><i class="ti ti-star'+(fol?"-filled":"")+'" style="font-size:15px"></i></button></td>';
-    if(dirColPrefs.serial) h+='<td style="font-family:monospace;font-size:11px;color:var(--text2)">'+escHtml(p.id)+(optCount>1?' <span class="pill pill-navy" style="font-size:10px;vertical-align:middle">'+optCount+' opts</span>':'')+'</td>';
-    if(dirColPrefs.client) h+='<td style="font-weight:500">'+escHtml(p.client||'—')+'</td>';
-    if(dirColPrefs.contact) h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.contact||'—')+'</td>';
-    if(dirColPrefs.segment) h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.segment||'—')+'</td>';
-    if(dirColPrefs.type) h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.type||'—')+'</td>';
-    if(dirColPrefs.value) h+='<td style="font-weight:500">'+fmtMoney(p.value)+'</td>';
-    if(dirColPrefs.user) h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.user||'—')+'</td>';
-    if(dirColPrefs.created) h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.created||'—')+'</td>';
-    if(dirColPrefs.stage) h+='<td><span class="pill '+(p.stage==='Final'?'pill-teal':'pill-muted')+'" style="font-size:10px">'+escHtml(p.stage||'Initial')+'</span></td>';
-    if(dirColPrefs.options) h+='<td style="text-align:center;font-size:12px">'+optCount+'</td>';
-    if(dirColPrefs.status) h+='<td><span class="pill pill-'+sc+'">'+escHtml(p.status)+'</span></td>';
+    if(dirColPrefs.serial)        h+='<td style="font-family:monospace;font-size:11px;color:var(--text2)">'+escHtml(p.id)+(optCount>1?' <span class="pill pill-navy" style="font-size:10px;vertical-align:middle">'+optCount+' opts</span>':'')+'</td>';
+    if(dirColPrefs.client)        h+='<td style="font-weight:500">'+escHtml(p.client||'—')+'</td>';
+    if(dirColPrefs.contact)       h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.contact||'—')+'</td>';
+    if(dirColPrefs.segment)       h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.segment||'—')+'</td>';
+    if(dirColPrefs.type)          h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.type||'—')+'</td>';
+    if(dirColPrefs.value)         h+='<td style="font-weight:500">'+fmtMoney(p.value)+'</td>';
+    if(dirColPrefs.user)          h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.user||'—')+'</td>';
+    if(dirColPrefs.created)       h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.created)+'</td>';
+    if(dirColPrefs.stage)         h+='<td><span class="pill '+(p.stage==='Final'?'pill-teal':'pill-muted')+'" style="font-size:10px">'+escHtml(p.stage||'Initial')+'</span></td>';
+    if(dirColPrefs.options)       h+='<td style="text-align:center;font-size:12px">'+optCount+'</td>';
+    if(dirColPrefs.status)        h+='<td><span class="pill pill-'+sc+'">'+escHtml(p.status)+'</span></td>';
+    if(dirColPrefs.initLockedAt)  h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.initLockedAt)+'</td>';
+    if(dirColPrefs.initApprovedAt)h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.initApprovedAt)+'</td>';
+    if(dirColPrefs.finalLockedAt) h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.finalLockedAt)+'</td>';
+    if(dirColPrefs.closedAt)      h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.closedAt)+'</td>';
     h+='<td style="white-space:nowrap" onclick="event.stopPropagation()">'
       +(!isClosed?' <button class="btn" style="font-size:11px;padding:3px 8px;color:var(--teal)" onclick="openNewOptionFromDir(\''+p.id+'\')" title="Create new option variant"><i class="ti ti-layers-difference"></i>New Option</button>':'')
       +'</td>';
@@ -8400,36 +8469,36 @@ function gSaveQuotation(){
   var grand=(_pCalc&&_pCalc.grand&&_pCalc.grand>0)?_pCalc.grand:0;
   if(!grand){var te=el('sum-total');if(te) grand=parseFloat(te.textContent.replace(/[^\d.]/g,''))||0;}
   var total=grand.toFixed(2);
-  var now=new Date().toISOString().split('T')[0];
+  var now=new Date().toISOString();
   var serial=qBaseSerial||qSerial;
   var status=qLocked?(qApproved?'Approved':'Locked'):'Draft';
   var stage=qStage===2?'Final':'Initial';
   var svcReq=(el('cl-service')?el('cl-service').value:'Fabrication only');
   var optCount=qOptionsList.filter(function(o){return o.status!=='archived';}).length||1;
-  // Columns: A=serial,B=date,C=bizname,D=acctType,E=contactName,F=status,G=total,H=user,I=segment,J=locked,K=stage,L=options,M=service
-  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq];
+  // Columns: A=serial,B=datetime,C=bizname,D=acctType,E=contactName,F=status,G=total,H=user,I=segment,J=locked,K=stage,L=options,M=service,N=initLockedAt,O=initApprovedAt,P=finalLockedAt,Q=closedAt
+  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||''];
   // Store in session memory immediately so directory shows it without waiting for Sheets
-  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service'];
+  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved'];
   var _bsM=serial.match(/^(QT-\d{6}-\d{4})/);
-  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount};
+  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||''};
   sheetsGet('Quotations!A:A').then(function(d){
     if(d.error){
       return sheetsCreateTab('Quotations').then(function(){
-        return sheetsAppend('Quotations!A:M',[QUOT_HDR]).then(function(){
-          return sheetsAppend('Quotations!A:M',[row]);
+        return sheetsAppend('Quotations!A:Q',[QUOT_HDR]).then(function(){
+          return sheetsAppend('Quotations!A:Q',[row]);
         });
       });
     }
     var vals=d.values||[];
     if(!vals.length){
-      return sheetsAppend('Quotations!A:M',[QUOT_HDR]).then(function(){
-        return sheetsAppend('Quotations!A:M',[row]);
+      return sheetsAppend('Quotations!A:Q',[QUOT_HDR]).then(function(){
+        return sheetsAppend('Quotations!A:Q',[row]);
       });
     }
     var rowIdx=-1;
     for(var i=1;i<vals.length;i++){if(vals[i][0]===serial){rowIdx=i+1;break;}}
-    if(rowIdx>0){return sheetsUpdate('Quotations!A'+rowIdx+':M'+rowIdx,[row]);}
-    else{return sheetsAppend('Quotations!A:M',[row]);}
+    if(rowIdx>0){return sheetsUpdate('Quotations!A'+rowIdx+':Q'+rowIdx,[row]);}
+    else{return sheetsAppend('Quotations!A:Q',[row]);}
   }).then(function(){
     showSheetsToast(true,'Quotation '+serial+' saved to database');
   }).catch(function(e){
@@ -8494,6 +8563,8 @@ function getFullQuotationState(){
     client:c,
     dates:{fab:(el('fab-date')?el('fab-date').value:''),inst:(el('inst-date')?el('inst-date').value:'')},
     status:qLocked?(qApproved?'Approved':'Locked'):'Draft',
+    initLockedAt:qInitLockedAt, initApprovedAt:qInitApprovedAt,
+    finalLockedAt:fqLockedAt, closedAt:qClosedAt,
     savedAt:new Date().toISOString(),
     savedBy:gUser?(gUser.email||''):''
   };
