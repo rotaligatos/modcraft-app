@@ -5487,6 +5487,16 @@ function _applyApprovedRequest(notif){
   }
 }
 
+// Update the pending badge to show "Counter-offer received" state
+function _showCounterBadge(type, notif){
+  var disc=notif&&notif.counterDisc?notif.counterDisc:notif&&notif.reqDisc?notif.reqDisc:0;
+  if(type==='discount'){
+    var dbtn=el('disc-req-btn');
+    if(dbtn){dbtn.innerHTML='<i class="ti ti-arrows-exchange"></i> Counter '+(disc?disc+'%':'offer');dbtn.className='btn btn-amber';dbtn.disabled=false;}
+    var dmsg=el('disc-ok-msg'); if(dmsg) dmsg.style.display='none';
+  }
+}
+
 // Update the pending badge to show "Approved" state after request is actioned
 function _showApprovedBadge(type, notif){
   var by=notif&&notif.by?(' by '+escHtml(notif.by)):'';
@@ -5535,6 +5545,36 @@ function _clearPendingBadge(type){
       b.innerHTML='Request approval'; b.disabled=false;
     });
   }
+}
+
+// Requester accepts the manager's counter-offer discount
+function acceptCounter(idx){
+  var n=NOTIFS[idx];
+  if(!n||n.type!=='discount') return;
+  var discPct=n.counterDisc||n.reqDisc||0;
+  // Apply counter discount as if it were an approved request
+  _applyApprovedRequest({type:'discount',reqDisc:discPct,ctx:n.ctx||'s1'});
+  _showApprovedBadge('discount',{reqDisc:discPct,by:n.by||''});
+  // Update in-memory status
+  var byMe=(gUser&&gUser.name)||currentRole;
+  NOTIFS[idx].status='accepted'; NOTIFS[idx].by=byMe;
+  if(n.reqId){
+    var key='APPREQ_'+n.reqId;
+    var updReq={id:n.reqId,type:n.type,status:'accepted',serial:n.serial,
+      client:n.client,from:n.from,fromEmail:n.fromEmail||'',
+      company:n.company,msg:n.msg,note:n.note||'',date:n.date,
+      approver:n.approverEmail||'',approverEmail:n.approverEmail||'',
+      amount:n.amount||0,reqDisc:n.reqDisc||0,counterDisc:n.counterDisc||0,
+      cfValues:n.cfValues||null,ctx:n.ctx||'s1',by:byMe,actionDate:new Date().toISOString()};
+    var row=[key,JSON.stringify(updReq),new Date().toISOString()];
+    sheetsGet('Settings!A:A').then(function(d){
+      var vals=(d&&d.values)||[]; var rowIdx=-1;
+      for(var i=1;i<vals.length;i++){if(vals[i][0]===key){rowIdx=i+1;break;}}
+      return rowIdx>0?sheetsUpdate('Settings!A'+rowIdx+':C'+rowIdx,[row]):sheetsAppend('Settings!A:C',[row]);
+    }).catch(function(e){console.warn('acceptCounter save failed',e);});
+  }
+  renderApprovals();
+  showToast('Counter-offer accepted. '+discPct+'% discount applied.');
 }
 
 // Cancel a pending approval request (requester withdraws it)
@@ -5605,6 +5645,7 @@ function gLoadApprovalRequests(cb){
                 // Backfill fields that may be missing from in-memory entry
                 if(!NOTIFS[j].fromEmail&&req.fromEmail) NOTIFS[j].fromEmail=req.fromEmail;
                 if(!NOTIFS[j].note&&req.note) NOTIFS[j].note=req.note;
+                if(!NOTIFS[j].counterDisc&&req.counterDisc) NOTIFS[j].counterDisc=req.counterDisc;
               }
               found=true; break;
             }
@@ -5613,7 +5654,8 @@ function gLoadApprovalRequests(cb){
             NOTIFS.push({id:NOTIFS.length+1,reqId:req.id,type:req.type,
               from:req.from,fromEmail:req.fromEmail||'',
               client:req.client,serial:req.serial,
-              amount:req.amount||0,reqDisc:req.reqDisc||0,msg:req.msg,
+              amount:req.amount||0,reqDisc:req.reqDisc||0,counterDisc:req.counterDisc||0,
+              msg:req.msg,note:req.note||'',
               date:req.date,status:req.status,company:req.company,
               approverEmail:req.approverEmail||'',cfValues:req.cfValues||null,
               ctx:req.ctx||'s1',by:req.by||''});
@@ -5689,8 +5731,9 @@ function renderNotifPanel(){
     var unread=_isNotifUnread(n);
     var tc=n.type==='nonvat'?'coral':n.type==='revision'?'navy':n.type==='client_update'?'teal':'amber';
     var tl=n.type==='nonvat'?'Non-VAT':n.type==='discount'?'Discount':n.type==='holiday'?'Holiday Premium':n.type==='client_update'?'Client Update':'Revision';
-    var sc=n.status==='pending'?'amber':n.status==='approved'?'teal':'coral';
-    var sl=n.status.charAt(0).toUpperCase()+n.status.slice(1);
+    var sc=n.status==='pending'?'amber':n.status==='approved'||n.status==='accepted'?'teal':n.status==='countered'?'amber':'coral';
+    var slMap2={pending:'Pending',approved:'Approved',rejected:'Rejected',countered:'Counter-offer',accepted:'Accepted',cancelled:'Cancelled'};
+    var sl=slMap2[n.status]||(n.status.charAt(0).toUpperCase()+n.status.slice(1));
     h+='<div class="notif-item'+(unread?' unread':'')+'" onclick="navigate(\'approvals\');closeNotifPanel();">'
       +'<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
       +(unread?'<span style="width:7px;height:7px;border-radius:50%;background:var(--coral);flex-shrink:0;display:inline-block"></span>':'<span style="width:7px;flex-shrink:0;display:inline-block"></span>')
@@ -5802,24 +5845,33 @@ function renderApprovals() {
     var origIdx=NOTIFS.indexOf(n);
     var tc=n.type==="nonvat"?"coral":n.type==="revision"?"navy":n.type==="client_update"?"teal":"amber";
     var tl=n.type==="nonvat"?"Non-VAT":n.type==="discount"?"Discount":n.type==="holiday"?"Holiday Premium":n.type==="client_update"?"Client Update":"Revision";
-    var sc=n.status==="pending"?"amber":n.status==="approved"?"teal":"coral";
-    var sl=n.status.charAt(0).toUpperCase()+n.status.slice(1);
-    h+='<div style="background:#fff;border:.5px solid '+(n.status==="pending"?"#f5d78e":"var(--border)")+';border-radius:12px;padding:16px 20px;margin-bottom:12px'+(unread?';border-left:3px solid var(--amber)':'')+'">'
+    var sc=n.status==="pending"?"amber":n.status==="approved"||n.status==="accepted"?"teal":n.status==="countered"?"amber":"coral";
+    var slMap={pending:'Pending',approved:'Approved',rejected:'Rejected',countered:'Counter-offer',accepted:'Accepted',cancelled:'Cancelled'};
+    var sl=slMap[n.status]||(n.status.charAt(0).toUpperCase()+n.status.slice(1));
+    var isOwn=n.fromEmail&&n.fromEmail.toLowerCase()===(gUser&&gUser.email||'').toLowerCase();
+    var borderCol=n.status==="pending"?"#f5d78e":n.status==="countered"?"#f5d78e":"var(--border)";
+    h+='<div style="background:#fff;border:.5px solid '+borderCol+';border-radius:12px;padding:16px 20px;margin-bottom:12px'+(unread?';border-left:3px solid var(--amber)':'')+'">'
       +'<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">'
-      +'<div><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+      +'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
       +(unread?'<span style="width:8px;height:8px;border-radius:50%;background:var(--coral);flex-shrink:0;display:inline-block" title="Unread"></span>':'')
       +'<span class="pill pill-'+tc+'">'+tl+'</span><span class="pill pill-'+sc+'">'+sl+'</span>'
       +(n.company?'<span class="pill pill-muted" style="font-size:10px">'+n.company+'</span>':'')
       +'</div>'
-      +'<div style="font-weight:500;font-size:14px;margin-bottom:2px">'+n.client+' · '+n.serial+'</div>'
-      +'<div style="font-size:12px;color:var(--text2);margin-bottom:4px">By: '+n.from+' · '+n.date+'</div>'
-      +'<div style="font-size:13px">'+n.msg+'</div>'
-      +(n.by?'<div style="font-size:12px;color:'+(n.status==="approved"?"var(--teal)":"var(--coral)")+';margin-top:4px">Actioned by: '+n.by+'</div>':'')
+      +'<div style="font-weight:500;font-size:14px;margin-bottom:2px">'+escHtml(n.client)+' · '+escHtml(n.serial)+'</div>'
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:4px">By: '+escHtml(n.from)+' · '+escHtml(n.date||'')+'</div>'
+      +'<div style="font-size:13px">'+escHtml(n.msg)+'</div>'
+      +(n.status==='countered'&&n.counterDisc?'<div style="font-size:12px;color:var(--amber);margin-top:4px"><i class="ti ti-arrows-exchange"></i> Counter-offer: <b>'+n.counterDisc+'%</b> discount</div>':'')
+      +(n.by?'<div style="font-size:12px;color:'+(n.status==="approved"||n.status==="accepted"?"var(--teal)":"var(--coral)")+';margin-top:4px">Actioned by: '+escHtml(n.by)+'</div>':'')
       +'</div>'
       +(n.status==="pending"?(
-          (n.fromEmail&&n.fromEmail.toLowerCase()===(gUser&&gUser.email||'').toLowerCase())
+          isOwn
           ? '<button class="btn btn-danger" onclick="cancelApprovalRequest(\''+escHtml(n.reqId||'')+'\',\''+n.type+'\')" style="align-self:flex-start;font-size:12px"><i class="ti ti-x"></i> Withdraw</button>'
           : (isApprover()?'<button class="btn btn-amber" onclick="openApprovalAction('+origIdx+')" style="align-self:flex-start"><i class="ti ti-check"></i>Action</button>':'')
+        ):n.status==="countered"&&isOwn?(
+          '<div style="display:flex;flex-direction:column;gap:6px;align-self:flex-start">'
+          +'<button class="btn btn-success" onclick="acceptCounter('+origIdx+')" style="font-size:12px;white-space:nowrap"><i class="ti ti-check"></i>Accept'+(n.counterDisc?' '+n.counterDisc+'%':'')+' counter</button>'
+          +'<button class="btn btn-danger" onclick="cancelApprovalRequest(\''+escHtml(n.reqId||'')+'\',\''+n.type+'\')" style="font-size:12px"><i class="ti ti-x"></i>Decline</button>'
+          +'</div>'
         ):'')
       +'</div></div>';
   }
@@ -5846,7 +5898,14 @@ function doApprovalAction(idx, action) {
   if(!checkPin(pin)){var e=el("appr-err");if(e)e.style.display="block";return;}
   var n=NOTIFS[idx];
   var byName=(gUser&&gUser.name)||currentRole;
+  // Capture counter-offer discount value before closing the modal
+  var counterDisc=n.counterDisc||0;
+  if(action==='countered'&&n.type==='discount'){
+    var cdInp=el('appr-disc');
+    counterDisc=cdInp?parseFloat(cdInp.value)||n.reqDisc||0:n.reqDisc||0;
+  }
   NOTIFS[idx].status=action; NOTIFS[idx].by=byName;
+  if(action==='countered') NOTIFS[idx].counterDisc=counterDisc;
 
   // Guard: prevent the 60s poll from reverting this approval for 30 s
   if(n.reqId) _localActions[n.reqId]={action:action,time:Date.now()};
@@ -5858,7 +5917,8 @@ function doApprovalAction(idx, action) {
       client:n.client,from:n.from,fromEmail:n.fromEmail||'',
       company:n.company,msg:n.msg,note:n.note||'',date:n.date,
       approver:n.approverEmail||'',approverEmail:n.approverEmail||'',
-      amount:n.amount||0,reqDisc:n.reqDisc||0,cfValues:n.cfValues||null,
+      amount:n.amount||0,reqDisc:n.reqDisc||0,counterDisc:counterDisc,
+      cfValues:n.cfValues||null,
       ctx:n.ctx||'s1',by:byName,actionDate:new Date().toISOString()};
     var row=[key,JSON.stringify(updReq),new Date().toISOString()];
     sheetsGet('Settings!A:A').then(function(d){
@@ -8425,7 +8485,9 @@ function gShowApp(){
           showToast('❌ Your '+tl+' request for '+n.serial+' was rejected by '+n.by+'.');
           _clearPendingBadge(n.type);        // remove the pending badge
         } else if(n.status==='countered'){
-          showToast('⚠️ Your '+tl+' request for '+n.serial+' received a counter-offer from '+n.by+'. Check the Approvals page.');
+          showToast('⚠️ Your '+tl+' request for '+n.serial+' received a counter-offer'+(n.counterDisc?' of '+n.counterDisc+'%':'')+' from '+(n.by||'approver')+'. Check the Approvals page.');
+          _clearPendingBadge(n.type);
+          _showCounterBadge(n.type, n);
         }
       }
       // Re-render Approvals page if currently visible
