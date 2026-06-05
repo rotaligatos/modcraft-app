@@ -103,6 +103,10 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
 @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 @keyframes bellPulse{0%,100%{transform:rotate(0)}15%{transform:rotate(16deg)}30%{transform:rotate(-13deg)}45%{transform:rotate(10deg)}60%{transform:rotate(-7deg)}75%{transform:rotate(4deg)}}
 .bell-pulse{animation:bellPulse .7s ease 0s 3}
+.notif-item{padding:11px 14px;border-bottom:.5px solid var(--border);cursor:pointer;transition:background .12s;}
+.notif-item:last-child{border-bottom:none;}
+.notif-item:hover{background:#f5f8ff;}
+.notif-item.unread{background:#fffdf0;border-left:3px solid var(--amber);}
 </style></head>
 <body>
 
@@ -167,10 +171,20 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
   </div>
   <div style="display:flex;align-items:center;gap:8px">
     <div style="position:relative">
-      <button class="btn" id="notif-btn" onclick="navigate('approvals')" style="padding:6px 8px">
+      <button class="btn" id="notif-btn" onclick="toggleNotifPanel(event)" style="padding:6px 8px">
         <i class="ti ti-bell" style="font-size:18px"></i>
       </button>
-      <span id="notif-cnt" style="position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:50%;background:var(--coral);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700">2</span>
+      <span id="notif-cnt" style="position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:50%;background:var(--coral);color:#fff;font-size:9px;display:none;align-items:center;justify-content:center;font-weight:700">0</span>
+      <div id="notif-panel" style="display:none;position:absolute;top:40px;right:0;width:320px;background:#fff;border-radius:12px;box-shadow:0 6px 28px rgba(0,0,0,.15);border:.5px solid var(--border);z-index:9999;overflow:hidden">
+        <div style="padding:12px 16px;border-bottom:.5px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:600;font-size:13px"><i class="ti ti-bell" style="margin-right:4px"></i>Notifications</span>
+          <button class="btn" onclick="navigate('approvals');closeNotifPanel();" style="font-size:11px;padding:3px 8px">View all</button>
+        </div>
+        <div id="notif-panel-list" style="max-height:360px;overflow-y:auto"></div>
+        <div style="padding:8px 14px;border-top:.5px solid var(--border)">
+          <button class="btn" onclick="navigate('approvals');closeNotifPanel();" style="width:100%;font-size:12px;justify-content:center">Open Approvals page</button>
+        </div>
+      </div>
     </div>
     <span class="pill pill-amber" id="topbar-role-pill">Admin</span>
     <div id="topbar-avatar" style="width:30px;height:30px;border-radius:50%;background:#e6edf5;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:var(--navy)">MS</div>
@@ -1093,6 +1107,20 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
 </div>
 
 <!-- ====== MODALS ====== -->
+<!-- APPROVAL INCOMING POPUP — appears top-right when new request arrives -->
+<div id="appr-incoming-popup" style="display:none;position:fixed;top:64px;right:16px;z-index:9999;width:320px;background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);border:.5px solid var(--border);overflow:hidden;animation:slideInRight .3s ease">
+  <div style="background:var(--navy);padding:10px 14px;display:flex;align-items:center;gap:8px">
+    <i class="ti ti-bell-ringing" style="color:#fff;font-size:18px"></i>
+    <span style="color:#fff;font-size:13px;font-weight:500;flex:1">New approval request</span>
+    <button onclick="el('appr-incoming-popup').style.display='none'" style="background:none;border:none;color:rgba(255,255,255,.7);cursor:pointer;font-size:18px;line-height:1">×</button>
+  </div>
+  <div id="appr-incoming-body" style="padding:12px 14px;font-size:13px"></div>
+  <div style="padding:0 14px 12px;display:flex;gap:8px">
+    <button class="btn btn-primary" onclick="navigate('approvals');el('appr-incoming-popup').style.display='none'" style="flex:1;font-size:12px"><i class="ti ti-check"></i> View & approve</button>
+    <button class="btn" onclick="el('appr-incoming-popup').style.display='none'" style="font-size:12px">Dismiss</button>
+  </div>
+</div>
+
 <!-- APPROVAL REQUEST — confirmation popup for non-Manager users -->
 <div class="overlay" id="ov-send-request">
   <div class="modal">
@@ -1479,6 +1507,9 @@ var _sreqCtx = {}; // context for the pending send-request modal
 // All real approval requests are loaded from Google Sheets (APPREQ_ keys in Settings tab).
 // Demo data removed — it caused confusion by showing fake pending items alongside real ones.
 var NOTIFS = [];
+var _localActions   = {};  // {reqId: {action, time}} — guards timer from reverting just-approved items
+var _lastSeenReqIds = {};  // {reqId: true} — tracks which requests the approver has already seen (for toast dedup)
+var _seenNotifIds   = {};  // {reqId_status: true} — tracks which notifications the user has read (for unread indicator)
 
 // ── Report / Export config ─────────────────────────────────────────────────
 var KPI_DEFS = {
@@ -5362,9 +5393,9 @@ function submitApprovalRequest(){
     cfValues:data.cfValues||null,ctx:data.ctx||'s1',by:'',actionDate:''
   };
 
-  // Push to in-memory NOTIFS
-  NOTIFS.unshift({id:NOTIFS.length+1,reqId:reqId,type:type,from:req.from,client:client,
-    serial:serial,amount:req.amount,reqDisc:req.reqDisc,msg:req.msg,
+  // Push to in-memory NOTIFS (fromEmail required for ownRequests filtering and status-change toast)
+  NOTIFS.unshift({id:NOTIFS.length+1,reqId:reqId,type:type,from:req.from,fromEmail:req.fromEmail,client:client,
+    serial:serial,amount:req.amount,reqDisc:req.reqDisc,msg:req.msg,note:req.note||'',
     date:req.date,status:'pending',company:currentUserCompany,
     approverEmail:appr.email,cfValues:req.cfValues,ctx:req.ctx,by:''});
 
@@ -5567,13 +5598,20 @@ function gLoadApprovalRequests(cb){
           var found=false;
           for(var j=0;j<NOTIFS.length;j++){
             if(NOTIFS[j].reqId===req.id){
-              NOTIFS[j].status=req.status; NOTIFS[j].by=req.by||'';
+              // Don't overwrite a locally-actioned item for 30 s (prevents race with Sheets write)
+              var local=_localActions[req.id];
+              if(!local||Date.now()-local.time>30000){
+                NOTIFS[j].status=req.status; NOTIFS[j].by=req.by||'';
+                // Backfill fields that may be missing from in-memory entry
+                if(!NOTIFS[j].fromEmail&&req.fromEmail) NOTIFS[j].fromEmail=req.fromEmail;
+                if(!NOTIFS[j].note&&req.note) NOTIFS[j].note=req.note;
+              }
               found=true; break;
             }
           }
           if(!found){
             NOTIFS.push({id:NOTIFS.length+1,reqId:req.id,type:req.type,
-              from:req.from,fromEmail:req.fromEmail||'',  // ← fromEmail required for Withdraw button & own-request filter
+              from:req.from,fromEmail:req.fromEmail||'',
               client:req.client,serial:req.serial,
               amount:req.amount||0,reqDisc:req.reqDisc||0,msg:req.msg,
               date:req.date,status:req.status,company:req.company,
@@ -5585,6 +5623,97 @@ function gLoadApprovalRequests(cb){
     }
     if(cb)cb();
   }).catch(function(){if(cb)cb();});
+}
+
+// ── Notification panel (bell dropdown) ────────────────────────────────────
+function _loadSeenNotifs(){
+  if(!gUser||!gUser.email) return;
+  try{var s=localStorage.getItem('mc_seen_'+gUser.email);if(s)_seenNotifIds=JSON.parse(s);}catch(e){}
+}
+function _saveSeenNotifs(){
+  if(!gUser||!gUser.email) return;
+  try{localStorage.setItem('mc_seen_'+gUser.email,JSON.stringify(_seenNotifIds));}catch(e){}
+}
+function _markNotifsRead(notifs){
+  var changed=false;
+  for(var i=0;i<notifs.length;i++){
+    var n=notifs[i]; var key=(n.reqId||n.id)+'_'+n.status;
+    if(!_seenNotifIds[key]){_seenNotifIds[key]=true;changed=true;}
+  }
+  if(changed)_saveSeenNotifs();
+}
+function _isNotifUnread(n){
+  return !_seenNotifIds[(n.reqId||n.id)+'_'+n.status];
+}
+function toggleNotifPanel(e){
+  if(e){e.stopPropagation();}
+  var p=el('notif-panel');
+  if(!p) return;
+  if(p.style.display==='block'){
+    closeNotifPanel();
+  } else {
+    renderNotifPanel();
+    p.style.display='block';
+    setTimeout(function(){
+      document.addEventListener('click',_notifPanelOutsideClick);
+    },0);
+  }
+}
+function closeNotifPanel(){
+  var p=el('notif-panel');
+  if(p) p.style.display='none';
+  document.removeEventListener('click',_notifPanelOutsideClick);
+}
+function _notifPanelOutsideClick(e){
+  var p=el('notif-panel'),btn=el('notif-btn');
+  if(p&&!p.contains(e.target)&&e.target!==btn&&!btn.contains(e.target)){
+    closeNotifPanel();
+  }
+}
+function renderNotifPanel(){
+  var list=el('notif-panel-list');
+  if(!list) return;
+  var visible=filterApprovalsByRouting(NOTIFS);
+  // Sort: unread first, then pending, then by date descending
+  visible.sort(function(a,b){
+    var ua=_isNotifUnread(a)?0:1, ub=_isNotifUnread(b)?0:1;
+    if(ua!==ub) return ua-ub;
+    if(a.status==='pending'&&b.status!=='pending') return -1;
+    if(a.status!=='pending'&&b.status==='pending') return 1;
+    return new Date(b.date)-new Date(a.date)||0;
+  });
+  var items=visible.slice(0,8);
+  var h='';
+  for(var i=0;i<items.length;i++){
+    var n=items[i];
+    var unread=_isNotifUnread(n);
+    var tc=n.type==='nonvat'?'coral':n.type==='revision'?'navy':n.type==='client_update'?'teal':'amber';
+    var tl=n.type==='nonvat'?'Non-VAT':n.type==='discount'?'Discount':n.type==='holiday'?'Holiday Premium':n.type==='client_update'?'Client Update':'Revision';
+    var sc=n.status==='pending'?'amber':n.status==='approved'?'teal':'coral';
+    var sl=n.status.charAt(0).toUpperCase()+n.status.slice(1);
+    h+='<div class="notif-item'+(unread?' unread':'')+'" onclick="navigate(\'approvals\');closeNotifPanel();">'
+      +'<div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">'
+      +(unread?'<span style="width:7px;height:7px;border-radius:50%;background:var(--coral);flex-shrink:0;display:inline-block"></span>':'<span style="width:7px;flex-shrink:0;display:inline-block"></span>')
+      +'<span class="pill pill-'+tc+'" style="font-size:10px;padding:1px 6px">'+tl+'</span>'
+      +'<span class="pill pill-'+sc+'" style="font-size:10px;padding:1px 6px">'+sl+'</span>'
+      +'</div>'
+      +'<div style="font-size:12px;font-weight:500;padding-left:12px">'+escHtml(n.client)+' · '+escHtml(n.serial)+'</div>'
+      +'<div style="font-size:11px;color:var(--text2);padding-left:12px">'+escHtml(n.from)+' · '+escHtml(n.date||'')+'</div>'
+      +(n.by?'<div style="font-size:11px;color:'+(n.status==='approved'?'var(--teal)':'var(--coral)')+';padding-left:12px">Actioned by: '+escHtml(n.by)+'</div>':'')
+      +'</div>';
+  }
+  if(!h) h='<div style="padding:24px 16px;text-align:center;color:var(--text2);font-size:13px">No notifications.</div>';
+  list.innerHTML=h;
+  // Mark visible items as read
+  _markNotifsRead(items);
+  // Update badge: pending count
+  _updateNotifBadge();
+}
+function _updateNotifBadge(){
+  var visible=filterApprovalsByRouting(NOTIFS);
+  var pending=visible.filter(function(n){return n.status==='pending';}).length;
+  var cnt=el('notif-cnt');
+  if(cnt){cnt.textContent=pending;cnt.style.display=pending?'flex':'none';}
 }
 
 function filterApprovalsByRouting(notifs){
@@ -5639,6 +5768,14 @@ function filterApprovalsByRouting(notifs){
 
 function renderApprovals() {
   var visible=filterApprovalsByRouting(NOTIFS);
+  // Sort: unread first, then pending, then by date descending
+  visible.sort(function(a,b){
+    var ua=_isNotifUnread(a)?0:1, ub=_isNotifUnread(b)?0:1;
+    if(ua!==ub) return ua-ub;
+    if(a.status==='pending'&&b.status!=='pending') return -1;
+    if(a.status!=='pending'&&b.status==='pending') return 1;
+    return new Date(b.date)-new Date(a.date)||0;
+  });
   var pending=0; for(var i=0;i<visible.length;i++){if(visible[i].status==="pending")pending++;}
   el("notif-cnt").textContent=pending; el("notif-cnt").style.display=pending?"flex":"none";
 
@@ -5660,15 +5797,18 @@ function renderApprovals() {
   var h="";
   for(var i=0;i<visible.length;i++){
     var n=visible[i];
+    var unread=_isNotifUnread(n);
     // Find original index in NOTIFS for action callbacks
     var origIdx=NOTIFS.indexOf(n);
     var tc=n.type==="nonvat"?"coral":n.type==="revision"?"navy":n.type==="client_update"?"teal":"amber";
     var tl=n.type==="nonvat"?"Non-VAT":n.type==="discount"?"Discount":n.type==="holiday"?"Holiday Premium":n.type==="client_update"?"Client Update":"Revision";
     var sc=n.status==="pending"?"amber":n.status==="approved"?"teal":"coral";
     var sl=n.status.charAt(0).toUpperCase()+n.status.slice(1);
-    h+='<div style="background:#fff;border:.5px solid '+(n.status==="pending"?"#f5d78e":"var(--border)")+';border-radius:12px;padding:16px 20px;margin-bottom:12px">'
+    h+='<div style="background:#fff;border:.5px solid '+(n.status==="pending"?"#f5d78e":"var(--border)")+';border-radius:12px;padding:16px 20px;margin-bottom:12px'+(unread?';border-left:3px solid var(--amber)':'')+'">'
       +'<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">'
-      +'<div><div style="display:flex;gap:6px;margin-bottom:6px"><span class="pill pill-'+tc+'">'+tl+'</span><span class="pill pill-'+sc+'">'+sl+'</span>'
+      +'<div><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+      +(unread?'<span style="width:8px;height:8px;border-radius:50%;background:var(--coral);flex-shrink:0;display:inline-block" title="Unread"></span>':'')
+      +'<span class="pill pill-'+tc+'">'+tl+'</span><span class="pill pill-'+sc+'">'+sl+'</span>'
       +(n.company?'<span class="pill pill-muted" style="font-size:10px">'+n.company+'</span>':'')
       +'</div>'
       +'<div style="font-weight:500;font-size:14px;margin-bottom:2px">'+n.client+' · '+n.serial+'</div>'
@@ -5684,6 +5824,8 @@ function renderApprovals() {
       +'</div></div>';
   }
   html("approvals-wrap",banner+(h||'<div style="color:var(--text2);padding:20px">No approval requests.</div>'));
+  // Mark all visible as read now that the user has seen them
+  _markNotifsRead(visible);
 }
 function openApprovalAction(idx) {
   var n=NOTIFS[idx];
@@ -5706,24 +5848,25 @@ function doApprovalAction(idx, action) {
   var byName=(gUser&&gUser.name)||currentRole;
   NOTIFS[idx].status=action; NOTIFS[idx].by=byName;
 
-  // Persist action to Sheets if this was a persisted request
+  // Guard: prevent the 60s poll from reverting this approval for 30 s
+  if(n.reqId) _localActions[n.reqId]={action:action,time:Date.now()};
+
+  // Persist action to Sheets — build from in-memory NOTIF (no extra sheetsGet round-trip)
   if(n.reqId){
     var key='APPREQ_'+n.reqId;
+    var updReq={id:n.reqId,type:n.type,status:action,serial:n.serial,
+      client:n.client,from:n.from,fromEmail:n.fromEmail||'',
+      company:n.company,msg:n.msg,note:n.note||'',date:n.date,
+      approver:n.approverEmail||'',approverEmail:n.approverEmail||'',
+      amount:n.amount||0,reqDisc:n.reqDisc||0,cfValues:n.cfValues||null,
+      ctx:n.ctx||'s1',by:byName,actionDate:new Date().toISOString()};
+    var row=[key,JSON.stringify(updReq),new Date().toISOString()];
     sheetsGet('Settings!A:A').then(function(d){
       var vals=(d&&d.values)||[]; var rowIdx=-1;
       for(var i=1;i<vals.length;i++){if(vals[i][0]===key){rowIdx=i+1;break;}}
-      if(rowIdx>0){
-        return sheetsGet('Settings!A'+rowIdx+':B'+rowIdx).then(function(d2){
-          if(d2&&d2.values&&d2.values[0]){
-            try{
-              var req=JSON.parse(d2.values[0][1]);
-              req.status=action; req.by=byName; req.actionDate=new Date().toISOString();
-              if(action==='countered'&&n.reqDisc){req.reqDisc=n.reqDisc;}
-              return sheetsUpdate('Settings!A'+rowIdx+':C'+rowIdx,[[key,JSON.stringify(req),new Date().toISOString()]]);
-            }catch(e){}
-          }
-        });
-      }
+      return rowIdx>0
+        ? sheetsUpdate('Settings!A'+rowIdx+':C'+rowIdx,[row])
+        : sheetsAppend('Settings!A:C',[row]);
     }).catch(function(e){console.warn('Failed to persist approval action',e);});
   }
 
@@ -8215,7 +8358,14 @@ function gShowApp(){
   gLoadAppSettings(); // restore saved cost factors / scheduling / terms from the Settings tab
   gLoadFollowed(function(){renderDashFollowed();renderDirectory();}); // restore followed quotations per user
   gLoadDashPref(function(){renderDashboard();}); // load widget prefs + admin restrictions, then re-render
-  gLoadApprovalRequests(function(){renderApprovals();}); // load persisted requests, update badge
+  _loadSeenNotifs(); // restore unread-tracking state from localStorage
+  gLoadApprovalRequests(function(){
+    // Mark all currently-pending requests as already known so the poll
+    // doesn't fire toasts for requests that existed before this login.
+    NOTIFS.forEach(function(n){if(n.status==='pending'&&n.reqId)_lastSeenReqIds[n.reqId]=true;});
+    _updateNotifBadge();
+    renderApprovals();
+  }); // load persisted requests, update badge
   // Auto-refresh every 60 s: ring bell for approvers when new requests arrive;
   // notify requesters when their own requests are approved or rejected.
   if(window._apprPollTimer) clearInterval(window._apprPollTimer);
@@ -8238,6 +8388,26 @@ function gShowApp(){
         var bell=el('notif-btn');
         if(bell){bell.classList.remove('bell-pulse');void bell.offsetWidth;bell.classList.add('bell-pulse');}
         setTimeout(function(){var b=el('notif-btn');if(b)b.classList.remove('bell-pulse');},2500);
+        // Show toast for each truly-new request (not previously seen)
+        var _tl2={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',client_update:'Client Update',revision:'Revision'};
+        var shown2=0;
+        NOTIFS.forEach(function(n){
+          if(n.status==='pending'&&n.reqId&&!_lastSeenReqIds[n.reqId]){
+            _lastSeenReqIds[n.reqId]=true;
+            if(shown2<2){ shown2++;
+              showToast('🔔 New '+(_tl2[n.type]||n.type)+' request from '+escHtml(n.from)+' — '+escHtml(n.serial));
+            }
+          }
+        });
+        // Refresh panel if it's already open; otherwise just update badge
+        var p=el('notif-panel');
+        if(p&&p.style.display==='block') renderNotifPanel();
+        else _updateNotifBadge();
+      } else {
+        _updateNotifBadge();
+        // Refresh panel if open
+        var p2=el('notif-panel');
+        if(p2&&p2.style.display==='block') renderNotifPanel();
       }
       // ── Requester side: notify when own request status changes ─────────
       for(var j=0;j<NOTIFS.length;j++){
