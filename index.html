@@ -202,7 +202,7 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
     <div class="kpi"><div class="lbl">Archived this month</div><div class="val" style="color:var(--muted)">3</div><div class="sub">No response after 35d</div></div>
   </div>
   <div id="dash-charts" style="display:grid;grid-template-columns:3fr 2fr;gap:14px;margin-bottom:14px">
-    <div class="card">
+    <div class="card" id="dash-chart-card">
       <div class="card-head"><h3><i class="ti ti-chart-line"></i>Monthly revenue vs target</h3></div>
       <div class="card-body"><canvas id="dash-chart" height="150" style="width:100%"></canvas>
         <div style="display:flex;gap:14px;margin-top:6px;font-size:11px">
@@ -211,7 +211,7 @@ table.data td{padding:10px 12px;border-bottom:0.5px solid var(--border);vertical
         </div>
       </div>
     </div>
-    <div class="card">
+    <div class="card" id="dash-pipeline-card">
       <div class="card-head"><h3><i class="ti ti-layout-board"></i>Project pipeline</h3></div>
       <div class="card-body" id="dash-pipeline"></div>
     </div>
@@ -1624,7 +1624,19 @@ var _pCalc = {}; // cached cost result — populated by recalc() and recalcFQ(),
 var currentRole = "Admin";
 var currentUserCompany = 'World Class Laminate, Inc.';
 var COMPANIES = ['World Class Laminate, Inc.', 'Module Systems and Services, Inc.', 'Cebu World Laminate, Inc.'];
-var dashWidgets = {kpis:true,chart:true,pipeline:true,team:true,followed:true};
+// Dashboard widget definitions — accKey = feature-access key required to see this widget
+var DASH_WIDGETS=[
+  {key:'kpis',    label:'KPI summary',        icon:'ti-squares',      accKey:'Dashboard'},
+  {key:'chart',   label:'Revenue chart',      icon:'ti-chart-line',   accKey:'Profit/Revenue'},
+  {key:'pipeline',label:'Project pipeline',   icon:'ti-layout-board', accKey:'Reports'},
+  {key:'team',    label:'Team performance',   icon:'ti-users',        accKey:'KPI'},
+  {key:'followed',label:'Followed quotations',icon:'ti-star',         accKey:null}  // special: Quotations OR Projects
+];
+var dashPref   = {kpis:true,chart:true,pipeline:true,team:true,followed:true}; // user's own toggle preference
+var dashAllow  = {}; // admin/manager restrictions for current user (empty = no restrictions)
+var dashCustTab= 'mine';   // 'mine' | 'users'
+var dashMgrTarget = '';    // email of user being managed in admin panel
+var dashMgrAllow  = {};    // loaded allow-state for dashMgrTarget
 var appLogoData = null;
 var companyLogos = {};   // keyed by company name — one logo per company
 
@@ -4457,13 +4469,20 @@ function renderDashboard() {
   teamHtml+='</tbody>';
   html("dash-team",teamHtml);
   drawChart("dash-chart",[1850,2100,1780,2450,2820,2380,3100,2950,3400,3150,3680,2900],[1600,1800,1900,2000,2200,2300,2400,2500,2600,2700,2800,2900]);
-  // Role-based widget visibility
-  var isAdmin=(currentRole==="Admin");
-  var cbtn=el("dash-customize-btn"); if(cbtn) cbtn.style.display=isAdmin?"inline-flex":"none";
-  var kpis=el("dash-kpis"); if(kpis) kpis.style.display=dashWidgets.kpis?"":"none";
-  var charts=el("dash-charts"); if(charts) charts.style.display=(isAdmin&&dashWidgets.chart)?"grid":"none";
-  var teamCard=el("dash-team-card"); if(teamCard) teamCard.style.display=(isAdmin&&dashWidgets.team)?"block":"none";
-  var followedCard=el("dash-followed"); if(followedCard) followedCard.style.display=dashWidgets.followed?"block":"none";
+  // Two-tier widget visibility: feature-access gate + admin allow + user pref
+  var cbtn=el("dash-customize-btn"); if(cbtn) cbtn.style.display="inline-flex"; // all users
+  var kpiEl=el("dash-kpis"); if(kpiEl) kpiEl.style.display=(isDashWidgetAllowed('kpis')&&dashPref.kpis)?"":"none";
+  var showChart=isDashWidgetAllowed('chart')&&dashPref.chart;
+  var showPipe =isDashWidgetAllowed('pipeline')&&dashPref.pipeline;
+  var chartCardEl=el("dash-chart-card"); if(chartCardEl) chartCardEl.style.display=showChart?"":"none";
+  var pipeCardEl=el("dash-pipeline-card"); if(pipeCardEl) pipeCardEl.style.display=showPipe?"":"none";
+  var chartsGrid=el("dash-charts");
+  if(chartsGrid){
+    chartsGrid.style.display=(showChart||showPipe)?"grid":"none";
+    chartsGrid.style.gridTemplateColumns=(showChart&&showPipe)?"3fr 2fr":"1fr";
+  }
+  var teamCard=el("dash-team-card"); if(teamCard) teamCard.style.display=(isDashWidgetAllowed('team')&&dashPref.team)?"block":"none";
+  var followedCard=el("dash-followed"); if(followedCard) followedCard.style.display=(isDashWidgetAllowed('followed')&&dashPref.followed)?"block":"none";
   renderDashFollowed();
 }
 
@@ -4498,44 +4517,101 @@ function renderDashFollowed() {
   tbl.innerHTML=h;
 }
 
-function toggleDashCustomize() {
+function toggleDashCustomize(){
   var panel=el("dash-customize-panel"); if(!panel) return;
   if(panel.style.display==="none"||panel.style.display===""){
-    panel.style.display="block";
-    renderDashCustomize();
-  } else {
-    panel.style.display="none";
-  }
+    panel.style.display="block"; renderDashCustomize();
+  } else { panel.style.display="none"; }
 }
-function renderDashCustomize() {
+function renderDashCustomize(){
   var panel=el("dash-customize-panel"); if(!panel) return;
-  var widgets=[
-    {key:"kpis",label:"KPI cards",icon:"ti-squares"},
-    {key:"chart",label:"Revenue & pipeline",icon:"ti-chart-line"},
-    {key:"team",label:"Team performance",icon:"ti-users"},
-    {key:"followed",label:"Followed quotations",icon:"ti-star"}
-  ];
-  var h='<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">'
-    +'<i class="ti ti-layout-dashboard" style="color:var(--navy)"></i>'
+  var canManage=(currentRole==='Admin'||currentRole==='Manager');
+  // Tab bar
+  var h='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">'
+    +'<i class="ti ti-layout-dashboard" style="color:var(--navy);font-size:16px"></i>'
     +'<span style="font-size:13px;font-weight:500;color:var(--navy)">Customize dashboard</span>'
-    +'<span class="pill pill-amber" style="font-size:10px;margin-left:4px">Admin only</span>'
-    +'</div><div style="display:flex;gap:8px;flex-wrap:wrap">';
-  for(var i=0;i<widgets.length;i++){
-    var w=widgets[i]; var on=dashWidgets[w.key];
-    h+='<button onclick="toggleDashWidget(\''+w.key+'\')" class="btn" style="font-size:12px;padding:6px 12px;gap:6px;'
-      +(on?"background:var(--navy);color:#fff;border-color:var(--navy)":"")+'">'
-      +'<i class="ti '+w.icon+'"></i>'+w.label
-      +(on?' <i class="ti ti-check" style="font-size:10px"></i>':'')+'</button>';
+    +(canManage
+      ?'<div style="display:flex;gap:4px;margin-left:auto">'
+        +'<button onclick="dashSetTab(\'mine\')" class="btn" style="font-size:11px;padding:3px 10px;'+(dashCustTab==='mine'?'background:var(--navy);color:#fff;border-color:var(--navy)':'')+'">'
+        +'<i class="ti ti-user" style="font-size:11px"></i> My widgets</button>'
+        +'<button onclick="dashSetTab(\'users\')" class="btn" style="font-size:11px;padding:3px 10px;'+(dashCustTab==='users'?'background:var(--navy);color:#fff;border-color:var(--navy)':'')+'">'
+        +'<i class="ti ti-users" style="font-size:11px"></i> Manage users</button>'
+        +'</div>'
+      :'')
+    +'</div>';
+
+  if(dashCustTab==='mine'||!canManage){
+    // ── User's own widget preferences ──
+    h+='<div style="font-size:11px;color:var(--text2);margin-bottom:10px"><i class="ti ti-info-circle"></i>'
+      +' Toggle the widgets you want on your dashboard. Greyed widgets are restricted by your Admin.</div>'
+      +'<div style="display:flex;gap:8px;flex-wrap:wrap">';
+    for(var i=0;i<DASH_WIDGETS.length;i++){
+      var w=DASH_WIDGETS[i];
+      var allowed=isDashWidgetAllowed(w.key);
+      var on=dashPref[w.key];
+      if(!allowed){
+        h+='<span class="btn" style="font-size:12px;padding:6px 12px;opacity:.4;cursor:not-allowed;display:inline-flex;align-items:center;gap:5px">'
+          +'<i class="ti '+w.icon+'"></i>'+w.label
+          +' <i class="ti ti-lock" style="font-size:10px"></i></span>';
+      } else {
+        h+='<button onclick="dashToggleWidget(\''+w.key+'\')" class="btn" style="font-size:12px;padding:6px 12px;display:inline-flex;align-items:center;gap:5px;'
+          +(on?'background:var(--navy);color:#fff;border-color:var(--navy)':'')+'">'
+          +'<i class="ti '+w.icon+'"></i>'+w.label
+          +(on?' <i class="ti ti-check" style="font-size:10px"></i>':'')+'</button>';
+      }
+    }
+    h+='</div>';
+
+  } else {
+    // ── Admin/Manager: manage another user's widget allowances ──
+    h+='<div style="font-size:11px;color:var(--text2);margin-bottom:10px"><i class="ti ti-info-circle"></i>'
+      +' Choose a user, then toggle which dashboard widgets they are allowed to see. Disabled widgets stay hidden on that user\'s dashboard regardless of their own preference.</div>';
+    var uOpts='<option value="">— Select a user —</option>';
+    for(var j=0;j<sheetUsers.length;j++){
+      var u=sheetUsers[j];
+      uOpts+='<option value="'+escHtml(u.email)+'"'+(dashMgrTarget===u.email?' selected':'')+'>'+escHtml(u.name)+' — '+escHtml(u.email)+'</option>';
+    }
+    h+='<div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px">'
+      +'<div><label class="fld" style="margin:0 0 4px">User to configure</label>'
+      +'<select style="height:30px;font-size:12px;min-width:280px" onchange="dashMgrLoad(this.value)">'+uOpts+'</select></div>'
+      +'</div>';
+    if(dashMgrTarget){
+      h+='<div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--navy)">Allowed widgets for <b>'+escHtml(dashMgrTarget)+'</b>:</div>'
+        +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
+      for(var i=0;i<DASH_WIDGETS.length;i++){
+        var w=DASH_WIDGETS[i];
+        var on=dashMgrAllow.hasOwnProperty(w.key)?dashMgrAllow[w.key]:true;
+        h+='<button onclick="dashMgrToggle(\''+w.key+'\')" class="btn" style="font-size:12px;padding:6px 12px;display:inline-flex;align-items:center;gap:5px;'
+          +(on?'background:var(--navy);color:#fff;border-color:var(--navy)':'')+'">'
+          +'<i class="ti '+w.icon+'"></i>'+w.label
+          +(on?' <i class="ti ti-check" style="font-size:10px"></i>':' <i class="ti ti-x" style="font-size:10px;color:#e07070"></i>')+'</button>';
+      }
+      h+='</div>'
+        +'<button onclick="dashMgrSave()" class="btn btn-primary" style="font-size:12px;padding:5px 14px"><i class="ti ti-device-floppy"></i> Save restrictions for this user</button>';
+    }
   }
-  h+='</div><p style="font-size:11px;color:var(--text2);margin-top:8px">'
-    +'<i class="ti ti-info-circle"></i> Revenue chart, Pipeline, and Team performance are visible to Admins only. '
-    +'KPI cards and Followed quotations are available to all roles.</p>';
   panel.innerHTML=h;
 }
-function toggleDashWidget(key) {
-  dashWidgets[key]=!dashWidgets[key];
+function dashSetTab(t){ dashCustTab=t; renderDashCustomize(); }
+function dashToggleWidget(key){
+  dashPref[key]=!dashPref[key];
+  gSaveDashPref();
   renderDashCustomize();
   renderDashboard();
+}
+// Admin/Manager: load allowed settings for a target user
+function dashMgrLoad(email){
+  dashMgrTarget=email;
+  if(!email){dashMgrAllow={};renderDashCustomize();return;}
+  gLoadDashAllowFor(email,function(allow){dashMgrAllow=allow||{};renderDashCustomize();});
+}
+function dashMgrToggle(key){
+  dashMgrAllow[key]=dashMgrAllow.hasOwnProperty(key)?!dashMgrAllow[key]:false; // default true → set false
+  renderDashCustomize();
+}
+function dashMgrSave(){
+  if(!dashMgrTarget){showToast('Select a user first.');return;}
+  gSaveDashAllow(dashMgrTarget,dashMgrAllow,function(){showToast('Dashboard restrictions saved.');});
 }
 
 function drawChart(canvasId, data, target) {
@@ -7689,12 +7765,13 @@ function gShowApp(){
     }
   }
   applyNavAccess();
-  renderDashboard();
+  renderDashboard(); // initial render with defaults; re-renders after prefs load below
   initQuotation();
   loadPriceDatabase(false);
   loadSheetUsersBackground();
   gLoadAppSettings(); // restore saved cost factors / scheduling / terms from the Settings tab
   gLoadFollowed(function(){renderDashFollowed();renderDirectory();}); // restore followed quotations per user
+  gLoadDashPref(function(){renderDashboard();}); // load widget prefs + admin restrictions, then re-render
 }
 function gLocalAccess(){
   currentRole='Admin';
@@ -8761,6 +8838,71 @@ function gSaveAppSettings(){
     var b=el('save-settings-btn'); if(b){b.disabled=false;b.innerHTML='<i class="ti ti-device-floppy"></i> Save settings';}
   });
 }
+// ── Dashboard widget access & persistence ─────────────────────────────────
+// Returns true if a widget is allowed by feature-access AND not restricted by admin
+function isDashWidgetAllowed(key){
+  // Hard feature-access gate
+  if(key==='kpis'    &&!currentUserAcc['Dashboard'])    return false;
+  if(key==='chart'   &&!currentUserAcc['Profit/Revenue'])return false;
+  if(key==='team'    &&!currentUserAcc['KPI'])           return false;
+  if(key==='pipeline'&&!currentUserAcc['Reports']&&!currentUserAcc['Quotations']&&!currentUserAcc['Projects']) return false;
+  if(key==='followed'&&!currentUserAcc['Quotations']&&!currentUserAcc['Projects']) return false;
+  // Admin/Manager restriction (can only restrict, not grant beyond feature access)
+  if(dashAllow.hasOwnProperty(key)&&!dashAllow[key]) return false;
+  return true;
+}
+// Save current user's widget preferences to Settings tab
+function gSaveDashPref(){
+  if(!gToken||!gUser) return;
+  var key='DASHPREF_'+(gUser.email||'unknown');
+  var row=[key,JSON.stringify(dashPref),new Date().toISOString()];
+  sheetsGet('Settings!A:A').then(function(d){
+    var vals=(d&&d.values)||[]; var idx=-1;
+    for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
+    return idx>0?sheetsUpdate('Settings!A'+idx+':C'+idx,[row]):sheetsAppend('Settings!A:C',[row]);
+  }).catch(function(e){console.warn('dashPref save failed',e);});
+}
+// Load current user's widget preferences AND admin-set restrictions at login
+function gLoadDashPref(cb){
+  if(!gToken||!gUser){if(cb)cb();return;}
+  var prefKey='DASHPREF_'+(gUser.email||'unknown');
+  var allowKey='DASHALLOW_'+(gUser.email||'unknown');
+  sheetsGet('Settings!A:B').then(function(d){
+    if(d.error||!d.values){if(cb)cb();return;}
+    for(var i=1;i<d.values.length;i++){
+      var k=d.values[i][0]; var v=d.values[i][1];
+      if(k===prefKey&&v){ try{var p=JSON.parse(v);for(var pk in p)dashPref[pk]=!!p[pk];}catch(e){} }
+      if(k===allowKey&&v){ try{dashAllow=JSON.parse(v);}catch(e){} }
+    }
+    if(cb)cb();
+  }).catch(function(){if(cb)cb();});
+}
+// Admin/Manager: save widget restrictions for another user
+function gSaveDashAllow(email,allow,cb){
+  if(!gToken||!gUser) return;
+  var key='DASHALLOW_'+email;
+  var row=[key,JSON.stringify(allow),new Date().toISOString()];
+  sheetsGet('Settings!A:A').then(function(d){
+    var vals=(d&&d.values)||[]; var idx=-1;
+    for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
+    return idx>0?sheetsUpdate('Settings!A'+idx+':C'+idx,[row]):sheetsAppend('Settings!A:C',[row]);
+  }).then(function(){if(cb)cb();}).catch(function(e){console.warn('dashAllow save failed',e);});
+}
+// Load widget restrictions for a specific user (admin panel use)
+function gLoadDashAllowFor(email,cb){
+  if(!gToken){if(cb)cb({});return;}
+  var key='DASHALLOW_'+email;
+  sheetsGet('Settings!A:B').then(function(d){
+    if(d.error||!d.values){if(cb)cb({});return;}
+    for(var i=1;i<d.values.length;i++){
+      if(d.values[i][0]===key&&d.values[i][1]){
+        try{if(cb)cb(JSON.parse(d.values[i][1]));return;}catch(e){}
+      }
+    }
+    if(cb)cb({});
+  }).catch(function(){if(cb)cb({});});
+}
+
 function gSaveFollowed(){
   if(!gToken||!gUser) return;
   var key='FOLLOWED_'+(gUser.email||'unknown');
