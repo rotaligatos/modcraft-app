@@ -555,6 +555,40 @@ _buildTransportTable(d)            // renders transport cost breakdown table fro
 _buildAccomGrid(d)                 // renders accommodation card grid from JSON data
 ```
 
+## What was changed on 2026-06-07 (session 2 — Share modal + Message Templates)
+
+### Share modal redesign (two-step flow)
+1. **Step 1 — Download PDF button** — prominent navy button at the top of the Share modal; calls `doShareDownloadPdf()` which reuses `printQuotation()` (opens browser print dialog in new tab — reliable, iframe-safe); shows toast "PDF dialog opened — choose Save as PDF"
+2. **Step 2 — Send via** — Email, Viber, WhatsApp, Native share, Copy to clipboard buttons below
+3. **Viber limitation acknowledged** — `viber://forward?text=` is text-only on desktop; no browser can auto-attach files to Viber; button now shows "attach PDF manually in Viber" subtitle and fires a toast reminder after opening Viber
+4. **Email** — opens `mailto:` with subject and body pre-filled from the message template; user attaches the PDF manually
+
+### Message Templates (Settings → Message Templates)
+5. **New Settings sub-tab** — "Message Templates" added between Price Database and Designers Support
+6. **Two templates** — Email (formal) and Viber/WhatsApp (conversational); side-by-side editor layout
+7. **Placeholders** — `{client}`, `{serial}`, `{service}`, `{total}`, `{valid_until}`, `{prepared_by}`, `{company}`; shown as reference bar at top; typed directly into the textarea
+8. **Live preview** — below each editor, shows the filled-in message using current quotation data
+9. **Persisted to Sheets** — `msgTemplates: { email, msg }` added to `_collectAppSettings()` and `_applyAppSettings()`; saved with the rest of app settings via Save Settings button
+10. **`_shareText(type)`** — refactored; now reads the saved template and calls `_fillMsgTemplate(tpl)` to replace all placeholders; `type='email'` uses email template, everything else uses msg template
+11. **Default templates** set to professional scripts:
+    - Email: formal "Good day" greeting, full proposal language, "Warm regards" closing
+    - Viber: warm conversational tone, concise, pipe separator in signature (`— {prepared_by} | {company}`)
+
+### New globals added
+```javascript
+MSG_TPL_DEFAULTS   // { email, msg } — fallback templates if none saved
+```
+
+### New functions added
+```javascript
+doShareDownloadPdf()           // triggers printQuotation for PDF save before sharing
+_getMsgTemplate(type)          // reads textarea value or falls back to MSG_TPL_DEFAULTS
+_fillMsgTemplate(tpl)          // replaces all {placeholders} with live quotation data
+insertPlaceholder(id, ph)      // inserts placeholder at cursor in textarea (unused in current UI but kept)
+renderMsgPreview(type)         // updates the preview div below each template editor
+initMsgTemplates()             // called when msgtpl tab opens; fills textareas with defaults if empty
+```
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
 - **Carcass pricing tab** in Settings — not yet verified as persisted through `gSaveAppSettings`
