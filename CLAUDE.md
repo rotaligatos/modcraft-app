@@ -10,7 +10,7 @@ A single-file HTML quotation management app for **World Class Laminate, Inc. / R
 - **Google Drive folder:** The app creates "Modcraft Quotations" in the signed-in user's personal My Drive (NOT the old hardcoded folder `1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB` which was the original broken approach)
 
 ## Key files
-- `index.html` — the entire app (HTML + CSS + JS, ~9000 lines)
+- `index.html` — the entire app (HTML + CSS + JS, ~10500 lines)
 - `server.ps1` — local PowerShell static server (port 8765, serves `quotation_app.html`)
 - `preview_server.ps1` — preview server for Claude testing (port 8766, serves `index.html`)
 - `.claude/launch.json` — launch configs for both servers
@@ -106,7 +106,9 @@ liveClients          // loaded from Clients sheet; never replaced with demo on e
 dirData              // loaded from Quotations sheet; never replaced with demo on error
 sessionQuotations    // { serial: entry } — in-memory cache for current session saves
 dbServices/dbMaterials/dbHardware/dbTemplates  // price DB catalog arrays
-prodSettings         // { claudeKey, kerf, aiEnabled, cabinetRules, ... } saved to localStorage
+prodSettings         // { claudeKey, kerf, aiEnabled, mobAiEnabled, cabinetRules, ... } saved to localStorage
+dirSelected          // { serial: true } — checked quotation rows for bulk delete (Admin)
+clientSelected       // { id: true } — checked client rows for bulk delete (Admin)
 
 // ── UI ────────────────────────────────────────────────────────────────────
 COMPANIES            // ['World Class Laminate, Inc.', 'Module Systems...', 'Cebu World...']
@@ -126,6 +128,26 @@ gSaveAppSettings()             // saves CF + MOB_LOCATIONS + scheduling/terms to
 gLoadAppSettings(cb)           // restores settings from Settings tab (called at login)
 verifyDatabaseConnection()     // checks Quotations, Clients, Quotation State tabs
 setupMissingSheetTabs()        // creates missing sheet tabs with correct headers
+
+// ── Admin delete helpers ───────────────────────────────────────────────────
+sheetsDeleteRowByKey(sheetName, keyVal, cb)  // finds row by col-A key, gets sheetId, issues deleteDimension batchUpdate
+deleteQuotation(serial)        // Admin: confirm → remove from memory + delete from Quotations & Quotation State sheets
+deleteClient(id)               // Admin: confirm → remove from liveClients + delete from Clients sheet
+deleteSelectedQuotations()     // Admin: bulk delete all dirSelected serials
+deleteSelectedClients()        // Admin: bulk delete all clientSelected ids
+toggleDirSelect(serial,chk)    // toggle checkbox selection for one quotation row
+selectAllDir(checked)          // select/deselect all visible quotation rows
+_updateDirDeleteBtn()          // sync delete-selected button count + select-all indeterminate state
+toggleClientSelect(id,chk)     // toggle checkbox selection for one client row
+selectAllClients(checked)      // select/deselect all visible client rows
+_updateClientDeleteBtn()       // sync delete-selected button count + select-all indeterminate state
+
+// ── Mobility planner ──────────────────────────────────────────────────────
+_defaultMobilityOrigin()       // returns origin address based on quotation company (getCompanyName())
+computeTransportation()        // AI call for transportation estimate only; sets mobilityState.transportResult
+computeAccommodation()         // AI call for accommodation search only; sets mobilityState.accumResult
+_mobCallClaude(prompt, cb)     // shared Claude API fetch helper for mobility (reuses prodSettings.claudeKey)
+_buildResultBlock(result)      // renders a single AI result block (used by both transport + accom)
 ```
 
 ## Serial number format
@@ -183,10 +205,21 @@ Admin → Manager → Supervisor → Approver → Encoder → Staff → Viewer
 
 ### Designers Support (Production AI page)
 - Upload shop drawings / cutting lists → Claude AI extracts components, services, BOM
-- **Claude API key** stored in Google Sheets `User Roles` sheet header row column R (shared across all users)
+- **Claude API key** stored in Google Sheets `User Roles` sheet header row column R (shared across all users); setup guide hidden in Settings once key is configured
 - Per-area grouping; editable reflect summary; "Reflect to quotation" pushes AI result into quotation
 - EBT legend and cabinet rules configurable in Settings → Designers Support
-- `prodSettings` object (saved to `localStorage` as `mc_prod`): `claudeKey`, `kerf`, `aiEnabled`, `shopDrawing`, `cabinetRules`
+- `prodSettings` object (saved to `localStorage` as `mc_prod`): `claudeKey`, `kerf`, `aiEnabled`, `mobAiEnabled`, `shopDrawing`, `cabinetRules`
+- **Mobility & Accommodation Planner** (separate tab):
+  - Three cards: **Shared header** (origin/destination), **Transportation**, **Accommodation**
+  - **Transportation card**: workers, days on site, vehicle → `computeTransportation()` AI call
+  - **Accommodation card**: nights, budget/night, min star rating (1–5★), max distance from site (km), food accessibility → `computeAccommodation()` AI call
+  - Two independent AI calls with separate loading states, results, and Clear buttons
+  - **AI ON/OFF toggle** in planner header — Admin sees click-to-toggle button; non-admins see status badge; `mobAiEnabled` saved to localStorage
+  - **Origin auto-fills** from quotation company via `_defaultMobilityOrigin()` → `getCompanyName()` (not user's company):
+    - WCL: `88 Jennys Ave., Pasig City, Metro Manila, Philippines`
+    - MSSI: `88 Jennys Ave., Pasig City, Metro Manila, Philippines`
+    - CWL: `Tawagan St., Tayud, Consolacion, Cebu, Philippines`
+  - **Destination** auto-filled from quotation's `cl-location` field; date hint shows install/fab date for airfare
 
 ### Clients page
 - Full client directory loaded from `Clients` Sheets tab
@@ -194,6 +227,8 @@ Admin → Manager → Supervisor → Approver → Encoder → Staff → Viewer
 - **B2C segments:** Homeowners, Condo Owners, First-time Homebuyers
 - Client search/autocomplete on quotation form; auto-creates client record from quotation info
 - Transaction history per client (pulled from Quotations tab)
+- **Rows are clickable** — clicking a row opens the client detail modal (View button removed)
+- **Admin bulk delete** — checkbox column (Admin only); select-all in header; "Delete selected (N)" button in sticky header; deletes from `liveClients` + `Clients` sheet
 
 ### Schedule page
 - Gantt chart (full year) and Calendar (month) views
@@ -222,7 +257,13 @@ Admin → Manager → Supervisor → Approver → Encoder → Staff → Viewer
 | Carcass pricing | Per-unit carcass cost table |
 | Services | Labor service catalog |
 | Price Database | Connect/initialize the Price DB Google Sheet |
-| Designers Support | Claude API key, kerf, EBT/cabinet rules |
+| Designers Support | Claude API key (hidden guide if key set), kerf, EBT/cabinet rules, Mobility AI on/off toggle |
+
+### Project List (directory) — Admin features
+- **Sticky header** — title, Columns button, New Quotation button, filters freeze at `top:52px` while table scrolls
+- **Clickable rows** — clicking a row opens that quotation
+- **Checkbox bulk delete (Admin only)** — checkbox column + select-all in header; "Delete selected (N)" button in filter bar; deletes from memory + `Quotations` and `Quotation State` sheets simultaneously; selections cleared on page navigation
+- **`sheetsDeleteRowByKey(sheetName, keyVal, cb)`** — shared helper: reads col A to find row index, fetches sheetId via metadata API, issues `deleteDimension` batchUpdate
 
 ### Notifications system
 - In-app notifications (`NOTIFS` array) for: client updates, approvals, follow-up alerts
@@ -277,7 +318,7 @@ These were all built before the current session — do NOT re-implement or overw
 3. **+ New quotation button moved** — removed from Dashboard; now lives in the Quotation page top bar (next to serial/status tags)
 4. **Project List rows clickable** — clicking any row opens that quotation; redundant "Open/View" button removed; star and New Option buttons stop propagation
 5. **Stage 1 form locked when quotation is locked** — `updateLockUI()` now disables all inputs/selects/textareas and buttons inside `#s1-wrap` when `qLocked=true`; CSS class `q-locked` applied; exempt buttons: Preview & Print (`data-lock-exempt`), Approve, Send, Request Unlock, Close Project
-6. **Quotation sticky header** — company banner + Stage 1/2 nav bar + options bar wrapped in `#q-sticky-header` (`position:sticky;top:0;z-index:100`) so they freeze when scrolling
+6. **Quotation sticky header** — company banner + Stage 1/2 nav bar + options bar wrapped in `#q-sticky-header` (`position:sticky;top:52px;z-index:99`) so they freeze below the topbar when scrolling (was `top:0` which caused it to scroll under the topbar — fixed 2026-06-06)
 7. **Project List: resizable columns** — drag right edge of any column header to resize; widths saved to `localStorage` key `mc_dir_col_widths`; uses `startColResize` / `_onColResizeMove` / `_onColResizeUp` handlers
 8. **Project List: Created column format** — now stores and displays full ISO datetime, rendered as `mm/dd/yy HH:MM` via new `fmtDT(s)` helper
 9. **Project List: 4 new timestamp columns** — off by default, toggleable in Columns panel: Initial Locked, Initial Approved, Final Locked, Final Approved
@@ -389,6 +430,62 @@ closeNotifPanel()          // hides #notif-panel, removes outside-click listener
 renderNotifPanel()         // renders up to 8 items in the panel, marks as read
 _showCounterBadge(type,n)  // shows "⇄ Counter X%" badge on the relevant button
 acceptCounter(idx)         // requester accepts manager's counter-offer discount
+```
+
+## What was changed on 2026-06-06
+
+### UX improvements
+1. **Client directory — View button removed** — clicking any row opens the client detail modal; `openClientModal()` now looks up `liveClients` first (was only checking `DEMO_CLIENTS`); hover highlight added via `tr.cl-row:hover`
+2. **Quotation sticky header fix** — changed `top:0` → `top:52px` so the client banner + Stage 1/2 nav bar freeze below the 52px topbar instead of scrolling under it
+3. **Project List sticky header** — title row + filter bar wrapped in `#dir-sticky-header` (`position:sticky;top:52px`)
+4. **Client directory sticky header** — title row wrapped in `#cl-sticky-header` (`position:sticky;top:52px`)
+5. **Claude API key setup guide hidden** — the "How to get your Claude API key" info box in Settings → Designers Support is now only shown when no key is configured
+
+### Admin bulk delete — Quotations
+6. **Checkbox column** (Admin only) — first column in the Project List table; select-all in `<th>`; selected rows highlighted amber (`#fef3e2`)
+7. **"Delete selected (N)" button** — appears in the sticky filter bar when rows are checked; one confirm dialog deletes all selected from memory + `Quotations` sheet + `Quotation State` sheet
+8. **Per-row trash button** — also kept for quick single-item delete
+9. **`dirSelected`** global — `{ serial: true }` tracks checked rows; cleared on navigate away
+10. **New functions**: `toggleDirSelect`, `selectAllDir`, `_updateDirDeleteBtn`, `deleteSelectedQuotations`, `deleteQuotation`
+
+### Admin bulk delete — Clients
+11. **Checkbox column** (Admin only) — first column in client table; select-all in `<th>`
+12. **"Delete selected (N)" button** — appears next to the Add client button when rows are checked
+13. **Delete button in client modal** — "Delete client" button in the detail modal footer (Admin only)
+14. **`clientSelected`** global — `{ id: true }` tracks checked rows; cleared on navigate away
+15. **New functions**: `toggleClientSelect`, `selectAllClients`, `_updateClientDeleteBtn`, `deleteSelectedClients`, `deleteClient`
+16. **`sheetsDeleteRowByKey(sheetName, keyVal, cb)`** — shared helper used by all delete operations; finds row by col-A key, fetches sheet's numeric ID from spreadsheet metadata, issues `deleteDimension` batchUpdate
+
+### Mobility & Accommodation Planner overhaul
+17. **Three separate cards** — Shared header (origin/destination/date hint), Transportation, Accommodation
+18. **Two independent AI search buttons**:
+    - `computeTransportation()` — transport-only Claude prompt; result shown inside Transportation card
+    - `computeAccommodation()` — accommodation-only Claude prompt; result shown inside Accommodation card
+    - `_mobCallClaude(prompt, cb)` — shared fetch helper reusing `prodSettings.claudeKey`
+    - `_buildResultBlock(result)` — renders AI result block (used by both)
+19. **New Accommodation fields**: min star rating (1–5★), max distance from site (km), food accessibility (No preference / Free breakfast / Near restaurants / Full board)
+20. **AI ON/OFF toggle on the planner page** — Admin sees a click-to-toggle button in the planner header card; non-admins see a status badge; `mobAiEnabled` saved to `localStorage` via `saveProdSettings()`; buttons show clear hint text when disabled (AI off / no key / no destination)
+21. **Company-based auto-origin** — `_defaultMobilityOrigin()` reads `getCompanyName()` from the quotation form (not `currentUserCompany`); refreshes on tab switch unless user typed a custom value:
+    - WCL: `World Class Laminate, Inc., 88 Jennys Ave., Pasig City, Metro Manila, Philippines`
+    - MSSI: `Module Systems and Services, Inc., 88 Jennys Ave., Pasig City, Metro Manila, Philippines`
+    - CWL: `Cebu World Laminate, Inc., Tawagan St., Tayud, Consolacion, Cebu, Philippines`
+22. **Mobility AI result cards** — each AI result is parsed by `<h4>` headings and rendered as separate cards (Transportation / Accommodation / Cost Summary) with matching icon and accent color
+
+### New globals added (2026-06-06)
+```javascript
+dirSelected          // { serial: true } — checked quotation rows for bulk delete
+clientSelected       // { id: true } — checked client rows for bulk delete
+_MOB_ORIGIN_MAP      // { companyName: originAddress } — company → origin address lookup
+// mobilityState additions:
+mobilityState.computingTransport  // boolean — transport AI in progress
+mobilityState.computingAccom      // boolean — accommodation AI in progress
+mobilityState.transportResult     // { html } or { error } — transport AI result
+mobilityState.accumResult         // { html } or { error } — accommodation AI result
+mobilityState.minStars            // minimum hotel star rating (1–5, default 2)
+mobilityState.maxDistKm           // max distance from site in km (default 5)
+mobilityState.foodPref            // 'any'|'breakfast'|'restaurants'|'full'
+// prodSettings addition:
+prodSettings.mobAiEnabled         // boolean — whether mobility AI buttons are enabled (Admin toggle)
 ```
 
 ## Known remaining areas to watch
