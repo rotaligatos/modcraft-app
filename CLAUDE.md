@@ -589,9 +589,37 @@ renderMsgPreview(type)         // updates the preview div below each template ed
 initMsgTemplates()             // called when msgtpl tab opens; fills textareas with defaults if empty
 ```
 
+## What was changed on 2026-06-08 (session — Carcass pricing, BOM unit, Printout materials)
+
+### Carcass pricing persistence (Settings → Carcass pricing tab)
+1. **`_collectAppSettings` now includes `carcassPrices`** — full `CARCASS_PRICES` object is saved into the CONFIG row in the Settings sheet alongside CF, MOB_LOCATIONS, etc.
+2. **`_applyAppSettings` restores carcass prices** — on login, merges saved prices back into `CARCASS_PRICES`, `CABINET_BASE_COSTS`, and `CARCASS_NAMES` (including any custom types added by Admin)
+3. **Add type** — `+ Add type` button in Carcass pricing tab header; prompts for name, rejects duplicates, inserts at ₱0
+4. **Remove type** — trash button per row; confirms before deleting; warns that existing quotations using that type will show ₱0 until re-saved
+5. **New functions**: `addCarcassType()`, `removeCarcassType(name)`
+
+### BOM materials / hardware — unit field
+6. **Unit dropdown replaced with read-only badge** — `<select>` with `UNIT_OPTS` replaced by a grey styled `<span>` showing `mi.unit` / `hi.unit` (auto-filled from DB on item pick). Shows `—` if unset. Grid column narrowed from `78px` to `60px`.
+
+### Quotation printout — Type of Materials column
+7. **`extractSubstrateInfo(matNames[])`** — new helper; strips internal company prefixes (`[CWLI ONLY]`, `[MSSI]`, etc.), deduplicates, joins with ` · `; returns `'Per specification'` when no materials
+8. **`_collectAreaMatNames(area)`** — new helper; collects material names for an area: BOM mode reads `bomItems[i].materials[].name`; services mode reads `matItems[].name` only (hardware excluded)
+9. **By area printout**: `areaSpec` replaces hardcoded `'Per specification'`; populated by `extractSubstrateInfo(_collectAreaMatNames(area))`
+10. **By cabinet type printout**: `typeMatNames{}` map tracks material names per cabinet type alongside `typeMap`; BOM mode populates from `bomItems[i].materials[]`; services mode assigns all area `matItems` names to service rows
+11. **Lump sum printout**: aggregates all area mat names across all areas into one `extractSubstrateInfo` call
+12. **Cabinet/Scope column — services mode**: scope now shows **services only** (service names from `svcItems`); `matItems` and `hwItems` removed from scope lines
+13. **Type of Materials column — services mode**: shows **matItems only** (hardware excluded from `_collectAreaMatNames`)
+
+### Column logic by fab mode (printout)
+| Fab mode | Cabinet / Scope | Type of Materials |
+|---|---|---|
+| Carcass | Cabinet type names (e.g. `2× Wardrobe`) | Per specification |
+| BOM | Cabinet type names | Materials from `bomItems[i].materials[]` |
+| Services | Service names only | `matItems` names only |
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
-- **Carcass pricing tab** in Settings — not yet verified as persisted through `gSaveAppSettings`
+- **Carcass pricing tab** — now persisted ✓ (fixed this session)
 - **Drive saves in Google Sites embed** — token refresh via `prompt:''` is blocked in iframes; users must re-auth via banner ~hourly
 - **First-time setup flow** — user needs to: sign in → Settings → Test connection → Create missing tabs → Save settings
 - **Google Sites iframe cache** — after pushing a fix, the embed shows stale version; fix: edit the Google Site, append `?v=N` (increment N each time) to the embed URL, republish
