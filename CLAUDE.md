@@ -10,7 +10,7 @@ A single-file HTML quotation management app for **World Class Laminate, Inc. / R
 - **Google Drive folder:** The app creates "Modcraft Quotations" in the signed-in user's personal My Drive (NOT the old hardcoded folder `1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB` which was the original broken approach)
 
 ## Key files
-- `index.html` — the entire app (HTML + CSS + JS, ~10500 lines)
+- `index.html` — the entire app (HTML + CSS + JS, ~12000 lines)
 - `server.ps1` — local PowerShell static server (port 8765, serves `quotation_app.html`)
 - `preview_server.ps1` — preview server for Claude testing (port 8766, serves `index.html`)
 - `.claude/launch.json` — launch configs for both servers
@@ -479,13 +479,80 @@ _MOB_ORIGIN_MAP      // { companyName: originAddress } — company → origin ad
 // mobilityState additions:
 mobilityState.computingTransport  // boolean — transport AI in progress
 mobilityState.computingAccom      // boolean — accommodation AI in progress
-mobilityState.transportResult     // { html } or { error } — transport AI result
-mobilityState.accumResult         // { html } or { error } — accommodation AI result
+mobilityState.transportResult     // { data } or { error } — transport AI result (structured JSON)
+mobilityState.accumResult         // { data } or { error } — accommodation AI result (structured JSON)
 mobilityState.minStars            // minimum hotel star rating (1–5, default 2)
 mobilityState.maxDistKm           // max distance from site in km (default 5)
 mobilityState.foodPref            // 'any'|'breakfast'|'restaurants'|'full'
+mobilityState.originLat           // lat from map picker / autocomplete for origin
+mobilityState.originLng           // lng from map picker / autocomplete for origin
+mobilityState.destLat             // lat from map picker / autocomplete for destination
+mobilityState.destLng             // lng from map picker / autocomplete for destination
 // prodSettings addition:
 prodSettings.mobAiEnabled         // boolean — whether mobility AI buttons are enabled (Admin toggle)
+// Map picker globals:
+_mapLeafletLoaded    // boolean — Leaflet.js lazy-load flag
+_mapPickerInstance   // Leaflet map instance (null when closed)
+_mapPickerMarker     // current draggable marker
+_mapPickerSelected   // { lat, lng, address } — confirmed pick
+_mapPickerOpts       // { title, inputId, latId, lngId, onConfirm } — current picker context
+_locAutoTimers       // { inputId: timer } — per-field debounce timers for autocomplete
+_locAutoOnSelectMap  // { inputId: fn } — registered onSelect callbacks for autocomplete
+```
+
+## What was changed on 2026-06-07 (session — Mobility planner results + Map picker)
+
+### Mobility planner: structured JSON results
+1. **`_mobCallClaude` now passes raw text** — removed `_mobilityTextToHtml` conversion inside the helper; callers parse the text themselves
+2. **Transport prompt → JSON output** — prompt now instructs Claude to return structured JSON: `{mode, items:[{label,detail,qty,unit_cost,total}], grand_total, notes}`; mode is one of: `land`, `air`, `both`, `ferry`
+3. **Accommodation prompt → JSON output** — prompt returns: `{options:[{name,type,address,stars,distance_km,price_per_night,guest_rating,food_note,within_budget,reason}], recommended_index, total_cost, nights, workers, notes}`
+4. **`_buildResultBlock(result)` rewritten** — dispatches to `_buildTransportTable(d)` or `_buildAccomGrid(d)` based on presence of `items` vs `options` key
+5. **`_buildTransportTable(d)`** — renders navy-header cost breakdown table: Item / Qty / Unit Cost / Total columns; bold grand total footer row; mode icon (🚗/✈️/⛴️) badge
+6. **`_buildAccomGrid(d)`** — renders responsive card grid; each card shows type badge, name, address, star rating (gold ★), distance, guest score, within/over budget badge, price/night, food note, reason; RECOMMENDED badge on best option; total cost footer
+7. **Accommodation type field added** — `type` in JSON: `hotel`, `airbnb`, `pension`, `transient`, `room_rental`, `apartelle`, `bnb`; each type gets distinct color badge (blue/pink/green/yellow/purple/sky/amber)
+8. **Accommodation scope expanded** — prompt explicitly requests hotels, Airbnb, pension houses, transient houses, room rentals, apartelles, B&Bs; not just hotels
+9. **Stars hidden for Airbnb/non-hotel types** — star row only renders if `o.stars > 0`
+
+### Mock mode (AI OFF)
+10. **`canSearch` logic updated** — AI OFF now enables buttons (mock mode); only truly blocked when AI ON + no API key; `canSearch = (mobOff || !noKey) && !!destVal`
+11. **Hint badge updated** — when AI OFF + destination set, shows amber "🧪 Mock mode — AI is OFF" badge instead of disabling buttons
+12. **`computeTransportation()` mock path** — when `mobOff`, injects realistic mock JSON (fuel/tolls/parking) after 600ms fake delay; no API call made
+13. **`computeAccommodation()` mock path** — when `mobOff`, injects 5 mock options covering all types (transient → pension → Airbnb → hotel → superior) scaled to `budgetPerNight`; total_cost = rec × nights × workers
+14. **Mock banner** — `_buildResultBlock` checks `result.data._mock`; if true, shows amber "Mock data — AI is OFF" banner above the result cards
+
+### Map picker (Leaflet + OpenStreetMap + Nominatim)
+15. **Zero-cost mapping stack** — Leaflet.js (CDN), OpenStreetMap tiles, Nominatim geocoding API; no API key, no account, no cost; only requirement is `© OpenStreetMap` attribution (shown in modal footer)
+16. **Lazy loading** — `_loadLeaflet(cb)` injects Leaflet CSS + JS on first map open only; no impact on initial page load
+17. **`openMapPicker(opts)`** — shared function used by all location fields; `opts: {title, inputId, latId, lngId, onConfirm(lat,lng,addr)}`
+18. **Map picker modal (`#ov-map-picker`)** — navy header with title, search bar at top, OSM map fills the body, footer with coordinates display + Cancel + Confirm buttons
+19. **Click to place pin** — clicking anywhere on map drops a marker; reverse geocodes via Nominatim; updates address, coordinates, enables Confirm button
+20. **Draggable pin** — marker can be dragged to fine-tune; re-geocodes on drag end
+21. **Search inside map** — `_mapSearchDebounce` + `_mapNominatimSearch` — debounced 400ms; Philippines-filtered (`countrycodes=ph`); results as clickable list; clicking pans map + places pin
+22. **Inline autocomplete on location fields** — `_locAutoDebounce` + `_locNominatimSearch` — as user types in any location input, shows dropdown of Nominatim suggestions; clicking fills field + stores lat/lng silently; 450ms debounce
+23. **Touch points with 📍 button**:
+    - Quotation → `cl-location` field: autocomplete + 📍 → stores `cl-lat` / `cl-lng` (hidden inputs)
+    - Mobility planner → `mob-origin`: autocomplete + 📍 → stores `mobilityState.originLat/Lng`
+    - Mobility planner → `mob-dest`: autocomplete + 📍 → stores `mobilityState.destLat/Lng`
+24. **Coordinates flow into AI prompts** — when lat/lng available, transport prompt includes `(coords: lat,lng)` for both origin and destination; accommodation prompt includes destination coords; Claude uses them for accurate distance calculation
+25. **CSS classes added**: `.loc-ac-drop`, `.loc-ac-item`, `.loc-ac-wrap`, `.map-sr-item` — shared autocomplete and map search result styles
+
+### New functions added (2026-06-07)
+```javascript
+_loadLeaflet(cb)                   // lazy-loads Leaflet CSS+JS from CDN; calls cb when ready
+openMapPicker(opts)                // opens #ov-map-picker modal; initializes Leaflet map
+_initLeafletMap(opts)              // creates Leaflet map instance, OSM tiles, click handler
+_placeMapMarker(lat,lng,addr)      // places/moves draggable marker; updates coords display
+_reverseGeocode(lat,lng,cb)        // Nominatim reverse geocode → readable address
+_mapPickerConfirm()                // fills input fields + calls onConfirm; closes modal
+closeMapPicker()                   // hides modal, destroys Leaflet instance
+_mapSearchDebounce(val)            // 400ms debounce for in-modal search input
+_mapNominatimSearch(q)             // Nominatim search inside map modal; renders .map-sr-item list
+_mapPickResult(lat,lng,addr)       // handles result click: pan map + place marker
+_locAutoDebounce(inputId,dropId,val,onSelect)  // 450ms debounce for inline field autocomplete
+_locNominatimSearch(inputId,dropId,q,onSelect) // Nominatim search for inline autocomplete dropdown
+_locPickResult(inputId,dropId,lat,lng,addr,onSelect) // fills field + calls onSelect on pick
+_buildTransportTable(d)            // renders transport cost breakdown table from JSON data
+_buildAccomGrid(d)                 // renders accommodation card grid from JSON data
 ```
 
 ## Known remaining areas to watch
