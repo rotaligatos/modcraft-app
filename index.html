@@ -1831,13 +1831,24 @@ var qSentStatus = "";
 var pendingOrders = [];
 var ordersLoaded = false;
 var qSourceOrderId = null; // order ID that spawned the current quotation
+function _defaultDaySchedule(){
+  return {
+    0: null,                // Sunday — closed
+    1: {start:8,end:17},   // Monday
+    2: {start:8,end:17},   // Tuesday
+    3: {start:8,end:17},   // Wednesday
+    4: {start:8,end:17},   // Thursday
+    5: {start:8,end:17},   // Friday
+    6: null                // Saturday — closed
+  };
+}
 var ordersSlaSettings = {
   defaultHours: 8,
   webhookUrl: '',
   companies: {
-    'World Class Laminate, Inc.':        { startH:8, endH:17, days:[1,2,3,4,5] },
-    'Module Systems and Services, Inc.': { startH:8, endH:17, days:[1,2,3,4,5] },
-    'Cebu World Laminate, Inc.':         { startH:8, endH:17, days:[1,2,3,4,5] }
+    'World Class Laminate, Inc.':        { excludeHolidays:true, schedule:_defaultDaySchedule() },
+    'Module Systems and Services, Inc.': { excludeHolidays:true, schedule:_defaultDaySchedule() },
+    'Cebu World Laminate, Inc.':         { excludeHolidays:true, schedule:_defaultDaySchedule() }
   }
 };
 var qLog = [];
@@ -6210,25 +6221,37 @@ function _updateOrdersBadge(){
   if(b){b.textContent=cnt;b.style.display=cnt>0?'inline':'none';}
 }
 
-// Working-minutes calculator — only counts time inside company work hours
+// Working-minutes calculator — per-day schedule + holiday exclusion
 function calcWorkingMinutes(fromIso, toIso, companyName) {
   if(!fromIso||!toIso) return null;
-  var wh=ordersSlaSettings.companies[companyName]||{startH:8,endH:17,days:[1,2,3,4,5]};
+  var cfg=ordersSlaSettings.companies[companyName];
+  // Migration: handle old format {startH,endH,days}
+  if(cfg&&cfg.days&&!cfg.schedule){
+    var migSched={}; for(var dd=0;dd<7;dd++) migSched[dd]=cfg.days.indexOf(dd)>=0?{start:cfg.startH||8,end:cfg.endH||17}:null;
+    cfg={excludeHolidays:false,schedule:migSched};
+  }
+  if(!cfg||!cfg.schedule) cfg={excludeHolidays:true,schedule:_defaultDaySchedule()};
   var from=new Date(fromIso), to=new Date(toIso);
   if(isNaN(from)||isNaN(to)||to<=from) return 0;
   var mins=0, cur=new Date(from);
-  // Snap cur to start of next work window if outside
-  while(cur<to){
-    var dow=cur.getDay(); // 0=Sun,6=Sat
-    var h=cur.getHours(), m=cur.getMinutes();
-    if(wh.days.indexOf(dow)<0){
-      // Not a work day — jump to next day start
-      cur.setDate(cur.getDate()+1); cur.setHours(wh.startH,0,0,0); continue;
+  var safety=0;
+  while(cur<to&&safety<50000){
+    safety++;
+    var dow=cur.getDay();
+    var daySlot=cfg.schedule[dow];
+    // Check if holiday
+    var dateStr=cur.getFullYear()+'-'+('0'+(cur.getMonth()+1)).slice(-2)+'-'+('0'+cur.getDate()).slice(-2);
+    var isHol=cfg.excludeHolidays&&(PH_HOL||[]).indexOf(dateStr)>=0;
+    if(!daySlot||isHol){
+      // Not a work day or holiday — jump to midnight then let loop find next work day
+      cur.setDate(cur.getDate()+1); cur.setHours(0,0,0,0); continue;
     }
-    if(h<wh.startH){cur.setHours(wh.startH,0,0,0); continue;}
-    if(h>=wh.endH){cur.setDate(cur.getDate()+1); cur.setHours(wh.startH,0,0,0); continue;}
-    // We are inside a work window — count until end of day or toIso
-    var dayEnd=new Date(cur); dayEnd.setHours(wh.endH,0,0,0);
+    var startH=daySlot.start, endH=daySlot.end;
+    var h=cur.getHours();
+    if(h<startH){cur.setHours(startH,0,0,0); continue;}
+    if(h>=endH){cur.setDate(cur.getDate()+1); cur.setHours(0,0,0,0); continue;}
+    // Inside work window — count to end of shift or toIso
+    var dayEnd=new Date(cur); dayEnd.setHours(endH,0,0,0);
     var until=to<dayEnd?to:dayEnd;
     mins+=Math.round((until-cur)/60000);
     cur=new Date(dayEnd);
@@ -6415,47 +6438,88 @@ function ensurePendingOrdersTab(cb){
   }).catch(function(){if(cb)cb();});
 }
 
+var DAY_LABELS=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+var DAY_SHORT=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function _ensureCompanySchedule(co){
+  if(!ordersSlaSettings.companies[co]) ordersSlaSettings.companies[co]={excludeHolidays:true,schedule:_defaultDaySchedule()};
+  var cfg=ordersSlaSettings.companies[co];
+  // Migrate old format
+  if(cfg.days&&!cfg.schedule){
+    var s={}; for(var d=0;d<7;d++) s[d]=cfg.days.indexOf(d)>=0?{start:cfg.startH||8,end:cfg.endH||17}:null;
+    cfg.schedule=s; cfg.excludeHolidays=false; delete cfg.days; delete cfg.startH; delete cfg.endH;
+  }
+  if(!cfg.schedule) cfg.schedule=_defaultDaySchedule();
+}
+
 function renderOrdersSlaSettings(){
-  // Sync inputs with current values
   var ih=el('sla-default-hours'); if(ih) ih.value=ordersSlaSettings.defaultHours;
   var wu=el('sla-webhook-url'); if(wu) wu.value=ordersSlaSettings.webhookUrl||'';
   var wrap=el('sla-company-wrap'); if(!wrap) return;
   var h='';
-  var cos=COMPANIES;
-  for(var i=0;i<cos.length;i++){
-    var co=cos[i];
-    var ws=ordersSlaSettings.companies[co]||{startH:8,endH:17,days:[1,2,3,4,5]};
-    var dayLabels=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    var dayChecks='';
+  for(var i=0;i<COMPANIES.length;i++){
+    var co=COMPANIES[i];
+    _ensureCompanySchedule(co);
+    var cfg=ordersSlaSettings.companies[co];
+    var cid='sla-'+i;
+    h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">'
+      +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+      +'<div style="font-weight:600;font-size:13px;color:var(--navy)">'+escHtml(co)+'</div>'
+      +'<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">'
+      +'<input type="checkbox" '+(cfg.excludeHolidays?'checked':'')+' onchange="_slaHolToggle(\''+co+'\',this.checked)">'
+      +'Exclude PH holidays from timer</label>'
+      +'</div>'
+      // Day-by-day schedule table
+      +'<table style="width:100%;border-collapse:collapse;font-size:12px">'
+      +'<thead><tr>'
+      +'<th style="text-align:left;padding:4px 8px;border-bottom:.5px solid var(--border);color:var(--text2)">Day</th>'
+      +'<th style="text-align:center;padding:4px 8px;border-bottom:.5px solid var(--border);color:var(--text2)">Working?</th>'
+      +'<th style="text-align:center;padding:4px 8px;border-bottom:.5px solid var(--border);color:var(--text2)">Start</th>'
+      +'<th style="text-align:center;padding:4px 8px;border-bottom:.5px solid var(--border);color:var(--text2)">End</th>'
+      +'<th style="text-align:center;padding:4px 8px;border-bottom:.5px solid var(--border);color:var(--text2)">Hours</th>'
+      +'</tr></thead><tbody>';
     for(var d=0;d<7;d++){
-      var chk=ws.days.indexOf(d)>=0?'checked':'';
-      dayChecks+='<label style="font-size:12px;display:flex;align-items:center;gap:3px;cursor:pointer">'
-        +'<input type="checkbox" '+chk+' onchange="_slaDayToggle(\''+co+'\','+d+',this.checked)"> '+dayLabels[d]+'</label>';
+      var slot=cfg.schedule[d];
+      var isWork=!!slot;
+      var startV=slot?slot.start:8, endV=slot?slot.end:17;
+      var hrs=isWork?(endV-startV):'—';
+      var rowBg=d===0||d===6?'background:#fafafa':'';
+      h+='<tr style="'+rowBg+'">'
+        +'<td style="padding:5px 8px;border-bottom:.5px solid var(--border);font-weight:'+(d===0||d===6?'400':'500')+'">'+DAY_LABELS[d]+(d===0||d===6?' <span style="color:var(--text2);font-size:10px">(rest)</span>':'')+'</td>'
+        +'<td style="text-align:center;padding:5px 8px;border-bottom:.5px solid var(--border)">'
+        +'<input type="checkbox" '+(isWork?'checked':'')+' onchange="_slaDayWorkToggle(\''+co+'\','+d+',this.checked)" id="'+cid+'-d'+d+'work"></td>'
+        +'<td style="text-align:center;padding:5px 8px;border-bottom:.5px solid var(--border)">'
+        +'<input type="number" min="0" max="23" value="'+startV+'" style="width:54px;height:28px;text-align:center;'+(isWork?'':'opacity:.35;pointer-events:none')+'" id="'+cid+'-d'+d+'s" oninput="_slaDayHour(\''+co+'\','+d+',\'start\',this.value)"></td>'
+        +'<td style="text-align:center;padding:5px 8px;border-bottom:.5px solid var(--border)">'
+        +'<input type="number" min="0" max="23" value="'+endV+'" style="width:54px;height:28px;text-align:center;'+(isWork?'':'opacity:.35;pointer-events:none')+'" id="'+cid+'-d'+d+'e" oninput="_slaDayHour(\''+co+'\','+d+',\'end\',this.value)"></td>'
+        +'<td style="text-align:center;padding:5px 8px;border-bottom:.5px solid var(--border);color:var(--text2)" id="'+cid+'-d'+d+'hrs">'+(isWork?hrs+'h':'—')+'</td>'
+        +'</tr>';
     }
-    h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px">'
-      +'<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--navy)">'+escHtml(co)+'</div>'
-      +'<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">'
-      +'<div><label class="fld">Start time</label>'
-      +'<input type="number" min="0" max="23" value="'+ws.startH+'" style="height:32px;width:70px" oninput="_slaHourChange(\''+co+'\',\'startH\',this.value)"></div>'
-      +'<div><label class="fld">End time</label>'
-      +'<input type="number" min="0" max="23" value="'+ws.endH+'" style="height:32px;width:70px" oninput="_slaHourChange(\''+co+'\',\'endH\',this.value)"></div>'
-      +'<div><label class="fld">Work days</label>'
-      +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">'+dayChecks+'</div></div>'
-      +'</div></div>';
+    h+='</tbody></table></div>';
   }
   wrap.innerHTML=h;
 }
 
-function _slaHourChange(co,field,val){
-  if(!ordersSlaSettings.companies[co]) ordersSlaSettings.companies[co]={startH:8,endH:17,days:[1,2,3,4,5]};
-  ordersSlaSettings.companies[co][field]=parseInt(val)||0;
+function _slaDayWorkToggle(co,day,checked){
+  _ensureCompanySchedule(co);
+  var cfg=ordersSlaSettings.companies[co];
+  cfg.schedule[day]=checked?{start:8,end:17}:null;
+  renderOrdersSlaSettings(); // re-render to sync enable/disable state
 }
-function _slaDayToggle(co,day,checked){
-  if(!ordersSlaSettings.companies[co]) ordersSlaSettings.companies[co]={startH:8,endH:17,days:[1,2,3,4,5]};
-  var days=ordersSlaSettings.companies[co].days;
-  var idx=days.indexOf(day);
-  if(checked&&idx<0) days.push(day);
-  if(!checked&&idx>=0) days.splice(idx,1);
+function _slaDayHour(co,day,field,val){
+  _ensureCompanySchedule(co);
+  var cfg=ordersSlaSettings.companies[co];
+  if(!cfg.schedule[day]) cfg.schedule[day]={start:8,end:17};
+  cfg.schedule[day][field]=parseInt(val)||0;
+  // Update hours display
+  var slot=cfg.schedule[day];
+  var idx=COMPANIES.indexOf(co);
+  var hrsEl=el('sla-'+idx+'-d'+day+'hrs');
+  if(hrsEl) hrsEl.textContent=(slot.end-slot.start)+'h';
+}
+function _slaHolToggle(co,checked){
+  _ensureCompanySchedule(co);
+  ordersSlaSettings.companies[co].excludeHolidays=checked;
 }
 function testWebhookUrl(){
   showToast('The webhook URL is pasted into Wufoo — it is not called from this app. Submit a test Wufoo entry to verify it works.');
