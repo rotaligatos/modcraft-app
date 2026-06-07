@@ -1019,6 +1019,7 @@ tr.cl-row:hover td{background:#f4f7fb}
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
           <button class="btn btn-primary" onclick="loadPriceDatabase(true)"><i class="ti ti-refresh"></i>Reload from Sheets</button>
           <button class="btn" onclick="initPriceDB()"><i class="ti ti-database-import"></i>Initialize DB (first-time setup)</button>
+          <button class="btn" onclick="dedupeServicesSheet()" style="color:var(--amber)"><i class="ti ti-filter"></i>Clean duplicates</button>
         </div>
         <div style="border:.5px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px">
           <div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;display:flex;align-items:center;gap:5px"><i class="ti ti-file-import"></i>Import from Excel</div>
@@ -1717,6 +1718,14 @@ var SERVICES = [
   {name:"Sanding",             unit:"sqm",     price:85},
   {name:"Assembly labor",      unit:"carcass", price:850},
   {name:"Installation labor",  unit:"carcass", price:1200}
+];
+// Capacity settings keyed by service name — separate from Price DB prices
+// { "Panel cutting (4x8 Marine Plywood)": { type:"production", teams:1, outputPerDay:60 }, ... }
+var SERVICE_CAPACITY = {};
+var SVC_TYPES = [
+  {v:'production',   l:'Production'},
+  {v:'installation', l:'Installation'},
+  {v:'outsourced',   l:'Outsourced'}
 ];
 var UNIT_OPTS = [
   {v:"lm",l:"/ linear meter"},{v:"sqm",l:"/ sq. meter"},{v:"hole",l:"/ hole"},
@@ -6806,38 +6815,86 @@ function removeCarcassType(name){
   if(idx>-1) CARCASS_NAMES.splice(idx,1);
   renderCarcassSettings();
 }
+function dedupeServicesSheet(){
+  if(!gToken){showToast('Sign in first.');return;}
+  var s=el('db-status-row');
+  if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Reading Services sheet…</div>';
+  priceDbGet('Services!A:C').then(function(data){
+    if(data.error) throw new Error(data.error.message);
+    var rows=(data.values||[]);
+    if(!rows.length){if(s)s.innerHTML='<div class="alert alert-warn">Services sheet is empty.</div>';return;}
+    var header=rows[0];
+    var seen={};
+    var unique=[header];
+    var removed=0;
+    for(var i=1;i<rows.length;i++){
+      var name=(rows[i][0]||'').trim().toLowerCase();
+      if(!name) continue;
+      if(seen[name]){removed++;continue;}
+      seen[name]=true;
+      unique.push(rows[i]);
+    }
+    if(!removed){
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> No exact duplicates found ('+( rows.length-1)+' services).</div>';
+      return;
+    }
+    return priceDbClear('Services!A:Z').then(function(){
+      return priceDbUpdate('Services!A1',unique);
+    }).then(function(){
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removed+' duplicate row'+(removed>1?'s':'')+'. '+(unique.length-1)+' services remain. Reload to refresh dropdowns.</div>';
+      loadPriceDatabase(false);
+    });
+  }).catch(function(e){
+    if(s)s.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i> Error: '+escHtml(e.message||e)+'</div>';
+  });
+}
 function renderServicesSettings() {
-  var uopts="";
-  for(var k=0;k<UNIT_OPTS.length;k++) uopts+='<option value="'+UNIT_OPTS[k].v+'">'+UNIT_OPTS[k].l+'</option>';
+  var lbl='<span style="font-size:12px;color:var(--text2)">'
+    +(SERVICES.length?SERVICES.length+' services':'Loading from Price DB…')
+    +' · prices are read-only here — edit in Price Database tab</span>';
   var h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
-    +'<span style="font-size:12px;color:var(--text2)">'+SERVICES.length+' services · unit of measurement is changeable per row</span>'
+    +lbl
     +'<div style="display:flex;gap:8px">'
-    +'<button class="btn" onclick="downloadTemplate(\'services\')" style="font-size:12px;padding:5px 10px"><i class="ti ti-download"></i>Template</button>'
-    +'<button class="btn" onclick="importExcel(\'services\')" style="font-size:12px;padding:5px 10px"><i class="ti ti-upload"></i>Import Excel</button>'
     +'<button class="btn btn-primary" onclick="addService()" style="font-size:12px;padding:5px 10px"><i class="ti ti-plus"></i>Add service</button>'
     +'</div></div>'
-    +'<div style="display:grid;grid-template-columns:2fr 150px 100px 36px;gap:6px;margin-bottom:6px;padding:0 2px">'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:10px">Capacity settings define how many units each team produces per day. Used for schedule load checks and future cost calculations.</div>'
+    +'<div style="display:grid;grid-template-columns:2fr 110px 90px 110px 90px 36px;gap:6px;margin-bottom:6px;padding:0 2px">'
     +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Service name</span>'
-    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Unit of measure</span>'
     +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Price (₱)</span>'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Type</span>'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Teams avail.</span>'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Output/team/day</span>'
     +'<span></span></div>';
   for(var i=0;i<SERVICES.length;i++){
     var s=SERVICES[i];
-    var selOpts="";
-    for(var k=0;k<UNIT_OPTS.length;k++){
-      selOpts+='<option value="'+UNIT_OPTS[k].v+'"'+(s.unit===UNIT_OPTS[k].v?' selected':'')+'>'+UNIT_OPTS[k].l+'</option>';
+    var typeOpts='';
+    for(var t=0;t<SVC_TYPES.length;t++){
+      typeOpts+='<option value="'+SVC_TYPES[t].v+'"'+(s.type===SVC_TYPES[t].v?' selected':'')+'>'+SVC_TYPES[t].l+'</option>';
     }
-    h+='<div style="display:grid;grid-template-columns:2fr 150px 100px 36px;gap:6px;margin-bottom:8px;align-items:center">'
-      +'<input value="'+s.name+'" oninput="SERVICES['+i+'].name=this.value" style="height:32px;font-size:13px">'
-      +'<select onchange="SERVICES['+i+'].unit=this.value" style="height:32px;font-size:12px">'+selOpts+'</select>'
-      +'<input type="number" value="'+s.price+'" oninput="SERVICES['+i+'].price=parseFloat(this.value)||0" style="height:32px;font-size:13px;text-align:right">'
+    var isMin=(s.name.toLowerCase().indexOf('minimum charge')>-1||s.name.toLowerCase().indexOf('min charge')>-1);
+    h+='<div style="display:grid;grid-template-columns:2fr 110px 90px 110px 90px 36px;gap:6px;margin-bottom:8px;align-items:center">'
+      +'<span style="font-size:13px;padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(s.name)+'">'+escHtml(s.name)+'</span>'
+      +'<span style="font-size:13px;padding:0 4px;color:var(--text2);text-align:right">'+fmtMoney(s.price)+(isMin?'<span style="font-size:10px;color:var(--amber);margin-left:4px">min</span>':'')+'</span>'
+      +(isMin
+        ? '<span style="font-size:12px;color:var(--text2);padding:0 4px" colspan="3">—</span><span></span><span></span>'
+        : '<select onchange="_svcCapSet('+i+',\'type\',this.value)" style="height:32px;font-size:12px">'+typeOpts+'</select>'
+          +'<input type="number" min="1" value="'+(s.teams||1)+'" oninput="_svcCapSet('+i+',\'teams\',+this.value||1)" style="height:32px;font-size:13px;text-align:center" placeholder="1">'
+          +'<input type="number" min="0" value="'+(s.outputPerDay||'')+'" oninput="_svcCapSet('+i+',\'outputPerDay\',+this.value||0)" style="height:32px;font-size:13px;text-align:center" placeholder="units/day">'
+       )
       +'<button class="btn" onclick="removeService('+i+')" style="height:32px;width:34px;padding:0;justify-content:center;color:var(--coral)" title="Remove"><i class="ti ti-trash"></i></button>'
       +'</div>';
   }
   html("services-rows",h);
 }
+function _svcCapSet(i,field,val){
+  SERVICES[i][field]=val;
+  // mirror into SERVICE_CAPACITY keyed by name
+  var name=SERVICES[i].name;
+  if(!SERVICE_CAPACITY[name]) SERVICE_CAPACITY[name]={};
+  SERVICE_CAPACITY[name][field]=val;
+}
 function addService() {
-  SERVICES.push({name:"New service",unit:"lm",price:0});
+  SERVICES.push({name:"New service",unit:"lm",price:0,type:"production",teams:1,outputPerDay:0});
   renderServicesSettings();
 }
 function removeService(i) {
@@ -9796,6 +9853,17 @@ function priceDbAppend(range,values){
     body:JSON.stringify({values:values})
   }).then(function(r){return r.json();});
 }
+function priceDbClear(range){
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID+'/values/'+encodeURIComponent(range)+':clear',{
+    method:'POST',headers:{Authorization:'Bearer '+gToken}
+  }).then(function(r){return r.json();});
+}
+function priceDbUpdate(range,values){
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID+'/values/'+encodeURIComponent(range)+'?valueInputOption=USER_ENTERED',{
+    method:'PUT',headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
+    body:JSON.stringify({values:values})
+  }).then(function(r){return r.json();});
+}
 
 var INIT_SERVICES=[
   ["Panel cutting (4x8 Marine Plywood)","lm",15],
@@ -10039,14 +10107,20 @@ function initPriceDB() {
       return priceDbBatchUpdate(reqs);
     })
     .then(function(){
-      // Populate Services header + rows
-      var rows=[['Name','Unit','Price']].concat(INIT_SERVICES.map(function(s){return [s[0],s[1],s[2]];}));
-      return priceDbAppend('Services!A1',rows);
+      // Clear then write Services — prevents duplicates if run more than once
+      return priceDbClear('Services!A:Z');
     })
     .then(function(){
-      // Populate CabinetTemplates header + rows
+      var rows=[['Name','Unit','Price']].concat(INIT_SERVICES.map(function(s){return [s[0],s[1],s[2]];}));
+      return priceDbUpdate('Services!A1',rows);
+    })
+    .then(function(){
+      // Clear then write CabinetTemplates
+      return priceDbClear('CabinetTemplates!A:Z');
+    })
+    .then(function(){
       var tRows=[['Cabinet','Category','Name','Unit','Qty','Price']].concat(INIT_TEMPLATES.map(function(t){return [t[0],t[1],t[2],t[3],t[4],t[5]];}));
-      return priceDbAppend('CabinetTemplates!A1',tRows);
+      return priceDbUpdate('CabinetTemplates!A1',tRows);
     })
     .then(function(){
       var s=el('db-status-row');
@@ -10059,6 +10133,17 @@ function initPriceDB() {
     });
 }
 
+function _syncServicesFromDb(){
+  // Merge dbServices (name/unit/price from Price DB) with SERVICE_CAPACITY (type/teams/output)
+  // Result goes into SERVICES so Settings → Services tab shows the real list
+  if(!dbServices.length) return;
+  SERVICES = dbServices.map(function(s){
+    var cap = SERVICE_CAPACITY[s.name] || {};
+    return {name:s.name, unit:s.unit, price:s.price,
+            type:cap.type||'production', teams:cap.teams||1, outputPerDay:cap.outputPerDay||0};
+  });
+  if(document.getElementById('services-rows')) renderServicesSettings();
+}
 function loadPriceDatabase(showFeedback) {
   if(!gToken) return;
   if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Loading price database…</div>';}
@@ -10067,6 +10152,7 @@ function loadPriceDatabase(showFeedback) {
       if(data.error) throw new Error(data.error.message||'API error on Services');
       var rows=(data.values||[]).slice(1);
       dbServices=rows.filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+      _syncServicesFromDb();
       return priceDbGet('Materials!A:C');
     })
     .then(function(data){
@@ -10314,7 +10400,8 @@ function _collectAppSettings(){
       msg:(el('s-msgtpl-msg')?el('s-msgtpl-msg').value:'')||MSG_TPL_DEFAULTS.msg
     },
     carcassPrices: (function(){ var o={}; for(var k in CARCASS_PRICES){ if(CARCASS_PRICES.hasOwnProperty(k)) o[k]=CARCASS_PRICES[k]; } return o; })(),
-    ordersSla: { defaultHours: ordersSlaSettings.defaultHours, webhookUrl: ordersSlaSettings.webhookUrl, companies: ordersSlaSettings.companies }
+    ordersSla: { defaultHours: ordersSlaSettings.defaultHours, webhookUrl: ordersSlaSettings.webhookUrl, companies: ordersSlaSettings.companies },
+    serviceCapacity: (function(){ var o={}; for(var k in SERVICE_CAPACITY){ if(SERVICE_CAPACITY.hasOwnProperty(k)) o[k]=SERVICE_CAPACITY[k]; } return o; })()
   };
 }
 function _applyAppSettings(s){
@@ -10353,6 +10440,13 @@ function _applyAppSettings(s){
         if(s.ordersSla.companies.hasOwnProperty(oc)) ordersSlaSettings.companies[oc]=s.ordersSla.companies[oc];
       }
     }
+  }
+  if(s.serviceCapacity&&typeof s.serviceCapacity==='object'){
+    for(var sk in s.serviceCapacity){
+      if(s.serviceCapacity.hasOwnProperty(sk)) SERVICE_CAPACITY[sk]=s.serviceCapacity[sk];
+    }
+    // re-sync SERVICES if Price DB already loaded
+    if(dbServices.length) _syncServicesFromDb();
   }
 }
 function gSaveAppSettings(){
