@@ -10,7 +10,7 @@ A single-file HTML quotation management app for **World Class Laminate, Inc. / R
 - **Google Drive folder:** The app creates "Modcraft Quotations" in the signed-in user's personal My Drive (NOT the old hardcoded folder `1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB` which was the original broken approach)
 
 ## Key files
-- `index.html` — the entire app (HTML + CSS + JS, ~12000 lines)
+- `index.html` — the entire app (HTML + CSS + JS, ~12600 lines)
 - `server.ps1` — local PowerShell static server (port 8765, serves `quotation_app.html`)
 - `preview_server.ps1` — preview server for Claude testing (port 8766, serves `index.html`)
 - `.claude/launch.json` — launch configs for both servers
@@ -26,6 +26,7 @@ A single-file HTML quotation management app for **World Class Laminate, Inc. / R
 | `User Roles` | User email → role + company assignment |
 | `Activity log` | Audit trail |
 | `Quotation Items` | Line items detail |
+| `Pending Orders` | Wufoo form submissions — 27 columns from ID to Source Company; written by Google Apps Script webhook |
 
 ## Google Drive structure (Shared/Team Drive under wcli-it-admin)
 - **Shared folder ID:** `1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB` (Team Drive — all users have Editor access)
@@ -616,6 +617,78 @@ initMsgTemplates()             // called when msgtpl tab opens; fills textareas 
 | Carcass | Cabinet type names (e.g. `2× Wardrobe`) | Per specification |
 | BOM | Cabinet type names | Materials from `bomItems[i].materials[]` |
 | Services | Service names only | `matItems` names only |
+
+## What was changed on 2026-06-07 (session 3 — Cost display cleanup)
+
+1. **Mobilization & Installation combined** — separate "Mobilization" and "Installation" line items (and Assembly) are now displayed as one combined "Mobilization & Installation" line in both the quotation form summary and the printout, regardless of fab mode
+2. **Contingency hidden from display** — Mob. contingency and Install. contingency rows removed from the admin breakdown panel; amounts are still computed and included in the combined value
+3. **Overhead hidden from printout** — the "Contingency & overhead" row removed from the printout table; its amount is absorbed into the "Mobilization & Installation" combined row so totals still add up: `pMobBase + pInstBase + pAssmBase + overheadAmt`
+4. **Fallback when no installation** — when `ni=false && na=false` (fabrication-only), the overhead is silently baked into the price; no mob/inst row shown; grand total unchanged
+
+## What was changed on 2026-06-07 (session 4 — Pending Orders / Wufoo integration)
+
+### New "Orders" nav tab
+1. **`Orders` nav button** — inserted between Projects and Clients; shows a red badge with count of Pending + In Progress orders
+2. **`page-orders`** — new page with sticky header, filter dropdown (Pending & In Progress / Done / All), Refresh button, SLA Settings shortcut button
+3. **Order cards** — each order shows: Wufoo entry ID, received timestamp, status badge, request type badge (New/Revision), client info grid, service flags (Edging/Boring/Cutting/Lipping), clickable attachment links, color-coded response timer, SLA progress bar
+4. **Response timer** — counts working minutes from received to now (Pending/In Progress) or to sentAt (Done); color: green → amber (≥75% SLA) → red (overdue)
+
+### Wufoo → Sheets integration
+5. **`Pending Orders` sheet tab** — new tab with 27 columns: ID, Received At, Client Name, Company Name, Contact Number, Customer Email, Salesman Email, Request Type, Type of Service, Floor (1F/2F), Board/Substrate, Haspe Flow, Edging, Boring, Cutting, Lipping, Handgrab Included/Groove/Installation/By, Agent Name, Attachment 1, Attachment 2, Status, Quotation Serial, Sent At, Source Company
+6. **Google Apps Script webhook** — standalone script (provided to user) deployed at script.google.com; receives Wufoo POST, maps field labels to columns, appends row to Pending Orders tab; Wufoo webhook URL pasted under Integrations in Wufoo form
+7. **Field mapping** — uses Wufoo's `Field1_label` + `Field1` pattern to build a label→value map; handles both old and new Wufoo field names with fallback
+
+### Export to Quotation
+8. **"Export to Quotation" button** — on each Pending order card; calls `exportOrderToQuotation(id)`: sets `qSourceOrderId`, navigates to Quotation page, pre-fills cl-name, cl-bizname, cl-contact, cl-email, cl-agent, cl-service; marks order "In Progress" in memory + Sheets
+9. **Auto-mark Done on send** — all `doShare*` functions call `orderMarkSentFromQuotation()`; if `qSourceOrderId` is set, writes status=Done + sentAt to Sheets and clears the variable
+10. **Manual "Mark Done" button** — shown on In Progress orders that already have a quotation serial; for cases where quotation was sent outside the app
+
+### Settings → Orders & SLA sub-tab
+11. **New "Orders & SLA" settings tab** — between Designers Support and the tab list end
+12. **Default SLA hours** — single input; default 8 working hours; persisted in CONFIG settings row
+13. **Per-company working hours** — day-by-day schedule table per company: checkbox (working/closed), start hour, end hour, computed hours column; Sunday/Saturday shown with grey background as default rest days
+14. **Holiday exclusion toggle** — per-company checkbox "Exclude PH holidays from timer"; uses existing `PH_HOL` array; holidays are skipped in working-minutes calculation
+15. **Wufoo webhook URL field** — informational storage + "Test" button (explains URL is pasted into Wufoo, not called from app)
+16. **Setup guide** — collapsible 3-step guide embedded in the tab
+17. **Settings persistence** — `ordersSla: { defaultHours, webhookUrl, companies }` added to `_collectAppSettings` / `_applyAppSettings`; saved/restored with all other settings
+
+### Working hours calculator
+18. **`calcWorkingMinutes(fromIso, toIso, companyName)`** — per-day schedule aware; skips non-work days, holidays (if enabled), and hours outside shift; migration-safe (handles old `{startH,endH,days}` format)
+19. **`_defaultDaySchedule()`** — returns Mon–Fri 8–17, Sat/Sun closed
+20. **`_ensureCompanySchedule(co)`** — ensures company entry exists in `ordersSlaSettings.companies`; migrates from old format if needed
+
+### New globals added (2026-06-07 session 4)
+```javascript
+pendingOrders        // array of order objects loaded from Pending Orders sheet
+ordersLoaded         // boolean — true once first load completes
+qSourceOrderId       // order ID that spawned the current quotation (cleared on send)
+ordersSlaSettings    // { defaultHours, webhookUrl, companies: { [co]: { excludeHolidays, schedule: {0..6: {start,end}|null} } } }
+DAY_LABELS           // ['Sunday','Monday',...,'Saturday']
+DAY_SHORT            // ['Sun','Mon',...,'Sat']
+```
+
+### New functions added (2026-06-07 session 4)
+```javascript
+_defaultDaySchedule()                    // returns Mon–Fri 8–17 schedule object
+_ensureCompanySchedule(co)               // ensures/migrates company schedule entry
+gLoadPendingOrders(cb)                   // loads Pending Orders sheet tab into pendingOrders[]
+_updateOrdersBadge()                     // updates red badge count on Orders nav button
+calcWorkingMinutes(fromIso,toIso,co)     // working-hours-aware elapsed minutes calculator
+fmtWorkMins(mins)                        // formats minutes as "2h 30m"
+_orderSlaClass(mins,slaHours)            // returns CSS color string based on SLA progress
+renderOrders()                           // renders order cards into #orders-wrap
+exportOrderToQuotation(orderId)          // pre-fills quotation from order, marks In Progress
+_setVal(id,v)                            // helper: sets element value if exists and value truthy
+_setOrderStatus(orderId,status,serial)   // updates in-memory + Sheets (cols X:Z) for one order
+markOrderDoneManual(orderId)             // manual "Mark Done" from order card
+orderMarkSentFromQuotation()             // called by doShare*; marks qSourceOrderId order Done
+ensurePendingOrdersTab(cb)               // creates Pending Orders tab + header row if missing
+renderOrdersSlaSettings()                // renders Settings → Orders & SLA tab content
+_slaDayWorkToggle(co,day,checked)        // toggles a day on/off in company schedule
+_slaDayHour(co,day,field,val)            // updates start/end hour for a day; refreshes hours display
+_slaHolToggle(co,checked)               // toggles holiday exclusion for a company
+testWebhookUrl()                         // shows toast explaining webhook URL goes in Wufoo
+```
 
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
