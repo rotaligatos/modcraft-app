@@ -690,15 +690,78 @@ _slaHolToggle(co,checked)               // toggles holiday exclusion for a compa
 testWebhookUrl()                         // shows toast explaining webhook URL goes in Wufoo
 ```
 
+## What was changed on 2026-06-09 (session — Service Catalog + Capacity, Phase 1)
+
+### Strategic plan established (Profitability roadmap)
+The session defined a 5-phase plan toward full project profitability reporting:
+- **Phase 1** ✓ — Service catalog with capacity fields (this session)
+- **Phase 2** — Cost breakdown per service (admin %, consumables, manpower, overhead → cost/unit → markup)
+- **Phase 3** — Wire capacity to real schedule load checks (replace hardcoded demo data)
+- **Phase 4** — PPIC page (Job Orders, material issuance tickets, delivery scheduling)
+- **Phase 5** — Profitability reports per project and monthly
+
+Key architectural decisions made:
+- Service catalog is a **global lookup** (not per-project-type) — same list for all quotations
+- Capacity is defined at **service row level** (not category level) since different materials on the same machine have genuinely different output rates (e.g. 18mm vs 25mm cutting speed differs due to blade contact, chipping risk, operator loading time)
+- Minimum charge rows (e.g. "Panel cutting (minimum charge)") are pricing rules, not capacity activities — detected by name and excluded from capacity fields
+- `SERVICES.price` kept in memory (used by `getAreaSubtotal()` for services-mode quotation cost) — removal deferred to Phase 2 when full cost structure is defined
+
+### Service catalog overhaul (Settings → Services tab)
+1. **Synced from Price DB** — `_syncServicesFromDb()` merges `dbServices` (name/unit/price from Price DB) with `SERVICE_CAPACITY` (type/teams/shifts/output from CONFIG); result stored in `SERVICES`; called after every `loadPriceDatabase()` and after `_applyAppSettings()`
+2. **Columns now shown**: Service name (editable) · UOM (editable dropdown) · Price (editable) · Type · Teams · Shifts/day · Output/shift · Delete
+3. **Prices shown but note clarified** — price field kept editable for now; deferred to Phase 2 for full redesign
+4. **Write-back on Save Settings** — `_saveServicesToPriceDb()` clears and rewrites the Price DB Services sheet with current `SERVICES` list; no need to edit the sheet directly
+5. **Add service** — adds new row with editable name/UOM/price + capacity fields; written to Price DB on Save Settings
+
+### Capacity fields per service
+6. **`SERVICE_CAPACITY`** global — `{ serviceName: { type, teams, shiftsPerDay, outputPerShift } }` keyed by service name; saved to CONFIG row in Settings sheet as `serviceCapacity`
+7. **Type** — `production` / `installation` / `outsourced`
+8. **Teams** — number of teams/machines available simultaneously
+9. **Shifts/day** — 1–3 shifts; affects total daily capacity
+10. **Output/shift** — units per team per shift (in service's UOM); placeholder shows UOM for clarity
+11. **Total effective daily capacity** = Teams × Shifts/day × Output/shift
+12. **`_svcCapSet(i, field, val)`** — updates both `SERVICES[i][field]` and `SERVICE_CAPACITY[name][field]` simultaneously
+
+### Price DB duplicate prevention
+13. **`initPriceDB` fixed** — now uses `priceDbClear()` + `priceDbUpdate()` instead of `priceDbAppend()` for Services and CabinetTemplates tabs; running Initialize DB multiple times no longer creates duplicate rows
+14. **`priceDbClear(range)`** — new helper; calls Sheets API `:clear` endpoint
+15. **`priceDbUpdate(range, values)`** — new helper; calls Sheets API PUT (overwrite) instead of POST (append)
+16. **"Clean duplicates" button** — added to Settings → Price Database tab; calls `dedupeServicesSheet()` which reads the sheet, removes exact-name duplicate rows, rewrites; shows count of removed rows
+
+### Duplicate/similar name detection in Services tab
+17. **`_svcSimilarGroups()`** — tokenizes service names, strips noise words (`minimum`, `charge`, `and`, `per`, etc.), flags any pair sharing 2+ significant tokens
+18. **Amber highlight** — flagged rows get amber background + border + inline warning banner listing which other services they resemble
+19. **Header count** — "⚠ N possible duplicates highlighted" shown in tab header when any are detected
+20. **Tooltip** — hover over flagged row shows similar names
+
+### New globals added (2026-06-09)
+```javascript
+SERVICE_CAPACITY   // { serviceName: { type, teams, shiftsPerDay, outputPerShift } } — capacity settings keyed by service name
+SVC_TYPES          // [{ v:'production', l:'Production' }, { v:'installation', l:'Installation' }, { v:'outsourced', l:'Outsourced' }]
+```
+
+### New functions added (2026-06-09)
+```javascript
+_syncServicesFromDb()        // merges dbServices + SERVICE_CAPACITY → SERVICES; re-renders if tab open
+_saveServicesToPriceDb()     // clears + rewrites Price DB Services sheet from SERVICES array; called by gSaveAppSettings
+_svcCapSet(i, field, val)    // updates SERVICES[i] and SERVICE_CAPACITY[name] simultaneously
+_svcSimilarGroups()          // returns { index: [similarIndexes] } for services with similar names (2+ shared tokens)
+dedupeServicesSheet()        // reads Price DB Services sheet, removes exact-name duplicates, rewrites
+priceDbClear(range)          // Sheets API :clear helper for Price DB
+priceDbUpdate(range, values) // Sheets API PUT (overwrite) helper for Price DB
+```
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
-- **Carcass pricing tab** — now persisted ✓ (fixed this session)
+- **Carcass pricing tab** — now persisted ✓
 - **Drive saves in Google Sites embed** — token refresh via `prompt:''` is blocked in iframes; users must re-auth via banner ~hourly
 - **First-time setup flow** — user needs to: sign in → Settings → Test connection → Create missing tabs → Save settings
 - **Google Sites iframe cache** — after pushing a fix, the embed shows stale version; fix: edit the Google Site, append `?v=N` (increment N each time) to the embed URL, republish
 - **Cross-session approval apply** — `_applyApprovedRequest()` updates the quotation form only if it is open in the same browser session; requester must navigate away and back to see the approved state if they were on a different page when approval happened
 - **User Roles sheet column R** — Claude API key is stored in header row column R (index 17); this is the same column used by the `Projects` ACC_KEY for data rows — no conflict because Claude key is only read from `rows[0]` (header) and ACC_KEY data is read from `rows[1+]` (data rows)
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
+- **`SERVICES.price` deferred** — price field kept in Services tab for now; it is actively used by `getAreaSubtotal()` for services-mode cost calculation; full redesign deferred to Phase 2 cost breakdown work
+- **Semantic duplicates in Price DB** — "Clean duplicates" button only catches exact-name matches; user must manually standardize semantically similar service names (e.g. "cutting (4×8)" vs "Panel cutting (4x8 Marine Plywood)") using the amber similarity highlight in Settings → Services tab
 
 ## Development workflow
 ```bash
