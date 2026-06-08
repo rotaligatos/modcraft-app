@@ -751,6 +751,109 @@ priceDbClear(range)          // Sheets API :clear helper for Price DB
 priceDbUpdate(range, values) // Sheets API PUT (overwrite) helper for Price DB
 ```
 
+## What was changed on 2026-06-09 (session 2 — Phase 2 Cost Breakdown + Orders fixes)
+
+### Phase 2: Cost Breakdown per service (Settings → Cost Breakdown tab)
+
+#### New tab structure
+1. **"Cost Breakdown" Settings sub-tab** — dedicated tab between Services and Cost Factors; shows global overhead card + one expandable card per service
+2. **Global overhead card** — inputs: Admin cost, Utility cost, Other expenses, Packing (all ₱/mo), Working days/mo; live "Total base" display; no oninput re-render (uses `_refreshAllCbdOverhead()` in-place patch to avoid focus loss)
+3. **Per-service 3-column layout** — Overhead | Manpower | Consumables; always fully expanded (no drawer hiding)
+
+#### Revenue mix — overhead split
+4. **Revenue mix slider** — in the global overhead card; sets Production share % (Installation = 100 − Production); default 70/30 based on historical sales data
+5. **Two pool cards** — Production overhead pool (blue) and Installation overhead pool (green) update live as slider moves
+6. **Effect on overhead only** — `computeServiceCosts()` applies `CF.productionMix` or `CF.installMix` % to `fixedTotal` first to get `fixedPool`, then applies `expenseRatio%` to the pool; manpower and consumables are unaffected
+7. **Service type determines pool** — `s.type === 'installation'` uses installMix pool; all others (production, outsourced) use productionMix pool
+8. **Persisted in CF** — `CF.productionMix` and `CF.installMix` saved with Save Settings
+
+#### Overhead column per service
+9. **Expense ratio (%)** — what share of the revenue-mix-adjusted pool this service absorbs
+10. **Display chain** — shows: `₱fixedTotal total → × revShare% [prod/install] = ₱pool → × expenseRatio% ratio → = ₱fixedAlloc / mo`
+
+#### Manpower column per service
+11. **Team / operator cost (₱/mo)** — monthly salary of all operators for this service
+12. **Allocation (%)** — what % of the team's cost to attribute here (since same team may work across services); `opCostMonth = operatorCost × manpowerPct%`
+13. **Capacity utilization (%) slider** — what share of this machine's total monthly output is for this service; range 0–100%; live display: `Used: N lm / mo (of M max)`; affects `monthlyCapacity = fullCap × capacityPct%`; default 100%
+
+#### Consumables column per service
+14. **Formula: Cost ÷ Lifecycle** — each consumable row: label, Cost (₱), Lifecycle/Consumption → Cost per output unit = Cost ÷ Lifecycle
+15. **Total consumable cost / unit** — sum of all consumable cost/unit rows; shown at bottom of consumables column
+16. **No capacity needed for unit cost** — cost/unit always computable; monthly total requires capacity set
+
+#### Summary bar per service card
+17. **5-cell summary** — Monthly capacity | Overhead alloc. | Operator cost | Consumables/mo | Op Cost → Gross Margin
+18. **Consumables/mo fallback** — when capacity = 0 but consumables entered: shows `₱X.XXXX/unit` + amber "Set output/shift for monthly total" instead of ₱0
+19. **Op Cost → Margin** — when capacity = 0: shows amber "Set output/shift in Services tab" hint
+20. **Gross margin color** — teal ≥30%, amber ≥15%, coral <15%
+
+#### computeServiceCosts() formula
+```
+fullCap = teams × shiftsPerDay × outputPerShift × workdaysPerMonth
+cap = fullCap × capacityPct%
+fixedPool = fixedTotal × revShare%          ← revenue mix applied here only
+fixedAlloc = fixedPool × expenseRatio%
+opCostMonth = operatorCost × manpowerPct%
+consumCost = Σ(cost/lifecycle) × cap        ← per-unit × monthly output
+totalExpense = fixedAlloc + opCostMonth + consumCost
+opCost = totalExpense / cap
+grossMargin = (price - opCost) / price × 100
+```
+
+#### Services tab sync
+21. **Services drawer always re-renders on open** — removed `!d.innerHTML.trim()` cache guard; drawer always shows fresh data so Services tab and Cost Breakdown tab always agree
+22. **`_buildCbdSummaryHtml` overhead sub-label fixed** — now shows `Pool ₱X × ratio%` not `fixedTotal × ratio%`
+
+### New globals added (Phase 2)
+```javascript
+// Added to each SERVICES[i] object:
+//   expenseRatio     — % of overhead pool absorbed (0–200)
+//   operatorCost     — monthly operator salary (₱)
+//   manpowerPct      — % of team cost allocated to this service (0–100, default 100)
+//   capacityPct      — % of machine capacity used by this service (0–100, default 100)
+//   consumables      — [{ label, cost, lifecycle }] array
+
+// Added to CF:
+//   adminMonthlyCost — monthly admin cost (₱)
+//   utilityCost      — monthly utility cost (₱)
+//   otherExpenses    — monthly other expenses (₱)
+//   packingCost      — monthly packing cost (₱)
+//   productionMix    — production revenue share % (default 70)
+//   installMix       — installation revenue share % (default 30)
+```
+
+### New functions added (Phase 2)
+```javascript
+computeServiceCosts(s)           // returns { fullCap, monthlyCapacity, fixedTotal, fixedPool, revShare, fixedAlloc, opCostMonth, consumCost, totalExpense, opCost, grossMargin }
+_buildSvcCostSummaryHtml(i,s,cc) // 5-cell summary bar HTML (used in Services drawer)
+_buildCbdSummaryHtml(i,s,cc)     // 5-cell summary bar HTML (used in Cost Breakdown tab)
+renderCostBreakdownSettings()    // renders the full Cost Breakdown tab
+_refreshCbdSummary(i)            // in-place patch of summary bar for service i
+_refreshAllCbdOverhead()         // patches all overhead/pool displays when global costs change
+_cbdAddConsumable(i)             // adds consumable row to service i; re-renders
+_cbdRemoveConsumable(i,ci)       // removes consumable row; re-renders
+_svcSetConsumable(i,ci,field,v)  // updates consumable field; patches cpu display + summary
+addCarcassType()                 // adds custom carcass type (Settings → Carcass pricing)
+removeCarcassType(name)          // removes carcass type with confirmation
+```
+
+### Orders page fixes
+23. **Export to Quotation — race condition fixed** — always clears `qSerial` first (starts fresh), then polls every 150ms (up to 3s) until `cl-name` DOM field exists before filling — replaces the old fixed 400ms timeout
+24. **View button on every order card** — opens `ov-order-detail` modal showing all 27 named fields with `—` for empty ones
+25. **Raw sheet columns section** — collapsible "🔍 Raw sheet columns" section in View modal shows every non-empty column letter + value; used to diagnose Wufoo webhook column mapping issues
+26. **Attachment files** — clicking File 1/File 2 opens modal with full URL + Copy to clipboard button; explains that Wufoo cabinet URLs require Wufoo login (cannot open directly)
+27. **`ov-order-detail` overlay** — new reusable overlay used by both `viewOrderDetail()` and `viewOrderAttachment()`
+28. **`_raw` stored on each order** — `pendingOrders[i]._raw = r` stores the raw sheet row array for the raw column dump
+
+### GAS webhook update
+29. **Robust label-flexible GAS script provided** — handles label variations via `LABEL_MAP` (50+ aliases), logs raw POST data via `Logger.log` for diagnosis, writes `EntryId` to col A, timestamp to col B, all mapped fields to correct columns, `Pending` default to col X; `doGet` health check endpoint; user needs to: paste new script → Deploy new version → resubmit Wufoo test → check Executions log for actual field labels sent
+
+### New functions added (Orders fixes)
+```javascript
+viewOrderDetail(orderId)         // opens ov-order-detail modal with all fields + raw column dump
+viewOrderAttachment(url)         // opens ov-order-detail modal with URL + copy button + Wufoo login note
+```
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
 - **Carcass pricing tab** — now persisted ✓
@@ -762,6 +865,9 @@ priceDbUpdate(range, values) // Sheets API PUT (overwrite) helper for Price DB
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
 - **`SERVICES.price` deferred** — price field kept in Services tab for now; it is actively used by `getAreaSubtotal()` for services-mode cost calculation; full redesign deferred to Phase 2 cost breakdown work
 - **Semantic duplicates in Price DB** — "Clean duplicates" button only catches exact-name matches; user must manually standardize semantically similar service names (e.g. "cutting (4×8)" vs "Panel cutting (4x8 Marine Plywood)") using the amber similarity highlight in Settings → Services tab
+- **Wufoo webhook field mapping pending** — GAS script updated with robust `LABEL_MAP` and Logger.log; user is waiting for next live Wufoo submission to check Executions log and confirm actual field labels; once labels are known, `LABEL_MAP` in the GAS script may need updating to match exact Wufoo form field names
+- **Phase 2 Cost Breakdown — output/shift not yet set** — most services still have `outputPerShift=0`; until this is filled in Settings → Services, monthly capacity = 0 and Op Cost / Gross Margin show `—` in Cost Breakdown
+- **Phase 3 onward** — capacity wired to schedule load checks (Phase 3), PPIC page (Phase 4), profitability reports (Phase 5) all pending
 
 ## Development workflow
 ```bash
