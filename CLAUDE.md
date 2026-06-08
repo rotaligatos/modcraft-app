@@ -854,6 +854,27 @@ viewOrderDetail(orderId)         // opens ov-order-detail modal with all fields 
 viewOrderAttachment(url)         // opens ov-order-detail modal with URL + copy button + Wufoo login note
 ```
 
+## What was changed on 2026-06-09 (session 3 — Installation inputs + Cost Breakdown additions)
+
+### Installation workers & days inputs (Mobilization card)
+1. **`qInstWorkers` / `qInstDays` globals** — new per-quotation installation labor overrides; `0` means use CF defaults
+2. **Mobilization card UI** — "Installation labor" section added below region selector: Workers input + Days on site input; shows CF defaults as placeholder (`CF.laborCount` / calculated days); live `inst-cost-disp` shows computed cost
+3. **`recalc()` updated** — `instBase = workers × days × laborCostPerDay`; uses CF defaults when inputs are 0
+4. **State save** — `collectQuotState` includes `instWorkers`/`instDays`
+5. **State load** — restored from saved state JSON; DOM fields synced after loading
+6. **Option snapshots** — `captureQuotationSnapshot` includes `instWorkers`/`instDays`; `restoreQuotationSnapshot` restores globals + DOM fields when switching options
+7. **`initQuotation` reset** — both globals and DOM fields reset to 0 when starting a new quotation
+
+### Cost Breakdown additions (session continuation)
+8. **Price editable in Cost Breakdown card header** — service price field now has an editable input directly in the card header (₱X.XX / UOM); changes write back to `SERVICES[i].price` and `SERVICE_CAPACITY[name].price`; no auto-save — takes effect on Save Settings
+9. **Price, Op Cost, Margin columns removed from Services tab** — these are already shown in Cost Breakdown; Services tab now only shows: Service name · UOM · Type · Teams · Shifts/d · Output/shift · Delete (grid `2fr 68px 80px 58px 74px 90px 36px`)
+
+### New globals added
+```javascript
+var qInstWorkers = 0;   // installation workers override (0 = use CF.laborCount)
+var qInstDays = 0;      // installation days override (0 = auto-calculate from totU)
+```
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
 - **Carcass pricing tab** — now persisted ✓
@@ -863,8 +884,8 @@ viewOrderAttachment(url)         // opens ov-order-detail modal with URL + copy 
 - **Cross-session approval apply** — `_applyApprovedRequest()` updates the quotation form only if it is open in the same browser session; requester must navigate away and back to see the approved state if they were on a different page when approval happened
 - **User Roles sheet column R** — Claude API key is stored in header row column R (index 17); this is the same column used by the `Projects` ACC_KEY for data rows — no conflict because Claude key is only read from `rows[0]` (header) and ACC_KEY data is read from `rows[1+]` (data rows)
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
-- **`SERVICES.price` deferred** — price field kept in Services tab for now; it is actively used by `getAreaSubtotal()` for services-mode cost calculation; full redesign deferred to Phase 2 cost breakdown work
-- **Semantic duplicates in Price DB** — "Clean duplicates" button only catches exact-name matches; user must manually standardize semantically similar service names (e.g. "cutting (4×8)" vs "Panel cutting (4x8 Marine Plywood)") using the amber similarity highlight in Settings → Services tab
+- **`SERVICES.price` deferred** — price field kept in Services tab for now; it is actively used by `getAreaSubtotal()` for services-mode cost calculation; editable in Cost Breakdown card header; full redesign deferred to Phase 3
+- **Semantic duplicates in Price DB** — "Clean duplicates" button only catches exact-name matches; user must manually standardize semantically similar service names using the amber similarity highlight in Settings → Services tab
 - **Wufoo webhook field mapping pending** — GAS script updated with robust `LABEL_MAP` and Logger.log; user is waiting for next live Wufoo submission to check Executions log and confirm actual field labels; once labels are known, `LABEL_MAP` in the GAS script may need updating to match exact Wufoo form field names
 - **Phase 2 Cost Breakdown — output/shift not yet set** — most services still have `outputPerShift=0`; until this is filled in Settings → Services, monthly capacity = 0 and Op Cost / Gross Margin show `—` in Cost Breakdown
 - **Phase 3 onward** — capacity wired to schedule load checks (Phase 3), PPIC page (Phase 4), profitability reports (Phase 5) all pending
