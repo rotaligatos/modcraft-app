@@ -1,0 +1,92 @@
+# WCLI Shop Standards — Cabinet Construction Rules
+
+> This is the **source of truth** for how World Class Laminate builds modular cabinets.
+> The parametric engine (`poc_cabinet.html`) and, later, the AI drawing reader both
+> reference these rules. Update this file whenever plant practice changes.
+> Captured from plant feedback 2026-06-08. Items marked **[CONFIRM]** need verification.
+
+EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a **length**-direction edge).
+`4s`/`2s2l` = all four edges. Per-panel L = length, W = width.
+
+---
+
+## 1. Edge Banding (EBT) by component
+
+| Component | EBT rule | Code | Notes |
+|-----------|----------|------|-------|
+| Side panel | Band **front + bottom** edges | `1s/1l` | front vertical = 1l, bottom = 1s |
+| Bottom panel | Band **front** edge | `1l` | |
+| Top rail (front) | Band **front-facing** edge | `1l` | |
+| Top rail (back) | Band **front-facing** edge | `1l` | **[CONFIRM]** both rails band the front-facing edge |
+| Back panel (18mm full) | None | `N/A` | hidden |
+| Back panel (6mm / 3mm grooved) | None | `N/A` | sits in groove |
+| Support back panel | None | `N/A` | behind thin backing |
+| **Fixed** shelf | Band **exposed (front)** side only | `1l` | |
+| **Adjustable** shelf | Band **all** sides | `2s/2l` | |
+| End panel (exposed side cover) | Band **front + bottom** | `1s/1l` | covers assembly screws |
+| Door — standard | Band **all 4** edges | `2s/2l` (=4 edges) | |
+| Door — aluminum handgrab | Band 3 edges; top edge grooved for alu profile | `1s/2l` | top edge covered by handgrab |
+| Door — 45° taper (J-pull) | Edge **all** sides, then 45° cut, then **manual** edgeband | `2s/2l` + manual | |
+| Door — routered finger-pull | Band all edges; router grip into edge | `2s/2l` | **[CONFIRM]** band before or after routering |
+| Toe kick board | Band **front** edge | `1l` | |
+
+---
+
+## 2. Backing construction
+
+- **Standard: 18mm single-face backing** (full back panel).
+- Options on client preference: **3mm** or **6mm** backing.
+- **When 6mm (or 3mm) is used — grooved construction:**
+  - Groove cut in **side panels and bottom panel**: **4mm wide × 9mm deep**, located **18mm from the back edge**.
+  - The thin back is inserted into this groove.
+  - Because the groove is 9mm deep on each side: **backing width += 18mm** (9mm into each side panel), **backing height += 9mm** (9mm into the bottom). **[CONFIRM]** top edge not grooved.
+  - **A support back panel is additionally installed** behind the 3mm/6mm panel for rigidity.
+
+---
+
+## 3. Assembly fasteners
+
+| Situation | Fastener |
+|-----------|----------|
+| Standard carcass assembly | **HiLo / chipboard screw 4 × 50** |
+| Joining two cabinets together | **HiLo / chipboard screw 4 × 32** |
+| When the assembly screw would be **visible** (exposed end) | **Minifix** instead of screw |
+| Exposed side panel | Add an **End panel** to cover the screws (if not using minifix) |
+| **Fixed** shelf fastening | Screw (4×50) **or** Minifix |
+| **Adjustable** shelf | **Shelf pins — 4 per shelf** |
+| **[CONFIRM]** | Are dowel + cam lock used anywhere as standard, or only minifix/screw? |
+
+---
+
+## 4. Doors & handles
+
+- **Hinges:** 2 per door leaf. If door height is **double the standard** (tall door), use **4** per leaf.
+- **Door gap / reveal:** 3mm.
+- **Handle options:**
+  1. **Aluminum handgrab** — reduce door height by **~35mm** (depends on handgrab size); groove the **top edge** of the door; **glue** before inserting the aluminum profile for durable attachment.
+  2. **45° taper (J-pull)** — edge all sides, 45° cut on the edge, then manual edgebanding.
+  3. **Routered finger-pull** — router the door edge so it can be opened (no separate handle).
+  4. **Knob / D-handle** — drilled, 1 per leaf.
+
+---
+
+## 5. Carcass & materials
+
+- **Standard carcass thickness: 18mm.** Never 25mm for cabinets **unless** client requests it or the item is a **table**.
+- **Adjustable legs** used for base cabinets; **toe kick board** clipped on, standard height **100mm**.
+- 2-face melamine board unless stated otherwise.
+
+### Standard board sizes
+| Material | Sizes |
+|----------|-------|
+| MDF / PB / Plywood | **4×8 ft (1220 × 2440 mm)** standard; **6×8 ft (1830 × 2440 mm)** in some cases |
+| Compact laminate | various |
+
+---
+
+## Open items to confirm
+1. Top rail EBT — does the **back** rail really get a banded front-facing edge, or only the front rail?
+2. Grooved backing dimension adds — confirm **+18mm width / +9mm height**, and that the **top** edge has no groove.
+3. Routered finger-pull — band edges before or after routering?
+4. Dowel + cam lock — used anywhere as standard, or is it screw/minifix only?
+5. Handgrab door height reduction — is **35mm** fixed, or does it vary by profile? What profile(s)?
