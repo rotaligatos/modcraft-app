@@ -17,7 +17,7 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 | Side panel | Band **front + bottom** edges | `1s/1l` | front vertical = 1l, bottom = 1s |
 | Bottom panel | Band **front** edge | `1l` | |
 | Top rail (front) | Band **front-facing** edge | `1l` | |
-| Top rail (back) | Band **front-facing** edge | `1l` | **[CONFIRM]** both rails band the front-facing edge |
+| Top rail (back) | Band **front-facing** edge | `1l` | ✓ confirmed — both rails banded |
 | Back panel (18mm full) | None | `N/A` | hidden |
 | Back panel (6mm / 3mm grooved) | None | `N/A` | sits in groove |
 | Support back panel | None | `N/A` | behind thin backing |
@@ -27,7 +27,7 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 | Door — standard | Band **all 4** edges | `2s/2l` (=4 edges) | |
 | Door — aluminum handgrab | Band 3 edges; top edge grooved for alu profile | `1s/2l` | top edge covered by handgrab |
 | Door — 45° taper (J-pull) | Edge **all** sides, then 45° cut, then **manual** edgeband | `2s/2l` + manual | |
-| Door — routered finger-pull | Band all edges; router grip into edge | `2s/2l` | **[CONFIRM]** band before or after routering |
+| Door — routered finger-pull | **Router first, then edgeband** | `2s/2l` | ✓ confirmed: router → edgeband |
 | Toe kick board | Band **front** edge | `1l` | |
 
 ---
@@ -37,10 +37,10 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 - **Standard: 18mm single-face backing** (full back panel).
 - Options on client preference: **3mm** or **6mm** backing.
 - **When 6mm (or 3mm) is used — grooved construction:**
-  - Groove cut in **side panels and bottom panel**: **4mm wide × 9mm deep**, located **18mm from the back edge**.
-  - The thin back is inserted into this groove.
-  - Because the groove is 9mm deep on each side: **backing width += 18mm** (9mm into each side panel), **backing height += 9mm** (9mm into the bottom). **[CONFIRM]** top edge not grooved.
-  - **A support back panel is additionally installed** behind the 3mm/6mm panel for rigidity.
+  - Groove cut on **all four sides** — side panels, bottom panel, **and top** (back top rail): **4mm wide × 9mm deep**, offset **18mm from the back edge**.
+  - The thin back is inserted into the groove.
+  - Because the groove is 9mm deep on each edge: **backing width += 18mm** (9mm into each side) and **backing height += 18mm** (9mm into bottom + 9mm into top). The 18mm offset is the groove *position*, not a size add.
+  - **A horizontal support rail is added across the centre** (behind the thin back) for rigidity — prevents the thin panel bowing.
 
 ---
 
@@ -54,7 +54,7 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 | Exposed side panel | Add an **End panel** to cover the screws (if not using minifix) |
 | **Fixed** shelf fastening | Screw (4×50) **or** Minifix |
 | **Adjustable** shelf | **Shelf pins — 4 per shelf** |
-| **[CONFIRM]** | Are dowel + cam lock used anywhere as standard, or only minifix/screw? |
+| Dowel + cam lock | **Not used** in WCLI cabinet fabrication — strictly screw / Minifix |
 
 ---
 
@@ -84,9 +84,9 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 
 ---
 
-## Open items to confirm
-1. Top rail EBT — does the **back** rail really get a banded front-facing edge, or only the front rail?
-2. Grooved backing dimension adds — confirm **+18mm width / +9mm height**, and that the **top** edge has no groove.
-3. Routered finger-pull — band edges before or after routering?
-4. Dowel + cam lock — used anywhere as standard, or is it screw/minifix only?
-5. Handgrab door height reduction — is **35mm** fixed, or does it vary by profile? What profile(s)?
+## Confirmed (2026-06-09)
+1. ✓ Both top rails (front + back) band the front-facing edge.
+2. ✓ Grooved backing: groove on **all four sides incl. top**, offset 18mm from back edge; backing grows **+18mm width / +18mm height**; **horizontal centre support rail** added (not a full panel).
+3. ✓ Routered finger-pull: **router first, then edgeband**.
+4. ✓ Dowel + cam lock **not used** — screw / Minifix only.
+5. ✓ Aluminum handgrab cut **varies**, but **35mm** is the normal/default reduction.
