@@ -38,7 +38,7 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 - Options on client preference: **3mm** or **6mm** backing.
 - **When 6mm (or 3mm) is used — grooved construction:**
   - Groove cut on **all four sides** — side panels, bottom panel, **and top** (back top rail): **4mm wide × 9mm deep**, offset **18mm from the back edge**.
-  - The thin back is inserted into the groove.
+  - The thin back is inserted into the groove, so it is **recessed 18mm from the rear edge** — the carcass (sides/bottom/top) extends 18mm behind the back panel (an 18mm lip). The back is **not flush** with the rear of the cabinet.
   - Because the groove is 9mm deep on each edge: **backing width += 18mm** (9mm into each side) and **backing height += 18mm** (9mm into bottom + 9mm into top). The 18mm offset is the groove *position*, not a size add.
   - **A horizontal support rail is added across the centre** (behind the thin back) for rigidity — prevents the thin panel bowing.
 
