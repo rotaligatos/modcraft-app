@@ -875,6 +875,46 @@ var qInstWorkers = 0;   // installation workers override (0 = use CF.laborCount)
 var qInstDays = 0;      // installation days override (0 = auto-calculate from totU)
 ```
 
+## What was changed on 2026-06-09 (session 4 — AI model upgrade + Drawing Intelligence Pipeline POC)
+
+### AI model upgrade (drawing analysis + mobility)
+1. **Model upgraded `claude-sonnet-4-5` → `claude-sonnet-4-6`** — updated all 6 references in `index.html`: the 4 drawing-analysis calls (`prodSendPdf`, `prodSendText`, and the prompt paths around lines 12400/12416/12474/12529), the mobility planner (`_mobCallClaude`, ~line 12073), and the billing help text. Current-generation Sonnet for better structured-extraction accuracy at ~same cost.
+2. **Opus 4.8 deferred** — kept as an "open consideration" (saved to auto-memory `project_opus_upgrade_consideration.md`): upgrade drawing analysis to `claude-opus-4-8` if Sonnet 4.6 still misses too much on real drawings. Opus is ~1.67× token cost ($5/$25 vs $3/$15 per 1M) but meaningfully better on ambiguous/low-quality inputs. 5 other accuracy improvements also still pending (EBT default-to-blank, max_tokens raise, page-type context, scale/title-block extraction, few-shot examples).
+
+### Strategic direction — Drawing Intelligence Pipeline (the big goal)
+The user's north-star for the Designers Support feature: accurately analyze shop drawings to reduce dependence on human expertise. Agreed pipeline (each arrow = a human-review gate):
+```
+Elevation/technical drawing → cabinet INTENT (type + W/H/D + material)
+  → parametric MODEL (rules engine generates every panel/EBT/hardware)
+  → 3D review (catch missing parts, overlaps, wrong sizes)
+  → shop drawing → components/EBT → cutting layout (nesting) → cutting list
+```
+**Core architectural decision:** the LLM must NOT do geometry/EBT/cutting math directly (a language model gives a *plausible* answer each time, not a *consistent* one). Instead a **deterministic parametric rules engine** is the source of truth. The AI's job shrinks to *reading the drawing → cabinet type + dimensions*; the engine expands that into panels, EBT, and hardware by rule. This is what delivers accuracy + consistency + reduced human dependence. Beyond Claude, planned integrations: **Three.js** (3D review), **bin-packing** (cutting layout/nesting), a **WCLI rules library** (the encoded expertise = the actual product), and a **feedback loop** (log user corrections → engine + prompts evolve).
+
+Phased roadmap: **Phase 1 ✓** single-cabinet parametric engine + 3D (done this session) · Phase 2 = all 13 cabinet types · Phase 3 = cutting layout → cutting list · Phase 4 = AI reads elevation → feeds engine · Phase 5 = feedback loop.
+
+### New files (standalone — NOT part of the deployed app)
+3. **`poc_cabinet.html`** — Phase 1 proof-of-concept. Standalone single file (Three.js via CDN), zero risk to `index.html`. Three inputs (W/H/D) + options deterministically generate a full base-cabinet parts list, EBT, and hardware, rendered in interactive 3D for review. Open by double-clicking, or via preview server at `http://localhost:8766/poc_cabinet.html`. Proves: determinism, EBT-by-rule, auto hardware derivation, 3D review gate. Key functions: `buildBaseCabinet(p)` (the rules engine), `tapePerPiece(code,L,W)` (EBT→tape length), `placeBoxes(p)` (Three.js render). EBT codes shown in **red** (banded), grey (`N/A`), orange (manual band).
+4. **`WCLI_shop_standards.md`** — source-of-truth document capturing WCLI's actual cabinet-construction rules (from plant feedback). Referenced by the engine now and the AI prompt later. Update this whenever plant practice changes.
+
+### WCLI plant standards captured & encoded (from user feedback)
+- **EBT:** side panel = front+bottom (`1s/1l`); bottom = front (`1l`); top rails = front-facing edge (`1l`); 18mm full back / grooved thin back = `N/A`; **fixed** shelf = front only (`1l`); **adjustable** shelf = all sides (`2s/2l`); standard door = `2s/2l`; handgrab door = `1s/2l` (top grooved); end panel = `1s/1l`; toe kick = `1l`.
+- **Backing:** standard 18mm full; option 3mm/6mm grooved (`4mm W × 9mm deep` groove in sides+bottom, 18mm from back edge; back oversized +18mm width/+9mm height; **support back panel added** behind thin back).
+- **Fasteners:** HiLo/chipboard screw 4×50 (assembly), 4×32 (cabinet-to-cabinet), Minifix when screws would be visible; exposed side → add **End panel** or use Minifix.
+- **Shelves:** adjustable = shelf pins (4/shelf); fixed = screw 4×50 or Minifix.
+- **Doors/handles:** hinges 2/leaf (4 if tall, >~1400mm); 3mm gap; **aluminum handgrab** (−35mm door height, top-edge groove, glue); **45° taper** (edge all → 45° cut → manual band); **routered finger-pull**; knob/D-handle.
+- **Materials:** standard 18mm carcass (25mm only on client request or tables); adjustable legs; 100mm toe kick; board sizes 4×8ft (1220×2440) standard, 6×8ft (1830×2440) some cases; compact laminate various.
+
+### Open confirmation items (in `WCLI_shop_standards.md`, pending user verification)
+1. Top rail EBT — does the **back** rail band the front-facing edge, or only the front rail?
+2. Grooved backing add — confirm +18mm width / +9mm height, no top groove.
+3. Routered finger-pull — band before or after routering?
+4. Dowel + cam lock — used anywhere as standard, or strictly screw/Minifix?
+5. Handgrab −35mm — fixed, or varies by profile? Which profiles stocked?
+
+### Next decision (not yet taken)
+After the user confirms the 5 items: go **wide** (Phase 2 — other cabinet types) or **deep** (Phase 4 — wire AI elevation reading into the engine).
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
 - **Carcass pricing tab** — now persisted ✓
