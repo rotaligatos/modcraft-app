@@ -939,6 +939,29 @@ Shared sub-builders: `addSides`, `addBacking`, `addShelves`, `addDoors`/`doorHw`
 ### Next after production verification
 Refine the 4 new types per plant feedback, then either continue wide (corner, oven tower, remaining WCLI types) or pivot deep (Phase 4 — AI reads elevation drawing → feeds the engine).
 
+## What was changed on 2026-06-10 (session — Wufoo source order tracking + timezone fix)
+
+### Wufoo field mapping fixed
+1. **GAS script rewritten to map by field ID** — previous version used `Field1_label`/`Field1` label-pair approach; Wufoo actually sends direct field IDs (`Field2`, `Field4`, etc.); script rewritten with confirmed field ID mapping from debug data
+2. **Webhook URL corrected** — Wufoo was pointing to an old deployment URL; updated to match the active GAS deployment
+3. **Wufoo Debug sheet** — GAS writes every raw POST to a `Wufoo Debug` sheet tab for diagnosis
+4. **Field mapping confirmed** — `Field2`=Client Name, `Field4`=Company, `Field6`=Contact, `Field131`=Customer Email, `Field179`=Salesman Email, `Field156`=Request Type, `Field161`=Type of Service, `Field168`=Floor, `Field150`=Board/Substrate, `Field163`=Haspe Flow, `Field123`=Edging, `Field124`=Boring, `Field171`=Cutting, `Field177`=Lipping, `Field153`=HG Included, `Field172`=HG Groove, `Field175`=HG Installation, `Field152`=HG By, `Field126`=Agent Name, `Field128-url`=Attachment 1, `Field129-url`=Attachment 2
+
+### Source Order tracking (index.html)
+5. **`q-order-badge`** — blue pill badge near quotation serial shows `📋 Order #XXXX` when quotation was exported from a Wufoo order
+6. **`qSourceOrderId` persisted** — saved to `Quotation State` JSON and restored on load
+7. **Quotations sheet column R** — `Source Order` field written by `gSaveQuotation`; all `Quotations!A:Q` ranges updated to `A:R`; `QUOT_HDR` and `sessionQuotations` updated
+8. **Project List "Source Order" column** — toggleable (off by default); shows blue `📋 #XXXX` pill for orders from Wufoo
+9. **Activity log entry** — `logActivity('Quotation created from Wufoo Order #XXXX — Client Name')` called on export
+
+### Timestamp timezone fix
+10. **`DateCreated` timezone bug** — Wufoo sends `DateCreated` as UTC with no timezone indicator (e.g. `"2026-06-09 08:00:00"`); browsers treated it as local PHT time, making the received time 8 hours wrong and the elapsed timer off by the same amount
+11. **Fix in GAS script** — `rawDate.replace(' ','T')+'Z'` normalizes to proper UTC ISO string before storing; browsers now parse and display correctly in PHT
+
+### Attachment via Google Drive (PENDING — needs Wufoo API key)
+12. **GAS `_uploadAttachment()` function** — downloads attachment from Wufoo at webhook time using Basic Auth (Wufoo API key), uploads to Team Drive folder, stores Drive URL instead of Wufoo-protected URL; falls back to original URL on failure
+13. **PENDING** — Rommel is a Wufoo sub-user and cannot see API Information; needs account owner/manager to share the Wufoo API key; GAS script is already pasted with placeholder `YOUR-WUFOO-API-KEY-HERE`; once key is obtained: replace placeholder → run `doGet` manually once (Drive OAuth approval) → deploy new version
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
 - **Carcass pricing tab** — now persisted ✓
@@ -950,7 +973,7 @@ Refine the 4 new types per plant feedback, then either continue wide (corner, ov
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
 - **`SERVICES.price` deferred** — price field kept in Services tab for now; it is actively used by `getAreaSubtotal()` for services-mode cost calculation; editable in Cost Breakdown card header; full redesign deferred to Phase 3
 - **Semantic duplicates in Price DB** — "Clean duplicates" button only catches exact-name matches; user must manually standardize semantically similar service names using the amber similarity highlight in Settings → Services tab
-- **Wufoo webhook field mapping pending** — GAS script updated with robust `LABEL_MAP` and Logger.log; user is waiting for next live Wufoo submission to check Executions log and confirm actual field labels; once labels are known, `LABEL_MAP` in the GAS script may need updating to match exact Wufoo form field names
+- **Wufoo attachment via Drive (PENDING)** — GAS script has `_uploadAttachment()` ready with placeholder `YOUR-WUFOO-API-KEY-HERE`; Rommel needs to get Wufoo API key from account owner/manager → replace placeholder → run `doGet` manually once (Drive OAuth) → deploy new version; until then attachments still require Wufoo login to open
 - **Phase 2 Cost Breakdown — output/shift not yet set** — most services still have `outputPerShift=0`; until this is filled in Settings → Services, monthly capacity = 0 and Op Cost / Gross Margin show `—` in Cost Breakdown
 - **Phase 3 onward** — capacity wired to schedule load checks (Phase 3), PPIC page (Phase 4), profitability reports (Phase 5) all pending
 
