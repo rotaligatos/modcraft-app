@@ -912,8 +912,32 @@ Phased roadmap: **Phase 1 ✓** single-cabinet parametric engine + 3D (done this
 4. Dowel + cam lock — used anywhere as standard, or strictly screw/Minifix?
 5. Handgrab −35mm — fixed, or varies by profile? Which profiles stocked?
 
-### Next decision (not yet taken)
-After the user confirms the 5 items: go **wide** (Phase 2 — other cabinet types) or **deep** (Phase 4 — wire AI elevation reading into the engine).
+### All 5 base-cabinet confirmations applied (2026-06-09)
+1. ✓ Both top rails band the front-facing edge.
+2. ✓ Grooved backing: groove on all 4 sides incl. top, 18mm offset from rear edge; back panel +18mm W/+18mm H; **back panel recessed 18mm** from the rear (18mm carcass lip); **horizontal centre support rail** stands in the rear recess behind the back panel.
+3. ✓ Routered finger-pull: router first, then edgeband.
+4. ✓ Dowel + cam lock not used — screw/Minifix only.
+5. ✓ Handgrab cut varies, 35mm is normal default.
+
+### Decision taken: GO WIDE (Phase 2 started — multiple cabinet types)
+Refactored `poc_cabinet.html` so geometry is defined **once per part** (`boxes:[{sx,sy,sz,x,y,z}]`); both the 3D view (`render3D`) and the cutting table read from the same source. Added a **cabinet-type dispatcher** `buildCabinet(p)` with a build function per type:
+- **`buildBase`** — base cabinet (plant-accurate, confirmed by user).
+- **`buildWall`** — wall/upper: no toe kick (`tk=0`), full top + bottom panels (not rails), hanging rail at top back, wall brackets, shallower default depth (320mm).
+- **`buildTall`** — tall/pantry: full top panel, default height 2100mm, floor-standing (toe kick + legs), more shelves.
+- **`buildDrawerBase`** — N drawer fronts (one part, N boxes) + drawer box panels (sides/front-back/bottom, aggregated qty, not rendered) + slide runners + pulls.
+- **`buildSinkOpen`** — no bottom panel (open under-sink), bottom front rail to tie sides, door optional.
+
+Shared sub-builders: `addSides`, `addBacking`, `addShelves`, `addDoors`/`doorHw`, `addToeKickLegs`, `addExposed`, `screws`. UI: cabinet-type dropdown, per-type control show/hide (`applyTypeUI`), per-type dimension defaults (`typeDefaults`), part color legend (`PART_COLORS`). All 5 types verified rendering with no console errors.
+
+### Open items to VERIFY WITH PRODUCTION (the 4 new types use best-guess standard-practice rules — base cabinet is the only confirmed one)
+- **Wall cabinet:** full top + bottom panels vs rails? Hanging rail vs French cleat vs direct screw? Standard wall depth?
+- **Tall/pantry:** full top panel vs rails? Single tall door vs split upper/lower doors?
+- **Drawer base:** drawer box material/thickness (assumed 15mm sides, 6mm base), slide clearance (assumed 26mm total), do drawer boxes get any EBT, bottom rail vs full bottom panel under drawers?
+- **Sink/open base:** "no bottom panel + bottom front rail" correct, or built differently?
+- User is checking these against the actual plant and will report back.
+
+### Next after production verification
+Refine the 4 new types per plant feedback, then either continue wide (corner, oven tower, remaining WCLI types) or pivot deep (Phase 4 — AI reads elevation drawing → feeds the engine).
 
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
