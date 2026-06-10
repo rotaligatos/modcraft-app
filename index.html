@@ -393,28 +393,32 @@ tr.cl-row:hover td{background:#f4f7fb}
         </div>
       </div>
       <div class="card" id="mob-card" style="display:none">
-        <div class="card-head"><h3><i class="ti ti-truck"></i>Mobilization &amp; Installation</h3></div>
+        <div class="card-head"><h3><i class="ti ti-truck"></i>Mobilization</h3></div>
         <div class="card-body">
-          <label class="fld">Installation region</label>
+          <label class="fld">Mobilization region</label>
           <select id="mob-area" onchange="recalc()"></select>
           <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 0 4px;color:var(--text2)">
             <span>Base mobilization cost</span><span id="mob-disp" style="font-weight:500;color:var(--text)"></span>
           </div>
-          <div style="border-top:.5px solid var(--border);margin-top:10px;padding-top:12px">
-            <label class="fld" style="margin-bottom:8px">Installation labor</label>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-              <div>
-                <label class="fld" style="font-size:11px;margin-bottom:4px">Workers <span style="font-weight:400;color:var(--text2)">(0 = use CF default)</span></label>
-                <input type="number" id="inst-workers" min="0" value="0" oninput="qInstWorkers=parseInt(this.value)||0;recalc()" style="height:32px;width:100%">
-              </div>
-              <div>
-                <label class="fld" style="font-size:11px;margin-bottom:4px">Days on site <span style="font-weight:400;color:var(--text2)">(0 = use CF default)</span></label>
-                <input type="number" id="inst-days" min="0" value="0" oninput="qInstDays=parseInt(this.value)||0;recalc()" style="height:32px;width:100%">
-              </div>
-            </div>
-            <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 0 0;color:var(--text2)">
-              <span>Installation cost</span><span id="inst-cost-disp" style="font-weight:500;color:var(--text)"></span>
-            </div>
+          <div id="mob-planner-lines"></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 0 0;border-top:.5px solid var(--border);margin-top:8px;color:var(--text2)">
+            <span style="font-weight:600">Total mobilization</span><span id="mob-total-q-disp" style="font-weight:700;color:var(--navy)"></span>
+          </div>
+        </div>
+      </div>
+      <div class="card" id="inst-card" style="display:none">
+        <div class="card-head"><h3><i class="ti ti-hammer"></i>Installation</h3></div>
+        <div class="card-body">
+          <label class="fld">Installation region</label>
+          <select id="inst-region" onchange="qInstRegion=this.value;recalc()"></select>
+          <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 0 4px;color:var(--text2)">
+            <span>Price per carcass unit</span><span id="inst-unit-disp" style="font-weight:500;color:var(--text)"></span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;color:var(--text2)">
+            <span>Carcass units in quotation</span><span id="inst-units-disp" style="font-weight:500;color:var(--text)"></span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 0 0;border-top:.5px solid var(--border);margin-top:8px;color:var(--text2)">
+            <span style="font-weight:600">Installation cost</span><span id="inst-cost-disp" style="font-weight:700;color:var(--navy)"></span>
           </div>
         </div>
       </div>
@@ -1966,8 +1970,11 @@ var qOutContingency = null;
 var qOutBuffer = null;
 var qSiteVisit = {enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
 var qAssembly = {enabled:false,carcassCount:0};
-var qInstWorkers = 0;   // number of installation workers (0 = use CF default)
-var qInstDays = 0;      // days on site for installation (0 = use CF default)
+var qInstWorkers = 0;   // legacy installation workers override (kept for old saved states)
+var qInstDays = 0;      // legacy installation days override (kept for old saved states)
+var qInstRegion = 'metro';  // installation region: 'metro' | 'outside' — drives per-unit install price
+var qMobTransport = null;   // {label, total} — transportation exported from the mobility planner
+var qMobAccom = null;       // {label, total} — accommodation exported from the mobility planner
 var qCuttingList = {enabled:false};
 var qDesignCharge = {enabled:false};
 var _pCalc = {}; // cached cost result — populated by recalc() and recalcFQ(), read by openPrint()
@@ -2044,6 +2051,7 @@ var mobilityState = {
   computingAccom: false,
   transportResult: null,
   accumResult: null,
+  selectedAccomIdx: null,
   origin: '',
   destination: '',
   workers: 4,
@@ -2378,14 +2386,55 @@ function calcQAQCCost(idx) {
   return raw * (1+(z.contingency||0)/100) * (1+(z.buffer||0)/100) * (1+(z.markup||0)/100);
 }
 function populateMobSelect() {
-  var sel=el("mob-area"); if(!sel) return;
-  var cur=sel.value;
+  var sel=el("mob-area");
+  if(sel){
+    var cur=sel.value;
+    var opts="";
+    for(var i=0;i<MOB_LOCATIONS.length;i++){
+      var t=calcMobTotal(i);
+      opts+='<option value="'+t+'"'+(cur==t?' selected':'')+'>'+MOB_LOCATIONS[i].name+' — '+fmtMoney(t)+'</option>';
+    }
+    sel.innerHTML=opts;
+  }
+  populateInstRegionSelect();
+}
+// Per-unit installation price for a region, from the Installation cost
+// breakdown (Settings → Cost Breakdown → Installation). 'outside' includes
+// the Outside Metro additional-cost items regardless of the enabled toggle.
+function instPriceUnitFor(region){
+  var save=INST_COST.outsideMetro.enabled;
+  INST_COST.outsideMetro.enabled=(region==='outside');
+  var c=_instCalc();
+  INST_COST.outsideMetro.enabled=save;
+  return c.priceUnit;
+}
+function populateInstRegionSelect(){
+  var sel=el("inst-region"); if(!sel) return;
+  var regions=[['metro','Metro Manila'],['outside','Outside Metro Manila']];
   var opts="";
-  for(var i=0;i<MOB_LOCATIONS.length;i++){
-    var t=calcMobTotal(i);
-    opts+='<option value="'+t+'"'+(cur==t?' selected':'')+'>'+MOB_LOCATIONS[i].name+' — '+fmtMoney(t)+'</option>';
+  for(var i=0;i<regions.length;i++){
+    opts+='<option value="'+regions[i][0]+'"'+(qInstRegion===regions[i][0]?' selected':'')+'>'
+      +regions[i][1]+' — '+fmtMoney(instPriceUnitFor(regions[i][0]))+' / unit</option>';
   }
   sel.innerHTML=opts;
+}
+// Transportation / Accommodation lines exported from the mobility planner
+function renderMobPlannerLines(ni){
+  var w=el('mob-planner-lines'); if(!w) return;
+  if(!ni||(!qMobTransport&&!qMobAccom)){w.innerHTML='';return;}
+  var xBtn=function(varName){
+    return '<button onclick="'+varName+'=null;recalc()" title="Remove from quotation" '
+      +'style="height:20px;width:20px;padding:0;background:none;border:.5px solid #fca5a5;border-radius:4px;cursor:pointer;color:var(--coral);font-size:11px;line-height:1">×</button>';
+  };
+  var line=function(icon,label,sub,amt,varName){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:4px 0;color:var(--text2)">'
+      +'<span>'+icon+' '+label+(sub?' <span style="font-size:11px">'+escHtml(sub)+'</span>':'')+'</span>'
+      +'<span style="display:flex;align-items:center;gap:6px"><span style="font-weight:500;color:var(--text)">'+fmtMoney(amt)+'</span>'+xBtn(varName)+'</span></div>';
+  };
+  var h='';
+  if(qMobTransport) h+=line('🚗','Transportation',qMobTransport.label?'— '+qMobTransport.label+' (planner)':'(planner)',qMobTransport.total,'qMobTransport');
+  if(qMobAccom)     h+=line('🏨','Accommodation',qMobAccom.label?'— '+qMobAccom.label:'(planner)',qMobAccom.total,'qMobAccom');
+  w.innerHTML=h;
 }
 function initQuotation() {
   // ── Full state reset — every field, every variable ──────────────────────
@@ -2409,8 +2458,8 @@ function initQuotation() {
   if(el('fab-date'))el('fab-date').value='';
   if(el('inst-date'))el('inst-date').value='';
   qInstWorkers=0; qInstDays=0;
-  if(el('inst-workers'))el('inst-workers').value=0;
-  if(el('inst-days'))el('inst-days').value=0;
+  qInstRegion='metro'; qMobTransport=null; qMobAccom=null;
+  populateInstRegionSelect();
   _linkedClientId=null;_confirmedFields={};_originalValues={};
   var _vp=el('cl-verify-panel');if(_vp){_vp.style.display='none';_vp.innerHTML='';}
   var _vbadge=el('cl-linked-badge');if(_vbadge)_vbadge.style.display='none';
@@ -2789,6 +2838,7 @@ function onServiceChange() {
   var svc=el("cl-service").value;
   var ni=svc.indexOf("Installation")>=0;
   el("mob-card").style.display=ni?"block":"none";
+  var icq=el("inst-card"); if(icq) icq.style.display=ni?"block":"none";
   // Assembly card: only shown under "Fabrication only"
   var ac=el("assembly-card");
   if(ac) ac.style.display=(svc==="Fabrication only")?"block":"none";
@@ -3638,27 +3688,28 @@ function recalc(fast) {
   var regularFabC=regularBase*(1+cf/100);
   var fabC=regularFabC+outsourceFinal; // combined for display
   var mobSel=el("mob-area");
-  var mobBaseRaw=ni?(mobSel?parseInt(mobSel.value)||3500:3500):0;
+  var mobRegionCost=ni?(mobSel?parseInt(mobSel.value)||3500:3500):0;
+  // Planner exports: transportation + accommodation from the mobility planner
+  var mobPlanner=ni?((qMobTransport?qMobTransport.total:0)+(qMobAccom?qMobAccom.total:0)):0;
+  var mobBaseRaw=mobRegionCost+mobPlanner;
   // Site visit: add to mob or treat as separate
   var svCost=getSiteVisitCost();
   var svSep=qSiteVisit.enabled&&qSiteVisit.chargeMode==='separate';
   var mobBase=mobBaseRaw+(qSiteVisit.enabled&&!svSep?svCost:0);
   var mobC=mobBase*(1+cm/100);
-  var instRate=aCF.installCostPerUnit||CF.installCostPerUnit||1200;
   var assmRate=aCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850;
   var mobZoneIdx=ni&&mobSel?mobSel.selectedIndex:0;
   var qaqcBase=ni?calcQAQCCost(mobZoneIdx):0;
-  // Installation cost: use workers×days×dailyRate if both set, else per-unit rate
-  var instLaborCost = 0;
-  if (ni) {
-    var iWorkers = qInstWorkers > 0 ? qInstWorkers : (CF.laborCount||4);
-    var iDays    = qInstDays   > 0 ? qInstDays   : Math.ceil(totU / (CF.capacityPerDay||3));
-    var iRate    = CF.laborCostPerDay || 800;
-    instLaborCost = iWorkers * iDays * iRate;
-  }
+  // Installation cost: per-unit price from the Installation cost breakdown
+  // (Settings → Cost Breakdown → Installation) × carcass units, by region
+  var instUnitPrice = ni ? instPriceUnitFor(qInstRegion) : 0;
+  var instLaborCost = ni ? instUnitPrice * totU : 0;
   var instBase=ni?(instLaborCost+qaqcBase):0;
-  // Update display
+  // Update displays
   var icd=el('inst-cost-disp'); if(icd) icd.textContent=ni?fmtMoney(instBase):'—';
+  var iud=el('inst-unit-disp'); if(iud) iud.textContent=ni?fmtMoney(instUnitPrice):'—';
+  var ind=el('inst-units-disp'); if(ind) ind.textContent=ni?(totU+' unit'+(totU===1?'':'s')):'—';
+  renderMobPlannerLines(ni,mobRegionCost,mobBaseRaw);
   var assmCarcass=ni?totU:(qAssembly.carcassCount>0?qAssembly.carcassCount:totU);
   var assmBase=na?assmRate*assmCarcass:0;
   var instC=(instBase+assmBase)*(1+ci/100);
@@ -3701,7 +3752,8 @@ function recalc(fast) {
     }
   }
 
-  if(el("mob-disp")) el("mob-disp").textContent=fmtMoney(mobBaseRaw);
+  if(el("mob-disp")) el("mob-disp").textContent=fmtMoney(mobRegionCost);
+  if(el("mob-total-q-disp")) el("mob-total-q-disp").textContent=fmtMoney(mobBaseRaw);
   // Live-update mat/hw/svc amounts in form (avoids re-render so focused inputs keep focus)
   if(qFabMode==='services'){
     for(var _a=0;_a<qAreas.length;_a++){
@@ -3822,7 +3874,7 @@ function recalc(fast) {
     }
     if(ni||na){
       var miSvcNote='';
-      if(ni) miSvcNote=totU+' unit'+(totU!==1?'s':'')+' × '+fmtMoney(instRate);
+      if(ni) miSvcNote=totU+' unit'+(totU!==1?'s':'')+' × '+fmtMoney(instUnitPrice);
       if(na) miSvcNote+=(miSvcNote?', ':'')+assmCarcass+' assm × '+fmtMoney(assmRate);
       var miSvcInclNote=(!svSep&&qSiteVisit.enabled&&ni)?' <span style="font-size:11px;color:var(--text2)">(incl. site visit)</span>':'';
       lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)">'
@@ -8546,7 +8598,10 @@ function captureQuotationSnapshot(){
     outMarkup:qOutMarkup,outContingency:qOutContingency,outBuffer:qOutBuffer,
     vatApproved:qVatApproved,discApproved:qDiscApproved,discPct:qDiscPct,premApproved:qPremApproved,
     locked:qLocked,saved:qSaved,sentStatus:qSentStatus,
-    instWorkers:qInstWorkers,instDays:qInstDays
+    instWorkers:qInstWorkers,instDays:qInstDays,
+    instRegion:qInstRegion,
+    mobTransport:qMobTransport?JSON.parse(JSON.stringify(qMobTransport)):null,
+    mobAccom:qMobAccom?JSON.parse(JSON.stringify(qMobAccom)):null
   };
 }
 function restoreQuotationSnapshot(snap){
@@ -8564,8 +8619,10 @@ function restoreQuotationSnapshot(snap){
   if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';}
   if(snap.initLockedAt!==undefined){qInitLockedAt=snap.initLockedAt||'';qInitApprovedAt=snap.initApprovedAt||'';fqLockedAt=snap.finalLockedAt||'';qClosedAt=snap.closedAt||'';}
   qInstWorkers=snap.instWorkers||0; qInstDays=snap.instDays||0;
-  if(el('inst-workers')) el('inst-workers').value=qInstWorkers;
-  if(el('inst-days')) el('inst-days').value=qInstDays;
+  qInstRegion=snap.instRegion||'metro';
+  qMobTransport=snap.mobTransport?JSON.parse(JSON.stringify(snap.mobTransport)):null;
+  qMobAccom=snap.mobAccom?JSON.parse(JSON.stringify(snap.mobAccom)):null;
+  populateInstRegionSelect();
 }
 function syncOptionUI(){
   // Sync DOM/UI elements after restoring a snapshot
@@ -11878,6 +11935,7 @@ function getFullQuotationState(){
     bondIns:JSON.parse(JSON.stringify(qBondIns)),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     instWorkers:qInstWorkers, instDays:qInstDays,
+    instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom,
     assembly:JSON.parse(JSON.stringify(qAssembly)),
     cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
     designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
@@ -11980,6 +12038,8 @@ function restoreFullQuotationState(state){
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
   qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
   qInstWorkers=state.instWorkers||0; qInstDays=state.instDays||0;
+  qInstRegion=state.instRegion||'metro';
+  qMobTransport=state.mobTransport||null; qMobAccom=state.mobAccom||null;
   qSourceOrderId=state.sourceOrderId||null;
   _updateOrderBadge();
   qAssembly=state.assembly?JSON.parse(JSON.stringify(state.assembly)):{enabled:false,carcassCount:0};
@@ -12009,8 +12069,7 @@ function restoreFullQuotationState(state){
   var d=state.dates||{};
   if(el('fab-date')) el('fab-date').value=d.fab||'';
   if(el('inst-date')) el('inst-date').value=d.inst||'';
-  if(el('inst-workers')) el('inst-workers').value=qInstWorkers||0;
-  if(el('inst-days')) el('inst-days').value=qInstDays||0;
+  populateInstRegionSelect();
   // Restore log
   qLog=JSON.parse(JSON.stringify(state.log||[]));
   var logEl=el('activity-log-body');
@@ -12568,6 +12627,10 @@ function _buildTransportTable(d){
     +'</tr></tfoot>'
     +'</table>'
     +(d.notes?'<p style="font-size:11px;color:var(--text2);margin-top:8px;font-style:italic">📌 '+escHtml(d.notes)+'</p>':'')
+    +'<div style="margin-top:10px;display:flex;justify-content:flex-end;align-items:center;gap:10px">'
+    +(qMobTransport?'<span style="font-size:11px;color:var(--teal)"><i class="ti ti-check"></i> '+fmtMoney(qMobTransport.total)+' on quotation</span>':'')
+    +'<button class="btn btn-primary" onclick="exportTransportToQuotation()" style="font-size:12px;padding:5px 14px"><i class="ti ti-file-export"></i> Export to quotation</button>'
+    +'</div>'
     +'</div>';
 }
 function _buildAccomGrid(d){
@@ -12576,17 +12639,20 @@ function _buildAccomGrid(d){
   var typeLabel={hotel:'🏨 Hotel',airbnb:'🏠 Airbnb',pension:'🏡 Pension House',transient:'🛖 Transient House',room_rental:'🚪 Room Rental',apartelle:'🏢 Apartelle',bnb:'☕ B&B'};
   var typeColor={hotel:'#dbeafe',airbnb:'#fce7f3',pension:'#dcfce7',transient:'#fef9c3',room_rental:'#ede9fe',apartelle:'#e0f2fe',bnb:'#fef3c7'};
   var typeText={hotel:'#1e40af',airbnb:'#9d174d',pension:'#15803d',transient:'#a16207',room_rental:'#6d28d9',apartelle:'#0369a1',bnb:'#b45309'};
+  var selIdx=mobilityState.selectedAccomIdx!=null?mobilityState.selectedAccomIdx:recIdx;
   var cards=opts.map(function(o,i){
     var t=o.type||'hotel';
     var typeBadge='<span style="background:'+(typeColor[t]||'#f0f4fa')+';color:'+(typeText[t]||'var(--navy)')+';border-radius:10px;padding:2px 8px;font-size:10px;font-weight:600">'+(typeLabel[t]||t)+'</span>';
     var stars='';
     if(o.stars>0) for(var s=0;s<5;s++) stars+='<span style="color:'+(s<o.stars?'#f59e0b':'#ddd')+'">★</span>';
     var isRec=(i===recIdx);
+    var isSel=(i===selIdx);
     var budgColor=o.within_budget?'#16a34a':'#dc2626';
     var budgBg=o.within_budget?'#dcfce7':'#fee2e2';
-    return '<div style="background:#fff;border:1.5px solid '+(isRec?'var(--navy)':'#dde')+';border-radius:8px;padding:14px;position:relative'+(isRec?';box-shadow:0 2px 10px rgba(0,0,0,.1)':'')+'">'
-      +(isRec?'<div style="position:absolute;top:-1px;right:12px;background:var(--navy);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:0 0 6px 6px;letter-spacing:.5px">RECOMMENDED</div>':'')
-      +'<div style="margin-bottom:5px">'+typeBadge+'</div>'
+    return '<div onclick="_selectAccomOption('+i+')" style="background:'+(isSel?'#f0faf7':'#fff')+';border:2px solid '+(isSel?'var(--teal)':isRec?'var(--navy)':'#dde')+';border-radius:8px;padding:14px;position:relative;cursor:pointer'+(isSel?';box-shadow:0 2px 10px rgba(15,118,110,.18)':isRec?';box-shadow:0 2px 10px rgba(0,0,0,.1)':'')+'" title="Click to select this option">'
+      +(isSel?'<div style="position:absolute;top:-2px;left:12px;background:var(--teal);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:0 0 6px 6px;letter-spacing:.5px">✓ SELECTED</div>':'')
+      +(isRec?'<div style="position:absolute;top:-2px;right:12px;background:var(--navy);color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:0 0 6px 6px;letter-spacing:.5px">RECOMMENDED</div>':'')
+      +'<div style="margin-bottom:5px;margin-top:'+((isSel||isRec)?'8px':'0')+'">'+typeBadge+'</div>'
       +'<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:3px;padding-right:70px">'+escHtml(o.name||'')+'</div>'
       +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">'+escHtml(o.address||'')+'</div>'
       +'<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px;align-items:center">'
@@ -12610,20 +12676,61 @@ function _buildAccomGrid(d){
       +'<div style="font-size:11px;color:#7c2d12;margin-top:2px">'+(d.tourist_premium_note||'Prices may be 20–60% higher than standard Philippine rates due to tourist demand. Budget accordingly.')+'</div>'
       +'</div></div>';
   }
-  return '<div style="margin-top:14px;border-top:.5px solid var(--border);padding-top:14px">'
+  var out='<div style="margin-top:14px;border-top:.5px solid var(--border);padding-top:14px">'
     +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
     +'<span style="font-size:20px">🏨</span>'
     +'<span style="font-size:13px;font-weight:700;color:var(--navy)">Accommodation Options</span>'
-    +'<span style="font-size:11px;color:var(--text2);margin-left:auto"><i class="ti ti-sparkles" style="color:var(--teal)"></i> AI estimate — verify before booking</span>'
+    +'<span style="font-size:11px;color:var(--text2);margin-left:auto">Click an option to select it · <i class="ti ti-sparkles" style="color:var(--teal)"></i> AI estimate — verify before booking</span>'
     +'</div>'
     +touristBanner
-    +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">'+cards+'</div>'
-    +(d.total_cost?'<div style="margin-top:12px;background:#eef2fa;border-radius:8px;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">'
-      +'<span style="font-size:12px;color:var(--text2)">Best option × '+(d.nights||0)+' nights × '+(d.workers||0)+' workers</span>'
-      +'<span style="font-size:16px;font-weight:700;color:var(--navy)">Total: ₱'+Number(d.total_cost).toLocaleString()+'</span>'
-      +'</div>':'')
-    +(d.notes?'<p style="font-size:11px;color:var(--text2);margin-top:8px;font-style:italic">📌 '+escHtml(d.notes)+'</p>':'')
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px">'+cards+'</div>';
+  // Selected-option export bar
+  var selOpt=opts[selIdx];
+  if(selOpt){
+    var nights=d.nights||mobilityState.nights||1;
+    var workers=d.workers||mobilityState.workers||1;
+    var selTotal=(Number(selOpt.price_per_night)||0)*nights*workers;
+    out+='<div style="margin-top:12px;background:#f0faf7;border:1.5px solid var(--teal);border-radius:8px;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">'
+      +'<span style="font-size:12px;color:var(--text2)"><b style="color:var(--teal)">✓ '+escHtml(selOpt.name||'')+'</b> — ₱'+Number(selOpt.price_per_night||0).toLocaleString()+'/night × '+nights+' nights × '+workers+' workers</span>'
+      +'<span style="display:flex;align-items:center;gap:12px">'
+      +'<span style="font-size:16px;font-weight:700;color:var(--navy)">'+fmtMoney(selTotal)+'</span>'
+      +(qMobAccom?'<span style="font-size:11px;color:var(--teal)"><i class="ti ti-check"></i> '+fmtMoney(qMobAccom.total)+' on quotation</span>':'')
+      +'<button class="btn btn-primary" onclick="exportAccomToQuotation()" style="font-size:12px;padding:5px 14px"><i class="ti ti-file-export"></i> Export to quotation</button>'
+      +'</span></div>';
+  }
+  out+=(d.notes?'<p style="font-size:11px;color:var(--text2);margin-top:8px;font-style:italic">📌 '+escHtml(d.notes)+'</p>':'')
     +'</div>';
+  return out;
+}
+// ── Planner → quotation exports ───────────────────────────────────────────
+function _selectAccomOption(i){
+  mobilityState.selectedAccomIdx=i;
+  renderProductionPage();
+}
+function exportTransportToQuotation(){
+  var r=mobilityState.transportResult;
+  if(!r||!r.data){showToast('Run the transportation search first.');return;}
+  var total=Number(r.data.grand_total)||0;
+  var modeLabel={land:'Land',air:'Air',both:'Land + Air',ferry:'Ferry'};
+  qMobTransport={label:modeLabel[r.data.mode]||'Transport',total:total};
+  recalc(); renderProductionPage();
+  logActivity('Transportation '+fmtMoney(total)+' exported from mobility planner to mobilization');
+  showToast('🚗 Transportation '+fmtMoney(total)+' added to quotation mobilization ✓');
+}
+function exportAccomToQuotation(){
+  var r=mobilityState.accumResult;
+  if(!r||!r.data||!r.data.options||!r.data.options.length){showToast('Run the accommodation search first.');return;}
+  var d=r.data;
+  var idx=mobilityState.selectedAccomIdx!=null?mobilityState.selectedAccomIdx:(typeof d.recommended_index==='number'?d.recommended_index:0);
+  var o=d.options[idx];
+  if(!o){showToast('Click an accommodation option to select it first.');return;}
+  var nights=d.nights||mobilityState.nights||1;
+  var workers=d.workers||mobilityState.workers||1;
+  var total=(Number(o.price_per_night)||0)*nights*workers;
+  qMobAccom={label:(o.name||'Accommodation')+' · '+nights+'n × '+workers+'w',total:total};
+  recalc(); renderProductionPage();
+  logActivity('Accommodation "'+(o.name||'')+'" '+fmtMoney(total)+' exported from mobility planner to mobilization');
+  showToast('🏨 Accommodation '+fmtMoney(total)+' added to quotation mobilization ✓');
 }
 function _mobCallClaude(prompt, callback){
   fetch('https://api.anthropic.com/v1/messages',{
@@ -12710,7 +12817,7 @@ function computeAccommodation(){
     var w=+(el('mob-workers')?el('mob-workers').value:mobilityState.workers)||1;
     var n=+(el('mob-nights')?el('mob-nights').value:mobilityState.nights)||1;
     var bgt=+(el('mob-budget')?el('mob-budget').value:mobilityState.budgetPerNight)||1500;
-    mobilityState.computingAccom=true; mobilityState.accumResult=null;
+    mobilityState.computingAccom=true; mobilityState.accumResult=null; mobilityState.selectedAccomIdx=null;
     renderProductionPage();
     setTimeout(function(){
       var rec=Math.round(bgt*0.9);
@@ -12741,7 +12848,7 @@ function computeAccommodation(){
   mobilityState.minStars=+(el('mob-stars')?el('mob-stars').value:mobilityState.minStars)||2;
   mobilityState.maxDistKm=+(el('mob-dist')?el('mob-dist').value:mobilityState.maxDistKm)||5;
   mobilityState.foodPref=el('mob-food')?el('mob-food').value:mobilityState.foodPref;
-  mobilityState.computingAccom=true; mobilityState.accumResult=null;
+  mobilityState.computingAccom=true; mobilityState.accumResult=null; mobilityState.selectedAccomIdx=null;
   renderProductionPage();
   var foodLabel={any:'No preference',breakfast:'Free breakfast preferred',restaurants:'Near restaurants/eateries',full:'Full board (breakfast + dinner)'};
   var prompt='You are an accommodation advisor for a modular furniture installation team in the Philippines.\n'
