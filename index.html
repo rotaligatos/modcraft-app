@@ -6803,15 +6803,57 @@ function updateAppLogo() {
     svg.style.display="inline";
   }
 }
+// Downscales a logo to fit 480×160 and ≤45k chars so it fits one Sheets cell
+function _shrinkLogoDataUrl(dataUrl, cb){
+  var img=new Image();
+  img.onload=function(){
+    var w=img.width||1, h=img.height||1;
+    var scale=Math.min(1,480/w,160/h);
+    function encode(s){
+      var c=document.createElement('canvas');
+      c.width=Math.max(1,Math.round(w*s)); c.height=Math.max(1,Math.round(h*s));
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      var out=c.toDataURL('image/png');
+      if(out.length>45000){
+        // PNG too big — JPEG on white background (drops transparency, much smaller)
+        var c2=document.createElement('canvas'); c2.width=c.width; c2.height=c.height;
+        var x2=c2.getContext('2d'); x2.fillStyle='#fff'; x2.fillRect(0,0,c2.width,c2.height);
+        x2.drawImage(img,0,0,c2.width,c2.height);
+        out=c2.toDataURL('image/jpeg',0.85);
+      }
+      return out;
+    }
+    var out=encode(scale), tries=0;
+    while(out.length>45000&&tries<3){scale*=0.7;out=encode(scale);tries++;}
+    cb(out);
+  };
+  img.onerror=function(){cb(null);};
+  img.src=dataUrl;
+}
+// Upserts a LOGO_ row in the Settings sheet (empty val = logo removed)
+function gSaveLogoRow(key,val,okMsg){
+  if(!gToken){showToast('Sign in to save the logo.');return;}
+  var row=[key,val||'',new Date().toISOString()];
+  sheetsGet('Settings!A:A').then(function(d){
+    var vals=(d&&d.values)||[]; var idx=-1;
+    for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
+    return idx>0?sheetsUpdate('Settings!A'+idx+':C'+idx,[row]):sheetsAppend('Settings!A:C',[row]);
+  }).then(function(){showToast(okMsg||'Logo saved to database ✓');})
+    .catch(function(e){console.warn('Logo save failed',e);showToast('Logo save failed — check connection.');});
+}
 function uploadAppLogo() {
   var inp=document.createElement("input"); inp.type="file"; inp.accept="image/*";
   inp.onchange=function(e){
     var f=e.target.files[0]; if(!f) return;
     var r=new FileReader();
     r.onload=function(ev){
-      appLogoData=ev.target.result;
-      updateAppLogo();
-      renderLogoUploadCard();
+      _shrinkLogoDataUrl(ev.target.result,function(small){
+        if(!small){showToast('Could not read that image — try a PNG or JPG.');return;}
+        appLogoData=small;
+        updateAppLogo();
+        renderLogoUploadCard();
+        gSaveLogoRow('LOGO_APP',small);
+      });
     };
     r.readAsDataURL(f);
   };
@@ -6821,6 +6863,7 @@ function resetAppLogo() {
   appLogoData=null;
   updateAppLogo();
   renderLogoUploadCard();
+  gSaveLogoRow('LOGO_APP','','Logo removed ✓');
 }
 function uploadCompanyLogo(idx) {
   var coName=COMPANIES[idx];
@@ -6828,7 +6871,14 @@ function uploadCompanyLogo(idx) {
   inp.onchange=function(e){
     var f=e.target.files[0]; if(!f) return;
     var r=new FileReader();
-    r.onload=function(ev){ companyLogos[coName]=ev.target.result; renderLogoUploadCard(); };
+    r.onload=function(ev){
+      _shrinkLogoDataUrl(ev.target.result,function(small){
+        if(!small){showToast('Could not read that image — try a PNG or JPG.');return;}
+        companyLogos[coName]=small;
+        renderLogoUploadCard();
+        gSaveLogoRow('LOGO_CO_'+coName,small);
+      });
+    };
     r.readAsDataURL(f);
   };
   inp.click();
@@ -6837,6 +6887,7 @@ function resetCompanyLogo(idx) {
   var coName=COMPANIES[idx];
   delete companyLogos[coName];
   renderLogoUploadCard();
+  gSaveLogoRow('LOGO_CO_'+coName,'','Logo removed ✓');
 }
 function renderLogoUploadCard() {
   var body=el("logo-upload-body"); if(!body) return;
@@ -11625,11 +11676,16 @@ function gLoadAppSettings(callback){
   sheetsGet('Settings!A:B').then(function(d){
     if(d.error||!d.values){if(callback)callback();return;}
     for(var i=1;i<d.values.length;i++){
-      if(d.values[i][0]==='CONFIG'&&d.values[i][1]){
-        try{_applyAppSettings(JSON.parse(d.values[i][1]));}catch(e){console.warn('Bad settings JSON',e);}
-        break;
+      var k=d.values[i][0]||'', v=d.values[i][1];
+      if(k==='CONFIG'&&v){
+        try{_applyAppSettings(JSON.parse(v));}catch(e){console.warn('Bad settings JSON',e);}
+      } else if(k==='LOGO_APP'){
+        appLogoData=v||null;
+      } else if(k.indexOf('LOGO_CO_')===0){
+        if(v) companyLogos[k.substring(8)]=v; else delete companyLogos[k.substring(8)];
       }
     }
+    updateAppLogo();
     if(callback)callback();
   }).catch(function(){if(callback)callback();});
 }
