@@ -4401,27 +4401,95 @@ function _pdfOpts(filename){
   return {margin:[10,10,10,10],filename:filename,image:{type:'jpeg',quality:0.97},
     html2canvas:_pdfHtml2canvasOpts(),jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}};
 }
-// Trigger print for email attachment — reuses the same working Print/Save PDF logic,
-// then calls onDone so the email client opens right after.
+// ── PDF capture v2 — SnapDOM (SVG foreignObject) with html2canvas fallback ──
+// html2canvas renders blank for this app's print content; SnapDOM serializes the
+// live DOM (all styles inline in _buildPrintBody) so off-screen capture works.
+var SNAPDOM_URL='https://cdn.jsdelivr.net/npm/@zumer/snapdom@1/dist/snapdom.min.js';
+var _snapdomCbs=null;
+function _loadSnapdom(cb){
+  if(window.snapdom){cb(true);return;}
+  if(_snapdomCbs){_snapdomCbs.push(cb);return;}
+  _snapdomCbs=[cb];
+  var s=document.createElement('script');
+  s.src=SNAPDOM_URL;
+  s.onload=function(){var q=_snapdomCbs;_snapdomCbs=null;(q||[]).forEach(function(f){f(!!window.snapdom);});};
+  s.onerror=function(){var q=_snapdomCbs;_snapdomCbs=null;(q||[]).forEach(function(f){f(false);});};
+  document.head.appendChild(s);
+}
+function _canvasLooksBlank(canvas){
+  try{
+    var ctx=canvas.getContext('2d'); var w=canvas.width,h=canvas.height;
+    if(!w||!h) return true;
+    for(var i=0;i<12;i++){
+      var y=Math.floor(h*(i+0.5)/12);
+      var row=ctx.getImageData(0,y,w,1).data;
+      for(var x=0;x<row.length;x+=64){
+        if(row[x+3]>10&&(row[x]<245||row[x+1]<245||row[x+2]<245)) return false;
+      }
+    }
+    return true;
+  }catch(e){return false;} // tainted canvas — can't sample; let the PDF step decide
+}
+function _capturePrintCanvas(bodyHtml, cb){
+  // Renders bodyHtml in an off-screen wrapper, captures to canvas; cb(canvas|null)
+  var wrap=document.createElement('div');
+  wrap.style.cssText='position:fixed;left:-9999px;top:0;width:794px;background:#fff;padding:10px;font-family:Arial,sans-serif;color:#1a1a1a';
+  wrap.innerHTML=bodyHtml;
+  document.body.appendChild(wrap);
+  var finished=false;
+  function done(canvas){
+    if(finished) return; finished=true;
+    if(wrap.parentNode) wrap.parentNode.removeChild(wrap);
+    cb(canvas&&!_canvasLooksBlank(canvas)?canvas:null);
+  }
+  function fallbackH2C(){
+    if(finished||typeof html2canvas==='undefined'){done(null);return;}
+    try{
+      html2canvas(wrap,{scale:2,useCORS:true,allowTaint:true,logging:false,scrollX:0,scrollY:0})
+        .then(done).catch(function(){done(null);});
+    }catch(e){done(null);}
+  }
+  _loadSnapdom(function(ok){
+    if(!ok){fallbackH2C();return;}
+    try{
+      window.snapdom.toCanvas(wrap,{scale:2,backgroundColor:'#ffffff'}).then(function(canvas){
+        if(canvas&&!_canvasLooksBlank(canvas)) done(canvas); else fallbackH2C();
+      }).catch(fallbackH2C);
+    }catch(e){fallbackH2C();}
+  });
+}
+function _canvasToPdfBlob(canvas, filename, cb){
+  // Paginates a tall canvas into an A4 PDF blob via html2pdf's slicer; cb(blob|null)
+  if(typeof html2pdf==='undefined'){cb(null);return;}
+  html2pdf().set(_pdfOpts(filename)).from(canvas,'canvas').toPdf().get('pdf').then(function(pdf){
+    cb(new Blob([pdf.output('arraybuffer')],{type:'application/pdf'}));
+  }).catch(function(){cb(null);});
+}
+// Builds a real PDF blob for email attachment; falls back to the print dialog
+// (the pre-SnapDOM workaround) only when capture fails.
 function _buildPdfBlob(onDone){
-  printQuotation(''); // same as clicking Print/Save PDF button — already iframe-safe
-  onDone(null);
+  var bodyHtml=_buildPrintBody();
+  _capturePrintCanvas(bodyHtml,function(canvas){
+    if(!canvas){printQuotation('');onDone(null);return;}
+    _canvasToPdfBlob(canvas,getPdfFilename(''),function(blob){
+      if(!blob) printQuotation('');
+      onDone(blob);
+    });
+  });
 }
 function generatePdfForOption(optId, callback){
   if(typeof html2pdf==='undefined'){if(callback)callback(null,null);return;}
   var prevId=qActiveOptionId;
   if(optId&&optId!==qActiveOptionId) switchToOption(optId);
-  html('print-body',_buildPrintBody());
-  var body=el('print-body');
+  var bodyHtml=_buildPrintBody();
   var opt=qOptionsList.find(function(o){return o.id===optId;})||{};
   var filename=getPdfFilename(opt.label||('Option '+optId));
-  html2pdf().set(_pdfOpts(filename)).from(body).toPdf().get('pdf').then(function(pdf){
-    var blob=new Blob([pdf.output('arraybuffer')],{type:'application/pdf'});
-    if(prevId&&prevId!==optId) switchToOption(prevId);
-    if(callback) callback(blob, filename);
-  }).catch(function(){
-    if(prevId&&prevId!==optId) switchToOption(prevId);
-    if(callback) callback(null,null);
+  if(prevId&&prevId!==optId) switchToOption(prevId);
+  _capturePrintCanvas(bodyHtml,function(canvas){
+    if(!canvas){if(callback)callback(null,null);return;}
+    _canvasToPdfBlob(canvas,filename,function(blob){
+      if(callback) callback(blob, filename+'.pdf');
+    });
   });
 }
 function downloadBlob(blob, filename){
@@ -8817,8 +8885,10 @@ function confirmSend(via) {
     _buildPdfBlob(function(blob){
       if(blob){
         downloadBlob(blob,pfn+'.pdf');
+        if(t2){t2.innerHTML='<i class="ti ti-circle-check" style="font-size:16px;color:var(--teal);flex-shrink:0"></i><span><b>PDF downloaded</b><br><span style="font-size:12px;color:var(--text2)">Attach it to the email opening now</span></span>';t2._timer=setTimeout(function(){t2.style.display='none';},10000);}
+      } else {
+        if(t2){t2.innerHTML='<i class="ti ti-circle-check" style="font-size:16px;color:var(--teal);flex-shrink:0"></i><span><b>Save the PDF from the print window</b><br><span style="font-size:12px;color:var(--text2)">Then attach it to the email opening now</span></span>';t2._timer=setTimeout(function(){t2.style.display='none';},10000);}
       }
-      if(t2){t2.innerHTML='<i class="ti ti-circle-check" style="font-size:16px;color:var(--teal);flex-shrink:0"></i><span><b>Save the PDF from the print window</b><br><span style="font-size:12px;color:var(--text2)">Then attach it to the email opening now</span></span>';t2._timer=setTimeout(function(){t2.style.display='none';},10000);}
       window.open(gmailUrl,'_blank');
     });
   } else if(via==="messaging"){
