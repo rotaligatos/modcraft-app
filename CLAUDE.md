@@ -955,12 +955,37 @@ Refine the 4 new types per plant feedback, then either continue wide (corner, ov
 9. **Activity log entry** — `logActivity('Quotation created from Wufoo Order #XXXX — Client Name')` called on export
 
 ### Timestamp timezone fix
-10. **`DateCreated` timezone bug** — Wufoo sends `DateCreated` as UTC with no timezone indicator (e.g. `"2026-06-09 08:00:00"`); browsers treated it as local PHT time, making the received time 8 hours wrong and the elapsed timer off by the same amount
-11. **Fix in GAS script** — `rawDate.replace(' ','T')+'Z'` normalizes to proper UTC ISO string before storing; browsers now parse and display correctly in PHT
+10. **`DateCreated` is UTC-7 (US Pacific Daylight Time)** — Wufoo stores `DateCreated` on their US servers in UTC-7; confirmed by comparing GAS webhook receipt time (true UTC) vs `DateCreated` — consistently 7 hours apart
+11. **Fix in GAS script** — `rawDate.replace(' ','T')+'-07:00'` parses as UTC-7; then `Utilities.formatDate(dt, 'Asia/Manila', ...)` converts to PHT and stores as `"yyyy-MM-dd'T'HH:mm:ss+08:00"`; orders now show correct Philippine time
 
-### Attachment via Google Drive (PENDING — needs Wufoo API key)
-12. **GAS `_uploadAttachment()` function** — downloads attachment from Wufoo at webhook time using Basic Auth (Wufoo API key), uploads to Team Drive folder, stores Drive URL instead of Wufoo-protected URL; falls back to original URL on failure
-13. **PENDING** — Rommel is a Wufoo sub-user and cannot see API Information; needs account owner/manager to share the Wufoo API key; GAS script is already pasted with placeholder `YOUR-WUFOO-API-KEY-HERE`; once key is obtained: replace placeholder → run `doGet` manually once (Drive OAuth approval) → deploy new version
+### Attachment via Google Drive (COMPLETED)
+12. **GAS `_uploadAttachment()` function** — downloads attachment from Wufoo at webhook time, uploads to Team Drive folder (`1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB`), stores Drive URL instead of Wufoo-protected URL; falls back to original URL on failure
+13. **Wufoo API key obtained** — `FCNJ-5BIO-MQJW-HKKK`; placed in GAS script; `doGet` run manually once for Drive OAuth approval
+14. **Auth fix** — original `_uploadAttachment` sent `Authorization: Basic` header; Wufoo cabinet URLs are **pre-signed Amazon S3 URLs** (auth already embedded in query string); adding a second auth mechanism caused AWS 400 `InvalidArgument` error; fixed by removing the header — fetch the URL directly with no auth header
+15. **Verified working** — `testAttachment()` returns a `drive.google.com` URL; new Wufoo submissions store Drive links instead of Wufoo cabinet URLs
+
+## What was changed on 2026-06-10 (session 2 — Wufoo attachment fix + Mobility planner improvements)
+
+### Wufoo attachment → Google Drive (completed)
+1. **Root cause found** — `_uploadAttachment()` was sending `Authorization: Basic` header to Wufoo cabinet URLs; those URLs are pre-signed Amazon S3 URLs with auth already in the query string; AWS rejects dual-auth with HTTP 400 `InvalidArgument: Only one auth mechanism allowed`
+2. **Fix** — removed the `Authorization` header from `_uploadAttachment()`; fetch the S3 URL directly with no extra headers; it downloads successfully and uploads to Team Drive
+3. **Verified** — `testAttachment()` returns a `drive.google.com` URL; new order submissions automatically store Drive links; existing orders (#8704, #8705) still have old Wufoo URLs (saved before fix — not retroactively updated)
+
+### Wufoo DateCreated timezone (corrected)
+4. **Actual timezone confirmed as UTC-7** (US Pacific Daylight Time) — debug data showed GAS webhook receipt at 07:12Z vs `DateCreated: "2026-06-10 00:12:32"` — exactly 7 hours behind; the `+'Z'` fix treated it as UTC, still wrong
+5. **Correct GAS fix** — `new Date(rawDate.replace(' ','T')+'-07:00')` → `Utilities.formatDate(dt, 'Asia/Manila', ...)+'08:00'`; orders now display correct Philippine time
+
+### Tourist area detection in Accommodation Planner
+6. **AI prompt updated** — `computeAccommodation()` now instructs Claude to detect if destination is a known tourist area in the Philippines (Boracay, Palawan, Siargao, Baguio, Tagaytay, Batangas beach areas, Cebu tourist zones, Vigan, Chocolate Hills, etc.)
+7. **New JSON fields** — `tourist_area: boolean`, `tourist_premium_note: string` added to accommodation response schema
+8. **Orange warning banner** — `_buildAccomGrid()` shows an orange 🏖️ banner above the accommodation cards when `tourist_area: true`; displays the AI's specific note (e.g. *"Boracay peak season — expect 30–50% above standard PH rates"*)
+9. **Context** — tourist destination areas in PH typically have 20–60% higher accommodation and food prices vs non-tourist areas; banner prompts user to budget accordingly
+
+### Mobility planner default origin/destination fix
+10. **Origin not refreshing bug** — `mobilityState.origin` set to `'Philippines'` (fallback) was not in `knownDefaults` array; condition `knownDefaults.indexOf(mobilityState.origin)>=0` always false → origin never refreshed from company even when it should
+11. **Fix** — added `'Philippines'` and `''` to `knownDefaults` so the fallback value is treated as non-custom and always refreshes
+12. **Destination always syncs** — `setProdTab('mobility')` now always overwrites `mobilityState.destination` with `cl-location` value when switching to mobility tab; previously only filled when empty, so switching quotations left stale destination
+13. **Rule confirmed** — WCL and MSSI both use `88 Jennys Ave., Pasig City, Metro Manila`; CWL uses `Tawagan St., Tayud, Consolacion, Cebu`; determined from quotation company via `getCompanyName()`, not user's company
 
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
@@ -973,7 +998,7 @@ Refine the 4 new types per plant feedback, then either continue wide (corner, ov
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
 - **`SERVICES.price` deferred** — price field kept in Services tab for now; it is actively used by `getAreaSubtotal()` for services-mode cost calculation; editable in Cost Breakdown card header; full redesign deferred to Phase 3
 - **Semantic duplicates in Price DB** — "Clean duplicates" button only catches exact-name matches; user must manually standardize semantically similar service names using the amber similarity highlight in Settings → Services tab
-- **Wufoo attachment via Drive (PENDING)** — GAS script has `_uploadAttachment()` ready with placeholder `YOUR-WUFOO-API-KEY-HERE`; Rommel needs to get Wufoo API key from account owner/manager → replace placeholder → run `doGet` manually once (Drive OAuth) → deploy new version; until then attachments still require Wufoo login to open
+- **Wufoo attachment via Drive (DONE ✓)** — API key `FCNJ-5BIO-MQJW-HKKK` deployed; Drive OAuth approved; new submissions automatically upload to Team Drive; fetch URL directly (no auth header — S3 pre-signed URL)
 - **Phase 2 Cost Breakdown — output/shift not yet set** — most services still have `outputPerShift=0`; until this is filled in Settings → Services, monthly capacity = 0 and Op Cost / Gross Margin show `—` in Cost Breakdown
 - **Phase 3 onward** — capacity wired to schedule load checks (Phase 3), PPIC page (Phase 4), profitability reports (Phase 5) all pending
 
