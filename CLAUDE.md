@@ -1224,6 +1224,60 @@ var logisticsDb = {         // loaded at login (like dbServices/dbMaterials)
 6. Remove min-max placeholders from rate inputs in `renderMobCalc()`
 7. Save `LOGISTICS_DB_ID` to Settings sheet CONFIG row
 
+## What was changed on 2026-06-13 (session — PPIC tab + Installation cost overhaul)
+
+### Component 1 — PPIC Page (nav between Orders and Clients)
+1. **`ppicSettings` global** — `{installation:{teamsPerDay, cabPerTeamDay, workdaysPerMonth}}`; saved/restored via `_collectAppSettings` / `_applyAppSettings`
+2. **`page-ppic` HTML** — new page with sticky header; "Cost Breakdown Settings" shortcut button
+3. **`_ppicCapacity()`** — computes `teamsPerDay × cabPerTeamDay`; used by `_instCalc()` instead of the old manual `INST_COST.capacityPerDay`
+4. **`renderPpicPage()`** — 3 cards: Installation Capacity inputs (teams/day, cabs/team/day, workdays/month) with live capacity display + Metro/Outside Metro rate banner; Complexity Factors per CARCASS_NAME (multiplier inputs, live effective rate display); Rate Preview table (all 13 types × metro/outside)
+5. **`instPriceUnitForType(region, cabinetType)`** — new helper; `instPriceUnitFor(region) × complexity[type]`
+6. **`canNavigate('ppic')`** — Admin / Director / Manager / Supervisor only; `applyNavAccess()` shows/hides button
+
+### Component 2 — Settings → Cost Breakdown → Installation (enhanced)
+7. **`INST_COST` extended** — added `siteFees[]`, `instQaqc[]`, `complexity{}` arrays saved with `instCost` in Settings
+8. **`_instCalc()` updated** — includes `siteFeesT` and `instQaqcT` in subtotal; returns `cap` from `_ppicCapacity()`
+9. **New Site & Access Fees card** — elevator/stair fee, parking/access permit, after-hours surcharge (editable rows)
+10. **New Installation QA/QC card** — punch list & defect rect., final QA inspection, site cleaning, as-built documentation, snag visit
+11. **Capacity display** — replaced manual input with read-only PPIC computed value + "PPIC →" link
+12. **Summary table** — added Site & Access Fees and Installation QA/QC rows
+
+### Component 3 — Mobility Planner accommodation split export
+13. **`qInstPlanner` global** — `{workNightAccom, perDiem, touristPremium, touristNote, isTourist, detail}`; saved/restored with quotation state + option snapshots; reset on `initQuotation()`
+14. **`qInstTouristPrem` global** — boolean toggle for tourist premium; saved with quotation state
+15. **`mobilityState.accomTravelNights`** — tracks how many nights are transit (→ mob); default 1
+16. **`exportAccomToQuotation()` rewritten** — opens `ov-accom-split` modal: travel nights input (→ `qMobAccom`), working nights display (→ `qInstPlanner`), tourist premium checkbox (if `tourist_area` detected), preview panel; confirm calls `_doAccomSplitExport()`
+17. **`_accomSplitRefresh()`** — live preview of mob vs install split counts
+18. **`_doAccomSplitExport(...)`** — splits accommodation: mob portion → `qMobAccom`, working-night accom + per diem (from `INST_COST.allowance`) + tourist premium → `qInstPlanner`; calls `recalc()` + logs activity
+
+### Component 4 — Quotation installation card with line items
+19. **`inst-card` HTML updated** — added PPIC button in header, `#inst-lines-wrap` div for line items
+20. **`renderInstCardLines(ni, laborCost, unitPrice, units, qaqcAmt, workAccom, perDiem, touristPrem)`** — renders line items: Labor (N × rate), QA/QC supervision, Working-night accommodation (removable), Per diem on site (removable), Tourist area premium (removable); shows "→ Mobility Planner" hint when no planner data
+21. **`recalc()` updated** — `instBase` now includes `instPlannerWorkAccom + instPlannerPerDiem + instPlannerTourist` from `qInstPlanner`; calls `renderInstCardLines()` after computing
+
+### New globals added (2026-06-13)
+```javascript
+ppicSettings      // {installation:{teamsPerDay, cabPerTeamDay, workdaysPerMonth}}
+qInstPlanner      // {workNightAccom, perDiem, touristPremium, touristNote, isTourist, detail}
+qInstTouristPrem  // boolean — tourist area premium toggle on inst card
+// INST_COST additions:
+//   siteFees    — [{label, cost}] — Site & Access Fees
+//   instQaqc    — [{label, cost}] — Installation QA/QC activities
+//   complexity  — {cabinetName: factor} — per-type installation multiplier
+// mobilityState additions:
+//   accomTravelNights — number of transit nights going to mobilization (default 1)
+```
+
+### New functions added (2026-06-13)
+```javascript
+_ppicCapacity()                        // teamsPerDay × cabPerTeamDay; fallback to INST_COST.capacityPerDay
+instPriceUnitForType(region,type)      // instPriceUnitFor(region) × complexity factor
+renderPpicPage()                       // renders full PPIC page content
+renderInstCardLines(ni,labor,...)      // renders inst-card line items from INST_COST + qInstPlanner
+_accomSplitRefresh()                   // live preview of travel/working night split in modal
+_doAccomSplitExport(nights,workers,...) // commits the accommodation split to qMobAccom + qInstPlanner
+```
+
 ## Known remaining areas to watch
 - **PENDING — Embed fullscreen hint (deferred 2026-06-12)** — fullscreen works on GitHub Pages but is impossible inside the Google Sites iframe (no `allowfullscreen` attribute; Google controls it). Current behavior: prompt suppressed in embed; topbar ⛶ opens the app in its own tab. TO BUILD LATER: a small one-time hint after login inside the embed ("Want fullscreen? Open the app in its own tab →") so users discover the ⛶ route
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
