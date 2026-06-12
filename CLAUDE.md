@@ -1035,6 +1035,148 @@ Refine the 4 new types per plant feedback, then either continue wide (corner, ov
 - **Per-zone cost items each have Min/Max + Basis** (per trip / per day / per shipment / per person / per person/night). Full line-item tables for all 8 zones are in the attached xlsx (sheets 3, 7).
 - **Quoting rules:** mobilization is one-time **per trip** (multi-trip projects charge per trip); freight insurance required for Z3/Z4/inter-island; admin never added to mobilization.
 
+## What was changed on 2026-06-12 (session 2 — Mob calc Pass 2 + planner nav + overlap detection)
+
+### Mobilization calculator Pass 1 refinements (commit `aa641f9`)
+1. **Zone auto-adjusts on calculator open** — re-suggests from company (zone set) + project location on every open; `qMobCalc._zoneManual=true` locks the user's manual override; if zone set changes (company changes), manual flag resets
+2. **"Days on site" removed** — installation concept, not mobilization; driver costs are per delivery trip only
+3. **Driver per diem + Driver meals/food** — added to land-delivery zones (Z1, Z2, Cebu A/B/C) with basis `trip`; freight zones (Visayas/Mindanao/inter-island) have no company driver (cargo goes by sea/air carrier)
+4. **Per-line client-handled exclusion checkbox** — every goods line has an include/exclude toggle; excluded lines grey out + strike-through + drop from total and cost report; `line.excluded` flag
+5. **Packing & crating `noAi:true`** — flagged "set by you"; AI skip these in Pass 2; all lines still editable
+6. **Margin summary gated to Manager/Director/Admin** — `_canSeeMobMargins()` = `canViewCostReport()`; Encoders/Staff see cost lines + final Total only; no subtotal/contingency/buffer/markup rows shown to lower roles; applied to both Stage 1, Stage 2, and cost report
+
+### Mobilization calculator Pass 2 — AI auto-fill (commit `562d9a8`)
+7. **`computeMobCalcAI()`** — new function; calls Claude Sonnet 4.6 via `_mobCallClaude()`; estimates every goods/incidentals line (except `noAi` lines) for the specific project site using zone + destination + workers + trips; mock mode fills policy midpoints when `mobAiEnabled=false`; sets `qMobCalc.aiAssisted=true`
+8. **Prompt — RAW COSTS only** — explicitly instructs AI not to add markup/contingency/buffer; scoped to goods movement + incidentals only (not installer travel)
+9. **AI badge on lines** — each AI-estimated line shows a teal "✨ AI" badge; hover shows the AI's note (e.g. "L300 van 1 round trip, NCR rate")
+10. **AI Estimate button in calculator footer** — left side of footer; shows "AI Estimate" when AI on, "Mock estimate" when off; loading spinner while computing; "No API key" hint when key missing
+11. **"Open Mobility Planner →" link** — appears in both the calculator modal (planner section header) and the mob card bar (both states); closes the calc modal then navigates to Designers Support → Mobility tab
+12. **`_mobCalcAutoSyncPlannerExclusions()`** — new function; runs after transport AI results arrive; auto-unticks any planner item whose label/detail contains goods-movement keywords (cargo, truck, freight, port, crating, forwarding, trucking, balikbayan, sea/air freight); sets `it._autoExcluded=true` for badge display
+13. **`_buildTransportTable()` improvements** — when `qMobCalc` is active: shows a navy info banner explaining the planner/calculator transport split; auto-excluded items show amber "⬆ in calc" badge and are pre-unticked
+14. **Min-max policy hints removed from AI prompt** — AI no longer anchored to a policy range; estimates based on actual conditions; min/max kept in zone data as mock-mode fallback only (not shown to user)
+
+### Key new globals (2026-06-12 session 2)
+```javascript
+// On each qMobCalc.lines[i]:
+//   aiNote        — AI's explanation for its estimate (shown on hover of ✨ AI badge)
+// On qMobCalc:
+//   aiZoneNote    — AI's zone confirmation note
+//   aiNotes       — AI's general route notes
+//   _aiRunning    — boolean: true while computeMobCalcAI() is in progress
+```
+
+### Key new functions (2026-06-12 session 2)
+```javascript
+computeMobCalcAI()                       // Pass 2 AI auto-fill: estimates all non-noAi mob calc lines
+_mobCalcAutoSyncPlannerExclusions()      // auto-unticks goods-movement items in planner results when calc is active
+```
+
+---
+
+## Logistics DB — SPEC AGREED (2026-06-12), READY TO BUILD
+
+### Strategic rationale
+Weight-based freight estimation is the core accuracy gap in the mobilization calculator. Every Philippine carrier (2GO, LBC Cargo, RoRo lines) prices by **weight (kg) + volume (CBM)**. Without these inputs the AI guesses; with them it computes. Additionally, this data will be the foundation for Phase 4 (PPIC page) — logistics team needs a dedicated reference database separate from quotation data and pricing data.
+
+**Decision: Separate Google Sheet** — not a tab in the main DB or Price DB. Logistics team + PPIC access it independently. User creates the sheet, pastes the ID in Settings → Logistics DB tab (same pattern as Price DB).
+
+### Logistics DB Google Sheet structure
+| Tab | Columns | Purpose |
+|---|---|---|
+| **Materials** | Name · Board size (4x8 / 6x8 / custom) · Length mm · Width mm · Thickness mm · Weight/sheet kg · CBM/sheet (auto-computed) · Notes | Weight lookup by board type; expandable — any material/thickness/size |
+| **Trucks** | Type name · Max weight kg · Max CBM · Body type (open/closed) · Notes | Truck selection: app picks smallest truck that fits; AI uses for rental estimate |
+| **Carriers** *(future Phase 4)* | Name · Route · Mode (land/sea/air) · Rate/kg · Min charge · Notes | Actual carrier rate cards for PPIC |
+| **Delivery Log** *(future Phase 4)* | Serial · Date · Carrier · Weight kg · CBM · Cost · Status | Per-delivery tracking |
+
+### Materials tab — expandable design
+- **No fixed rows** — user adds any material, any thickness, any board size
+- **Auto-computed CBM/sheet** = (Length mm × Width mm × Thickness mm) ÷ 1,000,000,000 (in m³)
+- **Default rows pre-filled by "Initialize"** button (user can add more):
+
+| Material | Size | L mm | W mm | T mm | Weight/sheet |
+|---|---|---|---|---|---|
+| MDF | 4×8 ft | 1220 | 2440 | 18 | 40 kg |
+| MDF | 4×8 ft | 1220 | 2440 | 25 | 55 kg |
+| MDF | 6×8 ft | 1830 | 2440 | 18 | 62 kg |
+| Plywood | 4×8 ft | 1220 | 2440 | 18 | 35 kg |
+| Plywood | 4×8 ft | 1220 | 2440 | 12 | 24 kg |
+| Melamine board | 4×8 ft | 1220 | 2440 | 18 | 40 kg |
+| HMR board | 4×8 ft | 1220 | 2440 | 18 | 42 kg |
+| Compact laminate | 4×8 ft | 1220 | 2440 | 12 | 38 kg |
+| Particle board | 4×8 ft | 1220 | 2440 | 18 | 37 kg |
+
+- **User can add:** any custom material, any thickness (e.g. MDF 9mm, MDF 32mm, Hardwood 25mm)
+- **Matching logic** in `_computeShipmentWeight()`: case-insensitive keyword match on material name from BOM (e.g. "MDF 18mm" → MDF row with T=18); falls back to closest thickness if exact not found
+
+### Trucks tab — default rows
+| Type | Max weight | Max CBM | Body |
+|---|---|---|---|
+| L300 / Multicab | 800 kg | 3 CBM | closed |
+| Closed van (Canter) | 3,000 kg | 12 CBM | closed |
+| 6-wheeler truck | 6,000 kg | 20 CBM | closed |
+| 10-wheeler truck | 15,000 kg | 40 CBM | open/closed |
+
+### Settings → "Logistics DB" sub-tab (new)
+- Sheet ID input + Connect button (verifies access, counts rows in Materials/Trucks tabs)
+- "Initialize with defaults" button — clears + writes default Materials + Trucks rows
+- **Materials table** — inline add/edit/delete; columns: Name, Size dropdown (4x8/6x8/Custom), L mm, W mm, T mm, Weight kg, CBM/sheet (computed live), Notes
+- **Trucks table** — inline add/edit/delete; columns: Type, Max weight kg, Max CBM, Body, Notes
+
+### Weight computation (app-side, before AI call)
+```javascript
+_computeShipmentWeight()   // reads qAreas → BOM → materials[], matches to Logistics DB,
+                           // sums qty × weight/sheet; also computes total CBM
+                           // returns { weightKg, cbm, boards:[], breakdown:[], truckSuggestion }
+_matchMaterial(name)       // case-insensitive keyword + thickness match against logisticsDb.materials
+_suggestTruck(weightKg, cbm) // picks smallest truck from logisticsDb.trucks that fits; notes if multi-truck
+```
+
+### Enhanced AI prompt (with weight data)
+After weight computation, the mob calc AI prompt gains:
+```
+Shipment cargo details:
+- Total weight: ~450 kg
+- Total volume: ~2.1 CBM
+- Boards: 35× MDF 18mm (4x8ft), 12× Plywood 18mm (4x8ft)
+- Suggested truck: Closed van (1 truck sufficient at 450 kg / 2.1 CBM)
+- Origin: 88 Jennys Ave., Pasig City, Metro Manila
+- Destination: Iloilo City, Iloilo (Zone 3 — Visayas; sea route required)
+- Delivery trips: 1
+Estimate: sea freight (2GO / RoRo / LBC), port handling (origin + destination), freight insurance, local truck port→site.
+```
+
+### Option B — carrier quote badge (for Z3/Z4/inter-island lines)
+For sea freight, air freight, port handling, and freight insurance lines in Visayas/Mindanao/inter-island zones, show an amber badge: **"⚠ Formal carrier quote recommended"**. The AI estimate is based on weight/CBM; actual carrier rates vary by season and booking date. Badge appears in the calculator on those specific lines, and on the cost report.
+
+### Globals to add
+```javascript
+var LOGISTICS_DB_ID = '';   // Google Sheet ID for the Logistics DB (saved in Settings sheet CONFIG row)
+var logisticsDb = {         // loaded at login (like dbServices/dbMaterials)
+  materials: [],            // [{ name, boardSize, lengthMm, widthMm, thicknessMm, weightKg, cbm, notes }]
+  trucks: []                // [{ type, maxWeightKg, maxCbm, bodyType, notes }]
+};
+```
+
+### Integration points
+- `computeMobCalcAI()` calls `_computeShipmentWeight()` first; if weight data available, adds cargo section to prompt; if no Logistics DB connected, falls back to current prompt (zone + destination only)
+- `logisticsDb` loaded via `gLoadLogisticsDb(cb)` called after login alongside other DB loads
+- Mob calc cost report snapshot includes `shipmentWeight` and `truckSuggestion` for PPIC reference
+- **Back-compat**: if `LOGISTICS_DB_ID` is empty, weight computation returns null and AI prompt uses zone-only estimation (current behavior)
+
+### Min-max removal (mob calc lines)
+- Remove `placeholder="₱X–Y"` from rate inputs in `renderMobCalc()` — no visible policy range shown
+- Remove min/max from AI prompt so AI isn't anchored to a range
+- Keep `min`/`max` fields in `MOB_ZONES` zone data silently (used only for mock-mode midpoint fill when AI is OFF)
+
+### Build order
+1. Settings → Logistics DB sub-tab (connect + initialize + inline table CRUD)
+2. `gLoadLogisticsDb()` — load on login
+3. `_computeShipmentWeight()` + `_matchMaterial()` + `_suggestTruck()`
+4. Wire into `computeMobCalcAI()` — enhanced prompt when weight data available
+5. Option B carrier quote badges on Z3/Z4/inter-island lines
+6. Remove min-max placeholders from rate inputs in `renderMobCalc()`
+7. Save `LOGISTICS_DB_ID` to Settings sheet CONFIG row
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
 - **Carcass pricing tab** — now persisted ✓
