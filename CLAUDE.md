@@ -1073,6 +1073,53 @@ _mobCalcAutoSyncPlannerExclusions()      // auto-unticks goods-movement items in
 
 ---
 
+## What was changed on 2026-06-12 (session 3 — BOM Report + Fullscreen)
+
+### BOM Report (commits `55a97a5`, `b22d1dd`, `8780fac`)
+1. **`_collectBomData()`** — consolidates all materials + hardware across all three fab modes into `{mode, areas, consMats, consHws, totalWeightKg, totalCbm, truckSuggestion}`:
+   - BOM mode: `bomItems[].materials[]` + `bomItems[].hardware[]` × `bom.qty`
+   - Carcass mode: `items[].type` × qty × `dbTemplates` (or `INIT_TEMPLATES` fallback) filtered by `category==='materials'`/`'hardware'`
+   - Services mode: `matItems[]` + `hwItems[]`
+   - Weight/CBM added per material via `_matchMaterial()` if Logistics DB connected
+2. **`_buildBomHtml(d, optLabel)`** — standalone rendered HTML report with:
+   - Preliminary (Stage 1, amber) vs Final (Stage 2, green) banner based on `fqLocked||fqInitialized`
+   - Navy option badge next to serial when `optLabel` set (e.g. "Option 1")
+   - Price toggle button (`Hide prices / Show prices`) — shows/hides `.pc` columns via JS in saved HTML
+   - Consolidated Materials table + Consolidated Hardware table
+   - Green cargo weight summary block (total kg, CBM, truck suggestion) if Logistics DB matched
+   - Per-area breakdown section when multiple areas have data
+   - Footer with timestamp + user email
+3. **`generateBomReport()`** — resolves `optLabel` from `qActiveOptionId` + `qOptionsList`; opens blob URL in new tab immediately (rendered HTML, printable to PDF); saves to Drive in background as `driveFileName(optLabel ? optLabel+' — BOM' : 'BOM')`
+4. **Option-versioned Drive filenames** — no overwrite between options:
+   - Base quotation: `QT-XXXX-XXXX — Client — BOM.html`
+   - Option 1 active: `QT-XXXX-XXXX — Client — Option 1 — BOM.html`
+5. **Blob URL instead of `webViewLink`** — Drive shows `.html` files as raw source; blob URL opens the rendered report directly; Drive file is kept as a silent backup
+6. **`_computeShipmentWeight()` carcass mode** — new branch reads `dbTemplates` (or `INIT_TEMPLATES` fallback) for material weight when `fabMode==='carcass'`; matches by `t.cabinet===item.type && t.category==='materials'`
+7. **Generate BOM button** — added to Stage 1 toolbar (lock-exempt, next to Preview & Print) and Stage 2 toolbar
+
+### Fullscreen (commits `f9fffda`, `06ffa54`, `e3f2adb`)
+8. **`_fsAvailable()`** — checks `document.fullscreenEnabled` (or webkit variant); returns false inside Google Sites iframe (no `allowfullscreen` on the iframe — Google controls it)
+9. **`_reqFullscreen()`** — tries standard then webkit API; promise rejection surfaced as `showToast()` instead of failing silently
+10. **`toggleFullscreen()`** — enter/exit fullscreen; when blocked in embed, opens app in new tab + shows toast; icon synced via `fullscreenchange` + `webkitfullscreenchange` listeners
+11. **`_showFullscreenPrompt()`** — post-login modal "Yes, go fullscreen / Not now"; prompt suppressed inside embed where fullscreen can't work; `_fsPromptYes()` is a named function so rejection surfaces correctly
+12. **Topbar ⛶ button** — added between avatar and Sign Out; icon toggles between maximize/minimize
+13. **Works on GitHub Pages; blocked in Google Sites embed** — embed behavior: prompt suppressed, ⛶ opens app in its own tab where fullscreen works. One-time embed hint deferred (see Known remaining areas)
+
+### New functions added (2026-06-12 session 3)
+```javascript
+_collectBomData()          // consolidates BOM/carcass/services materials + hardware; adds Logistics DB weight
+_buildBomHtml(d, optLabel) // renders standalone HTML BOM report with price toggle + weight summary
+generateBomReport()        // resolves option label → opens blob URL + saves to Drive
+_fsAvailable()             // detects fullscreen permission (false inside Google Sites iframe)
+_reqFullscreen()           // standard + webkit requestFullscreen with error surfacing
+toggleFullscreen()         // enter/exit; new-tab fallback when blocked in embed
+_fsSyncIcon()              // fullscreenchange listener — keeps topbar icon in sync
+_showFullscreenPrompt()    // post-login "go fullscreen?" dialog
+_fsPromptYes()             // Yes button handler — removes prompt + calls _reqFullscreen()
+```
+
+---
+
 ## Logistics DB — SPEC AGREED (2026-06-12), READY TO BUILD
 
 ### Strategic rationale
