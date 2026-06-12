@@ -987,6 +987,54 @@ Refine the 4 new types per plant feedback, then either continue wide (corner, ov
 12. **Destination always syncs** — `setProdTab('mobility')` now always overwrites `mobilityState.destination` with `cl-location` value when switching to mobility tab; previously only filled when empty, so switching quotations left stale destination
 13. **Rule confirmed** — WCL and MSSI both use `88 Jennys Ave., Pasig City, Metro Manila`; CWL uses `Tawagan St., Tayud, Consolacion, Cebu`; determined from quotation company via `getCompanyName()`, not user's company
 
+## What was changed on 2026-06-11/12 (session — planner transport, cost report, Director role, mobilization breakdown)
+
+### Mobility planner — long-haul transport preference + public commute mode (commit `8dfefcb`)
+1. **`mobilityState.longHaulPref`** (`auto`/`air`/`sea`/`combined`) + **`mobilityState.publicMode`** (`commute`/`grab`) added (defaults `auto`/`commute`)
+2. **Transportation card** — new "Long-haul preference" dropdown (always shown) + "Public mode" dropdown (only when Vehicle = Public Transport); grid widens to 4–5 cols
+3. **AI prompt** — long-haul preference applied only when AI judges the trip is Visayas/Mindanao/far-Luzon (inter-island or >500km); prices preferred mode (airfare+transfers / RoRo passenger+vehicle / drive+ferry combo) and notes the alternative; ignored for nearby destinations. Public mode prices Grab vs jeep/bus city legs
+4. **Mock mode** reflects both choices (mode icon, ferry/airfare/Grab lines)
+5. **Origin lookup hardened** (commit `9f5acf3`) — `_mobOriginFor()` matches company names ignoring punctuation/spacing + keyword fallback (cebu/world class/module); fixes origin defaulting to "Philippines" when User Roles company string isn't an exact map key
+6. **Search buttons never disabled** (commit `9f5acf3`) — clicking when blocked shows a toast ("Enter destination first" / "No Claude API key") instead of a dead disabled button; blocked state shown dimmed
+
+### Transport export — choose which line items to send (commit `d1b388a`)
+7. **Per-item checkboxes** in the transport result table (header = select/deselect all); unticked rows grey out + strikethrough — for costs already covered by the mobilization region cost
+8. **`mobilityState.transportSel`** `{itemIdx:bool}` (null = all); footer shows teal "SELECTED FOR EXPORT (n of m items)" subtotal when partial; export button shows live amount, disabled at zero
+9. **`exportTransportToQuotation()`** sends only ticked items' total; `qMobTransport.label` notes partial ("Ferry · 3 of 5 items"); selection resets on every new search
+10. New helpers: `_transportItemChecked(i)`, `_toggleTransportItem(i,chk)`, `_transportSelTotal(d)`, `_selectAllTransportItems(chk)`
+
+### Project Cost Report — planner detail → Drive + Reports tab (commit `5d1a89e`)
+11. **`qMobTransport.detail` / `qMobAccom.detail`** — exports now carry full detail (mode, route, vehicle, selected + EXCLUDED items, AI grand total, exportedAt/By, mock flag)
+12. **`_saveCostDetailToDrive()`** — on every planner export, upserts `<serial> — <client> — cost detail.json` into the quotation's Drive folder (non-blocking, logged)
+13. **`_pCalc` extended (both stages)** — now caches `bufAmt`, `mkAmt`, `fabContAmt`/`mobContAmt`/`instContAmt`, region-vs-planner mob split, and applied `rates`
+14. **`_buildCostReportSnapshot()`** — computes revenue ex-VAT, total direct cost, est. profit, margin %; stored as `costReport` in the quotation state JSON on every save
+15. **Reports → "Cost report" tab** — `renderCostReportTab()` / `loadCostReport()` / `_buildCostReportHtml()`; quotation picker → loads saved state; KPI strip (grand, revenue ex-VAT, direct cost, profit, margin %), Direct costs table, Contingency/buffer/markup/taxes table (with % rates), transport detail sub-table (excluded items struck through), accommodation detail; CONFIDENTIAL banner; rebuilds from `pCalc` for older saves
+16. **`canViewCostReport()`** = Admin/Director/Manager — gates tab visibility, tab guard, and renderer
+
+### Director role (commit `6cc2d2e`)
+17. **New role** between Manager and Admin; in `posOpts` dropdowns (Users add/edit), coral pill in user lists
+18. **`getDefaultAcc`** — Director defaults = same as Manager (all except Users)
+19. **`isApprover()`** includes Director — approves directly via PIN, not a request
+20. **Approval routing** — Director sees ALL requests across companies (`filterApprovalsByRouting`); `findApprover()` includes Directors as delegation sources + fallback pool; Directors can delegate; dashboard "Manage users" + Security settings admin views extended to Director
+21. **Deferred** — fine-grained per-role authority (discount % limits, per-role PINs, escalation thresholds) to be defined later; shared PIN is still the single static `checkPin` ('1234')
+
+### Mobilization card — planner lines + contingency/buffer/markup breakdown (commit `0945b34`)
+22. **`renderMobPlannerLines(ni,mobRegionCost,mobBaseRaw,rates)`** rewritten — card now shows: Base mobilization cost → Transportation/Accommodation planner lines (each removable via ×) → Mobilization subtotal → "+ Mob. contingency (x%)" / "+ Buffer (x%)" / "+ Markup (x%)" rows using CF rates (or approved custom-CF) → "Total mobilization charge" (final marked-up amount)
+23. **Display-only** — recalc's grand-total math unchanged (planner amounts already flowed through the same margin chain); the card just shows the build-up explicitly. `mob-total-q-disp` now shows `mobBaseRaw×(1+cm/100)×(1+buf/100)×(1+markup/100)`
+
+### Pending / open activities (not yet built)
+24. **Floating AI agent** — approved 2026-06-11, deferred; chat bubble on every page, role-gated context injection (profit data only for Admin/Director/Manager), 3-phase plan. See memory `project_floating_ai_agent.md`
+25. **Mobilization calculator** — IN DISCUSSION (this session). User attached `MSSI_Mobilization_Installation_Pricing_Policy v4.xlsx` and wants to adopt the **mobilization** portion (not the full policy yet). Goal: replace the simple region dropdown with a shortcut button to a calculator that computes mobilization from quotation + mobility-planner inputs, applying the policy's zone cost-items and the Mobilization-vs-Installation **overlap rules**. Policy structure captured below. Awaiting design answers before building.
+
+#### MSSI/WCLI/CWLI Pricing Policy v4 — key facts (for the mobilization calculator)
+- **Definitions:** MOBILIZATION = getting people & materials to site (per trip, per zone). INSTALLATION = work on site (per carcass × zone rate, incl. QA/QC & turnover). ADMIN = 30% overhead loaded as % on the installation rate, hidden from client. Mob & Install are **always separate line items**.
+- **Overlap rules (double-counting prevention) — Mobilization gets:** truck/vehicle rental, fuel & toll, sea/air freight, port handling (origin+dest), freight insurance, packing & crating, **travel-night** accommodation (night before install only), driver per diem (travel days only).
+- **Installation gets (NOT mobilization):** installer base rate + carcass-type factor + zone adjustment, overtime (DOLE +25%/+30%/+100%), tools/consumables, elevator/permit, after-hours surcharge, meal allowance + per diem on **working days**, **working-night** accommodation, site cleaning, punch-list, QA/QC, client sign-off, as-built docs.
+- **Manila-base zones (MSSI/WCLI):** Z1 Within Metro Manila (mob ₱5k–12k) · Z2 Provincial Luzon (₱15k–35k) · Z3 Visayas (₱40k–80k) · Z4 Mindanao (₱60k–120k).
+- **Cebu-base zones (CWLI):** Cebu A Metro Cebu core (₱3.5k–9k) · Cebu B Mid-Cebu 30–80km (₱8k–18k) · Cebu C Far N/S & islands 80–150km+ (₱15k–30k) · Inter-island other Visayas from Cebu (₱20k–45k). Never flat-rate all Cebu.
+- **Per-zone cost items each have Min/Max + Basis** (per trip / per day / per shipment / per person / per person/night). Full line-item tables for all 8 zones are in the attached xlsx (sheets 3, 7).
+- **Quoting rules:** mobilization is one-time **per trip** (multi-trip projects charge per trip); freight insurance required for Z3/Z4/inter-island; admin never added to mobilization.
+
 ## Known remaining areas to watch
 - **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
 - **Carcass pricing tab** — now persisted ✓
