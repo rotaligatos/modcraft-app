@@ -849,6 +849,7 @@ tr.cl-row:hover td{background:#f4f7fb}
     <button class="tab" onclick="setStTab('msgtpl')"><i class="ti ti-message" style="font-size:11px"></i> Message Templates</button>
     <button class="tab" onclick="setStTab('production')"><i class="ti ti-cpu" style="font-size:11px"></i> Designers Support</button>
     <button class="tab" onclick="setStTab('orders-sla')"><i class="ti ti-clock" style="font-size:11px"></i> Orders &amp; SLA</button>
+    <button class="tab" onclick="setStTab('logistics')"><i class="ti ti-truck-delivery" style="font-size:11px"></i> Logistics DB</button>
   </div>
 
   <!-- NETWORK & DEPLOYMENT TAB -->
@@ -1159,6 +1160,7 @@ tr.cl-row:hover td{background:#f4f7fb}
       </div>
     </div>
   </div>
+  <div id="st-logistics" style="display:none"><div id="logistics-settings-wrap"></div></div>
 </div>
 
 <!-- USERS -->
@@ -2315,6 +2317,8 @@ var modalCtx = 's1';  // 's1' = Stage 1, 'fq' = Final Quotation
 var GOOG_CLIENT_ID='605710112392-vgvmr9e66b8himis6ka118cdq5er6393.apps.googleusercontent.com';
 var SHEETS_ID='1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o';
 var PRICE_DB_ID='1t7ND6N6uwJtkm7VWziUUf7gbqcn_sOXHhde0ZFeqVpY';
+var LOGISTICS_DB_ID='';
+var logisticsDb={materials:[],trucks:[]};
 var dbServices=[]; var dbMaterials=[]; var dbHardware=[]; var dbTemplates=[];
 var dbLoaded=false;
 var gToken=null;
@@ -2792,11 +2796,15 @@ function renderMobCalc(){
   for(var i=0;i<c.lines.length;i++){
     var l=c.lines[i];
     var ex=!!l.excluded;
+    var _isFreightZone=(c.zoneId==='mnl-z3'||c.zoneId==='mnl-z4'||c.zoneId==='ceb-ii');
+    var _isFreightLine=/^(sea_freight|port|freight_ins)$/.test(l.key);
     h+='<div style="display:grid;grid-template-columns:26px 1fr 60px 104px 84px;gap:6px;align-items:center;padding:6px 0;border-bottom:.5px solid #f0f0ee'+(ex?';opacity:.45':'')+'">'
       +'<input type="checkbox" '+(ex?'':'checked')+' onchange="_mobCalcToggleLine('+i+',this.checked)" title="Untick if the client handles this" style="cursor:pointer">'
-      +'<div style="font-size:12px'+(ex?';text-decoration:line-through':'')+'">'+escHtml(l.label)+(l.noAi?' <span style="font-size:9px;background:#eef2fa;color:var(--navy);border-radius:8px;padding:1px 5px">set by you</span>':'')+(l.aiNote&&!l.noAi?' <span style="font-size:9px;background:#f0fdf4;color:var(--teal);border-radius:8px;padding:1px 5px;cursor:help" title="'+escHtml(l.aiNote)+'">✨ AI</span>':'')+'<div style="font-size:10px;color:var(--muted)">'+escHtml(l.basis)+' · '+escHtml(l.note||'')+'</div></div>'
+      +'<div style="font-size:12px'+(ex?';text-decoration:line-through':'')+'">'+escHtml(l.label)+(l.noAi?' <span style="font-size:9px;background:#eef2fa;color:var(--navy);border-radius:8px;padding:1px 5px">set by you</span>':'')+(l.aiNote&&!l.noAi?' <span style="font-size:9px;background:#f0fdf4;color:var(--teal);border-radius:8px;padding:1px 5px;cursor:help" title="'+escHtml(l.aiNote)+'">✨ AI</span>':'')
+        +(_isFreightZone&&_isFreightLine?' <span style="font-size:9px;background:#fff7ed;color:#c05500;border:1px solid #fbb04f;border-radius:8px;padding:1px 5px" title="Weight-based carrier quote recommended for accuracy (2GO, LBC, RoRo). AI estimate is an approximation.">⚠ carrier quote</span>':'')
+        +'<div style="font-size:10px;color:var(--muted)">'+escHtml(l.basis)+' · '+escHtml(l.note||'')+'</div></div>'
       +'<input type="number" min="0" value="'+l.qty+'" '+(ex?'disabled':'')+' style="height:30px;font-size:12px;text-align:center" oninput="_mobCalcSetLine('+i+',\'qty\',this.value)" title="Auto from basis ('+l.basis+'); editable">'
-      +'<input type="number" min="0" step="0.01" value="'+(l.rate||'')+'" '+(ex?'disabled':'')+' placeholder="₱'+l.min+'–'+l.max+'" style="height:30px;font-size:12px;text-align:right" oninput="_mobCalcSetLine('+i+',\'rate\',this.value)">'
+      +'<input type="number" min="0" step="0.01" value="'+(l.rate||'')+'" '+(ex?'disabled':'')+' placeholder="0.00" style="height:30px;font-size:12px;text-align:right" oninput="_mobCalcSetLine('+i+',\'rate\',this.value)">'
       +'<span id="mobc-lt-'+i+'" style="font-size:12px;font-weight:600;text-align:right'+(ex?';text-decoration:line-through':'')+'">'+fmtMoney((parseFloat(l.qty)||0)*(parseFloat(l.rate)||0))+'</span>'
       +'</div>';
   }
@@ -2867,15 +2875,28 @@ function computeMobCalcAI(){
     },700);
     return;
   }
+  // Compute shipment weight from BOM if Logistics DB is connected
+  var shipment=_computeShipmentWeight();
+  var cargoSection='';
+  if(shipment){
+    var bdLines=shipment.breakdown.map(function(b){return b.qty+'× '+b.name+' '+b.thickness+'mm ('+b.size+'ft) = '+b.weightKg+' kg / '+b.cbm.toFixed(3)+' CBM';}).join(', ');
+    cargoSection='\n\nShipment cargo details (computed from BOM):\n'
+      +'- Total weight: ~'+shipment.weightKg+' kg\n'
+      +'- Total volume: ~'+shipment.cbm+' CBM\n'
+      +'- Boards: '+bdLines+'\n'
+      +(shipment.truckSuggestion?'- Suggested truck: '+shipment.truckSuggestion.note+'\n':'')
+      +'Use these specifics to price cargo truck rental, sea/air freight (by weight/CBM), and port handling accurately.';
+  }
   var linesList=aiLines.map(function(l){
-    return '- key:"'+l.key+'" label:"'+l.label+'" basis:'+l.basis+' typical:₱'+l.min+'–'+l.max+' ('+l.note+')';
+    return '- key:"'+l.key+'" label:"'+l.label+'" basis:'+l.basis+' ('+l.note+')';
   }).join('\n');
   var prompt='You are estimating RAW mobilization costs for a modular furniture installation project in the Philippines.\n\n'
     +'Origin (company warehouse): '+origin+'\n'
     +'Project destination: '+dest+'\n'
     +'Zone classification: '+zoneName+'\n'
     +'Delivery trips (materials only): '+trips+'\n'
-    +'Installers travelling: '+workers+' workers\n\n'
+    +'Installers travelling: '+workers+' workers'
+    +cargoSection+'\n\n'
     +'SCOPE — GOODS MOVEMENT + INCIDENTALS ONLY. Do NOT estimate installer airfare/ferry/fuel/Grab (people travel) — those come from the mobility planner. Estimate only: physical delivery of cabinets/panels/materials to site, port/cargo handling, driver per diem (for goods delivery driver), packing materials, site protection, contingency.\n\n'
     +'CRITICAL: Return RAW COST estimates — actual expected PHP spend. No markup, contingency, or buffer — those are applied by the app on export.\n\n'
     +'For each line item below, estimate the unit rate (₱ per unit) based on current Philippine market rates. Use 0 for items genuinely not applicable for this route (explain why in note).\n\n'
@@ -7553,11 +7574,12 @@ function testWebhookUrl(){
 // ── Settings ──────────────────────────────────────────────────────────────
 function setStTab(t) {
   stTab=t;
-  var tabs=["company","network","security","schedule","pricing","validity","carcass","services","costbreakdown","database","msgtpl","production","orders-sla"];
+  var tabs=["company","network","security","schedule","pricing","validity","carcass","services","costbreakdown","database","msgtpl","production","orders-sla","logistics"];
   for(var i=0;i<tabs.length;i++){var e=el("st-"+tabs[i]);if(e)e.style.display=tabs[i]===t?"block":"none";}
   document.querySelectorAll("#page-settings .tab").forEach(function(b,i){b.classList.toggle("active",tabs[i]===t);});
   if(t==='msgtpl') initMsgTemplates();
   if(t==='orders-sla') renderOrdersSlaSettings();
+  if(t==='logistics') renderLogisticsSettings();
   if(t==="carcass") renderCarcassSettings();
   if(t==="services") renderServicesSettings();
   if(t==="costbreakdown") renderCostBreakdownSettings();
@@ -11786,6 +11808,345 @@ function priceDbUpdate(range,values){
   }).then(function(r){return r.json();});
 }
 
+// ── Logistics DB helpers (parallel to priceDb* for LOGISTICS_DB_ID sheet) ──
+function logDbGet(range){
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+LOGISTICS_DB_ID+'/values/'+encodeURIComponent(range)+'?valueRenderOption=UNFORMATTED_VALUE',{
+    headers:{Authorization:'Bearer '+gToken}
+  }).then(function(r){return r.json();});
+}
+function logDbClear(range){
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+LOGISTICS_DB_ID+'/values/'+encodeURIComponent(range)+':clear',{
+    method:'POST',headers:{Authorization:'Bearer '+gToken}
+  }).then(function(r){return r.json();});
+}
+function logDbUpdate(range,values){
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+LOGISTICS_DB_ID+'/values/'+encodeURIComponent(range)+'?valueInputOption=USER_ENTERED',{
+    method:'PUT',headers:{Authorization:'Bearer '+gToken,'Content-Type':'application/json'},
+    body:JSON.stringify({values:values})
+  }).then(function(r){return r.json();});
+}
+
+// ── Logistics DB: load, connect, initialize ────────────────────────────────
+function gLoadLogisticsDb(cb){
+  if(!LOGISTICS_DB_ID){if(cb)cb();return;}
+  Promise.all([
+    logDbGet('Materials!A:H').catch(function(){return {values:[]};}),
+    logDbGet('Trucks!A:E').catch(function(){return {values:[]};})
+  ]).then(function(res){
+    var matRows=(res[0].values||[]).slice(1);
+    logisticsDb.materials=matRows.map(function(r){
+      return {name:r[0]||'',boardSize:r[1]||'4x8',lengthMm:parseFloat(r[2])||1220,widthMm:parseFloat(r[3])||2440,
+        thicknessMm:parseFloat(r[4])||18,weightKg:parseFloat(r[5])||0,cbm:parseFloat(r[6])||0,notes:r[7]||''};
+    }).filter(function(m){return m.name;});
+    var truckRows=(res[1].values||[]).slice(1);
+    logisticsDb.trucks=truckRows.map(function(r){
+      return {type:r[0]||'',maxWeightKg:parseFloat(r[1])||0,maxCbm:parseFloat(r[2])||0,bodyType:r[3]||'closed',notes:r[4]||''};
+    }).filter(function(t){return t.type;});
+    if(cb)cb();
+  }).catch(function(e){console.warn('Logistics DB load failed',e);if(cb)cb();});
+}
+function connectLogisticsDB(){
+  var idInp=el('s-logistics-db-id');
+  var id=idInp?idInp.value.trim():'';
+  if(!id){showToast('Paste a Google Sheet ID first.');return;}
+  if(!gToken){showToast('Sign in first.');return;}
+  LOGISTICS_DB_ID=id;
+  var btn=el('logistics-connect-btn');if(btn){btn.disabled=true;btn.textContent='Connecting…';}
+  fetch('https://sheets.googleapis.com/v4/spreadsheets/'+id+'?fields=sheets.properties.title',{
+    headers:{Authorization:'Bearer '+gToken}
+  }).then(function(r){return r.json();}).then(function(d){
+    if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-plug"></i> Connect';}
+    var sw=el('logistics-status-row');
+    if(d.error){
+      if(sw) sw.innerHTML='<div class="alert alert-warn" style="margin:0"><i class="ti ti-alert-triangle"></i> Cannot connect: '+escHtml(d.error.message||'Check sheet permissions')+'</div>';
+      return;
+    }
+    gLoadLogisticsDb(function(){
+      renderLogisticsSettings();
+      showToast('Logistics DB connected — '+logisticsDb.materials.length+' materials, '+logisticsDb.trucks.length+' trucks loaded.');
+    });
+  }).catch(function(e){
+    if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-plug"></i> Connect';}
+    showToast('Connect failed: '+e);
+  });
+}
+function initLogisticsDB(){
+  if(!LOGISTICS_DB_ID){showToast('Connect a Logistics DB sheet first.');return;}
+  if(!gToken){showToast('Sign in first.');return;}
+  if(!confirm('Initialize the Logistics DB with default materials and truck types?\nThis will clear and rewrite both the Materials and Trucks sheets.')) return;
+  var defMats=[
+    ['MDF','4x8',1220,2440,18,40,0.0537,''],
+    ['MDF','4x8',1220,2440,25,55,0.0745,''],
+    ['MDF','6x8',1830,2440,18,62,0.0805,''],
+    ['Plywood','4x8',1220,2440,18,35,0.0537,''],
+    ['Plywood','4x8',1220,2440,12,24,0.0358,''],
+    ['Melamine board','4x8',1220,2440,18,40,0.0537,''],
+    ['HMR board','4x8',1220,2440,18,42,0.0537,''],
+    ['Compact laminate','4x8',1220,2440,12,38,0.0358,''],
+    ['Particle board','4x8',1220,2440,18,37,0.0537,'']
+  ];
+  var defTrucks=[
+    ['L300 / Multicab',800,3,'closed',''],
+    ['Closed van (Canter)',3000,12,'closed',''],
+    ['6-wheeler truck',6000,20,'closed',''],
+    ['10-wheeler truck',15000,40,'open/closed','']
+  ];
+  var matHdr=[['Name','Board Size','Length mm','Width mm','Thickness mm','Weight/sheet kg','CBM/sheet','Notes']];
+  var truckHdr=[['Type','Max Weight kg','Max CBM','Body Type','Notes']];
+  showToast('Initializing Logistics DB…');
+  Promise.all([
+    logDbClear('Materials!A:Z').catch(function(){return null;}).then(function(){return logDbUpdate('Materials!A1',matHdr.concat(defMats));}),
+    logDbClear('Trucks!A:Z').catch(function(){return null;}).then(function(){return logDbUpdate('Trucks!A1',truckHdr.concat(defTrucks));})
+  ]).then(function(){
+    gLoadLogisticsDb(function(){renderLogisticsSettings();showToast('✓ Logistics DB initialized — '+logisticsDb.materials.length+' materials, '+logisticsDb.trucks.length+' trucks.');});
+  }).catch(function(e){showToast('Initialize failed — check that the sheet is shared with your account.');console.error(e);});
+}
+
+// ── Logistics DB: Settings tab render + inline CRUD ───────────────────────
+function renderLogisticsSettings(){
+  var w=el('logistics-settings-wrap');if(!w)return;
+  var connected=!!LOGISTICS_DB_ID;
+  var h='';
+  h+='<div class="alert alert-info" style="margin-bottom:14px"><i class="ti ti-info-circle"></i> Separate Google Sheet for cargo logistics — material weights, truck capacities, and (future) carrier rate cards and delivery tracking. Used by the Mobilization Calculator for weight-based freight estimation.</div>';
+  h+='<div class="card" style="margin-bottom:14px"><div class="card-head"><h3><i class="ti ti-database"></i>Connection</h3></div><div class="card-body">';
+  h+='<div id="logistics-status-row" style="margin-bottom:10px">'+(connected?'<span class="pill pill-teal"><i class="ti ti-circle-check"></i> Connected — '+escHtml(LOGISTICS_DB_ID.slice(0,28))+'…</span>':'<span class="pill" style="background:#f4f4f2;color:var(--text2)">Not connected</span>')+'</div>';
+  h+='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    +'<input id="s-logistics-db-id" type="text" placeholder="Paste Google Sheet ID (from the URL)" style="flex:1;min-width:200px;height:34px;font-size:13px" value="'+escHtml(LOGISTICS_DB_ID)+'">'
+    +'<button id="logistics-connect-btn" class="btn btn-primary" onclick="connectLogisticsDB()"><i class="ti ti-plug"></i> Connect</button>'
+    +'<button class="btn" onclick="initLogisticsDB()" title="Write default materials and trucks to the sheet"><i class="ti ti-database-import"></i> Initialize defaults</button>'
+    +'<button class="btn" onclick="gLoadLogisticsDb(function(){renderLogisticsSettings();showToast(\'Reloaded.\');})" title="Reload from sheet"><i class="ti ti-refresh"></i></button>'
+    +'</div><p style="font-size:11px;color:var(--text2);margin-top:6px">Create a blank Google Sheet, copy its ID from the URL bar (the long string between /d/ and /edit), paste it here, and click Connect.</p>';
+  h+='</div></div>';
+  // Materials table
+  h+='<div class="card" style="margin-bottom:14px"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0"><i class="ti ti-files"></i>Materials — weight &amp; dimensions</h3><button class="btn" onclick="_logAddMat()" style="font-size:11px"><i class="ti ti-plus"></i> Add row</button></div><div class="card-body" style="padding:0">';
+  h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">';
+  h+='<thead><tr style="background:#f8f8f6;font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:var(--text2)">'
+    +'<th style="padding:7px 10px;text-align:left;min-width:120px">Material name</th>'
+    +'<th style="padding:7px 8px;min-width:80px">Board size</th>'
+    +'<th style="padding:7px 8px;min-width:68px">L (mm)</th>'
+    +'<th style="padding:7px 8px;min-width:68px">W (mm)</th>'
+    +'<th style="padding:7px 8px;min-width:65px">T (mm)</th>'
+    +'<th style="padding:7px 8px;min-width:90px">Weight/sheet (kg)</th>'
+    +'<th style="padding:7px 8px;min-width:75px;color:var(--muted)">CBM/sheet</th>'
+    +'<th style="padding:7px 8px;min-width:100px">Notes</th>'
+    +'<th style="padding:7px 8px;width:36px"></th>'
+    +'</tr></thead><tbody id="log-mat-tbody">';
+  if(!logisticsDb.materials.length){
+    h+='<tr><td colspan="9" style="text-align:center;padding:16px;color:var(--muted)">No materials yet — click <b>Initialize defaults</b> or <b>Add row</b>.</td></tr>';
+  } else {
+    for(var i=0;i<logisticsDb.materials.length;i++) h+=_logMatRow(i);
+  }
+  h+='</tbody></table></div>';
+  h+='<div style="padding:8px 12px;border-top:.5px solid var(--border);display:flex;justify-content:flex-end">'
+    +'<button class="btn btn-primary" onclick="_logSaveMats()" style="font-size:12px"><i class="ti ti-device-floppy"></i> Save materials to sheet</button>'
+    +'</div></div></div>';
+  // Trucks table
+  h+='<div class="card"><div class="card-head" style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0"><i class="ti ti-truck"></i>Trucks / vehicles — cargo capacity</h3><button class="btn" onclick="_logAddTruck()" style="font-size:11px"><i class="ti ti-plus"></i> Add row</button></div><div class="card-body" style="padding:0">';
+  h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">';
+  h+='<thead><tr style="background:#f8f8f6;font-size:10px;text-transform:uppercase;letter-spacing:.03em;color:var(--text2)">'
+    +'<th style="padding:7px 10px;text-align:left;min-width:140px">Vehicle type</th>'
+    +'<th style="padding:7px 8px;min-width:100px">Max weight (kg)</th>'
+    +'<th style="padding:7px 8px;min-width:85px">Max CBM</th>'
+    +'<th style="padding:7px 8px;min-width:90px">Body type</th>'
+    +'<th style="padding:7px 8px;min-width:110px">Notes</th>'
+    +'<th style="padding:7px 8px;width:36px"></th>'
+    +'</tr></thead><tbody id="log-truck-tbody">';
+  if(!logisticsDb.trucks.length){
+    h+='<tr><td colspan="6" style="text-align:center;padding:16px;color:var(--muted)">No trucks yet — click <b>Initialize defaults</b> or <b>Add row</b>.</td></tr>';
+  } else {
+    for(var j=0;j<logisticsDb.trucks.length;j++) h+=_logTruckRow(j);
+  }
+  h+='</tbody></table></div>';
+  h+='<div style="padding:8px 12px;border-top:.5px solid var(--border);display:flex;justify-content:flex-end">'
+    +'<button class="btn btn-primary" onclick="_logSaveTrucks()" style="font-size:12px"><i class="ti ti-device-floppy"></i> Save trucks to sheet</button>'
+    +'</div></div></div>';
+  w.innerHTML=h;
+}
+function _logMatRow(i){
+  var m=logisticsDb.materials[i];
+  var cbmCalc=Math.round(m.lengthMm*m.widthMm*m.thicknessMm/1e9*10000)/10000;
+  var rdOnly=m.boardSize!=='custom';
+  return '<tr style="border-bottom:.5px solid #f0f0ee">'
+    +'<td style="padding:5px 8px"><input type="text" value="'+escHtml(m.name)+'" style="height:28px;font-size:12px;width:100%;min-width:100px" oninput="logisticsDb.materials['+i+'].name=this.value"></td>'
+    +'<td style="padding:5px 8px"><select style="height:28px;font-size:12px" onchange="_logBoardSizeChange('+i+',this.value)">'
+      +'<option value="4x8"'+(m.boardSize==='4x8'?' selected':'')+'>4×8 ft</option>'
+      +'<option value="6x8"'+(m.boardSize==='6x8'?' selected':'')+'>6×8 ft</option>'
+      +'<option value="custom"'+(m.boardSize==='custom'?' selected':'')+'>Custom</option>'
+      +'</select></td>'
+    +'<td style="padding:5px 8px"><input id="log-mat-L-'+i+'" type="number" min="1" value="'+m.lengthMm+'" '+(rdOnly?'readonly':'')+' style="height:28px;font-size:12px;width:68px;'+(rdOnly?'background:#f8f8f6':'')+'" oninput="logisticsDb.materials['+i+'].lengthMm=parseFloat(this.value)||0;_logRefreshCbm('+i+')"></td>'
+    +'<td style="padding:5px 8px"><input id="log-mat-W-'+i+'" type="number" min="1" value="'+m.widthMm+'" '+(rdOnly?'readonly':'')+' style="height:28px;font-size:12px;width:68px;'+(rdOnly?'background:#f8f8f6':'')+'" oninput="logisticsDb.materials['+i+'].widthMm=parseFloat(this.value)||0;_logRefreshCbm('+i+')"></td>'
+    +'<td style="padding:5px 8px"><input type="number" min="0.5" step="0.5" value="'+m.thicknessMm+'" style="height:28px;font-size:12px;width:62px" oninput="logisticsDb.materials['+i+'].thicknessMm=parseFloat(this.value)||0;_logRefreshCbm('+i+')"></td>'
+    +'<td style="padding:5px 8px"><input type="number" min="0" step="0.1" value="'+m.weightKg+'" style="height:28px;font-size:12px;width:80px" oninput="logisticsDb.materials['+i+'].weightKg=parseFloat(this.value)||0"></td>'
+    +'<td style="padding:5px 8px;text-align:center;font-size:11px;color:var(--muted)" id="log-mat-cbm-'+i+'">'+cbmCalc.toFixed(4)+'</td>'
+    +'<td style="padding:5px 8px"><input type="text" value="'+escHtml(m.notes||'')+'" style="height:28px;font-size:12px;width:100%;min-width:80px" oninput="logisticsDb.materials['+i+'].notes=this.value"></td>'
+    +'<td style="padding:5px 6px"><button type="button" onclick="_logRemoveMat('+i+')" style="background:none;border:none;color:var(--coral);cursor:pointer;font-size:14px;padding:0" title="Remove"><i class="ti ti-trash"></i></button></td>'
+    +'</tr>';
+}
+function _logTruckRow(i){
+  var t=logisticsDb.trucks[i];
+  return '<tr style="border-bottom:.5px solid #f0f0ee">'
+    +'<td style="padding:5px 8px"><input type="text" value="'+escHtml(t.type)+'" style="height:28px;font-size:12px;width:100%;min-width:110px" oninput="logisticsDb.trucks['+i+'].type=this.value"></td>'
+    +'<td style="padding:5px 8px"><input type="number" min="0" value="'+t.maxWeightKg+'" style="height:28px;font-size:12px;width:90px" oninput="logisticsDb.trucks['+i+'].maxWeightKg=parseFloat(this.value)||0"></td>'
+    +'<td style="padding:5px 8px"><input type="number" min="0" step="0.1" value="'+t.maxCbm+'" style="height:28px;font-size:12px;width:78px" oninput="logisticsDb.trucks['+i+'].maxCbm=parseFloat(this.value)||0"></td>'
+    +'<td style="padding:5px 8px"><input type="text" value="'+escHtml(t.bodyType||'')+'" placeholder="open/closed" style="height:28px;font-size:12px;width:90px" oninput="logisticsDb.trucks['+i+'].bodyType=this.value"></td>'
+    +'<td style="padding:5px 8px"><input type="text" value="'+escHtml(t.notes||'')+'" style="height:28px;font-size:12px;width:100%;min-width:80px" oninput="logisticsDb.trucks['+i+'].notes=this.value"></td>'
+    +'<td style="padding:5px 6px"><button type="button" onclick="_logRemoveTruck('+i+')" style="background:none;border:none;color:var(--coral);cursor:pointer;font-size:14px;padding:0" title="Remove"><i class="ti ti-trash"></i></button></td>'
+    +'</tr>';
+}
+function _logBoardSizeChange(i,size){
+  var m=logisticsDb.materials[i];
+  m.boardSize=size;
+  if(size==='4x8'){m.lengthMm=1220;m.widthMm=2440;}
+  else if(size==='6x8'){m.lengthMm=1830;m.widthMm=2440;}
+  _logRefreshCbm(i);
+  var lInp=el('log-mat-L-'+i); if(lInp){lInp.value=m.lengthMm;lInp.readOnly=(size!=='custom');lInp.style.background=size!=='custom'?'#f8f8f6':'';}
+  var wInp=el('log-mat-W-'+i); if(wInp){wInp.value=m.widthMm;wInp.readOnly=(size!=='custom');wInp.style.background=size!=='custom'?'#f8f8f6':'';}
+}
+function _logRefreshCbm(i){
+  var m=logisticsDb.materials[i];
+  m.cbm=Math.round(m.lengthMm*m.widthMm*m.thicknessMm/1e9*10000)/10000;
+  var e=el('log-mat-cbm-'+i);if(e)e.textContent=m.cbm.toFixed(4);
+}
+function _logAddMat(){
+  logisticsDb.materials.push({name:'',boardSize:'4x8',lengthMm:1220,widthMm:2440,thicknessMm:18,weightKg:0,cbm:0.0537,notes:''});
+  var tbody=el('log-mat-tbody');if(!tbody){renderLogisticsSettings();return;}
+  var i=logisticsDb.materials.length-1;
+  if(i===0) tbody.innerHTML='';
+  var tmp=document.createElement('tbody');
+  tmp.innerHTML=_logMatRow(i);
+  tbody.appendChild(tmp.firstElementChild);
+}
+function _logRemoveMat(i){
+  if(!confirm('Remove this material row?')) return;
+  logisticsDb.materials.splice(i,1);
+  renderLogisticsSettings();
+}
+function _logAddTruck(){
+  logisticsDb.trucks.push({type:'',maxWeightKg:0,maxCbm:0,bodyType:'closed',notes:''});
+  var tbody=el('log-truck-tbody');if(!tbody){renderLogisticsSettings();return;}
+  var j=logisticsDb.trucks.length-1;
+  if(j===0) tbody.innerHTML='';
+  var tmp=document.createElement('tbody');
+  tmp.innerHTML=_logTruckRow(j);
+  tbody.appendChild(tmp.firstElementChild);
+}
+function _logRemoveTruck(i){
+  if(!confirm('Remove this truck row?')) return;
+  logisticsDb.trucks.splice(i,1);
+  renderLogisticsSettings();
+}
+function _logSaveMats(){
+  if(!LOGISTICS_DB_ID){showToast('Connect a Logistics DB sheet first.');return;}
+  var rows=[['Name','Board Size','Length mm','Width mm','Thickness mm','Weight/sheet kg','CBM/sheet','Notes']];
+  logisticsDb.materials.forEach(function(m){rows.push([m.name,m.boardSize,m.lengthMm,m.widthMm,m.thicknessMm,m.weightKg,m.cbm,m.notes||'']);});
+  showToast('Saving materials…');
+  logDbClear('Materials!A:Z').then(function(){return logDbUpdate('Materials!A1',rows);})
+    .then(function(d){
+      if(d.error) showToast('Save failed: '+d.error.message);
+      else showToast('✓ Materials saved ('+logisticsDb.materials.length+' rows).');
+    }).catch(function(e){showToast('Save failed: '+e);});
+}
+function _logSaveTrucks(){
+  if(!LOGISTICS_DB_ID){showToast('Connect a Logistics DB sheet first.');return;}
+  var rows=[['Type','Max Weight kg','Max CBM','Body Type','Notes']];
+  logisticsDb.trucks.forEach(function(t){rows.push([t.type,t.maxWeightKg,t.maxCbm,t.bodyType||'',t.notes||'']);});
+  showToast('Saving trucks…');
+  logDbClear('Trucks!A:Z').then(function(){return logDbUpdate('Trucks!A1',rows);})
+    .then(function(d){
+      if(d.error) showToast('Save failed: '+d.error.message);
+      else showToast('✓ Trucks saved ('+logisticsDb.trucks.length+' rows).');
+    }).catch(function(e){showToast('Save failed: '+e);});
+}
+
+// ── Logistics DB: shipment weight computation ────────────────────────────
+function _matchMaterial(name){
+  if(!name||!logisticsDb.materials.length) return null;
+  var n=name.toLowerCase();
+  var tMatch=n.match(/(\d+)\s*mm/);
+  var tNum=tMatch?parseInt(tMatch[1]):null;
+  var kws=[
+    {re:/\bmdf\b|medium[\s-]density/,tag:'mdf'},
+    {re:/plywood/,tag:'plywood'},
+    {re:/melamine/,tag:'melamine'},
+    {re:/\bhmr\b/,tag:'hmr'},
+    {re:/compact\s*lam/,tag:'compact'},
+    {re:/particle\s*board|chipboard|particleboard/,tag:'particle'},
+    {re:/hardwood|solid\s*wood/,tag:'hardwood'}
+  ];
+  var nameTag=null;
+  for(var k=0;k<kws.length;k++){if(kws[k].re.test(n)){nameTag=kws[k].tag;break;}}
+  if(!nameTag) return null;
+  var cands=logisticsDb.materials.filter(function(m){
+    var mn=m.name.toLowerCase();
+    for(var k=0;k<kws.length;k++){if(kws[k].tag===nameTag&&kws[k].re.test(mn)) return true;}
+    return false;
+  });
+  if(!cands.length) return null;
+  if(tNum){
+    var exact=cands.filter(function(m){return m.thicknessMm===tNum;});
+    if(exact.length) return exact[0];
+    cands.sort(function(a,b){return Math.abs(a.thicknessMm-tNum)-Math.abs(b.thicknessMm-tNum);});
+  }
+  return cands[0];
+}
+function _suggestTruck(weightKg,cbm){
+  if(!logisticsDb.trucks.length) return null;
+  var sorted=logisticsDb.trucks.slice().sort(function(a,b){return a.maxWeightKg-b.maxWeightKg;});
+  var fit=sorted.filter(function(t){return t.maxWeightKg>=weightKg&&t.maxCbm>=cbm;});
+  if(fit.length) return {type:fit[0].type,count:1,note:'1× '+fit[0].type+' sufficient ('+weightKg+' kg / '+cbm+' CBM)'};
+  var largest=sorted[sorted.length-1];
+  var c=Math.max(Math.ceil(weightKg/largest.maxWeightKg),Math.ceil(cbm/largest.maxCbm));
+  return {type:largest.type,count:c,note:c+'× '+largest.type+' required ('+weightKg+' kg / '+cbm+' CBM)'};
+}
+function _computeShipmentWeight(){
+  if(!LOGISTICS_DB_ID||!logisticsDb.materials.length) return null;
+  var boards={};
+  for(var ai=0;ai<qAreas.length;ai++){
+    var area=qAreas[ai];
+    var fabMode=area.fabMode||qFabMode;
+    if(fabMode==='bom'&&area.bomItems){
+      for(var bi=0;bi<area.bomItems.length;bi++){
+        var bom=area.bomItems[bi];
+        var baseQty=parseFloat(bom.qty)||1;
+        for(var mi=0;mi<(bom.materials||[]).length;mi++){
+          var mat=bom.materials[mi];
+          var qty=(parseFloat(mat.qty)||1)*baseQty;
+          var matched=_matchMaterial(mat.name||'');
+          if(matched){
+            var key=matched.name+'|'+matched.thicknessMm;
+            if(!boards[key]) boards[key]={mat:matched,qty:0};
+            boards[key].qty+=qty;
+          }
+        }
+      }
+    } else {
+      for(var si=0;si<(area.matItems||[]).length;si++){
+        var m2=area.matItems[si];
+        var matched2=_matchMaterial(m2.name||'');
+        if(matched2){
+          var key2=matched2.name+'|'+matched2.thicknessMm;
+          if(!boards[key2]) boards[key2]={mat:matched2,qty:0};
+          boards[key2].qty+=parseFloat(m2.qty)||1;
+        }
+      }
+    }
+  }
+  var totalKg=0,totalCbm=0,breakdown=[];
+  for(var bk in boards){
+    if(!boards.hasOwnProperty(bk)) continue;
+    var b=boards[bk];
+    var sheets=Math.ceil(b.qty);
+    var cbmPer=b.mat.cbm||Math.round(b.mat.lengthMm*b.mat.widthMm*b.mat.thicknessMm/1e9*10000)/10000;
+    var w=sheets*b.mat.weightKg;
+    var c=sheets*cbmPer;
+    totalKg+=w; totalCbm+=c;
+    breakdown.push({name:b.mat.name,thickness:b.mat.thicknessMm,size:b.mat.boardSize,qty:sheets,weightKg:Math.round(w*10)/10,cbm:Math.round(c*1000)/1000});
+  }
+  if(!totalKg) return null;
+  totalKg=Math.round(totalKg); totalCbm=Math.round(totalCbm*100)/100;
+  return {weightKg:totalKg,cbm:totalCbm,breakdown:breakdown,truckSuggestion:_suggestTruck(totalKg,totalCbm)};
+}
+
 var INIT_SERVICES=[
   ["Panel cutting (4x8 Marine Plywood)","lm",15],
   ["Panel cutting (acrylic/HPL 6x8)","lm",18],
@@ -12323,6 +12684,7 @@ function _collectAppSettings(){
     },
     carcassPrices: (function(){ var o={}; for(var k in CARCASS_PRICES){ if(CARCASS_PRICES.hasOwnProperty(k)) o[k]=CARCASS_PRICES[k]; } return o; })(),
     ordersSla: { defaultHours: ordersSlaSettings.defaultHours, webhookUrl: ordersSlaSettings.webhookUrl, companies: ordersSlaSettings.companies },
+    logisticsDbId:(el('s-logistics-db-id')?el('s-logistics-db-id').value.trim():'')||LOGISTICS_DB_ID||'',
     serviceCapacity: (function(){ var o={}; for(var k in SERVICE_CAPACITY){ if(SERVICE_CAPACITY.hasOwnProperty(k)) o[k]=SERVICE_CAPACITY[k]; } return o; })(),
     instCost: JSON.parse(JSON.stringify(INST_COST))
   };
@@ -12353,6 +12715,10 @@ function _applyAppSettings(s){
   if(s.msgTemplates){
     if(s.msgTemplates.email){var te=el('s-msgtpl-email');if(te)te.value=s.msgTemplates.email;}
     if(s.msgTemplates.msg){var tm=el('s-msgtpl-msg');if(tm)tm.value=s.msgTemplates.msg;}
+  }
+  if(s.logisticsDbId&&s.logisticsDbId!==LOGISTICS_DB_ID){
+    LOGISTICS_DB_ID=s.logisticsDbId;
+    gLoadLogisticsDb(); // non-blocking background load
   }
   if(typeof populateMobSelect==='function'){try{populateMobSelect();}catch(e){}}
   if(s.ordersSla){
