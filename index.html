@@ -607,6 +607,7 @@ tr.cl-row:hover td{background:#f4f7fb}
       </div>
       <div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap">
         <button class="btn" onclick="openPrint()" data-lock-exempt="1"><i class="ti ti-printer"></i>Preview & Print</button>
+        <button class="btn" onclick="generateBomReport()" data-lock-exempt="1" style="background:#f4f4f2;color:var(--text);border-color:var(--border)"><i class="ti ti-clipboard-list"></i>Generate BOM</button>
         <button class="btn" onclick="saveDraftS1()" style="background:#f4f4f2;color:var(--text);border-color:var(--border)"><i class="ti ti-device-floppy"></i>Save draft</button>
         <button class="btn btn-primary" id="approve-btn" onclick="doApprove()" style="flex:2;justify-content:center"><i class="ti ti-circle-check"></i>Approve & proceed to Stage 2</button>
         <button class="btn" id="lock-btn" onclick="doLockOnly()" style="background:var(--navy);color:#fff;border-color:var(--navy)"><i class="ti ti-lock"></i>Lock</button>
@@ -10694,6 +10695,7 @@ function renderFQCards() {
   // ── Action buttons (bottom) ──
   h+='<div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap;align-items:center">'
     +'<button class="btn" onclick="openPrint()"><i class="ti ti-printer"></i>Preview &amp; Print</button>'
+    +'<button class="btn" onclick="generateBomReport()" style="background:#f4f4f2;color:var(--text);border-color:var(--border)"><i class="ti ti-clipboard-list"></i>Generate BOM</button>'
     +'<button class="btn btn-outline" onclick="fqSaveDraft()" style="background:#f4f4f2;color:var(--text);border-color:var(--border)"><i class="ti ti-device-floppy"></i>Save Draft</button>'
     +'<button class="btn" id="fq-lock-btn" onclick="doFQLock()" style="flex:2;justify-content:center"><i class="ti ti-lock"></i>Lock &amp; Send</button>'
     +'</div>'
@@ -12157,6 +12159,22 @@ function _computeShipmentWeight(){
           }
         }
       }
+    } else if(fabMode==='carcass'){
+      var _cTplSrc=dbTemplates.length?dbTemplates:INIT_TEMPLATES.map(function(t){return {cabinet:t[0],category:t[1],name:t[2],unit:t[3],qty:parseFloat(t[4])||0};});
+      for(var cii=0;cii<(area.items||[]).length;cii++){
+        var cItem=area.items[cii];
+        var cIQ=parseFloat(cItem.qty)||1;
+        var cTpls=_cTplSrc.filter(function(t){return t.cabinet===cItem.type&&t.category==='materials';});
+        for(var cti=0;cti<cTpls.length;cti++){
+          var cTp=cTpls[cti];
+          var cM=_matchMaterial(cTp.name||'');
+          if(cM){
+            var cK=cM.name+'|'+cM.thicknessMm;
+            if(!boards[cK]) boards[cK]={mat:cM,qty:0};
+            boards[cK].qty+=cTp.qty*cIQ;
+          }
+        }
+      }
     } else {
       for(var si=0;si<(area.matItems||[]).length;si++){
         var m2=area.matItems[si];
@@ -12183,6 +12201,186 @@ function _computeShipmentWeight(){
   if(!totalKg) return null;
   totalKg=Math.round(totalKg); totalCbm=Math.round(totalCbm*100)/100;
   return {weightKg:totalKg,cbm:totalCbm,breakdown:breakdown,truckSuggestion:_suggestTruck(totalKg,totalCbm)};
+}
+
+// ── BOM Report ────────────────────────────────────────────────────────────
+function _collectBomData(){
+  var mode=qFabMode,matMap={},hwMap={},areas=[];
+  var tplSrc=dbTemplates.length?dbTemplates:INIT_TEMPLATES.map(function(t){return {cabinet:t[0],category:t[1],name:t[2],unit:t[3],qty:parseFloat(t[4])||0,price:parseFloat(t[5])||0};});
+  function _aM(map,arr,name,qty,unit,price){
+    if(!name||!(qty>0)) return;
+    arr.push({name:name,qty:qty,unit:unit||'sheet',price:price||0});
+    if(!map[name]) map[name]={name:name,unit:unit||'sheet',totalQty:0,totalPrice:0};
+    map[name].totalQty+=qty; map[name].totalPrice+=qty*(price||0);
+  }
+  function _aH(map,arr,name,qty,unit,price){
+    if(!name||!(qty>0)) return;
+    arr.push({name:name,qty:qty,unit:unit||'pc',price:price||0});
+    if(!map[name]) map[name]={name:name,unit:unit||'pc',totalQty:0,totalPrice:0};
+    map[name].totalQty+=qty; map[name].totalPrice+=qty*(price||0);
+  }
+  for(var ai=0;ai<qAreas.length;ai++){
+    var area=qAreas[ai],aMode=area.fabMode||mode,areaMats=[],areaHws=[];
+    if(aMode==='bom'){
+      (area.bomItems||[]).forEach(function(bom){
+        var bq=parseFloat(bom.qty)||1;
+        (bom.materials||[]).forEach(function(m){_aM(matMap,areaMats,m.name,(parseFloat(m.qty)||0)*bq,m.unit,parseFloat(m.price)||0);});
+        (bom.hardware||[]).forEach(function(h){_aH(hwMap,areaHws,h.name,(parseFloat(h.qty)||0)*bq,h.unit,parseFloat(h.price)||0);});
+      });
+    } else if(aMode==='carcass'){
+      (area.items||[]).forEach(function(item){
+        var iq=parseFloat(item.qty)||1;
+        tplSrc.filter(function(t){return t.cabinet===item.type;}).forEach(function(tp){
+          if(tp.category==='materials') _aM(matMap,areaMats,tp.name,tp.qty*iq,tp.unit,tp.price);
+          else if(tp.category==='hardware') _aH(hwMap,areaHws,tp.name,tp.qty*iq,tp.unit,tp.price);
+        });
+      });
+    } else {
+      (area.matItems||[]).forEach(function(m){_aM(matMap,areaMats,m.name,parseFloat(m.qty)||0,m.unit,parseFloat(m.price)||0);});
+      (area.hwItems||[]).forEach(function(h){_aH(hwMap,areaHws,h.name,parseFloat(h.qty)||0,h.unit,parseFloat(h.price)||0);});
+    }
+    areas.push({name:area.name||('Area '+(ai+1)),materials:areaMats,hardware:areaHws});
+  }
+  var consMats=Object.keys(matMap).map(function(k){return matMap[k];});
+  var consHws=Object.keys(hwMap).map(function(k){return hwMap[k];});
+  var totalKg=0,totalCbm=0;
+  if(logisticsDb.materials.length){
+    consMats.forEach(function(m){
+      var lm=_matchMaterial(m.name);
+      if(lm){var sh=Math.ceil(m.totalQty);m.weightKg=Math.round(sh*lm.weightKg*10)/10;m.cbm=Math.round(sh*lm.cbm*10000)/10000;totalKg+=m.weightKg;totalCbm+=m.cbm;}
+    });
+  }
+  totalKg=Math.round(totalKg); totalCbm=Math.round(totalCbm*100)/100;
+  return {mode:mode,areas:areas,consMats:consMats,consHws:consHws,
+    totalWeightKg:totalKg,totalCbm:totalCbm,
+    truckSuggestion:totalKg>0?_suggestTruck(totalKg,totalCbm):null};
+}
+function _buildBomHtml(d){
+  var cn=(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'';
+  var isFinal=!!(fqLocked||fqInitialized);
+  var stage=isFinal?'Stage 2 — Final Quotation':'Stage 1 — Initial Quotation';
+  var mLabel={carcass:'By Furniture Type (Carcass)',services:'By Cutting List (Services)',bom:'By BOM'}[d.mode]||d.mode;
+  var co=getCompanyName()||'World Class Laminate, Inc.';
+  var hasW=d.totalWeightKg>0;
+  var colSpan=hasW?7:5;
+  function fN(n){return (Math.round((n||0)*1000)/1000).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});}
+  function fP(n){return '₱'+fN(n);}
+  function es(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  var css='body{font-family:Arial,sans-serif;padding:24px;max-width:1000px;margin:0 auto;font-size:12px;color:#222}'
+    +'h2{font-size:14px;margin:18px 0 5px;border-bottom:2px solid #1a3a5c;padding-bottom:4px;color:#1a3a5c}'
+    +'table{border-collapse:collapse;width:100%;margin-bottom:6px}'
+    +'th{background:#1a3a5c;color:#fff;padding:6px 8px;font-size:11px;text-align:left;white-space:nowrap}'
+    +'td{padding:5px 8px;border-bottom:.5px solid #eee;vertical-align:top}'
+    +'.num{text-align:right}.ttl td{background:#f0f4f8;font-weight:700}'
+    +'@media print{.nop{display:none!important}}';
+  var mHdr='<tr><th>Material</th><th class="num">Qty</th><th>Unit</th>'
+    +'<th class="pc num">Unit Price</th><th class="pc num">Total</th>'
+    +(hasW?'<th class="num">Weight</th><th class="num">CBM</th>':'')+'</tr>';
+  var hHdr='<tr><th>Hardware / Item</th><th class="num">Qty</th><th>Unit</th>'
+    +'<th class="pc num">Unit Price</th><th class="pc num">Total</th></tr>';
+  // Consolidated materials rows
+  var totalMatPrice=d.consMats.reduce(function(s,m){return s+(m.totalPrice||0);},0);
+  var totalHwPrice=d.consHws.reduce(function(s,h){return s+(h.totalPrice||0);},0);
+  var cMatRows=d.consMats.length
+    ?d.consMats.map(function(m){
+        var uP=m.totalQty?(m.totalPrice/m.totalQty):0;
+        return '<tr><td>'+es(m.name)+'</td><td class="num">'+fN(m.totalQty)+'</td><td>'+es(m.unit||'sheet')+'</td>'
+          +'<td class="pc num">'+fP(uP)+'</td><td class="pc num">'+fP(m.totalPrice)+'</td>'
+          +(hasW?'<td class="num">'+(m.weightKg!=null?m.weightKg+' kg':'—')+'</td><td class="num">'+(m.cbm!=null?m.cbm:'—')+'</td>':'')+'</tr>';
+      }).join('')+'<tr class="ttl"><td colspan="2">TOTAL</td><td></td>'
+      +'<td></td><td class="pc num">'+fP(totalMatPrice)+'</td>'
+      +(hasW?'<td class="num">'+d.totalWeightKg+' kg</td><td class="num">'+d.totalCbm+'</td>':'')+'</tr>'
+    :'<tr><td colspan="'+colSpan+'" style="color:#999;font-style:italic;padding:8px">No materials found'+(d.mode==='carcass'&&!dbTemplates.length?' — Price Database not connected':d.mode==='carcass'?' — check cabinet templates have materials':'')+'.</td></tr>';
+  // Consolidated hardware rows
+  var cHwRows=d.consHws.length
+    ?d.consHws.map(function(h){
+        var uP=h.totalQty?(h.totalPrice/h.totalQty):0;
+        return '<tr><td>'+es(h.name)+'</td><td class="num">'+fN(h.totalQty)+'</td><td>'+es(h.unit||'pc')+'</td>'
+          +'<td class="pc num">'+fP(uP)+'</td><td class="pc num">'+fP(h.totalPrice)+'</td></tr>';
+      }).join('')+'<tr class="ttl"><td colspan="2">TOTAL</td><td></td><td></td><td class="pc num">'+fP(totalHwPrice)+'</td></tr>'
+    :'<tr><td colspan="5" style="color:#999;font-style:italic;padding:8px">No hardware found.</td></tr>';
+  // Per-area breakdown (only when multiple areas have data)
+  var areaSection='';
+  var hasAreaData=d.areas.length>1&&d.areas.some(function(a){return a.materials.length||a.hardware.length;});
+  if(hasAreaData){
+    var aRows='';
+    d.areas.forEach(function(area){
+      if(!area.materials.length&&!area.hardware.length) return;
+      aRows+='<tr><td colspan="'+colSpan+'" style="background:#f0f4f8;font-weight:600;font-size:11px;padding:5px 8px">'+es(area.name)+'</td></tr>';
+      if(area.materials.length){
+        aRows+='<tr><td colspan="'+colSpan+'" style="padding:2px 8px;font-size:10px;color:#666;font-weight:600;background:#f8f9fa">MATERIALS</td></tr>';
+        area.materials.forEach(function(m){
+          aRows+='<tr><td>'+es(m.name)+'</td><td class="num">'+fN(m.qty)+'</td><td>'+es(m.unit||'sheet')+'</td>'
+            +'<td class="pc num">'+fP(m.price||0)+'</td><td class="pc num">'+fP((m.price||0)*m.qty)+'</td>'
+            +(hasW?'<td></td><td></td>':'')+'</tr>';
+        });
+      }
+      if(area.hardware.length){
+        aRows+='<tr><td colspan="'+colSpan+'" style="padding:2px 8px;font-size:10px;color:#666;font-weight:600;background:#f8f9fa">HARDWARE</td></tr>';
+        area.hardware.forEach(function(h){
+          aRows+='<tr><td>'+es(h.name)+'</td><td class="num">'+fN(h.qty)+'</td><td>'+es(h.unit||'pc')+'</td>'
+            +'<td class="pc num">'+fP(h.price||0)+'</td><td class="pc num">'+fP((h.price||0)*h.qty)+'</td>'
+            +(hasW?'<td></td><td></td>':'')+'</tr>';
+        });
+      }
+    });
+    areaSection='<h2>Per-Area Breakdown</h2><table>'+mHdr+aRows+'</table>';
+  }
+  // Weight block
+  var wBlock='';
+  if(hasW){
+    wBlock='<div style="background:#e8f5e9;border:1px solid #a5d6a7;border-radius:6px;padding:12px 16px;margin-top:14px">'
+      +'<div style="font-weight:700;font-size:13px;color:#1b5e20;margin-bottom:8px">Cargo Weight Summary</div>'
+      +'<div style="display:flex;gap:28px;flex-wrap:wrap">'
+      +'<div><div style="font-size:10px;color:#555;text-transform:uppercase">Total Weight</div><div style="font-size:22px;font-weight:700;color:#1b5e20">'+d.totalWeightKg+' kg</div></div>'
+      +'<div><div style="font-size:10px;color:#555;text-transform:uppercase">Total Volume</div><div style="font-size:22px;font-weight:700;color:#1b5e20">'+d.totalCbm+' CBM</div></div>'
+      +(d.truckSuggestion?'<div><div style="font-size:10px;color:#555;text-transform:uppercase">Suggested Truck</div><div style="font-size:13px;font-weight:600;color:#1b5e20">'+es(d.truckSuggestion.note)+'</div></div>':'')
+      +'</div>'
+      +'<div style="font-size:10px;color:#666;margin-top:7px">Weight based on board count × density (Logistics DB). Hardware and packaging not included. For freight estimation only.</div>'
+      +'</div>';
+  } else if(logisticsDb.materials.length){
+    wBlock='<div style="background:#fff8e1;border:1px solid #ffe082;border-radius:4px;padding:8px 12px;margin-top:12px;font-size:11px;color:#795548">'
+      +'<b>Weight not computed</b> — No materials matched Logistics DB entries. Ensure material names include keywords like MDF, Plywood, Melamine, etc.</div>';
+  }
+  var toggleScript='<scr'+'ipt>var _sp=true;function _tgP(btn){_sp=!_sp;var c=document.querySelectorAll(\'.pc\');for(var i=0;i<c.length;i++)c[i].style.display=_sp?\'\':\' none\';btn.textContent=_sp?\'Hide prices\':\'Show prices\';}<\/scr'+'ipt>';
+  return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
+    +'<title>'+es(qSerial)+' — BOM</title><style>'+css+'</style></head><body>'
+    +'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;padding-bottom:10px;border-bottom:2px solid #1a3a5c">'
+    +'<div><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.06em">Bill of Materials</div>'
+    +'<div style="font-size:22px;font-weight:700;color:#1a3a5c;margin:2px 0">'+es(qSerial)+'</div>'
+    +(cn?'<div style="font-size:13px;color:#444">'+es(cn)+'</div>':'')+'</div>'
+    +'<div style="text-align:right;font-size:11px;color:#666;line-height:1.7">'
+    +'<div style="font-weight:600">'+es(co)+'</div>'
+    +'<div>'+es(stage)+' &nbsp;·&nbsp; '+es(mLabel)+'</div>'
+    +'<div>'+new Date().toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'})+'</div>'
+    +'</div></div>'
+    +(isFinal
+      ?'<div style="background:#d1e7dd;border:1px solid #198754;border-radius:4px;padding:8px 14px;margin-bottom:14px;font-size:11px;color:#0f5132">✓ <b>FINAL BOM — Stage 2.</b> This bill of materials is confirmed for production.</div>'
+      :'<div style="background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px 14px;margin-bottom:14px;font-size:11px;color:#856404">⚠ <b>PRELIMINARY — Stage 1.</b> Quantities are subject to revision upon finalization in Stage 2. Do not issue materials without Stage 2 confirmation.</div>')
+    +'<button class="nop" onclick="_tgP(this)" style="background:#1a3a5c;color:#fff;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin-bottom:12px">Hide prices</button>'
+    +'<h2>Consolidated Materials</h2><table>'+mHdr+cMatRows+'</table>'
+    +'<h2>Consolidated Hardware</h2><table>'+hHdr+cHwRows+'</table>'
+    +wBlock+areaSection
+    +'<hr style="border:none;border-top:1px solid #eee;margin-top:24px">'
+    +'<p style="font-size:9px;color:#bbb;text-align:right;margin:4px 0 0">Generated by Modcraft · '+new Date().toLocaleString()+' · '+es(gUser&&gUser.email?gUser.email:'')+'</p>'
+    +toggleScript+'</body></html>';
+}
+function generateBomReport(){
+  if(!qSerial){showToast('Open a quotation first.');return;}
+  if(!gToken){showToast('Sign in first.');return;}
+  var d=_collectBomData();
+  var html=_buildBomHtml(d);
+  var fname=driveFileName('BOM');
+  showToast('Saving BOM to Drive…');
+  ensureDriveFolder()
+    .then(function(rootId){return ensureQuotationFolder(qBaseSerial||qSerial,rootId);})
+    .then(function(fid){return _driveUpsertFile(fid,fname,'text/html',html);})
+    .then(function(r){
+      if(!r||!r.id){showToast('BOM save failed — check Drive permissions.');return;}
+      showToast('✓ BOM saved — '+fname);
+      if(r.webViewLink) window.open(r.webViewLink,'_blank');
+    })
+    .catch(function(e){showToast('BOM save failed: '+(e&&e.message?e.message:e));});
 }
 
 var INIT_SERVICES=[
