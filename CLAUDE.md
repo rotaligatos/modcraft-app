@@ -1226,13 +1226,13 @@ var logisticsDb = {         // loaded at login (like dbServices/dbMaterials)
 
 ## What was changed on 2026-06-13 (session — PPIC tab + Installation cost overhaul)
 
-### Component 1 — PPIC Page (nav between Orders and Clients)
+### Component 1 — PPIC Page (Settings sub-tab, between Logistics DB and end of tab bar)
+> **Note:** Originally built as a standalone nav tab between Orders and Clients, then immediately relocated to Settings → PPIC sub-tab in the same session (see session 2 below). The standalone `page-ppic` HTML and nav button were removed; PPIC now lives inside Settings only.
+
 1. **`ppicSettings` global** — `{installation:{teamsPerDay, cabPerTeamDay, workdaysPerMonth}}`; saved/restored via `_collectAppSettings` / `_applyAppSettings`
-2. **`page-ppic` HTML** — new page with sticky header; "Cost Breakdown Settings" shortcut button
-3. **`_ppicCapacity()`** — computes `teamsPerDay × cabPerTeamDay`; used by `_instCalc()` instead of the old manual `INST_COST.capacityPerDay`
-4. **`renderPpicPage()`** — 3 cards: Installation Capacity inputs (teams/day, cabs/team/day, workdays/month) with live capacity display + Metro/Outside Metro rate banner; Complexity Factors per CARCASS_NAME (multiplier inputs, live effective rate display); Rate Preview table (all 13 types × metro/outside)
-5. **`instPriceUnitForType(region, cabinetType)`** — new helper; `instPriceUnitFor(region) × complexity[type]`
-6. **`canNavigate('ppic')`** — Admin / Director / Manager / Supervisor only; `applyNavAccess()` shows/hides button
+2. **`_ppicCapacity()`** — computes `teamsPerDay × cabPerTeamDay`; used by `_instCalc()` instead of the old manual `INST_COST.capacityPerDay`
+3. **`renderPpicPage()`** — 2 cards: Installation Capacity inputs (teams/day, cabs/team/day, workdays/month) with live capacity display + Metro/Outside Metro rate banner; Complexity Factors per CARCASS_NAME (multiplier inputs, live effective rate display). Rate Preview table is in Cost Breakdown → Installation (see session 2).
+4. **`instPriceUnitForType(region, cabinetType)`** — new helper; `instPriceUnitFor(region) × complexity[type]`
 
 ### Component 2 — Settings → Cost Breakdown → Installation (enhanced)
 7. **`INST_COST` extended** — added `siteFees[]`, `instQaqc[]`, `complexity{}` arrays saved with `instCost` in Settings
@@ -1277,6 +1277,27 @@ renderInstCardLines(ni,labor,...)      // renders inst-card line items from INST
 _accomSplitRefresh()                   // live preview of travel/working night split in modal
 _doAccomSplitExport(nights,workers,...) // commits the accommodation split to qMobAccom + qInstPlanner
 ```
+
+## What was changed on 2026-06-13 (session 2 — PPIC relocation + Rate Preview move)
+
+### PPIC relocated to Settings sub-tab
+1. **Standalone nav button removed** — `<button data-pg="ppic">` removed from the top nav bar
+2. **`page-ppic` standalone HTML removed** — the full-page div and its sticky header were removed
+3. **Settings tab button added** — PPIC is now the last tab in the Settings tab bar: `<button onclick="setStTab('ppic')">PPIC</button>`
+4. **`st-ppic` div added** — inside the Settings page; `renderPpicPage()` renders into its `ppic-wrap` child
+5. **`setStTab()` updated** — added `'ppic'` to the tabs array; `if(t==='ppic') renderPpicPage()` fires on open
+6. **`ppic` removed from `navigate()`, `canNavigate()`, `applyNavAccess()`** — all three guards cleaned up
+7. **All `navigate('ppic')` call-sites fixed** — the PPIC button on the Installation card now calls `navigate('settings');setTimeout(function(){setStTab('ppic');},150)` (was `navigate('ppic')`)
+8. **"Cost Breakdown" button fixed** — the button inside `renderPpicPage()` now calls `_cbdSubTab='installation';setStTab('costbreakdown')` directly (previously called `navigate('settings')` which navigated away from Settings and back, losing the PPIC tab state)
+
+### Acronym fix: Installation Control → Inventory Control
+9. **PPIC acronym corrected** — "Production, Planning and **Inventory** Control" (was "Installation Control"); the incorrect text was only in the now-removed `page-ppic` sticky header paragraph
+
+### Rate Preview moved to Cost Breakdown → Installation
+10. **Rate Preview card removed from `renderPpicPage()`** — the 13-type × metro/outside table is no longer shown in PPIC
+11. **Rate Preview added to `renderInstCostBreakdown()`** — appended after the "Daily Cost Summary & Price per Unit" panel; computes `_rpMetro = instPriceUnitFor('metro')` and `_rpOutside = instPriceUnitFor('outside')` freshly at render time; shows all CARCASS_NAMES with their complexity factor and effective rates
+12. **Cross-link** — Rate Preview header shows "Complexity factors set in Settings → PPIC" as a link; PPIC's "Cost Breakdown" button links back
+13. **"PPIC →" button in summary fixed** — the Capacity row in Cost Breakdown → Installation summary called `navigate('ppic')` (broken); now calls `setStTab('ppic')`
 
 ## Known remaining areas to watch
 - **PENDING — Embed fullscreen hint (deferred 2026-06-12)** — fullscreen works on GitHub Pages but is impossible inside the Google Sites iframe (no `allowfullscreen` attribute; Google controls it). Current behavior: prompt suppressed in embed; topbar ⛶ opens the app in its own tab. TO BUILD LATER: a small one-time hint after login inside the embed ("Want fullscreen? Open the app in its own tab →") so users discover the ⛶ route
