@@ -1120,12 +1120,14 @@ _fsPromptYes()             // Yes button handler — removes prompt + calls _req
 
 ---
 
-## Logistics DB — SPEC AGREED (2026-06-12), READY TO BUILD
+## Logistics DB — COMPLETED ✅ (confirmed 2026-06-13)
 
 ### Strategic rationale
 Weight-based freight estimation is the core accuracy gap in the mobilization calculator. Every Philippine carrier (2GO, LBC Cargo, RoRo lines) prices by **weight (kg) + volume (CBM)**. Without these inputs the AI guesses; with them it computes. Additionally, this data will be the foundation for Phase 4 (PPIC page) — logistics team needs a dedicated reference database separate from quotation data and pricing data.
 
 **Decision: Separate Google Sheet** — not a tab in the main DB or Price DB. Logistics team + PPIC access it independently. User creates the sheet, pastes the ID in Settings → Logistics DB tab (same pattern as Price DB).
+
+**Status:** All functions built and confirmed present in `index.html`: `gLoadLogisticsDb`, `_computeShipmentWeight`, `_matchMaterial`, `_suggestTruck`, Settings → Logistics DB tab with inline CRUD, Initialize defaults, connected to `computeMobCalcAI()` prompt.
 
 ### Logistics DB Google Sheet structure
 | Tab | Columns | Purpose |
@@ -1301,9 +1303,9 @@ _doAccomSplitExport(nights,workers,...) // commits the accommodation split to qM
 
 ## Known remaining areas to watch
 - **PENDING — Embed fullscreen hint (deferred 2026-06-12)** — fullscreen works on GitHub Pages but is impossible inside the Google Sites iframe (no `allowfullscreen` attribute; Google controls it). Current behavior: prompt suppressed in embed; topbar ⛶ opens the app in its own tab. TO BUILD LATER: a small one-time hint after login inside the embed ("Want fullscreen? Open the app in its own tab →") so users discover the ⛶ route
-- **Blank PDF on Send email** — `_buildPdfBlob()` currently calls `printQuotation('')` which opens the print dialog; auto-PDF-generation via html2canvas consistently produces blank output (html2canvas limitation in this app's context); user saves PDF from print dialog and attaches manually
+- **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
 - **Carcass pricing tab** — now persisted ✓
-- **Drive saves in Google Sites embed** — token refresh via `prompt:''` is blocked in iframes; users must re-auth via banner ~hourly
+- **Drive saves in Google Sites embed** — RESOLVED ✅ (confirmed 2026-06-13)
 - **First-time setup flow** — user needs to: sign in → Settings → Test connection → Create missing tabs → Save settings
 - **Google Sites iframe cache** — after pushing a fix, the embed shows stale version; fix: edit the Google Site, append `?v=N` (increment N each time) to the embed URL, republish
 - **Cross-session approval apply** — `_applyApprovedRequest()` updates the quotation form only if it is open in the same browser session; requester must navigate away and back to see the approved state if they were on a different page when approval happened
