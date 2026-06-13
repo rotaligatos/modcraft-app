@@ -1315,6 +1315,63 @@ _doAccomSplitExport(nights,workers,...) // commits the accommodation split to qM
 - **Phase 2 Cost Breakdown — output/shift not yet set** — most services still have `outputPerShift=0`; until this is filled in Settings → Services, monthly capacity = 0 and Op Cost / Gross Margin show `—` in Cost Breakdown
 - **Phase 3 onward** — capacity wired to schedule load checks (Phase 3), PPIC page (Phase 4), profitability reports (Phase 5) all pending
 
+## What was changed on 2026-06-13 (session 2 — Cost formula redesign + Settings cleanup)
+
+### Cost formula redesign — per-component buffer/markup (commits `cc91fcd`, `ff993d9`, `fdefc36`)
+1. **Old global `buf` / `markup` CF fields removed** — replaced by per-component chains for each cost pool
+2. **New CF fields added:**
+   - `fabContingency`, `fabBuffer` (applied when install is included)
+   - `mobContingency`, `mobBuffer`, `mobMarkup`
+   - `instContingency`, `instBuffer`, `instMarkup`
+   - `discountBuffer` (applied to combined total — absorbs future discounts)
+   - `mssiCommPct` + `mssiCommissionEnabled` (MSSI user + CWL subsidiary client trigger)
+   - `designersCommPct` + `designersCommissionEnabled` (fab+install quotations when activated)
+3. **Formula chain (Stage 1 & 2):**
+   ```
+   fabC  = fabBase × (1+fabCont%) [× (1+fabBuf%) when install included]
+   mobC  = mobBase × (1+mobCont%) × (1+mobBuf%) × (1+mobMk%)
+   instC = instBase × (1+instCont%) × (1+instBuf%) × (1+instMk%)
+   combined = fabC + mobC + instC + design + other
+   discBufAmt = combined × discountBuffer%
+   subtotal = combined + discBufAmt
+   mssiCommAmt = subtotal × mssiCommPct% (when MSSI user + CWL subsidiary + enabled)
+   designerCommAmt = subtotal × designersCommPct% (when fab+install + enabled)
+   preDisc = subtotal + mssiCommAmt + designerCommAmt
+   → discount → VAT → grand total
+   ```
+4. **Custom CF override modal** — redesigned from 2 fields to 9 fields (one per new component); `_setCCFFields(src)` + `_readCCFFields()` helpers added; PIN-gate unchanged
+5. **Settings → Cost Factors UI** — redesigned into labeled sections (Fabrication / Mobilization / Installation / Grand Total / VAT & Premiums / Commissions)
+6. **Cost Factors moved inside Cost Breakdown** — now the first sub-tab of Cost Breakdown (alongside Services, Installation, Mobilization); `setStTab('pricing')` auto-redirects to Cost Breakdown → Cost Factors for backward compat
+7. **Service cost breakdown data loss fixed** — added explicit `serviceCostData` backup key to `_collectAppSettings()`; `_applyAppSettings()` merges it into `SERVICE_CAPACITY` before re-syncing; fixes race condition where Price DB load could clobber restored service cost data
+8. **Blank Cost Factors sub-tab fixed** — removed old hidden `<div id="st-pricing">` that `document.getElementById` found first, causing content to render into invisible div
+
+### CF redundant fields cleanup — Cost Factors tab (commits `dcf97c0`, `905a122`)
+
+#### "Labor & capacity basis" card removed (commit `dcf97c0`)
+- **`CF.laborCostPerDay`** — removed from UI; not used in any cost calculation (INST_COST.labor per-role rows handle installation cost)
+- **`CF.laborCount`** — removed from UI; superseded by `_instLaborPersons()` which counts from Labor card rows
+- **`CF.capacityPerDay`** — removed from UI; PPIC `teamsPerDay × cabPerTeamDay` is now sole authority via `_ppicCapacity()`
+- **`CF.workdaysPerMonth`** — removed from CF UI; all computation reads now use `ppicSettings.installation.workdaysPerMonth`; the "Working days / mo" input in Cost Breakdown → Services overhead now writes to PPIC
+- **Amber "computed labor cost per unit" display** — removed (was a remnant; formula ₱800×4÷3 didn't feed into any calculation)
+
+#### "Admin, overhead & operating cost factors" card removed (commit `905a122`)
+- **Monthly cost fields** (adminMonthlyCost, utilityCost, otherExpenses, packingCost) — removed from Cost Factors; these inputs already exist in Cost Breakdown → Services overhead card (their actual home); `CF` fields retained for persistence
+- **Percentage fields** (adminPct, overheadPct, consumablesPct, utilitiesPct) — removed entirely; had zero usage in any calculation since Phase 2 per-service cost breakdown replaced them
+
+#### Single source of truth after cleanup
+| Setting | Owned by |
+|---|---|
+| Capacity (units/day) | PPIC → teams × cabs/team |
+| Workdays per month | PPIC → Working days / mo |
+| Team composition & cost | Cost Breakdown → Installation → Labor rows |
+| Monthly overhead costs | Cost Breakdown → Services → overhead card |
+
+### "Outside Metro — Additional Costs" removed from Cost Breakdown → Installation (commit `4b5da1a`)
+- `outsideT` was hardcoded to `0` with comment "zone add-ons handled in _instCalcForZone; keep for back-compat" — never computed
+- Enable toggle, row editor, summary table row, display refresh calls all removed
+- `INST_COST.outsideMetro` definition and restore-from-state code kept for backward compat with old saved quotations
+- Zone-based add-ons are handled by the mobilization calculator and zone rates, not this section
+
 ## Development workflow
 ```bash
 # Local preview (Claude testing)
