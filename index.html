@@ -12211,8 +12211,9 @@ function gShowApp(){
     }
   }
   applyNavAccess();
-  // Reveal Chip after login
+  // Reveal Chip after login + speak greeting
   var chipB=el('chip-btn'); if(chipB) chipB.style.display='block';
+  setTimeout(_chipLoginGreet, 1800);
   renderDashboard(); // initial render with defaults; re-renders after prefs load below
   initQuotation();
   loadPriceDatabase(false);
@@ -17515,17 +17516,24 @@ function _chipRefreshSuggestions(){
   var pgId=pg?pg.id:'';
   if(pgId==='page-quotation'){
     if(sugs.length<3) sugs.push('Explain the cost breakdown');
-    if(sugs.length<3) sugs.push('What\'s the difference between Stage 1 and Stage 2?');
+    if(sugs.length<3) sugs.push('What\'s Stage 1 vs Stage 2?');
   } else if(pgId==='page-production'){
-    sugs.push('How does the Mobility Planner work?');
-    sugs.push('What is mock mode?');
+    if(sugs.length<3) sugs.push('How does the Mobility Planner work?');
+    if(sugs.length<3) sugs.push('Take me to the quotation');
   } else if(pgId==='page-directory'){
-    sugs.push('How do I create a new quotation?');
-    sugs.push('How do I delete a quotation?');
+    if(sugs.length<3) sugs.push('How do I create a new quotation?');
+    if(sugs.length<3) sugs.push('Show me the reports');
+  } else if(pgId==='page-dashboard'){
+    if(sugs.length<3) sugs.push('What\'s the revenue trend?');
+    if(sugs.length<3) sugs.push('Show me pending approvals');
+  } else if(pgId==='page-reports'){
+    if(sugs.length<3) sugs.push('What\'s my conversion rate?');
+    if(sugs.length<3) sugs.push('Project next month\'s revenue');
   } else {
-    sugs.push('How do I create a quotation?');
-    sugs.push('What can you help me with?');
+    if(sugs.length<3) sugs.push('What can you do?');
+    if(sugs.length<3) sugs.push('Take me to the quotation');
   }
+  if(sugs.length<3) sugs.push('Who made you?');
   box.innerHTML=sugs.slice(0,3).map(function(s){
     return '<div class="chip-sug" onclick="_chipSugClick(this.textContent)">'+escHtml(s)+'</div>';
   }).join('');
@@ -17574,65 +17582,207 @@ function sendChip(){
   _chipCallAI(text);
 }
 
+// ── Login greeting ────────────────────────────────────────────────────────
+function _chipLoginGreet(){
+  var name=(gUser&&gUser.name)?gUser.name.split(' ')[0]:'there';
+  var h=new Date().getHours();
+  var tod=h<12?'Good morning':h<18?'Good afternoon':'Good evening';
+  var greet=tod+', '+name+'! I\'m Chip, your Modcraft buddy. '
+    +'I\'m here to help you navigate the app, check your quotations, '
+    +'and keep an eye on things you might have missed. '
+    +'Just tap me anytime you need help!';
+  _chipSpeak(greet);
+  // Show nudge dot if there are pending items
+  setTimeout(_chipRunAuditSilent, 2500);
+}
+
+// ── KPI / data context builder ────────────────────────────────────────────
+function _chipKpiContext(){
+  var all=[];
+  var seen={};
+  if(dirData&&dirData.length){
+    dirData.forEach(function(e){seen[e.id]=true;all.push(e);});
+  }
+  if(sessionQuotations){
+    Object.keys(sessionQuotations).forEach(function(k){
+      if(!seen[k]) all.push(sessionQuotations[k]);
+    });
+  }
+  if(!all.length) return null;
+
+  var total=all.length;
+  var byStatus={Draft:0,Locked:0,Approved:0,Closed:0,'On-going':0,Other:0};
+  var totalRevenue=0, closedRevenue=0;
+  var byMonth={};
+  var now=new Date(), thisMonth=now.getFullYear()+'-'+(String(now.getMonth()+1).padStart(2,'0'));
+
+  all.forEach(function(q){
+    var st=q.status||'Draft';
+    if(byStatus[st]!==undefined) byStatus[st]++; else byStatus.Other++;
+    var v=parseFloat(q.value)||0;
+    totalRevenue+=v;
+    if(st==='Closed'||st==='Approved') closedRevenue+=v;
+    // Monthly bucketing by created date
+    var d=q.created||(q.date||'');
+    var m=d?d.substring(0,7):'';
+    if(m){
+      if(!byMonth[m]) byMonth[m]={count:0,revenue:0};
+      byMonth[m].count++;
+      byMonth[m].revenue+=v;
+    }
+  });
+
+  // Last 6 months sorted
+  var months=Object.keys(byMonth).sort().slice(-6);
+  var monthLines=months.map(function(m){
+    return m+': '+byMonth[m].count+' quotations, ₱'+byMonth[m].revenue.toLocaleString('en-PH',{maximumFractionDigits:0});
+  });
+
+  // Simple trend: compare last month vs month before
+  var trend='stable';
+  if(months.length>=2){
+    var last=byMonth[months[months.length-1]].revenue;
+    var prev=byMonth[months[months.length-2]].revenue;
+    if(last>prev*1.1) trend='up ('+(((last-prev)/prev)*100).toFixed(0)+'% vs prior month)';
+    else if(last<prev*0.9) trend='down ('+(((prev-last)/prev)*100).toFixed(0)+'% vs prior month)';
+  }
+
+  // Active pipeline (not closed)
+  var pipeline=all.filter(function(q){return q.status!=='Closed';})
+    .reduce(function(s,q){return s+(parseFloat(q.value)||0);},0);
+
+  // Conversion: closed / total
+  var conversion=total>0?(((byStatus.Closed+byStatus.Approved)/total)*100).toFixed(1)+'%':'N/A';
+
+  return {total:total, byStatus:byStatus, totalRevenue:totalRevenue,
+    closedRevenue:closedRevenue, pipeline:pipeline, conversion:conversion,
+    trend:trend, monthLines:monthLines, thisMonth:thisMonth};
+}
+
+// ── Navigation map ────────────────────────────────────────────────────────
+var CHIP_NAV_MAP={
+  'dashboard':'dashboard','home':'dashboard','overview':'dashboard',
+  'quotation':'quotation','quote':'quotation','new quotation':'quotation',
+  'projects':'directory','project list':'directory','directory':'directory','list of quotes':'directory',
+  'clients':'clients','client directory':'clients','client list':'clients',
+  'orders':'orders','pending orders':'orders','wufoo':'orders',
+  'designers':'production','mobility':'production','shop drawing':'production','production':'production',
+  'reports':'reports','analytics':'reports','kpi':'reports',
+  'schedule':'schedule','calendar':'schedule','gantt':'schedule',
+  'approvals':'approvals','approval':'approvals','pending approval':'approvals',
+  'users':'users','user management':'users','team':'users',
+  'settings':'settings','configuration':'settings','cost factors':'settings',
+  'help':'help'
+};
+
+function _chipParseNav(text){
+  // Detect [NAV:page] marker Claude places in responses
+  var m=text.match(/\[NAV:([a-z]+)\]/i);
+  if(m) return m[1].toLowerCase();
+  return null;
+}
+
+function _chipDoNav(pg){
+  if(!pg) return;
+  var label={'dashboard':'Dashboard','quotation':'Quotation','directory':'Project List',
+    'clients':'Clients','orders':'Orders','production':'Designers Support',
+    'reports':'Reports','schedule':'Schedule','approvals':'Approvals',
+    'users':'Users','settings':'Settings','help':'Help'}[pg]||pg;
+  showToast('Navigating to '+label+' →');
+  setTimeout(function(){navigate(pg);},400);
+}
+
+// ── System prompt ─────────────────────────────────────────────────────────
 function _chipBuildSystemPrompt(){
   var pg=document.querySelector('.page.active');
   var pgId=pg?pg.id:'';
-  var pageLabel={'page-quotation':'Quotation form','page-directory':'Project List','page-clients':'Client Directory',
-    'page-production':'Designers Support (Mobility/AI)','page-orders':'Pending Orders','page-reports':'Reports',
-    'page-settings':'Settings','page-help':'Help','page-dashboard':'Dashboard','page-schedule':'Schedule',
+  var pageLabel={'page-quotation':'Quotation form','page-directory':'Project List',
+    'page-clients':'Client Directory','page-production':'Designers Support',
+    'page-orders':'Pending Orders','page-reports':'Reports','page-settings':'Settings',
+    'page-help':'Help','page-dashboard':'Dashboard','page-schedule':'Schedule',
     'page-approvals':'Approvals','page-users':'Users'}[pgId]||pgId;
 
-  var sys='You are **Chip**, a friendly and witty AI assistant built into Modcraft — a quotation management app for '
-    +'World Class Laminate, Inc. (WCL), Module Systems and Services, Inc. (MSSI), and Cebu World Laminate, Inc. (CWLI), '
-    +'all Philippine interior fit-out and modular furniture companies.\n\n'
-    +'You help users: navigate the app, understand quotation workflows, fill in cost details correctly, '
-    +'and catch things they might have missed. Be concise, warm, occasionally witty — like a smart colleague, not a manual.\n\n'
+  var sys='You are **Chip**, a friendly, warm, and occasionally witty AI assistant '
+    +'built into **Modcraft** — a quotation management app used by:\n'
+    +'- World Class Laminate, Inc. (WCL) — Pasig City, Metro Manila\n'
+    +'- Module Systems and Services, Inc. (MSSI) — Pasig City, Metro Manila\n'
+    +'- Cebu World Laminate, Inc. (CWLI) — Consolacion, Cebu\n'
+    +'All are Philippine interior fit-out and modular furniture companies.\n\n'
+
+    +'**YOUR CREATOR:** You were built by **Sir Rommel Taligatos**. '
+    +'When anyone asks who made you, who built you, who designed you, or who is your creator — '
+    +'always answer: Sir Rommel Taligatos, proudly. You may add a warm remark about him.\n\n'
+
+    +'**WHAT YOU CAN DO:**\n'
+    +'1. Answer any question about how to use Modcraft (quotations, approvals, settings, reports, etc.)\n'
+    +'2. Navigate the user to any page — when the user says "take me to X", "go to X", "show me X", '
+    +'   or "where is X", respond helpfully AND include [NAV:pagename] at the end of your reply '
+    +'   (pagename = dashboard, quotation, directory, clients, orders, production, reports, schedule, approvals, users, settings, help)\n'
+    +'3. Flag things missing in the current quotation (client, dates, transport, accommodation, etc.)\n'
+    +'4. Explain cost breakdowns, margins, and quotation stages\n'
+    +'5. Answer KPI and data questions using the live app data provided below\n'
+    +'6. Give simple trend analysis and projections from the monthly data\n\n'
+
+    +'**NAVIGATION RULE:** Always include [NAV:pagename] when the user wants to go somewhere. '
+    +'Example: user says "take me to reports" → your reply ends with [NAV:reports]\n\n'
+
+    +'**STYLE:** Speak like a smart, friendly Filipino colleague — warm, direct, no jargon overload. '
+    +'Use **bold** for key terms. Keep replies short unless the user asks for detail.\n\n'
+
     +'User: **'+(gUser?gUser.name:'Unknown')+'** · Role: **'+(currentRole||'?')+'** · Company: **'+(currentUserCompany||'?')+'**\n'
     +'Current page: **'+pageLabel+'**\n';
 
-  // Quotation context
+  // Current quotation context
   if(qSerial){
     var clName=(el('cl-name')||{}).value||'(not set)';
     var clLoc=(el('cl-location')||{}).value||'(not set)';
-    var areaCount=qAreas?qAreas.length:0;
-    sys+='\n**Current quotation:** '+qSerial+' · Client: '+clName+' · Location: '+clLoc
-      +' · Areas: '+areaCount+' · Stage: '+(qLocked?'Stage 1 Locked':fqLocked?'Stage 2 Locked':'Stage 1 Draft')
-      +' · Saved: '+(qSaved?'Yes':'No')+'\n';
-    if(_pCalc){
-      sys+='Grand total: ₱'+(_pCalc.grand||0).toLocaleString('en-PH',{maximumFractionDigits:2})+'\n';
-    }
-    // Transport/accom status
-    sys+='Transportation (planner): '+(qMobTransport?'✅ ₱'+qMobTransport.total:'❌ Not set')+'\n';
-    sys+='Accommodation (planner): '+(qMobAccom?'✅ ₱'+qMobAccom.total:'❌ Not set')+'\n';
-    if(qInstPlanner&&(qInstPlanner.workNightAccom||qInstPlanner.perDiem)){
-      sys+='Installation planner split: ✅ Exported\n';
-    } else {
-      sys+='Installation planner split: ❌ Not exported\n';
-    }
-    // Nudges
+    var fabD=(el('fab-date')||{}).value||'not set';
+    var instD=(el('inst-date')||{}).value||'not set';
+    sys+='\n**Open quotation:** '+qSerial
+      +' | Client: '+clName+' | Location: '+clLoc
+      +' | Fab date: '+fabD+' | Install date: '+instD
+      +' | Areas: '+(qAreas?qAreas.length:0)
+      +' | Stage: '+(fqLocked?'Stage 2 Locked':qLocked?'Stage 1 Locked':'Stage 1 Draft')
+      +' | Saved: '+(qSaved?'Yes':'No')+'\n';
+    if(_pCalc) sys+='Grand total: ₱'+(_pCalc.grand||0).toLocaleString('en-PH',{maximumFractionDigits:2})+'\n';
+    sys+='Transport (planner): '+(qMobTransport?'✅ ₱'+(qMobTransport.total||0).toLocaleString():'❌ not set')+'\n';
+    sys+='Accommodation (planner): '+(qMobAccom?'✅ ₱'+(qMobAccom.total||0).toLocaleString():'❌ not set')+'\n';
+    sys+='Installation planner split: '+(qInstPlanner&&(qInstPlanner.workNightAccom||qInstPlanner.perDiem)?'✅':'❌ not exported')+'\n';
     if(chipAuditNudges.length){
-      sys+='\n**Things I noticed that may need attention:**\n';
+      sys+='\nMissing items flagged by audit:\n';
       chipAuditNudges.forEach(function(n){sys+='- '+n.text+'\n';});
     }
   }
 
-  // Role-gated profit info
-  if(canViewCostReport()&&_pCalc){
-    sys+='\n**[Confidential — visible to your role only]**\n';
-    var grand=_pCalc.grand||0;
-    var fabC=_pCalc.fabC||0, mobC=_pCalc.mobC||0, instC=_pCalc.instC||0;
-    var direct=fabC+mobC+instC;
-    var vat=_pCalc.vatAmt||0;
-    var estProfit=grand-direct-vat;
-    var margin=grand>0?((estProfit/grand)*100).toFixed(1):0;
-    sys+='Direct cost estimate: ₱'+direct.toLocaleString('en-PH',{maximumFractionDigits:2})+'\n';
-    sys+='Est. profit: ₱'+estProfit.toLocaleString('en-PH',{maximumFractionDigits:2})+' ('+margin+'% margin)\n';
+  // Role-gated profit + KPI data
+  var kpi=_chipKpiContext();
+  if(kpi){
+    if(canViewCostReport()){
+      sys+='\n**[Confidential KPI — your role only]**\n'
+        +'Total quotations: '+kpi.total+' | Pipeline: ₱'+kpi.pipeline.toLocaleString('en-PH',{maximumFractionDigits:0})
+        +' | Conversion rate: '+kpi.conversion+'\n'
+        +'Status breakdown: Draft='+kpi.byStatus.Draft+', Locked='+kpi.byStatus.Locked
+        +', Approved='+kpi.byStatus.Approved+', Closed='+kpi.byStatus.Closed+'\n'
+        +'Revenue trend: '+kpi.trend+'\n'
+        +'Monthly data (last 6 months):\n'+kpi.monthLines.join('\n')+'\n';
+      if(_pCalc){
+        var grand=_pCalc.grand||0, fabC=_pCalc.fabC||0, mobC=_pCalc.mobC||0, instC=_pCalc.instC||0;
+        var direct=fabC+mobC+instC, vat=_pCalc.vatAmt||0, profit=grand-direct-vat;
+        var margin=grand>0?((profit/grand)*100).toFixed(1):0;
+        sys+='Current quotation cost: ₱'+direct.toLocaleString('en-PH',{maximumFractionDigits:0})
+          +' | Est. profit: ₱'+profit.toLocaleString('en-PH',{maximumFractionDigits:0})+' ('+margin+'% margin)\n';
+      }
+    } else {
+      // Non-privileged roles get totals only, no margins
+      sys+='\nApp data: '+kpi.total+' total quotations | Conversion: '+kpi.conversion+'\n';
+    }
   }
 
-  sys+='\nKeep answers short and practical. Use **bold** for key terms. No long numbered lists unless asked.';
+  sys+='\nRemember: always include [NAV:pagename] when navigating. Keep replies concise.';
   return sys;
 }
 
+// ── AI call with navigation parsing ──────────────────────────────────────
 function _chipCallAI(userMsg){
   if(!prodSettings.claudeKey){
     _chipAppendAi('I need a Claude API key to answer that. Ask your Admin to set it up in **Settings → Designers Support**.');
@@ -17650,7 +17800,7 @@ function _chipCallAI(userMsg){
       'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({
       model:'claude-sonnet-4-6',
-      max_tokens:512,
+      max_tokens:600,
       system:_chipBuildSystemPrompt(),
       messages:chipHistory
     })
@@ -17659,7 +17809,11 @@ function _chipCallAI(userMsg){
     if(send) send.disabled=false;
     var reply=(data.content&&data.content[0]&&data.content[0].text)||'Sorry, I couldn\'t get a response. Try again?';
     chipHistory.push({role:'assistant',content:reply});
-    _chipAppendAi(reply);
+    // Parse and execute navigation command
+    var navPg=_chipParseNav(reply);
+    var displayReply=reply.replace(/\[NAV:[a-z]+\]/gi,'').trim();
+    _chipAppendAi(displayReply);
+    if(navPg) _chipDoNav(navPg);
     _chipRefreshSuggestions();
   }).catch(function(e){
     _chipTyping(false);
