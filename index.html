@@ -1900,7 +1900,8 @@ var INST_COST = {
     {label:'As-built documentation',    cost:0},
     {label:'Snag visit',                cost:0}
   ],
-  complexity: {}
+  complexity: {},
+  rateMatrix: {}  // rateMatrix[cabinetType][zoneKey] = ₱ per unit; 0 = use bottom-up validator
 };
 
 // ── Mobilization cost by location ─────────────────────────────────────────
@@ -2093,7 +2094,7 @@ var qSiteVisit = {enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMo
 var qAssembly = {enabled:false,carcassCount:0};
 var qInstWorkers = 0;   // legacy installation workers override (kept for old saved states)
 var qInstDays = 0;      // legacy installation days override (kept for old saved states)
-var qInstRegion = 'metro';  // installation region: 'metro' | 'outside' — drives per-unit install price
+var qInstRegion = 'z1';  // installation zone key — drives per-unit install price from rate matrix
 var qMobTransport = null;   // {label, total} — transportation exported from the mobility planner
 var qMobAccom = null;       // {label, total} — accommodation exported from the mobility planner
 // Mobilization calculator result (Pass 1). null = legacy dropdown mode (back-compat).
@@ -2105,7 +2106,18 @@ var qMobAccom = null;       // {label, total} — accommodation exported from th
 var qMobCalc = null;
 var qInstPlanner = null;   // {workNightAccom, perDiem, touristPremium, touristNote, detail} from planner split export
 var qInstTouristPrem = false;  // whether tourist premium toggle is on in the inst card
-var ppicSettings = {installation:{teamsPerDay:1,cabPerTeamDay:3,workdaysPerMonth:22}};
+var ppicSettings = {installation:{teamsPerDay:1,cabPerTeamDay:3,workdaysPerMonth:22,typeCapacity:{}}};
+// Installation zones — Manila-base (WCL/MSSI) + Cebu-base (CWL)
+var INST_ZONES = [
+  {key:'z1',    label:'Z1 — Metro Manila',           short:'Metro Manila'},
+  {key:'z2',    label:'Z2 — Provincial Luzon',       short:'Prov. Luzon'},
+  {key:'z3',    label:'Z3 — Visayas',                short:'Visayas'},
+  {key:'z4',    label:'Z4 — Mindanao',               short:'Mindanao'},
+  {key:'cebuA', label:'Cebu A — Metro Cebu core',    short:'Cebu A'},
+  {key:'cebuB', label:'Cebu B — Mid-Cebu (30–80km)', short:'Cebu B'},
+  {key:'cebuC', label:'Cebu C — Far N/S & Islands',  short:'Cebu C'},
+  {key:'inter', label:'Inter-island (from Cebu)',     short:'Inter-island'}
+];
 var qCuttingList = {enabled:false};
 var qDesignCharge = {enabled:false};
 var _pCalc = {}; // cached cost result — populated by recalc() and recalcFQ(), read by openPrint()
@@ -2538,25 +2550,68 @@ function populateMobSelect() {
 // Per-unit installation price for a region, from the Installation cost
 // breakdown (Settings → Cost Breakdown → Installation). 'outside' includes
 // the Outside Metro additional-cost items regardless of the enabled toggle.
-function _ppicCapacity(){
+function _ppicCapacity(cabinetType){
   var p=ppicSettings&&ppicSettings.installation;
-  if(p&&(parseFloat(p.teamsPerDay)||0)>0&&(parseFloat(p.cabPerTeamDay)||0)>0){
+  if(!p) return parseFloat(INST_COST.capacityPerDay)||1;
+  // Per-type capacity takes precedence when set
+  if(cabinetType&&p.typeCapacity&&parseFloat(p.typeCapacity[cabinetType])>0){
+    return (parseFloat(p.teamsPerDay)||1)*parseFloat(p.typeCapacity[cabinetType]);
+  }
+  if((parseFloat(p.teamsPerDay)||0)>0&&(parseFloat(p.cabPerTeamDay)||0)>0){
     return (parseFloat(p.teamsPerDay)||1)*(parseFloat(p.cabPerTeamDay)||3);
   }
   return parseFloat(INST_COST.capacityPerDay)||1;
 }
+function _zoneIsMetro(zoneKey){
+  return zoneKey==='z1'||zoneKey==='cebuA';
+}
 function instPriceUnitFor(region){
+  // region can be a zone key ('z1','z2',...) or legacy ('metro','outside')
+  var isMetro=(region==='metro'||region==='z1'||region==='cebuA');
   var save=INST_COST.outsideMetro.enabled;
-  INST_COST.outsideMetro.enabled=(region==='outside');
+  INST_COST.outsideMetro.enabled=!isMetro;
   var c=_instCalc();
   INST_COST.outsideMetro.enabled=save;
   return c.priceUnit;
 }
 function instPriceUnitForType(region,cabinetType){
+  // Check rate matrix first
+  var rm=INST_COST.rateMatrix;
+  if(rm&&cabinetType&&rm[cabinetType]){
+    var v=parseFloat(rm[cabinetType][region]||rm[cabinetType][_zoneIsMetro(region)?'z1':'z2']);
+    if(v>0) return v;
+  }
   var base=instPriceUnitFor(region);
   if(!cabinetType||typeof INST_COST.complexity!=='object') return base;
   var factor=parseFloat(INST_COST.complexity[cabinetType]);
   return base*(isNaN(factor)?1:factor);
+}
+// Returns total installation labor cost across all areas, per cabinet type × zone rate
+function getInstCostByType(zoneKey){
+  var rm=INST_COST.rateMatrix||{};
+  var fallback=instPriceUnitFor(zoneKey);
+  var total=0;
+  for(var a=0;a<qAreas.length;a++){
+    if(qFabMode==='carcass'){
+      var items=qAreas[a].items||[];
+      for(var i=0;i<items.length;i++){
+        var t=items[i].type; var q=items[i].qty||0;
+        var rate=(rm[t]&&parseFloat(rm[t][zoneKey])>0)?parseFloat(rm[t][zoneKey]):fallback;
+        total+=rate*q;
+      }
+    } else if(qFabMode==='bom'){
+      var bi=qAreas[a].bomItems||[];
+      for(var i=0;i<bi.length;i++){
+        var t=bi[i].type; var q=bi[i].qty||1;
+        var rate=(rm[t]&&parseFloat(rm[t][zoneKey])>0)?parseFloat(rm[t][zoneKey]):fallback;
+        total+=rate*q;
+      }
+    } else {
+      var si=qAreas[a].svcItems||[];
+      for(var i=0;i<si.length;i++) total+=fallback*(si[i].qty||0);
+    }
+  }
+  return total;
 }
 function renderPpicPage(){
   var w=el('ppic-wrap'); if(!w) return;
@@ -2585,39 +2640,42 @@ function renderPpicPage(){
   h+='<div style="font-size:20px;font-weight:800;color:var(--navy)">'+capDay.toFixed(1)+' <span style="font-size:12px;font-weight:400">units/day</span></div>';
   h+='<div style="font-size:11px;color:var(--text2)">'+Math.round(capMonth)+' units/month</div>';
   h+='</div></div>';
-  // Cost at a glance
-  var priceMetro=instPriceUnitFor('metro');
-  var priceOutside=instPriceUnitFor('outside');
+  // Bottom-up cost at a glance (Z1 and Z2 as reference)
+  var priceZ1=instPriceUnitFor('z1');
+  var priceZ2=instPriceUnitFor('z2');
   h+='<div style="margin-top:14px;padding:12px 16px;background:var(--navy);border-radius:8px;display:flex;gap:24px;align-items:center;flex-wrap:wrap">';
-  h+='<div style="color:#fff"><div style="font-size:10px;opacity:.7;text-transform:uppercase;letter-spacing:.04em">Metro Manila</div>'
-    +'<div style="font-size:22px;font-weight:800">'+fmt(priceMetro)+'</div>'
+  h+='<div style="color:#fff;font-size:11px;opacity:.8;margin-right:4px"><i class="ti ti-calculator" style="font-size:13px"></i><br>Bottom-up<br>validator</div>';
+  h+='<div style="color:#fff"><div style="font-size:10px;opacity:.7;text-transform:uppercase;letter-spacing:.04em">Z1 Metro Manila</div>'
+    +'<div style="font-size:20px;font-weight:800">'+fmt(priceZ1)+'</div>'
     +'<div style="font-size:10px;opacity:.7">per unit</div></div>';
   h+='<div style="color:#fff;opacity:.4;font-size:24px;font-weight:300">|</div>';
-  h+='<div style="color:#fff"><div style="font-size:10px;opacity:.7;text-transform:uppercase;letter-spacing:.04em">Outside Metro</div>'
-    +'<div style="font-size:22px;font-weight:800">'+fmt(priceOutside)+'</div>'
+  h+='<div style="color:#fff"><div style="font-size:10px;opacity:.7;text-transform:uppercase;letter-spacing:.04em">Z2 Prov. Luzon</div>'
+    +'<div style="font-size:20px;font-weight:800">'+fmt(priceZ2)+'</div>'
     +'<div style="font-size:10px;opacity:.7">per unit</div></div>';
-  h+='<div style="margin-left:auto;color:#fff;font-size:11px;opacity:.8;text-align:right">Adjust cost components in<br><button class="btn" onclick="_cbdSubTab=\'installation\';setStTab(\'costbreakdown\')" style="font-size:11px;padding:3px 10px;margin-top:4px;color:var(--navy)"><i class="ti ti-settings"></i> Cost Breakdown</button></div>';
+  h+='<div style="margin-left:auto;color:#fff;font-size:11px;opacity:.8;text-align:right">Set zone rates in<br><button class="btn" onclick="_cbdSubTab=\'installation\';setStTab(\'costbreakdown\')" style="font-size:11px;padding:3px 10px;margin-top:4px;color:var(--navy)"><i class="ti ti-table"></i> Rate Matrix</button></div>';
   h+='</div>';
   h+='</div></div>';
-  // ── Complexity factors per cabinet type ─────────────────────────────────────
+  // ── Capacity per cabinet type ───────────────────────────────────────────────
   h+='<div class="card" style="margin-bottom:14px">';
-  h+='<div class="card-head" style="display:flex;align-items:center;justify-content:space-between"><h3><i class="ti ti-adjustments"></i>Complexity Factors per Cabinet Type</h3>'
-    +'<span style="font-size:11px;color:var(--text2);font-weight:400">Multiplier on base rate · 1.0 = standard</span></div>';
+  h+='<div class="card-head" style="display:flex;align-items:center;justify-content:space-between">'
+    +'<h3><i class="ti ti-adjustments"></i>Capacity per Cabinet Type</h3>'
+    +'<span style="font-size:11px;color:var(--text2);font-weight:400">Units a team can install per day · blank = use global default ('+cabPerTeamDay+')</span></div>';
   h+='<div class="card-body">';
-  h+='<p style="font-size:12px;color:var(--text2);margin-bottom:12px">Tall cabinets, drawer bases, and specialty types take longer to install. Set a multiplier (e.g. 1.5 = 50% harder than standard) to auto-adjust the installation rate per unit in quotations.</p>';
+  h+='<p style="font-size:12px;color:var(--text2);margin-bottom:12px">Taller or more complex cabinets take longer to install. Override the global rate per type. The Cost Breakdown validator uses these to show your true cost per unit.</p>';
   h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px">';
+  var tc=p.typeCapacity||{};
   for(var ci=0;ci<CARCASS_NAMES.length;ci++){
     var cName=CARCASS_NAMES[ci];
-    var cFactor=parseFloat(INST_COST.complexity[cName]);
-    if(isNaN(cFactor)) cFactor=1.0;
-    var effRate=priceMetro*cFactor;
+    var tcVal=parseFloat(tc[cName])||'';
+    var effCap=teamsPerDay*(parseFloat(tc[cName])||cabPerTeamDay);
     h+='<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#f8f9ff;border-radius:6px;border:.5px solid var(--border)">';
     h+='<span style="font-size:12px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(cName)+'">'+escHtml(cName)+'</span>';
-    h+='<input type="number" min="0.1" max="5" step="0.05" value="'+cFactor.toFixed(2)+'" oninput="INST_COST.complexity['+JSON.stringify(cName)+']=parseFloat(this.value)||1;renderPpicPage()" style="height:28px;width:68px;font-size:12px;text-align:center">';
-    h+='<span style="font-size:11px;color:var(--text2);min-width:72px;text-align:right">= '+fmt(effRate)+'</span>';
+    h+='<input type="number" min="0.1" max="20" step="0.5" value="'+(tcVal===''?'':tcVal)+'" placeholder="'+cabPerTeamDay+'" oninput="if(!ppicSettings.installation.typeCapacity)ppicSettings.installation.typeCapacity={};ppicSettings.installation.typeCapacity['+JSON.stringify(cName)+']=parseFloat(this.value)||0;renderPpicPage()" style="height:28px;width:68px;font-size:12px;text-align:center">';
+    h+='<span style="font-size:11px;color:var(--text2);min-width:80px;text-align:right">= '+effCap.toFixed(1)+' /day</span>';
     h+='</div>';
   }
   h+='</div>';
+  h+='<div style="margin-top:10px;font-size:11px;color:var(--text2)"><i class="ti ti-info-circle" style="font-size:10px"></i> Rates per zone are set in <button class="btn" onclick="_cbdSubTab=\'installation\';setStTab(\'costbreakdown\')" style="font-size:11px;padding:2px 8px;margin-left:2px"><i class="ti ti-table"></i> Cost Breakdown → Installation → Rate Matrix</button></div>';
   h+='</div></div>';
   w.innerHTML=h;
 }
@@ -2650,11 +2708,15 @@ function renderInstCardLines(ni,laborCost,unitPrice,units,qaqcAmt,workAccom,perD
 }
 function populateInstRegionSelect(){
   var sel=el("inst-region"); if(!sel) return;
-  var regions=[['metro','Metro Manila'],['outside','Outside Metro Manila']];
+  // Back-compat: map legacy values
+  if(qInstRegion==='metro') qInstRegion='z1';
+  else if(qInstRegion==='outside') qInstRegion='z2';
   var opts="";
-  for(var i=0;i<regions.length;i++){
-    opts+='<option value="'+regions[i][0]+'"'+(qInstRegion===regions[i][0]?' selected':'')+'>'
-      +regions[i][1]+' — '+fmtMoney(instPriceUnitFor(regions[i][0]))+' / unit</option>';
+  for(var i=0;i<INST_ZONES.length;i++){
+    var z=INST_ZONES[i];
+    var rate=instPriceUnitFor(z.key);
+    opts+='<option value="'+z.key+'"'+(qInstRegion===z.key?' selected':'')+'>'
+      +z.label+(rate>0?' — '+fmtMoney(rate)+' / unit':'')+' </option>';
   }
   sel.innerHTML=opts;
 }
@@ -4390,8 +4452,8 @@ function recalc(fast) {
   var qaqcBase=ni?calcQAQCCost(mobZoneIdx):0;
   // Installation cost: per-unit price from the Installation cost breakdown
   // (Settings → Cost Breakdown → Installation) × carcass units, by region
-  var instUnitPrice = ni ? instPriceUnitFor(qInstRegion) : 0;
-  var instLaborCost = ni ? instUnitPrice * totU : 0;
+  var instLaborCost = ni ? getInstCostByType(qInstRegion) : 0;
+  var instUnitPrice = ni&&totU>0 ? instLaborCost/totU : instPriceUnitFor(qInstRegion);
   // Planner-sourced installation costs (working-night accommodation + per diem + tourist premium)
   var instPlannerWorkAccom = ni&&qInstPlanner ? (qInstPlanner.workNightAccom||0) : 0;
   var instPlannerPerDiem   = ni&&qInstPlanner ? (qInstPlanner.perDiem||0) : 0;
@@ -8622,6 +8684,65 @@ function _instAddRow(arrName) {
   else INST_COST[arrName].push(row);
   renderCostBreakdownSettings();
 }
+function _buildInstRateMatrix(){
+  var rm=INST_COST.rateMatrix; if(!rm) INST_COST.rateMatrix=rm={};
+  var fmt=function(v){return v>0?'₱'+v.toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:0}):'';};
+  // Compute bottom-up validator rates (one per zone using metro/outside logic)
+  var validatorRates={};
+  for(var zi=0;zi<INST_ZONES.length;zi++) validatorRates[INST_ZONES[zi].key]=instPriceUnitFor(INST_ZONES[zi].key);
+  var h='<div class="card" style="margin-bottom:14px">';
+  h+='<div class="card-head" style="display:flex;align-items:center;justify-content:space-between">'
+    +'<h3><i class="ti ti-table"></i>Rate Matrix — ₱ per Unit × Zone</h3>'
+    +'<span style="font-size:11px;color:var(--text2);font-weight:400">Pricing table used in quotations · Capacity per type set in <a href="#" onclick="setStTab(\'ppic\');return false" style="color:var(--navy)">PPIC</a></span></div>';
+  h+='<div class="card-body" style="padding:10px 0;overflow-x:auto">';
+  // Zone header
+  var thStyle='padding:5px 8px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;text-align:right;color:#fff;background:var(--navy)';
+  var tdStyle='padding:4px 6px;font-size:11px;border:.5px solid var(--border)';
+  h+='<table style="border-collapse:collapse;width:100%;min-width:700px">';
+  h+='<thead><tr>';
+  h+='<th style="'+thStyle+';text-align:left;min-width:150px;border-radius:6px 0 0 0">Cabinet Type</th>';
+  for(var zi=0;zi<INST_ZONES.length;zi++){
+    h+='<th style="'+thStyle+'">'+INST_ZONES[zi].short+'</th>';
+  }
+  h+='</tr></thead><tbody>';
+  for(var ci=0;ci<CARCASS_NAMES.length;ci++){
+    var cName=CARCASS_NAMES[ci];
+    if(!rm[cName]) rm[cName]={};
+    var rowBg=ci%2===0?'#fff':'#f8f9ff';
+    h+='<tr style="background:'+rowBg+'">';
+    h+='<td style="'+tdStyle+';font-weight:500;font-size:12px">'+escHtml(cName)+'</td>';
+    for(var zi=0;zi<INST_ZONES.length;zi++){
+      var zk=INST_ZONES[zi].key;
+      var val=parseFloat(rm[cName][zk])||0;
+      var vRate=validatorRates[zk]||0;
+      // Color: green if matrix ≥ validator, amber if 0 (not set), red if below cost
+      var cellBg=val===0?'#fffbeb':val>=vRate?'#f0fdf4':'#fff1f1';
+      h+='<td style="'+tdStyle+';background:'+cellBg+';padding:3px 4px">';
+      h+='<input type="number" min="0" step="50" value="'+(val||'')+'" placeholder="0"'
+        +' oninput="if(!INST_COST.rateMatrix['+JSON.stringify(cName)+'])INST_COST.rateMatrix['+JSON.stringify(cName)+']={}; INST_COST.rateMatrix['+JSON.stringify(cName)+'][\''+zk+'\']=parseFloat(this.value)||0;_instRefreshSummary()"'
+        +' style="width:80px;height:26px;font-size:11px;text-align:right;border:.5px solid #ddd;border-radius:4px;padding:0 4px;background:transparent">';
+      h+='</td>';
+    }
+    h+='</tr>';
+  }
+  // Validator row — shows bottom-up computed cost per zone
+  h+='<tr style="background:#f0f4ff;border-top:2px solid var(--navy)">';
+  h+='<td style="'+tdStyle+';font-size:11px;font-weight:600;color:var(--navy)"><i class="ti ti-calculator" style="font-size:10px"></i> Bottom-up cost (validator)</td>';
+  for(var zi=0;zi<INST_ZONES.length;zi++){
+    var vr=validatorRates[INST_ZONES[zi].key]||0;
+    h+='<td style="'+tdStyle+';text-align:right;font-size:11px;color:var(--navy);font-weight:600;background:#e8eeff">'+fmt(vr)+'</td>';
+  }
+  h+='</tr>';
+  h+='</tbody></table>';
+  // Legend
+  h+='<div style="display:flex;gap:14px;padding:8px 14px;font-size:10px;color:var(--text2)">';
+  h+='<span><span style="display:inline-block;width:10px;height:10px;background:#f0fdf4;border:.5px solid #ddd;border-radius:2px;margin-right:3px"></span>At or above cost</span>';
+  h+='<span><span style="display:inline-block;width:10px;height:10px;background:#fffbeb;border:.5px solid #ddd;border-radius:2px;margin-right:3px"></span>Not set (uses bottom-up)</span>';
+  h+='<span><span style="display:inline-block;width:10px;height:10px;background:#fff1f1;border:.5px solid #ddd;border-radius:2px;margin-right:3px"></span>Below computed cost</span>';
+  h+='</div>';
+  h+='</div></div>';
+  return h;
+}
 function renderInstCostBreakdown(w, navHtml) {
   var c = _instCalc();
   var fmt = function(v){ return '₱'+v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); };
@@ -8639,6 +8760,8 @@ function renderInstCostBreakdown(w, navHtml) {
     return s;
   }
   var h = navHtml;
+  // ── Rate Matrix: cabinet type × zone ────────────────────────────────────────
+  h += _buildInstRateMatrix();
   // ── Admin cost (read-only) ───────────────────────────────────────────────
   h += '<div class="card" style="margin-bottom:10px;border-left:4px solid var(--teal)">';
   h += '<div class="card-body" style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between">';
@@ -8741,34 +8864,7 @@ function renderInstCostBreakdown(w, navHtml) {
   h += '<div style="font-size:28px;font-weight:800;color:#fff" id="inst-price-disp">'+fmt(c.priceUnit)+'</div>';
   h += '</div>';
   h += '</div></div>';
-  // ── Rate Preview table ────────────────────────────────────────────────────
-  var _rpMetro = instPriceUnitFor('metro');
-  var _rpOutside = instPriceUnitFor('outside');
-  var _rpCap = c.cap;
-  h += '<div class="card" style="margin-top:14px">';
-  h += '<div class="card-head" style="display:flex;align-items:center;justify-content:space-between"><h3><i class="ti ti-table"></i>Rate Preview — Per Cabinet Type</h3>'
-    +'<span style="font-size:11px;color:var(--text2);font-weight:400">Complexity factors set in <a href="#" onclick="setStTab(\'ppic\');return false" style="color:var(--navy)">Settings → PPIC</a></span></div>';
-  h += '<div class="card-body" style="padding:0">';
-  h += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
-  h += '<thead><tr style="background:#f0f4f8">'
-    +'<th style="text-align:left;padding:8px 12px;font-weight:600">Cabinet Type</th>'
-    +'<th style="padding:8px 12px;font-weight:600;text-align:right">Factor</th>'
-    +'<th style="padding:8px 12px;font-weight:600;text-align:right">Metro</th>'
-    +'<th style="padding:8px 12px;font-weight:600;text-align:right">Outside Metro</th>'
-    +'</tr></thead><tbody>';
-  for(var _ri=0;_ri<CARCASS_NAMES.length;_ri++){
-    var _rn=CARCASS_NAMES[_ri];
-    var _rf=parseFloat(INST_COST.complexity[_rn]); if(isNaN(_rf)) _rf=1.0;
-    h+='<tr style="border-top:.5px solid var(--border)">'
-      +'<td style="padding:7px 12px">'+escHtml(_rn)+'</td>'
-      +'<td style="padding:7px 12px;text-align:right;color:var(--text2)">×'+_rf.toFixed(2)+'</td>'
-      +'<td style="padding:7px 12px;text-align:right;font-weight:600;color:var(--navy)">'+fmt(_rpMetro*_rf)+'</td>'
-      +'<td style="padding:7px 12px;text-align:right;font-weight:600;color:var(--navy)">'+fmt(_rpOutside*_rf)+'</td>'
-      +'</tr>';
-  }
-  h += '</tbody></table>';
-  h += '<div style="padding:10px 14px;font-size:11px;color:var(--text2)">Rates reflect all cost components above, at current PPIC capacity ('+_rpCap.toFixed(1)+' units/day).</div>';
-  h += '</div></div>';
+  // Rate Preview replaced by Rate Matrix at top of this tab
   w.innerHTML = h;
   // Patch subtotals that sectionCard rendered before we knew values
   _instPatchSectionTotals(c);
@@ -9547,7 +9643,7 @@ function restoreQuotationSnapshot(snap){
   if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';}
   if(snap.initLockedAt!==undefined){qInitLockedAt=snap.initLockedAt||'';qInitApprovedAt=snap.initApprovedAt||'';fqLockedAt=snap.finalLockedAt||'';qClosedAt=snap.closedAt||'';}
   qInstWorkers=snap.instWorkers||0; qInstDays=snap.instDays||0;
-  qInstRegion=snap.instRegion||'metro';
+  qInstRegion=snap.instRegion||'z1'; if(qInstRegion==='metro')qInstRegion='z1'; if(qInstRegion==='outside')qInstRegion='z2';
   qMobTransport=snap.mobTransport?JSON.parse(JSON.stringify(snap.mobTransport)):null;
   qMobAccom=snap.mobAccom?JSON.parse(JSON.stringify(snap.mobAccom)):null;
   qMobCalc=snap.mobCalc?JSON.parse(JSON.stringify(snap.mobCalc)):null;
@@ -13706,12 +13802,14 @@ function _applyAppSettings(s){
     if(Array.isArray(ic.siteFees))  INST_COST.siteFees=ic.siteFees;
     if(Array.isArray(ic.instQaqc))  INST_COST.instQaqc=ic.instQaqc;
     if(ic.complexity&&typeof ic.complexity==='object') INST_COST.complexity=ic.complexity;
+    if(ic.rateMatrix&&typeof ic.rateMatrix==='object') INST_COST.rateMatrix=ic.rateMatrix;
   }
   if(s.ppicSettings&&s.ppicSettings.installation){
     var pi=s.ppicSettings.installation;
     if(typeof pi.teamsPerDay==='number')     ppicSettings.installation.teamsPerDay=pi.teamsPerDay;
     if(typeof pi.cabPerTeamDay==='number')   ppicSettings.installation.cabPerTeamDay=pi.cabPerTeamDay;
     if(typeof pi.workdaysPerMonth==='number')ppicSettings.installation.workdaysPerMonth=pi.workdaysPerMonth;
+    if(pi.typeCapacity&&typeof pi.typeCapacity==='object') ppicSettings.installation.typeCapacity=pi.typeCapacity;
   }
 }
 function gSaveAppSettings(){
@@ -14084,7 +14182,7 @@ function restoreFullQuotationState(state){
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
   qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
   qInstWorkers=state.instWorkers||0; qInstDays=state.instDays||0;
-  qInstRegion=state.instRegion||'metro';
+  qInstRegion=state.instRegion||'z1'; if(qInstRegion==='metro')qInstRegion='z1'; if(qInstRegion==='outside')qInstRegion='z2';
   qMobTransport=state.mobTransport||null; qMobAccom=state.mobAccom||null;
   qMobCalc=state.mobCalc||null;
   qInstPlanner=state.instPlanner||null; qInstTouristPrem=!!state.instTouristPrem;
