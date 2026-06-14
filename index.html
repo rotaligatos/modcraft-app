@@ -18466,16 +18466,15 @@ function _lamiStartWakeWord(){
   };
   _lamiWakeRecog.onend=function(){
     _lamiWakeRunning=false;
-    // Restart unless explicitly stopped or disabled
-    if(lamiWakeWordEnabled&&lamiEnabled&&!_lamiListening){
-      setTimeout(_lamiStartWakeWord, 1000);
+    // Only restart if mic is fully idle — if loop mic took over, don't conflict
+    if(lamiWakeWordEnabled&&lamiEnabled&&!_lamiListening&&_lamiMicState==='idle'){
+      setTimeout(_lamiStartWakeWord, 1200);
     }
   };
   _lamiWakeRecog.onerror=function(e){
     _lamiWakeRunning=false;
-    // Silently stop on no-speech / not-allowed; retry on others
     if(e.error==='not-allowed'||e.error==='service-not-allowed') return;
-    if(lamiWakeWordEnabled&&lamiEnabled&&!_lamiListening){
+    if(lamiWakeWordEnabled&&lamiEnabled&&!_lamiListening&&_lamiMicState==='idle'){
       setTimeout(_lamiStartWakeWord, 3000);
     }
   };
@@ -18504,19 +18503,88 @@ function _lamiSetEnabled(on){
   renderLamiSettings();
 }
 
+// ── Preferred name / honorific ────────────────────────────────────────────
+// Stored per user email in localStorage: { callName, honorific }
+// honorific: 'none' | 'Sir' | 'Ma\'am'
+function _lamiPrefKey(){ return 'mc_lami_pref_'+(gUser&&gUser.email?gUser.email:'guest'); }
+function _lamiLoadPref(){ try{ return JSON.parse(localStorage.getItem(_lamiPrefKey())||'null'); }catch(e){ return null; } }
+function _lamiSavePref(p){ try{ localStorage.setItem(_lamiPrefKey(),JSON.stringify(p)); }catch(e){} }
+function _lamiCallName(){
+  var p=_lamiLoadPref();
+  if(p&&p.callName){
+    return p.honorific&&p.honorific!=='none'?p.honorific+' '+p.callName:p.callName;
+  }
+  return (gUser&&gUser.name)?gUser.name.split(' ')[0]:'there';
+}
+function _lamiSetCallName(honorific, callName){
+  _lamiSavePref({honorific:honorific,callName:callName});
+  var display=honorific&&honorific!=='none'?honorific+' '+callName:callName;
+  _chipAppendAi('Got it! I\'ll call you **'+display+'** from now on. 😊 You can always change this by asking me anytime.');
+}
+function _lamiAskNamePref(){
+  var firstName=(gUser&&gUser.name)?gUser.name.split(' ')[0]:'';
+  var msg='Before we get started — what would you like me to call you? 😊';
+  _chipAppendAi(msg, true); // silent — login already greeted
+  // Show quick-pick buttons in the suggestions bar
+  var box=el('chip-suggestions'); if(!box) return;
+  var opts=[
+    {label:'Sir '+(firstName||'…'), hon:'Sir', name:firstName},
+    {label:'Ma\'am '+(firstName||'…'), hon:'Maam', name:firstName},
+    {label:'Just '+(firstName||'my first name'), hon:'none', name:firstName}
+  ];
+  box.innerHTML=opts.map(function(o){
+    return '<div class="chip-sug" onclick="_lamiSetCallName(\''+o.hon+'\',\''+escHtml(o.name)+'\')" style="white-space:nowrap">'+escHtml(o.label)+'</div>';
+  }).join('')
+  +'<div class="chip-sug" onclick="_lamiNameCustom()" style="white-space:nowrap">Custom name…</div>';
+}
+function _lamiNameCustom(){
+  var box=el('chip-suggestions'); if(box) box.innerHTML='';
+  _chipAppendAi('Sure! Just type what you\'d like me to call you (e.g. "Sir Jun", "Ma\'am Rose", or just "Rommel").');
+  // Set a flag so the next user message is treated as their name choice
+  window._lamiAwaitingName=true;
+}
+// Hook into sendChip to intercept name input
+var _origSendChipForName=sendChip;
+sendChip=function(){
+  if(window._lamiAwaitingName){
+    window._lamiAwaitingName=false;
+    var inp=el('chip-inp'); if(!inp||!inp.value.trim()) return _origSendChipForName();
+    var raw=inp.value.trim();
+    inp.value='';
+    _chipAppendUser(raw);
+    el('chip-suggestions').innerHTML='';
+    // Parse honorific from input
+    var hon='none', name=raw;
+    var m=raw.match(/^(sir|ma'?am|mr\.?|ms\.?|mrs\.?)\s+(.+)$/i);
+    if(m){ hon=m[1].replace(/['.]/g,'').replace(/^ma$/i,'Maam'); name=m[2]; }
+    else { name=raw; }
+    _lamiSavePref({honorific:hon,callName:name});
+    var display=hon!=='none'?hon+' '+name:name;
+    _chipAppendAi('Perfect! I\'ll call you **'+display+'** going forward. 😊');
+    return;
+  }
+  _origSendChipForName();
+};
+
 var _chipLoginGreeted=false;
 function _chipLoginGreet(){
-  if(_chipLoginGreeted) return;   // hard guard — gShowApp may fire more than once (token refresh)
+  if(_chipLoginGreeted) return;
   _chipLoginGreeted=true;
-  var name=(gUser&&gUser.name)?gUser.name.split(' ')[0]:'there';
+  var callName=_lamiCallName();
   var h=new Date().getHours();
   var tod=h<12?'Magandang umaga':'Good '+(h<18?'afternoon':'evening');
   var raw=LAMI_GREETINGS[Math.floor(Math.random()*LAMI_GREETINGS.length)];
-  var spoken=tod+', '+name+'! '+raw.replace(/\*\*(.*?)\*\*/g,'$1');
-  // Speak once on login — mark greeted so panel open won't repeat it
+  var spoken=tod+', '+callName+'! '+raw.replace(/\*\*(.*?)\*\*/g,'$1');
   chipGreeted=true;
   _chipSpeak(spoken);
   setTimeout(_chipRunAuditSilent, 2500);
+  // First-time login for this user — ask name preference after a short delay
+  if(!_lamiLoadPref()){
+    setTimeout(function(){
+      if(!chipOpen) toggleChip();
+      _lamiAskNamePref();
+    }, 3500);
+  }
 }
 
 // ── KPI / data context builder ────────────────────────────────────────────
@@ -18707,6 +18775,8 @@ function _chipBuildSystemPrompt(){
     'page-approvals':'Approvals','page-users':'Users'}[pgId]||pgId;
 
   var lamiLangMode=typeof lamiLang!=='undefined'?lamiLang:'en';
+  var _pref=_lamiLoadPref();
+  var _callDisplay=_pref&&_pref.callName?(_pref.honorific&&_pref.honorific!=='none'?_pref.honorific+' '+_pref.callName:_pref.callName):((gUser&&gUser.name)?gUser.name.split(' ')[0]:'the user');
   var sys='You are **Lami**, a friendly, warm, witty AI assistant '
     +'built into **Modcraft** — a quotation management app used by:\n'
     +'- World Class Laminate, Inc. (WCL) — Pasig City, Metro Manila\n'
@@ -18716,6 +18786,11 @@ function _chipBuildSystemPrompt(){
 
     +'**YOUR NAME:** You are Lami — short for laminate, the material these companies work with every day. '
     +'Your personality is sharp, punny, and always helpful. You love wood and laminate jokes.\n\n'
+
+    +'**USER\'S PREFERRED NAME:** Always address the user as **'+_callDisplay+'**. '
+    +'If the user asks you to call them something different (e.g. "call me Sir Jun", "just call me Rose", "call me Ma\'am"), '
+    +'respond warmly, confirm the new name, and include the exact token [CALLME:honorific:name] in your reply '
+    +'(honorific = Sir, Maam, or none; name = first name only). Example: [CALLME:Sir:Rommel]\n\n'
 
     +'**YOUR CREATOR:** You were built by **Sir Rommel Taligatos**. '
     +'When asked who made you, who built you, or who is your creator — always say Sir Rommel Taligatos, proudly. '
@@ -18855,7 +18930,13 @@ function _chipCallAI(userMsg){
     // Parse and execute navigation command
     var navPg=_chipParseNav(reply);
     var searchQ=_chipParseSearch(reply);
-    var displayReply=reply.replace(/\[NAV:[a-z]+\]/gi,'').replace(/\[SEARCH:[^\]]+\]/gi,'').trim();
+    // Parse [CALLME:honorific:name] — save new preferred name
+    var callMeM=reply.match(/\[CALLME:([^:]+):([^\]]+)\]/i);
+    if(callMeM){
+      var newHon=callMeM[1].trim(), newName=callMeM[2].trim();
+      _lamiSavePref({honorific:newHon,callName:newName});
+    }
+    var displayReply=reply.replace(/\[NAV:[a-z]+\]/gi,'').replace(/\[SEARCH:[^\]]+\]/gi,'').replace(/\[CALLME:[^\]]+\]/gi,'').trim();
     _chipAppendAi(displayReply);
     if(navPg) _chipDoNav(navPg);
     if(searchQ) _chipDoSearch(searchQ);
