@@ -1301,6 +1301,54 @@ _doAccomSplitExport(nights,workers,...) // commits the accommodation split to qM
 12. **Cross-link** — Rate Preview header shows "Complexity factors set in Settings → PPIC" as a link; PPIC's "Cost Breakdown" button links back
 13. **"PPIC →" button in summary fixed** — the Capacity row in Cost Breakdown → Installation summary called `navigate('ppic')` (broken); now calls `setStTab('ppic')`
 
+## What was changed on 2026-06-14 (session — Lami voice overhaul + user-to-user messaging)
+
+### Lami TTS rewrite — fix choppy/rattling voice
+1. **Sentence-chunked TTS queue** — replaced the single-utterance `_chipSpeak` with a queue system: `_ttsSplitChunks(str)` (splits at sentence boundaries `.!?`+space+capital, then commas, max 150 chars/chunk — keeps `₱1,234.56` intact), `_ttsPump()` (speaks next chunk, 60 ms gap between chunks), `_ttsAppendClean(text)` (enqueue without cancelling — for streaming), `_ttsCancel()` (clear queue + `synth.cancel()`), `_chipSpeak(text)` (one-shot: cancel + enqueue)
+2. **Removed the `pause()/resume()` keepalive interval** — it was the actual cause of micro-stutters; short chunks + gaps are enough for Chrome
+3. **Globals:** `_ttsQueue`, `_ttsSpeaking`
+
+### Lami voice selector (Settings → Lami → Voice)
+4. **Pick any installed system voice** — `_chipVoicePresetId` saved to `localStorage` `mc_lami_voice_id`; `_chipPickVoice()` honours it first; lists all voices (English first, others tagged by lang), Neural badge for online voices, ▶ Preview per voice, ↻ Refresh, ✕ Reset to auto
+5. **`_lamiSetVoice(name)` / `_lamiPreviewVoice(name)`** — set + audition; tip in UI to install Microsoft Guy/Mark on Windows for a deep "Jarvis" voice. ElevenLabs/custom-voice API is a saved future idea (memory `project_elevenlabs_voice.md`)
+
+### Conversation Mode (Settings → Lami)
+6. **`lamiConvMode`** (`'continuous'` | `'wakeword'`, saved to `mc_lami_conv`) via `_lamiSetConvMode(m)`
+7. **Continuous (Loop)** — after "Hi Lami", mic stays on in loop until manually stopped
+8. **Wake Word (5-second window)** — `_lamiWakeFollowListen()` listens once with a 5 s silence fallback (`_lamiFollowTimer`); after each exchange reopens a 5 s window; silence → back to standby
+
+### Loop mic reliability + intent gate + barge-in
+9. **Restart mic only after TTS drains** — `_lamiPendingRestart` flag; `_ttsPump` drain calls `_lamiResumeAfterTts()` (routes to loop listen or wake-follow). Fixes loop hearing itself / dying after one exchange
+10. **Intent gate (continuous mode)** — `_lamiIsAddressed(t)`: speech reaches the API only if it mentions "Lami" (incl. mishearings lammy/lommie/laffy) OR is within the engaged window `_lamiEngagedUntil` (9 s after each exchange, 12 s after wake word). Background chatter no longer triggers API calls. `_lamiVoiceTurn` marks voice turns
+11. **Barge-in** — tapping the mic while Lami speaks cancels TTS (`_lamiBeginListen` calls `_ttsCancel()` if speaking); `_lamiStartVoice` also cancels
+12. **Broadened wake-word regex** — `(hi|hey|ey|hello|yo)\s+(la+mi+|lami|lammy|lommie|laffy)`
+
+### Streaming AI responses (the big latency win)
+13. **`_chipCallAI` now streams** — `stream:true` SSE parse via `resp.body.getReader()`; text appears in the bubble as it arrives and each completed sentence is spoken immediately (sub-second perceived latency vs 2–3 s). Markers (`[NAV]`,`[SEARCH]`,`[CALLME]`,`[MSG]`) held back from speech mid-stream via `_stripMarkers(s,streaming)` (hides dangling `[…`)
+14. **Brief-when-voice** — voice turns get `max_tokens:320` + a "1–2 short spoken sentences, no markdown/lists" instruction; typed turns keep `max_tokens:900`
+15. **Token usage** captured from `message_start` (input) + `message_delta` (output) → `_tkRecord('chat',…)`
+
+### User-to-user messaging (Lami relay + inbox + email fallback)
+16. **New `Messages` sheet tab** (auto-created via `gEnsureMessagesTab`/`_msgCreateTab`) — 11 cols: ID, Created At, From Email, From Name, To Email, To Name, Message, Priority, Status, Read At, Context (`MSG_HDR`)
+17. **Core fns:** `gSendMessage(toEmail,toName,text,priority,ctx,cb)` (append row + email fallback + logActivity), `gLoadMessages(cb)` (rows where I'm sender or recipient → `messagesData`), `_msgMarkRead(id)`, `_msgUnreadForMe()`, `_updateMsgBadge()`
+18. **✉ envelope button + panel** — left of the notification bell (`msg-btn`/`msg-cnt`/`msg-panel`); `toggleMsgPanel`/`closeMsgPanel`/`renderMsgPanel`; built-in composer (recipient `<select>` from `sheetUsers`, textarea, Urgent checkbox, Send → `_msgComposeSend`) + thread list (sent + received, opening marks incoming read)
+19. **Attention on arrival** — 45 s poll (`_msgPollTimer`) → for new unread-to-me: `_msgAttention(m)` = toast + chime (`_msgPlayChime`, WebAudio, sharper 3-note for urgent) + envelope pulse + voice announcement if `chipVoiceOn`. Pre-existing messages baselined into `_msgSeen` at login so they don't re-toast
+20. **Lami relay** — system prompt MESSAGING rule + `[MSG:recipient|priority|text]` marker; `_chipHandleMsgMarker(raw)` resolves recipient via `_resolveRecipient(q)` (email/full-name/first-name/contains; returns `{ambiguous:[…]}` when >1 match → Lami asks which); recipient roster injected via `_lamiRecipientList()`
+21. **Email fallback** — `_sendMessageEmail(toEmail,fromName,text,priority)`: if `MSG_MAILER_URL` set → silent `fetch(..., {mode:'no-cors'})` POST `{to,subject,body}` to a Google Apps Script web app (`MailApp.sendEmail`); else opens Gmail compose for **urgent** only. URL field + **Send test** button (`_msgTestMailer`) in Settings → Lami → Messaging (Admin/Director only); persisted as `msgMailerUrl` in `_collectAppSettings`/`_applyAppSettings` (Settings sheet CONFIG → shared across users)
+22. **GAS mailer (Option B, standalone)** — separate Apps Script project, `doPost` parses JSON + `MailApp.sendEmail`, `doGet` health check; deployed as Web App (Execute as: Me, Access: Anyone); paste the `/exec` URL into Settings. **Confirmed working 2026-06-14.** Note: `no-cors` means the app can't read the response — the toast confirms the request was sent, not delivery
+
+### New globals (2026-06-14)
+```javascript
+lamiConvMode            // 'continuous' | 'wakeword'
+_chipVoicePresetId      // saved TTS voice name
+_lamiFollowTimer        // wake-word 5 s follow-up timer
+_lamiPendingRestart     // restart loop mic after TTS drains
+_lamiEngagedUntil       // continuous-mode intent-gate window (epoch ms)
+_lamiVoiceTurn          // current turn came from voice → brief reply
+_ttsQueue, _ttsSpeaking // TTS chunk queue state
+MSG_HDR, messagesData, _msgSeen, _msgTabReady, _msgAudioCtx, MSG_MAILER_URL
+```
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
