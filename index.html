@@ -18027,6 +18027,12 @@ function _chipRunAudit(){
     if(hasItems&&!qMobAccom) nudges.push({icon:'🏨',text:'Accommodation not added',ask:'How do I include accommodation in the quotation?'});
     if(hasItems&&qMobAccom&&!(qInstPlanner&&(qInstPlanner.workNightAccom||qInstPlanner.perDiem))) nudges.push({icon:'🔀',text:'Accommodation not split to Installation — export from Planner',ask:'How do I split accommodation between mobilization and installation?'});
     if(!qSaved&&hasItems) nudges.push({icon:'💾',text:'Quotation not saved yet',ask:'How do I save a draft quotation?'});
+    // Site visit waiver check
+    if(hasItems&&typeof qSiteVisit!=='undefined'&&!qSiteVisit.enabled)
+      nudges.push({icon:'📋',text:'Site visit not included — a Site Visit Waiver may be required',ask:'What is a Site Visit Waiver and when do we need it?'});
+    // MOA reminder for high-value quotations
+    if(_pCalc&&_pCalc.grand>300000)
+      nudges.push({icon:'📝',text:'Grand total exceeds ₱300,000 — confirm with your Manager if an MOA is needed before production',ask:'What is a Memorandum of Agreement and when is it required?'});
   }
   chipAuditNudges=nudges;
   var bar=el('chip-audit-bar'), txt=el('chip-audit-text'), dot=el('chip-alert-dot');
@@ -18234,7 +18240,88 @@ function _chipDoNav(pg){
   setTimeout(function(){navigate(pg);},400);
 }
 
+function _chipParseSearch(text){
+  var m=text.match(/\[SEARCH:([^\]]+)\]/i);
+  return m?m[1].trim():null;
+}
+
+function _chipDoSearch(query){
+  if(!query||!prodSettings.claudeKey) return;
+  // Show a "searching…" indicator in chat
+  var msgs=el('chip-msgs'); if(!msgs) return;
+  var searchDiv=document.createElement('div');
+  searchDiv.className='chip-msg-ai';
+  searchDiv.innerHTML='<span style="opacity:.6;font-size:12px">🌐 Searching: <em>'+escHtml(query)+'</em>…</span>';
+  msgs.appendChild(searchDiv);
+  msgs.scrollTop=msgs.scrollHeight;
+
+  var searchPrompt='You are a helpful web search assistant for a Philippine interior fit-out and modular furniture company. '
+    +'Search query: "'+query+'"\n\n'
+    +'Provide accurate, useful information based on your knowledge. Focus on Philippine context where relevant. '
+    +'Format as 3-5 concise bullet points. Include any relevant pricing, regulations, or industry standards. '
+    +'Note if information may be outdated and a live web check is recommended.';
+
+  fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,
+      'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({
+      model:'claude-sonnet-4-6',
+      max_tokens:500,
+      system:searchPrompt,
+      messages:[{role:'user',content:query}]
+    })
+  }).then(function(r){return r.json();}).then(function(data){
+    var result=(data.content&&data.content[0]&&data.content[0].text)||'No results found.';
+    searchDiv.innerHTML='<div style="border-left:3px solid #14b8a6;padding-left:8px;margin-top:4px">'
+      +'<div style="font-size:10px;font-weight:600;opacity:.6;margin-bottom:4px">🌐 WEB SEARCH: '+escHtml(query)+'</div>'
+      +result.replace(/\*\*(.*?)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>')
+      +'</div>';
+    msgs.scrollTop=msgs.scrollHeight;
+    _chipSpeak('Here\'s what I found about '+query);
+  }).catch(function(){
+    searchDiv.innerHTML='<span style="opacity:.5;font-size:12px">🌐 Search unavailable. Check your connection.</span>';
+  });
+}
+
 // ── System prompt ─────────────────────────────────────────────────────────
+// ── Lami data context helpers ─────────────────────────────────────────────
+function _lamiProjectsContext(){
+  var all=[];
+  // merge dirData + sessionQuotations
+  var seen={};
+  if(dirData) dirData.forEach(function(r){if(r&&r[0]){seen[r[0]]=true;all.push(r);}});
+  if(sessionQuotations) Object.keys(sessionQuotations).forEach(function(k){
+    if(!seen[k]){var r=sessionQuotations[k];if(r)all.push([k,r.date||'',r.client||'',r.bizname||'',r.status||'',r.total||0,r.service||'',r.agent||'',r.company||'']);}
+  });
+  if(!all.length) return '';
+  // sort newest first (col 1 = date)
+  all.sort(function(a,b){return (b[1]||'').localeCompare(a[1]||'');});
+  var lines=all.slice(0,40).map(function(r){
+    var serial=r[0]||'',date=(r[1]||'').substring(0,10),client=r[2]||'',biz=r[3]||'',status=r[4]||'',total=parseFloat(r[5])||0,svc=r[6]||'';
+    return serial+'|'+date+'|'+(biz||client)+(client&&biz?' ('+client+')':'')+'|'+status+'|₱'+Math.round(total).toLocaleString()+(svc?'|'+svc:'');
+  });
+  return '\n**ALL PROJECTS (newest first, up to 40):**\nSerial|Date|Client|Status|Total|Service\n'+lines.join('\n')+'\n';
+}
+function _lamiOrdersContext(){
+  if(!pendingOrders||!pendingOrders.length) return '';
+  var counts={Pending:0,'In Progress':0,Done:0};
+  pendingOrders.forEach(function(o){counts[o.status]=(counts[o.status]||0)+1;});
+  var recent=pendingOrders.filter(function(o){return o.status!=='Done';}).slice(0,8);
+  var lines=recent.map(function(o){
+    return '#'+(o.id||'?')+' | '+(o.clientName||'?')+' | '+(o.requestType||'?')+' | '+(o.typeOfService||'?')+' | '+(o.status||'?');
+  });
+  return '\n**PENDING ORDERS:** Pending='+counts.Pending+', In Progress='+(counts['In Progress']||0)+', Done='+counts.Done
+    +'\nRecent active:\n'+lines.join('\n')+'\n';
+}
+function _lamiClientsContext(){
+  if(!liveClients||!liveClients.length) return '';
+  var lines=liveClients.slice(0,60).map(function(c){
+    return (c.bizName||c.name||'?')+' | '+(c.name||'')+(c.contact?' | '+c.contact:'')+(c.segment?' | '+c.segment:'');
+  });
+  return '\n**CLIENT DIRECTORY ('+liveClients.length+' total, showing up to 60):**\nBusiness|Contact|Segment\n'+lines.join('\n')+'\n';
+}
+
 function _chipBuildSystemPrompt(){
   var pg=document.querySelector('.page.active');
   var pgId=pg?pg.id:'';
@@ -18261,15 +18348,28 @@ function _chipBuildSystemPrompt(){
 
     +'**WHAT YOU CAN DO:**\n'
     +'1. Answer any question about how to use Modcraft\n'
-    +'2. Navigate to any page — include [NAV:pagename] in your reply when user wants to go somewhere '
+    +'2. Navigate to any page — include [NAV:pagename] in your reply\n'
     +'   (pages: dashboard, quotation, directory, clients, orders, production, reports, schedule, approvals, users, settings, help)\n'
-    +'3. Flag missing quotation details (client, dates, transport, accommodation, etc.)\n'
-    +'4. Explain cost breakdowns, margins, and quotation stages\n'
-    +'5. Answer KPI questions and give trend analysis from live data below\n'
-    +'6. Respond to voice — user may speak to you via microphone\n\n'
+    +'3. Flag missing quotation details and compliance reminders (site visit waiver, MOA, etc.)\n'
+    +'4. Look up any past project by client name, business name, or serial — use the PROJECTS data below\n'
+    +'5. Analyze and project KPI trends, pipeline, conversion from live data\n'
+    +'6. Answer questions about pending orders and order status\n'
+    +'7. For Manager/Admin/Director: access full client directory and provide client info\n'
+    +'8. Search the web for further support — include [SEARCH:your query here] in your reply when you need current web info\n\n'
 
-    +'**NAVIGATION RULE:** Always include [NAV:pagename] when user wants to go somewhere. '
-    +'Example: "take me to reports" → end reply with [NAV:reports]\n\n'
+    +'**NAVIGATION RULE:** Include [NAV:pagename] when user wants to go somewhere.\n\n'
+
+    +'**SEARCH RULE:** When the user asks something requiring current web info (material prices, regulations, market rates, company info, etc.), '
+    +'include [SEARCH:specific search query] in your reply. The app will fetch results and show them. '
+    +'You can still answer from your knowledge first, then add [SEARCH:query] for live confirmation.\n\n'
+
+    +'**LOOKUP RULE:** You have full access to all projects and clients in the data below. '
+    +'When asked to find a quotation or client, search the PROJECTS or CLIENT DIRECTORY data and answer directly — '
+    +'list the matching serial(s), client name, status, total, and date. If nothing matches, say so clearly.\n\n'
+
+    +'**COMPLIANCE REMINDERS (always flag these proactively):**\n'
+    +'- Site visit not enabled + fabrication items present → remind user a Site Visit Waiver may be required\n'
+    +'- Grand total > ₱300,000 → remind user to check with Manager if an MOA is needed before production\n\n'
 
     +(lamiLangMode==='taglish'
       ?'**LANGUAGE:** Respond in **Taglish** — natural mix of Tagalog and English as spoken in Philippine offices. '
@@ -18329,7 +18429,18 @@ function _chipBuildSystemPrompt(){
     }
   }
 
-  sys+='\nRemember: always include [NAV:pagename] when navigating. Keep replies concise.';
+  // Projects data — always injected so Lami can look up by name/client
+  sys+=_lamiProjectsContext();
+
+  // Pending orders
+  sys+=_lamiOrdersContext();
+
+  // Client directory — Manager/Director/Admin only
+  var role=currentRole||'';
+  var isManagerUp=['Admin','Director','Manager'].indexOf(role)>=0;
+  if(isManagerUp) sys+=_lamiClientsContext();
+
+  sys+='\nRemember: include [NAV:pagename] when navigating, [SEARCH:query] when web info needed. Keep replies concise.';
   return sys;
 }
 
@@ -18351,7 +18462,7 @@ function _chipCallAI(userMsg){
       'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({
       model:'claude-sonnet-4-6',
-      max_tokens:600,
+      max_tokens:900,
       system:_chipBuildSystemPrompt(),
       messages:chipHistory
     })
@@ -18362,9 +18473,11 @@ function _chipCallAI(userMsg){
     chipHistory.push({role:'assistant',content:reply});
     // Parse and execute navigation command
     var navPg=_chipParseNav(reply);
-    var displayReply=reply.replace(/\[NAV:[a-z]+\]/gi,'').trim();
+    var searchQ=_chipParseSearch(reply);
+    var displayReply=reply.replace(/\[NAV:[a-z]+\]/gi,'').replace(/\[SEARCH:[^\]]+\]/gi,'').trim();
     _chipAppendAi(displayReply);
     if(navPg) _chipDoNav(navPg);
+    if(searchQ) _chipDoSearch(searchQ);
     _chipRefreshSuggestions();
   }).catch(function(e){
     _chipTyping(false);
