@@ -17538,78 +17538,81 @@ function _chipCleanText(text){
     .replace(/\s+/g,' ').trim();
 }
 
+// Chrome TTS chops on long utterances. Break a string into short chunks ≤150 chars:
+// split at sentence boundaries first, then at commas if a sentence is still long.
+function _ttsSplitChunks(str){
+  var sentences=str.replace(/([.!?])\s+([A-Z])/g,'$1\n$2').split('\n');
+  var out=[];
+  sentences.forEach(function(s){
+    s=s.trim(); if(!s) return;
+    if(s.length<=150){out.push(s);return;}
+    var cur='';
+    s.split(/,\s+/).forEach(function(ph){
+      var add=(cur?cur+', ':'')+ph;
+      if(add.length>150&&cur){out.push(cur.trim());cur=ph;}
+      else{cur=add;}
+    });
+    if(cur.trim()) out.push(cur.trim());
+  });
+  return out.filter(function(s){return s.length>1;});
+}
+
+// Speak the next queued chunk; on drain, fire the pending mic restart.
+function _ttsPump(){
+  var synth=window.speechSynthesis;
+  if(!chipVoiceOn||!synth){ _ttsQueue=[]; _ttsSpeaking=false; return; }
+  var bars=el('chip-speak-bars');
+  if(!_ttsQueue.length){
+    _ttsSpeaking=false;
+    if(bars) bars.classList.remove('speaking');
+    if(_lamiPendingRestart){ _lamiPendingRestart=false; setTimeout(_lamiResumeAfterTts,350); }
+    return;
+  }
+  _ttsSpeaking=true;
+  if(bars) bars.classList.add('speaking');
+  var utt=new SpeechSynthesisUtterance(_ttsQueue.shift());
+  if(!_chipVoiceObj) _chipPickVoice();
+  if(_chipVoiceObj) utt.voice=_chipVoiceObj;
+  utt.pitch=1.0; utt.rate=0.93; utt.volume=1.0;
+  utt.onend=function(){ setTimeout(_ttsPump,60); }; // small gap lets Chrome reset its buffer
+  utt.onerror=function(e){
+    if(e.error==='interrupted'||e.error==='canceled'){ return; } // barge-in / cancel: stop quietly
+    setTimeout(_ttsPump,60);
+  };
+  synth.speak(utt);
+}
+
+// Append already-clean text to the speech queue WITHOUT cancelling (used by streaming).
+function _ttsAppendClean(cleanText){
+  if(!chipVoiceOn||!cleanText) return;
+  var synth=window.speechSynthesis; if(!synth) return;
+  _ttsSplitChunks(cleanText).forEach(function(c){ _ttsQueue.push(c); });
+  if(!_ttsSpeaking) setTimeout(_ttsPump,40);
+}
+
+// Cancel everything currently speaking/queued (barge-in or panel close).
+function _ttsCancel(){
+  _ttsQueue=[];
+  _ttsSpeaking=false;
+  if(window.speechSynthesis) window.speechSynthesis.cancel();
+  var bars=el('chip-speak-bars'); if(bars) bars.classList.remove('speaking');
+}
+
+// One-shot speak: cancel anything in flight, then speak this text fresh.
 function _chipSpeak(text){
   if(!chipVoiceOn) return;
   var synth=window.speechSynthesis; if(!synth) return;
-  synth.cancel();
   var clean=_chipCleanText(text);
   if(!clean) return;
-  if(!_chipVoiceObj) _chipPickVoice();
-
-  // Chrome TTS chops on long utterances. Fix: break into short chunks ≤150 chars.
-  // 1) Split at sentence boundaries (.!? followed by space + capital letter).
-  // 2) If a sentence is still long, split further at commas.
-  // NO keepalive interval — pause()/resume() polling causes its own stuttering.
-  function _splitToChunks(str){
-    var sentences=str.replace(/([.!?])\s+([A-Z])/g,'$1\n$2').split('\n');
-    var out=[];
-    sentences.forEach(function(s){
-      s=s.trim(); if(!s) return;
-      if(s.length<=150){out.push(s);return;}
-      // secondary split at comma phrases
-      var cur='';
-      s.split(/,\s+/).forEach(function(ph){
-        var add=(cur?cur+', ':'')+ph;
-        if(add.length>150&&cur){out.push(cur.trim());cur=ph;}
-        else{cur=add;}
-      });
-      if(cur.trim()) out.push(cur.trim());
-    });
-    return out.filter(function(s){return s.length>1;});
-  }
-
-  var chunks=_splitToChunks(clean);
-  if(!chunks.length) chunks=[clean];
-
-  var idx=0;
-  var bars=el('chip-speak-bars');
-  var _done=false;
-
-  function speakNext(){
-    if(_done) return;
-    if(idx>=chunks.length){
-      _done=true;
-      if(bars) bars.classList.remove('speaking');
-      if(_lamiPendingRestart){_lamiPendingRestart=false;setTimeout(_lamiBeginListen,400);}
-      return;
-    }
-    var utt=new SpeechSynthesisUtterance(chunks[idx++]);
-    if(_chipVoiceObj) utt.voice=_chipVoiceObj;
-    utt.pitch=1.0;
-    utt.rate=0.93;
-    utt.volume=1.0;
-    if(idx===1&&bars) bars.classList.add('speaking');
-    // Small gap between chunks lets Chrome reset its audio buffer cleanly
-    utt.onend=function(){setTimeout(speakNext,60);};
-    utt.onerror=function(e){
-      if(e.error==='interrupted'||e.error==='canceled'){
-        if(_lamiPendingRestart){_lamiPendingRestart=false;setTimeout(_lamiBeginListen,400);}
-        return;
-      }
-      _done=true;
-      if(bars) bars.classList.remove('speaking');
-      _lamiPendingRestart=false;
-    };
-    synth.speak(utt);
-  }
-  setTimeout(speakNext,80);
+  _ttsCancel();
+  setTimeout(function(){ _ttsAppendClean(clean); }, 60);
 }
 
 // Cancel speech when panel closes
 var _origToggleChip=toggleChip;
 toggleChip=function(){
   _origToggleChip();
-  if(!chipOpen&&window.speechSynthesis) window.speechSynthesis.cancel();
+  if(!chipOpen) _ttsCancel();
 };
 
 // ── Lami language toggle ──────────────────────────────────────────────────
@@ -17657,8 +17660,26 @@ function _lamiStopListen(){
   if(lamiWakeWordEnabled&&lamiEnabled) setTimeout(_lamiStartWakeWord,800);
 }
 var _lamiGotResult=false;     // did onresult fire this listen cycle?
+// Is this utterance addressed to Lami? Used by the continuous-loop intent gate so
+// background chatter / side conversations don't get sent to the API.
+function _lamiIsAddressed(t){
+  if(!t) return false;
+  // Within the engaged follow-up window → treat as part of the ongoing conversation.
+  if(Date.now()<_lamiEngagedUntil) return true;
+  // Explicit name mention (incl. common speech-recognition mishearings of "Lami").
+  return /\b(la+mi+|lami|lammy|lommie|laffy|larmy|salami|tommy)\b/i.test(t);
+}
+// After Lami finishes speaking, reopen the mic in the right mode:
+// loop → keep listening; wake-word follow → reopen the 5-second window.
+function _lamiResumeAfterTts(){
+  if(!lamiMicEnabled||_lamiListening) return;
+  if(_lamiMicState==='loop') _lamiBeginListen();
+  else if(lamiConvMode==='wakeword'&&_lamiMicState==='once') _lamiWakeFollowListen();
+}
 function _lamiBeginListen(){
   if(_lamiListening) return;    // already listening — don't stack recognizers
+  // Barge-in safety: stop any of Lami's own speech before we open the mic.
+  if(_ttsSpeaking) _ttsCancel();
   var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SR){showToast('Voice input not supported. Try Chrome or Edge.');_lamiMicState='idle';_lamiSyncMicUI();return;}
   // Pause the wake-word recognizer while the main mic is active (one recognizer at a time)
@@ -17671,9 +17692,17 @@ function _lamiBeginListen(){
   _lamiRecog.maxAlternatives=1;
   _lamiRecog.onstart=function(){_lamiListening=true;_lamiSyncMicUI();};
   _lamiRecog.onresult=function(e){
+    var transcript=(e.results[0][0].transcript||'').trim();
+    // Intent gate (continuous loop only): ignore speech not addressed to Lami.
+    // Addressed = contains "Lami" (or a common mishearing) OR within the engaged follow-up window.
+    if(_lamiMicState==='loop' && lamiConvMode==='continuous' && !_lamiIsAddressed(transcript)){
+      _lamiGotResult=false; // nothing sent → onend restarts the loop silently
+      return;
+    }
     _lamiGotResult=true;
-    clearTimeout(_lamiFollowTimer); // cancel the 5s silence timeout — user spoke
-    var transcript=e.results[0][0].transcript;
+    _lamiVoiceTurn=true;           // this turn came from voice → reply stays short + spoken-friendly
+    _lamiEngagedUntil=Date.now()+9000; // user is clearly talking to Lami → open the follow-up window
+    clearTimeout(_lamiFollowTimer);
     var inp=el('chip-inp');
     if(inp) inp.value=transcript;
     setTimeout(sendChip,200);
@@ -17709,14 +17738,19 @@ function _lamiBeginListen(){
 }
 function _lamiStartVoice(){
   if(!lamiMicEnabled) return;
+  // Barge-in: tapping the mic while Lami is speaking stops her so you can talk.
+  if(_ttsSpeaking){ _lamiPendingRestart=false; _ttsCancel(); }
   // Cycle: idle → once → loop → idle
   if(_lamiMicState==='idle'){
     _lamiMicState='once';
+    _lamiVoiceTurn=true;
     _lamiSyncMicUI();
     _lamiBeginListen();
   } else if(_lamiMicState==='once'){
     // upgrade to loop — restart listening if the once-cycle already ended
     _lamiMicState='loop';
+    _lamiVoiceTurn=true;
+    _lamiEngagedUntil=Date.now()+9000; // user opted into loop → first utterances go straight through
     _lamiSyncMicUI();
     showToast('Loop ON 🔄 — Lami keeps listening after each reply');
     if(!_lamiListening) _lamiBeginListen();
@@ -17862,6 +17896,10 @@ var lamiConvMode=(function(){try{return localStorage.getItem('mc_lami_conv')||'c
 var _chipVoicePresetId=(function(){try{return localStorage.getItem('mc_lami_voice_id')||'';}catch(e){return '';}})(); // saved voice name preference
 var _lamiFollowTimer=null; // timer for wake-word 5-second follow-up window
 var _lamiPendingRestart=false; // true when loop mic should restart after TTS finishes
+var _lamiEngagedUntil=0;   // continuous mode: speech within this window reaches Lami without saying "Lami"
+var _lamiVoiceTurn=false;  // the current turn's input came from voice → keep the reply short + spoken-friendly
+var _ttsQueue=[];          // pending sentences/chunks waiting to be spoken
+var _ttsSpeaking=false;    // is the TTS queue actively playing
 
 // ── Lami face customization ───────────────────────────────────────────────
 var lamiface=localStorage.getItem('mc_lami_face')||'default';
@@ -18611,12 +18649,16 @@ function _lamiStartWakeWord(){
   _lamiWakeRecog.lang='en-PH';
   _lamiWakeRecog.onresult=function(e){
     var t=(e.results[e.results.length-1][0].transcript||'').toLowerCase().trim();
-    if(/\b(hi|hey|ey)\s+lami\b/.test(t)){
+    // Broadened to catch common mishearings of "Lami" (lammy / lommie / laffy).
+    if(/\b(hi|hey|ey|hello|yo)\s+(la+mi+|lami|lammy|lommie|laffy)\b/.test(t)){
       // Open panel and greet
       if(!chipOpen) toggleChip();
       var name=(gUser&&gUser.name)?gUser.name.split(' ')[0]:'';
       var reply='Yes'+(name?', '+name:'')+'! 😊 I\'m here — what do you need?';
       _chipAppendAi(reply);
+      // User just summoned Lami → open a generous engaged window so the first
+      // request goes straight through without having to say "Lami" again.
+      _lamiEngagedUntil=Date.now()+12000;
       // Hands-free: switch the mic into always-on loop so the user can just keep talking.
       // _lamiBeginListen pauses this wake recognizer; loop resumes it when stopped.
       if(lamiMicEnabled){
@@ -19063,35 +19105,115 @@ function _chipBuildSystemPrompt(){
 
 // ── AI call with navigation parsing ──────────────────────────────────────
 function _chipCallAI(userMsg){
+  // Restart loop mic after a spoken non-AI reply (voice still works when AI is off).
+  function _restartLoopAfterPlain(){
+    if(!lamiMicEnabled||_lamiListening||_lamiMicState!=='loop') return;
+    if(chipVoiceOn) _lamiPendingRestart=true; // TTS queue drain will reopen the mic
+    else setTimeout(_lamiBeginListen,600);
+  }
   if(!lamiAiEnabled){
+    _lamiVoiceTurn=false;
     _chipAppendAi('AI responses are currently off. An Admin can turn them on in Settings, under Lami.');
     _chipRefreshSuggestions();
-    // Still restart loop mic after TTS finishes (voice works even when AI is off)
-    if(lamiMicEnabled&&!_lamiListening&&_lamiMicState==='loop'){
-      if(chipVoiceOn&&window.speechSynthesis&&window.speechSynthesis.speaking){
-        _lamiPendingRestart=true;
-      } else {
-        setTimeout(_lamiBeginListen,600);
-      }
-    }
+    _restartLoopAfterPlain();
     return;
   }
   if(!prodSettings.claudeKey){
+    _lamiVoiceTurn=false;
     _chipAppendAi('I need a Claude API key to answer that. Ask your Admin to set it up in Settings, under Designers Support.');
     _chipRefreshSuggestions();
-    if(lamiMicEnabled&&!_lamiListening&&_lamiMicState==='loop'){
-      if(chipVoiceOn&&window.speechSynthesis&&window.speechSynthesis.speaking){
-        _lamiPendingRestart=true;
-      } else {
-        setTimeout(_lamiBeginListen,600);
-      }
-    }
+    _restartLoopAfterPlain();
     return;
   }
+  var voiceTurn=_lamiVoiceTurn; _lamiVoiceTurn=false; // capture & reset for this turn
   chipHistory.push({role:'user',content:userMsg});
   if(chipHistory.length>16) chipHistory=chipHistory.slice(-16);
   _chipTyping(true);
   var send=el('chip-send'); if(send) send.disabled=true;
+
+  // Brief-when-voice: spoken replies should be short and free of markdown/lists.
+  var sys=_chipBuildSystemPrompt();
+  if(voiceTurn&&chipVoiceOn){
+    sys+='\n\n**VOICE MODE:** The user is speaking to you out loud and your reply will be read aloud. '
+      +'Answer in 1–2 short, natural spoken sentences. No markdown, no bullet points, no lists, no headings. '
+      +'Be warm and conversational, like a quick spoken reply.';
+  }
+  var maxTok=(voiceTurn&&chipVoiceOn)?320:900;
+
+  // Restart the mic after a reply (waits for TTS to drain when voice is on).
+  function restartMicAfterReply(){
+    if(!lamiMicEnabled||_lamiListening) return;
+    var speaking=chipVoiceOn&&(_ttsSpeaking||(window.speechSynthesis&&window.speechSynthesis.speaking)||_ttsQueue.length>0);
+    if(_lamiMicState==='loop'){
+      if(speaking) _lamiPendingRestart=true; else setTimeout(_lamiBeginListen,500);
+    } else if(lamiConvMode==='wakeword'&&_lamiMicState==='once'){
+      if(speaking) _lamiPendingRestart=true; else setTimeout(_lamiWakeFollowListen,500);
+    }
+  }
+
+  // Strip command markers; also hide a dangling, not-yet-complete trailing "[..." while streaming.
+  function _stripMarkers(s,streaming){
+    s=s.replace(/\[NAV:[a-z]+\]/gi,'').replace(/\[SEARCH:[^\]]*\]/gi,'').replace(/\[CALLME:[^\]]*\]/gi,'');
+    if(streaming){ var open=s.lastIndexOf('['); if(open>=0&&s.indexOf(']',open)<0) s=s.slice(0,open); }
+    return s;
+  }
+
+  // ── Streaming state ──
+  var fullText='';        // raw accumulated reply (with markers)
+  var spokenLen=0;        // chars of fullText already pushed to the TTS queue
+  var aiDiv=null;         // the live message bubble
+  var firstToken=true;
+  var inTok=0, outTok=0;
+
+  function ensureDiv(){
+    if(aiDiv) return;
+    var msgs=el('chip-msgs'); if(!msgs) return;
+    aiDiv=document.createElement('div'); aiDiv.className='chip-msg-ai';
+    var typing=el('chip-typing');
+    if(typing) msgs.insertBefore(aiDiv,typing); else msgs.appendChild(aiDiv);
+  }
+  function renderLive(){
+    ensureDiv(); if(!aiDiv) return;
+    var disp=_stripMarkers(fullText,true).replace(/\*\*(.*?)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>');
+    aiDiv.innerHTML=disp;
+    var msgs=el('chip-msgs'); if(msgs) msgs.scrollTop=msgs.scrollHeight;
+  }
+  // Queue any complete sentences that haven't been spoken yet.
+  function speakReady(isFinal){
+    if(!chipVoiceOn) return;
+    while(true){
+      var rest=fullText.slice(spokenLen);
+      if(!rest){ break; }
+      // Don't speak into a dangling marker mid-stream.
+      var searchRegion=rest;
+      if(!isFinal){ var op=rest.lastIndexOf('['); if(op>=0&&rest.indexOf(']',op)<0) searchRegion=rest.slice(0,op); }
+      var idx;
+      if(isFinal){ idx=rest.length; }
+      else { var m=/[.!?](\s|$)/.exec(searchRegion); if(!m){ break; } idx=m.index+1; }
+      var sentence=rest.slice(0,idx);
+      spokenLen+=sentence.length;
+      var clean=_chipCleanText(_stripMarkers(sentence,false));
+      if(clean) _ttsAppendClean(clean);
+      if(isFinal) break;
+    }
+  }
+
+  function finalize(){
+    if(send) send.disabled=false;
+    _tkRecord('chat',inTok,outTok);
+    if(!fullText){ fullText='Sorry, I couldn\'t get a response. Try again?'; renderLive(); }
+    speakReady(true); // flush the remainder to speech
+    chipHistory.push({role:'assistant',content:fullText});
+    var navPg=_chipParseNav(fullText);
+    var searchQ=_chipParseSearch(fullText);
+    var callMeM=fullText.match(/\[CALLME:([^:]+):([^\]]+)\]/i);
+    if(callMeM) _lamiSavePref({honorific:callMeM[1].trim(),callName:callMeM[2].trim()});
+    if(aiDiv) aiDiv.innerHTML=_stripMarkers(fullText,false).replace(/\*\*(.*?)\*\*/g,'<b>$1</b>').replace(/\n/g,'<br>');
+    if(navPg) _chipDoNav(navPg);
+    if(searchQ) _chipDoSearch(searchQ);
+    restartMicAfterReply();
+    _chipRefreshSuggestions();
+  }
 
   fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
@@ -19099,52 +19221,46 @@ function _chipCallAI(userMsg){
       'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
     body:JSON.stringify({
       model:'claude-sonnet-4-6',
-      max_tokens:900,
-      system:_chipBuildSystemPrompt(),
+      max_tokens:maxTok,
+      stream:true,
+      system:sys,
       messages:chipHistory
     })
-  }).then(function(r){return r.json();}).then(function(data){
-    _chipTyping(false);
-    if(send) send.disabled=false;
-    _tkRecord('chat',(data.usage&&data.usage.input_tokens)||0,(data.usage&&data.usage.output_tokens)||0);
-    var reply=(data.content&&data.content[0]&&data.content[0].text)||'Sorry, I couldn\'t get a response. Try again?';
-    chipHistory.push({role:'assistant',content:reply});
-    // Parse and execute navigation command
-    var navPg=_chipParseNav(reply);
-    var searchQ=_chipParseSearch(reply);
-    // Parse [CALLME:honorific:name] — save new preferred name
-    var callMeM=reply.match(/\[CALLME:([^:]+):([^\]]+)\]/i);
-    if(callMeM){
-      var newHon=callMeM[1].trim(), newName=callMeM[2].trim();
-      _lamiSavePref({honorific:newHon,callName:newName});
+  }).then(function(resp){
+    if(!resp.ok||!resp.body){ throw new Error('http '+resp.status); }
+    var reader=resp.body.getReader();
+    var decoder=new TextDecoder();
+    var buf='';
+    function pump(){
+      return reader.read().then(function(res){
+        if(res.done){ _chipTyping(false); finalize(); return; }
+        buf+=decoder.decode(res.value,{stream:true});
+        var lines=buf.split('\n'); buf=lines.pop();
+        lines.forEach(function(line){
+          line=line.trim();
+          if(line.indexOf('data:')!==0) return;
+          var payload=line.slice(5).trim();
+          if(payload==='[DONE]') return;
+          var ev; try{ ev=JSON.parse(payload); }catch(_){ return; }
+          if(ev.type==='message_start'&&ev.message&&ev.message.usage){ inTok=ev.message.usage.input_tokens||0; }
+          else if(ev.type==='content_block_delta'&&ev.delta&&typeof ev.delta.text==='string'){
+            if(firstToken){ firstToken=false; _chipTyping(false); }
+            fullText+=ev.delta.text;
+            renderLive();
+            speakReady(false);
+          }
+          else if(ev.type==='message_delta'&&ev.usage&&typeof ev.usage.output_tokens==='number'){ outTok=ev.usage.output_tokens; }
+          else if(ev.type==='error'){ throw new Error((ev.error&&ev.error.message)||'stream error'); }
+        });
+        return pump();
+      });
     }
-    var displayReply=reply.replace(/\[NAV:[a-z]+\]/gi,'').replace(/\[SEARCH:[^\]]+\]/gi,'').replace(/\[CALLME:[^\]]+\]/gi,'').trim();
-    _chipAppendAi(displayReply);
-    if(navPg) _chipDoNav(navPg);
-    if(searchQ) _chipDoSearch(searchQ);
-    // Loop mic: restart after Lami responds.
-    // If voice/TTS is on, wait for speech to finish before opening mic (avoids hearing itself).
-    // _lamiPendingRestart is checked at the end of _chipSpeak's last chunk.
-    if(lamiMicEnabled&&!_lamiListening){
-      if(_lamiMicState==='loop'){
-        if(chipVoiceOn&&window.speechSynthesis&&window.speechSynthesis.speaking){
-          _lamiPendingRestart=true; // _chipSpeak will restart mic when done
-        } else {
-          setTimeout(_lamiBeginListen, 600); // voice off or already done — restart now
-        }
-      } else if(lamiConvMode==='wakeword'&&_lamiMicState==='once'){
-        if(chipVoiceOn&&window.speechSynthesis&&window.speechSynthesis.speaking){
-          _lamiPendingRestart=true;
-        } else {
-          setTimeout(_lamiWakeFollowListen, 600);
-        }
-      }
-    }
-    _chipRefreshSuggestions();
+    return pump();
   }).catch(function(e){
     _chipTyping(false);
     if(send) send.disabled=false;
-    _chipAppendAi('Oops — network hiccup. Check your connection and try again.');
+    if(fullText){ finalize(); }      // partial reply arrived — keep what we have
+    else { _chipAppendAi('Oops — network hiccup. Check your connection and try again.'); restartMicAfterReply(); }
   });
 }
 
