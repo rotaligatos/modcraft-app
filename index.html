@@ -17411,10 +17411,17 @@ function _lamiStopListen(){
   _lamiListening=false;
   _lamiMicState='idle';
   _lamiSyncMicUI();
+  // resume hands-free wake word if the user has it enabled
+  if(lamiWakeWordEnabled&&lamiEnabled) setTimeout(_lamiStartWakeWord,800);
 }
+var _lamiGotResult=false;     // did onresult fire this listen cycle?
 function _lamiBeginListen(){
+  if(_lamiListening) return;    // already listening — don't stack recognizers
   var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SR){showToast('Voice input not supported. Try Chrome or Edge.');_lamiMicState='idle';_lamiSyncMicUI();return;}
+  // Pause the wake-word recognizer while the main mic is active (one recognizer at a time)
+  _lamiStopWakeWord();
+  _lamiGotResult=false;
   _lamiRecog=new SR();
   _lamiRecog.lang=lamiLang==='taglish'?'fil-PH':'en-US';
   _lamiRecog.continuous=false;
@@ -17422,6 +17429,7 @@ function _lamiBeginListen(){
   _lamiRecog.maxAlternatives=1;
   _lamiRecog.onstart=function(){_lamiListening=true;_lamiSyncMicUI();};
   _lamiRecog.onresult=function(e){
+    _lamiGotResult=true;
     var transcript=e.results[0][0].transcript;
     var inp=el('chip-inp');
     if(inp) inp.value=transcript;
@@ -17435,15 +17443,25 @@ function _lamiBeginListen(){
       ||(e.error?'Voice error: '+e.error:'Voice unavailable.');
     if(msg) showToast(msg);
     _lamiListening=false;
-    if(_lamiMicState==='loop') setTimeout(_lamiBeginListen,1000);
-    else {_lamiMicState='idle';_lamiSyncMicUI();}
+    // hard errors stop the loop; transient ones (no-speech/aborted) keep it alive
+    if(e.error==='not-allowed'||e.error==='service-not-allowed'||e.error==='audio-capture'){
+      _lamiMicState='idle';_lamiSyncMicUI();
+    } else if(_lamiMicState==='loop'){
+      setTimeout(_lamiBeginListen,1000);
+    } else {_lamiMicState='idle';_lamiSyncMicUI();}
   };
   _lamiRecog.onend=function(){
     _lamiListening=false;
-    // don't reset state here — loop restart handled by _chipCallAI response
-    if(_lamiMicState!=='loop') _lamiSyncMicUI();
+    if(_lamiMicState==='loop'){
+      // If user actually spoke, _chipCallAI restarts the loop after the reply (avoids hearing itself).
+      // If it was just silence, restart here so the loop keeps going.
+      if(!_lamiGotResult) setTimeout(_lamiBeginListen,700);
+      _lamiSyncMicUI();
+    } else {
+      _lamiSyncMicUI();
+    }
   };
-  _lamiRecog.start();
+  try{_lamiRecog.start();}catch(e){_lamiListening=false;}
 }
 function _lamiStartVoice(){
   if(!lamiMicEnabled) return;
@@ -17453,10 +17471,11 @@ function _lamiStartVoice(){
     _lamiSyncMicUI();
     _lamiBeginListen();
   } else if(_lamiMicState==='once'){
-    // upgrade to loop while already listening
+    // upgrade to loop — restart listening if the once-cycle already ended
     _lamiMicState='loop';
     _lamiSyncMicUI();
     showToast('Loop ON 🔄 — Lami keeps listening after each reply');
+    if(!_lamiListening) _lamiBeginListen();
   } else {
     // stop everything
     _lamiStopListen();
@@ -17867,18 +17886,34 @@ function renderLamiSettings(){
     +'</div>';
   }).join('');
 
+  // Professional toggle switch (label left, sliding switch right, optional sub-note)
+  function _tog(checked,onchange,label,sub){
+    var track=checked?'var(--navy)':'#cbd0d6';
+    var knobX=checked?'18px':'2px';
+    return '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">'
+      +'<div style="flex:1">'
+        +'<div style="font-size:13px;color:var(--text1);font-weight:500">'+label+'</div>'
+        +(sub?'<div style="font-size:11px;color:var(--text2);margin-top:2px">'+sub+'</div>':'')
+      +'</div>'
+      +'<span onclick="'+onchange+'" role="switch" aria-checked="'+checked+'" '
+        +'style="flex:none;cursor:pointer;display:inline-block;width:40px;height:22px;border-radius:11px;background:'+track+';position:relative;transition:background .18s">'
+        +'<span style="position:absolute;top:2px;left:'+knobX+';width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .18s"></span>'
+      +'</span>'
+    +'</div>';
+  }
+
+  var generalSection='<div style="margin-bottom:22px">'
+    +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:12px">General</div>'
+    +_tog(lamiEnabled,'_lamiSetEnabled(!'+lamiEnabled+')','Lami AI Agent',lamiEnabled?'Floating button is visible':'Hidden — turn on to use Lami')
+    +_tog(chipVoiceOn,'toggleChipVoice();renderLamiSettings()','Voice output (TTS)',chipVoiceOn?'Lami speaks replies aloud':'Replies are text-only')
+  +'</div>';
+
   var micSection=inIframe
     ?'<div style="background:#fef9e7;border:1px solid #f9a825;border-radius:8px;padding:12px 14px;font-size:13px;color:#7c5a00;margin-bottom:20px"><b>Voice input is unavailable inside Google Sites.</b> Open the app directly to use the mic.</div>'
-    :'<div style="margin-bottom:24px">'
-      +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:10px">Voice Input</div>'
-      +'<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">'
-        +'<label style="font-size:13px;color:var(--text1)">Microphone button</label>'
-        +'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-left:auto">'
-          +'<input type="checkbox" id="lami-mic-chk" onchange="_lamiToggleMicEnabled(this.checked)" '+(lamiMicEnabled?'checked':'')+'>'
-          +'<span style="font-size:13px;color:var(--text2)">'+(lamiMicEnabled?'Shown':'Hidden')+'</span>'
-        +'</label>'
-      +'</div>'
-      +'<div style="font-size:12px;color:var(--text2);background:var(--bg2);border-radius:8px;padding:10px 12px;line-height:1.7">'
+    :'<div style="margin-bottom:22px">'
+      +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:12px">Voice Input</div>'
+      +_tog(lamiMicEnabled,'_lamiToggleMicEnabled(!'+lamiMicEnabled+')','Microphone button',lamiMicEnabled?'Shown on the panel':'Hidden')
+      +'<div style="font-size:12px;color:var(--text2);background:var(--bg2);border-radius:8px;padding:10px 12px;line-height:1.7;margin-top:4px">'
         +'<b>How the mic button works:</b><br>'
         +'🎤 <b>1st click</b> — listens once, sends when you stop speaking<br>'
         +'🔄 <b>2nd click</b> — upgrades to Loop: keeps listening after each reply<br>'
@@ -17886,28 +17921,12 @@ function renderLamiSettings(){
       +'</div>'
     +'</div>';
 
-  function _tog(id,checked,onchange,label,note){
-    return '<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">'
-      +'<label style="font-size:13px;color:var(--text1);flex:1">'+label+'</label>'
-      +'<label style="display:flex;align-items:center;gap:8px;cursor:pointer">'
-        +'<input type="checkbox" id="'+id+'" onchange="'+onchange+'" '+(checked?'checked':'')+'>'
-        +'<span style="font-size:13px;color:var(--text2)">'+note+'</span>'
-      +'</label>'
-    +'</div>';
-  }
-
-  var generalSection='<div style="margin-bottom:24px">'
-    +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:10px">General</div>'
-    +_tog('lami-on-chk',lamiEnabled,'_lamiSetEnabled(this.checked)','Lami AI Agent',lamiEnabled?'Enabled':'Disabled')
-    +_tog('lami-voice-chk',chipVoiceOn,'toggleChipVoice();renderLamiSettings()','Voice output (TTS)',chipVoiceOn?'On':'Off')
-  +'</div>';
-
   var wakeSection=inIframe
     ?''
-    :'<div style="margin-bottom:24px">'
+    :'<div style="margin-bottom:22px">'
       +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:6px">Wake Word</div>'
-      +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Say <b>"Hi Lami"</b> or <b>"Hey Lami"</b> to open the panel hands-free. Requires mic permission.</div>'
-      +_tog('lami-wake-chk',lamiWakeWordEnabled,'_lamiSetWakeWord(this.checked)','Respond to "Hi Lami"',lamiWakeWordEnabled?'On':'Off')
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Say <b>"Hi Lami"</b> or <b>"Hey Lami"</b> to open the panel hands-free, then the mic stays on so you can keep talking. Requires mic permission.</div>'
+      +_tog(lamiWakeWordEnabled,'_lamiSetWakeWord(!'+lamiWakeWordEnabled+')','Respond to "Hi Lami"',lamiWakeWordEnabled?'Always listening for the wake word':'Off')
     +'</div>';
 
   w.innerHTML='<div style="padding:20px 4px 8px">'
@@ -18220,6 +18239,13 @@ function _lamiStartWakeWord(){
       var name=(gUser&&gUser.name)?gUser.name.split(' ')[0]:'';
       var reply='Yes'+(name?', '+name:'')+'! 😊 I\'m here — what do you need?';
       _chipAppendAi(reply);
+      // Hands-free: switch the mic into always-on loop so the user can just keep talking.
+      // _lamiBeginListen pauses this wake recognizer; loop resumes it when stopped.
+      if(lamiMicEnabled){
+        _lamiMicState='loop';
+        _lamiSyncMicUI();
+        setTimeout(_lamiBeginListen,1200);  // let the greeting finish first
+      }
     }
   };
   _lamiWakeRecog.onend=function(){
@@ -18262,7 +18288,10 @@ function _lamiSetEnabled(on){
   renderLamiSettings();
 }
 
+var _chipLoginGreeted=false;
 function _chipLoginGreet(){
+  if(_chipLoginGreeted) return;   // hard guard — gShowApp may fire more than once (token refresh)
+  _chipLoginGreeted=true;
   var name=(gUser&&gUser.name)?gUser.name.split(' ')[0]:'there';
   var h=new Date().getHours();
   var tod=h<12?'Magandang umaga':'Good '+(h<18?'afternoon':'evening');
