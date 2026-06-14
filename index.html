@@ -17541,34 +17541,46 @@ function _chipCleanText(text){
 function _chipSpeak(text){
   if(!chipVoiceOn) return;
   var synth=window.speechSynthesis; if(!synth) return;
-  if(synth.paused) synth.resume();
   synth.cancel();
   var clean=_chipCleanText(text);
   if(!clean) return;
   if(!_chipVoiceObj) _chipPickVoice();
 
-  // Split into sentences — Chrome cuts out / rattles when speaking a long single utterance.
-  // Only split on .!? followed by whitespace + capital letter (avoids breaking ₱1,234.56 or e.g.)
-  var raw=clean.replace(/([.!?])\s+([A-Z])/g,'$1\n$2').split('\n');
-  var chunks=raw.map(function(s){return s.trim();}).filter(function(s){return s.length>1;});
+  // Chrome TTS chops on long utterances. Fix: break into short chunks ≤150 chars.
+  // 1) Split at sentence boundaries (.!? followed by space + capital letter).
+  // 2) If a sentence is still long, split further at commas.
+  // NO keepalive interval — pause()/resume() polling causes its own stuttering.
+  function _splitToChunks(str){
+    var sentences=str.replace(/([.!?])\s+([A-Z])/g,'$1\n$2').split('\n');
+    var out=[];
+    sentences.forEach(function(s){
+      s=s.trim(); if(!s) return;
+      if(s.length<=150){out.push(s);return;}
+      // secondary split at comma phrases
+      var cur='';
+      s.split(/,\s+/).forEach(function(ph){
+        var add=(cur?cur+', ':'')+ph;
+        if(add.length>150&&cur){out.push(cur.trim());cur=ph;}
+        else{cur=add;}
+      });
+      if(cur.trim()) out.push(cur.trim());
+    });
+    return out.filter(function(s){return s.length>1;});
+  }
+
+  var chunks=_splitToChunks(clean);
   if(!chunks.length) chunks=[clean];
 
   var idx=0;
   var bars=el('chip-speak-bars');
-  // Chrome bug: synth pauses after ~14s without periodic resume; 5s keeps it reliably alive
-  var _ka=setInterval(function(){
-    if(synth.speaking){synth.pause();synth.resume();}else{clearInterval(_ka);}
-  },5000);
+  var _done=false;
 
   function speakNext(){
+    if(_done) return;
     if(idx>=chunks.length){
-      clearInterval(_ka);
-      if(bars)bars.classList.remove('speaking');
-      // TTS done — restart loop mic if it was waiting for us to finish speaking
-      if(_lamiPendingRestart){
-        _lamiPendingRestart=false;
-        setTimeout(_lamiBeginListen,400);
-      }
+      _done=true;
+      if(bars) bars.classList.remove('speaking');
+      if(_lamiPendingRestart){_lamiPendingRestart=false;setTimeout(_lamiBeginListen,400);}
       return;
     }
     var utt=new SpeechSynthesisUtterance(chunks[idx++]);
@@ -17577,19 +17589,20 @@ function _chipSpeak(text){
     utt.rate=0.93;
     utt.volume=1.0;
     if(idx===1&&bars) bars.classList.add('speaking');
-    utt.onend=speakNext;
+    // Small gap between chunks lets Chrome reset its audio buffer cleanly
+    utt.onend=function(){setTimeout(speakNext,60);};
     utt.onerror=function(e){
       if(e.error==='interrupted'||e.error==='canceled'){
-        // TTS was cancelled mid-speech — still honour pending mic restart
         if(_lamiPendingRestart){_lamiPendingRestart=false;setTimeout(_lamiBeginListen,400);}
         return;
       }
-      clearInterval(_ka);if(bars)bars.classList.remove('speaking');
-      _lamiPendingRestart=false; // clear on hard error
+      _done=true;
+      if(bars) bars.classList.remove('speaking');
+      _lamiPendingRestart=false;
     };
     synth.speak(utt);
   }
-  setTimeout(speakNext, 80);
+  setTimeout(speakNext,80);
 }
 
 // Cancel speech when panel closes
