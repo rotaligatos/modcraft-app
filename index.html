@@ -6254,53 +6254,168 @@ function renderDashboard() {
   }
 }
 
+// ── Claude API token usage tracker ───────────────────────────────────────
+// Tracks tokens per source per calendar month in localStorage
+var _TOKEN_RATE_IN=3/1e6;   // $3 per 1M input tokens (Sonnet 4.6)
+var _TOKEN_RATE_OUT=15/1e6; // $15 per 1M output tokens
+var _PHP_PER_USD=56;        // approximate PHP/USD rate
+function _tkMonth(){ return new Date().toISOString().substring(0,7); } // 'YYYY-MM'
+function _tkLoad(){
+  try{
+    var s=JSON.parse(localStorage.getItem('mc_tk_usage')||'{}');
+    var m=_tkMonth();
+    if(s.month!==m) return {month:m,chat:{in:0,out:0},drawing:{in:0,out:0},mobility:{in:0,out:0}};
+    return s;
+  }catch(e){return {month:_tkMonth(),chat:{in:0,out:0},drawing:{in:0,out:0},mobility:{in:0,out:0}};}
+}
+function _tkSave(d){ try{localStorage.setItem('mc_tk_usage',JSON.stringify(d));}catch(e){} }
+function _tkRecord(src, inTok, outTok){
+  var d=_tkLoad();
+  if(!d[src]) d[src]={in:0,out:0};
+  d[src].in+=(inTok||0); d[src].out+=(outTok||0);
+  _tkSave(d);
+  // refresh card if visible
+  var card=el('dash-claude-card');
+  if(card&&card.style.display!=='none') _renderClaudeApiCard();
+}
+function _tkCost(d){
+  var tot={in:0,out:0};
+  ['chat','drawing','mobility'].forEach(function(s){if(d[s]){tot.in+=d[s].in;tot.out+=d[s].out;}});
+  var usd=tot.in*_TOKEN_RATE_IN+tot.out*_TOKEN_RATE_OUT;
+  var php=usd*_PHP_PER_USD;
+  return {totalIn:tot.in,totalOut:tot.out,usd:usd,php:php,
+    chatIn:(d.chat&&d.chat.in)||0,chatOut:(d.chat&&d.chat.out)||0,
+    drawIn:(d.drawing&&d.drawing.in)||0,drawOut:(d.drawing&&d.drawing.out)||0,
+    mobIn:(d.mobility&&d.mobility.in)||0,mobOut:(d.mobility&&d.mobility.out)||0};
+}
+
 function _renderClaudeApiCard(){
   var card=el('dash-claude-card'); if(!card) return;
   var key=prodSettings&&prodSettings.claudeKey?prodSettings.claudeKey:'';
   var keyMasked=key?key.substring(0,10)+'•••••••••••••••'+key.slice(-4):'Not configured';
-  var keyStatus=key
-    ?'<span style="display:inline-flex;align-items:center;gap:5px;color:var(--teal);font-size:12px;font-weight:600"><i class="ti ti-circle-check-filled"></i>Key configured</span>'
-    :'<span style="display:inline-flex;align-items:center;gap:5px;color:var(--coral);font-size:12px;font-weight:600"><i class="ti ti-circle-x-filled"></i>No API key set</span>';
+  var isAdminUp=(currentRole==='Admin'||currentRole==='Director');
+
+  var tk=_tkLoad();
+  var cc=_tkCost(tk);
+  var total=cc.totalIn+cc.totalOut;
+  var chatTok=cc.chatIn+cc.chatOut;
+  var drawTok=cc.drawIn+cc.drawOut;
+  var mobTok=cc.mobIn+cc.mobOut;
+
+  // Donut SVG — 3 segments: chat (navy), drawing (amber), mobility (teal)
+  function _seg(pct,offset,color){
+    if(pct<=0) return '';
+    var r=38,cx=44,cy=44,circ=2*Math.PI*r;
+    var dash=pct*circ,gap=circ-dash;
+    return '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+color+'" stroke-width="12" '
+      +'stroke-dasharray="'+dash.toFixed(1)+' '+gap.toFixed(1)+'" '
+      +'stroke-dashoffset="'+(-offset*circ).toFixed(1)+'" style="transition:stroke-dasharray .4s"/>';
+  }
+  var chatPct=total>0?chatTok/total:0;
+  var drawPct=total>0?drawTok/total:0;
+  var mobPct =total>0?mobTok/total:0;
+  var donut=total>0
+    ?'<svg width="88" height="88" style="transform:rotate(-90deg)">'
+      +_seg(chatPct,0,'#1a3a5c')
+      +_seg(drawPct,chatPct,'#d97706')
+      +_seg(mobPct,chatPct+drawPct,'#14b8a6')
+    +'</svg>'
+    :'<svg width="88" height="88"><circle cx="44" cy="44" r="38" fill="none" stroke="#e5e7eb" stroke-width="12"/></svg>';
+  var donutWrap='<div style="position:relative;width:88px;height:88px;flex:none">'
+    +donut
+    +'<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">'
+      +'<div style="font-size:11px;font-weight:700;color:var(--text1);line-height:1">'+fmtK(total)+'</div>'
+      +'<div style="font-size:9px;color:var(--text2)">tokens</div>'
+    +'</div>'
+  +'</div>';
+
+  function _bar(label,icon,color,toks,costUsd){
+    var pct=total>0?Math.round(toks/total*100):0;
+    return '<div style="margin-bottom:8px">'
+      +'<div style="display:flex;justify-content:space-between;margin-bottom:3px">'
+        +'<span style="font-size:12px;color:var(--text1)"><i class="ti '+icon+'" style="color:'+color+';margin-right:4px"></i>'+label+'</span>'
+        +'<span style="font-size:11px;color:var(--text2)">'+fmtK(toks)+' tok · $'+costUsd.toFixed(4)+'</span>'
+      +'</div>'
+      +'<div style="height:6px;background:var(--bg2);border-radius:3px;overflow:hidden">'
+        +'<div style="height:100%;width:'+pct+'%;background:'+color+';border-radius:3px;transition:width .4s"></div>'
+      +'</div>'
+    +'</div>';
+  }
+  var chatCost=cc.chatIn*_TOKEN_RATE_IN+cc.chatOut*_TOKEN_RATE_OUT;
+  var drawCost=cc.drawIn*_TOKEN_RATE_IN+cc.drawOut*_TOKEN_RATE_OUT;
+  var mobCost =cc.mobIn*_TOKEN_RATE_IN+cc.mobOut*_TOKEN_RATE_OUT;
+
+  var monthLabel=new Date().toLocaleString('en-PH',{month:'long',year:'numeric'});
+  var phpStr='₱'+cc.php.toFixed(2);
+  var usdStr='$'+cc.usd.toFixed(4);
+
   card.innerHTML='<div class="card">'
     +'<div class="card-head">'
-      +'<h3><i class="ti ti-brand-openai" style="color:#d97706"></i>Claude API</h3>'
+      +'<h3><i class="ti ti-robot" style="color:#d97706"></i>Claude API Usage — '+monthLabel+'</h3>'
       +'<div style="display:flex;gap:8px">'
         +(key?'<button class="btn" onclick="_testClaudeApi()" id="claude-test-btn" style="font-size:12px;padding:4px 10px"><i class="ti ti-plug-connected"></i>Test</button>':'')
-        +'<a href="https://console.anthropic.com/settings/billing" target="_blank" class="btn" style="font-size:12px;padding:4px 10px;text-decoration:none"><i class="ti ti-external-link"></i>View Balance</a>'
+        +'<a href="https://console.anthropic.com/settings/billing" target="_blank" class="btn btn-navy" style="font-size:12px;padding:4px 12px;text-decoration:none"><i class="ti ti-external-link"></i>View Balance</a>'
       +'</div>'
     +'</div>'
     +'<div class="card-body">'
-      +'<div style="display:flex;flex-wrap:wrap;gap:20px;align-items:center">'
-        +'<div>'
-          +'<div style="font-size:11px;color:var(--text2);margin-bottom:3px">Status</div>'
-          +'<div>'+keyStatus+'</div>'
-        +'</div>'
-        +(key?'<div>'
-          +'<div style="font-size:11px;color:var(--text2);margin-bottom:3px">API Key</div>'
-          +'<div style="font-size:12px;font-family:monospace;color:var(--text1)">'+keyMasked+'</div>'
-        +'</div>':'')
-        +'<div>'
-          +'<div style="font-size:11px;color:var(--text2);margin-bottom:3px">Model</div>'
-          +'<div style="font-size:12px;font-weight:500;color:var(--text1)">claude-sonnet-4-6</div>'
-        +'</div>'
-        +'<div>'
-          +'<div style="font-size:11px;color:var(--text2);margin-bottom:3px">Lami AI</div>'
-          +'<div style="display:flex;align-items:center;gap:8px">'
-            +(lamiAiEnabled
-              ?'<span style="display:inline-flex;align-items:center;gap:5px;color:var(--teal);font-size:12px;font-weight:600"><i class="ti ti-brain"></i>On</span>'
-              :'<span style="display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;font-weight:600"><i class="ti ti-brain-off"></i>Off</span>')
-            +'<button class="btn" onclick="_lamiSetAi(!'+lamiAiEnabled+')" style="font-size:11px;padding:2px 8px">'+(lamiAiEnabled?'Turn off':'Turn on')+'</button>'
+      +'<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">'
+
+        // Left — donut + cost summary
+        +'<div style="display:flex;flex-direction:column;align-items:center;gap:6px;flex:none">'
+          +donutWrap
+          +'<div style="text-align:center">'
+            +'<div style="font-size:16px;font-weight:700;color:var(--navy)">'+phpStr+'</div>'
+            +'<div style="font-size:10px;color:var(--text2)">'+usdStr+' · ~₱56/USD</div>'
           +'</div>'
         +'</div>'
-        +'<div>'
-          +'<div style="font-size:11px;color:var(--text2);margin-bottom:3px">Est. cost / message</div>'
-          +'<div style="font-size:12px;font-weight:500;color:var(--text1)">~$0.007–$0.01</div>'
+
+        // Middle — breakdown bars
+        +'<div style="flex:1;min-width:180px">'
+          +'<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Token breakdown</div>'
+          +_bar('Lami chat','ti-message-chatbot','#1a3a5c',chatTok,chatCost)
+          +_bar('Shop drawing AI','ti-file-pencil','#d97706',drawTok,drawCost)
+          +_bar('Mobility planner','ti-map-pin','#14b8a6',mobTok,mobCost)
+          +'<div style="display:flex;gap:10px;margin-top:10px;font-size:11px;color:var(--text2)">'
+            +'<span>↑ '+fmtK(cc.totalIn)+' in</span>'
+            +'<span>↓ '+fmtK(cc.totalOut)+' out</span>'
+          +'</div>'
         +'</div>'
-        +'<div id="claude-test-result"></div>'
+
+        // Right — key status + AI toggle + test result
+        +'<div style="display:flex;flex-direction:column;gap:10px;min-width:160px">'
+          +'<div>'
+            +'<div style="font-size:11px;color:var(--text2);margin-bottom:3px">API Key</div>'
+            +(key
+              ?'<div style="display:inline-flex;align-items:center;gap:5px;color:var(--teal);font-size:12px;font-weight:600"><i class="ti ti-circle-check-filled"></i>Configured</div>'
+              +'<div style="font-size:11px;font-family:monospace;color:var(--text2);margin-top:2px">'+keyMasked+'</div>'
+              :'<div style="display:inline-flex;align-items:center;gap:5px;color:var(--coral);font-size:12px;font-weight:600"><i class="ti ti-circle-x-filled"></i>Not set</div>')
+          +'</div>'
+          +'<div>'
+            +'<div style="font-size:11px;color:var(--text2);margin-bottom:4px">Lami AI</div>'
+            +'<div style="display:flex;align-items:center;gap:8px">'
+              +(lamiAiEnabled
+                ?'<span style="display:inline-flex;align-items:center;gap:4px;color:var(--teal);font-size:12px;font-weight:600"><i class="ti ti-brain"></i>On</span>'
+                :'<span style="display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:12px;font-weight:600"><i class="ti ti-brain-off"></i>Off</span>')
+              +(isAdminUp?'<button class="btn" onclick="_lamiSetAi(!'+lamiAiEnabled+')" style="font-size:11px;padding:2px 8px">'+(lamiAiEnabled?'Turn off':'Turn on')+'</button>':'')
+            +'</div>'
+          +'</div>'
+          +'<div id="claude-test-result"></div>'
+          +'<button class="btn" onclick="_tkResetMonth()" style="font-size:11px;padding:3px 8px;color:var(--text2)"><i class="ti ti-refresh"></i>Reset counter</button>'
+        +'</div>'
+
       +'</div>'
-      +'<div style="margin-top:10px;font-size:11px;color:var(--text2)">Live balance is on Anthropic Console — click <b>View Balance</b> above. Token costs apply to Lami chat, shop drawing analysis, and mobility planner.</div>'
+      +'<div style="margin-top:10px;padding-top:8px;border-top:.5px solid var(--border);font-size:11px;color:var(--text2)">'
+        +'Counter tracks this browser only. Live account balance → <b>View Balance</b> above. Rates: $3/M input · $15/M output (Sonnet 4.6).'
+      +'</div>'
     +'</div>'
   +'</div>';
+}
+
+function _tkResetMonth(){
+  if(!confirm('Reset this month\'s token counter?')) return;
+  localStorage.removeItem('mc_tk_usage');
+  _renderClaudeApiCard();
+  showToast('Token counter reset.');
 }
 
 function _testClaudeApi(){
@@ -6315,6 +6430,7 @@ function _testClaudeApi(){
   }).then(function(r){return r.json();}).then(function(d){
     if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-plug-connected"></i>Test';}
     if(d&&d.content){
+      _tkRecord('chat',(d.usage&&d.usage.input_tokens)||0,(d.usage&&d.usage.output_tokens)||0);
       if(res) res.innerHTML='<span style="display:inline-flex;align-items:center;gap:5px;color:var(--teal);font-size:12px;font-weight:600"><i class="ti ti-circle-check-filled"></i>API active ✓</span>';
     } else if(d&&d.error){
       if(res) res.innerHTML='<span style="display:inline-flex;align-items:center;gap:5px;color:var(--coral);font-size:12px;font-weight:600"><i class="ti ti-circle-x-filled"></i>'+(d.error.message||d.error.type||'API error')+'</span>';
@@ -15958,6 +16074,7 @@ function _mobCallClaude(prompt, callback){
     if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
     return r.json();
   }).then(function(d){
+    _tkRecord('mobility',(d.usage&&d.usage.input_tokens)||0,(d.usage&&d.usage.output_tokens)||0);
     callback((d.content&&d.content[0]&&d.content[0].text)||'',null);
   }).catch(function(e){callback(null,e.message||'API call failed. Check your Claude API key.');});
 }
@@ -16317,6 +16434,7 @@ function prodApiCall(bodyObj){
     if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
     return r.json();
   }).then(function(data){
+    _tkRecord('drawing',(data.usage&&data.usage.input_tokens)||0,(data.usage&&data.usage.output_tokens)||0);
     var text=(data.content&&data.content[0]&&data.content[0].text)||'';
     return prodParseResponse(text);
   });
@@ -18730,6 +18848,7 @@ function _chipCallAI(userMsg){
   }).then(function(r){return r.json();}).then(function(data){
     _chipTyping(false);
     if(send) send.disabled=false;
+    _tkRecord('chat',(data.usage&&data.usage.input_tokens)||0,(data.usage&&data.usage.output_tokens)||0);
     var reply=(data.content&&data.content[0]&&data.content[0].text)||'Sorry, I couldn\'t get a response. Try again?';
     chipHistory.push({role:'assistant',content:reply});
     // Parse and execute navigation command
