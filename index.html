@@ -17454,6 +17454,13 @@ function _chipPickVoice() {
   _chipVoiceReady = true;
   _chipVoiceObj = null;
 
+  // User's saved preference takes top priority
+  if(_chipVoicePresetId){
+    for(var i=0;i<voices.length;i++){
+      if(voices[i].name===_chipVoicePresetId){_chipVoiceObj=voices[i];return;}
+    }
+  }
+
   // Tier 1 — Neural / Online voices (sound genuinely human)
   // Edge has Microsoft neural voices; Chrome has Google WaveNet-quality voices
   var neural = ['Aria Online (Natural)','Jenny Online (Natural)','Ana Online (Natural)',
@@ -17534,31 +17541,40 @@ function _chipCleanText(text){
 function _chipSpeak(text){
   if(!chipVoiceOn) return;
   var synth=window.speechSynthesis; if(!synth) return;
-
-  // Chrome bug: speechSynthesis pauses when tab goes to background — resume first
   if(synth.paused) synth.resume();
   synth.cancel();
-
   var clean=_chipCleanText(text);
   if(!clean) return;
-
-  // Voices might have loaded since last pick — always ensure fresh pick
   if(!_chipVoiceObj) _chipPickVoice();
 
-  function _doSpeak(){
-    var utt=new SpeechSynthesisUtterance(clean);
+  // Split into sentences — Chrome cuts out / rattles when speaking a long single utterance
+  var raw=clean.match(/[^.!?]+[.!?]*/g)||[clean];
+  var chunks=raw.map(function(s){return s.trim();}).filter(function(s){return s.length>1;});
+  if(!chunks.length) chunks=[clean];
+
+  var idx=0;
+  var bars=el('chip-speak-bars');
+  // Chrome bug: synth pauses after ~15s without periodic resume
+  var _ka=setInterval(function(){
+    if(synth.speaking){synth.pause();synth.resume();}else{clearInterval(_ka);}
+  },10000);
+
+  function speakNext(){
+    if(idx>=chunks.length){clearInterval(_ka);if(bars)bars.classList.remove('speaking');return;}
+    var utt=new SpeechSynthesisUtterance(chunks[idx++]);
     if(_chipVoiceObj) utt.voice=_chipVoiceObj;
-    utt.pitch=1.0;   // keep natural — artificial pitch boost makes voices sound robotic
-    utt.rate=0.93;   // slightly slower = more natural, easier to follow
+    utt.pitch=1.0;
+    utt.rate=0.93;
     utt.volume=1.0;
-    var bars=el('chip-speak-bars');
-    utt.onstart=function(){if(bars)bars.classList.add('speaking');};
-    utt.onend=utt.onerror=function(){if(bars)bars.classList.remove('speaking');};
+    if(idx===1&&bars) bars.classList.add('speaking');
+    utt.onend=speakNext;
+    utt.onerror=function(e){
+      if(e.error==='interrupted'||e.error==='canceled') return;
+      clearInterval(_ka);if(bars)bars.classList.remove('speaking');
+    };
     synth.speak(utt);
   }
-
-  // Small delay helps Chrome honour the user-gesture unlock window
-  setTimeout(_doSpeak, 80);
+  setTimeout(speakNext, 80);
 }
 
 // Cancel speech when panel closes
@@ -17628,6 +17644,7 @@ function _lamiBeginListen(){
   _lamiRecog.onstart=function(){_lamiListening=true;_lamiSyncMicUI();};
   _lamiRecog.onresult=function(e){
     _lamiGotResult=true;
+    clearTimeout(_lamiFollowTimer); // cancel the 5s silence timeout — user spoke
     var transcript=e.results[0][0].transcript;
     var inp=el('chip-inp');
     if(inp) inp.value=transcript;
@@ -17813,6 +17830,9 @@ var lamiEnabled=localStorage.getItem('mc_lami_enabled')!=='off';       // show/h
 var lamiVoiceEnabled=localStorage.getItem('mc_lami_voice')!=='off';    // TTS voice output on/off
 var lamiWakeWordEnabled=localStorage.getItem('mc_lami_wake')==='on';   // "Hi Lami" wake word on/off
 var lamiAiEnabled=localStorage.getItem('mc_lami_ai')!=='off';          // Claude API calls on/off
+var lamiConvMode=(function(){try{return localStorage.getItem('mc_lami_conv')||'continuous';}catch(e){return 'continuous';}})(); // 'continuous'|'wakeword'
+var _chipVoicePresetId=(function(){try{return localStorage.getItem('mc_lami_voice_id')||'';}catch(e){return '';}})(); // saved voice name preference
+var _lamiFollowTimer=null; // timer for wake-word 5-second follow-up window
 
 // ── Lami face customization ───────────────────────────────────────────────
 var lamiface=localStorage.getItem('mc_lami_face')||'default';
@@ -18138,17 +18158,94 @@ function renderLamiSettings(){
       +_tog(lamiWakeWordEnabled,'_lamiSetWakeWord(!'+lamiWakeWordEnabled+')','Respond to "Hi Lami"',lamiWakeWordEnabled?'Always listening for the wake word':'Off')
     +'</div>';
 
+  // ── Conversation mode section ─────────────────────────────────────────────
+  var convSection=inIframe?''
+    :'<div style="margin-bottom:22px">'
+      +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:8px">Conversation Mode</div>'
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:12px">Controls what happens after "Hi Lami" activates the mic.</div>'
+      +'<div style="display:flex;flex-direction:column;gap:8px">'
+        +['continuous','wakeword'].map(function(m){
+          var sel=lamiConvMode===m;
+          var label=m==='continuous'?'Continuous (Loop)':'Wake Word (5-second window)';
+          var sub=m==='continuous'
+            ?'Mic stays on forever after "Hi Lami" — keeps listening until you click Stop'
+            :'Mic listens for 5 seconds after each exchange, then returns to standby';
+          return '<div onclick="_lamiSetConvMode(\''+m+'\')" style="cursor:pointer;display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;border:2px solid '+(sel?'var(--navy)':'var(--border)')+';background:'+(sel?'rgba(26,58,92,.06)':'var(--bg1)')+';transition:border-color .15s">'
+            +'<div style="margin-top:2px;width:16px;height:16px;border-radius:50%;border:2px solid '+(sel?'var(--navy)':'#aaa')+';display:flex;align-items:center;justify-content:center;flex:none">'
+              +(sel?'<div style="width:8px;height:8px;border-radius:50%;background:var(--navy)"></div>':'')
+            +'</div>'
+            +'<div><div style="font-size:13px;font-weight:500;color:var(--text1)">'+label+'</div>'
+              +'<div style="font-size:11px;color:var(--text2);margin-top:2px">'+sub+'</div>'
+            +'</div>'
+          +'</div>';
+        }).join('')
+      +'</div>'
+    +'</div>';
+
+  // ── Voice selector section ────────────────────────────────────────────────
+  var voiceSection='';
+  if(window.speechSynthesis&&chipVoiceOn){
+    var allVoices=window.speechSynthesis.getVoices();
+    var enVoices=allVoices.filter(function(v){return v.lang.indexOf('en')===0;});
+    if(!enVoices.length) enVoices=allVoices;
+    var voiceRows=enVoices.map(function(v,i){
+      var sel=v.name===(_chipVoicePresetId||((_chipVoiceObj&&_chipVoiceObj.name)||''));
+      var tag=v.localService?'':'<span style="font-size:10px;background:#e3f2fd;color:#1565c0;border-radius:4px;padding:1px 5px;margin-left:5px">Online</span>';
+      return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:'+(sel?'rgba(26,58,92,.08)':'transparent')+';border:1px solid '+(sel?'var(--navy)':'transparent')+'">'
+        +'<div onclick="_lamiSetVoice(\''+v.name.replace(/'/g,"\\'")+'\')" style="flex:1;cursor:pointer">'
+          +'<div style="font-size:12px;font-weight:'+(sel?'600':'400')+';color:'+(sel?'var(--navy)':'var(--text1)')+'">'+v.name+tag+'</div>'
+          +'<div style="font-size:10px;color:var(--text2)">'+v.lang+(sel?' · ✓ Active':'')+'</div>'
+        +'</div>'
+        +'<button onclick="_lamiPreviewVoice(\''+v.name.replace(/'/g,"\\'")+'\')" style="flex:none;font-size:11px;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);cursor:pointer;color:var(--text1)">▶ Preview</button>'
+      +'</div>';
+    }).join('');
+    voiceSection='<div style="margin-bottom:22px">'
+      +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:4px">Voice</div>'
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Pick from your system\'s installed voices. For a deep "Jarvis-style" voice on Windows, install <b>Microsoft Guy</b> or <b>Microsoft Mark</b> via <i>Settings → Time & Language → Speech → Add voices</i>. Online (neural) voices sound the most natural.</div>'
+      +'<div style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;padding:6px">'
+        +voiceRows
+      +'</div>'
+    +'</div>';
+  }
+
   w.innerHTML='<div style="padding:20px 4px 8px">'
     +'<div style="font-size:15px;font-weight:600;color:var(--text1);margin-bottom:16px">Lami Settings</div>'
     +generalSection
     +micSection
     +wakeSection
+    +convSection
+    +voiceSection
     +'<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:4px">Appearance</div>'
     +'<div style="font-size:13px;color:var(--text2);margin-bottom:16px">Choose Lami\'s face. Applies instantly and is saved per browser.</div>'
     +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px">'
       +cards
     +'</div>'
   +'</div>';
+}
+function _lamiSetConvMode(m){
+  lamiConvMode=m;
+  try{localStorage.setItem('mc_lami_conv',m);}catch(e){}
+  showToast(m==='continuous'?'Continuous mode — mic stays on in loop 🔄':'Wake Word mode — 5-second follow-up window ⏱');
+  renderLamiSettings();
+}
+function _lamiSetVoice(name){
+  _chipVoicePresetId=name;
+  try{localStorage.setItem('mc_lami_voice_id',name);}catch(e){}
+  var voices=window.speechSynthesis.getVoices();
+  for(var i=0;i<voices.length;i++){if(voices[i].name===name){_chipVoiceObj=voices[i];break;}}
+  showToast('Voice set to: '+name);
+  renderLamiSettings();
+}
+function _lamiPreviewVoice(name){
+  var synth=window.speechSynthesis; if(!synth) return;
+  synth.cancel();
+  var voices=synth.getVoices();
+  var vo=null;
+  for(var i=0;i<voices.length;i++){if(voices[i].name===name){vo=voices[i];break;}}
+  var utt=new SpeechSynthesisUtterance('Hello! I\'m Lami, your Modcraft assistant.');
+  if(vo) utt.voice=vo;
+  utt.rate=0.93; utt.pitch=1.0; utt.volume=1.0;
+  synth.speak(utt);
 }
 function _lamiToggleMicEnabled(on){
   lamiMicEnabled=on;
@@ -18437,6 +18534,22 @@ function sendChip(){
 // ── Wake word: "Hi Lami" / "Hey Lami" ────────────────────────────────────
 var _lamiWakeRecog=null;
 var _lamiWakeRunning=false;
+// Wake-word conversation mode: listen once with a 5s silence window; if nothing, return to wake word
+function _lamiWakeFollowListen(){
+  if(!lamiMicEnabled||!lamiEnabled) return;
+  if(_lamiListening) return;
+  clearTimeout(_lamiFollowTimer);
+  _lamiMicState='once';
+  _lamiSyncMicUI();
+  _lamiBeginListen();
+  // 5-second silence timeout — if user doesn't speak, exit back to wake word idle
+  _lamiFollowTimer=setTimeout(function(){
+    if(_lamiListening&&!_lamiGotResult){
+      _lamiStopListen(); // this resumes the wake word listener
+      showToast('Lami is back on standby 👋');
+    }
+  },5000);
+}
 function _lamiStartWakeWord(){
   if(!lamiWakeWordEnabled||!lamiEnabled) return;
   var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -18458,9 +18571,14 @@ function _lamiStartWakeWord(){
       // Hands-free: switch the mic into always-on loop so the user can just keep talking.
       // _lamiBeginListen pauses this wake recognizer; loop resumes it when stopped.
       if(lamiMicEnabled){
-        _lamiMicState='loop';
-        _lamiSyncMicUI();
-        setTimeout(_lamiBeginListen,1200);  // let the greeting finish first
+        if(lamiConvMode==='continuous'){
+          _lamiMicState='loop';
+          _lamiSyncMicUI();
+          setTimeout(_lamiBeginListen,1200);
+        } else {
+          // Wake-word mode: listen once with a 5-second silence fallback
+          setTimeout(_lamiWakeFollowListen,1200);
+        }
       }
     }
   };
@@ -18941,8 +19059,13 @@ function _chipCallAI(userMsg){
     if(navPg) _chipDoNav(navPg);
     if(searchQ) _chipDoSearch(searchQ);
     // Loop mic: restart listening after Lami responds
-    if(_lamiMicState==='loop'&&lamiMicEnabled&&!_lamiListening){
-      setTimeout(_lamiBeginListen, 900);
+    if(lamiMicEnabled&&!_lamiListening){
+      if(_lamiMicState==='loop'){
+        setTimeout(_lamiBeginListen, 900);
+      } else if(lamiConvMode==='wakeword'&&_lamiMicState==='once'){
+        // Wake-word mode: give another 5s follow-up window after each response
+        setTimeout(_lamiWakeFollowListen, 900);
+      }
     }
     _chipRefreshSuggestions();
   }).catch(function(e){
