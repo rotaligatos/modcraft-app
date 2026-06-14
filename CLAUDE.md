@@ -1302,7 +1302,7 @@ _doAccomSplitExport(nights,workers,...) // commits the accommodation split to qM
 13. **"PPIC →" button in summary fixed** — the Capacity row in Cost Breakdown → Installation summary called `navigate('ppic')` (broken); now calls `setStTab('ppic')`
 
 ## Known remaining areas to watch
-- **PENDING — Embed fullscreen hint (deferred 2026-06-12)** — fullscreen works on GitHub Pages but is impossible inside the Google Sites iframe (no `allowfullscreen` attribute; Google controls it). Current behavior: prompt suppressed in embed; topbar ⛶ opens the app in its own tab. TO BUILD LATER: a small one-time hint after login inside the embed ("Want fullscreen? Open the app in its own tab →") so users discover the ⛶ route
+- **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
 - **Carcass pricing tab** — now persisted ✓
 - **Drive saves in Google Sites embed** — RESOLVED ✅ (confirmed 2026-06-13)
