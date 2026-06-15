@@ -1250,7 +1250,13 @@ tr.cl-row:hover td{background:#f4f7fb}
     </div>
     <div id="ppic-wrap"></div>
     <div id="ppic-svc-wrap" style="display:none">
-      <div class="card"><div class="card-head"><h3><i class="ti ti-settings-2"></i>Services Capacity</h3></div><div class="card-body" id="services-rows"></div></div>
+      <div class="card">
+        <div class="card-head" style="display:flex;align-items:center;justify-content:space-between">
+          <h3><i class="ti ti-settings-2"></i>Services Capacity</h3>
+          <button class="btn" onclick="_restoreSvcCapFromDrive()" title="Restore capacity settings from Google Drive backup" style="font-size:12px;gap:5px"><i class="ti ti-cloud-download"></i> Restore from Drive</button>
+        </div>
+        <div class="card-body" id="services-rows"></div>
+      </div>
     </div>
   </div>
   <div id="st-lami" style="display:none"><div id="lami-settings-wrap"></div></div>
@@ -13061,6 +13067,56 @@ function _driveUpsertFile(folderId,fileName,mimeType,content){
       return gApiFetch(url,{method:existId?'PATCH':'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body:body});
     });
 }
+// ── Service Capacity Drive backup ─────────────────────────────────────────
+var _SVC_CAP_FILE = 'modcraft_service_capacity.json';
+function _saveSvcCapToDrive() {
+  var fid = sharedDriveFolderId || gDriveFolderId;
+  if (!gToken || !fid) return Promise.resolve();
+  var payload = JSON.stringify({
+    serviceCapacity: SERVICE_CAPACITY,
+    savedAt: new Date().toISOString(),
+    savedBy: gUser ? gUser.email : ''
+  });
+  return _driveUpsertFile(fid, _SVC_CAP_FILE, 'application/json', payload)
+    .catch(function(e){ console.warn('SvcCap Drive save failed', e); });
+}
+function _loadSvcCapFromDrive(cb) {
+  var fid = sharedDriveFolderId || gDriveFolderId;
+  if (!gToken || !fid) { if (cb) cb(null); return; }
+  var qry = encodeURIComponent("name='" + _SVC_CAP_FILE + "' and '" + fid + "' in parents and trashed=false");
+  _driveGet('files?q=' + qry + '&fields=files(id,modifiedTime)&' + _DRIVE_FLAGS)
+    .then(function(d) {
+      var files = (d && d.files) || [];
+      if (!files.length) { if (cb) cb(null); return; }
+      gApiFetch('https://www.googleapis.com/drive/v3/files/' + files[0].id + '?alt=media&supportsAllDrives=true', {})
+        .then(function(data) { if (cb) cb(data && typeof data === 'object' && !data.error ? data : null); })
+        .catch(function() { if (cb) cb(null); });
+    })
+    .catch(function() { if (cb) cb(null); });
+}
+function _applySvcCapFromDrive(driveData) {
+  if (!driveData || !driveData.serviceCapacity) return;
+  for (var k in driveData.serviceCapacity) {
+    if (driveData.serviceCapacity.hasOwnProperty(k)) SERVICE_CAPACITY[k] = driveData.serviceCapacity[k];
+  }
+  if (dbServices.length) _syncServicesFromDb();
+  if (stTab === 'ppic' && _ppicSubTab === 'services') renderServicesSettings();
+}
+function _restoreSvcCapFromDrive() {
+  var btn = event && event.target ? event.target.closest('button') : null;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ti ti-loader"></i> Restoring…'; }
+  _loadSvcCapFromDrive(function(driveData) {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-cloud-download"></i> Restore from Drive'; }
+    if (!driveData || !driveData.serviceCapacity) {
+      showToast('No Drive backup found — save Settings first to create one.');
+      return;
+    }
+    _applySvcCapFromDrive(driveData);
+    var by = driveData.savedBy ? ' (saved by ' + driveData.savedBy + ')' : '';
+    var at = driveData.savedAt ? ' on ' + new Date(driveData.savedAt).toLocaleString() : '';
+    showToast('Services Capacity restored from Drive backup' + at + by + ' ✓');
+  });
+}
 function driveClientName(){
   var cn=((el('cl-bizname')&&el('cl-bizname').value)||'').trim()||(el('cl-name')&&el('cl-name').value||'').trim()||'Client';
   return cn.replace(/[<>:"/\\|?*]/g,'-').substring(0,35).trim();
@@ -15073,6 +15129,8 @@ function gSaveAppSettings(){
   }).then(function(){
     showSheetsToast(true,'Settings saved to database');
     return _saveServicesToPriceDb();
+  }).then(function(){
+    _saveSvcCapToDrive(); // non-blocking Drive backup for SERVICE_CAPACITY
   }).catch(function(e){
     if(!(e&&e.message==='SESSION_EXPIRED')) showSheetsToast(false,'Settings not saved — '+escHtml(e&&e.message?e.message:'check connection'));
   }).then(function(){
@@ -15206,6 +15264,9 @@ function gLoadAppSettings(callback){
     }
     updateAppLogo();
     if(callback)callback();
+    // Non-blocking: overlay SERVICE_CAPACITY from Drive backup so capacity
+    // data survives even when the Settings sheet CONFIG row is wiped/reset.
+    _loadSvcCapFromDrive(function(driveData){ _applySvcCapFromDrive(driveData); });
   }).catch(function(){if(callback)callback();});
 }
 // ── Save quotation to Sheets ──────────────────────────────────────────────
