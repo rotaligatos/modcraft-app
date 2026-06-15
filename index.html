@@ -2587,6 +2587,11 @@ var fqBondIns = {
 };
 var fqInstRateOverride = null;
 var fqAssmRateOverride = null;
+var fqInstRegion = 'z1';
+var fqInstRegionManual = false;
+var fqInstWorkers = 0;
+var fqInstDays = 0;
+var fqInstPlanner = null;
 var fqLocked = false;
 var fqSentStatus = '';
 var fqInitialized = false;
@@ -11708,6 +11713,11 @@ function initFinalQuotation() {
   fqBondIns      = JSON.parse(JSON.stringify(qBondIns));
   fqInstRateOverride = null;
   fqAssmRateOverride = null;
+  fqInstRegion = qInstRegion;
+  fqInstRegionManual = false;
+  fqInstWorkers = qInstWorkers;
+  fqInstDays = qInstDays;
+  fqInstPlanner = qInstPlanner ? JSON.parse(JSON.stringify(qInstPlanner)) : null;
   fqPreviewed = false;
   fqFabBasis = 'initial';
   fqFabCostOverride = 0;
@@ -11718,6 +11728,59 @@ function initFinalQuotation() {
   updateFQSentStatus();
 }
 
+function populateFQInstRegionSelect(){
+  var sel=el('fq-inst-region'); if(!sel) return;
+  if(fqInstRegion==='metro') fqInstRegion='z1';
+  else if(fqInstRegion==='outside') fqInstRegion='z2';
+  var co=getCompanyName((el('cl-type')||{}).value||'Direct');
+  var isCWL=co&&co.toLowerCase().indexOf('cebu')>=0;
+  var CEBU_KEYS={cebuA:1,cebuB:1,cebuC:1,inter:1};
+  var MANILA_KEYS={z1:1,z2:1,z3:1,z4:1};
+  if(isCWL && MANILA_KEYS[fqInstRegion]) fqInstRegion='cebuA';
+  if(!isCWL && CEBU_KEYS[fqInstRegion]) fqInstRegion='z1';
+  var opts='';
+  for(var i=0;i<INST_ZONES.length;i++){
+    var z=INST_ZONES[i];
+    if(isCWL && !CEBU_KEYS[z.key]) continue;
+    if(!isCWL && CEBU_KEYS[z.key]) continue;
+    var rate=instPriceUnitFor(z.key);
+    opts+='<option value="'+z.key+'"'+(fqInstRegion===z.key?' selected':'')+'>'
+      +z.label+(rate>0?' — '+fmtMoney(rate)+' / unit':'')+' </option>';
+  }
+  sel.innerHTML=opts;
+}
+function renderFQInstCardLines(ni,laborCost,unitPrice,units,qaqcAmt,workAccom,perDiem,touristPrem,qaqcAccom){
+  var w=el('fq-inst-lines-wrap'); if(!w) return;
+  if(!ni){w.innerHTML='';return;}
+  var fmt=function(v){return fmtMoney(v);};
+  var h='';
+  function iLine(icon,label,val,color,removeFn){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:3px 0;color:var(--text2)">'
+      +'<span style="display:flex;align-items:center;gap:5px">'+(icon?'<i class="ti '+icon+'" style="font-size:11px"></i>':'')+label+'</span>'
+      +'<span style="display:flex;align-items:center;gap:6px">'
+      +'<span style="font-weight:500;color:'+(color||'var(--text)')+'">'+fmt(val)+'</span>'
+      +(removeFn?'<button onclick="'+removeFn+'" style="background:none;border:none;cursor:pointer;color:var(--coral);padding:0;line-height:1;font-size:11px" title="Remove">✕</button>':'')
+      +'</span></div>';
+  }
+  h+=iLine('ti-hammer','Labor ('+units+' × '+fmt(unitPrice)+')',laborCost,'var(--navy)');
+  if(qaqcAmt>0) h+=iLine('ti-home-check','QA/QC supervision',qaqcAmt,'var(--text)');
+  if(workAccom>0) h+=iLine('ti-bed','Working-night accommodation',workAccom,'var(--teal)','fqInstPlanner.workNightAccom=0;recalcFQ()');
+  if(perDiem>0)   h+=iLine('ti-wallet','Per diem on site',perDiem,'var(--teal)','fqInstPlanner.perDiem=0;recalcFQ()');
+  if(touristPrem>0) h+=iLine('ti-beach','Tourist area premium',touristPrem,'#f97316','fqInstPlanner.touristPremium=0;recalcFQ()');
+  if(qaqcAccom>0){
+    var qd=fqInstPlanner?fqInstPlanner.detail:{};
+    var qaqcLabel='QA/QC accommodation ('+(qd&&qd.qaqcPersons||mobilityState.qaqcPersons||1)+'p × '+(qd&&qd.qaqcDays||1)+'n)';
+    h+=iLine('ti-user-check',qaqcLabel,qaqcAccom,'var(--teal)','fqInstPlanner.qaqcAccom=0;recalcFQ()');
+  }
+  if(fqInstPlanner&&fqInstPlanner.detail&&fqInstPlanner.detail.hotelName){
+    h+='<div style="font-size:10px;color:var(--text2);padding:2px 0 4px;opacity:.7"><i class="ti ti-hotel" style="font-size:10px"></i> '+escHtml(fqInstPlanner.detail.hotelName)
+      +(fqInstPlanner.isTourist?' · 🏖️ Tourist area':'')+'</div>';
+  }
+  if(!workAccom&&!perDiem&&!qaqcAccom){
+    h+='<div style="font-size:11px;color:var(--text2);padding:4px 0;border-top:.5px dotted var(--border);margin-top:4px"><i class="ti ti-info-circle" style="font-size:10px"></i> Export accommodation from the <button class="btn" onclick="navigate(\'production\');setTimeout(function(){setProdTab(\'mobility\');},100)" style="font-size:10px;padding:1px 6px;margin-left:2px">Mobility Planner</button> to split working-night costs here</div>';
+  }
+  w.innerHTML=h;
+}
 function populateFQMobSelect() {
   var sel=el('fq-mob-area'); if(!sel) return;
   var s1Val=el('mob-area')?el('mob-area').value:'';
@@ -11759,23 +11822,35 @@ function renderFQCards() {
       +'</div></div>';
   }
 
-  // ── Installation & Assembly rates ──
-  if(ni||na){
+  // ── Installation (full card, same as Stage 1) ──
+  if(ni){
     h+='<div class="card">'
-      +'<div class="card-head"><h3><i class="ti ti-home-check"></i>Installation &amp; Assembly rates</h3>'
+      +'<div class="card-head" style="display:flex;align-items:center;justify-content:space-between">'
+      +'<h3><i class="ti ti-hammer"></i>Installation</h3>'
       +'<span style="font-size:11px;color:var(--text2)">Pre-filled from Stage 1 — adjust independently</span></div>'
-      +'<div class="card-body"><div class="g2">';
-    if(ni){
-      h+='<div><label class="fld">Installation cost per unit (₱)</label>'
-        +'<input type="number" id="fq-inst-rate" value="'+instRate+'" min="0" oninput="fqInstRateOverride=parseFloat(this.value)||null;recalcFQ()" style="height:36px">'
-        +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+totU+' units × ₱'+fmtNum(instRate)+' = '+fmtMoney(instRate*totU)+'</div></div>';
-    }
-    if(na){
-      h+='<div><label class="fld">Assembly cost per carcass (₱)</label>'
-        +'<input type="number" id="fq-assm-rate" value="'+assmRate+'" min="0" oninput="fqAssmRateOverride=parseFloat(this.value)||null;recalcFQ()" style="height:36px">'
-        +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+assmCarcass+' carcass'+(assmCarcass!==1?'es':'')+' × ₱'+fmtNum(assmRate)+' = '+fmtMoney(assmRate*assmCarcass)+'</div></div>';
-    }
-    h+='</div></div></div>';
+      +'<div class="card-body">'
+      +'<label class="fld">Installation region</label>'
+      +'<select id="fq-inst-region" onchange="fqInstRegionManual=true;fqInstRegion=this.value;recalcFQ()"></select>'
+      +'<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0;color:var(--text2)">'
+      +'<span>Base rate / unit</span><span id="fq-inst-unit-disp" style="font-weight:500;color:var(--text)"></span></div>'
+      +'<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0;color:var(--text2)">'
+      +'<span>Carcass units</span><span id="fq-inst-units-disp" style="font-weight:500;color:var(--text)"></span></div>'
+      +'<div id="fq-inst-lines-wrap" style="margin-top:8px"></div>'
+      +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:8px 0 0;border-top:.5px solid var(--border);margin-top:4px;color:var(--text2)">'
+      +'<span style="font-weight:600">Installation cost</span><span id="fq-inst-cost-disp" style="font-weight:700;color:var(--navy)"></span></div>'
+      +'</div></div>';
+  }
+  // ── Assembly ──
+  if(na){
+    h+='<div class="card">'
+      +'<div class="card-head" style="background:#f0fff4;border-color:#a0d8b0">'
+      +'<h3 style="color:#1a6e3c"><i class="ti ti-armchair"></i>Assembly</h3>'
+      +'<span style="font-size:11px;color:var(--text2)">Pre-filled from Stage 1 — adjust independently</span></div>'
+      +'<div class="card-body"><div class="g2">'
+      +'<div><label class="fld">Assembly cost per carcass (₱)</label>'
+      +'<input type="number" id="fq-assm-rate" value="'+assmRate+'" min="0" oninput="fqAssmRateOverride=parseFloat(this.value)||null;recalcFQ()" style="height:36px">'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+assmCarcass+' carcass'+(assmCarcass!==1?'es':'')+' × ₱'+fmtNum(assmRate)+' = '+fmtMoney(assmRate*assmCarcass)+'</div></div>'
+      +'</div></div></div>';
   }
 
   // ── Scheduling & timeline ──
@@ -11874,8 +11949,9 @@ function renderFQCards() {
 
   wrap.innerHTML=h;
 
-  // Post-render: populate mob selector and render bond form if active
+  // Post-render: populate mob selector, inst region selector, bond form
   if(ni) populateFQMobSelect();
+  if(ni) populateFQInstRegionSelect();
   if(fqBondIns.enabled) renderFQBondIns();
   recalcFQ();
 }
@@ -12100,11 +12176,22 @@ function recalcFQ() {
   if(typeof renderMobCalcBar==='function') renderMobCalcBar();
   var mobC=mobBase*(1+cm/100)*(1+mobBuf/100)*(1+mobMk/100);
 
-  var instRate=fqInstRateOverride!==null?fqInstRateOverride:(aCF.installCostPerUnit||CF.installCostPerUnit||1200);
   var assmRate=fqAssmRateOverride!==null?fqAssmRateOverride:(aCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850);
-  var fqZoneIdx=ni&&fqMobSel?fqMobSel.selectedIndex:0;
-  var qaqcBase=ni?calcQAQCCost(fqZoneIdx):0;
-  var instBase=ni?(instRate*totU+qaqcBase):0;
+  // Full installation cost chain — mirrors Stage 1 recalc()
+  var instLaborCost = ni ? getInstCostByType(fqInstRegion) : 0;
+  var instUnitPrice = ni&&totU>0 ? instLaborCost/totU : instPriceUnitFor(fqInstRegion);
+  var fqZoneIdx = ni ? (function(){ for(var _zi=0;_zi<INST_ZONES.length;_zi++){if(INST_ZONES[_zi].key===fqInstRegion) return _zi;} return 0; })() : 0;
+  var qaqcBase = ni ? calcQAQCCost(fqZoneIdx) : 0;
+  var instPlannerWorkAccom = ni&&fqInstPlanner ? (fqInstPlanner.workNightAccom||0) : 0;
+  var instPlannerPerDiem   = ni&&fqInstPlanner ? (fqInstPlanner.perDiem||0) : 0;
+  var instPlannerTourist   = ni&&fqInstPlanner ? (fqInstPlanner.touristPremium||0) : 0;
+  var instPlannerQaqcAccom = ni&&fqInstPlanner ? (fqInstPlanner.qaqcAccom||0) : 0;
+  var instBase = ni ? (instLaborCost+qaqcBase+instPlannerWorkAccom+instPlannerPerDiem+instPlannerTourist+instPlannerQaqcAccom) : 0;
+  // Update Stage 2 installation card displays
+  var _fqiud=el('fq-inst-unit-disp'); if(_fqiud) _fqiud.textContent=ni?fmtMoney(instUnitPrice):'—';
+  var _fqind=el('fq-inst-units-disp'); if(_fqind) _fqind.textContent=ni?(totU+' unit'+(totU===1?'':'s')):'—';
+  var _fqicd=el('fq-inst-cost-disp'); if(_fqicd) _fqicd.textContent=ni?fmtMoney(instBase):'—';
+  if(typeof renderFQInstCardLines==='function') renderFQInstCardLines(ni,instLaborCost,instUnitPrice,totU,qaqcBase,instPlannerWorkAccom,instPlannerPerDiem,instPlannerTourist,instPlannerQaqcAccom);
   var assmCarcass=ni?totU:(qAssembly&&qAssembly.carcassCount>0?qAssembly.carcassCount:totU);
   var assmBase=na?assmRate*assmCarcass:0;
   var instC=(instBase+assmBase)*(1+ci/100)*(1+instBuf/100)*(1+instMk/100);
