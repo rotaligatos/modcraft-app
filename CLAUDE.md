@@ -1349,6 +1349,70 @@ _ttsQueue, _ttsSpeaking // TTS chunk queue state
 MSG_HDR, messagesData, _msgSeen, _msgTabReady, _msgAudioCtx, MSG_MAILER_URL
 ```
 
+## What was changed on 2026-06-16 (session — PIN enrollment, approval routing, Users→Settings, CF override redesign)
+
+### PIN enrollment + per-user PIN verification (commit `9268dfa`)
+1. **SHA-256 + salt PINs** — `_pinHash(pin,salt)`, `_pinVerify(pin,hash,salt)`, `_pinGenSalt()` using browser-native `crypto.subtle.digest`; no plaintext PINs anywhere
+2. **User Roles sheet extended A:V → A:X** — col **W(22)=pin_hash**, **X(23)=pin_salt**; all `sheetsGet/Update/Append/Clear` ranges updated; `parseUserRows` reads cols 22–23 into `pinHash`/`pinSalt`; `saveUserRow` + `submitAddUser` write them (blank on add)
+3. **Avatar dropdown** — the topbar avatar is now a clickable dropdown (`toggleAvatarMenu`/`closeAvatarMenu`): "Set / Change PIN" (Manager/Director/Admin only via `isApprover()`) + Sign out; the old standalone Sign Out button moved inside it
+4. **`ov-set-pin` modal** — `openSetPinModal()` / `submitSetPin()`; first time = new PIN + confirm; thereafter must enter current PIN to change; writes to User Roles cols W:X via `sheetsUpdate`
+5. **Reset PIN (Admin/Director only)** — `resetUserPin(i)` button per Manager/Director/Admin row in the Users page; clears hash/salt; sends an urgent in-app message to the user; PIN set/unset badge shown per row
+6. **Named-approver validation** — `_pinModalApprover` global holds the approver being validated; `_verifyApproverPin(pin)` (async) hashes against that approver's stored salt; falls back to legacy `"1234"` when no PIN set (with an amber "no PIN" warning); `_openPinModal(ovId,pinId,errId)` sets the modal label to "Enter [Name]'s PIN" and shows the warning
+7. **All approval modals updated to async PIN verify** — `confirmVat`, `confirmDisc`, `confirmPremium`, `confirmRevise`, `confirmUnlock`, `confirmCustomCF`, `_acexSubmit`, `doApprovalAction`, `fqOnNonVat`, `fqOnDiscRequest`, `onPremiumRequest` all set `_pinModalApprover=findApproverForSelf()` before opening and call `_verifyApproverPin().then(...)`
+8. **`checkPin(val)` kept** — legacy `val==='1234'` retained only for non-modal callers; modals use `_verifyApproverPin`
+
+### Approval routing (commit `9268dfa`, gated `15ce52d`)
+9. **`APPR_ROUTING` global** — `{ company: { nonvat, discount, override, premium }: approverEmail }`; saved as `approvalRouting` in `_collectAppSettings` / restored in `_applyAppSettings` (Settings sheet CONFIG row)
+10. **Settings → Approval Routing tab** — `renderApprovalRoutingSettings()` renders a table (action type × company) of dropdowns listing active Manager/Director/Admin; `_setApprRoute(co,type,email)`; Save via `gSaveAppSettings()`
+11. **Admin/Director only** — tab hidden in `applyNavAccess()` (`st-tab-approvalrouting`) and the renderer shows a lock message for other roles
+12. **`findApproverForAction(type)`** — resolves approver: APPR_ROUTING[company][type] → delegation chain (Director/Admin → any Manager; Manager → any Manager/Supervisor; **cross-company**) → first active Manager/Director/Admin (not self)
+13. **`findApproverForSelf()`** — returns the current user's own `sheetUsers` entry (for self-approval PIN)
+14. **No-approver fallback** — when `findApproverForAction` returns null, `submitApprovalRequest` notifies the Admin via in-app message and toasts; no silent failure
+15. **`sheetUsers` populated at login** — **critical fix (commit `a7e3cd9`)**: `gCheckRole()` now calls `sheetUsers=parseUserRows(rows)` after reading User Roles. Previously `sheetUsers` was only populated when Settings → Users was opened, so `findApproverForSelf()` returned null and every approval PIN failed
+
+### Users page relocated to Settings (commit `ed0982f`)
+16. **Standalone `Users` nav button removed**; `page-users` content moved into a new **Settings → Users** sub-tab (`st-users`); `st-tab-users` button added to the Settings tab bar
+17. **`setStTab('users')`** loads `loadUsersFromSheet()`; `navigate('users')` redirects to `navigate('settings')`+`setStTab('users')`; tab visible to Admin/Director only (in `applyNavAccess`); `canNavigate('users')` allows Admin **and Director**
+
+### CF override redesign — reason-only request + approver-side profit calc (commits `2f915c5`, `b6650c5`, `baf7a82`)
+18. **Two distinct paths in `openCustomCF()` / `fqOpenCustomCF()`**:
+    - **Non-approver** → `ov-cf-request` modal: a single reason textarea (NO cost-factor numbers shown — too sensitive for basic users); `_submitCFRequest()` sends `openSendRequest('override',{reason})`. Request carries only the reason (no `cfValues`)
+    - **Approver** → full `ov-custom-cf` modal with the cost factor fields + PIN
+19. **Live Sale / Cost / Profit summary** — `_ccfUpdateProfit()` (fires on every field `oninput`): Sale (ex-VAT) = combined cost after the entered factors + discount buffer; Est. direct cost = fab+mob+inst+design+services raw bases from `_pCalc`; Est. profit + margin % (teal ≥30%, amber ≥15%, coral <15%). **Uses `fmtMoney` not `fmtP`** (the `fmtP` ReferenceError silently aborted the modal — fixed in `b6650c5`)
+20. **Approver acts on a routed request** — `openApprovalAction(idx)` detects `type==='override'` and opens `openCustomCFFromRequest(note,from)` (shows the requester's note banner `ccf-req-note`) instead of the generic approve/reject box; `_pendingOverrideNotifIdx` tracks it; on `confirmCustomCF` success, `_markOverrideApproved(idx,cfObj)` sets status=approved, notifies the requester via in-app message, and persists to Sheets
+21. **Lami announces incoming requests** — the 60 s approval poll now calls `_chipSpeak('You have a new … request from … for quotation …. They said: …')` when `chipVoiceOn`, alongside the existing toast
+22. **Override card gated to Fab + Installation** (commit `baf7a82`) — `ccf-card` shown only when service = "Fabrication with Installation"; hidden in `onServiceChange()` + `initQuotation()`. Rationale: for fabrication-only quotes, mob/inst factors multiply a zero base and fab buffer is `ni`-gated, so the override has almost no effect
+23. **Discount buffer gated to Fab + Installation** — in both `recalc()` and `recalcFQ()`, `discBuf = ni ? (aCF.discountBuffer||0) : 0`; a fabrication-only quote no longer bakes in the discount buffer
+
+### New globals (2026-06-16)
+```javascript
+APPR_ROUTING            // { company: { nonvat,discount,override,premium }: approverEmail }
+_pinModalApprover       // {name,email,pinHash,pinSalt} — approver being validated in the open modal
+_pendingOverrideNotifIdx// NOTIFS index of the override request the approver is currently actioning (-1 = none)
+// On each sheetUsers[i]: pinHash, pinSalt (User Roles cols W/X)
+```
+
+### New functions (2026-06-16)
+```javascript
+_pinHash(pin,salt) / _pinVerify(pin,hash,salt) / _pinGenSalt()
+_verifyApproverPin(pin)              // async; validates against _pinModalApprover's stored PIN (or legacy 1234)
+_openPinModal(ovId,pinId,errId)      // sets "Enter [Name]'s PIN" label + no-PIN warning
+toggleAvatarMenu(e)/closeAvatarMenu()
+openSetPinModal()/submitSetPin()
+resetUserPin(i)                      // Admin/Director: clear a user's PIN + notify them
+findApproverForSelf()                // current user's sheetUsers entry
+findApproverForAction(type)          // APPR_ROUTING → delegation → fallback
+renderApprovalRoutingSettings()/_setApprRoute(co,type,email)
+openCustomCFFromRequest(note,from)/_ccfShowReqNote(note,from)
+_ccfUpdateProfit()                   // live Sale/Cost/Profit on the approver CF modal
+_submitCFRequest()                   // non-approver: send reason-only override request
+_markOverrideApproved(idx,cfObj)     // mark routed override request approved + notify requester
+```
+
+### Open items deferred (2026-06-16)
+- **Fine-grained per-role authority** (discount % limits, per-role PINs, escalation thresholds) still deferred; routing assigns a single named approver per action+company
+- Approval routing currently covers 4 action types: `nonvat`, `discount`, `override`, `premium`
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
