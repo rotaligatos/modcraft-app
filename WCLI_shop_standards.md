@@ -105,11 +105,12 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
   - **MDF or PB → 3mm or 6mm**
   - **Plywood → 5mm**
   - Thin backing is **grooved into the sides/top/bottom** and **recessed 18mm from the rear edge** (same construction as the base cabinet grooved backing).
-- **Two 18mm horizontal rails at the rear** (the thin backing can't carry load):
+- **Two 18mm horizontal rails at the rear — only when the backing is THIN (3/5/6mm).** With **18mm backing there are NO rails** — the 18mm back is flush to the rear edge of the side panels, so a rear rail would protrude. (Universal rule: thin grooved backing → back rails; 18mm backing → none.)
   - Rail width **80–100mm** (model uses 90mm).
   - **Lower rail ≈ ¼ of cabinet height up from the bottom.**
   - **Upper rail ≈ ¼ of cabinet height down from the top.**
   - Both sit in the rear recess (behind the backing), spanning between the side panels.
+  - The suspension brackets screw to the **side panels** (not the rails), so they are present regardless of backing type.
 - **Suspension brackets (the white plastic adjustable corner brackets):**
   - **One at each top corner (L + R)**, screwed to the **inner face of the side panel**; a hole through the back panel lets the bracket flush to the rear.
   - Hooks onto a **steel wall mounting plate** screwed to the wall.
