@@ -118,6 +118,15 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 
 ---
 
+## 7. Tall / pantry cabinet (confirmed 2026-06-17)
+
+- **Built like the base cabinet** — **solid 18mm top, bottom, and side panels**, floor-standing (toe kick + adjustable legs).
+- **3 to 4 horizontal rails evenly distributed at the rear** (instead of the base's single centre support rail) — the extra height needs more back support. Rails span between the side panels, ~90mm wide, 18mm, at the rear recess. (Model: 4 rails when height ≥ 1900mm, otherwise 3.)
+- Each rail fastened with **2 screws per end** (4 per rail), same as other rails.
+- **Doors vary by client preference:** single, double, or **pull-out larder** (full-extension pull-out frame with a fixed front panel).
+
+---
+
 ## Confirmed (2026-06-09)
 1. ✓ Both top rails (front + back) band the front-facing edge.
 2. ✓ Grooved backing: groove on **all four sides incl. top**, offset 18mm from back edge; backing grows **+18mm width / +18mm height**; **horizontal centre support rail** added (not a full panel).
