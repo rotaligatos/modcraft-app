@@ -133,8 +133,9 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 - **Drawer slide/guide thickness: 13mm per side** → drawer box width = **inner cabinet width − 26mm**.
 - **Drawer box: 15mm boards** for sides, front/back, **and bottom** (not thin ply).
 - **Drawer face: 18mm.**
-- Carcass otherwise like the base cabinet (solid bottom panel, top front/back rails — **[CONFIRM]** full bottom panel vs rails under drawers).
-- **[CONFIRM]** EBT on drawer box edges (currently none).
+- **Drawer box top edge is edgebanded** (`1l` on sides and front/back); bottom not banded.
+- **Drawer guide (slide) is 50mm shorter than the cabinet depth** so it doesn't bump the backing → drawer box depth = cabinet depth − 50mm.
+- Carcass like the base cabinet: **full bottom panel** + top front/back rails (and thin-backing rear support follows the universal backing rule).
 
 ---
 
