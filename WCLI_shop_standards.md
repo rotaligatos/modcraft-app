@@ -128,6 +128,16 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 
 ---
 
+## 8. Drawer base cabinet (confirmed 2026-06-17)
+
+- **Drawer slide/guide thickness: 13mm per side** → drawer box width = **inner cabinet width − 26mm**.
+- **Drawer box: 15mm boards** for sides, front/back, **and bottom** (not thin ply).
+- **Drawer face: 18mm.**
+- Carcass otherwise like the base cabinet (solid bottom panel, top front/back rails — **[CONFIRM]** full bottom panel vs rails under drawers).
+- **[CONFIRM]** EBT on drawer box edges (currently none).
+
+---
+
 ## Confirmed (2026-06-09)
 1. ✓ Both top rails (front + back) band the front-facing edge.
 2. ✓ Grooved backing: groove on **all four sides incl. top**, offset 18mm from back edge; backing grows **+18mm width / +18mm height**; **horizontal centre support rail** added (not a full panel).
