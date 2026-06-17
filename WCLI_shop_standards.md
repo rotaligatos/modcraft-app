@@ -142,8 +142,8 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 ## 9. Sink / open base cabinet (confirmed 2026-06-17)
 
 - **Built like the base cabinet** — 18mm sides, **18mm full bottom panel**, **top front + back rails**, toe kick + adjustable legs.
-- **Backing: thinner board** (grooved 3/5/6mm), normally present (can be omitted, but normal practice is to fit a back).
-- **2 back rails at the TOP and BOTTOM of the backing** (instead of the base's single centre rail) — the **centre is left clear so a hole can be cut for the sink plumbing**. With 18mm solid backing there are no back rails (universal rule).
+- **Backing: always thinner board** (grooved 3/5/6mm) — a sink cabinet **never uses 18mm backing**. (A back can be omitted entirely, but when fitted it is always thin.)
+- **2 back rails at the TOP and BOTTOM of the backing** (instead of the base's single centre rail) — the **centre is left clear so a hole can be cut for the sink plumbing**.
 - **No shelves** on a sink cabinet.
 - Doors per client preference.
 
