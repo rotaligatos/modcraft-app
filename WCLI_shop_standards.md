@@ -56,6 +56,15 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 | **Adjustable** shelf | **Shelf pins — 4 per shelf** |
 | Dowel + cam lock | **Not used** in WCLI cabinet fabrication — strictly screw / Minifix |
 
+### Screw counts (confirmed 2026-06-17)
+| Joint | Screws (4×50 HiLo) |
+|-------|--------------------|
+| Bottom panel ↔ side panels | **4 pcs** (2 per side) |
+| Solid top panel ↔ side panels | **4 pcs** (2 per side) |
+| 18mm solid back panel | **8 pcs** — 2 each side + 2 top + 2 bottom |
+| Thin grooved back (3/5/6mm) | none — sits in groove |
+| Rail ↔ side panel | **[CONFIRM]** — screws per rail end not yet specified |
+
 ---
 
 ## 4. Doors & handles
@@ -75,6 +84,11 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 - **Standard carcass thickness: 18mm.** Never 25mm for cabinets **unless** client requests it or the item is a **table**.
 - **Adjustable legs** used for base cabinets; **toe kick board** clipped on, standard height **100mm**.
 - 2-face melamine board unless stated otherwise.
+
+### Shelves (confirmed 2026-06-17)
+- **Shelf depth = cabinet depth − 20mm** (both fixed and adjustable).
+- **Adjustable-shelf pin holes:** drilled in the side panels in **two rows** — one **35mm from the front edge**, one **35mm from the backing**. At each shelf level, drill the hole **plus one 50mm above and one 50mm below** (±50mm adjustability) → **3 holes per row per shelf** = **12 holes per shelf** (2 rows × 2 sides). **4 pins per shelf.**
+- Fixed shelf: band front edge only (`1l`); fasten with screw 4×50 or Minifix.
 
 ### Standard board sizes
 | Material | Sizes |
