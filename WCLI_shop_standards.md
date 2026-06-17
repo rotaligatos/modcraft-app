@@ -63,7 +63,7 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 | Solid top panel ↔ side panels | **4 pcs** (2 per side) |
 | 18mm solid back panel | **8 pcs** — 2 each side + 2 top + 2 bottom |
 | Thin grooved back (3/5/6mm) | none — sits in groove |
-| Rail ↔ side panel | **[CONFIRM]** — screws per rail end not yet specified |
+| Rail ↔ side panel | **2 screws per end** = **4 pcs per rail** |
 
 ---
 
