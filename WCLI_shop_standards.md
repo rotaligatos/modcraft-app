@@ -149,6 +149,19 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 
 ---
 
+## 10. Corner base cabinet — L-shape (confirmed 2026-06-17)
+
+- **True L-shape:** outer footprint A1 × A2 (e.g. 900 × 900), each leg **D deep** (e.g. 600), leaving a notch (A1−D) × (A2−D) at the room-facing corner. The two inner faces are the door openings, meeting at the corner that points into the room.
+- **Door openings** = leg length − depth (e.g. 900 − 600 = 300mm each). Doors can be **bi-fold** OR **two separate doors** (client preference).
+- **Bottom panel and shelves are ONE L-shaped (notched) piece each** — NOT split into two halves.
+- **Special cut:** any L-shaped (notched) piece is flagged as a **Special cut** — a panel saw cannot stop a cut in the middle of a board, so the L is cut from its full bounding-rectangle blank with the notch as a separate operation (the notch is waste; bounding rectangle = material consumed).
+- **Backing:** the **left side only** carries the (optional) thin grooved backing, using the base-cabinet procedure (recessed 18mm + centre support rail / anti-bow). **Every other panel is an 18mm side panel — even the one facing the wall.** Thin backing is optional; with 18mm there is no separate backing.
+- **3 top rails, all parallel** (run front-to-back, parallel to the left door): ① on top of the left backing, ② in front of the left door, ③ on the right side panel.
+- **Fascia** — a face piece at the inner (room-facing) corner that acts as the **door stopper / stabilizer** (the doors close against it).
+- Toe kick + ~5 adjustable legs (outer + inner). 4 hinges (separate doors) or ~6 (bi-fold).
+
+---
+
 ## Confirmed (2026-06-09)
 1. ✓ Both top rails (front + back) band the front-facing edge.
 2. ✓ Grooved backing: groove on **all four sides incl. top**, offset 18mm from back edge; backing grows **+18mm width / +18mm height**; **horizontal centre support rail** added (not a full panel).
