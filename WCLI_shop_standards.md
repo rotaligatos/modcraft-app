@@ -156,8 +156,9 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 - **Bottom panel and shelves are ONE L-shaped (notched) piece each** — NOT split into two halves.
 - **Special cut:** any L-shaped (notched) piece is flagged as a **Special cut** — a panel saw cannot stop a cut in the middle of a board, so the L is cut from its full bounding-rectangle blank with the notch as a separate operation (the notch is waste; bounding rectangle = material consumed).
 - **Backing:** the **left side only** carries the (optional) thin grooved backing, using the base-cabinet procedure (recessed 18mm + centre support rail / anti-bow). **Every other panel is an 18mm side panel — even the one facing the wall.** Thin backing is optional; with 18mm there is no separate backing.
-- **3 top rails, all parallel** (run front-to-back, parallel to the left door): ① on top of the left backing, ② in front of the left door, ③ on the right side panel.
-- **Fascia** — a face piece at the inner (room-facing) corner that acts as the **door stopper / stabilizer** (the doors close against it).
+- **3 top rails, all parallel** (run front-to-back, parallel to the left door): ① on top of the left backing, ② in front of the left door — **runs the full leg length up to the side panel** (same length as ①), ③ on the right side panel.
+- **Shelves are housed (dado) into the side panels** — the shelf penetrates the side panel; it spans the full L footprint to the panels (not inset).
+- **Fascia** — placed **on top of each door opening** (horizontal), acting as the **door stopper / stabilizer**; the doors close up against it.
 - Toe kick + ~5 adjustable legs (outer + inner). 4 hinges (separate doors) or ~6 (bi-fold).
 
 ---
