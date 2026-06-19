@@ -93,8 +93,17 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 ### Standard board sizes
 | Material | Sizes |
 |----------|-------|
-| MDF / PB / Plywood | **4×8 ft (1220 × 2440 mm)** standard; **6×8 ft (1830 × 2440 mm)** in some cases |
-| Compact laminate | various |
+| MDF / PB / Plywood | **4×8 ft (1220 × 2440 mm)** standard; sometimes smaller, or larger e.g. **6×8 ft (1830 × 2440 mm)** |
+| Compact laminate | normally **6×6 ft**; current trend **6×7 ft** or **6×8 ft** |
+
+### Component division (size limitation)
+- A component is **always kept as ONE piece**. The **only** reason to **divide** a component into more than one piece is when its size **exceeds the board size** in use (it physically won't fit on one board).
+- So division depends on the **board size selected**: default 4×8 ft, but if a 6×8 ft board is used, fewer/larger components need dividing; compact-laminate boards (6×6 / 6×7 / 6×8) have their own limits.
+- This is distinct from a **special cut** (L-shaped/notched, cut from a bounding blank) — a piece can be one-piece-but-special-cut, or divided only because it's bigger than the board.
+
+### Compact laminate
+- Used for **toilet/cubicle partitions** and **vanity cabinets**.
+- **No EBT (edge banding) required** — compact laminate is solid-core/self-finished at the edge, so edges are not banded.
 
 ---
 
