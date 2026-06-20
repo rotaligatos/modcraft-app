@@ -460,6 +460,16 @@ tr.cl-row:hover td{background:#f4f7fb}
           <button class="btn btn-primary" onclick="addArea()" style="font-size:12px;padding:4px 10px"><i class="ti ti-layout-grid-add"></i>Add area</button>
         </div>
         <div class="card-body">
+          <div id="client-mat-row" style="display:block;margin-bottom:12px">
+            <div class="alert" style="flex-direction:column;gap:8px;align-items:stretch;background:#eef6ff;border:.5px solid #b6d4f5">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:500;flex-wrap:wrap">
+                <input type="checkbox" id="client-mat-toggle" onchange="onClientSupplyMatToggle(this.checked)">
+                <span><i class="ti ti-package-import"></i> Client-supplied materials</span>
+                <span style="font-size:11px;font-weight:400;color:var(--muted)">— excludes materials from cost (hardware &amp; outsource still counted); services &times;<span id="client-mat-mult-lbl">1.20</span></span>
+              </label>
+              <div id="client-mat-body" style="display:none"></div>
+            </div>
+          </div>
           <div id="fab-mode-row" style="display:block;margin-bottom:12px">
             <div class="alert alert-info" style="flex-direction:column;gap:6px;align-items:flex-start">
               <div style="display:flex;align-items:center;gap:6px;font-weight:500"><i class="ti ti-cut"></i>Fabrication Cost Basis</div>
@@ -2071,7 +2081,8 @@ var CF = {
   installCostPerUnit:1200, assemblyCostPerUnit:850,
   siteVisitFee:1500,
   cuttingListPerUnit:500, cuttingListPerArea:0,
-  designChargePerUnit:0, designChargePerArea:1500
+  designChargePerUnit:0, designChargePerArea:1500,
+  clientMatServiceMult:1.20
 };
 
 // ── Installation cost breakdown ───────────────────────────────────────────
@@ -2275,6 +2286,10 @@ var QAQC_ZONES = [
 // ── App state ──────────────────────────────────────────────────────────────
 var qAreas = [{name:"Area 1", items:[{type:"Kitchen Base Cabinet",qty:1}], svcItems:[], matItems:[], hwItems:[], bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}]}];
 var qFabMode = "carcass";
+var qClientSupplyMat = false;     // client supplies the materials (BOM + cutting-list modes)
+var qClientSupplyMatList = [];    // [{brand,type,color,size,thickness,texture,qty}]
+var qClientMatMultOverride = 0;   // per-quotation override of CF.clientMatServiceMult (0 = use global)
+var CLIENT_MAT_TYPES = ['HPL','Raw Plywood','Melamine Laminated MDF/PB/Plywood','Compact Laminate'];
 var qHasCuttingList = false;
 var qLocked = false;
 var qSentStatus = "";
@@ -3841,6 +3856,7 @@ function initQuotation() {
   if(el('fab-date'))el('fab-date').value='';
   if(el('inst-date'))el('inst-date').value='';
   qInstWorkers=0; qInstDays=0;
+  qClientSupplyMat=false; qClientSupplyMatList=[]; qClientMatMultOverride=0;
   qInstRegion='metro'; qInstRegionManual=false;
   qMobTransport=null; qMobAccom=null; qMobCalc=null; qInstPlanner=null; qInstTouristPrem=false;
   mobilityState.accomException=null; mobilityState.zone='';
@@ -4302,11 +4318,24 @@ function getTotU() {
   }
   return u;
 }
+function clientMatMult(){
+  // service uplift when client supplies the materials; 1 (no effect) otherwise
+  if(!qClientSupplyMat) return 1;
+  var m=(qClientMatMultOverride>0)?qClientMatMultOverride:(CF.clientMatServiceMult||1);
+  return (m>0)?m:1;
+}
 function getBOMItemUnitCost(bItem) {
-  var c=0;
-  var rows=(bItem.materials||[]).concat(bItem.hardware||[]).concat(bItem.services||[]).concat(bItem.outsourceMaterials||[]).concat(bItem.outsourceHardware||[]);
-  for(var i=0;i<rows.length;i++) c+=(parseFloat(rows[i].qty)||0)*(parseFloat(rows[i].price)||0);
-  if(c===0) c=CABINET_BASE_COSTS[bItem.type]||0;
+  var c=0, mult=clientMatMult(), i;
+  // services get the client-supplied uplift
+  var svc=bItem.services||[];
+  for(i=0;i<svc.length;i++) c+=(parseFloat(svc[i].qty)||0)*(parseFloat(svc[i].price)||0)*mult;
+  // hardware + outsource always counted (not excluded by client-supplied)
+  var hw=(bItem.hardware||[]).concat(bItem.outsourceMaterials||[]).concat(bItem.outsourceHardware||[]);
+  for(i=0;i<hw.length;i++) c+=(parseFloat(hw[i].qty)||0)*(parseFloat(hw[i].price)||0);
+  // materials excluded when the client supplies them
+  if(!qClientSupplyMat){ var mat=bItem.materials||[]; for(i=0;i<mat.length;i++) c+=(parseFloat(mat[i].qty)||0)*(parseFloat(mat[i].price)||0); }
+  var hasRow=((bItem.materials||[]).length||(bItem.hardware||[]).length||(bItem.services||[]).length||(bItem.outsourceMaterials||[]).length||(bItem.outsourceHardware||[]).length);
+  if(c===0 && !hasRow) c=CABINET_BASE_COSTS[bItem.type]||0;
   return c;
 }
 function getAreaSubtotal(a) {
@@ -4317,13 +4346,15 @@ function getAreaSubtotal(a) {
     var bi=qAreas[a].bomItems||[];
     for(var i=0;i<bi.length;i++) sub+=getBOMItemUnitCost(bi[i])*(bi[i].qty||1);
   } else {
+    var mult=clientMatMult();
     for(var i=0;i<qAreas[a].svcItems.length;i++){
       var si=qAreas[a].svcItems[i];
       var svc=SERVICES[si.svcIdx]||{price:0};
-      sub+=svc.price*si.qty;
+      sub+=svc.price*si.qty*mult;   // services uplifted when client supplies materials
     }
     // Material & hardware costs: only charged to Direct clients, not Subsidiary
-    if(isDirectClient()){ sub+=getAreaMatSubtotal(a); sub+=getAreaHwSubtotal(a); }
+    // Materials excluded when client supplies them; hardware still counted
+    if(isDirectClient()){ if(!qClientSupplyMat) sub+=getAreaMatSubtotal(a); sub+=getAreaHwSubtotal(a); }
   }
   return sub;
 }
@@ -4367,6 +4398,46 @@ function getAreaHwSubtotal(a){
   var sub=0; var his=qAreas[a].hwItems||[];
   for(var i=0;i<his.length;i++) sub+=(his[i].qty||0)*(his[i].price||0);
   return sub;
+}
+// ── Client-supplied materials ─────────────────────────────────────────────
+function _cmMult(){ return (qClientMatMultOverride>0)?qClientMatMultOverride:(CF.clientMatServiceMult||1.2); }
+function _cmSet(i,f,v){ if(qClientSupplyMatList[i]){ qClientSupplyMatList[i][f]=v; } }
+function addClientMatRow(){ qClientSupplyMatList.push({brand:'',type:CLIENT_MAT_TYPES[0],color:'',size:'',thickness:'',texture:'',qty:1}); renderClientMatSection(); }
+function removeClientMatRow(i){ qClientSupplyMatList.splice(i,1); renderClientMatSection(); }
+function onClientSupplyMatToggle(on){
+  qClientSupplyMat=!!on;
+  if(qClientSupplyMat && (!qClientSupplyMatList || !qClientSupplyMatList.length)) qClientSupplyMatList.push({brand:'',type:CLIENT_MAT_TYPES[0],color:'',size:'',thickness:'',texture:'',qty:1});
+  renderClientMatSection();
+  if(typeof recalc==='function') recalc();
+}
+function renderClientMatSection(){
+  var t=el('client-mat-toggle'); if(t) t.checked=qClientSupplyMat;
+  var lbl=el('client-mat-mult-lbl'); if(lbl) lbl.textContent=(_cmMult()).toFixed(2);
+  var b=el('client-mat-body'); if(!b) return;
+  b.style.display=qClientSupplyMat?'block':'none';
+  if(!qClientSupplyMat){ b.innerHTML=''; return; }
+  var mult=_cmMult();
+  var h='<div style="font-size:11px;color:var(--text2);margin:2px 0 8px"><i class="ti ti-info-circle"></i> Materials are excluded from the quotation cost (hardware &amp; outsource still counted); all services are multiplied by &times;'+mult.toFixed(2)+'. List the materials the client will supply:</div>';
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"><label style="font-size:12px;color:var(--text2)">Service multiplier override (&times;):</label>'
+    +'<input type="number" step="0.01" min="1" value="'+(qClientMatMultOverride||'')+'" placeholder="'+(CF.clientMatServiceMult||1.2)+'" oninput="qClientMatMultOverride=parseFloat(this.value)||0;renderClientMatSection();if(typeof recalc===\'function\')recalc()" style="height:30px;width:90px">'
+    +'<span style="font-size:10px;color:var(--muted)">blank = global default ('+(CF.clientMatServiceMult||1.2)+')</span></div>';
+  h+='<div style="overflow-x:auto"><div style="display:grid;grid-template-columns:1.2fr 1.7fr 1fr 1fr .9fr 1fr 60px 30px;gap:5px;min-width:780px;align-items:center">';
+  ['Brand','Type','Color','Size','Thickness','Texture','Qty',''].forEach(function(c){ h+='<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">'+c+'</span>'; });
+  for(var i=0;i<qClientSupplyMatList.length;i++){
+    var m=qClientSupplyMatList[i];
+    var opts=CLIENT_MAT_TYPES.map(function(tp){ return '<option'+(tp===m.type?' selected':'')+'>'+tp+'</option>'; }).join('');
+    h+='<input value="'+(m.brand||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'brand\',this.value)" style="height:30px">'
+      +'<select onchange="_cmSet('+i+',\'type\',this.value)" style="height:30px">'+opts+'</select>'
+      +'<input value="'+(m.color||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'color\',this.value)" style="height:30px">'
+      +'<input value="'+(m.size||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'size\',this.value)" style="height:30px">'
+      +'<input value="'+(m.thickness||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'thickness\',this.value)" style="height:30px">'
+      +'<input value="'+(m.texture||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'texture\',this.value)" style="height:30px">'
+      +'<input type="number" min="0" value="'+(m.qty!=null?m.qty:1)+'" oninput="_cmSet('+i+',\'qty\',parseFloat(this.value)||0)" style="height:30px;text-align:center">'
+      +'<button class="btn" onclick="removeClientMatRow('+i+')" style="height:30px;width:30px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>';
+  }
+  h+='</div></div>';
+  h+='<button class="btn" onclick="addClientMatRow()" style="font-size:11px;padding:4px 10px;margin-top:8px"><i class="ti ti-plus"></i>Add material</button>';
+  b.innerHTML=h;
 }
 // ── Search-as-you-type helpers (native datalist) ──────────────────────────
 function onMatSearch(inp,a,i){
@@ -4863,6 +4934,7 @@ function renderOutsourceSection(a,ci) {
     +'</div>';
 }
 function renderItems() {
+  renderClientMatSection();
   var wrap=el("items-wrap"); if(!wrap) return;
   var isCarcass=(qFabMode==="carcass");
   var isBOM=(qFabMode==="bom");
@@ -6276,6 +6348,10 @@ function renderCostFactors() {
     +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Grand Total</div>'
     +'<div class="g3" style="margin-bottom:10px">'
     +'<div><label class="fld">Discount buffer (%)</label><input type="number" value="'+(CF.discountBuffer||0)+'" oninput="CF.discountBuffer=parseFloat(this.value)||0" style="height:32px"><div style="font-size:10px;color:var(--muted);margin-top:2px">Buffer baked into combined total to absorb future discounts</div></div>'
+    +'</div>'
+    +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Client-supplied materials</div>'
+    +'<div class="g3" style="margin-bottom:10px">'
+    +'<div><label class="fld">Service multiplier (&times;)</label><input type="number" step="0.01" min="1" value="'+(CF.clientMatServiceMult||1.2)+'" oninput="CF.clientMatServiceMult=parseFloat(this.value)||1" style="height:32px"><div style="font-size:10px;color:var(--muted);margin-top:2px">When the client supplies materials: materials are excluded from cost and all services are multiplied by this. Overridable per quotation.</div></div>'
     +'</div>'
     +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">VAT &amp; Premiums</div>'
     +'<div class="g3" style="margin-bottom:10px">'
@@ -10885,6 +10961,9 @@ function captureQuotationSnapshot(){
     mobCalc:qMobCalc?JSON.parse(JSON.stringify(qMobCalc)):null,
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null,
     instTouristPrem:qInstTouristPrem,
+    clientSupplyMat:qClientSupplyMat,
+    clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])),
+    clientMatMultOverride:qClientMatMultOverride,
     mobQaqcPersons:mobilityState.qaqcPersons||1
   };
 }
@@ -10911,12 +10990,16 @@ function restoreQuotationSnapshot(snap){
   qInstPlanner=snap.instPlanner?JSON.parse(JSON.stringify(snap.instPlanner)):null;
   if(snap.mobQaqcPersons) mobilityState.qaqcPersons=snap.mobQaqcPersons;
   qInstTouristPrem=!!snap.instTouristPrem;
+  qClientSupplyMat=!!snap.clientSupplyMat;
+  qClientSupplyMatList=snap.clientSupplyMatList?JSON.parse(JSON.stringify(snap.clientSupplyMatList)):[];
+  qClientMatMultOverride=snap.clientMatMultOverride||0;
   populateInstRegionSelect();
 }
 function syncOptionUI(){
   // Sync DOM/UI elements after restoring a snapshot
   var fabRads=document.querySelectorAll('[name="fab-mode"]');
   for(var i=0;i<fabRads.length;i++) fabRads[i].checked=(fabRads[i].value===qFabMode);
+  renderClientMatSection();
   if(el('assm-toggle')) el('assm-toggle').checked=qAssembly.enabled;
   if(el('assm-body')) el('assm-body').style.display=qAssembly.enabled?'block':'none';
   if(el('cl-charge-toggle')) el('cl-charge-toggle').checked=qCuttingList.enabled;
@@ -15803,6 +15886,7 @@ function getFullQuotationState(){
     instWorkers:qInstWorkers, instDays:qInstDays,
     instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom, mobCalc:qMobCalc,
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null, instTouristPrem:qInstTouristPrem,
+    clientSupplyMat:qClientSupplyMat, clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])), clientMatMultOverride:qClientMatMultOverride,
     accomException:mobilityState.accomException||null,
     mobPlannerZone:mobilityState.zone||'',
     mobQaqcPersons:mobilityState.qaqcPersons||1,
@@ -15913,6 +15997,7 @@ function restoreFullQuotationState(state){
   qMobTransport=state.mobTransport||null; qMobAccom=state.mobAccom||null;
   qMobCalc=state.mobCalc||null;
   qInstPlanner=state.instPlanner||null; qInstTouristPrem=!!state.instTouristPrem;
+  qClientSupplyMat=!!state.clientSupplyMat; qClientSupplyMatList=Array.isArray(state.clientSupplyMatList)?state.clientSupplyMatList:[]; qClientMatMultOverride=state.clientMatMultOverride||0;
   mobilityState.accomException=state.accomException||null;
   mobilityState.zone=state.mobPlannerZone||'';
   if(state.mobQaqcPersons) mobilityState.qaqcPersons=state.mobQaqcPersons;
