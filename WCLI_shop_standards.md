@@ -195,6 +195,14 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 
 ---
 
+## 13. Microwave / appliance cabinet (confirmed 2026-06-20)
+
+- Uses the **hanging (wall) cabinet construction** (18mm full top/bottom/sides, thin grooved backing + 2 rear rails, suspension brackets + wall plates, no toe kick/legs).
+- Adds a **lower OPEN microwave cavity** (no door), a **divider shelf** the microwave sits on (depth clears the recessed thin backing), and an **upper door** above the cavity.
+- Delegates to `buildWall` (doors off) + the cavity/divider/upper-door members.
+
+---
+
 ## Confirmed (2026-06-09)
 1. ✓ Both top rails (front + back) band the front-facing edge.
 2. ✓ Grooved backing: groove on **all four sides incl. top**, offset 18mm from back edge; backing grows **+18mm width / +18mm height**; **horizontal centre support rail** added (not a full panel).
