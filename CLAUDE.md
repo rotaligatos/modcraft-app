@@ -1513,6 +1513,25 @@ Dropdown options + dispatcher cases + `applyTypeUI` (filler has no doors) + `typ
 - **The POC now has 14 cabinet types total:** 9 confirmed (base, wall, tall, drawer, sink, corner base, corner wall, open shelf, microwave) + oven tower ON HOLD + these 5 PARKED scaffolds.
 - **Door TYPES discussion (deferred):** user asked about door styles; agreed it's a high-leverage cross-cutting axis (slab/shaker/glass/alu-glass/louvered construction × hinged/lift-up/sliding/tambour mechanism) that would multiply cut-list accuracy across all types — but chose to keep going wide on cabinet types for now. Revisit when ready (need WCLI's actual door styles + stile/rail/glass-rebate dimensions).
 
+## What was changed on 2026-06-20 (session 4 — Client-supplied materials + unlock PIN fix) [deployed app]
+
+> Back to the deployed `index.html` (not the POC).
+
+### Client-supplied materials (BOM + cutting-list modes)
+- **Toggle** "Client-supplied materials" sits **above the Fabrication Cost Basis** card (`#client-mat-row`/`#client-mat-toggle`/`#client-mat-body`). Applies to **By BOM** and **By cutting list (services)** modes.
+- **When ON:** materials are **excluded from cost** (hardware + outsource still counted), and **all services are multiplied** by an uplift. The Materials sections **gray out** (opacity .4 + non-interactive) with a "client-supplied · not counted" badge — in both BOM (`renderBOMSection`, cat==='materials') and cutting-list (`renderItems` services-mode materials) views.
+- **Customer Supplied Materials input** (`renderClientMatSection`): a list of rows — Brand · Type (`CLIENT_MAT_TYPES` = HPL / Raw Plywood / Melamine-Laminated MDF·PB·Plywood / Compact Laminate) · Color · Size · Thickness · Texture · Qty.
+- **Multiplier:** new `CF.clientMatServiceMult` (default **1.20**) in Settings → Cost Factors ("Client-supplied materials"). Per-quotation **override field** `qClientMatMultOverride` (separate from the custom-CF override; blank = global).
+- **Cost logic:** `clientMatMult()` helper; applied in `getBOMItemUnitCost` (services × mult, materials skipped, hardware/outsource counted) and `getAreaSubtotal` services branch (svcItems × mult, matItems skipped when client-supplied).
+- **Globals:** `qClientSupplyMat`, `qClientSupplyMatList`, `qClientMatMultOverride`. Persisted in quotation state (save/load), option snapshots (capture/restore), reset in `initQuotation`. CF persists wholesale via `_collectAppSettings`/`_applyAppSettings`.
+- **Printout:** `_clientMatPrintHtml()` renders a "Customer-Supplied Materials" table on the quote (note: excluded from quoted material cost).
+
+### Unlock PIN bug fix
+- **Symptom:** unlock button did nothing even with the correct PIN.
+- **Cause 1:** `requestUnlock` (Stage 1) never reset `modalCtx`; a leftover `'fq'` from a prior Final-Quotation action made `confirmUnlock` clear `fqLocked` instead of `qLocked` → Stage-1 quotation stayed locked. Fixed: `requestUnlock` sets `modalCtx='s1'`.
+- **Cause 2:** `requestFQUnlock` opened the modal via `openModal('ov-unlock')` **without** setting `_pinModalApprover` or calling `_openPinModal`, so `_verifyApproverPin` ran against a stale/null approver. Fixed: it now sets `_pinModalApprover=findApproverForSelf()` + `_openPinModal(...)`.
+- **Safety net:** `confirmUnlock` sets `_pinModalApprover=findApproverForSelf()` if unset.
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
