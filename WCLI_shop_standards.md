@@ -186,6 +186,15 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 
 ---
 
+## 12. Open shelf unit (confirmed 2026-06-20)
+
+- An open shelf is simply a **doorless cabinet**. It reuses an existing confirmed construction based on a **Mount** option:
+  - **Floor** → **base-cabinet construction** (18mm sides + bottom, top front/back rails, toe kick + legs, backing per the standard rule, adjustable shelves) — just no doors.
+  - **Hanging** → **wall-cabinet construction** (18mm full top/bottom/sides, thin grooved backing + 2 rear rails, suspension brackets + wall plates, no toe kick/legs) — just no doors.
+- No new geometry — it delegates to `buildBase` / `buildWall` with doors off.
+
+---
+
 ## Confirmed (2026-06-09)
 1. ✓ Both top rails (front + back) band the front-facing edge.
 2. ✓ Grooved backing: groove on **all four sides incl. top**, offset 18mm from back edge; backing grows **+18mm width / +18mm height**; **horizontal centre support rail** added (not a full panel).
