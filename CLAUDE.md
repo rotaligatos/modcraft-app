@@ -1495,6 +1495,24 @@ Dropdown options + dispatcher cases + `applyTypeUI`/`typeDefaults` updated; **Mo
 ### Standards doc
 `WCLI_shop_standards.md` now has confirmed sections **§11 Corner wall, §12 Open shelf, §13 Microwave** (oven tower not yet a confirmed section — on hold).
 
+## What was changed on 2026-06-20 (session 3 — 5 more scaffold types, all PARKED pending verification)
+
+> Continued going wide. Scaffolded 5 more cabinet types into `poc_cabinet.html` as **first-pass best-guesses**, then the user chose to **PARK all of them** (not yet plant-verified) and move on to other development. **None are confirmed; none are in `WCLI_shop_standards.md` yet.**
+
+New build functions (best-guess geometry — to verify with plant before confirming):
+```javascript
+buildBlindCorner(p)     // base carcass + partial door + fixed BLIND filler panel (corner access blocked by adjacent cabinet)
+buildDrawerDoor(p)      // base + top drawer over a lower door
+buildFridgeSurround(p)  // tall: open fridge void (no bottom) + upper bridging cabinet w/ door
+buildWardrobe(p)        // tall furniture: hat shelf + hanging rod + double doors
+buildFiller(p)          // single flat trim panel (filler / end panel)
+```
+Dropdown options + dispatcher cases + `applyTypeUI` (filler has no doors) + `typeDefaults` added.
+
+- **Blind corner** clarification confirmed with user: at the carcass level a blind corner ≈ a base cabinet (one box); the "blind" is about ACCESS — a partial door + a fixed blind panel that the adjacent perpendicular cabinet butts against (dead corner reached only through the door opening; lazy-susan/magic-corner hardware optional). User still needs to verify the exact split width, filler gap, and whether there's a stepped blind RETURN panel vs a flat blind panel.
+- **The POC now has 14 cabinet types total:** 9 confirmed (base, wall, tall, drawer, sink, corner base, corner wall, open shelf, microwave) + oven tower ON HOLD + these 5 PARKED scaffolds.
+- **Door TYPES discussion (deferred):** user asked about door styles; agreed it's a high-leverage cross-cutting axis (slab/shaker/glass/alu-glass/louvered construction × hinged/lift-up/sliding/tambour mechanism) that would multiply cut-list accuracy across all types — but chose to keep going wide on cabinet types for now. Revisit when ready (need WCLI's actual door styles + stile/rail/glass-rebate dimensions).
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
