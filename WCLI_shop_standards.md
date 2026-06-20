@@ -130,6 +130,9 @@ EBT notation: `s` = short side (a **width**-direction edge), `l` = long side (a 
 
 ## 7. Tall / pantry cabinet (confirmed 2026-06-17)
 
+> **Over 8ft → stacked modular cabinets (added 2026-06-20):** when the required height exceeds **8ft (2440mm)**, the tall cabinet is NOT built as one carcass with split panels. Instead the height is **divided into N stacked modular cabinets** (each a *complete* cabinet — its own top, bottom, sides, back, doors), stacked to capture the total height. Only the **bottom module** gets the toe kick + legs; upper modules sit directly on the one below. Modules are **joined cabinet-to-cabinet with 4×32 screws**. N = ceil(H / 2440), each module = H / N (so each module's panels fit on the board and don't need panel-splitting). This is distinct from the cut-list panel auto-split (which still applies to any single oversize panel on other types).
+
+
 - **Built like the base cabinet** — **solid 18mm top, bottom, and side panels**, floor-standing (toe kick + adjustable legs).
 - **3 to 4 horizontal rails evenly distributed at the rear — only when the backing is THIN (grooved 3/5/6mm).** With **18mm solid backing there are NO back rails** (the solid back provides the rigidity, same as the base cabinet). Rails span between the side panels, ~90mm wide, 18mm, at the rear recess. (Model: 4 rails when height ≥ 1900mm, otherwise 3.)
 - Each rail fastened with **2 screws per end** (4 per rail), same as other rails.
