@@ -1442,6 +1442,7 @@ _markOverrideApproved(idx,cfObj)     // mark routed override request approved + 
 - **Compact laminate → no EBT** (all edge banding forced to N/A; used for toilet partitions + vanity).
 - **Component division rule:** a component stays ONE piece; it is divided **only when bigger than the board in use**. Over-board pieces are flagged and **auto-split** along the longer side into the fewest equal parts that fit (min 2) — shown as separate cut-list rows (`split n/of`, `SPLIT Npc` badge); the **3D still shows the assembled whole piece**.
 - Distinct concepts in the cut list: **SPECIAL CUT** (L/notched) vs **SPLIT** (over-board).
+- **Tall cabinet over 8ft → stacked modular cabinets** (added 2026-06-20, distinct from panel auto-split): when a tall cabinet's height > **8ft (2440mm)**, it is NOT one carcass with split panels — `buildTall` divides it into **N = ceil(H/2440) stacked modular cabinets** (each a *complete* cabinet via `buildTallSingle`), each H/N tall (so its panels fit the board). Only the **bottom module** gets toe kick + legs; modules are **joined cabinet-to-cabinet with 4×32 screws**. Cut-list parts are labelled `[Module n/N]`; 3D shows the stack. (`buildTall` is now a modularizing wrapper; the original single-cabinet builder is `buildTallSingle`; global `MODULE_MAX=2440`.)
 
 ### Key `poc_cabinet.html` additions this session
 ```javascript
