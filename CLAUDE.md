@@ -1413,6 +1413,52 @@ _markOverrideApproved(idx,cfObj)     // mark routed override request approved + 
 - **Fine-grained per-role authority** (discount % limits, per-role PINs, escalation thresholds) still deferred; routing assigns a single named approver per action+company
 - Approval routing currently covers 4 action types: `nonvat`, `discount`, `override`, `premium`
 
+## What was changed on 2026-06-20 (session — Cabinet POC: all types plant-verified + corner base + board/material rules)
+
+> All work this session is in the **standalone** `poc_cabinet.html` (Drawing Intelligence Pipeline Phase 1/2 proof-of-concept) and `WCLI_shop_standards.md` — NOT the deployed `index.html`. This clears the long-standing **"verify the 4 new cabinet types with production"** open item.
+
+### Cabinet types verified/refined with the plant (base, wall, tall, drawer, sink) — now CONFIRMED
+1. **Wall cabinet** — 18mm full top/bottom/side panels; backing by material (MDF/PB 3 or 6mm, **plywood 5mm**), grooved + recessed 18mm; **2 rear rails** (~¼H up from bottom, ~¼H down from top); **plastic suspension brackets (×2) + steel wall plates (×2)** screwed to side panels.
+2. **Tall/pantry** — base-style (solid 18mm top/bottom/sides); **3–4 rear rails evenly distributed, ONLY when backing is thin** (none with 18mm solid back); doors single/double/**pull-out larder**.
+3. **Drawer base** — drawer box **15mm** boards incl. bottom (was 6mm ply); **18mm** face; slide/guide **13mm/side → box width = inner − 26mm**; **guide 50mm shorter than cabinet depth** (clears backing); drawer-box **top edge EBT** (`1l`); full bottom panel.
+4. **Sink/open base** — base-style with **18mm bottom**; **2 back rails at top & bottom of the backing** (centre left clear for the plumbing hole); **no shelves**; **never uses 18mm backing** (18mm option disabled for sink, snaps to 6mm).
+5. **Cross-cutting rules confirmed:**
+   - **Backing → rails:** thin (3/5/6mm) grooved = support rails; **18mm flush backing = NO rails** (universal — would protrude past the panel edge).
+   - **Screw counts (4×50 HiLo):** bottom panel **4** · solid top **4** · **each rail 4** (2 per end) · 18mm solid back **8** · thin grooved back **none**.
+   - **Adjustable-shelf pin holes:** 2 rows per side panel (**35mm from front, 35mm from back**), **3 holes/shelf @ 50mm pitch** (12 holes/shelf); **shelf depth = cabinet depth − 20mm**.
+
+### Corner base (L-shape) — NEW type, built iteratively against plant photos/feedback (CONFIRMED)
+- **True L-shape:** outer A1×A2, each leg D deep, notch (A1−D)×(A2−D) at the room-facing corner; door openings = legLen − depth. UI: **Width = left leg, Right leg width = back leg, Depth = leg depth**.
+- **Doors:** bi-fold OR two separate (new "Bi-fold (corner)" door option).
+- **Bottom + shelves = ONE L-shaped (notched) piece each** — rendered as a single **extruded polygon** (new renderer path: `part.poly` + `polyY` levels), not two boxes (no seam). Shelves are **housed/penetrate the side panels**.
+- **Special cut:** any L/notched piece flagged **SPECIAL CUT** (can't stop a saw mid-panel → cut from a bounding-rectangle blank, notch = waste).
+- **Backing on the LEFT side only** (optional thin grooved + centre support rail in the rear recess); **every other panel is an 18mm side panel** (even the one facing the wall). The left backing (18mm or thin) is **captured between the perpendicular side panels** (inset, recessed 18mm), same length as the rail on it — no exposed edge.
+- **Assembly correctness:** all vertical panels **butt-joint** (no overlap/exposed double edges); internal members (bottom, shelves, rails, fascia) **inset between panels** (no protrusion); **bottom captured between the sides** (not sitting on top). Right side (back-leg end) panel length = its top rail length.
+- **3 top rails, all parallel** (front-to-back): on the left backing, in front of the left door (full length to side panel), on the right side panel.
+- **Fascia** = horizontal door stopper on top of each door opening.
+
+### Board / material rules (wired into the POC engine)
+- **Material + Board-size selectors:** PB/MDF/Plywood → **4×8 / 6×8**; Compact laminate → **6×6 / 6×7 / 6×8**.
+- **Compact laminate → no EBT** (all edge banding forced to N/A; used for toilet partitions + vanity).
+- **Component division rule:** a component stays ONE piece; it is divided **only when bigger than the board in use**. Over-board pieces are flagged and **auto-split** along the longer side into the fewest equal parts that fit (min 2) — shown as separate cut-list rows (`split n/of`, `SPLIT Npc` badge); the **3D still shows the assembled whole piece**.
+- Distinct concepts in the cut list: **SPECIAL CUT** (L/notched) vs **SPLIT** (over-board).
+
+### Key `poc_cabinet.html` additions this session
+```javascript
+buildCornerBase(p)        // L-shape corner: butt-jointed panels, 1-pc L bottom/shelf, 3 parallel rails, fascia, bi-fold/separate doors
+// renderer: part.poly (x-z outline) + polyY (y levels) → single ExtrudeGeometry (one-piece L)
+BOARDS / MATERIAL_BOARDS  // board catalogue + per-material board list
+fitsOnBoard(L,W,bd)       // does a piece fit a board (either orientation)
+splitForBoard(L,W,bd)     // split over-board piece along longer side into fewest equal parts (min 2)
+updateBoardOptions()      // repopulate board dropdown when material changes
+// part flags: specialCut (L/notched), poly/polyY (extruded shape), qty (one-piece count)
+```
+
+### Status & next (Drawing Intelligence Pipeline)
+- **6 cabinet types now plant-verified:** base, wall, tall, drawer, sink, corner.
+- All confirmed rules captured in `WCLI_shop_standards.md` (dated sections per type + cross-cutting rules + board/division/compact rules).
+- **Next options:** more cabinet types (corner wall, oven/appliance tower, open shelf, microwave) · refine split (joint allowance / nesting) · or pivot to Phase 4 (AI reads elevation → feeds the engine).
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
