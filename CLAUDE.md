@@ -1460,6 +1460,41 @@ updateBoardOptions()      // repopulate board dropdown when material changes
 - All confirmed rules captured in `WCLI_shop_standards.md` (dated sections per type + cross-cutting rules + board/division/compact rules).
 - **Next options:** more cabinet types (corner wall, oven/appliance tower, open shelf, microwave) · refine split (joint allowance / nesting) · or pivot to Phase 4 (AI reads elevation → feeds the engine).
 
+## What was changed on 2026-06-20 (session 2 — 4 more cabinet types: corner wall, oven tower, open shelf, microwave)
+
+> Continues the `poc_cabinet.html` / `WCLI_shop_standards.md` work. Went WIDE — scaffolded 4 more types, then refined each against plant feedback. **9 cabinet types now in the POC** (base, wall, tall, drawer, sink, corner base, corner wall, open shelf, microwave) + oven tower on hold.
+
+### New build functions (`poc_cabinet.html`)
+```javascript
+buildCornerWall(p)   // corner base L-shape as a WALL unit
+buildOvenTower(p)    // tall appliance tower (oven cavity)
+buildOpenShelf(p)    // doorless cabinet, floor or hanging
+buildMicrowave(p)    // hanging cabinet + microwave cavity
+```
+Dropdown options + dispatcher cases + `applyTypeUI`/`typeDefaults` updated; **Mount** dropdown (`p-mount`, floor/wall) added for open shelf; wall-mounted types (`wall`/`cornerwall`/`microwave`) set `tk=0` in render.
+
+### Corner wall — CONFIRMED (wall construction on the L-shape)
+- Same L-shape as corner base (one-piece L bottom, special cut, fascia, bi-fold/separate doors), but **wall-mounted: no toe kick/legs**.
+- **Solid L top panel** (one piece, captured between sides) — NOT the corner base's 3 top rails.
+- **Backing = wall-cabinet method:** thin grooved + **2 back rails at ~¼ and ~¾ height** (replaces the single centre rail); 18mm → no rails.
+- **3 suspension brackets** (+ 3 wall plates) on the top corners of the 18mm side panels.
+
+### Corner shelves — fix (both corner base + corner wall)
+- L-shelf was protruding past the recessed thin backing. Added `shelfPoly` that insets the left edge to the **front face of the recessed backing** (`x = 18+bThk` when thin, else `x = t`).
+
+### Open shelf — CONFIRMED (doorless cabinet, Mount toggle)
+- **Floor → base-cabinet construction; Hanging → wall-cabinet construction** — just no doors. `buildOpenShelf` delegates to `buildBase`/`buildWall` with `door:'none'` + `tk` override. No new geometry.
+
+### Microwave / appliance cabinet — CONFIRMED (hanging)
+- Uses **hanging (wall) construction** (`buildWall`, doors off) + a **lower open microwave cavity**, a **divider shelf** (depth clears the recessed backing), and an **upper door**.
+
+### Oven / appliance tower — ON HOLD (partial)
+- Applied 2 user findings: **backing = tall-cabinet method** (thin grooved + 3–4 rear rails, none for 18mm), and the **appliance base shelf depth reduced to clear the recessed backing** (fixed a rear protrusion).
+- **User is finalizing the rest with their team** — cavity sizing, door/drawer config, appliance framing still to refine before it's confirmed.
+
+### Standards doc
+`WCLI_shop_standards.md` now has confirmed sections **§11 Corner wall, §12 Open shelf, §13 Microwave** (oven tower not yet a confirmed section — on hold).
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
