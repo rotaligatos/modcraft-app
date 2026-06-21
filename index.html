@@ -6725,18 +6725,35 @@ function _dashUpdateKPIs(){
   var closedN=filtered.filter(function(e){ return !!e.finalLockedAt; }).length;
   var convRate=total?Math.round(closedN/total*100):0;
 
-  // Avg response time: (order receivedAt if Wufoo, else quotation created) → initLockedAt
-  // Build a quick lookup map from pendingOrders if loaded
-  var orderTimeMap={};
-  (pendingOrders||[]).forEach(function(o){ if(o.id&&o.receivedAt) orderTimeMap[o.id]=o.receivedAt; });
+  // Avg response time
+  // Wufoo orders: receivedAt → sentAt (Done) or receivedAt → now (still running)
+  // Non-Wufoo: created → initLockedAt (only when already locked)
+  var orderMap={};
+  (pendingOrders||[]).forEach(function(o){ if(o.id) orderMap[o.id]=o; });
   var respTimes=[];
+  // Completed entries (have initLockedAt or sentAt)
   filtered.forEach(function(e){
-    if(!e.initLockedAt) return;
-    // Start time: order receivedAt (Wufoo) or quotation created
-    var startStr=(e.sourceOrder&&orderTimeMap[e.sourceOrder])?orderTimeMap[e.sourceOrder]:e.created;
-    if(!startStr) return;
-    var d1=new Date(startStr),d2=new Date(e.initLockedAt);
-    if(!isNaN(d1)&&!isNaN(d2)&&d2>d1) respTimes.push((d2-d1)/3600000);
+    if(e.sourceOrder&&orderMap[e.sourceOrder]){
+      var o=orderMap[e.sourceOrder];
+      if(o.status==='Done'&&o.sentAt&&o.receivedAt){
+        var d1=new Date(o.receivedAt),d2=new Date(o.sentAt);
+        if(!isNaN(d1)&&!isNaN(d2)&&d2>d1) respTimes.push((d2-d1)/3600000);
+      }
+      // still-running Wufoo entries handled in next block
+    } else if(!e.sourceOrder&&e.initLockedAt&&e.created){
+      // Non-Wufoo: created → initLockedAt
+      var d1=new Date(e.created),d2=new Date(e.initLockedAt);
+      if(!isNaN(d1)&&!isNaN(d2)&&d2>d1) respTimes.push((d2-d1)/3600000);
+    }
+  });
+  // Still-running Wufoo orders (Pending / In Progress) — clock is still ticking
+  (pendingOrders||[]).forEach(function(o){
+    if(o.status==='Done'||!o.receivedAt) return;
+    var receivedDate=(o.receivedAt||'').substring(0,10);
+    if(fromVal&&receivedDate<fromVal) return;
+    if(toVal&&receivedDate>toVal) return;
+    var d1=new Date(o.receivedAt);
+    if(!isNaN(d1)&&d1<now) respTimes.push((now-d1)/3600000);
   });
   var avgResp=respTimes.length?respTimes.reduce(function(s,v){return s+v;},0)/respTimes.length:null;
 
@@ -6835,11 +6852,15 @@ function renderDashboard() {
   if(dfEl&&!dfEl.value) dfEl.value=janStr;
   if(dtEl&&!dtEl.value) dtEl.value=todayStr;
 
-  // Load data if not cached, then compute KPIs
-  if(!dirData.length&&!Object.keys(sessionQuotations||{}).length){
+  // Load dirData + pendingOrders if not yet cached, then compute KPIs
+  var needsDir=!dirData.length&&!Object.keys(sessionQuotations||{}).length;
+  var needsOrders=!ordersLoaded;
+  if(needsDir||needsOrders){
     var kpiIds=['kpi-total','kpi-conv','kpi-rev','kpi-resp','kpi-exp','kpi-arch'];
     kpiIds.forEach(function(id){var v=el(id);if(v) v.innerHTML='<i class="ti ti-loader" style="animation:spin 1s linear infinite;font-size:14px"></i>';});
-    gLoadDirData(function(){ _dashUpdateKPIs(); });
+    var _done=function(){ _dashUpdateKPIs(); };
+    if(needsDir) gLoadDirData(function(){ if(needsOrders) gLoadPendingOrders(_done); else _done(); });
+    else gLoadPendingOrders(_done);
   } else {
     _dashUpdateKPIs();
   }
