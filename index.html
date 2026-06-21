@@ -1707,6 +1707,18 @@ tr.cl-row:hover td{background:#f4f7fb}
   </div>
 </div>
 
+<div class="overlay" id="ov-attachment">
+  <div class="modal wide" style="max-width:900px;width:95vw">
+    <div class="modal-head" style="display:flex;align-items:center;gap:8px">
+      <h3 id="ov-att-title" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">Attachment</h3>
+      <a id="ov-att-dl" href="#" class="btn btn-primary" style="font-size:12px;white-space:nowrap;display:none"><i class="ti ti-download"></i> Download</a>
+      <button class="modal-close" onclick="_closeAttachmentViewer()">×</button>
+    </div>
+    <div class="modal-body" id="ov-att-body" style="min-height:260px;max-height:74vh;overflow:auto;display:flex;align-items:center;justify-content:center;padding:0"></div>
+    <div class="modal-foot"><button class="btn" onclick="_closeAttachmentViewer()">Close</button></div>
+  </div>
+</div>
+
 <div class="overlay" id="ov-inst-detail">
   <div class="modal" style="max-width:600px;width:96%">
     <div class="modal-head"><h3><i class="ti ti-list-details"></i> Installation Cost Detail</h3><button class="modal-close" onclick="closeModal('ov-inst-detail')">×</button></div>
@@ -8802,26 +8814,116 @@ function viewOrderDetail(orderId){
   openModal('ov-order-detail');
 }
 
+// ── Attachment viewer (Option B: authenticated Drive fetch → in-app blob) ─────
+var _attBlobUrl=null;
+
+function _driveFileId(url){
+  var m;
+  m=url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/); if(m) return m[1];
+  m=url.match(/\/files\/([a-zA-Z0-9_-]+)/);   if(m) return m[1];
+  m=url.match(/[?&]id=([a-zA-Z0-9_-]+)/);     if(m) return m[1];
+  return null;
+}
+
+function _driveApiFetchBlob(url){
+  var pre=gValidToken()?Promise.resolve(gToken):gRefreshToken().catch(_gExpire);
+  return pre.then(function(tok){
+    return fetch(url,{headers:{Authorization:'Bearer '+tok}});
+  }).then(function(r){
+    if(r.status===401){
+      return gRefreshToken().then(function(tok2){
+        return fetch(url,{headers:{Authorization:'Bearer '+tok2}});
+      });
+    }
+    if(!r.ok) throw new Error('HTTP '+r.status+' '+r.statusText);
+    return r;
+  }).then(function(r){ return r.blob(); });
+}
+
+function _closeAttachmentViewer(){
+  closeModal('ov-attachment');
+  var b=el('ov-att-body'); if(b) b.innerHTML='';
+  if(_attBlobUrl){ URL.revokeObjectURL(_attBlobUrl); _attBlobUrl=null; }
+  var dl=el('ov-att-dl'); if(dl){ dl.href='#'; dl.removeAttribute('download'); dl.style.display='none'; }
+}
+
 function viewOrderAttachment(url){
   if(!url){ showToast('No attachment on this order.'); return; }
-  // Drive / direct links → open the actual file in a fresh tab.
-  // '_blank' (not a fixed window name) guarantees each click opens its OWN tab,
-  // so opening File 2 never reuses the tab still showing File 1.
-  var isWufoo = url.indexOf('wufoo.com')>=0 || url.indexOf('wufoo-')>=0;
-  if(!isWufoo){
+
+  var isWufoo=url.indexOf('wufoo.com')>=0||url.indexOf('wufoo-')>=0;
+  if(isWufoo){
+    var safeUrl=url.replace(/'/g,"\\'");
+    var msg='<div style="padding:20px">'
+      +'<div style="font-size:13px;margin-bottom:14px">This is a legacy <b>Wufoo</b> attachment and requires you to be signed in to wufoo.com to open.</div>'
+      +'<div style="background:#f0f4ff;border-radius:8px;padding:10px 14px;font-size:12px;word-break:break-all;margin-bottom:12px">'+escHtml(url)+'</div>'
+      +'<button class="btn btn-primary" onclick="navigator.clipboard.writeText(\''+safeUrl+'\');showToast(\'URL copied!\')" style="font-size:13px"><i class="ti ti-copy"></i> Copy URL to clipboard</button>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:10px">Then paste the URL in a browser tab where you are signed in to wufoo.com.</div>'
+      +'</div>';
+    var titleEl=el('ov-att-title'); if(titleEl) titleEl.textContent='Wufoo Attachment';
+    var bodyEl=el('ov-att-body'); if(bodyEl){ bodyEl.innerHTML=msg; bodyEl.style.display='block'; }
+    openModal('ov-attachment');
+    return;
+  }
+
+  var fileId=_driveFileId(url);
+  if(!fileId||!gToken){
     var w=window.open(url,'_blank','noopener');
     if(!w) showToast('Pop-up blocked — allow pop-ups for this site to open attachments.');
     return;
   }
-  // Legacy Wufoo cabinet URLs require a Wufoo login — show the copy fallback.
-  var safeUrl = url.replace(/'/g,"\\'");
-  var msg='<div style="font-size:13px;margin-bottom:14px">This is a legacy <b>Wufoo</b> attachment and requires you to be signed in to wufoo.com to open.</div>'
-        +'<div style="background:#f0f4ff;border-radius:8px;padding:10px 14px;font-size:12px;word-break:break-all;margin-bottom:12px">'+escHtml(url)+'</div>'
-        +'<button class="btn btn-primary" onclick="navigator.clipboard.writeText(\''+safeUrl+'\');showToast(\'URL copied!\')" style="font-size:13px"><i class="ti ti-copy"></i> Copy URL to clipboard</button>'
-        +'<div style="font-size:11px;color:var(--text2);margin-top:10px">Then paste the URL in a browser tab where you are signed in to wufoo.com.</div>';
-  var titleEl=el('ov-order-detail-title'); if(titleEl) titleEl.textContent='Wufoo Attachment';
-  var bodyEl=el('ov-order-detail-body'); if(bodyEl) bodyEl.innerHTML=msg;
-  openModal('ov-order-detail');
+
+  // Show modal with spinner while fetching
+  var bodyEl=el('ov-att-body'), titleEl=el('ov-att-title'), dlEl=el('ov-att-dl');
+  if(!bodyEl) return;
+  if(titleEl) titleEl.textContent='Loading…';
+  bodyEl.style.display='flex';
+  bodyEl.innerHTML='<div style="text-align:center;padding:40px;color:var(--text2)">'
+    +'<div style="width:32px;height:32px;border:3px solid #e2e8f0;border-top-color:var(--navy);border-radius:50%;animation:spin 0.7s linear infinite;margin:0 auto 12px"></div>'
+    +'<div style="font-size:13px">Fetching file…</div></div>';
+  if(dlEl){ dlEl.style.display='none'; dlEl.href='#'; dlEl.removeAttribute('download'); }
+  if(_attBlobUrl){ URL.revokeObjectURL(_attBlobUrl); _attBlobUrl=null; }
+  openModal('ov-attachment');
+
+  // Step 1: get file name + MIME type
+  var metaUrl='https://www.googleapis.com/drive/v3/files/'+fileId+'?fields=name%2CmimeType&supportsAllDrives=true';
+  gApiFetch(metaUrl).then(function(meta){
+    var name=meta.name||'attachment';
+    var mime=meta.mimeType||'';
+    if(titleEl) titleEl.textContent=name;
+
+    // Step 2: download content as blob
+    var dlUrl='https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media&supportsAllDrives=true';
+    return _driveApiFetchBlob(dlUrl).then(function(blob){
+      _attBlobUrl=URL.createObjectURL(blob);
+
+      // Wire download link
+      if(dlEl){ dlEl.href=_attBlobUrl; dlEl.setAttribute('download',name); dlEl.style.display=''; }
+
+      var isImage=mime.indexOf('image/')===0;
+      var isPdf=mime==='application/pdf';
+
+      if(isImage){
+        bodyEl.style.display='flex';
+        bodyEl.innerHTML='<img src="'+_attBlobUrl+'" style="max-width:100%;max-height:72vh;object-fit:contain;display:block;margin:auto;padding:8px">';
+      } else if(isPdf){
+        bodyEl.style.display='block';
+        bodyEl.innerHTML='<iframe src="'+_attBlobUrl+'" style="width:100%;height:72vh;border:none;display:block"></iframe>';
+      } else {
+        bodyEl.style.display='flex';
+        bodyEl.innerHTML='<div style="text-align:center;padding:40px">'
+          +'<div style="font-size:44px;margin-bottom:12px">📄</div>'
+          +'<div style="font-size:15px;font-weight:600;margin-bottom:6px">'+escHtml(name)+'</div>'
+          +'<div style="font-size:12px;color:var(--text2);margin-bottom:20px">'+escHtml(mime||'Unknown file type')+'<br>This file type cannot be previewed in the app.</div>'
+          +'<a href="'+_attBlobUrl+'" download="'+escHtml(name)+'" class="btn btn-primary"><i class="ti ti-download"></i> Download file</a></div>';
+      }
+    });
+  }).catch(function(e){
+    console.error('[attachment]',e);
+    bodyEl.style.display='flex';
+    bodyEl.innerHTML='<div style="text-align:center;padding:40px">'
+      +'<div style="font-size:13px;color:var(--error);margin-bottom:14px">Could not load attachment.<br><small>'+escHtml(String(e))+'</small></div>'
+      +'<a href="'+escHtml(url)+'" target="_blank" rel="noopener" class="btn">Open in new tab instead</a></div>';
+  });
 }
 
 function _setOrderStatus(orderId, status, quotSerial){
