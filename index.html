@@ -367,6 +367,10 @@ tr.cl-row:hover td{background:#f4f7fb}
   <div style="max-width:800px;margin:16px auto">
     <!-- Stage 1 -->
     <div id="s1-wrap">
+      <div id="reactivation-banner" style="display:none;background:#fff8e1;border:1.5px solid var(--amber);border-radius:10px;padding:16px 20px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <div><span style="font-weight:600;color:#92400e"><i class="ti ti-archive"></i> This quotation is archived</span><span id="reactivation-date" style="font-size:12px;color:var(--text2);margin-left:10px"></span><br><span style="font-size:12px;color:var(--text2)">Reactivating will set it back to Draft so work can resume.</span></div>
+        <div id="reactivation-actions"></div>
+      </div>
       <div class="card">
         <div class="card-head" style="display:flex;align-items:center;justify-content:space-between"><h3><i class="ti ti-user"></i>Client information</h3><span id="q-order-badge-card" style="display:none;background:#e8f4fd;color:#1a73e8;border:1px solid #b3d8f7;border-radius:6px;font-size:12px;padding:3px 10px;font-weight:600"></span></div>
         <div class="card-body">
@@ -916,6 +920,7 @@ tr.cl-row:hover td{background:#f4f7fb}
         <option value="">All statuses</option>
         <option>On-going</option><option>Closed</option><option>Draft</option>
       </select>
+      <button id="dir-archive-toggle" class="btn" onclick="dirShowArchived=!dirShowArchived;renderDirectory()" style="height:34px;font-size:12px;display:none"></button>
       <select id="dir-year-filter" onchange="renderDirectory()" style="height:34px;width:110px">
         <option value="">All years</option>
         <option>2026</option><option>2025</option>
@@ -2338,6 +2343,7 @@ var qLog = [];
 var qFollowed = {};
 try{var _qf=localStorage.getItem('mc_followed');if(_qf)qFollowed=JSON.parse(_qf);}catch(e){}
 var dirSort = "date"; var dirAsc = false; var dirFilter = "";
+var dirShowArchived = false; // resets to hidden on every login/page load
 var dirSelected = {};   // { serial: true } — checked quotation rows
 var clientSelected = {}; // { id: true } — checked client rows
 var qStage = 1;
@@ -8214,6 +8220,26 @@ function _applyApprovedRequest(notif){
     if(ctx==='fq'){fqPremApproved=true;checkFQSchedule();recalcFQ();}
     else {qPremApproved=true;checkSchedule();recalc();}
   }
+  if(type==='reactivate'){
+    // Apply if the approved quotation is currently open
+    var ser=notif.serial||notif.quotSerial||'';
+    var openSer=qBaseSerial||qSerial;
+    if(ser&&ser===openSer) doReactivate();
+    else {
+      // Not open — just update memory so Projects list reflects the change
+      if(sessionQuotations[ser]) sessionQuotations[ser].status='Draft';
+      for(var i=0;i<dirData.length;i++){
+        if(dirData[i].id===ser||dirData[i].baseSerial===ser){dirData[i].status='Draft';break;}
+      }
+      sheetsGet('Quotations!A:A').then(function(d){
+        var vals=d.values||[];
+        for(var i=1;i<vals.length;i++){
+          if((vals[i]||[])[0]===ser){sheetsUpdate('Quotations!F'+(i+1),[['Draft']]).catch(function(){});break;}
+        }
+      }).catch(function(){});
+      showToast('Reactivation approved — quotation '+ser+' is now active.');
+    }
+  }
 }
 
 // Update the pending badge to show "Counter-offer received" state
@@ -11938,6 +11964,68 @@ function updateLockUI() {
     if(b.getAttribute('data-lock-exempt')) return;
     b.disabled=locked;
   });
+  _updateReactivationBanner();
+}
+// ── Reactivation (Archived → Draft) ───────────────────────────────────────
+function _qIsArchived(){
+  var ser=qBaseSerial||qSerial; if(!ser) return false;
+  if(sessionQuotations[ser]) return (sessionQuotations[ser].status||'')==='Archived';
+  for(var i=0;i<dirData.length;i++){
+    if(dirData[i].id===ser||dirData[i].baseSerial===ser) return dirData[i].status==='Archived';
+  }
+  return false;
+}
+function _updateReactivationBanner(){
+  var banner=el('reactivation-banner'); if(!banner) return;
+  var archived=_qIsArchived();
+  banner.style.display=archived?'flex':'none';
+  if(!archived) return;
+  var ser=qBaseSerial||qSerial;
+  // Date label
+  var dateEl=el('reactivation-date');
+  if(dateEl){
+    var entry=sessionQuotations[ser]||dirData.filter(function(e){return e.id===ser||e.baseSerial===ser;})[0];
+    dateEl.textContent=entry&&entry.closedAt?'· Archived '+fmtDT(entry.closedAt):'';
+  }
+  // Action button — approver reactivates directly; others send a request
+  var actEl=el('reactivation-actions');
+  if(!actEl) return;
+  if(isApprover()){
+    actEl.innerHTML='<button class="btn" style="background:var(--navy);color:#fff;border-color:var(--navy)" onclick="doReactivate()"><i class="ti ti-refresh"></i> Reactivate</button>';
+  } else {
+    var pending=NOTIFS.some(function(n){return n.type==='reactivate'&&n.serial===ser&&n.status==='pending';});
+    actEl.innerHTML=pending
+      ?'<span class="pill pill-amber"><i class="ti ti-clock"></i> Reactivation pending approval</span>'
+      :'<button class="btn btn-amber" onclick="requestReactivation()"><i class="ti ti-send"></i> Request Reactivation</button>';
+  }
+}
+function requestReactivation(){
+  var ser=qBaseSerial||qSerial; if(!ser) return;
+  submitApprovalRequest('reactivate',{serial:ser});
+  var actEl=el('reactivation-actions');
+  if(actEl) actEl.innerHTML='<span class="pill pill-amber"><i class="ti ti-clock"></i> Reactivation pending approval</span>';
+}
+function doReactivate(){
+  var ser=qBaseSerial||qSerial; if(!ser) return;
+  // Update in-memory
+  if(sessionQuotations[ser]) sessionQuotations[ser].status='Draft';
+  for(var i=0;i<dirData.length;i++){
+    if(dirData[i].id===ser||dirData[i].baseSerial===ser){dirData[i].status='Draft';break;}
+  }
+  // Update Quotations sheet col F
+  sheetsGet('Quotations!A:A').then(function(d){
+    var vals=d.values||[];
+    for(var i=1;i<vals.length;i++){
+      if((vals[i]||[])[0]===ser){
+        sheetsUpdate('Quotations!F'+(i+1),[['Draft']]).catch(function(){});
+        break;
+      }
+    }
+  }).catch(function(){});
+  logActivity('Quotation reactivated from Archived — status reset to Draft');
+  showToast('Quotation reactivated. You can now resume work.');
+  _updateReactivationBanner();
+  updateLockUI();
 }
 function requestUnlock() {
   modalCtx='s1';
@@ -12142,7 +12230,20 @@ function renderDirectoryTable(){
   var merged={}; baseList.forEach(function(e){merged[e.id]=e;});
   Object.keys(sessionQuotations).forEach(function(k){merged[k]=sessionQuotations[k];});
   var list=Object.values(merged).slice();
+  // Count archived before filtering so the toggle button can show the number
+  var archivedCount=Object.values(merged).filter(function(e){return (e.status||'')==='Archived';}).length;
+  var archBtn=el('dir-archive-toggle');
+  if(archBtn){
+    archBtn.style.display=archivedCount?'':'none';
+    archBtn.innerHTML=dirShowArchived
+      ?'<i class="ti ti-eye-off"></i> Hide archived'
+      :'<i class="ti ti-archive"></i> '+archivedCount+' archived';
+    archBtn.style.background=dirShowArchived?'var(--muted)':'';
+    archBtn.style.color=dirShowArchived?'#fff':'';
+    archBtn.style.borderColor=dirShowArchived?'var(--muted)':'';
+  }
   list=list.filter(function(p){
+    if(!dirShowArchived&&(p.status||'')==='Archived') return false;
     var matchS=!search||((p.client||'').toLowerCase().indexOf(search)>=0||(p.id||'').toLowerCase().indexOf(search)>=0||((p.type||'').toLowerCase().indexOf(search)>=0));
     var matchSt=!statusF||p.status===statusF;
     var matchY=!yearF||(p.created||'').indexOf(yearF)===0;
