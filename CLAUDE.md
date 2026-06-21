@@ -1542,7 +1542,28 @@ Direction decided to move Modcraft's backend off **Google Sheets/Drive**. Full p
 - **Synology not required to start:** P3 is the only NAS-dependent phase and is independent. During P0–P2 **Google Sheets stays live = inherent backup**; Supabase has its own backups too. So data stays safe without the NAS.
 - **No lock-in (user asked):** Supabase is open-source Postgres; switching accounts later = restore the pg_dump + update 2 values in `index.html` (project URL + anon key) + re-add Google redirect. Same dump can restore to self-hosted Postgres on the NAS for fully on-prem later.
 - **Cost:** Supabase free tier likely enough; ~$25/mo Pro if outgrown.
-- **NEXT STEP:** write the Supabase **schema SQL** (Phase 0) so the user can create a free project and paste it in. Nothing built yet; live Sheets app untouched.
+
+## What was changed on 2026-06-21 (session — Supabase migration Phase 0 + Phase 1 spike)
+
+### Phase 0 — Supabase project + schema (DONE ✅)
+1. **`supabase_schema.sql`** (commit `9a53380`) — paste-ready schema: **16 tables** (one per Sheets tab; `quotation_states` uses ONE `state jsonb` column = the 45k-char 10-column chunking hack is gone), `updated_at` triggers, **RLS enabled on all 16** with a permissive `"authenticated full access"` starter policy (tighten by company/role later), 2 storage buckets (`quotations`, `logos`). Idempotent — only CREATEs, never touches live Sheets/Drive.
+2. **Live Supabase project created + verified:** name **Modcraft**, ref **`nkpekroogqsmfilypowd`**, region **ap-southeast-1 (Singapore)**, org `krnnchlunkimkumfdtdx`, Postgres 17. (First made in Tokyo; deleted + recreated in Singapore while empty. Unrelated older "rotaligatos's Project" in Sydney — leave alone.) Verified via Supabase MCP: 16 tables / 16 RLS-on / 16 policies / 2 buckets.
+3. **Google sign-in enabled** in Supabase Auth → Providers → Google, reusing the app's existing OAuth client "Modcraft Web" (`605710112392-…`). Redirect URI `https://nkpekroogqsmfilypowd.supabase.co/auth/v1/callback` added in Google Cloud. Auth → URL Configuration: Site URL `https://rotaligatos.github.io/modcraft-app/` + Redirect URL `https://rotaligatos.github.io/modcraft-app/**`.
+
+### Phase 1 spike — quotations + state dual-write (DONE ✅, proven end-to-end)
+All additive + fully guarded; **Google Sheets stays primary and untouched.** Commits `26d1280`, `1ce464e`, `1487baa`.
+4. **Library + config:** `<script src=".../@supabase/supabase-js@2">`; globals `SUPA_URL`, `SUPA_ANON_KEY` (= **publishable** key `sb_publishable_…`, public-safe), `SUPA_DUAL_WRITE=true` (writes on), `USE_SUPABASE=false` (reads still from Sheets), `supa`, `supaSession`.
+5. **Auth — redirect flow, NOT One Tap.** Google One Tap / `signInWithIdToken` is **blocked for Internal/org-restricted Google apps** (403 `org_internal`). So `supaConnect()` uses `supa.auth.signInWithOAuth({provider:'google'})` (flowType pkce, `detectSessionInUrl:true`) — the same redirect mechanism as the app's working Sheets login. It's **manual/one-time** (run `supaConnect()` once in the console); the session then persists in localStorage and **auto-restores** via `getSession()` on every load. NOT auto-called in `gShowApp` (would redirect-loop). Must connect with the **@worldclasslaminate.com.ph** account (yahoo blocked by org_internal).
+6. **New functions:** `initSupabase()` (called at startup after `initGoogleAuth()`), `supaConnect()`, `supaConnected()`, `supaReady()`, `supaUpsertQuotation(entry)`, `supaUpsertState(serial,state)`, `supaGetState(serial)` (for the future read path).
+7. **Dual-write hooks:** `gSaveQuotation()` → `supaUpsertQuotation(sessionQuotations[serial])` (reads `entry.id` — sessionQuotations stores the serial as `id`, not `serial`; the original `entry.serial` bug wrote null → fixed in `1487baa`). `saveQuotationJson()` → `supaUpsertState(serial,state)` (first upserts a `{serial}` parent stub with `ignoreDuplicates` to satisfy the FK, then upserts the full state jsonb).
+8. **Proven:** saving `QT-260621-4858` wrote the header row (client/total ₱240,086.62/status/company/prepared_by all correct) **and** the full state as one ~6k-char jsonb column. Verified via Supabase MCP.
+
+### NEXT (each its own small, reviewable step — NOT started; Synology deferred, no hardware yet)
+1. Dual-write **clients**, then **settings**.
+2. Wire **reads** behind `USE_SUPABASE` (`loadQuotationJson` → `supaGetState` first, Sheets fallback), then flip the flag once proven.
+3. **Phase 2** — one-time data migration Sheets → Supabase (verify row counts).
+4. Tighten **RLS** from permissive "any authenticated" to per-company/role.
+5. **Phase 3 (Synology)** — deferred until the NAS is on hand; Sheets remains the inherent backup meanwhile. Eventually drop GIS/Sheets and make Supabase Auth the sole login.
 
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
