@@ -1532,6 +1532,18 @@ Dropdown options + dispatcher cases + `applyTypeUI` (filler has no doors) + `typ
 - **Cause 2:** `requestFQUnlock` opened the modal via `openModal('ov-unlock')` **without** setting `_pinModalApprover` or calling `_openPinModal`, so `_verifyApproverPin` ran against a stale/null approver. Fixed: it now sets `_pinModalApprover=findApproverForSelf()` + `_openPinModal(...)`.
 - **Safety net:** `confirmUnlock` sets `_pinModalApprover=findApproverForSelf()` if unset.
 
+## Backend migration — Supabase + Synology (PLANNING, 2026-06-20)
+
+Direction decided to move Modcraft's backend off **Google Sheets/Drive**. Full plan in **`SUPABASE_MIGRATION_PLAN.md`** (beginner-friendly — user is new to Supabase and wants to go SLOWLY).
+
+- **Architecture:** **Supabase Cloud = primary live DB** (Postgres + Auth/Google + Storage + Realtime, **Singapore region**) **+ Synology NAS = nightly backup node** (pg_dump + storage mirror). One source of truth + one local backup the user owns. Explicitly NOT two live syncing databases.
+- **Why Supabase over NAS-as-primary:** keeps the serverless single-file architecture (browser → Supabase directly, no server to run), kills the 45k-char `Quotation State` chunking hack (whole state → one JSON column), gives real RLS for the role/company model, multi-site friendly (Pasig + Cebu), low ops burden for a team with no IT.
+- **Phases:** P0 schema (zero risk — builds empty DB beside the live app) → P1 incremental data-layer swap behind a `USE_SUPABASE` flag with dual-write safety (quotations+state first) → P2 one-time data migration → **P3 Synology backup (PENDING HARDWARE — decoupled, last)**.
+- **Synology not required to start:** P3 is the only NAS-dependent phase and is independent. During P0–P2 **Google Sheets stays live = inherent backup**; Supabase has its own backups too. So data stays safe without the NAS.
+- **No lock-in (user asked):** Supabase is open-source Postgres; switching accounts later = restore the pg_dump + update 2 values in `index.html` (project URL + anon key) + re-add Google redirect. Same dump can restore to self-hosted Postgres on the NAS for fully on-prem later.
+- **Cost:** Supabase free tier likely enough; ~$25/mo Pro if outgrown.
+- **NEXT STEP:** write the Supabase **schema SQL** (Phase 0) so the user can create a free project and paste it in. Nothing built yet; live Sheets app untouched.
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
