@@ -1094,6 +1094,16 @@ tr.cl-row:hover td{background:#f4f7fb}
         </div>
       </div>
     </div>
+    <!-- Quotation serial counter reset — Admin only -->
+    <div class="card" id="serial-counter-card">
+      <div class="card-head" style="background:#e6edf5;border-color:#b0c8e0">
+        <h3 style="color:var(--navy)"><i class="ti ti-sort-ascending-numbers"></i>Quotation serial counter <span class="pill" style="background:#e6edf5;color:var(--navy);font-size:10px;margin-left:6px">Admin only</span></h3>
+      </div>
+      <div class="card-body">
+        <div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-info-circle"></i><div>Serial numbers are sequential and company-specific. <b>W series</b> (WCLI &amp; MSSI): <code>QT-W00000001</code>. <b>C series</b> (Cebu World Laminate): <code>QT-C00000001</code>. Resetting moves the counter forward to the new value — never backwards past existing quotations.</div></div>
+        <div id="serial-counter-card-body"></div>
+      </div>
+    </div>
     <!-- Admin-only logo management — rendered via renderLogoUploadCard() -->
     <div id="logo-upload-card" class="card" style="display:none">
       <div class="card-head" style="background:#fdf2e0;border-color:#f5d78e">
@@ -2803,13 +2813,84 @@ var _colResizing=null;
 var qInitLockedAt='', qInitApprovedAt='', fqLockedAt='', qClosedAt='';
 
 // ── Utility ────────────────────────────────────────────────────────────────
-function makeSerial() {
-  var n = new Date();
-  var y = n.getFullYear().toString().slice(-2);
-  var m = String(n.getMonth()+1).padStart(2,"0");
-  var d = String(n.getDate()).padStart(2,"0");
-  var r = Math.floor(Math.random()*9000+1000);
-  return "QT-" + y + m + d + "-" + r;
+// ── Serial counters — loaded from Settings sheet at login ─────────────────
+var serialCounters = { W: 1, C: 1 };  // next available number per prefix
+
+function _serialPrefix(){
+  // WCLI + MSSI → W; CWLI (Cebu World Laminate) → C
+  var co = currentUserCompany || '';
+  return (co.toLowerCase().indexOf('cebu') >= 0) ? 'C' : 'W';
+}
+function makeSerial(){
+  // Before login currentUserCompany is not set — return legacy format as placeholder
+  // (this init value is always overwritten by initQuotation() after login)
+  if(!currentUserCompany){
+    var n=new Date();
+    return 'QT-'+n.getFullYear().toString().slice(-2)+String(n.getMonth()+1).padStart(2,'0')+String(n.getDate()).padStart(2,'0')+'-'+Math.floor(Math.random()*9000+1000);
+  }
+  var prefix = _serialPrefix();
+  var num = serialCounters[prefix] || 1;
+  serialCounters[prefix] = num + 1;
+  _saveSerialCounters(); // fire-and-forget, non-blocking
+  return 'QT-' + prefix + String(num).padStart(8, '0');
+}
+function _saveSerialCounters(){
+  if(!gToken) return;
+  // Read-then-max-write to survive simultaneous creation by two users
+  sheetsGet('Settings!A:B').then(function(d){
+    var vals=d.values||[]; var rowIdx=-1;
+    for(var i=0;i<vals.length;i++){ if((vals[i]||[])[0]==='SERIAL_COUNTERS'){rowIdx=i+1;break;} }
+    // Take MAX of in-flight local value and anything already written
+    var stored={W:1,C:1};
+    if(rowIdx>0){ try{stored=JSON.parse((vals[rowIdx-1]||[])[1]||'{}');}catch(e){} }
+    var merged={
+      W: Math.max(serialCounters.W||1, stored.W||1),
+      C: Math.max(serialCounters.C||1, stored.C||1)
+    };
+    serialCounters.W=merged.W; serialCounters.C=merged.C;
+    var payload=JSON.stringify(merged);
+    if(rowIdx>0){
+      sheetsUpdate('Settings!A'+rowIdx+':B'+rowIdx,[['SERIAL_COUNTERS',payload]]).catch(function(){});
+    } else {
+      sheetsAppend('Settings!A:B',[['SERIAL_COUNTERS',payload]]).catch(function(){});
+    }
+  }).catch(function(){});
+}
+function _loadSerialCounters(cb){
+  if(!gToken){if(cb)cb();return;}
+  sheetsGet('Settings!A:B').then(function(d){
+    var vals=d.values||[];
+    for(var i=0;i<vals.length;i++){
+      if((vals[i]||[])[0]==='SERIAL_COUNTERS'){
+        try{ var sc=JSON.parse(vals[i][1]||'{}'); if(sc.W) serialCounters.W=sc.W; if(sc.C) serialCounters.C=sc.C; }catch(e){}
+        break;
+      }
+    }
+    if(cb)cb();
+  }).catch(function(){if(cb)cb();});
+}
+function resetSerialCounter(prefix, newVal){
+  // Admin only — called from Settings → Company & DB
+  if(currentRole!=='Admin'){showToast('Admin only');return;}
+  var n=parseInt(newVal)||1;
+  if(n<1){showToast('Enter a number ≥ 1');return;}
+  if(!confirm('Reset '+prefix+' series counter to '+n+'?\n\nThe next quotation from '+(prefix==='C'?'Cebu World Laminate':'WCLI / MSSI')+' will be QT-'+prefix+String(n).padStart(8,'0')+'.\n\nThis cannot be undone. Existing quotations are not affected.')) return;
+  serialCounters[prefix]=n;
+  _saveSerialCounters();
+  showToast('Counter reset — next serial: QT-'+prefix+String(n).padStart(8,'0'));
+  renderSerialCounterCard();
+}
+function renderSerialCounterCard(){
+  var wrap=el('serial-counter-card-body'); if(!wrap) return;
+  if(currentRole!=='Admin'){wrap.innerHTML='<p style="color:var(--text2);font-size:13px">Admin only.</p>';return;}
+  function row(prefix,label){
+    return '<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:.5px solid var(--border)">'
+      +'<div style="flex:1"><b>'+label+'</b><br><span style="font-size:11px;color:var(--text2)">Next serial: <code>QT-'+prefix+String(serialCounters[prefix]||1).padStart(8,'0')+'</code> &nbsp;(current counter: '+((serialCounters[prefix]||1))+')</span></div>'
+      +'<input type="number" id="serial-reset-'+prefix+'" placeholder="New start #" min="1" style="width:120px;height:32px;font-size:13px">'
+      +'<button class="btn btn-coral" style="font-size:12px;height:32px" onclick="resetSerialCounter(\''+prefix+'\', el(\'serial-reset-'+prefix+'\').value)"><i class="ti ti-refresh"></i> Reset</button>'
+      +'</div>';
+  }
+  wrap.innerHTML=row('W','W series — WCLI &amp; MSSI')+row('C','C series — Cebu World Laminate, Inc.');
 }
 function addDays(s, n) {
   var d = new Date(s); d.setDate(d.getDate()+n); return d.toISOString().split("T")[0];
@@ -6667,7 +6748,7 @@ function gLoadDirData(cb){
       dirData=[];
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
-        var ser=r[0],m=ser.match(/^(QT-\d{6}-\d{4})/),baseS=m?m[1]:ser;
+        var ser=r[0],m=ser.match(/^(QT-(?:[WC]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
         if(seen[baseS]){var p=seen[baseS];if(r[5]==='Locked'||r[5]==='Approved') p.status=r[5];continue;}
         var entry={id:ser,baseSerial:baseS,created:r[1]||'',client:r[2]||'',contact:r[4]||'',type:r[12]||'',
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,user:r[7]||'',segment:r[8]||'',
@@ -9365,6 +9446,7 @@ function setStTab(t) {
   if(t==="lami") renderLamiSettings();
   if(t==="approvalrouting") renderApprovalRoutingSettings();
   if(t==="users") loadUsersFromSheet();
+  if(t==="company") renderSerialCounterCard();
 }
 // ── Logo management (Admin only) ──────────────────────────────────────────
 function updateAppLogo() {
@@ -12148,7 +12230,7 @@ function renderDirectory(){
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var ser=r[0];
-        var baseM=ser.match(/^(QT-\d{6}-\d{4})/);
+        var baseM=ser.match(/^(QT-(?:[WC]\d{8}|\d{6}-\d{4}))/);
         var baseS=baseM?baseM[1]:ser; // strip option suffix (e.g. -1, -2) but not 4-digit serial part
         if(seen[baseS]){
           // Update if newer or higher status
@@ -13739,6 +13821,7 @@ function gShowApp(){
   gLoadClients(function(){}); // load clients at login so quotation client-name autocomplete works without first visiting the Clients tab
   gLoadPendingOrders(function(){ _updateOrdersBadge(); }); // load orders at login so the badge is live without visiting the tab
   gLoadAppSettings(); // restore saved cost factors / scheduling / terms from the Settings tab
+  _loadSerialCounters(); // load sequential serial counters (W/C series) from Settings sheet
   gLoadFollowed(function(){renderDashFollowed();renderDirectory();}); // restore followed quotations per user
   gLoadDashPref(function(){renderDashboard();}); // load widget prefs + admin restrictions, then re-render
   _loadSeenNotifs(); // restore unread-tracking state from localStorage
@@ -14253,7 +14336,7 @@ function _showDriveWarning(msg){
 // Save a JSON state backup into Modcraft Quotations/{baseSerial}/ — belt-and-suspenders alongside Sheets.
 function saveQuotationStateToDrive(serial,json){
   if(!gToken) return;
-  var baseSerial=(serial.match(/^(QT-\d{6}-\d{4})/)||[,''])[1]||serial;
+  var baseSerial=(serial.match(/^(QT-(?:[WC]\d{8}|\d{6}-\d{4}))/)||[,''])[1]||serial;
   var cn=driveClientName();
   var fileName=baseSerial+' — '+cn+' — state.json';
   ensureDriveFolder()
@@ -16388,7 +16471,7 @@ function gSaveQuotation(){
   var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||''];
   // Store in session memory immediately so directory shows it without waiting for Sheets
   var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order'];
-  var _bsM=serial.match(/^(QT-\d{6}-\d{4})/);
+  var _bsM=serial.match(/^(QT-(?:[WC]\d{8}|\d{6}-\d{4}))/);
   sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||''};
   try{ supaUpsertQuotation(sessionQuotations[serial]); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
   sheetsGet('Quotations!A:A').then(function(d){
