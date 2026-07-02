@@ -7611,6 +7611,7 @@ function _buildCostReportHtml(serial,state,cr){
     +(cr.dcCost?row('Design charge',cr.dcCost):'')
     +(cr.svCost?row('Site visit (separate)',cr.svCost):'')
     +(cr.biTotal?row('Bond & insurance cost',cr.biTotal):'')
+    +(cr.fabServiceMargin?row('Fabrication service margin (built-in, Cost Breakdown → Services)',cr.fabServiceMargin,'Reclassified from cost to profit',true):'')
     +'</tbody><tfoot>'+totRow('TOTAL DIRECT COST',cr.directCost,'var(--amber)')+'</tfoot></table>';
   h+='<table style="width:100%;border-collapse:collapse;background:#fff;border:.5px solid #dde;border-radius:8px;overflow:hidden">'
     +'<thead><tr style="background:var(--navy)"><th colspan="2" style="padding:8px 12px;text-align:left;font-size:12px;color:#fff">Contingency, buffer, markup &amp; taxes</th></tr></thead><tbody>'
@@ -9898,6 +9899,47 @@ function computeServiceCosts(s) {
   var opCost = cap > 0 ? totalExpense / cap : 0;
   var grossMargin = (s.price > 0 && cap > 0) ? (s.price - opCost) / s.price * 100 : null;
   return {fullCap:fullCap, monthlyCapacity:cap, fixedTotal:fixedTotal, fixedPool:fixedPool, revShare:revShare, fixedAlloc:fixedAlloc, opCostMonth:opCostMonth, consumCost:consumCost, totalExpense:totalExpense, opCost:opCost, grossMargin:grossMargin};
+}
+// Fabrication service line items are priced from SERVICES[i].price, which is
+// designed to already include built-in profit (see computeServiceCosts — the
+// true unit cost is opCost, not price). The Cost Report's directCost formula
+// otherwise treats the full service price as pure cost, silently hiding this
+// margin. This sums (price×mult − opCost)×qty across every service line item
+// in the current fab mode, so the Cost Report can reclassify it as profit
+// instead of cost. Only counted when capacity is configured (monthlyCapacity>0)
+// — without capacity, opCost is unknowable, so we leave that line's full price
+// treated as cost (unchanged, conservative default) rather than guess.
+function _fabServiceMarginTotal(){
+  var margin=0, mult=clientMatMult();
+  function addLine(svc,qty){
+    if(!svc) return;
+    var cc=computeServiceCosts(svc);
+    if(cc.monthlyCapacity>0) margin+=((svc.price||0)*mult-cc.opCost)*(qty||0);
+  }
+  if(qFabMode==='services'){
+    for(var a=0;a<qAreas.length;a++){
+      var svcItems=qAreas[a].svcItems||[];
+      for(var i=0;i<svcItems.length;i++){
+        var si=svcItems[i];
+        addLine(SERVICES[si.svcIdx],si.qty);
+      }
+    }
+  } else if(qFabMode==='bom'){
+    for(var a2=0;a2<qAreas.length;a2++){
+      var bi=qAreas[a2].bomItems||[];
+      for(var b=0;b<bi.length;b++){
+        var svcRows=bi[b].services||[];
+        for(var s2=0;s2<svcRows.length;s2++){
+          var row=svcRows[s2];
+          var nameLC=(row.name||'').trim().toLowerCase();
+          var matched=null;
+          for(var k=0;k<SERVICES.length;k++){ if((SERVICES[k].name||'').trim().toLowerCase()===nameLC){matched=SERVICES[k];break;} }
+          addLine(matched,row.qty);
+        }
+      }
+    }
+  }
+  return margin;
 }
 
 function _buildSvcCostSummaryHtml(i, s, cc) {
@@ -18150,7 +18192,8 @@ function _buildCostReportSnapshot(){
   var p=_pCalc;
   if(!p||!p.grand) return null;
   var revenueExVat=(p.grand||0)-(p.vatAmt||0);
-  var directCost=(p.regularBase||p.fabBaseRaw||0)+(p.outsourceBase||0)+(p.mobBase||0)+(p.instBase||0)+(p.assmBase||0)+(p.dcCost||0)+(p.svCost||0)+(p.biTotal||0);
+  var fabServiceMargin=_fabServiceMarginTotal();
+  var directCost=(p.regularBase||p.fabBaseRaw||0)+(p.outsourceBase||0)+(p.mobBase||0)+(p.instBase||0)+(p.assmBase||0)+(p.dcCost||0)+(p.svCost||0)+(p.biTotal||0)-fabServiceMargin;
   var profit=revenueExVat-directCost;
   return {
     generatedAt:new Date().toISOString(),
@@ -18158,6 +18201,7 @@ function _buildCostReportSnapshot(){
     stage:p.stage,totU:p.totU,
     grand:p.grand,vatAmt:p.vatAmt,premAmt:p.premAmt,discAmt:p.discAmt,discPct:p.discPct,
     fabBase:p.regularBase!=null?p.regularBase:p.fabBaseRaw,outsourceBase:p.outsourceBase,outsourceFinal:p.outsourceFinal,
+    fabServiceMargin:fabServiceMargin,
     mobBase:p.mobBase,mobRegionCost:p.mobRegionCost||0,mobPlanner:p.mobPlanner||0,
     instBase:p.instBase,assmBase:p.assmBase,qaqcBase:p.qaqcBase||0,
     dcCost:p.dcCost,svCost:p.svCost,biTotal:p.biTotal,
