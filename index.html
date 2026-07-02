@@ -13637,6 +13637,26 @@ function _migrateBatch(items,concurrency,fn){
   for(var c=0;c<concurrency&&c<items.length;c++) runners.push(next());
   return Promise.all(runners);
 }
+function _migrateSleep(ms){ return new Promise(function(res){ setTimeout(res,ms); }); }
+// Sheets read with exponential-backoff retry on 429 (Too Many Requests) — the
+// migration fires far more API calls in a short span than normal app use, so
+// it can trip Google's per-minute quota partway through. Retries up to
+// maxRetries times (1.5s, 3s, 6s, 12s, 24s) before giving up on that one row.
+function _sheetsGetWithRetry(range,maxRetries){
+  maxRetries=maxRetries==null?5:maxRetries;
+  function attempt(n){
+    return sheetsGet(range).then(function(d){
+      if(d&&d.error&&(d.error.code===429||/rate|quota|too many/i.test(d.error.message||''))){
+        if(n>=maxRetries) return d; // give up, caller will treat as error
+        var wait=1500*Math.pow(2,n);
+        console.warn('[migrate] rate-limited on',range,'— retrying in',(wait/1000)+'s ('+(n+1)+'/'+maxRetries+')');
+        return _migrateSleep(wait).then(function(){ return attempt(n+1); });
+      }
+      return d;
+    });
+  }
+  return attempt(0);
+}
 // Phase 2 — ONE-TIME historical migration: copies every existing quotation
 // header row + saved state from Google Sheets into Supabase. Run
 // supaMigrateAll() in the browser console (after supaConnect()) once, then
@@ -13666,28 +13686,37 @@ function supaMigrateAll(){
       });
     }
     console.log('[migrate] found',headerRows.length,'quotation header rows in Sheets — migrating...');
-    return _migrateBatch(headerRows,4,function(entry){
+    return _migrateBatch(headerRows,3,function(entry){
       return supaUpsertQuotation(entry).then(function(){stats.quotHeaders++;}).catch(function(){stats.quotHeaderErrors++;});
     });
   }).then(function(){
-    console.log('[migrate] headers done:',stats.quotHeaders,'ok,',stats.quotHeaderErrors,'errors. Now migrating saved states...');
+    console.log('[migrate] headers done:',stats.quotHeaders,'ok,',stats.quotHeaderErrors,'errors. Pausing briefly before states to let the Sheets API quota cool down...');
+    return _migrateSleep(2000);
+  }).then(function(){
     return sheetsGet('Quotation State!A:A');
   }).then(function(d){
     var vals=(d&&!d.error&&d.values)||[];
     var serials=[];
     for(var i=1;i<vals.length;i++){ if(vals[i][0]) serials.push({serial:vals[i][0],row:i+1}); }
-    console.log('[migrate] found',serials.length,'quotation state rows in Sheets — migrating...');
-    return _migrateBatch(serials,4,function(item){
-      return sheetsGet('Quotation State!A'+item.row+':K'+item.row).then(function(d2){
-        if(d2.error) throw new Error('read failed');
+    console.log('[migrate] found',serials.length,'quotation state rows in Sheets — migrating (slower pace, retries on rate-limit)...');
+    var failedSerials=[];
+    return _migrateBatch(serials,2,function(item){
+      return _sheetsGetWithRetry('Quotation State!A'+item.row+':K'+item.row).then(function(d2){
+        if(d2.error) throw new Error(d2.error.message||'read failed');
         var row=(d2.values||[])[0]||[];
         var json=(row.slice(1)).join('');
         var state=JSON.parse(json);
         return supaUpsertState(item.serial,state);
-      }).then(function(){stats.states++;}).catch(function(e){stats.stateErrors++; console.warn('[migrate] state failed for',item.serial,e);});
-    });
+      }).then(function(){stats.states++;}).catch(function(e){
+        stats.stateErrors++; failedSerials.push(item.serial);
+        console.warn('[migrate] state failed for',item.serial,e);
+      }).then(function(){ return _migrateSleep(120); }); // small pacing gap between requests
+    }).then(function(){ stats.failedSerials=failedSerials; });
   }).then(function(){
     console.log('[migrate] DONE.',stats);
+    if(stats.failedSerials&&stats.failedSerials.length){
+      console.warn('[migrate] '+stats.failedSerials.length+' state row(s) still failed after retries — safe to re-run supaMigrateAll() to pick these up (already-migrated rows just get re-upserted, no harm):',stats.failedSerials);
+    }
     return supa.from('quotations').select('*',{count:'exact',head:true});
   }).then(function(r1){
     console.log('[migrate] Supabase "quotations" row count:',r1.count);
