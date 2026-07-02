@@ -9498,7 +9498,7 @@ function gSaveLogoRow(key,val,okMsg){
     var vals=(d&&d.values)||[]; var idx=-1;
     for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
     return idx>0?sheetsUpdate('Settings!A'+idx+':C'+idx,[row]):sheetsAppend('Settings!A:C',[row]);
-  }).then(function(){showToast(okMsg||'Logo saved to database ✓');})
+  }).then(function(){ supaUpsertSetting(key,val||''); showToast(okMsg||'Logo saved to database ✓');})
     .catch(function(e){console.warn('Logo save failed',e);showToast('Logo save failed — check connection.');});
 }
 function uploadAppLogo() {
@@ -13760,6 +13760,65 @@ function supaUpsertSettings(configObj){
     });
   }catch(e){ console.warn('[supa] settings upsert threw',e); return Promise.resolve(); }
 }
+// — generic single-key settings upsert (dual-write) — used for logos and any
+//   other one-off Settings-tab keys beyond the CONFIG blob —
+function supaUpsertSetting(key,value){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!key) return Promise.resolve();
+  try{
+    return supa.from('settings').upsert({key:key,value:value},{onConflict:'key'}).then(function(r){
+      if(r.error) console.warn('[supa] setting upsert error:',r.error.message||r.error);
+    });
+  }catch(e){ console.warn('[supa] setting upsert threw',e); return Promise.resolve(); }
+}
+// — settings read (used when USE_SUPABASE is true). Returns a {key:value} map
+//   of every row in the settings table (CONFIG + LOGO_APP + LOGO_CO_*), or
+//   null on any error/empty so callers fall back to Sheets —
+function supaGetAllSettings(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('settings').select('key,value').then(function(r){
+      if(r.error||!r.data||!r.data.length) return null;
+      var map={};
+      r.data.forEach(function(row){ map[row.key]=row.value; });
+      return map;
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
+// — user_prefs read (FOLLOWED/DASHPREF/DASHALLOW, used when USE_SUPABASE is true) —
+function supaGetUserPref(email,prefType){
+  if(!supaReady()||!email) return Promise.resolve(null);
+  try{
+    return supa.from('user_prefs').select('value').eq('email',email).eq('pref_type',prefType).maybeSingle().then(function(r){
+      if(r.error) return null;
+      return (r.data&&r.data.value!=null)?r.data.value:null;
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
+// — clients read (used when USE_SUPABASE is true). Returns raw rows or null
+//   on any error/empty so the caller falls back to Sheets —
+function supaGetClients(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('clients').select('*').then(function(r){
+      if(r.error||!r.data||!r.data.length) return null;
+      return r.data;
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
+// — quotations read, used only to build the client transaction-history list.
+//   Note: the Supabase "quotations" table doesn't carry the segment/contact
+//   columns the Sheets txn "proj" label uses — service_type is the closest
+//   equivalent, so the label is slightly coarser via this path (display-only,
+//   not a data-loss concern; id/date/value/status are all exact) —
+function supaGetQuotationsForTxns(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('quotations').select('serial,created_at,client_name,total,status,service_type').then(function(r){
+      if(r.error||!r.data) return null;
+      return r.data;
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 // — generic full-table replace (delete-all + bulk insert) for Price DB / Logistics DB
 //   "clear then rewrite" tables that mirror the Sheets clear+update pattern —
 function supaReplaceTable(table,rows){
@@ -16377,44 +16436,73 @@ function renderPriceDbSettings() {
 function gLoadClients(callback){
   // Only show sample/demo data when genuinely not signed in. Never use demo to mask a failed read.
   if(!gToken){liveClients=DEMO_CLIENTS.slice();if(callback)callback();return;}
-  sheetsGet('Clients!A:L').then(function(d){
-    if(d.error){
-      // Clients tab not created yet (e.g. 400) — no clients saved so far. Show empty, not demo.
-      if(!clientsSheetLoaded) liveClients=[];
-      clientsSheetLoaded=true; if(callback)callback(); return;
-    }
-    var rows=d.values||[];
-    var parsed=[];
-    for(var i=1;i<rows.length;i++){
-      var r=rows[i];if(!r||(!r[1]&&!r[2])) continue;
-      parsed.push({id:parseInt(r[0])||i,name:r[1]||'',bizname:r[2]||'',contact:r[3]||'',email:r[4]||'',address:r[5]||'',city:r[6]||'',type:r[7]||'Direct',segment:r[8]||'',segmentGroup:r[9]||'',segmentCustom:r[10]||'',notes:r[11]||'',txns:[]});
-    }
-    liveClients=parsed; // real data (may be empty if no clients yet — that's correct, not "lost")
-    // Load transactions from Quotations sheet
-    sheetsGet('Quotations!A:L').then(function(qd){
-      var qrows=(qd&&!qd.error&&qd.values)?qd.values:[];
-      for(var qi=1;qi<qrows.length;qi++){
-        var qr=qrows[qi];if(!qr||!qr[0]) continue;
-        var qclient=(qr[2]||'').toLowerCase();
-        for(var ci=0;ci<liveClients.length;ci++){
-          var lc=liveClients[ci];
-          if((lc.bizname||'').toLowerCase()===qclient||(lc.name||'').toLowerCase()===qclient){
-            lc.txns.push({id:qr[0],proj:qr[8]||qr[4]||'',date:qr[1]||'',val:parseFloat((qr[6]||'0').replace(/[^\d.]/g,''))||0,st:qr[5]||'Draft'});
-            break;
+  function fromSheets(){
+    sheetsGet('Clients!A:L').then(function(d){
+      if(d.error){
+        // Clients tab not created yet (e.g. 400) — no clients saved so far. Show empty, not demo.
+        if(!clientsSheetLoaded) liveClients=[];
+        clientsSheetLoaded=true; if(callback)callback(); return;
+      }
+      var rows=d.values||[];
+      var parsed=[];
+      for(var i=1;i<rows.length;i++){
+        var r=rows[i];if(!r||(!r[1]&&!r[2])) continue;
+        parsed.push({id:parseInt(r[0])||i,name:r[1]||'',bizname:r[2]||'',contact:r[3]||'',email:r[4]||'',address:r[5]||'',city:r[6]||'',type:r[7]||'Direct',segment:r[8]||'',segmentGroup:r[9]||'',segmentCustom:r[10]||'',notes:r[11]||'',txns:[]});
+      }
+      liveClients=parsed; // real data (may be empty if no clients yet — that's correct, not "lost")
+      // Load transactions from Quotations sheet
+      sheetsGet('Quotations!A:L').then(function(qd){
+        var qrows=(qd&&!qd.error&&qd.values)?qd.values:[];
+        for(var qi=1;qi<qrows.length;qi++){
+          var qr=qrows[qi];if(!qr||!qr[0]) continue;
+          var qclient=(qr[2]||'').toLowerCase();
+          for(var ci=0;ci<liveClients.length;ci++){
+            var lc=liveClients[ci];
+            if((lc.bizname||'').toLowerCase()===qclient||(lc.name||'').toLowerCase()===qclient){
+              lc.txns.push({id:qr[0],proj:qr[8]||qr[4]||'',date:qr[1]||'',val:parseFloat((qr[6]||'0').replace(/[^\d.]/g,''))||0,st:qr[5]||'Draft'});
+              break;
+            }
           }
         }
-      }
+        clientsSheetLoaded=true;
+        if(callback)callback();
+      }).catch(function(){clientsSheetLoaded=true;if(callback)callback();});
+    }).catch(function(e){
+      // Auth/network failure — DO NOT replace real data with demo. Keep what we have and warn.
+      console.warn('Clients load failed',e);
+      if(e&&e.message==='SESSION_EXPIRED'){ /* banner already shown by gApiFetch */ }
+      else { showSheetsToast(false,'Could not load clients — check your connection. Your saved data is safe.'); }
       clientsSheetLoaded=true;
       if(callback)callback();
-    }).catch(function(){clientsSheetLoaded=true;if(callback)callback();});
-  }).catch(function(e){
-    // Auth/network failure — DO NOT replace real data with demo. Keep what we have and warn.
-    console.warn('Clients load failed',e);
-    if(e&&e.message==='SESSION_EXPIRED'){ /* banner already shown by gApiFetch */ }
-    else { showSheetsToast(false,'Could not load clients — check your connection. Your saved data is safe.'); }
-    clientsSheetLoaded=true;
-    if(callback)callback();
-  });
+    });
+  }
+  if(USE_SUPABASE&&supaReady()){
+    supaGetClients().then(function(rows){
+      if(!rows){ fromSheets(); return; }
+      var parsed=rows.map(function(r,i){
+        return {id:parseInt(r.id)||i,name:r.name||'',bizname:r.biz_name||'',contact:r.contact||'',email:r.email||'',address:r.address||'',city:'',type:r.client_type||'Direct',segment:r.segment||'',segmentGroup:'',segmentCustom:'',notes:r.notes||'',txns:[]};
+      });
+      liveClients=parsed;
+      supaGetQuotationsForTxns().then(function(qrows){
+        if(qrows){
+          qrows.forEach(function(q){
+            var qclient=(q.client_name||'').toLowerCase();
+            for(var ci=0;ci<liveClients.length;ci++){
+              var lc=liveClients[ci];
+              if((lc.bizname||'').toLowerCase()===qclient||(lc.name||'').toLowerCase()===qclient){
+                lc.txns.push({id:q.serial,proj:q.service_type||'',date:q.created_at||'',val:parseFloat(q.total)||0,st:q.status||'Draft'});
+                break;
+              }
+            }
+          });
+        }
+        clientsSheetLoaded=true;
+        if(callback)callback();
+      });
+    });
+    return;
+  }
+  fromSheets();
 }
 function gSaveClient(client){
   if(!gToken||!gUser) return;
@@ -16669,17 +16757,29 @@ function gSaveDashPref(){
 // Load current user's widget preferences AND admin-set restrictions at login
 function gLoadDashPref(cb){
   if(!gToken||!gUser){if(cb)cb();return;}
-  var prefKey='DASHPREF_'+(gUser.email||'unknown');
-  var allowKey='DASHALLOW_'+(gUser.email||'unknown');
-  sheetsGet('Settings!A:B').then(function(d){
-    if(d.error||!d.values){if(cb)cb();return;}
-    for(var i=1;i<d.values.length;i++){
-      var k=d.values[i][0]; var v=d.values[i][1];
-      if(k===prefKey&&v){ try{var p=JSON.parse(v);for(var pk in p)dashPref[pk]=!!p[pk];}catch(e){} }
-      if(k===allowKey&&v){ try{dashAllow=JSON.parse(v);}catch(e){} }
-    }
-    if(cb)cb();
-  }).catch(function(){if(cb)cb();});
+  var email=gUser.email||'unknown';
+  function fromSheets(){
+    var prefKey='DASHPREF_'+email, allowKey='DASHALLOW_'+email;
+    sheetsGet('Settings!A:B').then(function(d){
+      if(d.error||!d.values){if(cb)cb();return;}
+      for(var i=1;i<d.values.length;i++){
+        var k=d.values[i][0]; var v=d.values[i][1];
+        if(k===prefKey&&v){ try{var p=JSON.parse(v);for(var pk in p)dashPref[pk]=!!p[pk];}catch(e){} }
+        if(k===allowKey&&v){ try{dashAllow=JSON.parse(v);}catch(e){} }
+      }
+      if(cb)cb();
+    }).catch(function(){if(cb)cb();});
+  }
+  if(USE_SUPABASE&&supaReady()){
+    Promise.all([supaGetUserPref(email,'DASHPREF'),supaGetUserPref(email,'DASHALLOW')]).then(function(r){
+      if(!r[0]&&!r[1]){ fromSheets(); return; }
+      if(r[0]) for(var pk in r[0]) dashPref[pk]=!!r[0][pk];
+      if(r[1]) dashAllow=r[1];
+      if(cb)cb();
+    });
+    return;
+  }
+  fromSheets();
 }
 // Admin/Manager: save widget restrictions for another user
 function gSaveDashAllow(email,allow,cb){
@@ -16695,16 +16795,26 @@ function gSaveDashAllow(email,allow,cb){
 // Load widget restrictions for a specific user (admin panel use)
 function gLoadDashAllowFor(email,cb){
   if(!gToken){if(cb)cb({});return;}
-  var key='DASHALLOW_'+email;
-  sheetsGet('Settings!A:B').then(function(d){
-    if(d.error||!d.values){if(cb)cb({});return;}
-    for(var i=1;i<d.values.length;i++){
-      if(d.values[i][0]===key&&d.values[i][1]){
-        try{if(cb)cb(JSON.parse(d.values[i][1]));return;}catch(e){}
+  function fromSheets(){
+    var key='DASHALLOW_'+email;
+    sheetsGet('Settings!A:B').then(function(d){
+      if(d.error||!d.values){if(cb)cb({});return;}
+      for(var i=1;i<d.values.length;i++){
+        if(d.values[i][0]===key&&d.values[i][1]){
+          try{if(cb)cb(JSON.parse(d.values[i][1]));return;}catch(e){}
+        }
       }
-    }
-    if(cb)cb({});
-  }).catch(function(){if(cb)cb({});});
+      if(cb)cb({});
+    }).catch(function(){if(cb)cb({});});
+  }
+  if(USE_SUPABASE&&supaReady()){
+    supaGetUserPref(email,'DASHALLOW').then(function(v){
+      if(v){ if(cb)cb(v); return; }
+      fromSheets();
+    });
+    return;
+  }
+  fromSheets();
 }
 
 function gSaveFollowed(){
@@ -16721,45 +16831,88 @@ function gSaveFollowed(){
   }).then(function(){ supaUpsertUserPref((gUser&&gUser.email)||'unknown','FOLLOWED',ids); })
   .catch(function(e){console.warn('Failed to save followed quotations',e);});
 }
+function _applyFollowedIds(ids){
+  qFollowed={};
+  if(Array.isArray(ids)){ids.forEach(function(id){qFollowed[id]=true;});}
+  try{localStorage.setItem('mc_followed',JSON.stringify(qFollowed));}catch(e){}
+}
 function gLoadFollowed(cb){
   if(!gToken||!gUser){if(cb)cb();return;}
-  var key='FOLLOWED_'+(gUser.email||'unknown');
-  sheetsGet('Settings!A:B').then(function(d){
-    if(d.error||!d.values){if(cb)cb();return;}
-    for(var i=1;i<d.values.length;i++){
-      if(d.values[i][0]===key&&d.values[i][1]){
-        try{
-          var ids=JSON.parse(d.values[i][1]);
-          qFollowed={};
-          if(Array.isArray(ids)){ids.forEach(function(id){qFollowed[id]=true;});}
-          try{localStorage.setItem('mc_followed',JSON.stringify(qFollowed));}catch(e){}
-        }catch(e){console.warn('Bad followed JSON',e);}
-        break;
+  var email=gUser.email||'unknown';
+  function fromSheets(){
+    var key='FOLLOWED_'+email;
+    sheetsGet('Settings!A:B').then(function(d){
+      if(d.error||!d.values){if(cb)cb();return;}
+      for(var i=1;i<d.values.length;i++){
+        if(d.values[i][0]===key&&d.values[i][1]){
+          try{ _applyFollowedIds(JSON.parse(d.values[i][1])); }catch(e){console.warn('Bad followed JSON',e);}
+          break;
+        }
       }
+      if(cb)cb();
+    }).catch(function(){if(cb)cb();});
+  }
+  if(USE_SUPABASE&&supaReady()){
+    supaGetUserPref(email,'FOLLOWED').then(function(ids){
+      if(ids==null){ fromSheets(); return; }
+      _applyFollowedIds(ids);
+      if(cb)cb();
+    });
+    return;
+  }
+  fromSheets();
+}
+function _applyLoadedSettingsMap(map){
+  if(map.CONFIG){
+    try{ _applyAppSettings(map.CONFIG); }catch(e){ console.warn('Bad settings JSON',e); }
+  }
+  if(map.hasOwnProperty('LOGO_APP')){
+    appLogoData=map.LOGO_APP||null;
+  }
+  Object.keys(map).forEach(function(k){
+    if(k.indexOf('LOGO_CO_')===0){
+      var v=map[k];
+      if(v){companyLogos[k.substring(8)]=v;_cacheLogoDims(v);} else delete companyLogos[k.substring(8)];
     }
-    if(cb)cb();
-  }).catch(function(){if(cb)cb();});
+  });
+  updateAppLogo();
 }
 function gLoadAppSettings(callback){
   if(!gToken){if(callback)callback();return;}
-  sheetsGet('Settings!A:B').then(function(d){
-    if(d.error||!d.values){if(callback)callback();return;}
-    for(var i=1;i<d.values.length;i++){
-      var k=d.values[i][0]||'', v=d.values[i][1];
-      if(k==='CONFIG'&&v){
-        try{_applyAppSettings(JSON.parse(v));}catch(e){console.warn('Bad settings JSON',e);}
-      } else if(k==='LOGO_APP'){
-        appLogoData=v||null;
-      } else if(k.indexOf('LOGO_CO_')===0){
-        if(v){companyLogos[k.substring(8)]=v;_cacheLogoDims(v);} else delete companyLogos[k.substring(8)];
+  function fromSheets(){
+    sheetsGet('Settings!A:B').then(function(d){
+      if(d.error||!d.values){if(callback)callback();return;}
+      for(var i=1;i<d.values.length;i++){
+        var k=d.values[i][0]||'', v=d.values[i][1];
+        if(k==='CONFIG'&&v){
+          try{_applyAppSettings(JSON.parse(v));}catch(e){console.warn('Bad settings JSON',e);}
+        } else if(k==='LOGO_APP'){
+          appLogoData=v||null;
+        } else if(k.indexOf('LOGO_CO_')===0){
+          if(v){companyLogos[k.substring(8)]=v;_cacheLogoDims(v);} else delete companyLogos[k.substring(8)];
+        }
       }
-    }
-    updateAppLogo();
-    if(callback)callback();
-    // Non-blocking: overlay SERVICE_CAPACITY from Drive backup so capacity
-    // data survives even when the Settings sheet CONFIG row is wiped/reset.
-    _loadSvcCapFromDrive(function(driveData){ _applySvcCapFromDrive(driveData); });
-  }).catch(function(){if(callback)callback();});
+      updateAppLogo();
+      if(callback)callback();
+      // Non-blocking: overlay SERVICE_CAPACITY from Drive backup so capacity
+      // data survives even when the Settings sheet CONFIG row is wiped/reset.
+      _loadSvcCapFromDrive(function(driveData){ _applySvcCapFromDrive(driveData); });
+    }).catch(function(){if(callback)callback();});
+  }
+  if(USE_SUPABASE&&supaReady()){
+    supaGetAllSettings().then(function(map){
+      if(!map){ fromSheets(); return; }
+      // Sheets values are stored as JSON-encoded strings (v.CONFIG is a string to
+      // JSON.parse); Supabase jsonb round-trips as a native object already —
+      // build a Sheets-shaped map so _applyLoadedSettingsMap's CONFIG branch
+      // (which expects the already-parsed object) works for both read paths.
+      _applyLoadedSettingsMap(map);
+      if(callback)callback();
+      _loadSvcCapFromDrive(function(driveData){ _applySvcCapFromDrive(driveData); });
+    });
+    return;
+  }
+  fromSheets();
 }
 // ── Save quotation to Sheets ──────────────────────────────────────────────
 // One-time-per-session: rewrite the Quotations header row if it's from an
