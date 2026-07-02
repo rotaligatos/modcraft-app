@@ -1662,9 +1662,27 @@ Closes out the Supabase read-path rollout started in sessions 3–4.
 5. **`USE_SUPABASE` flipped `false → true`** (commit `a93c2fa`) — `loadQuotationJson()` now tries `supaGetState()` first for any browser session that has called `supaConnect()`. Sheets remains the automatic fallback on any miss, and dual-write (`SUPA_DUAL_WRITE=true`) keeps both stores in sync on every future save.
 6. **Important nuance flagged to user:** flipping this flag is NOT an org-wide cutover. `supaReady()` requires `supaSession`, which is only set after a user manually runs `supaConnect()` in their own browser session (a deliberate one-time step per the Phase 1 design — auto-connecting at login was explicitly avoided to prevent OAuth redirect loops). So today only the user's own connected session reads from Supabase; every other staff member's browser continues reading from Sheets exactly as before, unaffected, until they too run `supaConnect()`.
 
-### Current state of the Supabase migration
-- Phase 0 (schema) ✅ · Phase 1 (dual-write, all 16 tables) ✅ · Phase 2 (historical migration, quotations+states) ✅ · Quotation-state reads flipped to Supabase-first ✅ (for connected sessions)
-- Not yet done: reads for clients/settings/users/etc. (still Sheets-only); org-wide auto-connect to Supabase (still manual `supaConnect()` per session); RLS tightening (still permissive "any authenticated"); Phase 3 Synology backup (no hardware yet)
+### Current state of the Supabase migration (as of the session below)
+- Phase 0 (schema) ✅ · Phase 1 (dual-write, all 16 tables) ✅ · Phase 2 (historical migration, quotations+states) ✅ · Reads flipped Supabase-first for quotations/state ✅, settings ✅, clients ✅ (all for connected sessions)
+- Not yet done: reads for users/login-auth (deliberately held back, see below); org-wide auto-connect to Supabase (still manual `supaConnect()` per session); RLS tightening (still permissive "any authenticated"); Phase 3 Synology backup (no hardware yet)
+
+## What was changed on 2026-07-02 (session 6 — Supabase reads extended to Settings + Clients)
+
+Continued the read-path rollout from session 5 (quotation state only). User explicitly held back the login/authorization path as more sensitive than the rest — see the AskUserQuestion decision below.
+
+1. **Scope decision:** offered the user a choice on whether to include the Users/login-authorization read path (`gCheckRole`) in this pass. They chose to leave it Sheets-only for now — it's the most security-sensitive read (decides who can sign in and what role/access they get), so it's deliberately deferred to a separate, more careful review rather than bundled in with routine settings/clients reads.
+2. **New Supabase helper functions** (all return `null` on any error/empty so callers cleanly fall back to Sheets, same pattern as `supaGetState`):
+   - `supaUpsertSetting(key,value)` — generic single-key upsert into the `settings` table (for logos and any future one-off keys beyond the `CONFIG` blob)
+   - `supaGetAllSettings()` — returns a `{key:value}` map of the whole `settings` table
+   - `supaGetUserPref(email,prefType)` — single-value read from `user_prefs` (`FOLLOWED`/`DASHPREF`/`DASHALLOW`)
+   - `supaGetClients()` — full `clients` table read
+   - `supaGetQuotationsForTxns()` — reads `quotations` (serial/created_at/client_name/total/status/service_type) for building client transaction history
+3. **`gSaveLogoRow` now dual-writes** — was previously the one Settings-tab writer not hooked to Supabase; now calls `supaUpsertSetting(key,val)` alongside the Sheets write, so `LOGO_APP`/`LOGO_CO_*` stay in sync like everything else.
+4. **`gLoadAppSettings` reads Supabase-first** — new `_applyLoadedSettingsMap(map)` helper applies a `{CONFIG, LOGO_APP, LOGO_CO_*}` map from either source; the Sheets path is untouched (still parses the JSON-string CONFIG value), the Supabase path uses the already-parsed jsonb object directly.
+5. **`gLoadDashPref`, `gLoadDashAllowFor`, `gLoadFollowed` all read Supabase-first** — same fallback pattern; `_applyFollowedIds(ids)` factored out of `gLoadFollowed` so both read paths share the exact same apply logic (was previously inlined only in the Sheets branch).
+6. **`gLoadClients` reads Supabase-first**, with one known limitation: the Supabase `quotations` table doesn't store the `segment`/`contact_name` columns the Sheets-based transaction-history "project" label falls back through (`qr[8]||qr[4]`) — there's no equivalent to reconstruct from Supabase alone. Used `service_type` as the closest available substitute. This only affects a cosmetic label in the client's transaction list (id/date/value/status are all exact); flagged explicitly rather than silently accepted. Fixing properly would mean either adding `segment`/`contact_name` columns to the `quotations` table (schema change + backfill) or accepting the current approximation — left as a known gap, not fixed in this pass.
+7. **Cleanup mid-session:** a first draft of the Clients Supabase-read path had a half-finished generic `_matchClientTxns()` helper called once with dummy no-op arguments and then immediately redone manually below it (leftover from iterating on the join logic) — caught before commit and simplified to a single inline loop matching the Sheets-path style.
+8. **Verified** — `new Function()` parse check on every `<script>` block passes; cross-referenced all 24 `supa*` function calls in the file against their definitions (zero missing).
 
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
