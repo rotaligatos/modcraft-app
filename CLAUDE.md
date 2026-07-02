@@ -1595,7 +1595,29 @@ Continuing the additive/guarded Supabase migration (Phase 0 schema + quotations/
 2. **Phase 2** — one-time data migration Sheets → Supabase (verify row counts) for all tables, not just the 4 dual-written so far.
 3. Tighten RLS from permissive "any authenticated" to per-company/role.
 4. **Phase 3 (Synology)** — still deferred, no hardware yet.
-5. Remaining tables not yet dual-written: `users`, `user_prefs`, `approval_requests`, `activity_log`, `pending_orders`, `messages`, `price_services`/`price_materials`/`price_hardware`, `cabinet_templates`, `logistics_materials`/`logistics_trucks`.
+5. ~~Remaining tables not yet dual-written~~ — all 16 schema tables now dual-written as of the session below.
+
+## What was changed on 2026-07-02 (session 2 — Supabase Phase 1 complete: all remaining tables dual-written)
+
+Closed out the rest of the Phase 1 "NEXT" list — every table in `supabase_schema.sql` now has a dual-write hook. Same additive/guarded pattern throughout: every `supa*` call is gated on `SUPA_DUAL_WRITE`/`supaReady()`, never throws to the caller, and Sheets remains the sole source of truth (nothing reads from Supabase yet — `USE_SUPABASE` is still `false`).
+
+1. **New generic helper `supaReplaceTable(table, rows)`** — delete-all + bulk insert, mirrors the existing "clear then rewrite" pattern already used by Sheets saves for Price DB / Logistics DB (`priceDbClear`+`priceDbUpdate`, `logDbClear`+`logDbUpdate`). Used for every table where the app treats the whole set as replaceable rather than row-by-row upsertable.
+2. **`users`** — `supaUpsertUser(u)` hooked into `saveUserRow`, `submitAddUser`, `toggleUserActive` (all upsert on `email`); `supaDeleteUser(email)` hooked into `removeUserRow`.
+3. **`user_prefs`** — `supaUpsertUserPref(email,prefType,value)` upserts on `(email,pref_type)`; hooked into `gSaveDashPref` (`DASHPREF`), `gSaveDashAllow` (`DASHALLOW`), `gSaveFollowed` (`FOLLOWED`).
+4. **`approval_requests`** — `supaUpsertApprovalRequest(req)` (tolerates partial req objects, e.g. `_markOverrideApproved` only sends the changed fields); hooked into all 4 write paths: `gSaveApprovalRequest` (covers `submitApprovalRequest` + `_markOverrideApproved`), the inline save in `doApprovalAction`, `acceptCounter`, and `cancelApprovalRequest`.
+5. **`activity_log`** — `supaInsertActivity(action,serial)` plain insert (bigint identity PK, append-only); hooked into `gLogToSheets` (called by every `logActivity()`).
+6. **`pending_orders`** — `supaUpdateOrderStatus(orderId,status,quotSerial,sentAt)` hooked into `_setOrderStatus`. **Creation is NOT mirrored** — Wufoo submissions write directly Sheets-only via the separate Google Apps Script webhook project (not part of `index.html`); only in-app status transitions (Pending → In Progress → Done) dual-write.
+7. **`messages`** — `supaInsertMessage(m)` hooked into `gSendMessage`'s success path; `supaMarkMessageRead(id,readAt)` hooked into `_msgMarkRead`.
+8. **Price DB (4 tables)** — `price_services`/`price_materials`/`price_hardware`/`cabinet_templates` all use `supaReplaceTable`, hooked into: `_saveServicesToPriceDb` (services, full capacity/cost-breakdown fields → `cost_data` jsonb), `initPriceDB` (services + cabinet templates on init), `importPriceDbExcel` (generic Materials/Hardware/Services Excel import — target table resolved from `targetSheet` name), `dedupeServicesSheet` (services after dedup).
+9. **Logistics DB (2 tables)** — `logistics_materials`/`logistics_trucks` via `supaReplaceTable`, hooked into `_logSaveMats`/`_logSaveTrucks`.
+10. **Verified** — `new Function()` parse check on every `<script>` block passes; a script cross-reference confirmed all 17 `supa*` functions called are defined (no typos, no dangling calls).
+
+### Now truly pending (nothing left to dual-write)
+1. Wire **reads** behind `USE_SUPABASE` — this is the next real step. `loadQuotationJson` → try `supaGetState` first, fall back to Sheets; then expand the same pattern to clients/settings/users/etc. once proven, and only then flip `USE_SUPABASE=true`.
+2. **Phase 2** — one-time historical data migration Sheets → Supabase (verify row counts per table).
+3. Tighten RLS from permissive "any authenticated" to per-company/role.
+4. **Phase 3 (Synology)** — still deferred, no hardware yet.
+5. `pending_orders` creation still Sheets-only (Wufoo GAS webhook) — would need editing the separate Apps Script project to also POST to Supabase; not started, low priority while Sheets is still the read path.
 
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
