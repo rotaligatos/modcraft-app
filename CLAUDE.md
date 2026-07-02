@@ -1578,7 +1578,24 @@ User reported the app "slows down, rattles, and sometimes hangs" — investigate
 4. **Verified no JS syntax errors** and all fixes work via mocked Sheets calls (targeted reads only, no full-sheet scan, calls run in parallel, cache hit/invalidation confirmed).
 
 ### Ceiling — why some delay remains, and the real fix
-These changes squeeze the most out of Google Sheets as a backend, but each Sheets API call still has a **fixed per-call latency floor** (~300ms–2+s from a PH connection) that the app cannot remove — Sheets has no indexing and wasn't built for frequent small point-lookups. **This is exactly what the Supabase migration (see `SUPABASE_MIGRATION_PLAN.md` / the "Backend migration" section above) is expected to fix structurally** — an indexed Postgres query is typically single/double-digit milliseconds server-side vs. Sheets' per-call overhead, and it collapses today's 1–2 Sheets calls into a single indexed query with no chunking. User is proceeding to the Supabase migration next (starting a new chat for it — Phase 0 schema SQL is the next step per the section above).
+These changes squeeze the most out of Google Sheets as a backend, but each Sheets API call still has a **fixed per-call latency floor** (~300ms–2+s from a PH connection) that the app cannot remove — Sheets has no indexing and wasn't built for frequent small point-lookups. **This is exactly what the Supabase migration (see `SUPABASE_MIGRATION_PLAN.md` / the "Backend migration" section above) is expected to fix structurally** — an indexed Postgres query is typically single/double-digit milliseconds server-side vs. Sheets' per-call overhead, and it collapses today's 1–2 Sheets calls into a single indexed query with no chunking. (Phase 0 schema + Phase 1 quotations/state dual-write since shipped 2026-06-21 — see the Supabase session below.)
+
+## What was changed on 2026-07-02 (session — Supabase Phase 1 continued: clients + settings dual-write)
+
+Continuing the additive/guarded Supabase migration (Phase 0 schema + quotations/state dual-write shipped 2026-06-21 — see "Backend migration — Supabase + Synology" section and the 2026-06-21 Supabase session above). This session wired the next two tables per the plan's "NEXT" list.
+
+1. **`supaUpsertClient(client)`** — new function (~index.html:13575); maps the in-app client object to the `clients` table row (`id`, `name`, `biz_name`, `contact`, `email`, `address` (joined address+city), `segment`, `client_type`, `company` via `getCompanyName()`, `notes`); upserts on conflict `id`. Guarded by `SUPA_DUAL_WRITE`/`supaReady()` — no-ops silently if either is false, exactly like the existing quotation/state upserts.
+2. **`supaUpsertSettings(configObj)`** — new function; upserts the full settings object as one `jsonb` row keyed `'CONFIG'` into the `settings` table (mirrors the Sheets `Settings!A:C` CONFIG-row pattern).
+3. **Hooked into existing save paths** — `gSaveClient()` now calls `supaUpsertClient(client)` right after the Sheets write succeeds; `gSaveAppSettings()` calls `supaUpsertSettings(_collectAppSettings())` at the start of the save (same JSON object that's stringified for the Sheets row, so both writes always agree). Neither call blocks or gates the Sheets save — if Supabase write fails or `supa`/session isn't ready, Sheets save proceeds exactly as before.
+4. **Verified** — all `<script>` blocks in `index.html` still parse cleanly (`new Function()` check, no syntax errors introduced).
+5. **Memory cleanup** — `MEMORY.md` index had 3 stale lines: Supabase entry said "Phase 0 = write schema SQL next" (schema was already live since 2026-06-21), and the mobilization-calculator + cost-formula-redesign entries said "spec agreed, not built" when both shipped weeks ago. All three corrected; the now-resolved `project_stale_memory_index.md` TODO memory was deleted.
+
+### Still pending (per the migration plan's "NEXT" list — quotations, state, clients, settings now dual-written)
+1. Wire **reads** behind `USE_SUPABASE` (`loadQuotationJson` → `supaGetState` first, Sheets fallback), then flip the flag once proven.
+2. **Phase 2** — one-time data migration Sheets → Supabase (verify row counts) for all tables, not just the 4 dual-written so far.
+3. Tighten RLS from permissive "any authenticated" to per-company/role.
+4. **Phase 3 (Synology)** — still deferred, no hardware yet.
+5. Remaining tables not yet dual-written: `users`, `user_prefs`, `approval_requests`, `activity_log`, `pending_orders`, `messages`, `price_services`/`price_materials`/`price_hardware`, `cabinet_templates`, `logistics_materials`/`logistics_trucks`.
 
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
