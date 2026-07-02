@@ -13623,6 +13623,82 @@ function supaVerifyRead(serial){
     return false;
   }).catch(function(e){ window.alert=_origAlert; console.warn('[supa-verify] error',e); return false; });
 }
+// Simple concurrency-limited batch runner — processes `items` through `fn`
+// with at most `concurrency` in flight at once (avoids hammering the Sheets
+// API / Supabase with hundreds of simultaneous requests on a one-time job).
+function _migrateBatch(items,concurrency,fn){
+  var idx=0;
+  function next(){
+    if(idx>=items.length) return Promise.resolve();
+    var i=idx++;
+    return fn(items[i]).then(next);
+  }
+  var runners=[];
+  for(var c=0;c<concurrency&&c<items.length;c++) runners.push(next());
+  return Promise.all(runners);
+}
+// Phase 2 — ONE-TIME historical migration: copies every existing quotation
+// header row + saved state from Google Sheets into Supabase. Run
+// supaMigrateAll() in the browser console (after supaConnect()) once, then
+// compare the row counts it prints against your Sheets tabs (Quotations /
+// Quotation State, minus 1 for the header row each) to confirm completeness.
+// Idempotent — safe to re-run; every write is an upsert, so it never
+// duplicates or loses data, it just re-syncs anything that changed.
+function supaMigrateAll(){
+  if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(); }
+  if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(); }
+  console.log('[migrate] starting — this can take a few minutes for a large dataset. Do not close this tab.');
+  var stats={quotHeaders:0,quotHeaderErrors:0,states:0,stateErrors:0};
+  return sheetsGet('Quotations!A:R').then(function(d){
+    var rows=(d&&!d.error&&d.values)||[];
+    var headerRows=[];
+    for(var i=1;i<rows.length;i++){
+      var r=rows[i]; if(!r||!r[0]) continue;
+      var ser=r[0];
+      var baseM=ser.match(/^(QT-(?:[WC]\d{8}|\d{6}-\d{4}))/);
+      var baseS=baseM?baseM[1]:ser;
+      headerRows.push({
+        serial:ser,created:r[1]||'',client:r[2]||'',status:r[5]||'',
+        value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,
+        user:r[7]||'',stage:r[10]||'',type:r[12]||'',
+        baseSerial:baseS,initLockedAt:r[13]||'',initApprovedAt:r[14]||'',
+        finalLockedAt:r[15]||'',sourceOrder:r[17]||''
+      });
+    }
+    console.log('[migrate] found',headerRows.length,'quotation header rows in Sheets — migrating...');
+    return _migrateBatch(headerRows,4,function(entry){
+      return supaUpsertQuotation(entry).then(function(){stats.quotHeaders++;}).catch(function(){stats.quotHeaderErrors++;});
+    });
+  }).then(function(){
+    console.log('[migrate] headers done:',stats.quotHeaders,'ok,',stats.quotHeaderErrors,'errors. Now migrating saved states...');
+    return sheetsGet('Quotation State!A:A');
+  }).then(function(d){
+    var vals=(d&&!d.error&&d.values)||[];
+    var serials=[];
+    for(var i=1;i<vals.length;i++){ if(vals[i][0]) serials.push({serial:vals[i][0],row:i+1}); }
+    console.log('[migrate] found',serials.length,'quotation state rows in Sheets — migrating...');
+    return _migrateBatch(serials,4,function(item){
+      return sheetsGet('Quotation State!A'+item.row+':K'+item.row).then(function(d2){
+        if(d2.error) throw new Error('read failed');
+        var row=(d2.values||[])[0]||[];
+        var json=(row.slice(1)).join('');
+        var state=JSON.parse(json);
+        return supaUpsertState(item.serial,state);
+      }).then(function(){stats.states++;}).catch(function(e){stats.stateErrors++; console.warn('[migrate] state failed for',item.serial,e);});
+    });
+  }).then(function(){
+    console.log('[migrate] DONE.',stats);
+    return supa.from('quotations').select('*',{count:'exact',head:true});
+  }).then(function(r1){
+    console.log('[migrate] Supabase "quotations" row count:',r1.count);
+    return supa.from('quotation_states').select('*',{count:'exact',head:true});
+  }).then(function(r2){
+    console.log('[migrate] Supabase "quotation_states" row count:',r2.count);
+    console.log('[migrate] Compare these counts against your Sheets "Quotations" and "Quotation State" tab row counts (subtract 1 for the header row on each) to confirm the migration is complete.');
+  }).catch(function(e){
+    console.warn('[migrate] fatal error — some data may not have migrated. Safe to re-run supaMigrateAll() again.',e);
+  });
+}
 // — client upsert (dual-write) —
 function supaUpsertClient(client){
   if(!SUPA_DUAL_WRITE||!supaReady()||!client||client.id==null) return Promise.resolve();
