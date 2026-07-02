@@ -8411,7 +8411,7 @@ function acceptCounter(idx){
       var vals=(d&&d.values)||[]; var rowIdx=-1;
       for(var i=1;i<vals.length;i++){if(vals[i][0]===key){rowIdx=i+1;break;}}
       return rowIdx>0?sheetsUpdate('Settings!A'+rowIdx+':C'+rowIdx,[row]):sheetsAppend('Settings!A:C',[row]);
-    }).catch(function(e){console.warn('acceptCounter save failed',e);});
+    }).then(function(){ supaUpsertApprovalRequest(updReq); }).catch(function(e){console.warn('acceptCounter save failed',e);});
   }
   renderApprovals();
   showToast('Counter-offer accepted. '+discPct+'% discount applied.');
@@ -8439,7 +8439,7 @@ function cancelApprovalRequest(reqId, type){
           try{
             var req=JSON.parse(d2.values[0][1]);
             req.status='cancelled'; req.actionDate=new Date().toISOString();
-            return sheetsUpdate('Settings!A'+idx+':C'+idx,[[key,JSON.stringify(req),new Date().toISOString()]]);
+            return sheetsUpdate('Settings!A'+idx+':C'+idx,[[key,JSON.stringify(req),new Date().toISOString()]]).then(function(){ supaUpsertApprovalRequest(req); });
           }catch(e){}
         }
       });
@@ -8462,7 +8462,7 @@ function gSaveApprovalRequest(req,cb){
     var vals=(d&&d.values)||[]; var idx=-1;
     for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
     return idx>0?sheetsUpdate('Settings!A'+idx+':C'+idx,[row]):sheetsAppend('Settings!A:C',[row]);
-  }).then(function(){if(cb)cb(true);}).catch(function(e){console.warn('gSaveApprovalRequest failed',e);if(cb)cb(false);});
+  }).then(function(){ supaUpsertApprovalRequest(req); if(cb)cb(true);}).catch(function(e){console.warn('gSaveApprovalRequest failed',e);if(cb)cb(false);});
 }
 
 // Load all approval requests from Settings sheet and merge into NOTIFS
@@ -8802,7 +8802,7 @@ function doApprovalAction(idx, action) {
       return rowIdx>0
         ? sheetsUpdate('Settings!A'+rowIdx+':C'+rowIdx,[row])
         : sheetsAppend('Settings!A:C',[row]);
-    }).catch(function(e){console.warn('Failed to persist approval action',e);});
+    }).then(function(){ supaUpsertApprovalRequest(updReq); }).catch(function(e){console.warn('Failed to persist approval action',e);});
   }
 
   // If approved → apply the change to the quotation form (if open)
@@ -9282,6 +9282,7 @@ function _setOrderStatus(orderId, status, quotSerial){
         var sentAt=pendingOrders[i].sentAt||'';
         sheetsUpdate('Pending Orders!X'+row+':Z'+row,[[status,quotSerial||pendingOrders[i].quotSerial||'',sentAt]]).catch(function(){});
       }
+      supaUpdateOrderStatus(orderId,status,quotSerial||pendingOrders[i].quotSerial||'',pendingOrders[i].sentAt||null);
       _updateOrdersBadge();
       break;
     }
@@ -9839,6 +9840,7 @@ function dedupeServicesSheet(){
     return priceDbClear('Services!A:Z').then(function(){
       return priceDbUpdate('Services!A1',unique);
     }).then(function(){
+      supaReplaceTable('price_services',unique.slice(1).map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
       if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removed+' duplicate row'+(removed>1?'s':'')+'. '+(unique.length-1)+' services remain. Reload to refresh dropdowns.</div>';
       loadPriceDatabase(false);
     });
@@ -11143,6 +11145,7 @@ function saveUserRow(i){
   sheetsUpdate('User Roles!A'+u.rowIdx+':X'+u.rowIdx,[row])
     .then(function(){
       sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',rowIdx:u.rowIdx};
+      supaUpsertUser(sheetUsers[i]);
       renderUsers(); showToast('User saved.');
     })
     .catch(function(){alert('Failed to save. Check sheet permissions.');});
@@ -11152,7 +11155,7 @@ function toggleUserActive(i){
   var u=sheetUsers[i]; var newActive=!u.active;
   _confirm((newActive?'Activate':'Deactivate')+' '+u.name+'?',function(){
     sheetsUpdate('User Roles!D'+u.rowIdx,[[newActive?'yes':'no']])
-      .then(function(){sheetUsers[i].active=newActive; renderUsers(); showToast('User '+(newActive?'activated':'deactivated')+'.');})
+      .then(function(){sheetUsers[i].active=newActive; supaUpsertUser(sheetUsers[i]); renderUsers(); showToast('User '+(newActive?'activated':'deactivated')+'.');})
       .catch(function(){showToast('Failed to update. Check sheet permissions.');});
   });
 }
@@ -11161,7 +11164,7 @@ function removeUserRow(i){
   var u=sheetUsers[i];
   _confirm('Remove '+u.name+' ('+u.email+')? They will no longer be able to sign in.',function(){
     sheetsClear('User Roles!A'+u.rowIdx+':X'+u.rowIdx)
-      .then(function(){sheetUsers.splice(i,1); renderUsers(); showToast('User removed.');})
+      .then(function(){supaDeleteUser(u.email); sheetUsers.splice(i,1); renderUsers(); showToast('User removed.');})
       .catch(function(){showToast('Failed to remove. Check sheet permissions.');});
   });
 }
@@ -11218,8 +11221,13 @@ function submitAddUser(){
   row.push('','FALSE','FALSE');  // O-Q: delegation blank
   for(var k=8;k<ACC_KEYS.length;k++){var cb=el('na'+k);row.push(cb&&cb.checked?'TRUE':'FALSE');}  // R-V (new 5 keys)
   row.push('','');  // W-X: no PIN set on add
+  var acc={};
+  for(var k=0;k<ACC_KEYS.length;k++){var cb=el('na'+k);acc[ACC_KEYS[k]]=cb?cb.checked:false;}
   sheetsAppend('User Roles!A:X',[row])
-    .then(function(){var w=el('add-user-form-wrap');if(w)w.innerHTML=''; loadUsersFromSheet(); showToast('User added.');})
+    .then(function(){
+      supaUpsertUser({name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:true,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:'',pinHash:'',pinSalt:''});
+      var w=el('add-user-form-wrap');if(w)w.innerHTML=''; loadUsersFromSheet(); showToast('User added.');
+    })
     .catch(function(){alert('Failed to add user. Check sheet permissions.');});
 }
 
@@ -13603,6 +13611,128 @@ function supaUpsertSettings(configObj){
     });
   }catch(e){ console.warn('[supa] settings upsert threw',e); return Promise.resolve(); }
 }
+// — generic full-table replace (delete-all + bulk insert) for Price DB / Logistics DB
+//   "clear then rewrite" tables that mirror the Sheets clear+update pattern —
+function supaReplaceTable(table,rows){
+  if(!SUPA_DUAL_WRITE||!supaReady()) return Promise.resolve();
+  try{
+    return supa.from(table).delete().gt('id',0).then(function(){
+      if(!rows||!rows.length) return null;
+      return supa.from(table).insert(rows);
+    }).then(function(r){
+      if(r&&r.error) console.warn('[supa] '+table+' replace error:',r.error.message||r.error);
+      else console.log('[supa] '+table+' replaced:',rows?rows.length:0,'rows');
+    }).catch(function(e){ console.warn('[supa] '+table+' replace threw',e); });
+  }catch(e){ return Promise.resolve(); }
+}
+// — user upsert / delete (dual-write) —
+function supaUpsertUser(u){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!u||!u.email) return Promise.resolve();
+  var row={
+    email:u.email.toLowerCase(),
+    name:u.name||null,
+    role:u.pos||null,
+    company:u.company||null,
+    active:!!u.active,
+    device_id:u.mac||null,
+    feature_access:u.acc||{},
+    delegate_to:u.delegateTo||null,
+    pin_hash:u.pinHash||null,
+    pin_salt:u.pinSalt||null
+  };
+  try{
+    return supa.from('users').upsert(row,{onConflict:'email'}).then(function(r){
+      if(r.error) console.warn('[supa] user upsert error:',r.error.message||r.error);
+      else console.log('[supa] user upserted:',row.email);
+    });
+  }catch(e){ console.warn('[supa] user upsert threw',e); return Promise.resolve(); }
+}
+function supaDeleteUser(email){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!email) return Promise.resolve();
+  try{
+    return supa.from('users').delete().eq('email',email.toLowerCase()).then(function(r){
+      if(r.error) console.warn('[supa] user delete error:',r.error.message||r.error);
+    });
+  }catch(e){ console.warn('[supa] user delete threw',e); return Promise.resolve(); }
+}
+// — user_prefs upsert (FOLLOWED / DASHPREF / DASHALLOW, dual-write) —
+function supaUpsertUserPref(email,prefType,value){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!email) return Promise.resolve();
+  try{
+    return supa.from('user_prefs').upsert({email:email,pref_type:prefType,value:value},{onConflict:'email,pref_type'}).then(function(r){
+      if(r.error) console.warn('[supa] user_pref upsert error:',r.error.message||r.error);
+    });
+  }catch(e){ console.warn('[supa] user_pref upsert threw',e); return Promise.resolve(); }
+}
+// — approval_requests upsert (dual-write). Tolerates partial req objects
+//   (some callers only send the fields that changed, e.g. _markOverrideApproved) —
+function supaUpsertApprovalRequest(req){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!req||!req.id) return Promise.resolve();
+  var row={
+    id:req.id,
+    req_type:req.type||null,
+    serial:req.serial||null,
+    client_name:req.client||null,
+    company:req.company||null,
+    from_email:req.fromEmail||null,
+    to_email:req.approverEmail||null,
+    note:req.note||null,
+    counter_disc:(req.counterDisc!=null?req.counterDisc:null),
+    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null},
+    status:req.status||'pending',
+    actioned_by:req.by||null
+  };
+  try{
+    return supa.from('approval_requests').upsert(row,{onConflict:'id'}).then(function(r){
+      if(r.error) console.warn('[supa] approval_request upsert error:',r.error.message||r.error);
+    });
+  }catch(e){ console.warn('[supa] approval_request upsert threw',e); return Promise.resolve(); }
+}
+// — activity_log insert (dual-write; append-only, no upsert needed) —
+function supaInsertActivity(action,serial){
+  if(!SUPA_DUAL_WRITE||!supaReady()) return Promise.resolve();
+  try{
+    return supa.from('activity_log').insert({user_email:(gUser&&gUser.email)||null,action:action,serial:serial||null}).then(function(r){
+      if(r.error) console.warn('[supa] activity insert error:',r.error.message||r.error);
+    });
+  }catch(e){ return Promise.resolve(); }
+}
+// — pending_orders status update (dual-write). Creation happens via the GAS
+//   Wufoo webhook directly to Sheets — not mirrored here (out of scope: a
+//   separate Apps Script project, not part of index.html) —
+function supaUpdateOrderStatus(orderId,status,quotSerial,sentAt){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!orderId) return Promise.resolve();
+  var patch={status:status};
+  if(quotSerial) patch.quotation_serial=quotSerial;
+  if(sentAt) patch.sent_at=sentAt;
+  try{
+    return supa.from('pending_orders').update(patch).eq('id',String(orderId)).then(function(r){
+      if(r.error) console.warn('[supa] order status update error:',r.error.message||r.error);
+    });
+  }catch(e){ console.warn('[supa] order status update threw',e); return Promise.resolve(); }
+}
+// — messages insert / mark-read (dual-write) —
+function supaInsertMessage(m){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!m||!m.id) return Promise.resolve();
+  var row={
+    id:m.id,created_at:m.createdAt||null,from_email:m.fromEmail||null,from_name:m.fromName||null,
+    to_email:m.toEmail||null,to_name:m.toName||null,message:m.text||null,
+    priority:m.priority||'normal',status:m.status||'unread',context:{ctx:m.ctx||''}
+  };
+  try{
+    return supa.from('messages').upsert(row,{onConflict:'id'}).then(function(r){
+      if(r.error) console.warn('[supa] message insert error:',r.error.message||r.error);
+    });
+  }catch(e){ console.warn('[supa] message insert threw',e); return Promise.resolve(); }
+}
+function supaMarkMessageRead(id,readAt){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!id) return Promise.resolve();
+  try{
+    return supa.from('messages').update({status:'read',read_at:readAt}).eq('id',id).then(function(r){
+      if(r.error) console.warn('[supa] message read-mark error:',r.error.message||r.error);
+    });
+  }catch(e){ return Promise.resolve(); }
+}
 
 function initGoogleAuth(){
   if(typeof google==='undefined'||!google.accounts||!google.accounts.oauth2){
@@ -15329,7 +15459,10 @@ function _logSaveMats(){
     logDbClear('Materials!A:Z').then(function(){return logDbUpdate('Materials!A1',rows);})
       .then(function(d){
         if(d.error) showToast('Save failed: '+d.error.message);
-        else showToast('✓ Materials saved ('+logisticsDb.materials.length+' rows).');
+        else{
+          supaReplaceTable('logistics_materials',logisticsDb.materials.map(function(m){return {name:m.name,board_size:m.boardSize,length_mm:m.lengthMm,width_mm:m.widthMm,thickness_mm:m.thicknessMm,weight_kg:m.weightKg,cbm:m.cbm,notes:m.notes||''};}));
+          showToast('✓ Materials saved ('+logisticsDb.materials.length+' rows).');
+        }
       }).catch(function(e){showToast('Save failed: '+e);});
   });
 }
@@ -15342,7 +15475,10 @@ function _logSaveTrucks(){
     logDbClear('Trucks!A:Z').then(function(){return logDbUpdate('Trucks!A1',rows);})
       .then(function(d){
         if(d.error) showToast('Save failed: '+d.error.message);
-        else showToast('✓ Trucks saved ('+logisticsDb.trucks.length+' rows).');
+        else{
+          supaReplaceTable('logistics_trucks',logisticsDb.trucks.map(function(t){return {type:t.type,max_weight_kg:t.maxWeightKg,max_cbm:t.maxCbm,body_type:t.bodyType||'',notes:t.notes||''};}));
+          showToast('✓ Trucks saved ('+logisticsDb.trucks.length+' rows).');
+        }
       }).catch(function(e){showToast('Save failed: '+e);});
   });
 }
@@ -15902,6 +16038,8 @@ function initPriceDB() {
       return priceDbUpdate('CabinetTemplates!A1',tRows);
     })
     .then(function(){
+      supaReplaceTable('price_services',INIT_SERVICES.map(function(s){return {name:s[0],unit:s[1],price:s[2]};}));
+      supaReplaceTable('cabinet_templates',INIT_TEMPLATES.map(function(t){return {cabinet:t[0],category:t[1],name:t[2],unit:t[3],qty:t[4],price:t[5]};}));
       var s=el('db-status-row');
       if(s) s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Database initialized! Services: '+INIT_SERVICES.length+' rows, Cabinet Templates: '+INIT_TEMPLATES.length+' rows for all 13 cabinet types. Materials & Hardware sheets ready for data entry.</div>';
       loadPriceDatabase(false);
@@ -16018,6 +16156,8 @@ function importPriceDbExcel(targetSheet, skipRows, colMap) {
             });
           })
           .then(function(){
+            var _tbl=targetSheet==='Materials'?'price_materials':targetSheet==='Hardware'?'price_hardware':targetSheet==='Services'?'price_services':null;
+            if(_tbl) supaReplaceTable(_tbl,rows.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
             if(s) s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Imported <b>'+rows.length+'</b> items into <b>'+targetSheet+'</b> from <b>'+file.name+'</b>. Reloading database…</div>';
             // Reload with feedback so item counts update in the UI
             loadPriceDatabase(true);
@@ -16340,6 +16480,11 @@ function _saveServicesToPriceDb(){
     .then(function(){ return priceDbUpdate('Services!A1',rows); })
     .then(function(){
       dbServices=SERVICES.map(function(s){return {name:s.name,unit:s.unit,price:s.price};});
+      supaReplaceTable('price_services',SERVICES.map(function(s){return {
+        name:s.name,unit:s.unit,price:s.price,svc_type:s.type||'production',
+        teams:s.teams||1,shifts_per_day:s.shiftsPerDay||1,output_per_shift:s.outputPerShift||0,
+        cost_data:{expenseRatio:s.expenseRatio||0,operatorCost:s.operatorCost||0,manpowerPct:s.manpowerPct,capacityPct:s.capacityPct,consumables:s.consumables||[]}
+      };}));
     })
     .catch(function(e){
       var msg='Price DB sync failed — '+(e&&e.message?e.message:'check connection');
@@ -16369,7 +16514,8 @@ function gSaveDashPref(){
     var vals=(d&&d.values)||[]; var idx=-1;
     for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
     return idx>0?sheetsUpdate('Settings!A'+idx+':C'+idx,[row]):sheetsAppend('Settings!A:C',[row]);
-  }).catch(function(e){console.warn('dashPref save failed',e);});
+  }).then(function(){ supaUpsertUserPref((gUser&&gUser.email)||'unknown','DASHPREF',dashPref); })
+  .catch(function(e){console.warn('dashPref save failed',e);});
 }
 // Load current user's widget preferences AND admin-set restrictions at login
 function gLoadDashPref(cb){
@@ -16395,7 +16541,7 @@ function gSaveDashAllow(email,allow,cb){
     var vals=(d&&d.values)||[]; var idx=-1;
     for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
     return idx>0?sheetsUpdate('Settings!A'+idx+':C'+idx,[row]):sheetsAppend('Settings!A:C',[row]);
-  }).then(function(){if(cb)cb();}).catch(function(e){console.warn('dashAllow save failed',e);showToast('Save failed — check sheet permissions.');});
+  }).then(function(){ supaUpsertUserPref(email,'DASHALLOW',allow); if(cb)cb(); }).catch(function(e){console.warn('dashAllow save failed',e);showToast('Save failed — check sheet permissions.');});
 }
 // Load widget restrictions for a specific user (admin panel use)
 function gLoadDashAllowFor(email,cb){
@@ -16423,7 +16569,8 @@ function gSaveFollowed(){
     for(var i=1;i<vals.length;i++){if(vals[i][0]===key){idx=i+1;break;}}
     if(idx>0) return sheetsUpdate('Settings!A'+idx+':C'+idx,[row]);
     return sheetsAppend('Settings!A:C',[row]);
-  }).catch(function(e){console.warn('Failed to save followed quotations',e);});
+  }).then(function(){ supaUpsertUserPref((gUser&&gUser.email)||'unknown','FOLLOWED',ids); })
+  .catch(function(e){console.warn('Failed to save followed quotations',e);});
 }
 function gLoadFollowed(cb){
   if(!gToken||!gUser){if(cb)cb();return;}
@@ -16788,6 +16935,7 @@ function gLogToSheets(action){
   if(!gToken||!gUser) return;
   var now=new Date().toLocaleString('en-PH',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});
   sheetsAppend('Activity Log!A:E',[[now,gUser.email||'',action,qSerial,'']]).catch(function(){});
+  supaInsertActivity(action,qSerial);
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -21005,6 +21153,7 @@ function gSendMessage(toEmail,toName,text,priority,ctx,cb){
   function doAppend(){
     sheetsAppend('Messages!A:K',[row]).then(function(){
       messagesData.unshift({id:id,createdAt:now,fromEmail:fromEmail,fromName:fromName,toEmail:toEmail,toName:toName||'',text:text,priority:priority,status:'unread',readAt:'',ctx:ctx||'',rowIdx:null});
+      supaInsertMessage(messagesData[0]);
       _msgSeen[id]=true; // never toast our own outgoing message
       _sendMessageEmail(toEmail,fromName,text,priority);
       try{logActivity('Message sent to '+(toName||toEmail)+(priority==='urgent'?' (URGENT)':''));}catch(e){}
@@ -21018,6 +21167,7 @@ function _msgMarkRead(id){
   if(!m||m.status==='read'||!m.rowIdx) return;
   m.status='read'; m.readAt=new Date().toISOString();
   sheetsUpdate('Messages!I'+m.rowIdx+':J'+m.rowIdx,[['read',m.readAt]]).catch(function(){});
+  supaMarkMessageRead(id,m.readAt);
 }
 function _msgUnreadForMe(){
   var me=((gUser&&gUser.email)||'').toLowerCase();
