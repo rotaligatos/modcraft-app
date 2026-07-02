@@ -12467,6 +12467,7 @@ function deleteQuotation(serial){
       if(!ok) console.warn('Quotations row not found for',serial);
     });
     sheetsDeleteRowByKey('Quotation State',serial,function(){});
+    _qStateRowCache={}; // row indices shift after a delete — invalidate the cache
     showToast('Quotation '+serial+' deleted');
   });
 }
@@ -12529,6 +12530,7 @@ function deleteSelectedQuotations(){
     sheetsDeleteRowByKey('Quotations',serial,function(){});
     sheetsDeleteRowByKey('Quotation State',serial,function(){});
   });
+  _qStateRowCache={}; // row indices shift after deletes — invalidate the cache
   renderDirectoryTable();
   _updateDirDeleteBtn();
   showToast(ids.length+' quotation'+(ids.length>1?'s':'')+' deleted');
@@ -16602,9 +16604,9 @@ function saveQuotationJson(callback){
       });
     }
     var rowIdx=-1;
-    for(var i=1;i<vals.length;i++){if(vals[i][0]===serial){rowIdx=i+1;break;}}
+    for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
     if(rowIdx>0){return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]);}
-    else{return sheetsAppend('Quotation State!A:K',[row]);}
+    else{return sheetsAppend('Quotation State!A:K',[row]).then(function(){ delete _qStateRowCache[serial]; }); } // new row — position unknown; next load will re-scan
   }).then(function(){
     saveQuotationStateToDrive(serial,json); // belt-and-suspenders Drive backup — non-blocking
     if(callback)callback();
@@ -16615,27 +16617,38 @@ function saveQuotationJson(callback){
     if(callback)callback();
   });
 }
+var _qStateRowCache={}; // {serial: rowIdx} — populated whenever we scan column A, so repeat opens this session skip straight to the 1-call path
+function _qStateReadRow(serial,rowIdx,callback){
+  sheetsGet('Quotation State!A'+rowIdx+':K'+rowIdx).then(function(d2){
+    if(d2.error){alert('Failed to load quotation state.');if(callback)callback(null);return;}
+    var row=(d2.values||[])[0]||[];
+    var json=(row.slice(1)).join(''); // reassemble chunked JSON from columns B..K
+    try{var state=JSON.parse(json);if(callback)callback(state);}
+    catch(e){alert('Saved state for '+serial+' is corrupted.');if(callback)callback(null);}
+  }).catch(function(e){
+    console.warn('Load state failed',e);
+    alert('Failed to load quotation state. Check your connection.');
+    if(callback)callback(null);
+  });
+}
 function loadQuotationJson(serial,callback){
   if(!gToken){alert('Please sign in to load quotations.');return;}
-  // Two-step lookup (mirrors saveQuotationJson): read only column A (cheap) to find the row,
-  // then fetch just that one row's chunked columns — avoids downloading the WHOLE sheet
-  // (every quotation's 10 chunked columns, up to 450KB each) just to find one row.
+  // In-session row cache: if we've already scanned column A this session (via a prior load or save),
+  // skip straight to the single-row read — 1 call instead of 2.
+  if(_qStateRowCache[serial]>0){ _qStateReadRow(serial,_qStateRowCache[serial],callback); return; }
+  // First time this session: read only column A (cheap) to find the row, then fetch just that row's
+  // chunked columns — avoids downloading the WHOLE sheet (every quotation's 10 chunked columns, up to
+  // 450KB each) just to find one row. While we're scanning, cache every serial's row for later.
   sheetsGet('Quotation State!A:A').then(function(d){
     if(d.error){alert('Quotation State sheet not found. Save the quotation once to create it.');if(callback)callback(null);return;}
     var vals=d.values||[];
     var rowIdx=-1;
-    for(var i=1;i<vals.length;i++){ if(vals[i][0]===serial){ rowIdx=i+1; break; } }
+    for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
     if(rowIdx<0){
       alert('No saved state found for '+serial+'.\nSave or lock the quotation at least once to store its state.');
       if(callback)callback(null);return;
     }
-    return sheetsGet('Quotation State!A'+rowIdx+':K'+rowIdx).then(function(d2){
-      if(d2.error){alert('Failed to load quotation state.');if(callback)callback(null);return;}
-      var row=(d2.values||[])[0]||[];
-      var json=(row.slice(1)).join(''); // reassemble chunked JSON from columns B..K
-      try{var state=JSON.parse(json);if(callback)callback(state);}
-      catch(e){alert('Saved state for '+serial+' is corrupted.');if(callback)callback(null);}
-    });
+    _qStateReadRow(serial,rowIdx,callback);
   }).catch(function(e){
     console.warn('Load state failed',e);
     alert('Failed to load quotation state. Check your connection.');
