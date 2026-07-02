@@ -13579,6 +13579,28 @@ function supaGetState(serial){
     }).catch(function(){ return null; });
   }catch(e){ return Promise.resolve(null); }
 }
+// — manual verification helper: compares the Supabase copy of a quotation's
+//   state against the Sheets copy (byte-for-byte JSON diff of top-level keys).
+//   Run supaVerifyRead('QT-XXXXXX-XXXX') in the browser console (once signed
+//   into Supabase via supaConnect()) to sanity-check the read path BEFORE
+//   flipping USE_SUPABASE. Does not touch USE_SUPABASE or any app state. —
+function supaVerifyRead(serial){
+  if(!supaReady()){ console.warn('[supa] not connected — run supaConnect() first'); return Promise.resolve(false); }
+  return Promise.all([
+    supaGetState(serial),
+    new Promise(function(res){ _loadQuotationJsonFromSheets(serial,res); })
+  ]).then(function(r){
+    var supaState=r[0], sheetsState=r[1];
+    if(!supaState){ console.warn('[supa-verify] no Supabase row for',serial,'— save this quotation once with dual-write on, then retry.'); return false; }
+    if(!sheetsState){ console.warn('[supa-verify] no Sheets row for',serial); return false; }
+    var a=JSON.stringify(supaState), b=JSON.stringify(sheetsState);
+    if(a===b){ console.log('[supa-verify] ✓ MATCH — Supabase and Sheets states are identical for',serial); return true; }
+    var keysA=Object.keys(supaState), keysB=Object.keys(sheetsState);
+    var diffKeys=keysA.concat(keysB).filter(function(k,i,arr){return arr.indexOf(k)===i;}).filter(function(k){return JSON.stringify(supaState[k])!==JSON.stringify(sheetsState[k]);});
+    console.warn('[supa-verify] ✗ MISMATCH for',serial,'— differing top-level keys:',diffKeys);
+    return false;
+  });
+}
 // — client upsert (dual-write) —
 function supaUpsertClient(client){
   if(!SUPA_DUAL_WRITE||!supaReady()||!client||client.id==null) return Promise.resolve();
@@ -16815,6 +16837,18 @@ function _qStateReadRow(serial,rowIdx,callback){
 }
 function loadQuotationJson(serial,callback){
   if(!gToken){alert('Please sign in to load quotations.');return;}
+  // Read path: when USE_SUPABASE is on, try Supabase first (indexed single-row read,
+  // no chunking) and fall back to the Sheets path below on miss/error/flag-off.
+  if(USE_SUPABASE&&supaReady()){
+    supaGetState(serial).then(function(state){
+      if(state){ if(callback)callback(state); return; }
+      _loadQuotationJsonFromSheets(serial,callback);
+    });
+    return;
+  }
+  _loadQuotationJsonFromSheets(serial,callback);
+}
+function _loadQuotationJsonFromSheets(serial,callback){
   // In-session row cache: if we've already scanned column A this session (via a prior load or save),
   // skip straight to the single-row read — 1 call instead of 2.
   if(_qStateRowCache[serial]>0){ _qStateReadRow(serial,_qStateRowCache[serial],callback); return; }
