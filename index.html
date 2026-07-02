@@ -15893,30 +15893,25 @@ function _syncServicesFromDb(){
 function loadPriceDatabase(showFeedback) {
   if(!gToken) return;
   if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Loading price database…</div>';}
-  priceDbGet('Services!A:C')
-    .then(function(data){
-      if(data.error) throw new Error(data.error.message||'API error on Services');
-      var rows=(data.values||[]).slice(1);
-      dbServices=rows.filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+  // Fetch all 4 tabs in PARALLEL (was sequential — 4 round-trips end-to-end).
+  // Total wait = the slowest single call instead of the sum of all four.
+  Promise.all([
+    priceDbGet('Services!A:C'),
+    priceDbGet('Materials!A:C'),
+    priceDbGet('Hardware!A:C'),
+    priceDbGet('CabinetTemplates!A:F')
+  ])
+    .then(function(results){
+      var svcData=results[0], matData=results[1], hwData=results[2], tplData=results[3];
+      if(svcData.error) throw new Error(svcData.error.message||'API error on Services');
+      if(matData.error) throw new Error(matData.error.message||'API error on Materials');
+      if(hwData.error) throw new Error(hwData.error.message||'API error on Hardware');
+      if(tplData.error) throw new Error(tplData.error.message||'API error on CabinetTemplates');
+      dbServices=(svcData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+      dbMaterials=(matData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+      dbHardware=(hwData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+      dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
       _syncServicesFromDb();
-      return priceDbGet('Materials!A:C');
-    })
-    .then(function(data){
-      if(data.error) throw new Error(data.error.message||'API error on Materials');
-      var rows=(data.values||[]).slice(1);
-      dbMaterials=rows.filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      return priceDbGet('Hardware!A:C');
-    })
-    .then(function(data){
-      if(data.error) throw new Error(data.error.message||'API error on Hardware');
-      var rows=(data.values||[]).slice(1);
-      dbHardware=rows.filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      return priceDbGet('CabinetTemplates!A:F');
-    })
-    .then(function(data){
-      if(data.error) throw new Error(data.error.message||'API error on CabinetTemplates');
-      var rows=(data.values||[]).slice(1);
-      dbTemplates=rows.filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
       dbLoaded=true;
       renderPriceDbSettings(); // always refresh settings panel counts
       if(qFabMode==='bom') renderItems(); // refresh BOM dropdowns
@@ -16622,18 +16617,25 @@ function saveQuotationJson(callback){
 }
 function loadQuotationJson(serial,callback){
   if(!gToken){alert('Please sign in to load quotations.');return;}
-  sheetsGet('Quotation State!A:K').then(function(d){
+  // Two-step lookup (mirrors saveQuotationJson): read only column A (cheap) to find the row,
+  // then fetch just that one row's chunked columns — avoids downloading the WHOLE sheet
+  // (every quotation's 10 chunked columns, up to 450KB each) just to find one row.
+  sheetsGet('Quotation State!A:A').then(function(d){
     if(d.error){alert('Quotation State sheet not found. Save the quotation once to create it.');if(callback)callback(null);return;}
     var vals=d.values||[];
-    for(var i=1;i<vals.length;i++){
-      if(vals[i][0]===serial){
-        var json=(vals[i].slice(1)).join(''); // reassemble chunked JSON from columns B..K
-        try{var state=JSON.parse(json);if(callback)callback(state);return;}
-        catch(e){alert('Saved state for '+serial+' is corrupted.');if(callback)callback(null);return;}
-      }
+    var rowIdx=-1;
+    for(var i=1;i<vals.length;i++){ if(vals[i][0]===serial){ rowIdx=i+1; break; } }
+    if(rowIdx<0){
+      alert('No saved state found for '+serial+'.\nSave or lock the quotation at least once to store its state.');
+      if(callback)callback(null);return;
     }
-    alert('No saved state found for '+serial+'.\nSave or lock the quotation at least once to store its state.');
-    if(callback)callback(null);
+    return sheetsGet('Quotation State!A'+rowIdx+':K'+rowIdx).then(function(d2){
+      if(d2.error){alert('Failed to load quotation state.');if(callback)callback(null);return;}
+      var row=(d2.values||[])[0]||[];
+      var json=(row.slice(1)).join(''); // reassemble chunked JSON from columns B..K
+      try{var state=JSON.parse(json);if(callback)callback(state);}
+      catch(e){alert('Saved state for '+serial+' is corrupted.');if(callback)callback(null);}
+    });
   }).catch(function(e){
     console.warn('Load state failed',e);
     alert('Failed to load quotation state. Check your connection.');
