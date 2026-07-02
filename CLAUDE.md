@@ -1565,6 +1565,21 @@ All additive + fully guarded; **Google Sheets stays primary and untouched.** Com
 4. Tighten **RLS** from permissive "any authenticated" to per-company/role.
 5. **Phase 3 (Synology)** — deferred until the NAS is on hand; Sheets remains the inherent backup meanwhile. Eventually drop GIS/Sheets and make Supabase Auth the sole login.
 
+## What was changed on 2026-06-21 (session — performance fixes for app slowness/hangs)
+
+User reported the app "slows down, rattles, and sometimes hangs" — investigated and fixed 4 concrete causes (not yet the Supabase migration; these are Sheets-backend optimizations).
+
+1. **Typing jank (13 fields)** — qty/price/CF `oninput` handlers called the heavy `recalc()` (full line-item DOM rebuild) on every keystroke. Changed to `recalcSoon()` (instant totals + line-items rebuild debounced 120ms). `onchange`/`onclick` handlers left calling `recalc()` immediately (not per-keystroke).
+2. **Background polling during hangs** — approvals (60s) and messages (45s) poll timers now skip when `document.hidden` (tab not visible), avoiding periodic Sheets-read stalls while the tab is backgrounded.
+3. **Materials list slow/blank in quotation (BOM + cutting-list mode) — root cause found:**
+   - `loadQuotationJson` was reading the **entire `Quotation State` sheet** (every quotation, all 10 chunked columns, up to 450KB each) just to scan for one row in JS. Gets slower as quotation count grows; large/slow reads could stall or silently fail ("blank"). Fixed: now mirrors `saveQuotationJson`'s pattern — read column A only (cheap) to find the row index, then fetch just that single row's range (`A{row}:K{row}`).
+   - `loadPriceDatabase` fetched Services→Materials→Hardware→CabinetTemplates **sequentially** (4 chained round-trips) before the Materials/Hardware dropdowns had real data. Fixed: all 4 now fetch via `Promise.all` in parallel — total wait = the slowest single call, not the sum of four.
+   - Added **`_qStateRowCache`** `{serial: rowIdx}` — populated whenever column A is scanned (by either load or save); a *second* open of any quotation in the same session skips the column-A scan entirely (1 API call instead of 2). Invalidated on quotation delete (single + bulk, since `deleteDimension` shifts row numbers — prevents reading the wrong row post-delete); a newly-appended row clears its own cache entry until the next scan.
+4. **Verified no JS syntax errors** and all fixes work via mocked Sheets calls (targeted reads only, no full-sheet scan, calls run in parallel, cache hit/invalidation confirmed).
+
+### Ceiling — why some delay remains, and the real fix
+These changes squeeze the most out of Google Sheets as a backend, but each Sheets API call still has a **fixed per-call latency floor** (~300ms–2+s from a PH connection) that the app cannot remove — Sheets has no indexing and wasn't built for frequent small point-lookups. **This is exactly what the Supabase migration (see `SUPABASE_MIGRATION_PLAN.md` / the "Backend migration" section above) is expected to fix structurally** — an indexed Postgres query is typically single/double-digit milliseconds server-side vs. Sheets' per-call overhead, and it collapses today's 1–2 Sheets calls into a single indexed query with no chunking. User is proceeding to the Supabase migration next (starting a new chat for it — Phase 0 schema SQL is the next step per the section above).
+
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
