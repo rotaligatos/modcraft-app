@@ -1613,11 +1613,25 @@ Closed out the rest of the Phase 1 "NEXT" list — every table in `supabase_sche
 10. **Verified** — `new Function()` parse check on every `<script>` block passes; a script cross-reference confirmed all 17 `supa*` functions called are defined (no typos, no dangling calls).
 
 ### Now truly pending (nothing left to dual-write)
-1. Wire **reads** behind `USE_SUPABASE` — this is the next real step. `loadQuotationJson` → try `supaGetState` first, fall back to Sheets; then expand the same pattern to clients/settings/users/etc. once proven, and only then flip `USE_SUPABASE=true`.
+1. ~~Wire reads behind `USE_SUPABASE`~~ — quotation state done, see session below. Clients/settings/users/etc. reads not yet wired (deliberately — proving one table at a time before expanding, per the plan's "go slowly" approach).
 2. **Phase 2** — one-time historical data migration Sheets → Supabase (verify row counts per table).
 3. Tighten RLS from permissive "any authenticated" to per-company/role.
 4. **Phase 3 (Synology)** — still deferred, no hardware yet.
 5. `pending_orders` creation still Sheets-only (Wufoo GAS webhook) — would need editing the separate Apps Script project to also POST to Supabase; not started, low priority while Sheets is still the read path.
+
+## What was changed on 2026-07-02 (session 3 — Supabase: quotation-state read path wired behind USE_SUPABASE)
+
+First read-path wiring — the next real step after Phase 1's dual-write was complete for all 16 tables (see the two sessions above). Deliberately scoped to ONE table (`quotation_states`, the highest-value one — this was the original motivation for the whole migration, see "Ceiling" note in the 2026-06-21 performance session) rather than wiring every table's reads at once, per the migration plan's "go slowly" approach.
+
+1. **`loadQuotationJson(serial,callback)` now branches on `USE_SUPABASE`** — when true and `supaReady()`, it calls `supaGetState(serial)` first; a hit calls back immediately (skips Sheets entirely — no column-A scan, no chunked-column reassembly). A miss (or `USE_SUPABASE=false`, the current default) falls through to the existing Sheets logic, which was extracted unchanged into a new internal function `_loadQuotationJsonFromSheets(serial,callback)`. The public `loadQuotationJson` signature and all 3 call sites are untouched.
+2. **`USE_SUPABASE` stays `false`** — this change is inert in production today. No behavior change until the flag is explicitly flipped.
+3. **New console helper `supaVerifyRead(serial)`** (~index.html:13582) — run in the browser console after `supaConnect()`; loads the same quotation's state from both Supabase and Sheets in parallel and diffs them, logging exactly which top-level JSON keys differ (or a ✓ MATCH). This is the self-serve way to prove the read path is correct on real data before flipping `USE_SUPABASE=true` — no code changes needed to test it.
+4. **Verified** — `new Function()` parse check on every `<script>` block passes.
+
+### Recommended next steps (not done — for the next session)
+1. Run `supaConnect()` then `supaVerifyRead('QT-...')` on a few real quotations in the browser console to confirm Supabase/Sheets agreement.
+2. Once several quotations verify clean, flip `USE_SUPABASE=true` and watch for regressions in day-to-day use (Sheets is still written in parallel as a safety net — nothing to undo, just flip back to `false`).
+3. Then expand the same try-Supabase-first/fallback-to-Sheets pattern to `gLoadClients` (more involved — it also joins transaction history from the `Quotations` sheet, so the Supabase equivalent needs a `quotations` query by client name, not just a straight table read) and `gLoadAppSettings`.
 
 ## Known remaining areas to watch
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
