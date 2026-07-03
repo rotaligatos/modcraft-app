@@ -2359,6 +2359,7 @@ var clientSelected = {}; // { id: true } — checked client rows
 var qStage = 1;
 var qApproved = false;
 var qSaved = false;       // true once Stage 1 Save Draft is clicked (gates Lock & Send)
+var qSerialCommitted = false; // true once this serial has survived a first-save collision check (see gSaveQuotation)
 var qSerial = makeSerial();
 var qRevisedFrom = "";
 var qOptionsList = [];      // [{id, label, snapshot, status:'active'|'approved'|'archived', grand}]
@@ -3947,6 +3948,7 @@ function renderMobCalcBar(){
 function initQuotation() {
   // ── Full state reset — every field, every variable ──────────────────────
   qSerial=makeSerial();
+  qSerialCommitted=false;
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}]}];
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus='';
@@ -5661,7 +5663,7 @@ function confirmRevise() {
   if(!ok) { el("revise-err").style.display="block"; return; }
   var old=qSerial;
   saveQuotationToDrive('final','Revision v'+old);
-  qSerial=makeSerial(); qApproved=false; qRevisedFrom=old;
+  qSerial=makeSerial(); qSerialCommitted=false; qApproved=false; qRevisedFrom=old;
   qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
   var qdl=el('q-drive-links'); if(qdl) qdl.innerHTML='';
   var fqdl=el('fq-drive-links'); if(fqdl) fqdl.innerHTML='';
@@ -16974,7 +16976,72 @@ function _syncQuotHeader(){
     if(stale) sheetsUpdate('Quotations!A1:R1',[HDR]);
   }).catch(function(){});
 }
+// Serial numbers are assigned client-side the instant "New Quotation" is
+// clicked (see makeSerial()), from a locally-cached counter that only syncs
+// to Sheets asynchronously afterward. If two users click "New Quotation"
+// within that sync window, both can be handed the identical serial — and
+// since the serial is the primary key everywhere (Quotations row, Quotation
+// State row, Supabase), whoever saves second silently overwrites whoever
+// saved first. This guard runs once, right before a quotation's FIRST save
+// actually commits: if another user's quotation already occupies this
+// serial, it claims a fresh one instead of overwriting theirs. Subsequent
+// saves of the same quotation skip the check (qSerialCommitted stays true),
+// since ownership was already settled at first save.
 function gSaveQuotation(){
+  if(!gToken||!gUser) return;
+  if(!qSerialCommitted){
+    var claimSerial=qBaseSerial||qSerial;
+    sheetsGet('Quotations!A:H').then(function(d){
+      var vals=(d&&!d.error&&d.values)||[];
+      var existingOwner='';
+      for(var i=1;i<vals.length;i++){ if(vals[i][0]===claimSerial){existingOwner=vals[i][7]||''; break;} }
+      var myName=gUser.name||gUser.email;
+      if(existingOwner&&existingOwner!==myName){
+        return _resolveSerialCollision(claimSerial).then(function(newSerial){
+          var oldSerial=claimSerial;
+          qSerial=newSerial; if(qBaseSerial===oldSerial) qBaseSerial=newSerial;
+          var qs=el('q-serial'); if(qs) qs.textContent=newSerial;
+          showToast('⚠ '+oldSerial+' was already claimed by another quotation — this one is now '+newSerial);
+          logActivity('Serial auto-renumbered '+oldSerial+' → '+newSerial+' (save-time collision detected)');
+          qSerialCommitted=true;
+          _proceedSaveQuotation();
+        });
+      }
+      qSerialCommitted=true;
+      _proceedSaveQuotation();
+    }).catch(function(){
+      // Collision check itself failed (offline/network) — don't block saving; proceed optimistically.
+      qSerialCommitted=true;
+      _proceedSaveQuotation();
+    });
+    return;
+  }
+  _proceedSaveQuotation();
+}
+// Picks a fresh, verified-free serial for a quotation that lost a naming
+// collision. Re-reads the counter fresh each attempt (narrows, doesn't fully
+// close, the staleness window) and checks the candidate against the actual
+// Quotations sheet before accepting it, retrying a few times in the
+// vanishingly unlikely case of a repeat collision.
+function _resolveSerialCollision(oldSerial){
+  var prefix=_serialPrefix();
+  function attempt(n){
+    if(n>5) return Promise.resolve(oldSerial+'-'+Date.now()); // pathological fallback, should never trigger
+    return new Promise(function(res){ _loadSerialCounters(res); }).then(function(){
+      var num=serialCounters[prefix]||1;
+      serialCounters[prefix]=num+1;
+      _saveSerialCounters();
+      var candidate='QT-'+prefix+String(num).padStart(8,'0');
+      return sheetsGet('Quotations!A:A').then(function(d){
+        var vals=(d&&!d.error&&d.values)||[];
+        for(var i=1;i<vals.length;i++){ if(vals[i][0]===candidate) return attempt(n+1); }
+        return candidate;
+      }).catch(function(){ return candidate; });
+    });
+  }
+  return attempt(0);
+}
+function _proceedSaveQuotation(){
   if(!gToken||!gUser) return;
   _syncQuotHeader();
   var bizName=(el('cl-bizname')&&el('cl-bizname').value)?el('cl-bizname').value:'';
@@ -17198,6 +17265,7 @@ function _loadQuotationJsonFromSheets(serial,callback){
 function restoreFullQuotationState(state){
   if(!state) return;
   qSerial=state.serial||makeSerial();
+  qSerialCommitted=true; // loading a quotation that was already saved under this serial
   qBaseSerial=state.baseSerial||'';
   qActiveOptionId=state.activeOptionId||0;
   qOptionsList=JSON.parse(JSON.stringify(state.optionsList||[]));
