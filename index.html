@@ -1102,6 +1102,16 @@ tr.cl-row:hover td{background:#f4f7fb}
       <div class="card-body">
         <div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-info-circle"></i><div>Serial numbers are sequential and company-specific. <b>W series</b> (WCLI &amp; MSSI): <code>QT-W00000001</code>. <b>C series</b> (Cebu World Laminate): <code>QT-C00000001</code>. Resetting moves the counter forward to the new value — never backwards past existing quotations.</div></div>
         <div id="serial-counter-card-body"></div>
+        <div style="margin-top:16px;padding-top:14px;border-top:.5px solid var(--border)">
+          <div style="font-size:13px;font-weight:600;color:var(--text1);margin-bottom:4px">Atomic claim service (prevents duplicate numbers)</div>
+          <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Two people saving a brand-new quotation at nearly the same moment can otherwise be handed the same number, silently overwriting each other. Paste a Google Apps Script web-app URL here to guarantee each save gets a truly unique number, with zero race window, for every user. Leave blank to use the built-in fallback check (still safe, but not fully race-proof).</div>
+          <div style="display:flex;gap:6px">
+            <input id="s-serial-claim" type="text" value="" placeholder="https://script.google.com/macros/s/…/exec"
+              oninput="SERIAL_CLAIM_URL=this.value.trim();localStorage.setItem('mc_serial_claim_url',SERIAL_CLAIM_URL)" style="flex:1;height:30px;font-size:12px">
+            <button class="btn" onclick="_testSerialClaimUrl()" style="font-size:12px;padding:4px 12px;white-space:nowrap"><i class="ti ti-flask"></i> Test claim</button>
+          </div>
+          <div style="font-size:11px;color:var(--text2);margin-top:6px">Saved with <b>Save settings</b>. Test claim previews the next W-series number (dry run — nothing is consumed). See setup guide in project docs for the Apps Script code to paste.</div>
+        </div>
       </div>
     </div>
     <!-- Admin-only logo management — rendered via renderLogoUploadCard() -->
@@ -2892,6 +2902,7 @@ function renderSerialCounterCard(){
       +'</div>';
   }
   wrap.innerHTML=row('W','W series — WCLI &amp; MSSI')+row('C','C series — Cebu World Laminate, Inc.');
+  var _sc=el('s-serial-claim'); if(_sc&&!_sc.value) _sc.value=SERIAL_CLAIM_URL;
 }
 function addDays(s, n) {
   var d = new Date(s); d.setDate(d.getDate()+n); return d.toISOString().split("T")[0];
@@ -16615,12 +16626,14 @@ function _collectAppSettings(){
     instCost: JSON.parse(JSON.stringify(INST_COST)),
     ppicSettings: JSON.parse(JSON.stringify(ppicSettings)),
     msgMailerUrl:(el('s-msg-mailer')?el('s-msg-mailer').value.trim():MSG_MAILER_URL)||MSG_MAILER_URL||'',
+    serialClaimUrl:(el('s-serial-claim')?el('s-serial-claim').value.trim():SERIAL_CLAIM_URL)||SERIAL_CLAIM_URL||'',
     approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING))
   };
 }
 function _applyAppSettings(s){
   if(!s) return;
   if(s.msgMailerUrl!==undefined){ MSG_MAILER_URL=s.msgMailerUrl||''; localStorage.setItem('mc_msg_mailer_url',MSG_MAILER_URL); var _mm=el('s-msg-mailer'); if(_mm) _mm.value=MSG_MAILER_URL; }
+  if(s.serialClaimUrl!==undefined){ SERIAL_CLAIM_URL=s.serialClaimUrl||''; localStorage.setItem('mc_serial_claim_url',SERIAL_CLAIM_URL); var _sc=el('s-serial-claim'); if(_sc) _sc.value=SERIAL_CLAIM_URL; }
   if(s.CF&&typeof s.CF==='object'){ for(var k in s.CF){ if(s.CF.hasOwnProperty(k)) CF[k]=s.CF[k]; } }
   if(Array.isArray(s.MOB_LOCATIONS)){ MOB_LOCATIONS.length=0; for(var i=0;i<s.MOB_LOCATIONS.length;i++) MOB_LOCATIONS.push(s.MOB_LOCATIONS[i]); }
   if(s.carcassPrices&&typeof s.carcassPrices==='object'){
@@ -16983,40 +16996,76 @@ function _syncQuotHeader(){
 // since the serial is the primary key everywhere (Quotations row, Quotation
 // State row, Supabase), whoever saves second silently overwrites whoever
 // saved first. This guard runs once, right before a quotation's FIRST save
-// actually commits: if another user's quotation already occupies this
-// serial, it claims a fresh one instead of overwriting theirs. Subsequent
-// saves of the same quotation skip the check (qSerialCommitted stays true),
-// since ownership was already settled at first save.
+// actually commits. Two tiers:
+//   1. If SERIAL_CLAIM_URL is configured, claim the real number via a
+//      Google Apps Script LockService web app — a genuinely atomic
+//      operation (Google locks the counter globally, so two simultaneous
+//      claims can never return the same number, no race window at all).
+//   2. Otherwise, fall back to a same-origin existence check: on a first
+//      save, if a row for this serial already exists, it cannot be ours
+//      (we've never saved before) — claim the next number instead. This
+//      narrows the race window but can't fully close it without #1.
+// Subsequent saves of the same quotation skip both checks entirely
+// (qSerialCommitted stays true) — ownership was already settled at first save.
 function gSaveQuotation(){
   if(!gToken||!gUser) return;
   if(!qSerialCommitted){
     var claimSerial=qBaseSerial||qSerial;
-    sheetsGet('Quotations!A:H').then(function(d){
-      var vals=(d&&!d.error&&d.values)||[];
-      var existingOwner='';
-      for(var i=1;i<vals.length;i++){ if(vals[i][0]===claimSerial){existingOwner=vals[i][7]||''; break;} }
-      var myName=gUser.name||gUser.email;
-      if(existingOwner&&existingOwner!==myName){
-        return _resolveSerialCollision(claimSerial).then(function(newSerial){
-          var oldSerial=claimSerial;
-          qSerial=newSerial; if(qBaseSerial===oldSerial) qBaseSerial=newSerial;
-          var qs=el('q-serial'); if(qs) qs.textContent=newSerial;
-          showToast('⚠ '+oldSerial+' was already claimed by another quotation — this one is now '+newSerial);
-          logActivity('Serial auto-renumbered '+oldSerial+' → '+newSerial+' (save-time collision detected)');
+    if(SERIAL_CLAIM_URL){
+      _claimSerialAtomic(_serialPrefix(),function(newSerial){
+        if(newSerial){
+          _acceptClaimedSerial(claimSerial,newSerial,false);
           qSerialCommitted=true;
           _proceedSaveQuotation();
-        });
-      }
-      qSerialCommitted=true;
-      _proceedSaveQuotation();
-    }).catch(function(){
-      // Collision check itself failed (offline/network) — don't block saving; proceed optimistically.
-      qSerialCommitted=true;
-      _proceedSaveQuotation();
-    });
+        } else {
+          // Claim service configured but unreachable this attempt — don't block the save,
+          // fall back to the existence-check tier instead.
+          _fallbackSerialCheck(claimSerial);
+        }
+      });
+      return;
+    }
+    _fallbackSerialCheck(claimSerial);
     return;
   }
   _proceedSaveQuotation();
+}
+function _fallbackSerialCheck(claimSerial){
+  sheetsGet('Quotations!A:A').then(function(d){
+    var vals=(d&&!d.error&&d.values)||[];
+    var rowExists=false;
+    for(var i=1;i<vals.length;i++){ if(vals[i][0]===claimSerial){rowExists=true; break;} }
+    if(rowExists){
+      // A row for this serial already exists, and this is genuinely our first
+      // save of this quotation — that row cannot be ours, so it belongs to
+      // someone/something else. Claim a fresh number instead of overwriting it.
+      return _resolveSerialCollision(claimSerial).then(function(newSerial){
+        _acceptClaimedSerial(claimSerial,newSerial,true);
+        qSerialCommitted=true;
+        _proceedSaveQuotation();
+      });
+    }
+    qSerialCommitted=true;
+    _proceedSaveQuotation();
+  }).catch(function(){
+    // Check itself failed (offline/network) — don't block saving; proceed optimistically.
+    qSerialCommitted=true;
+    _proceedSaveQuotation();
+  });
+}
+// Updates qSerial/qBaseSerial + the on-screen number when the claimed serial
+// differs from what was provisionally displayed since "New Quotation".
+function _acceptClaimedSerial(oldSerial,newSerial,wasCollision){
+  if(newSerial===oldSerial) return; // common case — no contention, nothing to change
+  qSerial=newSerial; if(qBaseSerial===oldSerial) qBaseSerial=newSerial;
+  var qs=el('q-serial'); if(qs) qs.textContent=newSerial;
+  if(wasCollision){
+    showToast('⚠ '+oldSerial+' was already claimed by another quotation — this one is now '+newSerial);
+    logActivity('Serial auto-renumbered '+oldSerial+' → '+newSerial+' (save-time collision detected)');
+  } else {
+    showToast('Quotation number confirmed as '+newSerial+' (was showing '+oldSerial+' provisionally).');
+    logActivity('Serial confirmed as '+newSerial+' via atomic claim (was provisional '+oldSerial+')');
+  }
 }
 // Picks a fresh, verified-free serial for a quotation that lost a naming
 // collision. Re-reads the counter fresh each attempt (narrows, doesn't fully
@@ -21538,6 +21587,7 @@ var _msgSeen={};          // {id:true} — message IDs already announced this se
 var _msgTabReady=false;
 var _msgAudioCtx=null;
 var MSG_MAILER_URL=localStorage.getItem('mc_msg_mailer_url')||'';    // optional GAS web-app endpoint for automated email fallback
+var SERIAL_CLAIM_URL=localStorage.getItem('mc_serial_claim_url')||''; // optional GAS web-app endpoint for atomic (race-free) serial claiming
 
 function _msgCreateTab(cb){
   gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+':batchUpdate',{
@@ -21679,6 +21729,27 @@ function _msgTestMailer(){
         body:'This is a test from Modcraft.\n\nIf you received this, the email fallback is working.\n\n— Sent via Modcraft Mailer.'})});
     setTimeout(function(){ showToast('Test sent to '+me+' — check your inbox (and Spam) in a minute.'); },1200);
   }catch(e){ showToast('Could not reach the mailer URL — check it and try again.'); }
+}
+// — Atomic serial claim service (optional GAS web app w/ LockService) —
+// dryRun:true previews the next number without consuming it (for the Test button).
+function _claimSerialAtomic(prefix,cb,dryRun){
+  if(!SERIAL_CLAIM_URL){ cb(null); return; }
+  fetch(SERIAL_CLAIM_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({prefix:prefix,dryRun:!!dryRun})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ cb((d&&d.serial)?d.serial:null); })
+    .catch(function(){ cb(null); });
+}
+function _testSerialClaimUrl(){
+  var inp=el('s-serial-claim');
+  var url=(inp?inp.value.trim():'')||SERIAL_CLAIM_URL;
+  if(!url){ showToast('Paste the claim service URL first.'); return; }
+  if(url.indexOf('/exec')<0){ showToast('That doesn\'t look like a Web App /exec URL.'); return; }
+  SERIAL_CLAIM_URL=url;
+  showToast('Testing claim service…');
+  _claimSerialAtomic('W', function(serial){
+    if(serial) showToast('✓ Claim service reachable — next W serial would be '+serial+' (dry run, nothing was consumed).');
+    else showToast('Could not reach the claim service — check the URL and try again.');
+  }, true);
 }
 // ── Messages panel UI ──
 function toggleMsgPanel(e){
