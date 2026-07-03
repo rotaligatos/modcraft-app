@@ -491,6 +491,20 @@ tr.cl-row:hover td{background:#f4f7fb}
           <div id="items-wrap"></div>
         </div>
       </div>
+      <div class="card" id="carcass-count-card" style="display:none">
+        <div class="card-head"><h3><i class="ti ti-cube"></i>Carcass / Unit Count</h3></div>
+        <div class="card-body">
+          <div class="alert alert-info" style="font-size:12px;margin-bottom:10px">A cutting list doesn't list individual cabinets — Installation and Assembly billing need a cabinet-unit count, so enter one here (or use the suggestion below). This single value is what both cards use.</div>
+          <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap">
+            <div style="flex:0 0 auto">
+              <label class="fld">Number of carcasses / units</label>
+              <input type="number" id="carcass-unit-count" min="0" value="" placeholder="0" oninput="onCarcassUnitCountChange()" style="height:32px;width:140px">
+            </div>
+            <button class="btn" onclick="suggestCarcassUnitCount()" style="font-size:12px;padding:6px 10px"><i class="ti ti-wand"></i> Suggest from materials</button>
+          </div>
+          <div id="carcass-count-suggest-note" style="font-size:11px;color:var(--text2);margin-top:8px"></div>
+        </div>
+      </div>
       <div class="card" id="mob-card" style="display:none">
         <div class="card-head"><h3><i class="ti ti-truck"></i>Mobilization</h3></div>
         <div class="card-body">
@@ -536,18 +550,12 @@ tr.cl-row:hover td{background:#f4f7fb}
           </label>
         </div>
         <div class="card-body" id="assm-body" style="display:none">
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-            <div style="flex:0 0 auto">
-              <label class="fld">Number of carcasses</label>
-              <input type="number" id="assm-count" min="1" value="" placeholder="Auto from upload" oninput="onAssmCountChange()" style="height:32px;width:140px">
-            </div>
-            <div style="flex:1;min-width:180px;font-size:13px;color:var(--text2)">
-              <span id="assm-cost-disp" style="font-weight:500;color:var(--navy)"></span>
-            </div>
+          <div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0">
+            <span>Assembly cost</span><span id="assm-cost-disp" style="font-weight:500;color:var(--navy)"></span>
           </div>
           <div style="font-size:11px;color:var(--text2);margin-top:8px;display:flex;align-items:center;gap:4px">
             <i class="ti ti-info-circle" style="font-size:11px"></i>
-            Carcass count auto-fills from Designers Support upload when available.
+            <span id="assm-units-note">Based on cabinet quantity in the scope of work above.</span>
           </div>
         </div>
       </div>
@@ -2390,7 +2398,14 @@ var qOutMarkup = null;
 var qOutContingency = null;
 var qOutBuffer = null;
 var qSiteVisit = {enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
-var qAssembly = {enabled:false,carcassCount:0};
+var qAssembly = {enabled:false};
+// Single shared "how many cabinet units does this represent" override — used by
+// BOTH Installation and Assembly billing when qFabMode==='services' (cutting-list
+// mode), where svcItems quantities are panel/edge-banding/etc. counts in mixed
+// units, not a real cabinet count (unlike carcass/BOM mode, where item qty IS a
+// real cabinet count already). Replaces the old assembly-only qAssembly.carcassCount
+// field so there's one input instead of two.
+var qCarcassUnitCount = 0;
 var qInstWorkers = 0;   // legacy installation workers override (kept for old saved states)
 var qInstDays = 0;      // legacy installation days override (kept for old saved states)
 var qInstRegion = 'z1';  // installation zone key — drives per-unit install price from rate matrix
@@ -4035,11 +4050,14 @@ function initQuotation() {
   qSiteVisit={enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
   initSiteVisitCard();
   // Reset assembly
-  qAssembly={enabled:false,carcassCount:0};
+  qAssembly={enabled:false};
   var at=el('assm-toggle'); if(at) at.checked=false;
   var ab=el('assm-body'); if(ab) ab.style.display='none';
-  var ac2=el('assm-count'); if(ac2) ac2.value='';
   var atl=el('assm-toggle-lbl'); if(atl){atl.textContent='Include assembly';atl.style.color='var(--text2)';}
+  // Reset carcass/unit count override
+  qCarcassUnitCount=0;
+  var cuc=el('carcass-unit-count'); if(cuc) cuc.value='';
+  _updateCarcassCountCardVisibility();
   // Reset cutting list & design charge
   qCuttingList={enabled:false};
   var clct=el('cl-charge-toggle'); if(clct) clct.checked=false;
@@ -4386,6 +4404,7 @@ function onServiceChange() {
   // Cost factor override: only meaningful for Fabrication + Installation
   var ccfc=el("ccf-card");
   if(ccfc) ccfc.style.display=ni?"block":"none";
+  _updateCarcassCountCardVisibility();
   recalc();
 }
 
@@ -4399,9 +4418,64 @@ function toggleAssembly() {
   recalc();
 }
 
-function onAssmCountChange() {
-  var inp=el("assm-count");
-  qAssembly.carcassCount=inp?Math.max(0,parseInt(inp.value)||0):0;
+function onCarcassUnitCountChange() {
+  var inp=el("carcass-unit-count");
+  qCarcassUnitCount=inp?Math.max(0,parseInt(inp.value)||0):0;
+  recalc();
+}
+// Materials-category units that represent a discrete board piece (e.g. "0.7 pc"
+// of a sheet) rather than a linear/area trim like edge banding ("lm"). Matches
+// real Price DB data, which records board consumption in "pc" fractions.
+var BOARD_UNIT_KEYS=['pc','pcs','piece','sheet','bd'];
+function _isBoardUnit(u){ return BOARD_UNIT_KEYS.indexOf(String(u||'').trim().toLowerCase())>=0; }
+// Sums board-piece quantities from this quotation's cutting-list materials
+// (matItems), across all areas.
+function _boardPcConsumedInQuotation(){
+  var total=0;
+  for(var a=0;a<qAreas.length;a++){
+    var mi=qAreas[a].matItems||[];
+    for(var i=0;i<mi.length;i++){ if(_isBoardUnit(mi[i].unit)) total+=parseFloat(mi[i].qty)||0; }
+  }
+  return total;
+}
+// Average board-piece consumption per cabinet type, derived from the (editable)
+// CabinetTemplates reference data — same source as the carcass-pricing sync
+// check — instead of a hardcoded guess. Simple mean across cabinet types that
+// have at least one board-material row; returns null if no such data exists.
+function _avgBoardPcPerCarcass(){
+  if(!dbTemplates.length) return null;
+  var byType={};
+  for(var i=0;i<dbTemplates.length;i++){
+    var t=dbTemplates[i];
+    if(t.category!=='materials'||!_isBoardUnit(t.unit)) continue;
+    byType[t.cabinet]=(byType[t.cabinet]||0)+(parseFloat(t.qty)||0);
+  }
+  var types=Object.keys(byType);
+  if(!types.length) return null;
+  var sum=0; for(var j=0;j<types.length;j++) sum+=byType[types[j]];
+  return sum/types.length;
+}
+// Fills the carcass-unit-count field with an ESTIMATE (board-pc consumed in
+// this quotation ÷ average board-pc per cabinet type from the Price DB
+// templates) — a suggestion, not an authoritative number; still fully
+// editable/overridable before it affects Installation/Assembly billing.
+function suggestCarcassUnitCount(){
+  var note=el('carcass-count-suggest-note');
+  var consumed=_boardPcConsumedInQuotation();
+  var avg=_avgBoardPcPerCarcass();
+  if(avg==null||avg<=0){
+    if(note) note.innerHTML='<span style="color:var(--coral)">No board-material reference data in the Price Database (CabinetTemplates) to base a suggestion on.</span>';
+    return;
+  }
+  if(consumed<=0){
+    if(note) note.innerHTML='<span style="color:var(--coral)">No board-type materials (unit = pc/pcs/piece/sheet/bd) found in this quotation\'s Materials yet.</span>';
+    return;
+  }
+  var suggested=Math.max(0,Math.round(consumed/avg));
+  var inp=el('carcass-unit-count');
+  if(inp) inp.value=suggested;
+  qCarcassUnitCount=suggested;
+  if(note) note.innerHTML='Estimated from '+consumed.toFixed(2)+' board-pc consumed &divide; '+avg.toFixed(2)+' avg board-pc/carcass (from Price DB templates) = <b>'+suggested+'</b> unit'+(suggested===1?'':'s')+'. Adjust if needed.';
   recalc();
 }
 
@@ -4444,6 +4518,17 @@ function getTotU() {
     }
   }
   return u;
+}
+// The unit count Installation and Assembly billing should multiply against.
+// In carcass/BOM mode, getTotU() already IS a real cabinet count (item qty is
+// literally "how many of this cabinet type"), so use it directly. In services
+// (cutting-list) mode, svcItems quantities are panel/edge-banding/etc. counts
+// in mixed units — not a cabinet count — so use the manual/suggested
+// qCarcassUnitCount instead. getTotU() itself is untouched (still used as-is
+// for fabrication capacity checks and report displays, a separate concept).
+function getInstallCarcassUnits(){
+  if(qFabMode==='services') return qCarcassUnitCount>0?qCarcassUnitCount:getTotU();
+  return getTotU();
 }
 function clientMatMult(){
   // service uplift when client supplies the materials; 1 (no effect) otherwise
@@ -4932,8 +5017,16 @@ function onFabModeChange(mode) {
   qFabMode=mode;
   var card=el('outsource-rates-card');
   if(card) card.style.display=(mode==='bom'?'block':'none');
+  _updateCarcassCountCardVisibility();
   renderItems();
   recalc();
+}
+// Shown only in cutting-list (services) mode, where Installation/Assembly need
+// the manual carcass-unit-count override (see getInstallCarcassUnits above).
+// Carcass/BOM mode already has a real cabinet count from item quantities.
+function _updateCarcassCountCardVisibility(){
+  var card=el('carcass-count-card');
+  if(card) card.style.display=(qFabMode==='services')?'block':'none';
 }
 
 function updateBOMCostHeader(a,ci) {
@@ -5286,6 +5379,7 @@ function recalc(fast) {
   var outRates=getOutRates();
   var outsourceFinal=outsourceBase*(1+outRates.contingency/100)*(1+outRates.buffer/100)*(1+outRates.markup/100);
   var totU=getTotU();
+  var instUnits=getInstallCarcassUnits(); // real cabinet count for Installation/Assembly billing (see getInstallCarcassUnits)
 
   var regularFabC=regularBase*(1+cf/100)*(ni?(1+fabBuf/100):1);
   var fabC=regularFabC+outsourceFinal; // combined for display
@@ -5312,7 +5406,7 @@ function recalc(fast) {
   var qaqcBase=ni?calcQAQCCost(mobZoneIdx):0;
   // Installation cost: per-unit price from the Installation cost breakdown
   var instLaborCost = ni ? getInstCostByType(qInstRegion) : 0;
-  var instUnitPrice = ni&&totU>0 ? instLaborCost/totU : instPriceUnitFor(qInstRegion);
+  var instUnitPrice = ni&&instUnits>0 ? instLaborCost/instUnits : instPriceUnitFor(qInstRegion);
   // Planner-sourced installation costs
   var instPlannerWorkAccom = ni&&qInstPlanner ? (qInstPlanner.workNightAccom||0) : 0;
   var instPlannerPerDiem   = ni&&qInstPlanner ? (qInstPlanner.perDiem||0) : 0;
@@ -5322,12 +5416,13 @@ function recalc(fast) {
   // Update displays
   var icd=el('inst-cost-disp'); if(icd) icd.textContent=ni?fmtMoney(instBase):'—';
   var iud=el('inst-unit-disp'); if(iud) iud.textContent=ni?fmtMoney(instUnitPrice):'—';
-  var ind=el('inst-units-disp'); if(ind) ind.textContent=ni?(totU+' unit'+(totU===1?'':'s')):'—';
-  if(typeof renderInstCardLines==='function') renderInstCardLines(ni,instLaborCost,instUnitPrice,totU,qaqcBase,instPlannerWorkAccom,instPlannerPerDiem,instPlannerTourist,instPlannerQaqcAccom);
+  var ind=el('inst-units-disp'); if(ind) ind.textContent=ni?(instUnits+' unit'+(instUnits===1?'':'s')):'—';
+  if(typeof renderInstCardLines==='function') renderInstCardLines(ni,instLaborCost,instUnitPrice,instUnits,qaqcBase,instPlannerWorkAccom,instPlannerPerDiem,instPlannerTourist,instPlannerQaqcAccom);
   renderMobPlannerLines(ni,mobRegionCost,mobBaseRaw,{cont:cm,buf:mobBuf,markup:mobMk});
   if(typeof renderMobCalcBar==='function') renderMobCalcBar();
-  var assmCarcass=ni?totU:(qAssembly.carcassCount>0?qAssembly.carcassCount:totU);
+  var assmCarcass=instUnits;
   var assmBase=na?assmRate*assmCarcass:0;
+  var _aun=el('assm-units-note'); if(_aun) _aun.textContent=(qFabMode==='services')?'Based on the Carcass / Unit Count set above.':'Based on cabinet quantity in the scope of work above.';
   var instC=(instBase+assmBase)*(1+ci/100)*(1+instBuf/100)*(1+instMk/100);
   // Per-component chains; discount buffer on combined total; commissions on subtotal
   var combined=regularFabC+mobC+instC+dcCost+(svSep?svCost:0)+outsourceFinal;
@@ -11698,6 +11793,7 @@ function captureQuotationSnapshot(){
     areas:JSON.parse(JSON.stringify(qAreas)),
     fabMode:qFabMode,
     assembly:JSON.parse(JSON.stringify(qAssembly)),
+    carcassUnitCount:qCarcassUnitCount,
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
     designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
@@ -11724,6 +11820,7 @@ function restoreQuotationSnapshot(snap){
   qAreas=JSON.parse(JSON.stringify(snap.areas));
   qFabMode=snap.fabMode;
   qAssembly=JSON.parse(JSON.stringify(snap.assembly));
+  qCarcassUnitCount=snap.carcassUnitCount||(snap.assembly&&snap.assembly.carcassCount)||0; // migrate pre-2026-07-04 saves
   qSiteVisit=JSON.parse(JSON.stringify(snap.siteVisit));
   qCuttingList=JSON.parse(JSON.stringify(snap.cuttingList));
   qDesignCharge=JSON.parse(JSON.stringify(snap.designCharge));
@@ -11755,6 +11852,8 @@ function syncOptionUI(){
   renderClientMatSection();
   if(el('assm-toggle')) el('assm-toggle').checked=qAssembly.enabled;
   if(el('assm-body')) el('assm-body').style.display=qAssembly.enabled?'block':'none';
+  if(el('carcass-unit-count')) el('carcass-unit-count').value=qCarcassUnitCount||'';
+  _updateCarcassCountCardVisibility();
   if(el('cl-charge-toggle')) el('cl-charge-toggle').checked=qCuttingList.enabled;
   if(el('cl-charge-body')) el('cl-charge-body').style.display=qCuttingList.enabled?'block':'none';
   if(el('dc-charge-toggle')) el('dc-charge-toggle').checked=qDesignCharge.enabled;
@@ -13143,7 +13242,7 @@ function renderFQCards() {
   var instRate=fqInstRateOverride!==null?fqInstRateOverride:s1InstRate;
   var assmRate=fqAssmRateOverride!==null?fqAssmRateOverride:s1AssmRate;
   var totU=getTotU();
-  var assmCarcass=ni?totU:(qAssembly&&qAssembly.carcassCount>0?qAssembly.carcassCount:totU);
+  var assmCarcass=getInstallCarcassUnits();
 
   var h='<div class="dvdr" style="margin:14px 0 12px"><span>Final Quotation — Cost Adjustments</span></div>';
 
@@ -13572,6 +13671,7 @@ function recalcFQ() {
     for(var a=0;a<qAreas.length;a++) fabBase+=getAreaSubtotal(a);
   }
   var totU=getTotU();
+  var instUnits=getInstallCarcassUnits();
   var clCost=qCuttingList.enabled?calcCuttingListCost():0;
   var _fqclb=el('fq-cl-charge-body'); if(_fqclb) _fqclb.style.display=qCuttingList.enabled?'block':'none';
   var _fqcld=el('fq-cl-charge-disp'); if(_fqcld) _fqcld.textContent=fmtMoney(clCost);
@@ -13604,7 +13704,7 @@ function recalcFQ() {
   var assmRate=fqAssmRateOverride!==null?fqAssmRateOverride:(aCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850);
   // Full installation cost chain — mirrors Stage 1 recalc()
   var instLaborCost = ni ? getInstCostByType(fqInstRegion) : 0;
-  var instUnitPrice = ni&&totU>0 ? instLaborCost/totU : instPriceUnitFor(fqInstRegion);
+  var instUnitPrice = ni&&instUnits>0 ? instLaborCost/instUnits : instPriceUnitFor(fqInstRegion);
   var fqZoneIdx = ni ? (function(){ for(var _zi=0;_zi<INST_ZONES.length;_zi++){if(INST_ZONES[_zi].key===fqInstRegion) return _zi;} return 0; })() : 0;
   var qaqcBase = ni ? calcQAQCCost(fqZoneIdx) : 0;
   var instPlannerWorkAccom = ni&&fqInstPlanner ? (fqInstPlanner.workNightAccom||0) : 0;
@@ -13614,10 +13714,10 @@ function recalcFQ() {
   var instBase = ni ? (instLaborCost+qaqcBase+instPlannerWorkAccom+instPlannerPerDiem+instPlannerTourist+instPlannerQaqcAccom) : 0;
   // Update Stage 2 installation card displays
   var _fqiud=el('fq-inst-unit-disp'); if(_fqiud) _fqiud.textContent=ni?fmtMoney(instUnitPrice):'—';
-  var _fqind=el('fq-inst-units-disp'); if(_fqind) _fqind.textContent=ni?(totU+' unit'+(totU===1?'':'s')):'—';
+  var _fqind=el('fq-inst-units-disp'); if(_fqind) _fqind.textContent=ni?(instUnits+' unit'+(instUnits===1?'':'s')):'—';
   var _fqicd=el('fq-inst-cost-disp'); if(_fqicd) _fqicd.textContent=ni?fmtMoney(instBase):'—';
-  if(typeof renderFQInstCardLines==='function') renderFQInstCardLines(ni,instLaborCost,instUnitPrice,totU,qaqcBase,instPlannerWorkAccom,instPlannerPerDiem,instPlannerTourist,instPlannerQaqcAccom);
-  var assmCarcass=ni?totU:(qAssembly&&qAssembly.carcassCount>0?qAssembly.carcassCount:totU);
+  if(typeof renderFQInstCardLines==='function') renderFQInstCardLines(ni,instLaborCost,instUnitPrice,instUnits,qaqcBase,instPlannerWorkAccom,instPlannerPerDiem,instPlannerTourist,instPlannerQaqcAccom);
+  var assmCarcass=instUnits;
   var assmBase=na?assmRate*assmCarcass:0;
   var instC=(instBase+assmBase)*(1+ci/100)*(1+instBuf/100)*(1+instMk/100);
 
@@ -17392,6 +17492,7 @@ function getFullQuotationState(){
     mobPlannerZone:mobilityState.zone||'',
     mobQaqcPersons:mobilityState.qaqcPersons||1,
     assembly:JSON.parse(JSON.stringify(qAssembly)),
+    carcassUnitCount:qCarcassUnitCount,
     cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
     designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
     customCF:qCustomCF?JSON.parse(JSON.stringify(qCustomCF)):null,
@@ -17536,7 +17637,10 @@ function restoreFullQuotationState(state){
   if(state.mobQaqcPersons) mobilityState.qaqcPersons=state.mobQaqcPersons;
   qSourceOrderId=state.sourceOrderId||null;
   _updateOrderBadge();
-  qAssembly=state.assembly?JSON.parse(JSON.stringify(state.assembly)):{enabled:false,carcassCount:0};
+  qAssembly=state.assembly?JSON.parse(JSON.stringify(state.assembly)):{enabled:false};
+  qCarcassUnitCount=state.carcassUnitCount||(state.assembly&&state.assembly.carcassCount)||0; // migrate pre-2026-07-04 saves
+  var _cucInp=el('carcass-unit-count'); if(_cucInp) _cucInp.value=qCarcassUnitCount||'';
+  _updateCarcassCountCardVisibility();
   qCuttingList=state.cuttingList?JSON.parse(JSON.stringify(state.cuttingList)):{enabled:false};
   qDesignCharge=state.designCharge?JSON.parse(JSON.stringify(state.designCharge)):{enabled:false};
   qCustomCF=state.customCF?JSON.parse(JSON.stringify(state.customCF)):null;
@@ -17874,12 +17978,13 @@ function renderProductionPage() {
   // Sync tab button state (in case page was navigated to directly)
   var dt=el('prod-tab-drawing'); if(dt) dt.classList.toggle('active',prodTab==='drawing');
   var mt=el('prod-tab-mobility'); if(mt) mt.classList.toggle('active',prodTab==='mobility');
-  // Auto-fill assembly carcass count from production result
+  // Auto-fill the shared carcass/unit count from production (shop-drawing) analysis
   if(prodState.result&&prodState.result.carcassCount){
     var pc=prodState.result.carcassCount;
-    if(pc>0&&qAssembly.carcassCount===0){
-      qAssembly.carcassCount=pc;
-      var ac=el("assm-count"); if(ac&&!ac.value) ac.value=pc;
+    if(pc>0&&qCarcassUnitCount===0){
+      qCarcassUnitCount=pc;
+      var ac=el("carcass-unit-count"); if(ac&&!ac.value) ac.value=pc;
+      recalc();
     }
   }
   var noKey=!prodSettings.claudeKey;
