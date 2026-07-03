@@ -3180,8 +3180,19 @@ function instPriceUnitForType(region,cabinetType){
 // Returns total installation labor cost across all areas, per cabinet type × zone
 // Uses _instCalcForZone(zone, type) so complexity is embedded in per-type capacity
 function getInstCostByType(zoneKey){
-  var total=0;
   var fallback=_instCalcForZone(zoneKey, null);
+  if(qFabMode==='services'){
+    // Cutting-list mode: svcItems quantities are panel/edge-banding/etc. counts
+    // in mixed units (sqm, lm, pcs...) — summing rate x qty per line item (the
+    // old behavior) wildly inflated the total. There's no per-cabinet-type
+    // breakdown available here, so charge the flat rate against the single
+    // corrected carcass/unit count for the whole quotation instead — same
+    // value used as the Installation card's unit-count divisor (see
+    // getInstallCarcassUnits), computed once (not per-area, since that count
+    // is already a whole-quotation figure).
+    return fallback*getInstallCarcassUnits();
+  }
+  var total=0;
   for(var a=0;a<qAreas.length;a++){
     if(qFabMode==='carcass'){
       var items=qAreas[a].items||[];
@@ -3189,15 +3200,12 @@ function getInstCostByType(zoneKey){
         var rate=_instCalcForZone(zoneKey, items[i].type);
         total+=rate*(items[i].qty||0);
       }
-    } else if(qFabMode==='bom'){
+    } else { // bom
       var bi=qAreas[a].bomItems||[];
       for(var i=0;i<bi.length;i++){
         var rate=_instCalcForZone(zoneKey, bi[i].type);
         total+=rate*(bi[i].qty||1);
       }
-    } else {
-      var si=qAreas[a].svcItems||[];
-      for(var i=0;i<si.length;i++) total+=fallback*(si[i].qty||0);
     }
   }
   return total;
@@ -4428,13 +4436,25 @@ function onCarcassUnitCountChange() {
 // real Price DB data, which records board consumption in "pc" fractions.
 var BOARD_UNIT_KEYS=['pc','pcs','piece','sheet','bd'];
 function _isBoardUnit(u){ return BOARD_UNIT_KEYS.indexOf(String(u||'').trim().toLowerCase())>=0; }
+// Name keywords for actual board-type materials (plywood/MDF/particle board/
+// melamine/HMR/compact laminate). Unit alone ("pc") isn't specific enough —
+// any piece-priced consumable entered under Materials (glue, sealant, etc.)
+// would otherwise count as a "board" and inflate the average. Requiring BOTH
+// a board-like unit AND a board-family name keeps the estimate to real boards.
+var BOARD_NAME_KEYWORDS=['mdf','plywood','ply','melamine','particle board','particleboard','hmr','compact laminate','marine ply','blockboard','chipboard'];
+function _isBoardMaterial(name,unit){
+  if(!_isBoardUnit(unit)) return false;
+  var n=String(name||'').toLowerCase();
+  for(var i=0;i<BOARD_NAME_KEYWORDS.length;i++){ if(n.indexOf(BOARD_NAME_KEYWORDS[i])>=0) return true; }
+  return false;
+}
 // Sums board-piece quantities from this quotation's cutting-list materials
 // (matItems), across all areas.
 function _boardPcConsumedInQuotation(){
   var total=0;
   for(var a=0;a<qAreas.length;a++){
     var mi=qAreas[a].matItems||[];
-    for(var i=0;i<mi.length;i++){ if(_isBoardUnit(mi[i].unit)) total+=parseFloat(mi[i].qty)||0; }
+    for(var i=0;i<mi.length;i++){ if(_isBoardMaterial(mi[i].name,mi[i].unit)) total+=parseFloat(mi[i].qty)||0; }
   }
   return total;
 }
@@ -4447,7 +4467,7 @@ function _avgBoardPcPerCarcass(){
   var byType={};
   for(var i=0;i<dbTemplates.length;i++){
     var t=dbTemplates[i];
-    if(t.category!=='materials'||!_isBoardUnit(t.unit)) continue;
+    if(t.category!=='materials'||!_isBoardMaterial(t.name,t.unit)) continue;
     byType[t.cabinet]=(byType[t.cabinet]||0)+(parseFloat(t.qty)||0);
   }
   var types=Object.keys(byType);
@@ -4468,7 +4488,7 @@ function suggestCarcassUnitCount(){
     return;
   }
   if(consumed<=0){
-    if(note) note.innerHTML='<span style="color:var(--coral)">No board-type materials (unit = pc/pcs/piece/sheet/bd) found in this quotation\'s Materials yet.</span>';
+    if(note) note.innerHTML='<span style="color:var(--coral)">No board-type materials (plywood/MDF/particle board/melamine/HMR/compact laminate, in pc/pcs/piece/sheet/bd) found in this quotation\'s Materials yet.</span>';
     return;
   }
   var suggested=Math.max(0,Math.round(consumed/avg));
