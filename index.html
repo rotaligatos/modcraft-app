@@ -312,6 +312,8 @@ tr.cl-row:hover td{background:#f4f7fb}
   </div>
   <!-- Claude API Status — Admin/Director/Manager only, rendered by renderDashboard() -->
   <div id="dash-claude-card" style="display:none;margin-bottom:14px"></div>
+  <!-- Supabase Storage usage — Admin/Director/Manager only, rendered by renderDashboard() -->
+  <div id="dash-storage-card" style="display:none;margin-bottom:14px"></div>
   <div id="dash-charts" style="display:grid;grid-template-columns:3fr 2fr;gap:14px;margin-bottom:14px">
     <div class="card" id="dash-chart-card">
       <div class="card-head"><h3><i class="ti ti-chart-line"></i>Monthly revenue vs target</h3></div>
@@ -1080,6 +1082,8 @@ tr.cl-row:hover td{background:#f4f7fb}
         Google Sheets ID: <code style="background:#f4f4f2;padding:2px 6px;border-radius:4px;font-size:11px">1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o</code>
       </div>
     </div></div>
+    <!-- Supabase Storage usage — Admin/Director/Manager only, rendered by renderDashboard()/setStTab -->
+    <div id="settings-storage-card" style="display:none;margin-bottom:14px"></div>
     <!-- Shared Drive folder — Admin sets once; all users inherit via Settings sheet -->
     <div class="card">
       <div class="card-head" style="background:#e0f2ec;border-color:#a0d4c0">
@@ -2793,6 +2797,7 @@ var USE_SUPABASE=true;      // READ quotations+state from Supabase first, fall b
 var SUPA_DUAL_WRITE=true;   // when true, ALSO write quotations+state to Supabase (safe/additive — Sheets stays primary)
 var supa=null;             // supabase-js client
 var supaSession=null;      // current Supabase auth session (null until Google sign-in completes)
+var supaStorageUsage=null; // {totalBytes,quotBytes,logoBytes,fileCount,computedAt} — cached, session-only; refreshed via _refreshStorageUsage()
 var dbServices=[]; var dbMaterials=[]; var dbHardware=[]; var dbTemplates=[];
 var dbLoaded=false;
 var gToken=null;
@@ -7137,6 +7142,14 @@ function renderDashboard() {
     claudeCard.style.display=canSeeApi?'block':'none';
     if(canSeeApi) _renderClaudeApiCard();
   }
+  // Supabase Storage usage card — same access tier as the Claude card; renders
+  // from cache only (no auto-fetch — checking usage lists every stored file,
+  // so it's an explicit Refresh action, not something to run on every visit).
+  var storageCard=el('dash-storage-card');
+  if(storageCard){
+    storageCard.style.display=canSeeApi?'block':'none';
+    if(canSeeApi) _renderStorageUsageCard();
+  }
 }
 
 // ── Claude API token usage tracker ───────────────────────────────────────
@@ -9615,7 +9628,12 @@ function setStTab(t) {
   if(t==="lami") renderLamiSettings();
   if(t==="approvalrouting") renderApprovalRoutingSettings();
   if(t==="users") loadUsersFromSheet();
-  if(t==="company") renderSerialCounterCard();
+  if(t==="company"){
+    renderSerialCounterCard();
+    var canSeeStorage=(currentRole==='Admin'||currentRole==='Director'||currentRole==='Manager');
+    var stgCard=el('settings-storage-card');
+    if(stgCard){ stgCard.style.display=canSeeStorage?'block':'none'; if(canSeeStorage) _renderStorageUsageCard(); }
+  }
 }
 // ── Logo management (Admin only) ──────────────────────────────────────────
 function updateAppLogo() {
@@ -14060,6 +14078,88 @@ function supaVerifyFile(baseSerial,fileName){
         });
     });
   }).catch(function(e){ console.warn('[verify] error',e); return false; });
+}
+// ── Supabase Storage usage tracker (Settings + Dashboard) ──────────────────
+// Recursively lists every file in a bucket, summing sizes. Read-only, no
+// writes. This is what Modcraft has actually stored — NOT the same as
+// Supabase's own enforced billing quota (that needs the Management API,
+// which requires an account-level token that must never live in a browser
+// app — see Settings card copy). Check Supabase's own Usage page for the
+// authoritative limit/number.
+function _supaListAllFiles(bucket,prefix){
+  if(!supaReady()) return Promise.resolve([]);
+  return supa.storage.from(bucket).list(prefix||'',{limit:1000,offset:0,sortBy:{column:'name',order:'asc'}}).then(function(res){
+    if(res.error||!res.data) return [];
+    var files=[], subPromises=[];
+    res.data.forEach(function(entry){
+      var entryPath=prefix?prefix+'/'+entry.name:entry.name;
+      var isFolder=entry.id===null; // Supabase Storage: folders have null id/metadata
+      if(isFolder) subPromises.push(_supaListAllFiles(bucket,entryPath));
+      else files.push({path:entryPath,size:(entry.metadata&&entry.metadata.size)||0});
+    });
+    return Promise.all(subPromises).then(function(subResults){
+      subResults.forEach(function(sub){ files=files.concat(sub); });
+      return files;
+    });
+  }).catch(function(){ return []; });
+}
+function computeSupaStorageUsage(cb){
+  if(!supaReady()){ if(cb) cb(null); return; }
+  Promise.all([_supaListAllFiles('quotations'),_supaListAllFiles('logos')]).then(function(results){
+    var quotFiles=results[0]||[], logoFiles=results[1]||[];
+    var quotBytes=quotFiles.reduce(function(s,f){return s+f.size;},0);
+    var logoBytes=logoFiles.reduce(function(s,f){return s+f.size;},0);
+    supaStorageUsage={
+      totalBytes:quotBytes+logoBytes, quotBytes:quotBytes, logoBytes:logoBytes,
+      fileCount:quotFiles.length+logoFiles.length, computedAt:new Date().toISOString()
+    };
+    if(cb) cb(supaStorageUsage);
+  }).catch(function(){ if(cb) cb(null); });
+}
+// Renders into whichever of the two container ids exist (Dashboard + Settings
+// share the same card content); no-op for ids not currently in the DOM.
+function _renderStorageUsageCard(){
+  var html=_buildStorageUsageHtml();
+  ['dash-storage-card','settings-storage-card'].forEach(function(id){ var e=el(id); if(e) e.innerHTML=html; });
+}
+function _buildStorageUsageHtml(){
+  var limitMB=CF.supaStorageLimitMB||1024;
+  var u=supaStorageUsage;
+  var usedMB=u?(u.totalBytes/1048576):0;
+  var pct=limitMB>0?Math.min(100,Math.round(usedMB/limitMB*100)):0;
+  var color=pct>=90?'var(--coral)':pct>=70?'var(--amber)':'var(--teal)';
+  var lastChecked=u?new Date(u.computedAt).toLocaleString():'Not checked yet this session';
+  return '<div class="card">'
+    +'<div class="card-head"><h3><i class="ti ti-cloud" style="color:#0ea5e9"></i>Supabase Storage Usage</h3>'
+    +'<button class="btn" onclick="_refreshStorageUsage()" id="storage-refresh-btn" style="font-size:12px;padding:4px 10px"><i class="ti ti-refresh"></i>Refresh</button>'
+    +'</div>'
+    +'<div class="card-body">'
+    +(u
+      ?('<div style="display:flex;justify-content:space-between;margin-bottom:4px">'
+        +'<span style="font-size:13px;color:var(--text1)">'+usedMB.toFixed(1)+' MB of '+limitMB+' MB</span>'
+        +'<span style="font-size:13px;font-weight:700;color:'+color+'">'+pct+'%</span>'
+        +'</div>'
+        +'<div style="height:8px;background:var(--bg2);border-radius:4px;overflow:hidden;margin-bottom:8px">'
+        +'<div style="height:100%;width:'+pct+'%;background:'+color+';border-radius:4px;transition:width .4s"></div>'
+        +'</div>'
+        +'<div style="font-size:11px;color:var(--text2)">'+u.fileCount+' file'+(u.fileCount===1?'':'s')+' · quotations '+(u.quotBytes/1048576).toFixed(1)+' MB · logos '+(u.logoBytes/1048576).toFixed(1)+' MB</div>')
+      :'<div style="font-size:12px;color:var(--text2)">Click Refresh to check current usage.</div>')
+    +'<div style="font-size:10px;color:var(--muted);margin-top:6px">Last checked: '+lastChecked+'</div>'
+    +'<div style="margin-top:10px;display:flex;align-items:center;gap:8px">'
+    +'<label style="font-size:11px;color:var(--text2)">Reference limit (MB):</label>'
+    +'<input type="number" min="1" value="'+limitMB+'" oninput="CF.supaStorageLimitMB=parseFloat(this.value)||1024;_renderStorageUsageCard()" style="width:90px;height:26px;font-size:12px">'
+    +'</div>'
+    +'<div style="font-size:10px;color:var(--muted);margin-top:6px">This tracks what Modcraft has actually stored — not Supabase\'s exact billing limit (that requires account-level access this app deliberately never has). Check your Supabase dashboard\'s Usage page for the authoritative number and update the reference above to match.</div>'
+    +'</div></div>';
+}
+function _refreshStorageUsage(){
+  if(!supaReady()){ showToast('Connect to Supabase first (run supaConnect() in the console) to check storage usage.'); return; }
+  var btn=el('storage-refresh-btn'); if(btn){btn.disabled=true;btn.innerHTML='<i class="ti ti-loader"></i> Checking…';}
+  computeSupaStorageUsage(function(u){
+    var b=el('storage-refresh-btn'); if(b){b.disabled=false;b.innerHTML='<i class="ti ti-refresh"></i>Refresh';}
+    _renderStorageUsageCard();
+    if(!u) showToast('Could not check storage usage — see console for details.');
+  });
 }
 // — manual verification helper: compares the Supabase copy of a quotation's
 //   state against the Sheets copy (byte-for-byte JSON diff of top-level keys).
