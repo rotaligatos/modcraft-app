@@ -4034,7 +4034,7 @@ function initQuotation() {
   qPrevSerials=[];
   _lastAcceptedClType='Direct'; _lastAcceptedClCompanySel='';
   var _qpsn=el('q-prev-serial-note'); if(_qpsn) _qpsn.style.display='none';
-  qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}]}];
+  qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}],outsourceMaterials:[],outsourceHardware:[]}];
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus='';
   qInitLockedAt=''; qInitApprovedAt=''; fqLockedAt=''; qClosedAt='';
@@ -4727,11 +4727,14 @@ function getAreaSubtotal(a) {
     // Material & hardware costs: only charged to Direct clients, not Subsidiary
     // Materials excluded when client supplies them; hardware still counted
     if(isDirectClient()){ if(!qClientSupplyMat) sub+=getAreaMatSubtotal(a); sub+=getAreaHwSubtotal(a); }
+    // Outsource: unconditional (matches BOM mode's existing behavior — an
+    // externally-purchased item's cost isn't waived for Subsidiary clients).
+    sub+=getAreaLevelOutsourceCost(a);
   }
   return sub;
 }
 function addArea() {
-  qAreas.push({name:"Area "+(qAreas.length+1),items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}]});
+  qAreas.push({name:"Area "+(qAreas.length+1),items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}],outsourceMaterials:[],outsourceHardware:[]});
   renderItems();
   logActivity("Added area: Area "+(qAreas.length));
 }
@@ -5027,12 +5030,25 @@ function getBOMItemOutsourceCost(bItem) {
   for(var i=0;i<rows.length;i++) c+=(parseFloat(rows[i].qty)||0)*(parseFloat(rows[i].price)||0);
   return c;
 }
+// Cutting-list/services mode's Outsource rows live directly on the area
+// (qAreas[a].outsourceMaterials/outsourceHardware), not per-cabinet-item —
+// see _outRowsArr. Same qty*price sum as getBOMItemOutsourceCost, just at
+// the area level instead of the BOM-item level.
+function getAreaLevelOutsourceCost(a){
+  var rows=(qAreas[a].outsourceMaterials||[]).concat(qAreas[a].outsourceHardware||[]);
+  var c=0;
+  for(var i=0;i<rows.length;i++) c+=(parseFloat(rows[i].qty)||0)*(parseFloat(rows[i].price)||0);
+  return c;
+}
 function getAreaOutsourceSubtotal(a) {
-  if(qFabMode!=='bom') return 0;
-  var sub=0;
-  var bi=qAreas[a].bomItems||[];
-  for(var i=0;i<bi.length;i++) sub+=getBOMItemOutsourceCost(bi[i])*(bi[i].qty||1);
-  return sub;
+  if(qFabMode==='bom'){
+    var sub=0;
+    var bi=qAreas[a].bomItems||[];
+    for(var i=0;i<bi.length;i++) sub+=getBOMItemOutsourceCost(bi[i])*(bi[i].qty||1);
+    return sub;
+  }
+  if(qFabMode==='services') return getAreaLevelOutsourceCost(a);
+  return 0; // carcass mode: no itemized materials/hardware at all, no Outsource concept
 }
 function onOutRateChange(field,val) {
   var v=parseFloat(val);
@@ -5107,25 +5123,37 @@ function initSiteVisitCard() {
   var disp=el('sv-cost-disp'); if(disp) disp.textContent=fmtMoney(getSiteVisitCost());
 }
 // ── Outsource BOM helpers ─────────────────────────────────────────────────
-function addOutsourceRow(a,ci,cat) {
+// Outsource rows live in two different places depending on fabrication mode:
+// per-BOM-item (qAreas[a].bomItems[ci][cat], ci>=0 — a specific cabinet) or
+// per-area (qAreas[a][cat], ci<0 — cutting-list/services mode, which has no
+// per-cabinet-item structure at all). This is the single lookup every
+// Outsource function goes through so both modes share the exact same logic.
+function _outRowsArr(a,ci,cat){
+  if(ci<0){
+    if(!qAreas[a][cat]) qAreas[a][cat]=[];
+    return qAreas[a][cat];
+  }
   if(!qAreas[a].bomItems[ci][cat]) qAreas[a].bomItems[ci][cat]=[];
-  qAreas[a].bomItems[ci][cat].push({name:'',unit:'pc',qty:1,price:0,saved:false});
+  return qAreas[a].bomItems[ci][cat];
+}
+function addOutsourceRow(a,ci,cat) {
+  _outRowsArr(a,ci,cat).push({name:'',unit:'pc',qty:1,price:0,saved:false});
   renderItems();
 }
 function removeOutsourceRow(a,ci,cat,ri) {
-  qAreas[a].bomItems[ci][cat].splice(ri,1);
+  _outRowsArr(a,ci,cat).splice(ri,1);
   renderItems();
 }
 function onOutsourceRowChange(a,ci,cat,ri,field,val) {
-  if(!qAreas[a].bomItems[ci][cat]) return;
-  var row=qAreas[a].bomItems[ci][cat][ri];
+  var row=_outRowsArr(a,ci,cat)[ri];
+  if(!row) return;
   if(field==='qty'||field==='price') row[field]=parseFloat(val)||0;
   else row[field]=val;
   if(field==='name'||field==='price') row.saved=false;
   var amtEl=el('out-amt-'+a+'-'+ci+'-'+cat+'-'+ri);
   if(amtEl) amtEl.textContent=fmtMoney((row.qty||0)*(row.price||0));
-  updateBOMCostHeader(a,ci);
-  updateBOMAreaSubtotal(a);
+  if(ci>=0) updateBOMCostHeader(a,ci); // per-cabinet cost header — BOM mode only
+  updateBOMAreaSubtotal(a); // safe to call unconditionally — no-ops where #bom-sub-{a} doesn't exist
   recalc();
 }
 // Outsource items are usually genuinely new (not yet in the price DB — that's
@@ -5139,7 +5167,8 @@ function onOutsourceItemSearch(inp,a,ci,cat,ri){
   var nameLC=name.trim().toLowerCase();
   var matchedIdx=-1;
   for(var k=0;k<db.length;k++){ if(db[k].name.trim().toLowerCase()===nameLC){matchedIdx=k;break;} }
-  var row=qAreas[a].bomItems[ci][cat][ri];
+  var row=_outRowsArr(a,ci,cat)[ri];
+  if(!row) return;
   if(matchedIdx>=0){
     var item=db[matchedIdx];
     row.name=item.name; row.unit=item.unit; row.price=parseFloat(item.price)||0; row.saved=true;
@@ -5149,8 +5178,8 @@ function onOutsourceItemSearch(inp,a,ci,cat,ri){
     if(unitEl) unitEl.value=item.unit;
     if(priceEl) priceEl.value=row.price;
     if(amtEl) amtEl.textContent=fmtMoney((row.qty||0)*row.price);
-    updateBOMCostHeader(a,ci);
-    updateBOMAreaSubtotal(a);
+    if(ci>=0) updateBOMCostHeader(a,ci); // per-cabinet cost header — BOM mode only
+    updateBOMAreaSubtotal(a); // safe to call unconditionally — no-ops where #bom-sub-{a} doesn't exist
     recalcSoon();
     renderItems(); // refresh the Save button to its "already saved" checkmark state
   } else {
@@ -5158,7 +5187,8 @@ function onOutsourceItemSearch(inp,a,ci,cat,ri){
   }
 }
 function saveOutsourceToDB(a,ci,cat,ri) {
-  var row=qAreas[a].bomItems[ci][cat][ri];
+  var row=_outRowsArr(a,ci,cat)[ri];
+  if(!row){showToast('Item not found.');return;}
   if(!row.name){showToast('Please enter an item name before saving.');return;}
   if(!gToken){showToast('Please sign in to save to the database.');return;}
   var sheetName=(cat==='outsourceMaterials')?'Materials':'Hardware';
@@ -5169,7 +5199,7 @@ function saveOutsourceToDB(a,ci,cat,ri) {
   }
   function _doAppend(){
     priceDbAppend(sheetName+'!A:C',[[row.name,row.unit||'pc',row.price||0]])
-      .then(function(){qAreas[a].bomItems[ci][cat][ri].saved=true;renderItems();loadPriceDatabase(false);})
+      .then(function(){row.saved=true;renderItems();loadPriceDatabase(false);})
       .catch(function(e){showToast('Error saving to database: '+(e&&e.message?e.message:e));});
   }
   if(dupFound){_confirm('"'+row.name+'" already exists in the '+sheetName+' database. Add a duplicate entry?',_doAppend);}
@@ -5295,10 +5325,12 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
     +'</div>';
   return h;
 }
+// ci>=0 = a specific BOM cabinet item's Outsource section; ci<0 = the whole
+// area's Outsource section (cutting-list/services mode, which has no
+// per-cabinet-item structure — see _outRowsArr).
 function renderOutsourceSection(a,ci) {
-  var bItem=qAreas[a].bomItems[ci];
-  var matRows=bItem.outsourceMaterials||[];
-  var hwRows=bItem.outsourceHardware||[];
+  var matRows=_outRowsArr(a,ci,'outsourceMaterials');
+  var hwRows=_outRowsArr(a,ci,'outsourceHardware');
   var uopts='<option value="pc">pc</option><option value="lm">lm</option><option value="sqm">sqm</option><option value="sheet">sheet</option><option value="hole">hole</option><option value="set">set</option><option value="lot">lot</option><option value="hr">hr</option>';
   var headerCols='<div style="display:grid;grid-template-columns:2fr 55px 65px 90px 80px 30px 28px;gap:4px;margin-bottom:3px">'
     +'<span style="font-size:9px;color:var(--text2);text-transform:uppercase">Item</span>'
@@ -5538,7 +5570,8 @@ function renderItems() {
       }
       h+='<div style="display:flex;justify-content:space-between;align-items:center;padding-top:6px;border-top:.5px solid var(--border)">'
         +'<button class="btn" onclick="addSvcItem('+a+')" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add service</button>'
-        +'<span id="area-sub-svc-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>';
+        +'<span id="area-sub-svc-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>'
+        +renderOutsourceSection(a,-1); // area-level — for a material/hardware not in the current catalog, without switching to BOM mode
     }
     h+='</div></div>';
   }
