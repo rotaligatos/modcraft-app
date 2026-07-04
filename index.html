@@ -13999,6 +13999,49 @@ function supaUploadQuotationFile(baseSerial,fileName,mimeType,content){
       }).catch(function(e){ console.warn('[supa] quotations storage upload threw',e); });
   }catch(e){ console.warn('[supa] quotations storage upload threw',e); return Promise.resolve(); }
 }
+// Raw-text Drive download — gApiFetch always calls r.json(), which breaks on
+// non-JSON files like Draft.html. Bypasses that for exact string comparison.
+function _driveDownloadRawText(fileId){
+  var pre=gValidToken()?Promise.resolve(gToken):gRefreshToken().catch(_gExpire);
+  return pre.then(function(tok){
+    return fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media&supportsAllDrives=true',{headers:{Authorization:'Bearer '+tok}});
+  }).then(function(r){ return r.text(); });
+}
+// Manual verification helper for Phase A file dual-write: confirms a specific
+// quotation file's Supabase Storage copy is byte-identical to its Drive copy.
+// Run in console (once signed into both the app and supaConnect()):
+//   supaVerifyFile('QT-M00000001', 'QT-M00000001 — World Class Laminate- Inc. — Draft.html')
+// Use the EXACT filename as shown in the app/Drive (with the em dash — this
+// function sanitizes it the same way supaUploadQuotationFile does internally
+// to find the Supabase Storage copy, so you don't need to know the sanitized
+// version). Both copies are written from the same in-memory string at save
+// time, so an exact match is expected — any mismatch is a real signal.
+function supaVerifyFile(baseSerial,fileName){
+  if(!supaReady()){ console.warn('[verify] not connected to Supabase — run supaConnect() first'); return Promise.resolve(false); }
+  if(!gToken){ console.warn('[verify] not signed into the app — sign in first'); return Promise.resolve(false); }
+  var storageKey=_supaSafeStorageKey(baseSerial)+'/'+_supaSafeStorageKey(fileName);
+  return supa.storage.from('quotations').download(storageKey).then(function(supaRes){
+    if(supaRes.error){ console.warn('[verify] Supabase Storage download failed ('+storageKey+'):',supaRes.error.message||supaRes.error); return false; }
+    return supaRes.data.text().then(function(supaText){
+      return ensureDriveFolder().then(function(rootId){ return ensureQuotationFolder(baseSerial,rootId); })
+        .then(function(folderId){
+          var qry=encodeURIComponent("name='"+fileName.replace(/'/g,"\\'")+"' and '"+folderId+"' in parents and trashed=false");
+          return _driveGet('files?q='+qry+'&fields=files(id)&'+_DRIVE_FLAGS);
+        })
+        .then(function(d){
+          var fileId=d.files&&d.files[0]&&d.files[0].id;
+          if(!fileId){ console.warn('[verify] Drive file not found:',fileName); return false; }
+          return _driveDownloadRawText(fileId);
+        })
+        .then(function(driveText){
+          var match=driveText===supaText;
+          if(match) console.log('✓ MATCH — Drive and Supabase copies are byte-identical ('+supaText.length+' chars)');
+          else console.warn('✗ MISMATCH — Drive: '+driveText.length+' chars vs Supabase: '+supaText.length+' chars');
+          return match;
+        });
+    });
+  }).catch(function(e){ console.warn('[verify] error',e); return false; });
+}
 // — manual verification helper: compares the Supabase copy of a quotation's
 //   state against the Sheets copy (byte-for-byte JSON diff of top-level keys).
 //   Run supaVerifyRead('QT-XXXXXX-XXXX') in the browser console (once signed
