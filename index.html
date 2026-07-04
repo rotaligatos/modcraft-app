@@ -356,6 +356,7 @@ tr.cl-row:hover td{background:#f4f7fb}
       <button class="nav-btn" id="s2btn" onclick="goStage(2)" style="opacity:.4;cursor:not-allowed"><i class="ti ti-ruler-2"></i><div><div>Stage 2</div><div style="font-size:10px;color:var(--text2)">Detailed spec</div></div></button>
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px;padding-right:4px">
         <span class="serial-tag" id="q-serial"></span>
+        <span id="q-prev-serial-note" style="display:none;font-size:10px;color:var(--text2);cursor:help"></span>
         <span id="q-order-badge" style="display:none;background:#e8f4fd;color:#1a73e8;border:1px solid #acd;border-radius:4px;font-size:11px;padding:2px 7px;font-weight:500"></span>
         <span class="pill pill-amber" id="q-status">Draft</span>
         <button class="btn btn-danger" id="revise-btn" style="display:none;font-size:12px;padding:4px 10px" onclick="openRevise()"><i class="ti ti-edit"></i>Revise</button>
@@ -2387,6 +2388,10 @@ var qRevisedFrom = "";
 var qOptionsList = [];      // [{id, label, snapshot, status:'active'|'approved'|'archived', grand}]
 var qBaseSerial = '';       // base serial without option suffix
 var qActiveOptionId = 0;    // 0 = no options, 1+ = current option number
+var qPrevSerials = [];      // serial(s) this quotation was renumbered FROM (company changed after first save) — kept for traceability
+var _lastAcceptedClType = 'Direct';      // last cl-type value the serial-prefix check accepted (for reverting on cancel)
+var _lastAcceptedClCompanySel = '';      // last cl-company-sel value accepted
+var _skipCompanyPrefixCheck = false;     // guards against re-triggering the check while programmatically reverting
 var qVatApproved = true;
 var qDiscApproved = false;
 var qDiscPct = 0;
@@ -2847,9 +2852,16 @@ var qInitLockedAt='', qInitApprovedAt='', fqLockedAt='', qClosedAt='';
 // ── Serial counters — loaded from Settings sheet at login ─────────────────
 var serialCounters = { W: 1, C: 1, M: 1 };  // next available number per prefix
 
+// Prefix follows the QUOTATION's own company (Direct → the staff member's own
+// company; Subsidiary → whichever company is selected in Client Information),
+// NOT just whoever is logged in — so a WCLI staffer issuing a quotation under
+// CWLI (subsidiary) gets a "C" serial, keeping each entity's own sequence
+// coherent. Falls back to currentUserCompany before login / before the
+// quotation form has rendered (cl-type doesn't exist yet).
 function _serialPrefix(){
   // WCLI → W; MSSI → M; CWLI (Cebu World Laminate) → C
-  var co = (currentUserCompany || '').toLowerCase();
+  var type = (typeof el==='function' && el('cl-type')) ? el('cl-type').value : 'Direct';
+  var co = ((typeof getCompanyName==='function' ? getCompanyName(type) : null) || currentUserCompany || '').toLowerCase();
   if (co.indexOf('cebu') >= 0) return 'C';
   if (co.indexOf('module') >= 0) return 'M'; // Module Systems and Services, Inc.
   return 'W'; // World Class Laminate, Inc. (default/fallback)
@@ -4011,6 +4023,9 @@ function initQuotation() {
   // ── Full state reset — every field, every variable ──────────────────────
   qSerial=_peekNextSerial(); // preview only — real number claimed at first save, see gSaveQuotation()
   qSerialCommitted=false;
+  qPrevSerials=[];
+  _lastAcceptedClType='Direct'; _lastAcceptedClCompanySel='';
+  var _qpsn=el('q-prev-serial-note'); if(_qpsn) _qpsn.style.display='none';
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}]}];
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus='';
@@ -4165,11 +4180,98 @@ function renderClientCompanyField() {
       }
     }
     row.innerHTML = '<label class="fld">Subsidiary company</label>'
-      + '<select id="cl-company-sel" onchange="updateBanner()">'+opts+'</select>';
+      + '<select id="cl-company-sel" onchange="updateBanner();_onQuotationCompanyMightChange()">'+opts+'</select>';
   }
   updateBanner();
 }
-function onClientTypeChange() { renderClientCompanyField(); renderItems(); }
+function onClientTypeChange() { renderClientCompanyField(); renderItems(); _onQuotationCompanyMightChange(); }
+// ── Serial prefix follows the quotation's company (see _serialPrefix) ─────
+// Called only from the two explicit user-interaction entry points above
+// (cl-type change, cl-company-sel change) — deliberately NOT from
+// updateBanner() itself, since that also runs during normal page/quotation
+// load/restore, where re-checking would wrongly flag old quotations (saved
+// under the previous currentUserCompany-based prefix logic) as "mismatched"
+// just for being opened, not because anyone actually changed anything.
+function _currentPrefixOfSerial(serial){
+  var m=String(serial||'').match(/^QT-([WCM])/);
+  return m?m[1]:null;
+}
+function _onQuotationCompanyMightChange(){
+  if(_skipCompanyPrefixCheck) return;
+  var newType=el('cl-type')?el('cl-type').value:'Direct';
+  var newCo=getCompanyName(newType);
+  var newPrefix=_serialPrefix();
+
+  if(!qSerialCommitted){
+    // Not saved yet — just keep the provisional number preview accurate.
+    _lastAcceptedClType=newType; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
+    qSerial=_peekNextSerial();
+    if(qBaseSerial==='') qBaseSerial=qSerial;
+    var qs=el('q-serial'); if(qs) qs.textContent=qSerial;
+    return;
+  }
+
+  var committedPrefix=_currentPrefixOfSerial(qSerial);
+  if(!committedPrefix || newPrefix===committedPrefix){
+    _lastAcceptedClType=newType; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
+    return; // already saved and no prefix change needed
+  }
+
+  // Prefix would change on an already-saved quotation — confirm before reclaiming.
+  var oldSerial=qSerial;
+  var prefixNames={W:'World Class Laminate',M:'Module Systems and Services',C:'Cebu World Laminate'};
+  var msg='Changing the company to '+newCo+' moves this quotation to a different numbering series ('
+    +(prefixNames[committedPrefix]||committedPrefix)+' → '+(prefixNames[newPrefix]||newPrefix)+').\n\n'
+    +'A NEW quotation number will be assigned. The current number ('+oldSerial+') will be kept on record for traceability.\n\nContinue?';
+  _confirm(msg,function(){
+    _claimSerialForNewPrefix(oldSerial,function(newSerial){
+      if(!newSerial){ showToast('Could not assign a new number — try again.'); _revertCompanyChange(); return; }
+      qPrevSerials=qPrevSerials||[]; qPrevSerials.push(oldSerial);
+      qSerial=newSerial; qBaseSerial=newSerial;
+      var qs=el('q-serial'); if(qs) qs.textContent=newSerial;
+      _lastAcceptedClType=newType; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
+      logActivity('Quotation renumbered '+oldSerial+' → '+newSerial+' (company changed to '+newCo+')');
+      showToast('Quotation renumbered to '+newSerial+' — previous number '+oldSerial+' kept on record.');
+      renderPrevSerialNote();
+      gSaveQuotation();
+    });
+  },function(){
+    _revertCompanyChange();
+  });
+}
+function _revertCompanyChange(){
+  _skipCompanyPrefixCheck=true;
+  var ct=el('cl-type'); if(ct) ct.value=_lastAcceptedClType;
+  renderClientCompanyField(); // rebuilds cl-company-sel per the reverted type
+  var cs=el('cl-company-sel'); if(cs&&_lastAcceptedClCompanySel) cs.value=_lastAcceptedClCompanySel;
+  updateBanner();
+  _skipCompanyPrefixCheck=false;
+}
+// Claims a fresh serial for whatever _serialPrefix() currently resolves to
+// (the NEW company, since the dropdown has already changed by the time this
+// runs) — tries the atomic claim service first, falls back to the same
+// existence-check mechanism used for ordinary first-save collisions.
+function _claimSerialForNewPrefix(oldSerial,cb){
+  var prefix=_serialPrefix();
+  if(SERIAL_CLAIM_URL){
+    _claimSerialAtomic(prefix,function(newSerial){
+      if(newSerial) cb(newSerial); else _resolveSerialCollision(oldSerial).then(cb);
+    });
+    return;
+  }
+  _resolveSerialCollision(oldSerial).then(cb);
+}
+function renderPrevSerialNote(){
+  var e=el('q-prev-serial-note');
+  if(!e) return;
+  if(qPrevSerials&&qPrevSerials.length){
+    e.style.display='inline';
+    e.title='Previously numbered: '+qPrevSerials.join(' → ');
+    e.textContent='(was '+qPrevSerials[qPrevSerials.length-1]+')';
+  } else {
+    e.style.display='none';
+  }
+}
 // ── Client segment (B2B / B2C) ────────────────────────────────────────────
 var B2B_SEGS=['General Contractors & Builders','Architects & Interior Designers','Real Estate Developers','Commercial/Corporate','Hotels & Hospitality'];
 var B2C_SEGS=['Homeowners','Condominium Owners','First time Homebuyers'];
@@ -11863,6 +11965,7 @@ function captureQuotationSnapshot(){
     fabMode:qFabMode,
     assembly:JSON.parse(JSON.stringify(qAssembly)),
     carcassUnitCount:qCarcassUnitCount,
+    prevSerials:JSON.parse(JSON.stringify(qPrevSerials||[])),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
     designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
@@ -11890,6 +11993,8 @@ function restoreQuotationSnapshot(snap){
   qFabMode=snap.fabMode;
   qAssembly=JSON.parse(JSON.stringify(snap.assembly));
   qCarcassUnitCount=snap.carcassUnitCount||(snap.assembly&&snap.assembly.carcassCount)||0; // migrate pre-2026-07-04 saves
+  qPrevSerials=snap.prevSerials?JSON.parse(JSON.stringify(snap.prevSerials)):[];
+  renderPrevSerialNote();
   qSiteVisit=JSON.parse(JSON.stringify(snap.siteVisit));
   qCuttingList=JSON.parse(JSON.stringify(snap.cuttingList));
   qDesignCharge=JSON.parse(JSON.stringify(snap.designCharge));
@@ -17774,6 +17879,7 @@ function getFullQuotationState(){
     location:(el('cl-location')?el('cl-location').value:''),
     agent:(el('cl-agent')?el('cl-agent').value:''),
     type:(el('cl-type')?el('cl-type').value:'Direct'),
+    company:(el('cl-company-sel')?el('cl-company-sel').value:''), // subsidiary company selection — was never persisted before 2026-07-04
     service:(el('cl-service')?el('cl-service').value:'Fabrication only'),
     segment:(el('cl-segment')?el('cl-segment').value:''),
     segmentOther:(el('cl-segment-other')?el('cl-segment-other').value:'')
@@ -17796,6 +17902,7 @@ function getFullQuotationState(){
     mobQaqcPersons:mobilityState.qaqcPersons||1,
     assembly:JSON.parse(JSON.stringify(qAssembly)),
     carcassUnitCount:qCarcassUnitCount,
+    prevSerials:JSON.parse(JSON.stringify(qPrevSerials||[])),
     cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
     designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
     customCF:qCustomCF?JSON.parse(JSON.stringify(qCustomCF)):null,
@@ -17944,6 +18051,8 @@ function restoreFullQuotationState(state){
   qCarcassUnitCount=state.carcassUnitCount||(state.assembly&&state.assembly.carcassCount)||0; // migrate pre-2026-07-04 saves
   var _cucInp=el('carcass-unit-count'); if(_cucInp) _cucInp.value=qCarcassUnitCount||'';
   _updateCarcassCountCardVisibility();
+  qPrevSerials=state.prevSerials?JSON.parse(JSON.stringify(state.prevSerials)):[];
+  renderPrevSerialNote();
   qCuttingList=state.cuttingList?JSON.parse(JSON.stringify(state.cuttingList)):{enabled:false};
   qDesignCharge=state.designCharge?JSON.parse(JSON.stringify(state.designCharge)):{enabled:false};
   qCustomCF=state.customCF?JSON.parse(JSON.stringify(state.customCF)):null;
@@ -17964,8 +18073,15 @@ function restoreFullQuotationState(state){
   if(el('cl-location')) el('cl-location').value=c.location||'';
   if(el('cl-agent')) el('cl-agent').value=c.agent||'';
   if(el('cl-type')) el('cl-type').value=c.type||'Direct';
+  if(typeof renderClientCompanyField==='function') renderClientCompanyField(); // rebuilds cl-company-sel per the restored type
+  if(c.company&&el('cl-company-sel')){ el('cl-company-sel').value=c.company; updateBanner(); }
   if(el('cl-service')) el('cl-service').value=c.service||'Fabrication only';
   if(typeof onServiceChange==='function') onServiceChange();
+  // Baseline for the serial-prefix-change check (see _onQuotationCompanyMightChange) —
+  // capture AFTER the client type/company fields above are actually restored,
+  // so re-interacting with them later doesn't compare against stale defaults.
+  _lastAcceptedClType=el('cl-type')?el('cl-type').value:'Direct';
+  _lastAcceptedClCompanySel=el('cl-company-sel')?el('cl-company-sel').value:'';
   if(el('cl-segment')) el('cl-segment').value=c.segment||'';
   if(el('cl-segment-other')) el('cl-segment-other').value=c.segmentOther||'';
   var d=state.dates||{};
