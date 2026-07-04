@@ -13969,6 +13969,28 @@ function supaGetState(serial){
     }).catch(function(){ return null; });
   }catch(e){ return Promise.resolve(null); }
 }
+// — Phase A of the file-storage migration (2026-07-04): dual-write quotation
+//   files (Draft/Final HTML, state.json backup, BOM report, cost detail) into
+//   Supabase Storage's `quotations` bucket, mirrored under the same
+//   <baseSerial>/<fileName> layout as the Drive per-quotation folder. Purely
+//   additive — Drive remains the actual save path and source of truth; this
+//   never blocks, delays, or affects it (fire-and-forget, all errors caught
+//   and logged only). The Synology NAS storage-mirror job pulls from this
+//   bucket once files start landing here. Once verified to reliably match
+//   Drive over time, a later phase can flip which one the app reads from
+//   first (Supabase primary, Drive failover) — not done yet, still Drive-only
+//   on the read side.
+function supaUploadQuotationFile(baseSerial,fileName,mimeType,content){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!baseSerial||!fileName) return Promise.resolve();
+  try{
+    var blob=new Blob([content],{type:mimeType});
+    return supa.storage.from('quotations').upload(baseSerial+'/'+fileName,blob,{contentType:mimeType,upsert:true})
+      .then(function(r){
+        if(r&&r.error) console.warn('[supa] quotations storage upload error:',r.error.message||r.error);
+        else console.log('[supa] quotations storage uploaded:',baseSerial+'/'+fileName);
+      }).catch(function(e){ console.warn('[supa] quotations storage upload threw',e); });
+  }catch(e){ console.warn('[supa] quotations storage upload threw',e); return Promise.resolve(); }
+}
 // — manual verification helper: compares the Supabase copy of a quotation's
 //   state against the Sheets copy (byte-for-byte JSON diff of top-level keys).
 //   Run supaVerifyRead('QT-XXXXXX-XXXX') in the browser console (once signed
@@ -15062,7 +15084,7 @@ function saveQuotationToDrive(typeKey,typeLabel){
   var htmlContent=buildFullQuotationHtml(typeLabel);
   ensureDriveFolder()
     .then(function(rootId){ return ensureQuotationFolder(baseSerial,rootId); })
-    .then(function(quotFolderId){ return _driveUpsertFile(quotFolderId,fileName,'text/html',htmlContent); })
+    .then(function(quotFolderId){ supaUploadQuotationFile(baseSerial,fileName,'text/html',htmlContent); return _driveUpsertFile(quotFolderId,fileName,'text/html',htmlContent); })
     .then(function(r){
       if(!r||!r.id){
         console.warn('Drive HTML save failed:',r&&r.error&&r.error.message);
@@ -15101,7 +15123,7 @@ function saveQuotationStateToDrive(serial,json){
   var fileName=baseSerial+' — '+cn+' — state.json';
   ensureDriveFolder()
     .then(function(rootId){ return ensureQuotationFolder(baseSerial,rootId); })
-    .then(function(quotFolderId){ return _driveUpsertFile(quotFolderId,fileName,'application/json',json); })
+    .then(function(quotFolderId){ supaUploadQuotationFile(baseSerial,fileName,'application/json',json); return _driveUpsertFile(quotFolderId,fileName,'application/json',json); })
     .then(function(r){
       if(r&&r.id){ console.log('Drive state backup saved:',r.name); }
       else { console.warn('Drive state backup failed:',r&&r.error&&r.error.message); _showDriveWarning(r&&r.error&&r.error.message); }
@@ -16369,7 +16391,7 @@ function generateBomReport(){
   var fname=driveFileName(optLabel?optLabel+' — BOM':'BOM');
   ensureDriveFolder()
     .then(function(rootId){return ensureQuotationFolder(qBaseSerial||qSerial,rootId);})
-    .then(function(fid){return _driveUpsertFile(fid,fname,'text/html',html);})
+    .then(function(fid){supaUploadQuotationFile(qBaseSerial||qSerial,fname,'text/html',html); return _driveUpsertFile(fid,fname,'text/html',html);})
     .then(function(r){
       if(r&&r.id) showToast('✓ BOM opened + saved to Drive — '+fname);
     })
@@ -18690,7 +18712,7 @@ function _saveCostDetailToDrive(){
   var fileName=qSerial+' — '+driveClientName()+' — cost detail.json';
   ensureDriveFolder()
     .then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);})
-    .then(function(fid){return _driveUpsertFile(fid,fileName,'application/json',JSON.stringify(payload,null,2));})
+    .then(function(fid){supaUploadQuotationFile(baseSerial,fileName,'application/json',JSON.stringify(payload,null,2)); return _driveUpsertFile(fid,fileName,'application/json',JSON.stringify(payload,null,2));})
     .then(function(r){
       if(r&&r.id) logActivity('Cost detail saved to Drive folder ('+fileName+')');
       else console.warn('Cost detail Drive save failed:',r&&r.error&&r.error.message);
