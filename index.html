@@ -14392,6 +14392,33 @@ function supaConnect(){
 // True once a Supabase session is restored/established — used to show a one-time
 // "Connect" affordance only when needed.
 function supaConnected(){ return !!supaSession; }
+// Auto-connect every signed-in user to Supabase, once per (browser, Google
+// account) — this is what actually turns on the fast indexed-Postgres read
+// path for the whole team, instead of requiring each person to manually run
+// supaConnect() in the browser console (which is how it worked before; see
+// project_synology_migration memory — only the dev session that ran that
+// command ever benefited from the migration in practice).
+//
+// Loop-safety: the "already tried" flag is written to localStorage BEFORE the
+// redirect is triggered, not after success. So even if the OAuth round-trip
+// fails, is cancelled, or the user's popup/redirect is blocked, this never
+// retries on a later page load — it just leaves that browser on the Sheets
+// path silently, exactly as it behaved before this change. Fully additive:
+// if anything here throws or the Supabase client never initialized, the
+// existing Google Sheets/Drive login is completely unaffected.
+function _supaAutoConnect(){
+  if(!gUser||!gUser.email||gUser.email==='local') return; // 'local' = dev/preview bypass (gLocalAccess) — never a real Google account
+  if(!supa) return;          // Supabase client failed to init — Sheets-only, unaffected
+  if(supaSession) return;    // already connected (restored from localStorage, or just completed the redirect)
+  var key='mc_supa_autotried_'+gUser.email.toLowerCase();
+  try{
+    if(localStorage.getItem(key)) return; // already attempted once on this browser+account — never nag/loop
+    localStorage.setItem(key,'1');
+  }catch(e){ return; } // localStorage unavailable (e.g. private/incognito) — skip silently
+  console.log('[supa] first-time auto-connect for this browser — linking Supabase session…');
+  showToast('One-time setup: connecting to the faster database… (redirecting briefly)');
+  setTimeout(function(){ supaConnect(); },600); // let the toast render before the page navigates away
+}
 // — quotations header upsert (dual-write) —
 function supaUpsertQuotation(entry){
   if(!SUPA_DUAL_WRITE||!supaReady()||!entry) return Promise.resolve();
@@ -15230,9 +15257,11 @@ function gCheckRole(){
 }
 function gShowApp(){
   var ov=el('login-overlay'); if(ov) ov.style.display='none';
-  // Supabase session restores itself from localStorage after a one-time connect.
-  // We do NOT auto-redirect here; supaConnect() is triggered manually the first time.
-  setTimeout(function(){ if(supa&&!supaSession) console.log('[supa] not connected — run supaConnect() once to link this device to Supabase'); },1500);
+  // Supabase session restores itself from localStorage on returning visits.
+  // First-ever visit per browser+account: auto-connect once (see _supaAutoConnect
+  // for the loop-safety guard) so everyone actually gets the fast Supabase read
+  // path instead of only whoever manually ran supaConnect() in the console.
+  setTimeout(_supaAutoConnect, 1500);
   // Update topbar role pill
   var rp=el('topbar-role-pill');
   if(rp){
