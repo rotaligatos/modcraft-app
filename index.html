@@ -15060,18 +15060,26 @@ function _migrateBatch(items,concurrency,fn){
   return Promise.all(runners);
 }
 function _migrateSleep(ms){ return new Promise(function(res){ setTimeout(res,ms); }); }
-// Sheets read with exponential-backoff retry on 429 (Too Many Requests) — the
-// migration fires far more API calls in a short span than normal app use, so
-// it can trip Google's per-minute quota partway through. Retries up to
-// maxRetries times (1.5s, 3s, 6s, 12s, 24s) before giving up on that one row.
+// True when a Sheets API error object is a transient rate-limit / quota error
+// (429 or a quota-ish message) — i.e. "try again shortly", NOT a permanent
+// permission/not-found failure. Used to decide whether to retry and to show
+// the right message to the user (see gCheckRole).
+function _isSheetsRateLimit(err){
+  return !!(err&&(err.code===429||/rate|quota|too many|429/i.test(err.message||'')));
+}
+// Sheets read with exponential-backoff retry on 429 (Too Many Requests). Used
+// both by the one-time migration (which fires far more calls than normal use)
+// AND by the login path (many users signing in at once — e.g. 9am — can spike
+// Google's per-minute quota). Retries up to maxRetries times (1.5s, 3s, 6s,
+// 12s, 24s) before giving up and returning the error object to the caller.
 function _sheetsGetWithRetry(range,maxRetries){
   maxRetries=maxRetries==null?5:maxRetries;
   function attempt(n){
     return sheetsGet(range).then(function(d){
-      if(d&&d.error&&(d.error.code===429||/rate|quota|too many/i.test(d.error.message||''))){
+      if(d&&d.error&&_isSheetsRateLimit(d.error)){
         if(n>=maxRetries) return d; // give up, caller will treat as error
         var wait=1500*Math.pow(2,n);
-        console.warn('[migrate] rate-limited on',range,'— retrying in',(wait/1000)+'s ('+(n+1)+'/'+maxRetries+')');
+        console.warn('[sheets] rate-limited on',range,'— retrying in',(wait/1000)+'s ('+(n+1)+'/'+maxRetries+')');
         return _migrateSleep(wait).then(function(){ return attempt(n+1); });
       }
       return d;
@@ -15597,13 +15605,24 @@ function gSignIn(){
 }
 function gCheckRole(){
   var ls=el('login-status'); if(ls){ls.textContent='Loading your permissions...';ls.style.color='#666';}
-  sheetsGet('User Roles!A:X')
+  // Retry on transient 429s: at rush hour many people sign in at once and can
+  // spike Google Sheets' per-minute quota. Without this, a rate-limited login
+  // fell into the data.error branch below and showed the misleading "ask your
+  // Admin to share the spreadsheet" message — telling the user they lack access
+  // when really the server was just briefly busy.
+  _sheetsGetWithRetry('User Roles!A:X',4)
     .then(function(data){
       if(data.error){
         if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
         var ls2=el('login-status');
-        if(ls2) ls2.innerHTML='<span style="color:#d85a30">&#9888; Cannot read the Sheets database — ask your Admin to share the spreadsheet with <b>'+escHtml(gUser.email)+'</b> (Viewer access).</span>';
-        var btn=el('signin-btn');if(btn){btn.disabled=false;btn.innerHTML=gSignInBtnHtml();}
+        var btn0=el('signin-btn');if(btn0){btn0.disabled=false;btn0.innerHTML=gSignInBtnHtml();}
+        if(_isSheetsRateLimit(data.error)){
+          // Transient — still rate-limited after all retries. Tell the user to
+          // wait and try again; do NOT imply a permissions problem.
+          if(ls2) ls2.innerHTML='<span style="color:#d85a30">&#9888; The database is busy right now (too many sign-ins at once). Please wait a few seconds and click Sign in again.</span>';
+        } else {
+          if(ls2) ls2.innerHTML='<span style="color:#d85a30">&#9888; Cannot read the Sheets database — ask your Admin to share the spreadsheet with <b>'+escHtml(gUser.email)+'</b> (Viewer access).</span>';
+        }
         return;
       }
       var rows=data.values||[];
