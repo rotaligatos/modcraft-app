@@ -16224,6 +16224,57 @@ function showDriveToast(url,label){
   t._timer=setTimeout(function(){t.style.display='none';},6000);
 }
 
+// Phase 4a — ONE-TIME backfill: Materials, Hardware, and Cabinet Templates were
+// never dual-written to Supabase in this account — their write path only fires
+// on a re-import/re-init, and nobody has re-run those since the dual-write code
+// shipped (confirmed via direct Supabase query: price_services had 48 rows,
+// the other three had 0). Services is included too for completeness, though it
+// was already populated. Run supaMigratePriceDb() in the console (after
+// supaConnect()) once to seed Supabase from the CURRENT Sheets Price DB before
+// relying on loadPriceDatabase()'s Supabase-first read. Idempotent —
+// supaReplaceTable() clears + rewrites each table, safe to re-run.
+function supaMigratePriceDb(){
+  if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
+  if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
+  console.log('[migrate] backfilling Price DB into Supabase from the current Sheets data…');
+  return Promise.all([
+    priceDbGet('Materials!A:C'),
+    priceDbGet('Hardware!A:C'),
+    priceDbGet('CabinetTemplates!A:F'),
+    priceDbGet('Services!A:C')
+  ]).then(function(results){
+    var matData=results[0], hwData=results[1], tplData=results[2], svcData=results[3];
+    var stats={materials:0,hardware:0,templates:0,services:0};
+    var tasks=[];
+    if(!matData.error&&matData.values){
+      var mats=matData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+      stats.materials=mats.length;
+      tasks.push(supaReplaceTable('price_materials',mats));
+    }
+    if(!hwData.error&&hwData.values){
+      var hws=hwData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+      stats.hardware=hws.length;
+      tasks.push(supaReplaceTable('price_hardware',hws));
+    }
+    if(!tplData.error&&tplData.values){
+      var tpls=tplData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
+      stats.templates=tpls.length;
+      tasks.push(supaReplaceTable('cabinet_templates',tpls));
+    }
+    if(!svcData.error&&svcData.values){
+      var svcs=svcData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+      stats.services=svcs.length;
+      tasks.push(supaReplaceTable('price_services',svcs));
+    }
+    return Promise.all(tasks).then(function(){
+      console.log('[migrate] Price DB backfill done:',stats);
+      return stats;
+    });
+  }).catch(function(e){
+    console.warn('[migrate] Price DB backfill failed',e);
+    return null;
+  });
+}
 // ── Price Database helpers ────────────────────────────────────────────────
 function priceDbGet(range){
   return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID+'/values/'+encodeURIComponent(range)+'?valueRenderOption=UNFORMATTED_VALUE',{
@@ -17568,9 +17619,50 @@ function _syncServicesFromDb(){
   });
   if(document.getElementById('services-rows')) renderServicesSettings();
 }
+// — Price DB read (Phase 4a). Unlike approvals/messages (Phase 3), an EMPTY
+//   table here means "not backfilled yet" (see supaMigratePriceDb), not a
+//   normal valid state — so this requires ALL FOUR tables to have at least
+//   one row, and any error or any-one-empty falls back to Sheets for all
+//   four together. Never mixes sources (e.g. Services from Supabase but
+//   Materials from Sheets) — that would risk an internally inconsistent
+//   catalog that's hard to reason about. —
+function supaGetPriceDb(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return Promise.all([
+      supa.from('price_services').select('name,unit,price'),
+      supa.from('price_materials').select('name,unit,price'),
+      supa.from('price_hardware').select('name,unit,price'),
+      supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price')
+    ]).then(function(results){
+      var svc=results[0],mat=results[1],hw=results[2],tpl=results[3];
+      if(svc.error||mat.error||hw.error||tpl.error) return null;
+      if(!svc.data||!svc.data.length||!mat.data||!mat.data.length||!hw.data||!hw.data.length||!tpl.data||!tpl.data.length) return null;
+      return {services:svc.data,materials:mat.data,hardware:hw.data,templates:tpl.data};
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 function loadPriceDatabase(showFeedback) {
   if(!gToken) return;
   if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Loading price database…</div>';}
+  if(USE_SUPABASE&&supaReady()){
+    supaGetPriceDb().then(function(data){
+      if(data===null){ _loadPriceDatabaseFromSheets(showFeedback); return; }
+      dbServices=data.services.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
+      dbMaterials=data.materials.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
+      dbHardware=data.hardware.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
+      dbTemplates=data.templates.map(function(r){return {cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0};});
+      _syncServicesFromDb();
+      dbLoaded=true;
+      renderPriceDbSettings();
+      if(qFabMode==='bom') renderItems();
+      if(qFabMode==='services') syncSvcMatHwPricesFromDB();
+    });
+    return;
+  }
+  _loadPriceDatabaseFromSheets(showFeedback);
+}
+function _loadPriceDatabaseFromSheets(showFeedback) {
   // Fetch all 4 tabs in PARALLEL (was sequential — 4 round-trips end-to-end).
   // Total wait = the slowest single call instead of the sum of all four.
   Promise.all([
