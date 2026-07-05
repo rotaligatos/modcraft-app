@@ -15077,17 +15077,46 @@ function supaGetMessages(){
 }
 // — generic full-table replace (delete-all + bulk insert) for Price DB / Logistics DB
 //   "clear then rewrite" tables that mirror the Sheets clear+update pattern —
+// Guards against two overlapping replace calls on the SAME table racing each
+// other — delete-then-insert is not atomic, so if a second call's delete fires
+// while a first call's (possibly large, slow) insert is still in flight, both
+// inserts land and the table ends up with duplicated rows. Confirmed this
+// exact failure mode in production: a large Materials table (~50k+ real rows)
+// ended up tripled after supaMigratePriceDb() was invoked more than once
+// while the first run's insert was still working through it.
+var _supaReplaceInFlight={};
 function supaReplaceTable(table,rows){
   if(!SUPA_DUAL_WRITE||!supaReady()) return Promise.resolve();
+  if(_supaReplaceInFlight[table]){
+    console.warn('[supa] '+table+' replace skipped — a previous replace for this table is still running; wait for it to finish rather than re-running.');
+    return Promise.resolve();
+  }
+  _supaReplaceInFlight[table]=true;
+  function chunk(arr,size){ var out=[]; for(var i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size)); return out; }
+  function done(){ _supaReplaceInFlight[table]=false; }
   try{
     return supa.from(table).delete().gt('id',0).then(function(){
       if(!rows||!rows.length) return null;
-      return supa.from(table).insert(rows);
-    }).then(function(r){
-      if(r&&r.error) console.warn('[supa] '+table+' replace error:',r.error.message||r.error);
-      else console.log('[supa] '+table+' replaced:',rows?rows.length:0,'rows');
-    }).catch(function(e){ console.warn('[supa] '+table+' replace threw',e); });
-  }catch(e){ return Promise.resolve(); }
+      // Chunk large tables (e.g. a 50k+ row Materials catalog) into smaller
+      // sequential inserts instead of one giant request — safer against
+      // timeouts/payload limits, and each batch either fully lands or fails
+      // clearly rather than one opaque all-or-nothing call.
+      var batches=chunk(rows,500);
+      var p=Promise.resolve();
+      batches.forEach(function(b){
+        p=p.then(function(){ return supa.from(table).insert(b); }).then(function(r){
+          if(r&&r.error) throw new Error(r.error.message||'insert error');
+        });
+      });
+      return p;
+    }).then(function(){
+      console.log('[supa] '+table+' replaced:',rows?rows.length:0,'rows');
+      done();
+    }).catch(function(e){
+      console.warn('[supa] '+table+' replace failed:',e&&e.message?e.message:e);
+      done();
+    });
+  }catch(e){ done(); return Promise.resolve(); }
 }
 // — user upsert / delete (dual-write) —
 function supaUpsertUser(u){
@@ -16233,9 +16262,16 @@ function showDriveToast(url,label){
 // supaConnect()) once to seed Supabase from the CURRENT Sheets Price DB before
 // relying on loadPriceDatabase()'s Supabase-first read. Idempotent —
 // supaReplaceTable() clears + rewrites each table, safe to re-run.
+// Guards against the whole migration being kicked off twice while still
+// running — e.g. pasting the command again because the console didn't show
+// an obvious "done" yet. supaReplaceTable() now guards each individual table
+// too, but this stops the redundant Sheets reads and duplicate work outright.
+var _priceDbMigrationInFlight=false;
 function supaMigratePriceDb(){
+  if(_priceDbMigrationInFlight){ console.warn('[migrate] already running — wait for the "Price DB backfill done" log before running this again.'); return Promise.resolve(null); }
   if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
+  _priceDbMigrationInFlight=true;
   console.log('[migrate] backfilling Price DB into Supabase from the current Sheets data…');
   return Promise.all([
     priceDbGet('Materials!A:C'),
@@ -16273,6 +16309,9 @@ function supaMigratePriceDb(){
   }).catch(function(e){
     console.warn('[migrate] Price DB backfill failed',e);
     return null;
+  }).then(function(result){
+    _priceDbMigrationInFlight=false;
+    return result;
   });
 }
 // ── Price Database helpers ────────────────────────────────────────────────
