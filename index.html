@@ -2841,6 +2841,7 @@ var USE_SUPABASE=true;      // READ quotations+state from Supabase first, fall b
 var SUPA_DUAL_WRITE=true;   // when true, ALSO write quotations+state to Supabase (safe/additive — Sheets stays primary)
 var supa=null;             // supabase-js client
 var supaSession=null;      // current Supabase auth session (null until Google sign-in completes)
+var _supaPreOpenedPopup=null; // popup pre-opened synchronously on the Sign-in click, for the one-time Supabase auto-connect (see gSignIn/_supaAutoConnect)
 var supaStorageUsage=null; // {totalBytes,quotBytes,logoBytes,fileCount,computedAt} — cached, session-only; refreshed via _refreshStorageUsage()
 var dbServices=[]; var dbMaterials=[]; var dbHardware=[]; var dbTemplates=[];
 var dbLoaded=false;
@@ -14399,25 +14400,51 @@ function supaConnected(){ return !!supaSession; }
 // project_synology_migration memory — only the dev session that ran that
 // command ever benefited from the migration in practice).
 //
+// Uses a POPUP, not supaConnect()'s full-page redirect — a top-level redirect
+// reloads the entire app and wipes all in-memory state, which visibly looked
+// like "login, back to login, login again" (confirmed in testing). The popup
+// is pre-opened blank by gSignIn() synchronously within the click gesture (see
+// there for why), then navigated here once we know whether it's actually
+// needed; the main tab is never reloaded and never re-shows the login screen.
+//
 // Loop-safety: the "already tried" flag is written to localStorage BEFORE the
-// redirect is triggered, not after success. So even if the OAuth round-trip
-// fails, is cancelled, or the user's popup/redirect is blocked, this never
-// retries on a later page load — it just leaves that browser on the Sheets
-// path silently, exactly as it behaved before this change. Fully additive:
-// if anything here throws or the Supabase client never initialized, the
-// existing Google Sheets/Drive login is completely unaffected.
-function _supaAutoConnect(){
-  if(!gUser||!gUser.email||gUser.email==='local') return; // 'local' = dev/preview bypass (gLocalAccess) — never a real Google account
-  if(!supa) return;          // Supabase client failed to init — Sheets-only, unaffected
-  if(supaSession) return;    // already connected (restored from localStorage, or just completed the redirect)
+// popup is used, not after success. So even if the OAuth round-trip fails, is
+// cancelled, or the popup was blocked, this never retries on a later page
+// load — it just leaves that browser on the Sheets path silently, exactly as
+// it behaved before this change. Fully additive: if anything here throws or
+// the Supabase client never initialized, the existing Sheets/Drive login is
+// completely unaffected.
+function _supaAutoConnect(popup){
+  function closeUnusedPopup(){ if(popup){ try{popup.close();}catch(e){} } }
+  if(!gUser||!gUser.email||gUser.email==='local'){ closeUnusedPopup(); return; } // 'local' = dev/preview bypass (gLocalAccess)
+  if(!supa){ closeUnusedPopup(); return; }       // Supabase client failed to init — Sheets-only, unaffected
+  if(supaSession){ closeUnusedPopup(); return; } // already connected (restored from localStorage)
   var key='mc_supa_autotried_'+gUser.email.toLowerCase();
   try{
-    if(localStorage.getItem(key)) return; // already attempted once on this browser+account — never nag/loop
+    if(localStorage.getItem(key)){ closeUnusedPopup(); return; } // already attempted once — never nag/loop
     localStorage.setItem(key,'1');
-  }catch(e){ return; } // localStorage unavailable (e.g. private/incognito) — skip silently
+  }catch(e){ closeUnusedPopup(); return; } // localStorage unavailable (e.g. private/incognito) — skip silently
+  if(!popup||popup.closed){
+    console.warn('[supa] auto-connect: popup unavailable (blocked or closed by user) — staying on Sheets for this session');
+    return;
+  }
   console.log('[supa] first-time auto-connect for this browser — linking Supabase session…');
-  showToast('One-time setup: connecting to the faster database… (redirecting briefly)');
-  setTimeout(function(){ supaConnect(); },600); // let the toast render before the page navigates away
+  showToast('One-time setup: connecting to the faster database…');
+  var back=window.location.href.split('#')[0].split('?')[0];
+  var popupUrl=back+'?supaAuthPopup=1';
+  supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:popupUrl,skipBrowserRedirect:true}}).then(function(r){
+    if(r.error||!r.data||!r.data.url){ console.warn('[supa] auto-connect: could not get OAuth URL',r.error&&r.error.message); closeUnusedPopup(); return; }
+    try{ popup.location.href=r.data.url; }catch(e){ console.warn('[supa] auto-connect: could not navigate popup',e); closeUnusedPopup(); return; }
+    var checkTimer=setInterval(function(){
+      if(popup.closed){
+        clearInterval(checkTimer);
+        supa.auth.getSession().then(function(res){
+          supaSession=(res&&res.data&&res.data.session)||null;
+          if(supaSession) console.log('[supa] auto-connect succeeded:',supaSession.user&&supaSession.user.email);
+        });
+      }
+    },500);
+  }).catch(function(e){ console.warn('[supa] auto-connect failed',e); closeUnusedPopup(); });
 }
 // — quotations header upsert (dual-write) —
 function supaUpsertQuotation(entry){
@@ -15052,6 +15079,8 @@ function initGoogleAuth(){
       if(resp.error){
         // A failed SILENT refresh lands here too — reject the pending refresh so callers surface it
         if(gRefreshReject){var rj=gRefreshReject;gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null;rj(new Error(resp.error));return;}
+        // Sign-in failed — gShowApp() (which would otherwise use/close it) never runs.
+        if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
         var ls=el('login-status'); if(ls){ls.textContent='Sign-in failed. Please try again.';ls.style.color='#d85a30';}
         var btn=el('signin-btn'); if(btn){btn.disabled=false;btn.innerHTML=gSignInBtnHtml();}
         return;
@@ -15074,6 +15103,9 @@ function initGoogleAuth(){
       // Reject any in-flight silent refresh immediately so the session banner appears
       // without waiting for the 12s timeout (silent refresh can't work inside an iframe).
       if(gRefreshReject){var rj=gRefreshReject;gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null;rj(new Error((err&&err.type)||'oauth_error'));}
+      // Sign-in didn't complete — gShowApp() (which would otherwise use/close it) never
+      // runs, so clean up the pre-opened popup here or it's left orphaned.
+      if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
       var btn=el('signin-btn'); if(btn){btn.disabled=false;btn.innerHTML=gSignInBtnHtml();}
       var t=err&&err.type;
       if(t==='popup_failed_to_open'){ gShowEmbedFallback(); }
@@ -15182,6 +15214,12 @@ function gSignIn(){
     return;
   }
   if(btn){btn.disabled=true;btn.innerHTML='<span style="color:#888">Signing in...</span>';}
+  // Pre-open a blank popup NOW, synchronously within this click — browsers block
+  // window.open() called later from an async callback (which is when we'd otherwise
+  // know whether the one-time Supabase auto-connect is actually needed). Opening it
+  // blank here and deciding what to do with it afterward (navigate it, or close it
+  // if unused) keeps it inside the permitted user-gesture window either way.
+  try{ _supaPreOpenedPopup=window.open('about:blank','supaAuthPopup','width=480,height=640'); }catch(e){ _supaPreOpenedPopup=null; }
   // Popup-based sign-in works inside a Google Sites iframe in most browsers — the popup is a
   // top-level window on accounts.google.com, so it isn't blocked by third-party-cookie rules.
   // If the popup genuinely can't open, error_callback → gShowEmbedFallback offers a new tab.
@@ -15189,6 +15227,7 @@ function gSignIn(){
     gTokenClient.requestAccessToken({prompt:'select_account'});
   }catch(e){
     gShowEmbedFallback();
+    if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e2){} _supaPreOpenedPopup=null; }
   }
 }
 function gCheckRole(){
@@ -15196,6 +15235,7 @@ function gCheckRole(){
   sheetsGet('User Roles!A:X')
     .then(function(data){
       if(data.error){
+        if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
         var ls2=el('login-status');
         if(ls2) ls2.innerHTML='<span style="color:#d85a30">&#9888; Cannot read the Sheets database — ask your Admin to share the spreadsheet with <b>'+escHtml(gUser.email)+'</b> (Viewer access).</span>';
         var btn=el('signin-btn');if(btn){btn.disabled=false;btn.innerHTML=gSignInBtnHtml();}
@@ -15231,6 +15271,7 @@ function gCheckRole(){
         }
       }
       if(!role){
+        if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
         var ls2=el('login-status');
         if(ls2){ls2.innerHTML='<span style="color:#d85a30">&#9888; <b>'+gUser.email+'</b> is not registered. Contact your Admin to be added to the User Roles sheet.</span>';}
         var btn=el('signin-btn');if(btn){btn.disabled=false;btn.innerHTML=gSignInBtnHtml();}
@@ -15240,6 +15281,7 @@ function gCheckRole(){
       if(deviceBindingEnabled&&!exempt&&isNewFmt&&userDeviceId){
         var devId=getDeviceId();
         if(devId.toLowerCase()!==userDeviceId.toLowerCase()){
+          if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
           var ls3=el('login-status');
           if(ls3) ls3.innerHTML='<span style="color:#d85a30">&#9888; <b>This device is not authorized</b> for your account. Contact your Admin to register this device.</span>';
           var btnX=el('signin-btn');if(btnX){btnX.disabled=false;btnX.innerHTML=gSignInBtnHtml();}
@@ -15258,10 +15300,11 @@ function gCheckRole(){
 function gShowApp(){
   var ov=el('login-overlay'); if(ov) ov.style.display='none';
   // Supabase session restores itself from localStorage on returning visits.
-  // First-ever visit per browser+account: auto-connect once (see _supaAutoConnect
-  // for the loop-safety guard) so everyone actually gets the fast Supabase read
-  // path instead of only whoever manually ran supaConnect() in the console.
-  setTimeout(_supaAutoConnect, 1500);
+  // First-ever visit per browser+account: auto-connect once via the popup
+  // gSignIn() pre-opened on click (see _supaAutoConnect for the loop-safety
+  // guard) so everyone actually gets the fast Supabase read path instead of
+  // only whoever manually ran supaConnect() in the console.
+  (function(){ var p=_supaPreOpenedPopup; _supaPreOpenedPopup=null; setTimeout(function(){ _supaAutoConnect(p); },400); })();
   // Update topbar role pill
   var rp=el('topbar-role-pill');
   if(rp){
@@ -20763,12 +20806,31 @@ function escHtml(s){
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-initGoogleAuth();
-initSupabase();
-// Show local-access button if running from file:// protocol
-if(window.location.protocol==='file:'){
-  var _law=el('local-access-wrap');
-  if(_law) _law.style.display='block';
+// ── Supabase auto-connect popup mode ───────────────────────────────────────
+// _supaAutoConnect() navigates a pre-opened popup to this same app URL
+// (tagged ?supaAuthPopup=1) to complete the Google→Supabase OAuth handshake.
+// When THIS load is that popup, skip the entire normal boot (login screen,
+// nav, Sheets auth, etc.) — just wait for the session to land in localStorage
+// (same origin, shared with the opener tab), then close. The opener tab is
+// never reloaded and never shows this.
+if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
+  document.body.innerHTML='<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font:15px -apple-system,Segoe UI,Roboto,sans-serif;color:#1a3a5c;background:#f4f4f2;text-align:center"><div><div style="font-size:28px;margin-bottom:10px">🔗</div><div>Connecting… this window will close automatically.</div></div></div>';
+  initSupabase();
+  var _popupStart=Date.now();
+  var _popupWait=setInterval(function(){
+    if(supaSession||Date.now()-_popupStart>10000){ // success, or give up after 10s so it can never hang open forever
+      clearInterval(_popupWait);
+      try{ window.close(); }catch(e){}
+    }
+  },300);
+} else {
+  initGoogleAuth();
+  initSupabase();
+  // Show local-access button if running from file:// protocol
+  if(window.location.protocol==='file:'){
+    var _law=el('local-access-wrap');
+    if(_law) _law.style.display='block';
+  }
 }
 
 // ── Map Picker (Leaflet + OpenStreetMap + Nominatim) ─────────────────────────
