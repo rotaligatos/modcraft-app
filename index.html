@@ -9435,8 +9435,68 @@ var ORDERS_COLS = ['ID','Received At','Client Name','Company Name','Contact Numb
   'Handgrab Included','Handgrab Groove','Handgrab Installation','Handgrab By',
   'Agent Name','Attachment 1','Attachment 2','Status','Quotation Serial','Sent At','Source Company'];
 
+// — Pending Orders read (Phase 4d). Same rule as Price/Logistics DB: an EMPTY
+//   result means "not backfilled yet" (see supaMigrateOrders), not a normal
+//   valid state — orders accumulate over time (historical ones stay with
+//   status Done), so a real account essentially never has zero rows once
+//   backfilled. —
+function supaGetPendingOrders(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('pending_orders').select('*').then(function(r){
+      if(r.error) return null;
+      if(!r.data||!r.data.length) return null;
+      return r.data;
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 function gLoadPendingOrders(cb) {
   if(!gToken){if(cb)cb();return;}
+  if(USE_SUPABASE&&supaReady()){
+    supaGetPendingOrders().then(function(rows){
+      if(rows===null){ _gLoadPendingOrdersFromSheets(cb); return; }
+      pendingOrders=rows.map(function(r){
+        return {
+          id:         r.id||'',
+          receivedAt: r.received_at||'',
+          clientName: r.client_name||'',
+          companyName:r.company_name||'',
+          contact:    r.contact_number||'',
+          custEmail:  r.customer_email||'',
+          salesEmail: r.salesman_email||'',
+          reqType:    r.request_type||'',
+          service:    r.type_of_service||'',
+          floor:      r.floor||'',
+          substrate:  r.board_substrate||'',
+          haspeFlow:  r.haspe_flow||'',
+          edging:     r.edging||'',
+          boring:     r.boring||'',
+          cutting:    r.cutting||'',
+          lipping:    r.lipping||'',
+          hgIncluded: r.hg_included||'',
+          hgGroove:   r.hg_groove||'',
+          hgInstall:  r.hg_installation||'',
+          hgBy:       r.hg_by||'',
+          agent:      r.agent_name||'',
+          attach1:    r.attachment_1||'',
+          attach2:    r.attachment_2||'',
+          status:     r.status||'Pending',
+          quotSerial: r.quotation_serial||'',
+          sentAt:     r.sent_at||'',
+          sourceCompany: r.source_company||'',
+          _row: null, // no Sheets row for a Supabase-sourced order — see _setOrderStatus, already handles this correctly
+          _raw: null
+        };
+      });
+      ordersLoaded=true;
+      _updateOrdersBadge();
+      if(cb)cb();
+    });
+    return;
+  }
+  _gLoadPendingOrdersFromSheets(cb);
+}
+function _gLoadPendingOrdersFromSheets(cb) {
   sheetsGet('Pending Orders!A:AA').then(function(d){
     pendingOrders=[];
     if(d&&d.values&&d.values.length>1){
@@ -9480,6 +9540,49 @@ function gLoadPendingOrders(cb) {
     _updateOrdersBadge();
     if(cb)cb();
   }).catch(function(){ordersLoaded=true;if(cb)cb();});
+}
+// One-time backfill (Phase 4d) — same reasoning as supaMigratePriceDb()/
+// supaMigrateLogisticsDb(): the webhook only started dual-writing NEW orders
+// today; anything already sitting in Sheets from before that needs a manual
+// one-time push. Runs as the connected browser session (authenticated role,
+// not anon), so — unlike the webhook's anon path — a plain supaReplaceTable()
+// call works fine here; the RLS issue that forced the RPC workaround only
+// affected the unauthenticated anon path. Run in the console (after
+// supaConnect()) once.
+var _ordersMigrationInFlight=false;
+function supaMigrateOrders(){
+  if(_ordersMigrationInFlight){ console.warn('[migrate] already running — wait for the "Orders backfill done" log before running this again.'); return Promise.resolve(null); }
+  if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
+  if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
+  _ordersMigrationInFlight=true;
+  console.log('[migrate] backfilling Pending Orders into Supabase from the current Sheets data…');
+  return sheetsGet('Pending Orders!A:AA').then(function(d){
+    var stats={orders:0};
+    var rows=(d&&!d.error&&d.values)||[];
+    var out=[];
+    for(var i=1;i<rows.length;i++){
+      var r=rows[i]; if(!r||!r[0]) continue;
+      out.push({
+        id:r[0]||'', received_at:r[1]||null, client_name:r[2]||'', company_name:r[3]||'', contact_number:r[4]||'',
+        customer_email:r[5]||'', salesman_email:r[6]||'', request_type:r[7]||'', type_of_service:r[8]||'', floor:r[9]||'',
+        board_substrate:r[10]||'', haspe_flow:r[11]||'', edging:r[12]||'', boring:r[13]||'', cutting:r[14]||'', lipping:r[15]||'',
+        hg_included:r[16]||'', hg_groove:r[17]||'', hg_installation:r[18]||'', hg_by:r[19]||'', agent_name:r[20]||'',
+        attachment_1:r[21]||'', attachment_2:r[22]||'', status:r[23]||'Pending', quotation_serial:r[24]||'', sent_at:r[25]||null,
+        source_company:r[26]||''
+      });
+    }
+    stats.orders=out.length;
+    return supaReplaceTable('pending_orders',out).then(function(){
+      console.log('[migrate] Pending Orders backfill done:',stats);
+      return stats;
+    });
+  }).catch(function(e){
+    console.warn('[migrate] Pending Orders backfill failed',e);
+    return null;
+  }).then(function(result){
+    _ordersMigrationInFlight=false;
+    return result;
+  });
 }
 
 function _updateOrdersBadge(){
