@@ -14529,6 +14529,7 @@ function supaReady(){ return !!(supa&&supaSession); }
 function supaConnect(){
   if(!supa){ console.warn('[supa] client not ready'); return; }
   if(supaSession){ console.log('[supa] already connected as',supaSession.user&&supaSession.user.email); return; }
+  if(_supaConnectInFlight){ console.warn('[supa] another connect attempt (popup) is already in progress — wait for it to finish first'); return; }
   try{
     var back=window.location.href.split('#')[0];
     supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:back}}).then(function(r){
@@ -14643,23 +14644,37 @@ function renderSupaStatus(){
       +'</div>';
   }
 }
+// Guards against a second signInWithOAuth() call starting while one is already
+// in flight — Supabase's PKCE flow stores a single code_verifier in localStorage
+// per client instance, so a second call (e.g. an impatient re-click of "Connect
+// now" while the first attempt is still working) silently overwrites the value
+// the FIRST attempt's popup still needs to complete its exchange. Confirmed via
+// Supabase auth logs on 2026-07-05: a wcli-it-admin attempt's own popup page
+// showed up as the referer on a LATER /authorize call — proof a second attempt
+// was firing from inside the still-open first popup and clobbering it. This
+// flag makes that impossible: a click while one is already running is ignored
+// with a toast instead of silently breaking the one already in progress.
+var _supaConnectInFlight=false;
 // Manual connect — triggered by an actual button click, so (unlike the automatic
 // one-time flow) the popup can be opened directly here without any pre-open
 // gymnastics; a real click is never subject to popup-blocking.
 function _supaManualConnect(){
   if(!supa){ showToast('Fast database client is not available right now.'); return; }
   if(supaSession){ renderSupaStatus(); return; }
+  if(_supaConnectInFlight){ showToast('Already connecting — please wait for it to finish before trying again.'); return; }
   var popup=window.open('about:blank','supaAuthPopup',_supaPopupFeatures());
   _supaWritePopupPlaceholder(popup);
   if(!popup){ showToast('Popup was blocked — allow pop-ups for this site and try again.'); return; }
+  _supaConnectInFlight=true;
   var back=window.location.href.split('#')[0].split('?')[0];
   var popupUrl=back+'?supaAuthPopup=1';
   supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:popupUrl,skipBrowserRedirect:true}}).then(function(r){
-    if(r.error||!r.data||!r.data.url){ showToast('Could not start the connection.'); try{popup.close();}catch(e){} return; }
-    try{ popup.location.href=r.data.url; }catch(e){ try{popup.close();}catch(e2){} return; }
+    if(r.error||!r.data||!r.data.url){ _supaConnectInFlight=false; showToast('Could not start the connection.'); try{popup.close();}catch(e){} return; }
+    try{ popup.location.href=r.data.url; }catch(e){ _supaConnectInFlight=false; try{popup.close();}catch(e2){} return; }
     var checkTimer=setInterval(function(){
       if(popup.closed){
         clearInterval(checkTimer);
+        _supaConnectInFlight=false;
         supa.auth.getSession().then(function(res){
           supaSession=(res&&res.data&&res.data.session)||null;
           renderSupaStatus();
@@ -14667,7 +14682,7 @@ function _supaManualConnect(){
         });
       }
     },500);
-  }).catch(function(e){ showToast('Connection failed.'); try{popup.close();}catch(e2){} });
+  }).catch(function(e){ _supaConnectInFlight=false; showToast('Connection failed.'); try{popup.close();}catch(e2){} });
 }
 // Auto-connect every signed-in user to Supabase, once per (browser, Google
 // account) — this is what actually turns on the fast indexed-Postgres read
@@ -14695,6 +14710,7 @@ function _supaAutoConnect(popup){
   if(!gUser||!gUser.email||gUser.email==='local'){ closeUnusedPopup(); return; } // 'local' = dev/preview bypass (gLocalAccess)
   if(!supa){ closeUnusedPopup(); return; }       // Supabase client failed to init — Sheets-only, unaffected
   if(supaSession){ closeUnusedPopup(); return; } // already connected (restored from localStorage)
+  if(_supaConnectInFlight){ closeUnusedPopup(); return; } // a manual/earlier attempt is already running — never overlap (see _supaConnectInFlight)
   var key='mc_supa_autotried_'+gUser.email.toLowerCase();
   try{
     if(localStorage.getItem(key)){ closeUnusedPopup(); return; } // already attempted once — never nag/loop
@@ -14706,21 +14722,23 @@ function _supaAutoConnect(popup){
   }
   console.log('[supa] first-time auto-connect for this browser — linking Supabase session…');
   showToast('One-time setup: connecting to the faster database…');
+  _supaConnectInFlight=true;
   var back=window.location.href.split('#')[0].split('?')[0];
   var popupUrl=back+'?supaAuthPopup=1';
   supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:popupUrl,skipBrowserRedirect:true}}).then(function(r){
-    if(r.error||!r.data||!r.data.url){ console.warn('[supa] auto-connect: could not get OAuth URL',r.error&&r.error.message); closeUnusedPopup(); return; }
-    try{ popup.location.href=r.data.url; }catch(e){ console.warn('[supa] auto-connect: could not navigate popup',e); closeUnusedPopup(); return; }
+    if(r.error||!r.data||!r.data.url){ _supaConnectInFlight=false; console.warn('[supa] auto-connect: could not get OAuth URL',r.error&&r.error.message); closeUnusedPopup(); return; }
+    try{ popup.location.href=r.data.url; }catch(e){ _supaConnectInFlight=false; console.warn('[supa] auto-connect: could not navigate popup',e); closeUnusedPopup(); return; }
     var checkTimer=setInterval(function(){
       if(popup.closed){
         clearInterval(checkTimer);
+        _supaConnectInFlight=false;
         supa.auth.getSession().then(function(res){
           supaSession=(res&&res.data&&res.data.session)||null;
           if(supaSession) console.log('[supa] auto-connect succeeded:',supaSession.user&&supaSession.user.email);
         });
       }
     },500);
-  }).catch(function(e){ console.warn('[supa] auto-connect failed',e); closeUnusedPopup(); });
+  }).catch(function(e){ _supaConnectInFlight=false; console.warn('[supa] auto-connect failed',e); closeUnusedPopup(); });
 }
 // — quotations header upsert (dual-write) —
 function supaUpsertQuotation(entry){
