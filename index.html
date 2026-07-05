@@ -21167,20 +21167,62 @@ function escHtml(s){
 // _supaAutoConnect() navigates a pre-opened popup to this same app URL
 // (tagged ?supaAuthPopup=1) to complete the Google→Supabase OAuth handshake.
 // When THIS load is that popup, skip the entire normal boot (login screen,
-// nav, Sheets auth, etc.) — just wait for the session to land in localStorage
-// (same origin, shared with the opener tab), then close. The opener tab is
-// never reloaded and never shows this.
+// nav, Sheets auth, etc.) — establish the session here, then HAND IT DIRECTLY
+// to the opener via postMessage before closing.
+//
+// Why postMessage instead of just letting the opener re-read localStorage:
+// that works fine when the opener is a normal top-level tab, but breaks when
+// the opener is running inside a cross-site iframe (e.g. embedded in a
+// Google Site) — browsers partition an iframe's storage separately from a
+// top-level popup's storage for the SAME origin, specifically to prevent
+// cross-site tracking. So the popup and the iframe-embedded app end up
+// writing to two different storage buckets even though both are
+// "rotaligatos.github.io" — confirmed in production: the embed always
+// reported "connection not completed" even though the popup itself
+// completed the OAuth handshake successfully. postMessage crosses that
+// boundary directly; shared storage does not.
 if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
   document.body.innerHTML='<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font:15px -apple-system,Segoe UI,Roboto,sans-serif;color:#1a3a5c;background:#f4f4f2;text-align:center"><div><div style="font-size:28px;margin-bottom:10px">🔗</div><div>Connecting… this window will close automatically.</div></div></div>';
   initSupabase();
   var _popupStart=Date.now();
+  var _popupMsgSent=false;
   var _popupWait=setInterval(function(){
-    if(supaSession||Date.now()-_popupStart>10000){ // success, or give up after 10s so it can never hang open forever
+    if(supaSession&&!_popupMsgSent){
+      _popupMsgSent=true;
+      try{
+        if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:true,
+          access_token:supaSession.access_token,refresh_token:supaSession.refresh_token},'https://rotaligatos.github.io');
+      }catch(e){}
+      clearInterval(_popupWait);
+      setTimeout(function(){ try{ window.close(); }catch(e){} },300); // brief delay so the message has time to leave before the window closes
+    } else if(Date.now()-_popupStart>10000){ // give up after 10s so it can never hang open forever
+      if(!_popupMsgSent){
+        try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false},'https://rotaligatos.github.io'); }catch(e){}
+      }
       clearInterval(_popupWait);
       try{ window.close(); }catch(e){}
     }
   },300);
 } else {
+  // Receive the session handed off directly from a supaAuthPopup=1 popup (see
+  // above) — the ONLY reliable path when this app is running inside a
+  // cross-site iframe, where the popup's own localStorage write is invisible
+  // to us. Origin-checked so only our own popup can post this.
+  window.addEventListener('message',function(event){
+    if(event.origin!=='https://rotaligatos.github.io') return;
+    var d=event.data;
+    if(!d||d.type!=='modcraft-supa-auth') return;
+    if(d.ok&&d.access_token&&d.refresh_token&&supa){
+      supa.auth.setSession({access_token:d.access_token,refresh_token:d.refresh_token}).then(function(r){
+        if(r.error){ console.warn('[supa] setSession from popup handoff failed:',r.error.message||r.error); return; }
+        supaSession=(r.data&&r.data.session)||null;
+        console.log('[supa] session established via popup handoff:',supaSession&&supaSession.user&&supaSession.user.email);
+        if(typeof renderSupaStatus==='function') renderSupaStatus();
+      }).catch(function(e){ console.warn('[supa] setSession threw',e); });
+    } else if(!d.ok){
+      console.warn('[supa] popup reported the connection did not complete');
+    }
+  });
   initGoogleAuth();
   initSupabase();
   // Show local-access button if running from file:// protocol
