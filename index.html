@@ -14662,27 +14662,30 @@ function _supaManualConnect(){
   if(!supa){ showToast('Fast database client is not available right now.'); return; }
   if(supaSession){ renderSupaStatus(); return; }
   if(_supaConnectInFlight){ showToast('Already connecting — please wait for it to finish before trying again.'); return; }
-  var popup=window.open('about:blank','supaAuthPopup',_supaPopupFeatures());
-  _supaWritePopupPlaceholder(popup);
-  if(!popup){ showToast('Popup was blocked — allow pop-ups for this site and try again.'); return; }
-  _supaConnectInFlight=true;
+  // Open the popup straight to our own ?supaAuthPopup=1 page and let IT drive the
+  // whole OAuth handshake (see the ?supaAuthPopup=1 boot branch) — the popup writes
+  // AND reads the PKCE verifier in its own storage context, then hands the finished
+  // session back via postMessage. No signInWithOAuth here in the opener.
   var back=window.location.href.split('#')[0].split('?')[0];
   var popupUrl=back+'?supaAuthPopup=1';
-  supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:popupUrl,skipBrowserRedirect:true}}).then(function(r){
-    if(r.error||!r.data||!r.data.url){ _supaConnectInFlight=false; showToast('Could not start the connection.'); try{popup.close();}catch(e){} return; }
-    try{ popup.location.href=r.data.url; }catch(e){ _supaConnectInFlight=false; try{popup.close();}catch(e2){} return; }
-    var checkTimer=setInterval(function(){
-      if(popup.closed){
-        clearInterval(checkTimer);
+  var popup=window.open(popupUrl,'supaAuthPopup',_supaPopupFeatures());
+  if(!popup){ showToast('Popup was blocked — allow pop-ups for this site and try again.'); return; }
+  _supaConnectInFlight=true;
+  // Fallback for the case where the popup is closed by the user (or dies) without
+  // ever posting a result — release the guard and re-check the session.
+  var checkTimer=setInterval(function(){
+    if(popup.closed){
+      clearInterval(checkTimer);
+      if(_supaConnectInFlight){ // postMessage handler didn't already resolve it
         _supaConnectInFlight=false;
         supa.auth.getSession().then(function(res){
           supaSession=(res&&res.data&&res.data.session)||null;
           renderSupaStatus();
-          showToast(supaSession?'Connected ✓':'Connection was not completed — you can try again any time.');
+          if(!supaSession) showToast('Connection was not completed — you can try again any time.');
         });
       }
-    },500);
-  }).catch(function(e){ _supaConnectInFlight=false; showToast('Connection failed.'); try{popup.close();}catch(e2){} });
+    }
+  },500);
 }
 // Auto-connect every signed-in user to Supabase, once per (browser, Google
 // account) — this is what actually turns on the fast indexed-Postgres read
@@ -14725,20 +14728,22 @@ function _supaAutoConnect(popup){
   _supaConnectInFlight=true;
   var back=window.location.href.split('#')[0].split('?')[0];
   var popupUrl=back+'?supaAuthPopup=1';
-  supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:popupUrl,skipBrowserRedirect:true}}).then(function(r){
-    if(r.error||!r.data||!r.data.url){ _supaConnectInFlight=false; console.warn('[supa] auto-connect: could not get OAuth URL',r.error&&r.error.message); closeUnusedPopup(); return; }
-    try{ popup.location.href=r.data.url; }catch(e){ _supaConnectInFlight=false; console.warn('[supa] auto-connect: could not navigate popup',e); closeUnusedPopup(); return; }
-    var checkTimer=setInterval(function(){
-      if(popup.closed){
-        clearInterval(checkTimer);
+  // Navigate the pre-opened popup to our own handshake page; the popup drives the
+  // whole OAuth flow itself and hands the session back via postMessage (see the
+  // ?supaAuthPopup=1 boot branch). No signInWithOAuth here in the opener.
+  try{ popup.location.href=popupUrl; }catch(e){ _supaConnectInFlight=false; console.warn('[supa] auto-connect: could not navigate popup',e); closeUnusedPopup(); return; }
+  var checkTimer=setInterval(function(){
+    if(popup.closed){
+      clearInterval(checkTimer);
+      if(_supaConnectInFlight){ // postMessage handler didn't already resolve it
         _supaConnectInFlight=false;
         supa.auth.getSession().then(function(res){
           supaSession=(res&&res.data&&res.data.session)||null;
           if(supaSession) console.log('[supa] auto-connect succeeded:',supaSession.user&&supaSession.user.email);
         });
       }
-    },500);
-  }).catch(function(e){ _supaConnectInFlight=false; console.warn('[supa] auto-connect failed',e); closeUnusedPopup(); });
+    }
+  },500);
 }
 // — quotations header upsert (dual-write) —
 function supaUpsertQuotation(entry){
@@ -21440,25 +21445,54 @@ function escHtml(s){
 if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
   document.body.innerHTML='<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font:15px -apple-system,Segoe UI,Roboto,sans-serif;color:#1a3a5c;background:#f4f4f2;text-align:center"><div><div style="font-size:28px;margin-bottom:10px">🔗</div><div>Connecting… this window will close automatically.</div></div></div>';
   initSupabase();
-  var _popupStart=Date.now();
-  var _popupMsgSent=false;
-  var _popupWait=setInterval(function(){
-    if(supaSession&&!_popupMsgSent){
-      _popupMsgSent=true;
-      try{
-        if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:true,
-          access_token:supaSession.access_token,refresh_token:supaSession.refresh_token},'https://rotaligatos.github.io');
-      }catch(e){}
-      clearInterval(_popupWait);
-      setTimeout(function(){ try{ window.close(); }catch(e){} },300); // brief delay so the message has time to leave before the window closes
-    } else if(Date.now()-_popupStart>30000){ // give up after 30s so it can never hang open forever — was 10s; Supabase auth logs showed the server-side callback consistently succeeding but the client-side session detection needing longer than 10s in at least one real account, causing this to close the popup right before it would have finished (see project_synology_migration memory / 2026-07-05 session)
-      if(!_popupMsgSent){
-        try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false},'https://rotaligatos.github.io'); }catch(e){}
-      }
-      clearInterval(_popupWait);
+  // The POPUP itself drives the entire PKCE handshake — this is the key fix.
+  // Previously the OPENER called signInWithOAuth (which writes the PKCE
+  // code_verifier into the OPENER's storage) and the popup tried to complete
+  // the code→token exchange (which reads the verifier from the POPUP's
+  // storage). Those are different storage contexts whenever the opener runs
+  // inside a storage-partitioned iframe (Google Sites embed) — so the popup
+  // never had the verifier and could not perform the exchange at all.
+  // Confirmed via Supabase auth logs 2026-07-05: /callback succeeded on every
+  // attempt but NO /auth/v1/token exchange was ever made for the failing
+  // account. By running signInWithOAuth HERE, the verifier is both written and
+  // later read in this popup's own storage — one context, no cross-window
+  // dependency — then we hand the finished session to the opener via
+  // postMessage (works regardless of the opener's storage partitioning).
+  var _hasCode=new URLSearchParams(window.location.search).has('code')||(window.location.hash.indexOf('code=')>=0)||(window.location.hash.indexOf('access_token=')>=0);
+  if(!_hasCode){
+    // First load of the popup — kick off the Google OAuth redirect FROM HERE.
+    if(supa){
+      supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:window.location.href.split('#')[0]}})
+        .then(function(r){ if(r&&r.error){ try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false,diag:'signInWithOAuth error: '+(r.error.message||r.error)},'https://rotaligatos.github.io'); }catch(e){} try{window.close();}catch(e){} } })
+        .catch(function(e){ try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false,diag:'signInWithOAuth threw'},'https://rotaligatos.github.io'); }catch(_){} try{window.close();}catch(_){} });
+    } else {
+      try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false,diag:'supa client not ready in popup'},'https://rotaligatos.github.io'); }catch(e){}
       try{ window.close(); }catch(e){}
     }
-  },300);
+  } else {
+    // Returned from Google carrying the auth code — detectSessionInUrl (set in
+    // initSupabase) exchanges it using the verifier this popup wrote before it
+    // redirected. Poll for the resulting session, then hand it to the opener.
+    var _popupStart=Date.now();
+    var _popupMsgSent=false;
+    var _popupWait=setInterval(function(){
+      if(supaSession&&!_popupMsgSent){
+        _popupMsgSent=true;
+        try{
+          if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:true,
+            access_token:supaSession.access_token,refresh_token:supaSession.refresh_token},'https://rotaligatos.github.io');
+        }catch(e){}
+        clearInterval(_popupWait);
+        setTimeout(function(){ try{ window.close(); }catch(e){} },300); // brief delay so the message has time to leave before the window closes
+      } else if(Date.now()-_popupStart>30000){ // give up after 30s so it can never hang open forever
+        if(!_popupMsgSent){
+          try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false,diag:'code present but session never resolved (exchange failed)'},'https://rotaligatos.github.io'); }catch(e){}
+        }
+        clearInterval(_popupWait);
+        try{ window.close(); }catch(e){}
+      }
+    },300);
+  }
 } else {
   // Receive the session handed off directly from a supaAuthPopup=1 popup (see
   // above) — the ONLY reliable path when this app is running inside a
@@ -21468,15 +21502,17 @@ if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
     if(event.origin!=='https://rotaligatos.github.io') return;
     var d=event.data;
     if(!d||d.type!=='modcraft-supa-auth') return;
+    _supaConnectInFlight=false; // handshake resolved (either way) — release the guard
     if(d.ok&&d.access_token&&d.refresh_token&&supa){
       supa.auth.setSession({access_token:d.access_token,refresh_token:d.refresh_token}).then(function(r){
         if(r.error){ console.warn('[supa] setSession from popup handoff failed:',r.error.message||r.error); return; }
         supaSession=(r.data&&r.data.session)||null;
         console.log('[supa] session established via popup handoff:',supaSession&&supaSession.user&&supaSession.user.email);
         if(typeof renderSupaStatus==='function') renderSupaStatus();
+        if(typeof showToast==='function') showToast('Connected to the faster database ✓');
       }).catch(function(e){ console.warn('[supa] setSession threw',e); });
     } else if(!d.ok){
-      console.warn('[supa] popup reported the connection did not complete');
+      console.warn('[supa] popup reported the connection did not complete'+(d.diag?(' — '+d.diag):''));
     }
   });
   initGoogleAuth();
