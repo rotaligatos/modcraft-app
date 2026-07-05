@@ -9041,44 +9041,69 @@ function gSaveApprovalRequest(req,cb){
 }
 
 // Load all approval requests from Settings sheet and merge into NOTIFS
+// Shared by both the Supabase and Sheets read paths so they can never drift —
+// same merge-into-NOTIFS logic regardless of where the request rows came from.
+function _mergeApprovalReqsIntoNotifs(reqs){
+  for(var idx=0;idx<reqs.length;idx++){
+    var req=reqs[idx]; if(!req||!req.id) continue;
+    var found=false;
+    for(var j=0;j<NOTIFS.length;j++){
+      if(NOTIFS[j].reqId===req.id){
+        // Don't overwrite a locally-actioned item for 30 s (prevents race with the write)
+        var local=_localActions[req.id];
+        if(!local||Date.now()-local.time>30000){
+          NOTIFS[j].status=req.status; NOTIFS[j].by=req.by||'';
+          // Backfill fields that may be missing from in-memory entry
+          if(!NOTIFS[j].fromEmail&&req.fromEmail) NOTIFS[j].fromEmail=req.fromEmail;
+          if(!NOTIFS[j].note&&req.note) NOTIFS[j].note=req.note;
+          if(!NOTIFS[j].counterDisc&&req.counterDisc) NOTIFS[j].counterDisc=req.counterDisc;
+        }
+        found=true; break;
+      }
+    }
+    if(!found){
+      NOTIFS.push({id:NOTIFS.length+1,reqId:req.id,type:req.type,
+        from:req.from||req.fromEmail,fromEmail:req.fromEmail||'',
+        client:req.client,serial:req.serial,
+        amount:req.amount||0,reqDisc:req.reqDisc||0,counterDisc:req.counterDisc||0,
+        msg:req.msg,note:req.note||'',
+        date:req.date,status:req.status,company:req.company,
+        approverEmail:req.approverEmail||'',cfValues:req.cfValues||null,
+        ctx:req.ctx||'s1',by:req.by||''});
+    }
+  }
+}
 function gLoadApprovalRequests(cb){
   if(!gToken){if(cb)cb();return;}
+  if(USE_SUPABASE&&supaReady()){
+    supaGetApprovalRequests().then(function(rows){
+      if(rows===null){ _gLoadApprovalRequestsFromSheets(cb); return; } // genuine read failure — fall back
+      var reqs=rows.map(function(row){
+        var p=row.payload||{};
+        return {id:row.id,type:row.req_type,client:row.client_name,serial:row.serial,
+          company:row.company,fromEmail:row.from_email,approverEmail:row.to_email,
+          note:row.note,counterDisc:row.counter_disc,status:row.status,by:row.actioned_by,
+          from:p.from,msg:p.msg,amount:p.amount||0,reqDisc:p.reqDisc||0,cfValues:p.cfValues||null,
+          ctx:p.ctx||'s1',date:p.date};
+      });
+      _mergeApprovalReqsIntoNotifs(reqs);
+      if(cb)cb();
+    });
+    return;
+  }
+  _gLoadApprovalRequestsFromSheets(cb);
+}
+function _gLoadApprovalRequestsFromSheets(cb){
   sheetsGet('Settings!A:B').then(function(d){
     if(d.error||!d.values){if(cb)cb();return;}
+    var reqs=[];
     for(var i=1;i<d.values.length;i++){
       var k=d.values[i][0]; var v=d.values[i][1];
       if(k&&k.indexOf('APPREQ_')===0&&v){
-        try{
-          var req=JSON.parse(v);
-          // Update existing NOTIF if found, otherwise push new
-          var found=false;
-          for(var j=0;j<NOTIFS.length;j++){
-            if(NOTIFS[j].reqId===req.id){
-              // Don't overwrite a locally-actioned item for 30 s (prevents race with Sheets write)
-              var local=_localActions[req.id];
-              if(!local||Date.now()-local.time>30000){
-                NOTIFS[j].status=req.status; NOTIFS[j].by=req.by||'';
-                // Backfill fields that may be missing from in-memory entry
-                if(!NOTIFS[j].fromEmail&&req.fromEmail) NOTIFS[j].fromEmail=req.fromEmail;
-                if(!NOTIFS[j].note&&req.note) NOTIFS[j].note=req.note;
-                if(!NOTIFS[j].counterDisc&&req.counterDisc) NOTIFS[j].counterDisc=req.counterDisc;
-              }
-              found=true; break;
-            }
-          }
-          if(!found){
-            NOTIFS.push({id:NOTIFS.length+1,reqId:req.id,type:req.type,
-              from:req.from,fromEmail:req.fromEmail||'',
-              client:req.client,serial:req.serial,
-              amount:req.amount||0,reqDisc:req.reqDisc||0,counterDisc:req.counterDisc||0,
-              msg:req.msg,note:req.note||'',
-              date:req.date,status:req.status,company:req.company,
-              approverEmail:req.approverEmail||'',cfValues:req.cfValues||null,
-              ctx:req.ctx||'s1',by:req.by||''});
-          }
-        }catch(e){}
+        try{ reqs.push(JSON.parse(v)); }catch(e){}
       }
     }
+    _mergeApprovalReqsIntoNotifs(reqs);
     if(cb)cb();
   }).catch(function(){if(cb)cb();});
 }
@@ -15026,6 +15051,30 @@ function supaGetQuotationsForTxns(){
     }).catch(function(){ return null; });
   }catch(e){ return Promise.resolve(null); }
 }
+// — approval_requests / messages reads (Phase 3: takes the two 45-60s poll
+//   timers off Sheets). Unlike supaGetClients() above, an EMPTY result here is
+//   a normal, valid state (no pending requests / no messages yet) — it must
+//   NOT be treated as "couldn't reach Supabase" or these would always fall
+//   back to Sheets on an otherwise-quiet day. Only a genuine query error
+//   returns null (triggering the Sheets fallback); an empty table returns []. —
+function supaGetApprovalRequests(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('approval_requests').select('*').then(function(r){
+      if(r.error) return null;
+      return r.data||[];
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
+function supaGetMessages(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('messages').select('*').then(function(r){
+      if(r.error) return null;
+      return r.data||[];
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 // — generic full-table replace (delete-all + bulk insert) for Price DB / Logistics DB
 //   "clear then rewrite" tables that mirror the Sheets clear+update pattern —
 function supaReplaceTable(table,rows){
@@ -15093,7 +15142,7 @@ function supaUpsertApprovalRequest(req){
     to_email:req.approverEmail||null,
     note:req.note||null,
     counter_disc:(req.counterDisc!=null?req.counterDisc:null),
-    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null},
+    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null},
     status:req.status||'pending',
     actioned_by:req.by||null
   };
@@ -22874,6 +22923,27 @@ function gEnsureMessagesTab(cb){
 }
 function gLoadMessages(cb){
   if(!gToken){if(cb)cb();return;}
+  if(USE_SUPABASE&&supaReady()){
+    supaGetMessages().then(function(rows){
+      if(rows===null){ _gLoadMessagesFromSheets(cb); return; } // genuine read failure — fall back
+      var me=((gUser&&gUser.email)||'').toLowerCase(), out=[];
+      for(var i=0;i<rows.length;i++){
+        var r=rows[i]; if(!r||!r.id) continue;
+        var toE=(r.to_email||'').toLowerCase(), frE=(r.from_email||'').toLowerCase();
+        if(toE!==me&&frE!==me) continue;
+        var ctxObj=r.context||{};
+        out.push({id:r.id,createdAt:r.created_at||'',fromEmail:r.from_email||'',fromName:r.from_name||'',
+          toEmail:r.to_email||'',toName:r.to_name||'',text:r.message||'',priority:r.priority||'normal',
+          status:r.status||'unread',readAt:r.read_at||'',ctx:ctxObj.ctx||'',rowIdx:null}); // no Sheets row for a Supabase-sourced message — see _msgMarkRead
+      }
+      out.sort(function(a,b){return new Date(b.createdAt)-new Date(a.createdAt)||0;});
+      messagesData=out; if(cb)cb();
+    });
+    return;
+  }
+  _gLoadMessagesFromSheets(cb);
+}
+function _gLoadMessagesFromSheets(cb){
   sheetsGet('Messages!A2:K').then(function(d){
     if(!d||d.error){ if(cb)cb(); return; }
     var rows=d.values||[], me=((gUser&&gUser.email)||'').toLowerCase(), out=[];
@@ -22908,9 +22978,13 @@ function gSendMessage(toEmail,toName,text,priority,ctx,cb){
 }
 function _msgMarkRead(id){
   var m=null; for(var i=0;i<messagesData.length;i++){if(messagesData[i].id===id){m=messagesData[i];break;}}
-  if(!m||m.status==='read'||!m.rowIdx) return;
+  if(!m||m.status==='read') return;
   m.status='read'; m.readAt=new Date().toISOString();
-  sheetsUpdate('Messages!I'+m.rowIdx+':J'+m.rowIdx,[['read',m.readAt]]).catch(function(){});
+  // rowIdx is only known when this message was loaded from the Sheets path (or
+  // just sent in this session); messages loaded from Supabase (see gLoadMessages)
+  // have no Sheets row cached, so skip the Sheets write rather than requiring it —
+  // the Supabase update below always fires regardless of where it was loaded from.
+  if(m.rowIdx) sheetsUpdate('Messages!I'+m.rowIdx+':J'+m.rowIdx,[['read',m.readAt]]).catch(function(){});
   supaMarkMessageRead(id,m.readAt);
 }
 function _msgUnreadForMe(){
