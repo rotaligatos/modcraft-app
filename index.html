@@ -1122,6 +1122,10 @@ tr.cl-row:hover td{background:#f4f7fb}
         Google Sheets ID: <code style="background:#f4f4f2;padding:2px 6px;border-radius:4px;font-size:11px">1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o</code>
       </div>
     </div></div>
+    <div class="card"><div class="card-head"><h3><i class="ti ti-bolt"></i>Fast database (Supabase)</h3></div><div class="card-body">
+      <div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-info-circle"></i><div>An optional faster connection used alongside Google Sheets for quicker loading on this browser. Google Sheets remains the primary, permanent record either way — this only affects how fast <i>your</i> session reads data, nothing about where it's stored.</div></div>
+      <div id="supa-status-wrap"></div>
+    </div></div>
     <!-- Supabase Storage usage — Admin/Director/Manager only, rendered by renderDashboard()/setStTab -->
     <div id="settings-storage-card" style="display:none;margin-bottom:14px"></div>
     <!-- Shared Drive folder — Admin sets once; all users inherit via Settings sheet -->
@@ -10023,6 +10027,7 @@ function setStTab(t) {
     var canSeeStorage=(currentRole==='Admin'||currentRole==='Director'||currentRole==='Manager');
     var stgCard=el('settings-storage-card');
     if(stgCard){ stgCard.style.display=canSeeStorage?'block':'none'; if(canSeeStorage) _renderStorageUsageCard(); }
+    renderSupaStatus();
   }
 }
 // ── Logo management (Admin only) ──────────────────────────────────────────
@@ -14393,6 +14398,70 @@ function supaConnect(){
 // True once a Supabase session is restored/established — used to show a one-time
 // "Connect" affordance only when needed.
 function supaConnected(){ return !!supaSession; }
+// Writes branded placeholder content into a popup the instant it opens, so it's
+// never a stark blank/white window while we wait on an async OAuth URL — a
+// blank popup that flashes and disappears reads as alarming to a normal user
+// with no context for what just happened.
+function _supaWritePopupPlaceholder(popup){
+  if(!popup) return;
+  try{
+    popup.document.write('<!DOCTYPE html><html><head><title>Connecting…</title></head>'
+      +'<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;'
+      +'font:15px -apple-system,Segoe UI,Roboto,sans-serif;color:#1a3a5c;background:#f4f4f2">'
+      +'<div style="text-align:center"><div style="font-size:28px;margin-bottom:10px">🔗</div>'
+      +'<div>Connecting Modcraft to a faster database…</div>'
+      +'<div style="font-size:12px;color:#888;margin-top:6px">You may briefly see a Google sign-in step.</div></div>'
+      +'</body></html>');
+    popup.document.close();
+  }catch(e){}
+}
+// Shows the current Supabase connection status for THIS browser session, and a
+// manual "Connect now" button — answers "how do I know if I'm connected" and
+// gives a fallback for anyone whose auto-connect popup got blocked. This is
+// per-browser/session, not something visible about other users' devices; there
+// is no server-side "who's connected" view without exposing admin-level keys
+// to the browser, which this app deliberately never does.
+function renderSupaStatus(){
+  var w=el('supa-status-wrap'); if(!w) return;
+  if(supaReady()){
+    w.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      +'<span class="pill pill-teal"><i class="ti ti-circle-check"></i> Connected</span>'
+      +'<span style="font-size:12px;color:var(--text2)">Signed in as <b>'+escHtml((supaSession.user&&supaSession.user.email)||'')+'</b> on this browser.</span>'
+      +'</div>';
+  } else {
+    w.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      +'<span class="pill pill-muted"><i class="ti ti-circle-x"></i> Not connected</span>'
+      +'<span style="font-size:12px;color:var(--text2)">Using the standard connection on this browser — nothing is broken, everything still works.</span>'
+      +'<button class="btn btn-primary" onclick="_supaManualConnect()" style="font-size:12px"><i class="ti ti-bolt"></i>Connect now</button>'
+      +'</div>';
+  }
+}
+// Manual connect — triggered by an actual button click, so (unlike the automatic
+// one-time flow) the popup can be opened directly here without any pre-open
+// gymnastics; a real click is never subject to popup-blocking.
+function _supaManualConnect(){
+  if(!supa){ showToast('Fast database client is not available right now.'); return; }
+  if(supaSession){ renderSupaStatus(); return; }
+  var popup=window.open('about:blank','supaAuthPopup','width=480,height=640');
+  _supaWritePopupPlaceholder(popup);
+  if(!popup){ showToast('Popup was blocked — allow pop-ups for this site and try again.'); return; }
+  var back=window.location.href.split('#')[0].split('?')[0];
+  var popupUrl=back+'?supaAuthPopup=1';
+  supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:popupUrl,skipBrowserRedirect:true}}).then(function(r){
+    if(r.error||!r.data||!r.data.url){ showToast('Could not start the connection.'); try{popup.close();}catch(e){} return; }
+    try{ popup.location.href=r.data.url; }catch(e){ try{popup.close();}catch(e2){} return; }
+    var checkTimer=setInterval(function(){
+      if(popup.closed){
+        clearInterval(checkTimer);
+        supa.auth.getSession().then(function(res){
+          supaSession=(res&&res.data&&res.data.session)||null;
+          renderSupaStatus();
+          showToast(supaSession?'Connected ✓':'Connection was not completed — you can try again any time.');
+        });
+      }
+    },500);
+  }).catch(function(e){ showToast('Connection failed.'); try{popup.close();}catch(e2){} });
+}
 // Auto-connect every signed-in user to Supabase, once per (browser, Google
 // account) — this is what actually turns on the fast indexed-Postgres read
 // path for the whole team, instead of requiring each person to manually run
@@ -15219,7 +15288,10 @@ function gSignIn(){
   // know whether the one-time Supabase auto-connect is actually needed). Opening it
   // blank here and deciding what to do with it afterward (navigate it, or close it
   // if unused) keeps it inside the permitted user-gesture window either way.
-  try{ _supaPreOpenedPopup=window.open('about:blank','supaAuthPopup','width=480,height=640'); }catch(e){ _supaPreOpenedPopup=null; }
+  try{
+    _supaPreOpenedPopup=window.open('about:blank','supaAuthPopup','width=480,height=640');
+    _supaWritePopupPlaceholder(_supaPreOpenedPopup); // never leave it a stark blank window, even for the instant before we decide whether to use it
+  }catch(e){ _supaPreOpenedPopup=null; }
   // Popup-based sign-in works inside a Google Sites iframe in most browsers — the popup is a
   // top-level window on accounts.google.com, so it isn't blocked by third-party-cookie rules.
   // If the popup genuinely can't open, error_callback → gShowEmbedFallback offers a new tab.
