@@ -1791,6 +1791,17 @@ tr.cl-row:hover td{background:#f4f7fb}
   </div>
 </div>
 
+<div class="overlay" id="ov-save-conflict">
+  <div class="modal">
+    <div class="modal-head"><h3><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Someone else already saved this</h3><button class="modal-close" onclick="closeModal('ov-save-conflict')">×</button></div>
+    <div class="modal-body" id="ov-save-conflict-body" style="font-size:13px;color:var(--text2)"></div>
+    <div class="modal-foot" style="gap:8px">
+      <button class="btn btn-outline" onclick="_saveConflictReload()"><i class="ti ti-refresh"></i>Reload their version</button>
+      <button class="btn" style="background:var(--coral);border-color:var(--coral)" onclick="_saveConflictOverwrite()"><i class="ti ti-device-floppy"></i>Overwrite anyway</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="ov-attachment">
   <div class="modal wide" style="max-width:900px;width:95vw">
     <div class="modal-head" style="display:flex;align-items:center;gap:8px">
@@ -2426,6 +2437,8 @@ var qStage = 1;
 var qApproved = false;
 var qSaved = false;       // true once Stage 1 Save Draft is clicked (gates Lock & Send)
 var qSerialCommitted = false; // true once this serial has survived a first-save collision check (see gSaveQuotation)
+var qLoadedSavedAt = null;    // savedAt of the state as last loaded/saved by THIS session — used to detect another user's save in between (see gSaveQuotation opts.checkConflict)
+var qLoadedSavedBy = '';      // savedBy of the state as last loaded/saved by THIS session
 var qSerial = makeSerial();
 var qRevisedFrom = "";
 var qOptionsList = [];      // [{id, label, snapshot, status:'active'|'approved'|'archived', grand}]
@@ -4075,6 +4088,7 @@ function initQuotation() {
   if(typeof renderClientCompanyField==='function') renderClientCompanyField();
   qSerial=_peekNextSerial(); // preview only — real number claimed at first save, see gSaveQuotation()
   qSerialCommitted=false;
+  qLoadedSavedAt=null; qLoadedSavedBy='';
   qPrevSerials=[];
   _lastAcceptedClType='Direct'; _lastAcceptedClCompanySel='';
   var _qpsn=el('q-prev-serial-note'); if(_qpsn) _qpsn.style.display='none';
@@ -12643,7 +12657,7 @@ function saveDraftS1() {
   updateLockUI();
   logActivity('Quotation draft saved.');
   saveQuotationToDrive('draft','Draft');
-  gSaveQuotation();
+  gSaveQuotation({checkConflict:true});
 }
 function doLock() {
   if(qLocked) return;
@@ -18627,7 +18641,30 @@ function _syncQuotHeader(){
 //      narrows the race window but can't fully close it without #1.
 // Subsequent saves of the same quotation skip both checks entirely
 // (qSerialCommitted stays true) — ownership was already settled at first save.
-function gSaveQuotation(){
+// opts.checkConflict=true is used only by explicit "Save Draft" clicks (saveDraftS1/fqSaveDraft) —
+// every other call site (lock, approve, share, etc.) keeps firing gSaveQuotation() with no args and
+// therefore skips this check entirely, exactly as before. Scoped narrowly on purpose: those other
+// ~15 call sites are synchronous internal flows (e.g. "gSaveQuotation(); updateLockUI();") that would
+// break if a save suddenly became async/interruptible; the moment a user actually cares about
+// clobbering someone else's edits is when they deliberately click Save Draft on an already-saved,
+// unlocked quotation (locked ones are already protected by the PIN-gated unlock flow).
+function gSaveQuotation(opts){
+  if(!gToken||!gUser) return;
+  opts=opts||{};
+  if(opts.checkConflict && qLoadedSavedAt && qSerialCommitted){
+    var _serial=qBaseSerial||qSerial;
+    loadQuotationJson(_serial,function(remote){
+      if(remote && remote.savedAt && remote.savedAt!==qLoadedSavedAt){
+        _showSaveConflictModal(remote,_serial);
+      } else {
+        _gSaveQuotationCore();
+      }
+    });
+    return;
+  }
+  _gSaveQuotationCore();
+}
+function _gSaveQuotationCore(){
   if(!gToken||!gUser) return;
   if(!qSerialCommitted){
     var claimSerial=qBaseSerial||qSerial;
@@ -18649,6 +18686,41 @@ function gSaveQuotation(){
     return;
   }
   _proceedSaveQuotation();
+}
+// Save-conflict warning (draft-stage concurrent edit guard) — see gSaveQuotation(opts.checkConflict).
+// _pendingSaveConflict stashes the remote state + serial between the modal opening and the
+// user's choice, since the modal buttons are plain onclick handlers with no argument passing.
+var _pendingSaveConflict=null;
+function _showSaveConflictModal(remote,serial){
+  var who=remote.savedBy||'';
+  var u=sheetUsers.find(function(x){return x.email&&x.email.toLowerCase()===who.toLowerCase();});
+  var whoLabel=(u&&u.name)?u.name:(who||'another user');
+  var when=remote.savedAt?fmtDT(remote.savedAt):'a moment ago';
+  _pendingSaveConflict={remote:remote,serial:serial};
+  var body=el('ov-save-conflict-body');
+  if(body){
+    body.innerHTML='<p><strong>'+escHtml(whoLabel)+'</strong> saved changes to this quotation at <strong>'+escHtml(when)+'</strong> — after you opened it.</p>'
+      +'<p>Saving now would overwrite their changes with your version. You can:</p>'
+      +'<ul style="margin:8px 0 0 18px;padding:0"><li><strong>Reload their version</strong> — discards your unsaved edits and loads what they saved (safest)</li>'
+      +'<li><strong>Overwrite anyway</strong> — keeps your edits and replaces theirs (use only if you are sure)</li></ul>';
+  }
+  openModal('ov-save-conflict');
+}
+function _saveConflictOverwrite(){
+  closeModal('ov-save-conflict');
+  if(!_pendingSaveConflict) return;
+  // Adopt the remote save's timestamp as our new baseline so the write we're about to do
+  // doesn't immediately re-trigger this same check against itself.
+  qLoadedSavedAt=_pendingSaveConflict.remote.savedAt||qLoadedSavedAt;
+  _pendingSaveConflict=null;
+  _gSaveQuotationCore();
+}
+function _saveConflictReload(){
+  closeModal('ov-save-conflict');
+  if(!_pendingSaveConflict) return;
+  restoreFullQuotationState(_pendingSaveConflict.remote); // self-renders (recalc/updateLockUI/etc.), same as openQuotationFromDir
+  showToast('Reloaded the latest saved version.');
+  _pendingSaveConflict=null;
 }
 // Advances the shared counter to at least one past the given serial's number
 // (only if it isn't already), so a previewed-then-successfully-claimed serial
@@ -18854,7 +18926,7 @@ function getFullQuotationState(){
     initLockedAt:qInitLockedAt, initApprovedAt:qInitApprovedAt,
     finalLockedAt:fqLockedAt, closedAt:qClosedAt,
     sourceOrderId:qSourceOrderId||'',
-    savedAt:new Date().toISOString(),
+    savedAt:(function(){ var t=new Date().toISOString(); qLoadedSavedAt=t; qLoadedSavedBy=gUser?(gUser.email||''):''; return t; })(),
     savedBy:gUser?(gUser.email||''):''
   };
 }
@@ -18961,6 +19033,7 @@ function restoreFullQuotationState(state){
   if(!state) return;
   qSerial=state.serial||makeSerial();
   qSerialCommitted=true; // loading a quotation that was already saved under this serial
+  qLoadedSavedAt=state.savedAt||null; qLoadedSavedBy=state.savedBy||''; // baseline for save-conflict detection (see gSaveQuotation opts.checkConflict)
   qBaseSerial=state.baseSerial||'';
   qActiveOptionId=state.activeOptionId||0;
   qOptionsList=JSON.parse(JSON.stringify(state.optionsList||[]));
