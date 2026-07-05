@@ -16362,9 +16362,44 @@ function logDbUpdate(range,values){
   }).then(function(r){return r.json();});
 }
 
+// — Logistics DB read (Phase 4b, same rule as Price DB Phase 4a): an EMPTY
+//   table means "not backfilled yet" (see supaMigrateLogisticsDb), not a
+//   normal valid state — both tables must have at least one row, or the
+//   whole thing falls back to Sheets together (never mixes sources). —
+function supaGetLogisticsDb(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return Promise.all([
+      supa.from('logistics_materials').select('name,board_size,length_mm,width_mm,thickness_mm,weight_kg,cbm,notes'),
+      supa.from('logistics_trucks').select('type,max_weight_kg,max_cbm,body_type,notes')
+    ]).then(function(results){
+      var mat=results[0],trk=results[1];
+      if(mat.error||trk.error) return null;
+      if(!mat.data||!mat.data.length||!trk.data||!trk.data.length) return null;
+      return {materials:mat.data,trucks:trk.data};
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 // ── Logistics DB: load, connect, initialize ────────────────────────────────
 function gLoadLogisticsDb(cb){
   if(!LOGISTICS_DB_ID){if(cb)cb();return;}
+  if(USE_SUPABASE&&supaReady()){
+    supaGetLogisticsDb().then(function(data){
+      if(data===null){ _gLoadLogisticsDbFromSheets(cb); return; }
+      logisticsDb.materials=data.materials.map(function(r){
+        return {name:r.name||'',boardSize:r.board_size||'4x8',lengthMm:parseFloat(r.length_mm)||1220,widthMm:parseFloat(r.width_mm)||2440,
+          thicknessMm:parseFloat(r.thickness_mm)||18,weightKg:parseFloat(r.weight_kg)||0,cbm:parseFloat(r.cbm)||0,notes:r.notes||''};
+      });
+      logisticsDb.trucks=data.trucks.map(function(r){
+        return {type:r.type||'',maxWeightKg:parseFloat(r.max_weight_kg)||0,maxCbm:parseFloat(r.max_cbm)||0,bodyType:r.body_type||'closed',notes:r.notes||''};
+      });
+      if(cb)cb();
+    });
+    return;
+  }
+  _gLoadLogisticsDbFromSheets(cb);
+}
+function _gLoadLogisticsDbFromSheets(cb){
   Promise.all([
     logDbGet('Materials!A:H').catch(function(){return {values:[]};}),
     logDbGet('Trucks!A:E').catch(function(){return {values:[]};})
@@ -16380,6 +16415,54 @@ function gLoadLogisticsDb(cb){
     }).filter(function(t){return t.type;});
     if(cb)cb();
   }).catch(function(e){console.warn('Logistics DB load failed',e);if(cb)cb();});
+}
+// One-time backfill (Phase 4b) — same reasoning as supaMigratePriceDb(): the
+// Logistics DB's Supabase tables only dual-write when someone clicks Save
+// Materials/Save Trucks, which nobody has done since that code shipped, so
+// Supabase was confirmed empty via direct query. Run in the console (after
+// supaConnect()) once. Guarded against being invoked twice while running,
+// same as the Price DB migration.
+var _logisticsDbMigrationInFlight=false;
+function supaMigrateLogisticsDb(){
+  if(_logisticsDbMigrationInFlight){ console.warn('[migrate] already running — wait for the "Logistics DB backfill done" log before running this again.'); return Promise.resolve(null); }
+  if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
+  if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
+  if(!LOGISTICS_DB_ID){ console.warn('[migrate] no Logistics DB connected — nothing to migrate'); return Promise.resolve(null); }
+  _logisticsDbMigrationInFlight=true;
+  console.log('[migrate] backfilling Logistics DB into Supabase from the current Sheets data…');
+  return Promise.all([
+    logDbGet('Materials!A:H').catch(function(){return {values:[]};}),
+    logDbGet('Trucks!A:E').catch(function(){return {values:[]};})
+  ]).then(function(results){
+    var matData=results[0], trkData=results[1];
+    var stats={materials:0,trucks:0};
+    var tasks=[];
+    if(matData.values){
+      var mats=matData.values.slice(1).filter(function(r){return r[0];}).map(function(r){
+        return {name:r[0]||'',board_size:r[1]||'4x8',length_mm:parseFloat(r[2])||1220,width_mm:parseFloat(r[3])||2440,
+          thickness_mm:parseFloat(r[4])||18,weight_kg:parseFloat(r[5])||0,cbm:parseFloat(r[6])||0,notes:r[7]||''};
+      });
+      stats.materials=mats.length;
+      tasks.push(supaReplaceTable('logistics_materials',mats));
+    }
+    if(trkData.values){
+      var trks=trkData.values.slice(1).filter(function(r){return r[0];}).map(function(r){
+        return {type:r[0]||'',max_weight_kg:parseFloat(r[1])||0,max_cbm:parseFloat(r[2])||0,body_type:r[3]||'closed',notes:r[4]||''};
+      });
+      stats.trucks=trks.length;
+      tasks.push(supaReplaceTable('logistics_trucks',trks));
+    }
+    return Promise.all(tasks).then(function(){
+      console.log('[migrate] Logistics DB backfill done:',stats);
+      return stats;
+    });
+  }).catch(function(e){
+    console.warn('[migrate] Logistics DB backfill failed',e);
+    return null;
+  }).then(function(result){
+    _logisticsDbMigrationInFlight=false;
+    return result;
+  });
 }
 function connectLogisticsDB(){
   var idInp=el('s-logistics-db-id');
