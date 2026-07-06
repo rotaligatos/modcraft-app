@@ -770,6 +770,7 @@ tr.cl-row:hover td{background:#f4f7fb}
         <button class="btn btn-primary" id="approve-btn" onclick="doApprove()" style="flex:2;justify-content:center"><i class="ti ti-circle-check"></i>Approve & proceed to Stage 2</button>
         <button class="btn" id="lock-btn" onclick="doLockOnly()" style="background:var(--navy);color:#fff;border-color:var(--navy)"><i class="ti ti-lock"></i>Lock</button>
         <button class="btn" id="send-btn" onclick="doShare()" style="display:none;background:var(--teal);color:#fff;border-color:var(--teal)"><i class="ti ti-share"></i>Share</button>
+        <button class="btn" id="cancel-s1-btn" onclick="requestCancelQuotation('s1')" style="display:none;background:var(--coral);color:#fff;border-color:var(--coral)" data-lock-exempt="1"><i class="ti ti-circle-x"></i>Client Declined</button>
         <button class="btn" id="close-project-btn" onclick="doCloseProject()" style="display:none;background:#e0f2ec;color:var(--teal);border-color:#a0d4c0"><i class="ti ti-checks"></i>Close Project</button>
       </div>
       <div id="q-drive-links" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px"></div>
@@ -966,9 +967,11 @@ tr.cl-row:hover td{background:#f4f7fb}
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <input id="dir-search" placeholder="Search client, serial, type…" oninput="dirFilter=this.value;renderDirectory()" style="width:240px;height:34px">
-      <select id="dir-status-filter" onchange="renderDirectory()" style="height:34px;width:150px">
+      <select id="dir-status-filter" onchange="renderDirectory()" style="height:34px;width:170px">
         <option value="">All statuses</option>
-        <option>On-going</option><option>Closed</option><option>Draft</option>
+        <option>Draft</option><option>Initial Quotation</option><option>In Final Quotation</option>
+        <option>Awaiting Client Approval</option><option>Client Approved</option>
+        <option>Cancelled</option><option>Closed</option>
       </select>
       <button id="dir-archive-toggle" class="btn" onclick="dirShowArchived=!dirShowArchived;renderDirectory()" style="height:34px;font-size:12px;display:none"></button>
       <select id="dir-year-filter" onchange="renderDirectory()" style="height:34px;width:110px">
@@ -1998,6 +2001,22 @@ tr.cl-row:hover td{background:#f4f7fb}
   </div>
 </div>
 
+<div class="overlay" id="ov-cancel-quotation">
+  <div class="modal">
+    <div class="modal-head"><h3><i class="ti ti-circle-x" style="color:var(--coral)"></i>Client declined</h3><button class="modal-close" onclick="closeModal('ov-cancel-quotation')">×</button></div>
+    <div class="modal-body">
+      <div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>This marks the quotation as Cancelled. State the reason below.</div>
+      <label class="fld">Reason</label>
+      <textarea id="cancel-reason" rows="3" placeholder="e.g. Client went with another supplier…"></textarea>
+      <p id="cancel-reason-err" style="color:var(--coral);font-size:12px;display:none;margin-top:4px">Please state a reason.</p>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn" onclick="closeModal('ov-cancel-quotation')">Back</button>
+        <button class="btn" style="background:var(--coral);border-color:var(--coral);color:#fff" onclick="confirmCancelQuotation()"><i class="ti ti-circle-x"></i>Confirm cancellation</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="ov-unlock">
   <div class="modal">
     <div class="modal-head"><h3><i class="ti ti-lock-open"></i>Request unlock</h3><button class="modal-close" onclick="closeModal('ov-unlock')">×</button></div>
@@ -2906,6 +2925,7 @@ try{var _dcw=localStorage.getItem('mc_dir_col_widths');if(_dcw)dirColWidths=JSON
 var _colResizing=null;
 // ── Quotation lifecycle timestamps ──────────────────────────────────────────
 var qInitLockedAt='', qInitApprovedAt='', fqLockedAt='', qClosedAt='';
+var qCancelled=false, qCancelledAt='', qCancelReason=''; // client declined to proceed — can happen from either stage
 
 // ── Utility ────────────────────────────────────────────────────────────────
 // ── Serial counters — loaded from Settings sheet at login ─────────────────
@@ -4098,6 +4118,7 @@ function initQuotation() {
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus='';
   qInitLockedAt=''; qInitApprovedAt=''; fqLockedAt=''; qClosedAt='';
+  qCancelled=false; qCancelledAt=''; qCancelReason='';
   qLog=[]; qPieces=[]; _pCalc={};
   qVatApproved=true; qDiscApproved=false; qDiscPct=0; qPremApproved=false;
   qCustomCF=null; qCustomCFApproved=false;
@@ -6102,6 +6123,7 @@ function doCloseProject(){
   });
 }
 function doApprove() {
+  if(qCancelled){ showToast('This quotation was cancelled — the client declined to proceed.'); return; }
   if(!qLocked){
     alert("The quotation must be locked and sent to the client before approving.\n\nPlease click \"Lock & Send\" first.");
     return;
@@ -7220,7 +7242,7 @@ function gLoadDirData(cb){
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var ser=r[0],m=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
-        if(seen[baseS]){var p=seen[baseS];if(r[5]==='Locked'||r[5]==='Approved') p.status=r[5];continue;}
+        if(seen[baseS]){var p=seen[baseS];if(_statusRank(r[5])>_statusRank(p.status)) p.status=r[5];continue;}
         var entry={id:ser,baseSerial:baseS,created:r[1]||'',client:r[2]||'',contact:r[4]||'',type:r[12]||'',
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,user:r[7]||'',segment:r[8]||'',
           status:r[5]||'Draft',locked:r[9]==='Yes',stage:r[10]||'Initial',options:parseInt(r[11])||1,
@@ -7659,14 +7681,15 @@ function renderDashFollowed() {
   var h='<thead><tr><th>Serial</th><th>Client</th><th>Type</th><th>Value</th><th>Assigned</th><th>Status</th><th></th></tr></thead><tbody>';
   for(var i=0;i<followed.length;i++){
     var p=followed[i];
-    var sc=p.status==="Closed"||p.status==="Client Approved"?"teal":p.status==="Locked"||p.status==="Approved"||p.status==="On-going"?"amber":"muted";
+    var dispSt=p.status==='On-going'?'On-going':_normalizeStatusLabel(p.status);
+    var sc=dispSt==='On-going'?'amber':(_STATUS_PILL_COLOR[dispSt]||'muted');
     h+='<tr>'
       +'<td style="font-family:monospace;font-size:11px;color:var(--text2)">'+escHtml(p.id)+'</td>'
       +'<td style="font-weight:500">'+escHtml(p.client||'—')+'</td>'
       +'<td style="font-size:12px;color:var(--text2)">'+escHtml(p.type||'—')+'</td>'
       +'<td style="font-weight:500">'+fmtMoney(p.value)+'</td>'
       +'<td style="font-size:12px;color:var(--text2)">'+escHtml(p.user||'—')+'</td>'
-      +'<td><span class="pill pill-'+sc+'">'+escHtml(p.status)+'</span></td>'
+      +'<td><span class="pill pill-'+sc+'">'+escHtml(dispSt)+'</span></td>'
       +'<td><button class="btn" style="font-size:11px;padding:3px 8px;color:var(--navy)" onclick="openQuotationFromDir(\''+p.id+'\')"><i class="ti ti-eye"></i>Open</button></td>'
       +'</tr>';
   }
@@ -12670,7 +12693,7 @@ function doLock() {
   openModal("ov-lock");
 }
 function doLockOnly(){
-  if(qLocked) return;
+  if(qLocked||qCancelled) return;
   qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
   // Also mark the current option object as locked
   if(qActiveOptionId>0){var _lo=qOptionsList.find(function(o){return o.id===qActiveOptionId;});if(_lo){_lo.locked=true;_lo.saved=true;}}
@@ -12995,16 +13018,28 @@ function updateLockUI() {
   var locked=qLocked||viewOnly;
   var lbtn=el("lock-btn");
   var sbtn=el("send-btn");
+  var cbtn=el("cancel-s1-btn");
+  var abtn=el("approve-btn");
   var hint=el("s1-lock-hint");
   if(!lbtn) return;
   if(hint) hint.style.display='none';
-  if(qLocked&&!viewOnly){
+  // "Client Declined" only makes sense in the window between Stage 1 being locked/sent and it
+  // being internally approved to proceed to Stage 2 — once qApproved, Stage 2 has its own
+  // fq-cancel-btn covering the equivalent later window (Awaiting Client Approval).
+  if(cbtn) cbtn.style.display=(qLocked&&!qApproved&&!qCancelled)?"inline-flex":"none";
+  if(qCancelled){
+    lbtn.style.display="none";
+    if(sbtn) sbtn.style.display="none";
+    if(abtn) abtn.style.display="none";
+  } else if(qLocked&&!viewOnly){
     lbtn.style.display="none";
     if(sbtn){sbtn.style.display="inline-flex";}
+    if(abtn) abtn.style.display="";
   } else if(viewOnly){
     // View-only: hide both Lock and Send buttons
     lbtn.style.display="none";
     if(sbtn){sbtn.style.display="none";}
+    if(abtn) abtn.style.display="";
   } else {
     lbtn.style.display="inline-flex";
     lbtn.disabled=false;
@@ -13012,6 +13047,7 @@ function updateLockUI() {
     lbtn.style.cursor="pointer";
     lbtn.innerHTML='<i class="ti ti-lock"></i>Lock';
     if(sbtn){sbtn.style.display="none";}
+    if(abtn) abtn.style.display="";
   }
   // Lock/unlock all form fields inside s1-wrap
   var s1w=el('s1-wrap');
@@ -13115,6 +13151,7 @@ function confirmUnlock() {
 
 // ── Final Quotation Lock / Unlock ─────────────────────────────────────────
 function doFQLock() {
+  if(qCancelled){ showToast('This quotation was cancelled — the client declined to proceed.'); return; }
   modalCtx='fq';
   openModal('ov-lock');
 }
@@ -13128,17 +13165,21 @@ function updateFQLockUI() {
   var hint=el('fq-previewed-hint');
   if(!lbtn) return;
   if(hint) hint.style.display='none';
-  lbtn.style.display='inline-flex';
-  if(!fqLocked){
-    lbtn.disabled=false;
-    lbtn.style.background='var(--navy)'; lbtn.style.color='#fff'; lbtn.style.borderColor='var(--navy)';
-    lbtn.style.cursor='pointer';
-    lbtn.innerHTML='<i class="ti ti-lock"></i>Lock &amp; Send';
+  if(qCancelled){
+    lbtn.style.display='none';
   } else {
-    lbtn.disabled=true;
-    lbtn.style.background='#e0f2ec'; lbtn.style.color='var(--teal)'; lbtn.style.borderColor='#a0d4c0';
-    lbtn.style.cursor='default';
-    lbtn.innerHTML='<i class="ti ti-lock-filled"></i>Locked';
+    lbtn.style.display='inline-flex';
+    if(!fqLocked){
+      lbtn.disabled=false;
+      lbtn.style.background='var(--navy)'; lbtn.style.color='#fff'; lbtn.style.borderColor='var(--navy)';
+      lbtn.style.cursor='pointer';
+      lbtn.innerHTML='<i class="ti ti-lock"></i>Lock &amp; Send';
+    } else {
+      lbtn.disabled=true;
+      lbtn.style.background='#e0f2ec'; lbtn.style.color='var(--teal)'; lbtn.style.borderColor='#a0d4c0';
+      lbtn.style.cursor='default';
+      lbtn.innerHTML='<i class="ti ti-lock-filled"></i>Locked';
+    }
   }
   updateFQClientApproveUI();
 }
@@ -13146,8 +13187,10 @@ function updateFQLockUI() {
 // client has actually confirmed approval verbally/in writing; the confirm dialog exists
 // specifically to prevent an accidental click from falsely recording client sign-off.
 function updateFQClientApproveUI(){
-  var btn=el('fq-client-approve-btn'); if(!btn) return;
-  if(!fqLocked){ btn.style.display='none'; return; }
+  var btn=el('fq-client-approve-btn'); var cbtn=el('fq-cancel-btn');
+  if(cbtn) cbtn.style.display=(fqLocked&&!fqClientApproved&&!qCancelled)?'inline-flex':'none';
+  if(!btn) return;
+  if(qCancelled||!fqLocked){ btn.style.display='none'; return; }
   btn.style.display='inline-flex';
   if(fqClientApproved){
     btn.disabled=true;
@@ -13162,23 +13205,78 @@ function updateFQClientApproveUI(){
   }
 }
 function requestClientApprove(){
-  if(!fqLocked||fqClientApproved) return;
+  if(!fqLocked||fqClientApproved||qCancelled) return;
   _confirm('Has the client approved this Final Quotation?\n\nThis records formal client sign-off on the quotation as final. Only confirm once the client has actually approved it.',confirmClientApprove);
 }
-// Shared q-status badge priority — most-advanced-true-state wins. Called on load/restore
-// and any time a state transition (client approval, unlock) could change what should show.
+// Single source of truth for the quotation status ladder — used for the saved Quotations-sheet
+// status column (_proceedSaveQuotation) AND the on-page q-status badge (_updateQStatusBadge),
+// so the two can never drift apart. Priority = most-advanced/most-final state wins.
+//   Draft -> Initial Quotation -> In Final Quotation -> Awaiting Client Approval -> Client Approved -> Closed
+//   Cancelled can happen from Initial Quotation or Awaiting Client Approval and overrides everything.
+function _computeQuotationStatus(){
+  if(qCancelled) return 'Cancelled';
+  if(qClosedAt) return 'Closed'; // doCloseProject() sets this directly; preserved here so this function agrees with it
+  if(fqClientApproved) return 'Client Approved';
+  if(fqLocked) return 'Awaiting Client Approval';
+  if(qApproved) return 'In Final Quotation';
+  if(qLocked) return 'Initial Quotation';
+  return 'Draft';
+}
+// Maps legacy stored status strings (from before this ladder existed) to their new equivalent
+// label, purely for DISPLAY — old Sheets/Supabase rows keep their old string until next save,
+// so anywhere a status is rendered to a user should go through this rather than the raw value.
+function _normalizeStatusLabel(s){
+  if(s==='Locked') return 'Initial Quotation';
+  if(s==='Approved') return 'In Final Quotation';
+  return s||'Draft';
+}
+var _STATUS_PILL_COLOR={
+  'Draft':'amber','Initial Quotation':'teal','In Final Quotation':'teal',
+  'Awaiting Client Approval':'amber','Client Approved':'teal','Cancelled':'coral','Closed':'teal'
+};
+// Ordinal rank of a (possibly legacy) stored status string — used when merging duplicate-serial
+// rows (option variants share a base serial) to keep whichever row is furthest along, instead of
+// the old crude "Locked or Approved wins" special case that couldn't distinguish among the
+// now-larger status set. Recognizes legacy 'Locked'/'Approved' strings at their equivalent rank.
+var _STATUS_RANK={'Draft':0,'Locked':1,'Initial Quotation':1,'Approved':2,'In Final Quotation':2,
+  'Awaiting Client Approval':3,'Client Approved':4,'Cancelled':5,'Closed':6};
+function _statusRank(s){ return _STATUS_RANK[s]!==undefined?_STATUS_RANK[s]:0; }
 function _updateQStatusBadge(){
   var statusEl=el('q-status'); if(!statusEl) return;
-  if(fqClientApproved){statusEl.textContent='Client Approved';statusEl.className='pill pill-teal';}
-  else if(qApproved){statusEl.textContent='Approved';statusEl.className='pill pill-teal';}
-  else if(qLocked){statusEl.textContent='Locked';statusEl.className='pill pill-teal';}
-  else{statusEl.textContent='Draft';statusEl.className='pill pill-amber';}
+  var st=_computeQuotationStatus();
+  statusEl.textContent=st;
+  statusEl.className='pill pill-'+(_STATUS_PILL_COLOR[st]||'amber');
 }
 function confirmClientApprove(){
   fqClientApproved=true;
   fqClientApprovedAt=new Date().toISOString();
   logActivity('Client approved the Final Quotation.');
   updateFQClientApproveUI();
+  _updateQStatusBadge();
+  gSaveQuotation();
+}
+// "Client Declined" — client doesn't want to proceed. Can be triggered from Stage 1 (Initial
+// Quotation, before the final quotation even starts) or Stage 2 (Awaiting Client Approval).
+// _cancelCtx isn't used to change behavior — the flag applies to the whole quotation regardless
+// of which stage's button triggered it — only kept for a slightly more specific log line.
+var _cancelCtx='';
+function requestCancelQuotation(ctx){
+  if(qCancelled) return;
+  _cancelCtx=ctx||'';
+  var ta=el('cancel-reason'); if(ta) ta.value='';
+  var err=el('cancel-reason-err'); if(err) err.style.display='none';
+  openModal('ov-cancel-quotation');
+}
+function confirmCancelQuotation(){
+  var reason=(el('cancel-reason')?el('cancel-reason').value:'').trim();
+  if(!reason){ var err=el('cancel-reason-err'); if(err) err.style.display='block'; return; }
+  closeModal('ov-cancel-quotation');
+  qCancelled=true;
+  qCancelledAt=new Date().toISOString();
+  qCancelReason=reason;
+  logActivity('Quotation cancelled — client declined to proceed ('+(_cancelCtx==='fq'?'Final Quotation':'Initial Quotation')+' stage). Reason: '+reason);
+  updateLockUI();
+  if(typeof updateFQLockUI==='function') updateFQLockUI();
   _updateQStatusBadge();
   gSaveQuotation();
 }
@@ -13256,7 +13354,7 @@ function renderDirectory(){
         if(seen[baseS]){
           // Update if newer or higher status
           var prev=seen[baseS];
-          if(r[5]==='Locked'||r[5]==='Approved'||(r[5]==='Draft'&&prev.status==='Draft')) prev.status=r[5];
+          if(_statusRank(r[5])>_statusRank(prev.status)) prev.status=r[5];
           continue;
         }
         var entry={id:ser,baseSerial:baseS,created:r[1]||'',client:r[2]||'',
@@ -13348,7 +13446,7 @@ function renderDirectoryTable(){
   list=list.filter(function(p){
     if(!dirShowArchived&&(p.status||'')==='Archived') return false;
     var matchS=!search||((p.client||'').toLowerCase().indexOf(search)>=0||(p.id||'').toLowerCase().indexOf(search)>=0||((p.type||'').toLowerCase().indexOf(search)>=0));
-    var matchSt=!statusF||p.status===statusF;
+    var matchSt=!statusF||_normalizeStatusLabel(p.status)===statusF;
     var matchY=!yearF||(p.created||'').indexOf(yearF)===0;
     return matchS&&matchSt&&matchY;
   });
@@ -13395,7 +13493,8 @@ function renderDirectoryTable(){
   for(var i=0;i<list.length;i++){
     var p=list[i];
     var isClosed=(p.status==='Closed');
-    var sc=isClosed||p.status==="Client Approved"?"teal":p.status==="Locked"||p.status==="Approved"||p.status==="On-going"?"amber":"muted";
+    var dispSt=p.status==='On-going'?'On-going':_normalizeStatusLabel(p.status);
+    var sc=dispSt==='On-going'?'amber':(_STATUS_PILL_COLOR[dispSt]||'muted');
     var fol=qFollowed[p.id];
     var isCurrentQuot=(p.id===(qBaseSerial||qSerial)||p.id===qSerial);
     var optCount=isCurrentQuot?qOptionsList.filter(function(o){return o.status!=='archived';}).length:(p.options||1);
@@ -13412,7 +13511,7 @@ function renderDirectoryTable(){
     if(dirColPrefs.created)       h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.created)+'</td>';
     if(dirColPrefs.stage)         h+='<td><span class="pill '+(p.stage==='Final'?'pill-teal':'pill-muted')+'" style="font-size:10px">'+escHtml(p.stage||'Initial')+'</span></td>';
     if(dirColPrefs.options)       h+='<td style="text-align:center;font-size:12px">'+optCount+'</td>';
-    if(dirColPrefs.status)        h+='<td><span class="pill pill-'+sc+'">'+escHtml(p.status)+'</span></td>';
+    if(dirColPrefs.status)        h+='<td><span class="pill pill-'+sc+'">'+escHtml(dispSt)+'</span></td>';
     if(dirColPrefs.initLockedAt)  h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.initLockedAt)+'</td>';
     if(dirColPrefs.initApprovedAt)h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.initApprovedAt)+'</td>';
     if(dirColPrefs.finalLockedAt) h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.finalLockedAt)+'</td>';
@@ -14087,6 +14186,7 @@ function renderFQCards() {
     +'<button class="btn btn-outline" onclick="fqSaveDraft()" style="background:#f4f4f2;color:var(--text);border-color:var(--border)"><i class="ti ti-device-floppy"></i>Save Draft</button>'
     +'<button class="btn" id="fq-lock-btn" onclick="doFQLock()" style="flex:2;justify-content:center"><i class="ti ti-lock"></i>Lock &amp; Send</button>'
     +'<button class="btn" id="fq-client-approve-btn" onclick="requestClientApprove()" style="display:none;flex:2;justify-content:center"><i class="ti ti-user-check"></i>Client Approve</button>'
+    +'<button class="btn" id="fq-cancel-btn" onclick="requestCancelQuotation(\'fq\')" style="display:none;background:var(--coral);color:#fff;border-color:var(--coral)"><i class="ti ti-circle-x"></i>Client Declined</button>'
     +'</div>'
     +'<div id="fq-drive-links" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px"></div>'
     +'<div id="fq-previewed-hint" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;color:var(--text2)">'
@@ -18903,7 +19003,7 @@ function _proceedSaveQuotation(){
   var total=grand.toFixed(2);
   var now=new Date().toISOString();
   var serial=qBaseSerial||qSerial;
-  var status=fqClientApproved?'Client Approved':(qLocked?(qApproved?'Approved':'Locked'):'Draft');
+  var status=_computeQuotationStatus();
   var stage=qStage===2?'Final':'Initial';
   var svcReq=(el('cl-service')?el('cl-service').value:'Fabrication only');
   var optCount=qOptionsList.filter(function(o){return o.status!=='archived';}).length||1;
@@ -19015,6 +19115,7 @@ function getFullQuotationState(){
     status:qLocked?(qApproved?'Approved':'Locked'):'Draft',
     initLockedAt:qInitLockedAt, initApprovedAt:qInitApprovedAt,
     finalLockedAt:fqLockedAt, closedAt:qClosedAt,
+    qCancelled:qCancelled, qCancelledAt:qCancelledAt, qCancelReason:qCancelReason,
     fqLocked:fqLocked, fqSentStatus:fqSentStatus,
     fqClientApproved:fqClientApproved, fqClientApprovedAt:fqClientApprovedAt,
     sourceOrderId:qSourceOrderId||'',
@@ -19132,6 +19233,7 @@ function restoreFullQuotationState(state){
   // setting them here before that lazy init runs is sufficient — no other change needed.
   fqLocked=!!state.fqLocked; fqSentStatus=state.fqSentStatus||'';
   fqClientApproved=!!state.fqClientApproved; fqClientApprovedAt=state.fqClientApprovedAt||'';
+  qCancelled=!!state.qCancelled; qCancelledAt=state.qCancelledAt||''; qCancelReason=state.qCancelReason||'';
   qBaseSerial=state.baseSerial||'';
   qActiveOptionId=state.activeOptionId||0;
   qOptionsList=JSON.parse(JSON.stringify(state.optionsList||[]));
@@ -23214,17 +23316,20 @@ function _chipKpiContext(){
   if(!all.length) return null;
 
   var total=all.length;
-  var byStatus={Draft:0,Locked:0,Approved:0,Closed:0,'On-going':0,Other:0};
+  var byStatus={Draft:0,'Initial Quotation':0,'In Final Quotation':0,'Awaiting Client Approval':0,'Client Approved':0,Cancelled:0,Closed:0,'On-going':0,Other:0};
   var totalRevenue=0, closedRevenue=0;
   var byMonth={};
   var now=new Date(), thisMonth=now.getFullYear()+'-'+(String(now.getMonth()+1).padStart(2,'0'));
 
   all.forEach(function(q){
-    var st=q.status||'Draft';
+    var st=q.status==='On-going'?'On-going':_normalizeStatusLabel(q.status);
     if(byStatus[st]!==undefined) byStatus[st]++; else byStatus.Other++;
     var v=parseFloat(q.value)||0;
     totalRevenue+=v;
-    if(st==='Closed'||st==='Approved') closedRevenue+=v;
+    // Revenue is recognized once the client has actually approved (or the project is closed) —
+    // not at the earlier internal Stage-1-approval point this used to key off. Note this counts
+    // as "signed, not yet collected" — there's no payment/invoice tracking yet to distinguish that.
+    if(st==='Closed'||st==='Client Approved') closedRevenue+=v;
     // Monthly bucketing by created date
     var d=q.created||(q.date||'');
     var m=d?d.substring(0,7):'';
@@ -23250,12 +23355,13 @@ function _chipKpiContext(){
     else if(last<prev*0.9) trend='down ('+(((prev-last)/prev)*100).toFixed(0)+'% vs prior month)';
   }
 
-  // Active pipeline (not closed)
-  var pipeline=all.filter(function(q){return q.status!=='Closed';})
+  // Active pipeline (not closed, not cancelled — a cancelled quotation isn't "in flight" anymore)
+  var pipeline=all.filter(function(q){var st=_normalizeStatusLabel(q.status);return st!=='Closed'&&st!=='Cancelled';})
     .reduce(function(s,q){return s+(parseFloat(q.value)||0);},0);
 
-  // Conversion: closed / total
-  var conversion=total>0?(((byStatus.Closed+byStatus.Approved)/total)*100).toFixed(1)+'%':'N/A';
+  // Win rate / conversion: client-approved (or closed) / total — keyed to actual client sign-off,
+  // not the earlier internal Stage-1-approval point this used to use.
+  var conversion=total>0?(((byStatus.Closed+byStatus['Client Approved'])/total)*100).toFixed(1)+'%':'N/A';
 
   return {total:total, byStatus:byStatus, totalRevenue:totalRevenue,
     closedRevenue:closedRevenue, pipeline:pipeline, conversion:conversion,
