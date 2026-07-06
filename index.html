@@ -21289,9 +21289,27 @@ function _prodApplyJargon(name,cat){
   }
   return name;
 }
-// Applies any saved color/texture corrections to every component right after parsing, so the raw
-// Cutting List table, the BOM rollup, and the reflect-to-quotation summary all see the corrected
-// value consistently — not just whichever view happened to look the value up itself.
+// Find-or-create a jargon rule (term+category -> dbItem) and persist it. Shared by every place
+// that remembers a correction (materials/hardware/services names, component color/texture/
+// material substitution, and the name-keyed faces/EBT rules below) instead of each re-implementing
+// the same find-or-push-then-save logic.
+function _prodSaveJargonRule(term,cat,dbItem,unit){
+  if(!term||!dbItem||term===dbItem) return;
+  if(!prodSettings.jargonMap) prodSettings.jargonMap=[];
+  var jm=prodSettings.jargonMap;
+  for(var i=0;i<jm.length;i++){
+    if(jm[i].term===term&&jm[i].category===cat){ jm[i].dbItem=dbItem; if(unit) jm[i].unit=unit; saveProdSettings(); return; }
+  }
+  jm.push({term:term,category:cat,dbItem:dbItem,unit:unit||''});
+  saveProdSettings();
+}
+// Applies any saved color/texture/material corrections to every component right after parsing, so
+// the raw Cutting List table, the BOM rollup, and the reflect-to-quotation summary all see the
+// corrected value consistently — not just whichever view happened to look the value up itself.
+// Faces/EBT work differently: those are blank specifically because the SOURCE was ambiguous (no
+// "wrong value" to substitute), so they're learned by component NAME instead — if a past correction
+// on a similarly-named component taught us the right faces/EBT, pre-fill it here rather than
+// leaving it blank again.
 function _prodApplyComponentJargon(components){
   for(var i=0;i<components.length;i++){
     var c=components[i];
@@ -21299,28 +21317,40 @@ function _prodApplyComponentJargon(components){
     if(c.texture) c.texture=_prodApplyJargon(c.texture,'texture');
     if(c.colorB) c.colorB=_prodApplyJargon(c.colorB,'color');
     if(c.textureB) c.textureB=_prodApplyJargon(c.textureB,'texture');
+    if(c.material) c.material=_prodApplyJargon(c.material,'material');
+    if(!c.faces&&c.name){ var fLearned=_prodApplyJargon(c.name,'faces'); if(fLearned!==c.name) c.faces=parseInt(fLearned)||c.faces; }
+    if(!c.ebt&&c.name){ var eLearned=_prodApplyJargon(c.name,'ebt'); if(eLearned!==c.name) c.ebt=eLearned; }
     // Snapshot the post-jargon, pre-manual-edit values — used as the "term" if the user corrects
     // this field further in the Cutting List table, so _prodComponentFieldCorrected can tell
     // whether a manual edit actually changed anything worth remembering.
-    c._aiColor=c.color; c._aiTexture=c.texture; c._aiColorB=c.colorB; c._aiTextureB=c.textureB;
+    c._aiColor=c.color; c._aiTexture=c.texture; c._aiColorB=c.colorB; c._aiTextureB=c.textureB; c._aiMaterial=c.material;
   }
   return components;
 }
 // A Cutting List field got manually corrected — apply it, resolve the row's needsReview flag (a
-// manual look-and-fix on any of its fields is exactly what the flag was asking for), and — for
-// color/texture specifically — remember the correction as a jargon mapping so the SAME kind of
-// value auto-corrects on future analyses instead of needing a flag+fix every single time.
+// manual look-and-fix on any of its fields is exactly what the flag was asking for), and remember
+// the correction so the SAME situation auto-resolves on future analyses instead of needing a
+// flag+fix every single time:
+//  - color/texture/material: remembered as a value substitution (AI said X, you meant Y)
+//  - faces/EBT: remembered by component NAME instead (there's no wrong value to swap — the field
+//    was blank because the source didn't say, so the lesson is "a component named like this is
+//    usually N faces / this EBT code")
 function _prodComponentFieldCorrected(idx,field,newVal){
   var r=prodState.result; if(!r||!r.components||!r.components[idx]) return;
   var c=r.components[idx];
+  if(field==='faces'||field==='ebt'){
+    if(c.name&&newVal) _prodSaveJargonRule(c.name,field,String(newVal));
+    c[field]=newVal;
+    c.needsReview=false;
+    r._services=prodComputeServices(r.components,r.holeSchedule||[]);
+    r._bom=prodComputeBom(r.components);
+    renderProductionPage();
+    return;
+  }
   var snapKey='_ai'+field.charAt(0).toUpperCase()+field.slice(1);
-  if((field==='color'||field==='texture'||field==='colorB'||field==='textureB')&&c[snapKey]&&c[snapKey]!==newVal&&newVal){
-    var cat=(field==='color'||field==='colorB')?'color':'texture';
-    if(!prodSettings.jargonMap) prodSettings.jargonMap=[];
-    var jm=prodSettings.jargonMap, found=false;
-    for(var i=0;i<jm.length;i++){ if(jm[i].term===c[snapKey]&&jm[i].category===cat){ jm[i].dbItem=newVal; found=true; break; } }
-    if(!found) jm.push({term:c[snapKey],category:cat,dbItem:newVal});
-    saveProdSettings();
+  if((field==='color'||field==='texture'||field==='colorB'||field==='textureB'||field==='material')&&c[snapKey]&&c[snapKey]!==newVal&&newVal){
+    var cat=(field==='color'||field==='colorB')?'color':(field==='material')?'material':'texture';
+    _prodSaveJargonRule(c[snapKey],cat,newVal);
   }
   c[field]=newVal;
   if(snapKey in c) c[snapKey]=newVal; // keep snapshot current so a 2nd edit compares against the latest value, not the stale original
@@ -21532,11 +21562,7 @@ function _prodServiceRowCorrected(idx,newVal){
   s.svcIdx=newIdx; s.name=SERVICES[newIdx].name; s.unit=SERVICES[newIdx].unit;
   if(s.needsReview){
     s.needsReview=false;
-    if(!prodSettings.jargonMap) prodSettings.jargonMap=[];
-    var jm=prodSettings.jargonMap, found=false;
-    for(var i=0;i<jm.length;i++){ if(jm[i].term===s.aiName&&jm[i].category==='services'){ jm[i].dbItem=SERVICES[newIdx].name; found=true; break; } }
-    if(!found) jm.push({term:s.aiName,category:'services',dbItem:SERVICES[newIdx].name,unit:SERVICES[newIdx].unit});
-    saveProdSettings();
+    _prodSaveJargonRule(s.aiName,'services',SERVICES[newIdx].name,SERVICES[newIdx].unit);
   }
   var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
 }
