@@ -2651,6 +2651,11 @@ var companyLogos = {};   // keyed by company name — one logo per company
 var prodSettings = {
   claudeKey: '',
   kerf: 3,
+  // 'panelsaw' = guillotine, grain locked along piece.length, no rotation (validated against
+  // real cutting lists). 'cnc' = nesting router — can rotate pieces to pack tighter; modeled as
+  // a simpler stubbed version of the same shelf algorithm with rotation allowed, not true 2D
+  // bin-packing yet (see project_board_layout_cutting_simulation memory — sharpen later).
+  machineType: 'panelsaw',
   ebtWastage: 5,
   ebtLegend: [
     {code:'N/A',   desc:'No edgebanding',                   condition:''},
@@ -19494,6 +19499,13 @@ function renderProductionSettings() {
     +'<input type="number" id="prod-kerf" value="'+prodSettings.kerf+'" min="0" max="10" step="0.5" style="height:32px;font-size:12px"></div>'
     +'<div><label class="fld">EBT wastage allowance (%)</label>'
     +'<input type="number" id="prod-ebt-waste" value="'+prodSettings.ebtWastage+'" min="0" max="50" style="height:32px;font-size:12px"></div>'
+    +'<div style="grid-column:1/-1;margin-top:8px"><label class="fld">Cutting machine (board-count simulation)</label>'
+    +'<select id="prod-machine-type" style="height:32px;font-size:12px">'
+    +'<option value="panelsaw"'+(prodSettings.machineType!=='cnc'?' selected':'')+'>Panel Saw (guillotine — no rotation, grain locked)</option>'
+    +'<option value="cnc"'+(prodSettings.machineType==='cnc'?' selected':'')+'>CNC / Nesting Router (rotation allowed — tighter packing)</option>'
+    +'</select>'
+    +'<div style="font-size:11px;color:var(--text2);margin-top:3px">Drives the boards-needed simulation on the Bill of Materials report. Panel Saw is validated against real cutting lists; CNC is a simpler first-pass estimate.</div>'
+    +'</div>'
     +'</div>'
     // EBT legend
     +'<div class="dvdr" style="margin-top:14px"><span>EBT code legend</span></div>'
@@ -19554,6 +19566,7 @@ function saveProductionSettings() {
   var isAdmin=(currentRole==='Admin');
   var kerf=parseFloat((el('prod-kerf')||{}).value)||3;
   var waste=parseFloat((el('prod-ebt-waste')||{}).value)||5;
+  var machineType=(el('prod-machine-type')||{}).value||'panelsaw';
   // EBT legend — only conditions are editable; code+desc are fixed
   var ebt=[];
   var ebtBase=prodSettings.ebtLegend||[];
@@ -19588,6 +19601,7 @@ function saveProductionSettings() {
     }
   }
   prodSettings.kerf=kerf;
+  prodSettings.machineType=machineType;
   prodSettings.ebtWastage=waste;
   prodSettings.ebtLegend=ebt;
   prodSettings.cabinetRules=cr;
@@ -21572,45 +21586,65 @@ function prodComputeServices(comps,holes){
 // average but hid 36%-83% per-job utilization swings a flat % can't catch, and
 // would genuinely under-order boards on a worse-fitting piece mix. Sorts pieces
 // widest-first, ships them onto shelves (rip-cut strips) with kerf deducted
-// between cuts, no rotation (grain locked along piece.length) — matches actual
-// panel-saw cutting practice. Zero AI tokens — pure deterministic math.
-function guillotinePackBoards(pieces,boardW,boardH,kerf){
+// between cuts. Zero AI tokens — pure deterministic math.
+//
+// allowRotate=false (default, Panel Saw): grain locked along piece.length, no
+// rotation — matches actual panel-saw cutting practice, validated against real
+// data (do not change this path's behavior, the 7/1/4-board result depends on
+// it staying exactly as-is).
+// allowRotate=true (CNC/Nesting Router): a CNC can orient a part either way,
+// so each piece is also tried rotated 90° and whichever orientation packs
+// tighter (existing shelf fit, else new-shelf fit, else new board) wins. This
+// is a simple stub on the same shelf algorithm, not true 2D bin-packing —
+// intentionally simpler for now, see project_board_layout_cutting_simulation
+// memory ("sharpen later").
+function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
   var items=pieces.slice().sort(function(a,b){ return b.width-a.width; });
   var oversized=0,usedArea=0,totalArea=0,boards=[];
   for(var i=0;i<items.length;i++){
     var p=items[i];
     totalArea+=p.length*p.width;
-    if(p.length+kerf>boardH||p.width+kerf>boardW){ oversized++; continue; }
-    // 1. Best-fit across ALL open boards' existing shelves (least leftover length that still fits) —
-    // checking only the most-recently-opened board (instead of every board) understates real
-    // packing efficiency; validated against samplesofcuttinglist/MARGARITA.xls, this global search
-    // is what reproduces the actual 7/1/4-board, 82.6%/35.9%/78.0%-utilization result.
-    var best=-1,bestBoard=-1,bestRem=Infinity;
-    for(var bi=0;bi<boards.length;bi++){
-      var bd=boards[bi];
-      for(var s=0;s<bd.shelves.length;s++){
-        var sh=bd.shelves[s]; var rem=boardH-sh.lenUsed;
-        if(sh.height>=p.width+kerf&&rem>=p.length+kerf&&rem<bestRem){ bestRem=rem; best=s; bestBoard=bi; }
+    var orientations=[p];
+    if(allowRotate&&p.length!==p.width) orientations.push({length:p.width,width:p.length});
+    orientations=orientations.filter(function(o){ return o.length+kerf<=boardH&&o.width+kerf<=boardW; });
+    if(!orientations.length){ oversized++; continue; }
+    // 1. Best-fit across ALL open boards' existing shelves (least leftover length that still fits),
+    // trying every allowed orientation — checking only the most-recently-opened board (instead of
+    // every board) understates real packing efficiency; validated against
+    // samplesofcuttinglist/MARGARITA.xls, this global search is what reproduces the actual
+    // 7/1/4-board, 82.6%/35.9%/78.0%-utilization result (with orientations=[p], i.e. no rotation).
+    var choice=null;
+    for(var oi=0;oi<orientations.length;oi++){
+      var o=orientations[oi];
+      for(var bi=0;bi<boards.length;bi++){
+        var bd=boards[bi];
+        for(var s=0;s<bd.shelves.length;s++){
+          var sh=bd.shelves[s]; var rem=boardH-sh.lenUsed;
+          if(sh.height>=o.width+kerf&&rem>=o.length+kerf&&(!choice||rem<choice.rem)){ choice={type:'shelf',board:bi,shelf:s,o:o,rem:rem}; }
+        }
       }
     }
-    if(best>=0){
-      boards[bestBoard].shelves[best].lenUsed+=(p.length+kerf); usedArea+=p.length*p.width;
+    if(choice){
+      boards[choice.board].shelves[choice.shelf].lenUsed+=(choice.o.length+kerf); usedArea+=p.length*p.width;
       continue;
     }
-    // 2. No existing shelf fits — open a new shelf (rip-cut strip) on whichever open board leaves
-    // the least leftover width afterward (best-fit, not first-fit).
-    var bb=-1,bestLeftW=Infinity;
-    for(var bj=0;bj<boards.length;bj++){
-      var leftAfter=boardW-(boards[bj].widthUsed+p.width+kerf);
-      if(leftAfter>=0&&leftAfter<bestLeftW){ bestLeftW=leftAfter; bb=bj; }
+    // 2. No existing shelf fits — open a new shelf (rip-cut strip) on whichever open board (and
+    // orientation) leaves the least leftover width afterward (best-fit, not first-fit).
+    for(var oj=0;oj<orientations.length;oj++){
+      var o2=orientations[oj];
+      for(var bj=0;bj<boards.length;bj++){
+        var leftAfter=boardW-(boards[bj].widthUsed+o2.width+kerf);
+        if(leftAfter>=0&&(!choice||leftAfter<choice.rem)){ choice={type:'new',board:bj,o:o2,rem:leftAfter}; }
+      }
     }
-    if(bb>=0){
-      boards[bb].shelves.push({height:p.width+kerf,lenUsed:p.length+kerf});
-      boards[bb].widthUsed+=p.width+kerf; usedArea+=p.length*p.width;
+    if(choice){
+      boards[choice.board].shelves.push({height:choice.o.width+kerf,lenUsed:choice.o.length+kerf});
+      boards[choice.board].widthUsed+=choice.o.width+kerf; usedArea+=p.length*p.width;
       continue;
     }
-    // 3. No open board has width budget left — start a new board.
-    boards.push({widthUsed:p.width+kerf,shelves:[{height:p.width+kerf,lenUsed:p.length+kerf}]});
+    // 3. No open board has width budget left — start a new board (first allowed orientation).
+    var o3=orientations[0];
+    boards.push({widthUsed:o3.width+kerf,shelves:[{height:o3.width+kerf,lenUsed:o3.length+kerf}]});
     usedArea+=p.length*p.width;
   }
   var boardArea=boardW*boardH;
@@ -21636,6 +21670,7 @@ function prodComputeBom(comps){
   }
   var bom=[]; var keys=Object.keys(groups);
   var kerf=prodSettings.kerf||3;
+  var allowRotate=prodSettings.machineType==='cnc';
   for(var j=0;j<keys.length;j++){
     var g=groups[keys[j]];
     var boardW=1220; var boardH=2440;
@@ -21646,7 +21681,7 @@ function prodComputeBom(comps){
         break;
       }
     }
-    var sim=guillotinePackBoards(g.pieces,boardW,boardH,kerf);
+    var sim=guillotinePackBoards(g.pieces,boardW,boardH,kerf,allowRotate);
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,
@@ -21958,7 +21993,7 @@ function prodBuildResultHtml(result){
   }
   var bomHtml='<div class="card" style="margin-bottom:14px">'
     +'<div class="card-head"><h3><i class="ti ti-layout-board"></i>Bill of Materials — boards needed</h3></div>'
-    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Simulated by cutting layout (guillotine panel-saw, '+(prodSettings.kerf||3)+'mm kerf, no rotation) — not a flat area estimate.</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Simulated by cutting layout ('+(prodSettings.machineType==='cnc'?'CNC/nesting router, rotation allowed':'guillotine panel-saw, no rotation')+', '+(prodSettings.kerf||3)+'mm kerf) — not a flat area estimate.</div>'
     +'<div style="overflow-x:auto"><table class="data">'
     +'<thead><tr><th>Material</th><th>Color</th><th>Texture</th><th style="text-align:right">Thickness</th><th style="text-align:right">Total area</th><th>Board size</th><th style="text-align:right">Sheets needed</th><th style="text-align:right">Utilization</th><th>Used in areas</th></tr></thead>'
     +'<tbody>'+bomRows+'</tbody>'
