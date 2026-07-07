@@ -20896,7 +20896,15 @@ function prodBuildPrompt(){
     +'- carcassCount: total number of discrete cabinet boxes or furniture pieces';
 }
 
+// Streams the response instead of one blocking fetch — required once max_tokens goes past
+// ~16000 (large cutting lists need far more than the old 4000-8192 caps to avoid truncation,
+// see prodParseResponse's _truncated handling) since a big non-streaming response risks the
+// browser fetch timing out before the model finishes. Same SSE-accumulation pattern as
+// _chipCallAI's Lami streaming. Public contract unchanged: resolves to prodParseResponse's
+// result object, rejects on network/HTTP error — every prodApiCall() caller's .then/.catch
+// keeps working unmodified.
 function prodApiCall(bodyObj){
+  var body=Object.assign({},bodyObj,{stream:true});
   return fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{
@@ -20905,14 +20913,35 @@ function prodApiCall(bodyObj){
       'anthropic-version':'2023-06-01',
       'anthropic-dangerous-direct-browser-access':'true'
     },
-    body:JSON.stringify(bodyObj)
+    body:JSON.stringify(body)
   }).then(function(r){
     if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
-    return r.json();
-  }).then(function(data){
-    _tkRecord('drawing',(data.usage&&data.usage.input_tokens)||0,(data.usage&&data.usage.output_tokens)||0);
-    var text=(data.content&&data.content[0]&&data.content[0].text)||'';
-    return prodParseResponse(text);
+    var reader=r.body.getReader();
+    var decoder=new TextDecoder();
+    var buf='',fullText='',inTok=0,outTok=0;
+    function pump(){
+      return reader.read().then(function(res){
+        if(res.done){
+          _tkRecord('drawing',inTok,outTok);
+          return prodParseResponse(fullText);
+        }
+        buf+=decoder.decode(res.value,{stream:true});
+        var lines=buf.split('\n'); buf=lines.pop();
+        for(var i=0;i<lines.length;i++){
+          var line=lines[i].trim();
+          if(line.indexOf('data:')!==0) continue;
+          var payload=line.slice(5).trim();
+          if(payload==='[DONE]') continue;
+          var ev; try{ ev=JSON.parse(payload); }catch(_){ continue; }
+          if(ev.type==='message_start'&&ev.message&&ev.message.usage){ inTok=ev.message.usage.input_tokens||0; }
+          else if(ev.type==='content_block_delta'&&ev.delta&&typeof ev.delta.text==='string'){ fullText+=ev.delta.text; }
+          else if(ev.type==='message_delta'&&ev.usage&&typeof ev.usage.output_tokens==='number'){ outTok=ev.usage.output_tokens; }
+          else if(ev.type==='error'){ throw new Error((ev.error&&ev.error.message)||'stream error'); }
+        }
+        return pump();
+      });
+    }
+    return pump();
   });
 }
 
@@ -20920,7 +20949,7 @@ function prodSendPdf(base64){
   var prompt=prodBuildPrompt();
   prodApiCall({
     model:'claude-sonnet-4-6',
-    max_tokens:8192,
+    max_tokens:64000, // was 8192 — real cutting lists (75+ rows) need far more; safe now that prodApiCall streams
     messages:[{role:'user',content:[
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}},
       {type:'text',text:prompt}
@@ -20936,7 +20965,7 @@ function prodSendText(csvText){
   var prompt=prodBuildPrompt();
   prodApiCall({
     model:'claude-sonnet-4-6',
-    max_tokens:8000,
+    max_tokens:64000, // was 8000 — see prodSendPdf
     messages:[{role:'user',content:'Here is the cutting list file content (CSV format):\n\n'+csvText+'\n\n---\n\n'+prompt}]
   }).then(function(result){
     prodState.analyzing=false; prodState.result=result; renderProductionPage();
@@ -20994,7 +21023,7 @@ function prodSendElevation(base64){
   var prompt=prodBuildElevationPrompt();
   prodApiCall({
     model:'claude-sonnet-4-6',
-    max_tokens:4000,
+    max_tokens:16000, // was 4000 — a complex elevation with many units can still need headroom
     messages:[{role:'user',content:[
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}},
       {type:'text',text:prompt}
@@ -21052,7 +21081,7 @@ function prodApproveElevation(){
     +'- Any component detail this generation step had to assume rather than derive from the unit data (e.g. color/texture not specified on the unit) — set "needsReview": true and a short "reviewNote" explaining what was assumed, rather than silently guessing';
   prodApiCall({
     model:'claude-sonnet-4-6',
-    max_tokens:8000,
+    max_tokens:64000, // was 8000 — a large approved-unit set generates a big cutting list
     messages:[{role:'user',content:prompt}]
   }).then(function(result){
     result.carcassCount=er.carcassCount||er.units.length;
