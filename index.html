@@ -2503,6 +2503,11 @@ var qMobAccom = null;       // {label, total} — accommodation exported from th
 //   lines:[{key,label,basis,qty,rate,total}], goodsSubtotal, transportTotal,
 //   accomTotal, subtotal, aiAssisted, computedAt, computedBy }
 var qMobCalc = null;
+// Board-layout snapshot captured from a Designers Support analysis at "Reflect to quotation"
+// time — { fileName, analyzedAt, componentCount, bom:[...] } where bom is prodComputeBom()'s
+// per-material-group guillotine simulation result (boardsNeeded/utilizationPct/oversizedCount).
+// null = no Designers Support analysis was reflected into this quotation (most quotations).
+var qBoardLayout = null;
 var qInstPlanner = null;   // {workNightAccom, perDiem, touristPremium, touristNote, detail} from planner split export
 var qInstTouristPrem = false;  // whether tourist premium toggle is on in the inst card
 var ppicSettings = {installation:{teamsPerDay:1,cabPerTeamDay:3,workdaysPerMonth:22,typeCapacity:{},typeUom:{},customTypes:[]}};
@@ -4138,7 +4143,7 @@ function initQuotation() {
   qInstWorkers=0; qInstDays=0;
   qClientSupplyMat=false; qClientSupplyMatList=[]; qClientMatMultOverride=0;
   qInstRegion='metro'; qInstRegionManual=false;
-  qMobTransport=null; qMobAccom=null; qMobCalc=null; qInstPlanner=null; qInstTouristPrem=false;
+  qMobTransport=null; qMobAccom=null; qMobCalc=null; qBoardLayout=null; qInstPlanner=null; qInstTouristPrem=false;
   mobilityState.accomException=null; mobilityState.zone='';
   populateInstRegionSelect();
   _linkedClientId=null;_confirmedFields={};_originalValues={};
@@ -12443,6 +12448,7 @@ function captureQuotationSnapshot(){
     mobTransport:qMobTransport?JSON.parse(JSON.stringify(qMobTransport)):null,
     mobAccom:qMobAccom?JSON.parse(JSON.stringify(qMobAccom)):null,
     mobCalc:qMobCalc?JSON.parse(JSON.stringify(qMobCalc)):null,
+    boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null,
     instTouristPrem:qInstTouristPrem,
     clientSupplyMat:qClientSupplyMat,
@@ -12474,6 +12480,7 @@ function restoreQuotationSnapshot(snap){
   qMobTransport=snap.mobTransport?JSON.parse(JSON.stringify(snap.mobTransport)):null;
   qMobAccom=snap.mobAccom?JSON.parse(JSON.stringify(snap.mobAccom)):null;
   qMobCalc=snap.mobCalc?JSON.parse(JSON.stringify(snap.mobCalc)):null;
+  qBoardLayout=snap.boardLayout?JSON.parse(JSON.stringify(snap.boardLayout)):null;
   qInstPlanner=snap.instPlanner?JSON.parse(JSON.stringify(snap.instPlanner)):null;
   if(snap.mobQaqcPersons) mobilityState.qaqcPersons=snap.mobQaqcPersons;
   qInstTouristPrem=!!snap.instTouristPrem;
@@ -12948,6 +12955,7 @@ function confirmSend(via) {
     logActivity(stage+" locked. "+sentTxt+".");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
+    _saveBoardLayoutToDrive();
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus=sentTxt; qInitLockedAt=qInitLockedAt||new Date().toISOString();
@@ -12989,6 +12997,7 @@ function skipSend() {
     logActivity("Final quotation locked. Not sent to client.");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
+    _saveBoardLayoutToDrive();
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus="Not sent"; qInitLockedAt=qInitLockedAt||new Date().toISOString();
@@ -13253,6 +13262,7 @@ function confirmClientApprove(){
   logActivity('Client approved the Final Quotation.');
   updateFQClientApproveUI();
   _updateQStatusBadge();
+  _saveBoardLayoutToDrive();
   gSaveQuotation();
 }
 // "Client Declined" — client doesn't want to proceed. Can be triggered from Stage 1 (Initial
@@ -15466,6 +15476,33 @@ function supaReplaceTable(table,rows){
       done();
     });
   }catch(e){ done(); return Promise.resolve(); }
+}
+// — board_layouts upsert (dual-write), scoped to ONE quotation's serial. Unlike
+// supaReplaceTable() (which wipes the whole table), this only replaces the rows
+// belonging to `serial` — one row per material group from prodComputeBom()'s
+// guillotine simulation. Feeds the future Production Operation app's board-layout
+// queries; Modcraft itself never reads this table back. —
+function supaReplaceBoardLayouts(serial,bomRows,analyzedAt){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!serial) return Promise.resolve();
+  try{
+    return supa.from('quotations').upsert({serial:serial},{onConflict:'serial',ignoreDuplicates:true}).then(function(){
+      return supa.from('board_layouts').delete().eq('serial',serial);
+    }).then(function(){
+      if(!bomRows||!bomRows.length) return null;
+      var rows=bomRows.map(function(bm){
+        return {
+          serial:serial, material:bm.material||null, color:bm.color||null, texture:bm.texture||null,
+          thickness_mm:bm.thickness||null, board_size:bm.boardSize||null, boards_needed:bm.boardsNeeded||0,
+          utilization_pct:bm.utilizationPct||0, oversized_count:bm.oversizedCount||0,
+          areas:bm.areas||null, analyzed_at:analyzedAt||null
+        };
+      });
+      return supa.from('board_layouts').insert(rows);
+    }).then(function(r){
+      if(r&&r.error) console.warn('[supa] board_layouts upsert error:',r.error.message||r.error);
+      else console.log('[supa] board_layouts upserted:',serial,bomRows?bomRows.length:0,'rows');
+    }).catch(function(e){ console.warn('[supa] board_layouts upsert threw',e); });
+  }catch(e){ console.warn('[supa] board_layouts upsert threw',e); return Promise.resolve(); }
 }
 // — user upsert / delete (dual-write) —
 function supaUpsertUser(u){
@@ -19093,6 +19130,7 @@ function getFullQuotationState(){
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     instWorkers:qInstWorkers, instDays:qInstDays,
     instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom, mobCalc:qMobCalc,
+    boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null, instTouristPrem:qInstTouristPrem,
     clientSupplyMat:qClientSupplyMat, clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])), clientMatMultOverride:qClientMatMultOverride,
     accomException:mobilityState.accomException||null,
@@ -19249,6 +19287,7 @@ function restoreFullQuotationState(state){
   qInstRegion=state.instRegion||'z1'; if(qInstRegion==='metro')qInstRegion='z1'; if(qInstRegion==='outside')qInstRegion='z2';
   qMobTransport=state.mobTransport||null; qMobAccom=state.mobAccom||null;
   qMobCalc=state.mobCalc||null;
+  qBoardLayout=state.boardLayout||null;
   qInstPlanner=state.instPlanner||null; qInstTouristPrem=!!state.instTouristPrem;
   qClientSupplyMat=!!state.clientSupplyMat; qClientSupplyMatList=Array.isArray(state.clientSupplyMatList)?state.clientSupplyMatList:[]; qClientMatMultOverride=state.clientMatMultOverride||0;
   mobilityState.accomException=state.accomException||null;
@@ -20298,6 +20337,33 @@ function _saveCostDetailToDrive(){
       else console.warn('Cost detail Drive save failed:',r&&r.error&&r.error.message);
     })
     .catch(function(e){console.warn('Cost detail Drive save failed:',e);});
+}
+// Persists the Designers Support board-layout simulation (qBoardLayout, captured at
+// "Reflect to quotation" time) to the quotation's Drive folder AND the Supabase
+// board_layouts table, at Stage 2 lock — see project_board_layout_cutting_simulation
+// memory: "Saved to the quotation's Drive folder at Stage 2 lock/Client Approved, AND
+// to a new Supabase board_layouts table (structured, queryable)". No-ops silently if
+// this quotation never went through Designers Support (qBoardLayout stays null).
+function _saveBoardLayoutToDrive(){
+  if(!gToken||!qSerial||!qBoardLayout||!qBoardLayout.bom||!qBoardLayout.bom.length) return;
+  var baseSerial=qBaseSerial||qSerial;
+  var payload={
+    serial:qSerial,
+    client:(el('cl-bizname')&&el('cl-bizname').value)||(el('cl-name')&&el('cl-name').value)||'',
+    savedAt:new Date().toISOString(),
+    savedBy:gUser?gUser.email:'',
+    boardLayout:qBoardLayout
+  };
+  var fileName=qSerial+' — '+driveClientName()+' — board layout.json';
+  ensureDriveFolder()
+    .then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);})
+    .then(function(fid){supaUploadQuotationFile(baseSerial,fileName,'application/json',JSON.stringify(payload,null,2)); return _driveUpsertFile(fid,fileName,'application/json',JSON.stringify(payload,null,2));})
+    .then(function(r){
+      if(r&&r.id) logActivity('Board layout saved to Drive folder ('+fileName+')');
+      else console.warn('Board layout Drive save failed:',r&&r.error&&r.error.message);
+    })
+    .catch(function(e){console.warn('Board layout Drive save failed:',e);});
+  supaReplaceBoardLayouts(baseSerial,qBoardLayout.bom,qBoardLayout.analyzedAt);
 }
 function _mobCallClaude(prompt, callback){
   fetch('https://api.anthropic.com/v1/messages',{
@@ -21977,10 +22043,21 @@ function prodReflectToQuotation(){
       +names.slice(0,8).join(', ')+(names.length>8?', …':''));
     return;
   }
-  // Init first (resets qAreas, qFabMode, etc.), then populate — NOT before
+  // Init first (resets qAreas, qFabMode, etc. — including qBoardLayout), then populate — NOT before
   initQuotation();
   _showPage('quotation');
   qFabMode='services';
+  // Capture the guillotine board-count simulation (prodComputeBom's _bom) onto the quotation
+  // itself, so it survives past this Designers Support session — Stage 2 lock persists it to
+  // Drive + Supabase board_layouts for the future Production Operation app to read.
+  if(prodState.result&&prodState.result._bom&&prodState.result._bom.length){
+    qBoardLayout={
+      fileName:prodState.fileName||'',
+      analyzedAt:new Date().toISOString(),
+      componentCount:(prodState.result.components||[]).length,
+      bom:JSON.parse(JSON.stringify(prodState.result._bom))
+    };
+  }
   var area=qAreas[0];
   if(!area.svcItems) area.svcItems=[];
   if(!area.matItems) area.matItems=[];

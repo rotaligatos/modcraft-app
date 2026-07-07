@@ -390,6 +390,39 @@ create table if not exists public.logistics_trucks (
 
 
 -- ============================================================================
+-- 12b. BOARD_LAYOUTS  (new — not a Google Sheets tab)
+--     One row per material group per quotation, from the Designers Support
+--     guillotine cutting simulation (prodComputeBom() in index.html). Feeds
+--     the future Production Operation app; Modcraft itself only writes here
+--     (at Stage 2 lock / Client Approved), it never reads this table back.
+-- ============================================================================
+create table if not exists public.board_layouts (
+  id              bigint generated always as identity primary key,
+  serial          text not null references public.quotations(serial) on delete cascade,
+  material        text,
+  color           text,
+  texture         text,
+  thickness_mm    numeric,
+  board_size      text,                          -- e.g. '1220×2440mm'
+  boards_needed   integer,
+  utilization_pct numeric,                        -- guillotine-simulation packing efficiency
+  oversized_count integer,                        -- pieces bigger than the board in either dimension
+  areas           text,                           -- which quotation areas use this material group
+  analyzed_at     timestamptz,                    -- when the Designers Support analysis ran
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+create index if not exists idx_board_layouts_serial   on public.board_layouts (serial);
+create index if not exists idx_board_layouts_material  on public.board_layouts (material);
+
+drop trigger if exists trg_board_layouts_updated on public.board_layouts;
+create trigger trg_board_layouts_updated
+  before update on public.board_layouts
+  for each row execute function public.set_updated_at();
+
+
+-- ============================================================================
 -- 13. ROW-LEVEL SECURITY  (RLS)
 --     Turn RLS ON for every table, then add ONE permissive starter policy per
 --     table: "any authenticated (logged-in) user can do everything."
@@ -404,7 +437,7 @@ declare
     'quotations','quotation_states','clients','users','settings',
     'user_prefs','approval_requests','activity_log','pending_orders',
     'messages','price_services','price_materials','price_hardware',
-    'cabinet_templates','logistics_materials','logistics_trucks'
+    'cabinet_templates','logistics_materials','logistics_trucks','board_layouts'
   ];
 begin
   foreach t in array tbls loop
