@@ -20981,6 +20981,83 @@ function prodBuildPrompt(){
     +'- carcassCount: total number of discrete cabinet boxes or furniture pieces';
 }
 
+// Native tool-use schemas — replace free-text "return ONLY JSON" prompting for the two analysis
+// output shapes. Forcing a tool call (tool_choice:{type:'tool',...}) means the model can't wrap the
+// result in markdown fences, add stray commentary, or drift on field names — the API enforces the
+// shape before it ever reaches prodParseResponse. strict:true additionally guarantees the input
+// validates exactly against the schema (additionalProperties:false + every field required — this
+// app always emits every field with an empty-string/zero default rather than omitting it, so full
+// strictness costs nothing). Tool use itself is a long-standing, universally-supported API feature
+// (unlike Structured Outputs' output_config.format, which is gated to specific newer models per the
+// Claude API docs and NOT confirmed for claude-sonnet-4-6 — tool-use was chosen specifically because
+// it's the safe, broadly-compatible mechanism for this app's model). See project_drawing_analysis_
+// dxf_direction memory item 1 ("NOT YET BUILT... native tool-use conversion").
+var PROD_CUTTING_LIST_TOOL={
+  name:'submit_cutting_list_analysis',
+  description:'Submit the structured furniture cutting-list analysis.',
+  strict:true,
+  input_schema:{
+    type:'object',
+    properties:{
+      summary:{type:'string',description:'brief description of the furniture item(s)'},
+      projectName:{type:'string',description:'project or client name if visible, else empty string'},
+      components:{type:'array',items:{
+        type:'object',
+        properties:{
+          area:{type:'string'},name:{type:'string'},material:{type:'string'},color:{type:'string'},
+          texture:{type:'string',enum:['','matte','stipple','supermatte','crosscut','woodgrain','softwood','hardwood','textile','stone']},
+          colorB:{type:'string'},textureB:{type:'string'},
+          thickness:{type:'number'},length:{type:'number'},width:{type:'number'},qty:{type:'integer'},
+          faces:{type:'integer'},grain:{type:'string',enum:['length','width','none']},
+          ebt:{type:'string'},grooving:{type:'string'},
+          needsReview:{type:'boolean'},reviewNote:{type:'string'},notes:{type:'string'}
+        },
+        required:['area','name','material','color','texture','colorB','textureB','thickness','length','width','qty','faces','grain','ebt','grooving','needsReview','reviewNote','notes'],
+        additionalProperties:false
+      }},
+      hardware:{type:'array',items:{
+        type:'object',
+        properties:{name:{type:'string'},qty:{type:'number'},unit:{type:'string'},notes:{type:'string'}},
+        required:['name','qty','unit','notes'],additionalProperties:false
+      }},
+      holeSchedule:{type:'array',items:{
+        type:'object',
+        properties:{component:{type:'string'},holeType:{type:'string'},qty:{type:'integer'},diameter:{type:'number'},position:{type:'string'},notes:{type:'string'}},
+        required:['component','holeType','qty','diameter','position','notes'],additionalProperties:false
+      }},
+      carcassCount:{type:'integer'}
+    },
+    required:['summary','projectName','components','hardware','holeSchedule','carcassCount'],
+    additionalProperties:false
+  }
+};
+var PROD_ELEVATION_TOOL={
+  name:'submit_elevation_analysis',
+  description:'Submit the structured elevation-drawing cabinet-intent analysis.',
+  strict:true,
+  input_schema:{
+    type:'object',
+    properties:{
+      summary:{type:'string'},projectName:{type:'string'},area:{type:'string'},
+      totalWidth:{type:'number'},totalHeight:{type:'number'},countertopHeight:{type:'number'},upperCabinetClearance:{type:'number'},
+      units:{type:'array',items:{
+        type:'object',
+        properties:{
+          id:{type:'integer'},label:{type:'string'},
+          type:{type:'string',enum:['Base Cabinet','Tall Cabinet','Upper Cabinet','Drawer Cabinet','Corner Cabinet','Open Shelf']},
+          position:{type:'number'},width:{type:'number'},height:{type:'number'},depth:{type:'number'},
+          material:{type:'string'},color:{type:'string'},doors:{type:'integer'},drawers:{type:'integer'},shelves:{type:'integer'},
+          handleType:{type:'string',enum:['bar','knob','integrated','none']},isUpperCabinet:{type:'boolean'},notes:{type:'string'}
+        },
+        required:['id','label','type','position','width','height','depth','material','color','doors','drawers','shelves','handleType','isUpperCabinet','notes'],
+        additionalProperties:false
+      }},
+      carcassCount:{type:'integer'},notes:{type:'string'}
+    },
+    required:['summary','projectName','area','totalWidth','totalHeight','countertopHeight','upperCabinetClearance','units','carcassCount','notes'],
+    additionalProperties:false
+  }
+};
 // Streams the response instead of one blocking fetch — required once max_tokens goes past
 // ~16000 (large cutting lists need far more than the old 4000-8192 caps to avoid truncation,
 // see prodParseResponse's _truncated handling) since a big non-streaming response risks the
@@ -20988,8 +21065,13 @@ function prodBuildPrompt(){
 // _chipCallAI's Lami streaming. Public contract unchanged: resolves to prodParseResponse's
 // result object, rejects on network/HTTP error — every prodApiCall() caller's .then/.catch
 // keeps working unmodified.
-function prodApiCall(bodyObj){
+// toolDef (optional): when passed, forces that tool call (see PROD_CUTTING_LIST_TOOL/
+// PROD_ELEVATION_TOOL above) and accumulates the streamed input_json_delta fragments instead of
+// text_delta. Omit it to keep the old free-text JSON path (kept for any future caller that isn't
+// one of the two known analysis shapes).
+function prodApiCall(bodyObj,toolDef){
   var body=Object.assign({},bodyObj,{stream:true});
+  if(toolDef){ body.tools=[toolDef]; body.tool_choice={type:'tool',name:toolDef.name}; }
   return fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{
@@ -21003,12 +21085,12 @@ function prodApiCall(bodyObj){
     if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
     var reader=r.body.getReader();
     var decoder=new TextDecoder();
-    var buf='',fullText='',inTok=0,outTok=0;
+    var buf='',fullText='',toolJson='',inTok=0,outTok=0;
     function pump(){
       return reader.read().then(function(res){
         if(res.done){
           _tkRecord('drawing',inTok,outTok);
-          return prodParseResponse(fullText);
+          return prodParseResponse(toolDef?toolJson:fullText);
         }
         buf+=decoder.decode(res.value,{stream:true});
         var lines=buf.split('\n'); buf=lines.pop();
@@ -21019,7 +21101,8 @@ function prodApiCall(bodyObj){
           if(payload==='[DONE]') continue;
           var ev; try{ ev=JSON.parse(payload); }catch(_){ continue; }
           if(ev.type==='message_start'&&ev.message&&ev.message.usage){ inTok=ev.message.usage.input_tokens||0; }
-          else if(ev.type==='content_block_delta'&&ev.delta&&typeof ev.delta.text==='string'){ fullText+=ev.delta.text; }
+          else if(ev.type==='content_block_delta'&&ev.delta&&ev.delta.type==='text_delta'&&typeof ev.delta.text==='string'){ fullText+=ev.delta.text; }
+          else if(ev.type==='content_block_delta'&&ev.delta&&ev.delta.type==='input_json_delta'&&typeof ev.delta.partial_json==='string'){ toolJson+=ev.delta.partial_json; }
           else if(ev.type==='message_delta'&&ev.usage&&typeof ev.usage.output_tokens==='number'){ outTok=ev.usage.output_tokens; }
           else if(ev.type==='error'){ throw new Error((ev.error&&ev.error.message)||'stream error'); }
         }
@@ -21039,7 +21122,7 @@ function prodSendPdf(base64){
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}},
       {type:'text',text:prompt}
     ]}]
-  }).then(function(result){
+  },PROD_CUTTING_LIST_TOOL).then(function(result){
     prodState.analyzing=false; prodState.result=result; renderProductionPage();
   }).catch(function(err){
     prodState.analyzing=false; prodState.result={error:err.message||'API call failed'}; renderProductionPage();
@@ -21052,7 +21135,7 @@ function prodSendText(csvText){
     model:'claude-sonnet-4-6',
     max_tokens:64000, // was 8000 — see prodSendPdf
     messages:[{role:'user',content:'Here is the cutting list file content (CSV format):\n\n'+csvText+'\n\n---\n\n'+prompt}]
-  }).then(function(result){
+  },PROD_CUTTING_LIST_TOOL).then(function(result){
     prodState.analyzing=false; prodState.result=result; renderProductionPage();
   }).catch(function(err){
     prodState.analyzing=false; prodState.result={error:err.message||'API call failed'}; renderProductionPage();
@@ -21113,7 +21196,7 @@ function prodSendElevation(base64){
       {type:'document',source:{type:'base64',media_type:'application/pdf',data:base64}},
       {type:'text',text:prompt}
     ]}]
-  }).then(function(er){
+  },PROD_ELEVATION_TOOL).then(function(er){
     prodState.elevationResult=er; prodState.phase='review';
     prodState.analyzing=false; renderProductionPage();
   }).catch(function(err){
@@ -21168,7 +21251,7 @@ function prodApproveElevation(){
     model:'claude-sonnet-4-6',
     max_tokens:64000, // was 8000 — a large approved-unit set generates a big cutting list
     messages:[{role:'user',content:prompt}]
-  }).then(function(result){
+  },PROD_CUTTING_LIST_TOOL).then(function(result){
     result.carcassCount=er.carcassCount||er.units.length;
     prodState.result=result; prodState.phase='cutting-list';
     prodState.analyzing=false; renderProductionPage();
