@@ -390,6 +390,30 @@ create table if not exists public.logistics_trucks (
 
 
 -- ============================================================================
+-- 12c. MAPPING_AUDIT  (new — not a Google Sheets tab)
+--     Append-only trail of every Designers Support jargon-mapping learn event
+--     (materials/hardware catalog resolution, faces/EBT/color/texture/material
+--     corrections, service corrections). Modcraft's jargonMap itself stays
+--     localStorage/per-browser (unchanged) — this table exists purely so
+--     Admins can trace which mappings were learned, by whom, and whether the
+--     source was genuinely ambiguous (was_flagged) when it was learned.
+-- ============================================================================
+create table if not exists public.mapping_audit (
+  id           bigint generated always as identity primary key,
+  saved_at     timestamptz not null default now(),
+  saved_by     text,
+  category     text,                          -- materials | hardware | faces | ebt | color | texture | material | services
+  term         text,                          -- the AI's raw/ambiguous extracted text
+  db_item      text,                          -- resolved catalog item / corrected value
+  unit         text,
+  was_flagged  boolean default false          -- true if needsReview was set when this was learned
+);
+
+create index if not exists idx_mapping_audit_saved_at on public.mapping_audit (saved_at desc);
+create index if not exists idx_mapping_audit_category on public.mapping_audit (category);
+
+
+-- ============================================================================
 -- 12b. BOARD_LAYOUTS  (new — not a Google Sheets tab)
 --     One row per material group per quotation, from the Designers Support
 --     guillotine cutting simulation (prodComputeBom() in index.html). Feeds
@@ -437,7 +461,8 @@ declare
     'quotations','quotation_states','clients','users','settings',
     'user_prefs','approval_requests','activity_log','pending_orders',
     'messages','price_services','price_materials','price_hardware',
-    'cabinet_templates','logistics_materials','logistics_trucks','board_layouts'
+    'cabinet_templates','logistics_materials','logistics_trucks','board_layouts',
+    'mapping_audit'
   ];
 begin
   foreach t in array tbls loop

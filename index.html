@@ -15581,6 +15581,31 @@ function supaInsertActivity(action,serial){
     });
   }catch(e){ return Promise.resolve(); }
 }
+// Append-only trace of every Designers Support jargon-mapping learn event (see
+// project_drawing_analysis_dxf_direction memory + the 2026-07-07/08 mapping-audit session).
+// Deliberately shared/durable (Supabase, not localStorage like jargonMap itself) so an Admin can
+// see, across all users, which mappings were learned from a genuinely ambiguous/flagged source —
+// those are the ones most likely to silently misapply to a future job with different specs.
+function supaInsertMappingAudit(category,term,dbItem,unit,wasFlagged){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!term||!dbItem) return Promise.resolve();
+  try{
+    return supa.from('mapping_audit').insert({
+      saved_by:(gUser&&gUser.email)||null,category:category||'',term:term,db_item:dbItem,unit:unit||null,was_flagged:!!wasFlagged
+    }).then(function(r){
+      if(r&&r.error) console.warn('[supa] mapping_audit insert error:',r.error.message||r.error);
+    });
+  }catch(e){ return Promise.resolve(); }
+}
+// Read path for the Settings → Designers Support → Mapping Audit Log review panel (Admin only).
+function supaGetMappingAudit(limitN){
+  if(!supaReady()) return Promise.resolve([]);
+  try{
+    return supa.from('mapping_audit').select('*').order('saved_at',{ascending:false}).limit(limitN||100).then(function(r){
+      if(r.error){ console.warn('[supa] mapping_audit read error:',r.error.message||r.error); return []; }
+      return r.data||[];
+    }).catch(function(){ return []; });
+  }catch(e){ return Promise.resolve([]); }
+}
 // — pending_orders status update (dual-write). Creation happens via the GAS
 //   Wufoo webhook directly to Sheets — not mirrored here (out of scope: a
 //   separate Apps Script project, not part of index.html) —
@@ -19532,6 +19557,16 @@ function renderProductionSettings() {
     +'<div class="dvdr" style="margin-top:16px"><span>Jargon Mapping</span></div>'
     +'<p style="font-size:11px;color:var(--text2);margin-bottom:10px">Map client terminology to standard names. When the AI extracts a term that matches, the quotation description will be auto-corrected in the Reflect preview.</p>'
     +jmHtml
+    // Mapping audit log — Admin only; every learn event above is durably logged (Supabase, not
+    // localStorage) so mappings learned from a genuinely ambiguous source can be traced and
+    // corrected as volume grows, instead of silently misapplying to a future job. See
+    // project_drawing_analysis_dxf_direction memory.
+    +'<div class="dvdr" style="margin-top:16px"><span>Mapping Audit Log</span></div>'
+    +(currentRole==='Admin'
+      ?'<p style="font-size:11px;color:var(--text2);margin-bottom:8px">Every mapping learned above, with who saved it and whether the source was ambiguous/flagged at the time. Shared across all users — read-only history; edit or remove the mapping itself in the table above.</p>'
+        +'<div id="prod-mapping-audit-wrap"><p style="font-size:12px;color:var(--text2)">Loading…</p></div>'
+        +'<button class="btn" style="font-size:11px;padding:4px 10px;margin-top:6px" onclick="_prodLoadMappingAudit()"><i class="ti ti-refresh"></i>Refresh</button>'
+      :'<p style="font-size:12px;color:var(--text2)"><i class="ti ti-lock"></i> Admin only.</p>')
     // Shop drawing title block
     +'<div class="dvdr" style="margin-top:16px"><span>Shop Drawing — Title Block</span></div>'
     +'<p style="font-size:11px;color:var(--text2);margin-bottom:10px">These details appear in the title block when printing shop drawings (Print / PDF button).</p>'
@@ -19560,6 +19595,40 @@ function renderProductionSettings() {
     +'<button class="btn btn-primary" onclick="saveProductionSettings()"><i class="ti ti-device-floppy"></i>Save Designers Support settings</button>'
     +'<span id="prod-save-msg" style="font-size:12px;color:var(--teal);align-self:center;display:none"><i class="ti ti-check"></i> Saved</span>'
     +'</div></div></div>';
+  if(currentRole==='Admin') _prodLoadMappingAudit();
+}
+// Async — Supabase read for the Mapping Audit Log panel above; not part of the synchronous
+// renderProductionSettings() HTML build since it depends on a network round-trip.
+function _prodLoadMappingAudit(){
+  var wrap=el('prod-mapping-audit-wrap'); if(!wrap) return;
+  wrap.innerHTML='<p style="font-size:12px;color:var(--text2)">Loading…</p>';
+  supaGetMappingAudit(100).then(function(rows){
+    var w2=el('prod-mapping-audit-wrap'); if(!w2) return;
+    if(!supaReady()){ w2.innerHTML='<p style="font-size:12px;color:var(--text2)">Not connected to the fast database (Supabase) in this browser session — connect in Settings → Company &amp; DB to see the audit log.</p>'; return; }
+    if(!rows.length){ w2.innerHTML='<p style="font-size:12px;color:var(--text2)">No mappings learned yet.</p>'; return; }
+    var h='<div style="max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">'
+      +'<div style="display:grid;grid-template-columns:118px 60px 1fr 1fr 60px 70px;gap:5px;padding:6px 8px;background:#f5f4f2;position:sticky;top:0">'
+      +['When','By','Term','Resolved to','Unit','Status'].map(function(c){return '<span style="font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">'+c+'</span>';}).join('')
+      +'</div>';
+    for(var i=0;i<rows.length;i++){
+      var r=rows[i];
+      var when=r.saved_at?new Date(r.saved_at).toLocaleString('en-US',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+      var by=(r.saved_by||'').split('@')[0];
+      var flagBadge=r.was_flagged
+        ?'<span class="pill" style="background:#fff8ec;color:var(--amber);font-size:9px" title="Learned from an ambiguous/flagged extraction">⚠ flagged</span>'
+        :'<span class="pill pill-muted" style="font-size:9px" title="Learned by reinforcing an already-confident match">confirmed</span>';
+      h+='<div style="display:grid;grid-template-columns:118px 60px 1fr 1fr 60px 70px;gap:5px;padding:5px 8px;border-top:1px solid var(--border);align-items:center">'
+        +'<span style="font-size:10px;color:var(--text2)">'+escHtml(when)+'</span>'
+        +'<span style="font-size:10px;color:var(--text2)" title="'+escHtml(r.saved_by||'')+'">'+escHtml(by)+'</span>'
+        +'<span style="font-size:11px">'+escHtml(r.term||'')+'</span>'
+        +'<span style="font-size:11px;font-weight:600">'+escHtml(r.db_item||'')+'</span>'
+        +'<span style="font-size:10px;color:var(--text2)">'+escHtml(r.unit||'')+'</span>'
+        +flagBadge
+        +'</div>';
+    }
+    h+='</div>';
+    w2.innerHTML=h;
+  });
 }
 
 function saveProductionSettings() {
@@ -21474,11 +21543,15 @@ function _prodSaveJargonRule(term,cat,dbItem,unit){
   if(!term||!dbItem||term===dbItem) return;
   if(!prodSettings.jargonMap) prodSettings.jargonMap=[];
   var jm=prodSettings.jargonMap;
+  // Every caller of this function (_prodCatalogRowMatchPicked, service correction, faces/EBT/
+  // color/texture/material correction) is resolving a value that was genuinely ambiguous/flagged
+  // when the AI extracted it — audit as wasFlagged:true so Admins can prioritize reviewing these.
   for(var i=0;i<jm.length;i++){
-    if(jm[i].term===term&&jm[i].category===cat){ jm[i].dbItem=dbItem; if(unit) jm[i].unit=unit; saveProdSettings(); return; }
+    if(jm[i].term===term&&jm[i].category===cat){ jm[i].dbItem=dbItem; if(unit) jm[i].unit=unit; saveProdSettings(); supaInsertMappingAudit(cat,term,dbItem,unit,true); return; }
   }
   jm.push({term:term,category:cat,dbItem:dbItem,unit:unit||''});
   saveProdSettings();
+  supaInsertMappingAudit(cat,term,dbItem,unit,true);
 }
 // Applies any saved color/texture/material corrections to every component right after parsing, so
 // the raw Cutting List table, the BOM rollup, and the reflect-to-quotation summary all see the
@@ -21900,7 +21973,11 @@ function _prodCatalogRowOutsourceToggled(cat,idx,checked){
   var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
 }
 function prodRemoveSummaryRow(cat,idx){if(!prodState.summary)return;prodState.summary[cat].splice(idx,1);var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
-function prodSaveJargon(cat,idx){if(!prodState.summary)return;var row=prodState.summary[cat][idx];if(!row||!row.aiName||!row.name||row.aiName===row.name)return;if(!prodSettings.jargonMap)prodSettings.jargonMap=[];var jm=prodSettings.jargonMap;for(var i=0;i<jm.length;i++){if(jm[i].term===row.aiName&&jm[i].category===cat){jm[i].dbItem=row.name;saveProdSettings();var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();return;}}jm.push({term:row.aiName,category:cat,dbItem:row.name,unit:row.unit||''});saveProdSettings();var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
+// Explicit "Save mapping" link — only ever shown on a row that already auto-resolved to a single
+// confident catalog match (see _prodCatalogRowHtml), so this is reinforcing an already-good match,
+// not resolving an ambiguous one — audited as wasFlagged:false (lower priority to review than the
+// _prodSaveJargonRule paths, but still tracked since the search term itself could still be wrong).
+function prodSaveJargon(cat,idx){if(!prodState.summary)return;var row=prodState.summary[cat][idx];if(!row||!row.aiName||!row.name||row.aiName===row.name)return;if(!prodSettings.jargonMap)prodSettings.jargonMap=[];var jm=prodSettings.jargonMap;for(var i=0;i<jm.length;i++){if(jm[i].term===row.aiName&&jm[i].category===cat){jm[i].dbItem=row.name;saveProdSettings();supaInsertMappingAudit(cat,row.aiName,row.name,row.unit,false);var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();return;}}jm.push({term:row.aiName,category:cat,dbItem:row.name,unit:row.unit||''});saveProdSettings();supaInsertMappingAudit(cat,row.aiName,row.name,row.unit,false);var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
 // A flagged (needsReview) service row got manually corrected — clear the flag and remember the
 // choice as a jargon mapping keyed by the concept label (e.g. "Panel cutting"), so the NEXT
 // analysis auto-resolves this same concept to the catalog service the user picked here, instead
