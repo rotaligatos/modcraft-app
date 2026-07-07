@@ -21500,17 +21500,76 @@ function prodComputeServices(comps,holes){
   return {cuttingLM:Math.round(cutLM*100)/100,edgebandingLM:Math.round(ebtLM*100)/100,holeCount:totalHoles};
 }
 
+// Guillotine (panel-saw) shelf-packing board simulation — replaces the old flat
+// area-division + wastage% estimate. Validated 2026-07-07 against real cutting
+// lists (samplesofcuttinglist/MARGARITA.xls): area-division looked right on
+// average but hid 36%-83% per-job utilization swings a flat % can't catch, and
+// would genuinely under-order boards on a worse-fitting piece mix. Sorts pieces
+// widest-first, ships them onto shelves (rip-cut strips) with kerf deducted
+// between cuts, no rotation (grain locked along piece.length) — matches actual
+// panel-saw cutting practice. Zero AI tokens — pure deterministic math.
+function guillotinePackBoards(pieces,boardW,boardH,kerf){
+  var items=pieces.slice().sort(function(a,b){ return b.width-a.width; });
+  var oversized=0,usedArea=0,totalArea=0,boards=[];
+  for(var i=0;i<items.length;i++){
+    var p=items[i];
+    totalArea+=p.length*p.width;
+    if(p.length+kerf>boardH||p.width+kerf>boardW){ oversized++; continue; }
+    // 1. Best-fit across ALL open boards' existing shelves (least leftover length that still fits) —
+    // checking only the most-recently-opened board (instead of every board) understates real
+    // packing efficiency; validated against samplesofcuttinglist/MARGARITA.xls, this global search
+    // is what reproduces the actual 7/1/4-board, 82.6%/35.9%/78.0%-utilization result.
+    var best=-1,bestBoard=-1,bestRem=Infinity;
+    for(var bi=0;bi<boards.length;bi++){
+      var bd=boards[bi];
+      for(var s=0;s<bd.shelves.length;s++){
+        var sh=bd.shelves[s]; var rem=boardH-sh.lenUsed;
+        if(sh.height>=p.width+kerf&&rem>=p.length+kerf&&rem<bestRem){ bestRem=rem; best=s; bestBoard=bi; }
+      }
+    }
+    if(best>=0){
+      boards[bestBoard].shelves[best].lenUsed+=(p.length+kerf); usedArea+=p.length*p.width;
+      continue;
+    }
+    // 2. No existing shelf fits — open a new shelf (rip-cut strip) on whichever open board leaves
+    // the least leftover width afterward (best-fit, not first-fit).
+    var bb=-1,bestLeftW=Infinity;
+    for(var bj=0;bj<boards.length;bj++){
+      var leftAfter=boardW-(boards[bj].widthUsed+p.width+kerf);
+      if(leftAfter>=0&&leftAfter<bestLeftW){ bestLeftW=leftAfter; bb=bj; }
+    }
+    if(bb>=0){
+      boards[bb].shelves.push({height:p.width+kerf,lenUsed:p.length+kerf});
+      boards[bb].widthUsed+=p.width+kerf; usedArea+=p.length*p.width;
+      continue;
+    }
+    // 3. No open board has width budget left — start a new board.
+    boards.push({widthUsed:p.width+kerf,shelves:[{height:p.width+kerf,lenUsed:p.length+kerf}]});
+    usedArea+=p.length*p.width;
+  }
+  var boardArea=boardW*boardH;
+  return {
+    boardsNeeded:boards.length,
+    utilization: boards.length? usedArea/(boards.length*boardArea) : 0,
+    oversizedCount:oversized,
+    totalPieceArea:totalArea
+  };
+}
+
 function prodComputeBom(comps){
   var groups={};
   for(var i=0;i<comps.length;i++){
     var c=comps[i];
     var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0].join('|');
-    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,totalAreaMm2:0,areas:{}};
-    groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*(c.qty||1);
+    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,totalAreaMm2:0,areas:{},pieces:[]};
+    var qty=c.qty||1;
+    groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*qty;
     var ar=c.area||'General';
-    groups[key].areas[ar]=(groups[key].areas[ar]||0)+(c.length||0)*(c.width||0)*(c.qty||1);
+    groups[key].areas[ar]=(groups[key].areas[ar]||0)+(c.length||0)*(c.width||0)*qty;
+    if(c.length>0&&c.width>0){ for(var q=0;q<qty;q++) groups[key].pieces.push({length:c.length,width:c.width}); }
   }
   var bom=[]; var keys=Object.keys(groups);
+  var kerf=prodSettings.kerf||3;
   for(var j=0;j<keys.length;j++){
     var g=groups[keys[j]];
     var boardW=1220; var boardH=2440;
@@ -21521,15 +21580,14 @@ function prodComputeBom(comps){
         break;
       }
     }
-    var boardArea=boardW*boardH;
-    var waste=1+(prodSettings.ebtWastage||0)/100;
-    var adjusted=g.totalAreaMm2*waste;
-    var needed=Math.ceil(adjusted/boardArea);
+    var sim=guillotinePackBoards(g.pieces,boardW,boardH,kerf);
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
-      boardSize:boardW+'×'+boardH+'mm',boardsNeeded:needed,areas:areaList
+      boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
+      utilizationPct:Math.round(sim.utilization*1000)/10,
+      oversizedCount:sim.oversizedCount
     });
   }
   return bom;
@@ -21819,6 +21877,7 @@ function prodBuildResultHtml(result){
   var bomRows='';
   for(var b=0;b<bom.length;b++){
     var bm=bom[b];
+    var utilColor=bm.utilizationPct>=70?'var(--good,#16a34a)':(bm.utilizationPct>=50?'var(--warn,#d97706)':'var(--bad,#dc2626)');
     bomRows+='<tr>'
       +'<td>'+escHtml(bm.material)+'</td>'
       +'<td>'+escHtml(bm.color)+'</td>'
@@ -21827,13 +21886,15 @@ function prodBuildResultHtml(result){
       +'<td style="text-align:right">'+bm.totalArea+' m²</td>'
       +'<td style="font-size:11px;color:var(--text2)">'+bm.boardSize+'</td>'
       +'<td style="text-align:right;font-weight:600">'+bm.boardsNeeded+'</td>'
-      +'<td style="font-size:10px;color:var(--text2)">'+escHtml(bm.areas||'')+'</td>'
+      +'<td style="text-align:right;color:'+utilColor+'">'+(bm.utilizationPct||0)+'%</td>'
+      +'<td style="font-size:10px;color:var(--text2)">'+escHtml(bm.areas||'')+(bm.oversizedCount?' <span style="color:var(--bad,#dc2626);font-weight:600">⚠ '+bm.oversizedCount+' piece(s) too big for this board</span>':'')+'</td>'
       +'</tr>';
   }
   var bomHtml='<div class="card" style="margin-bottom:14px">'
     +'<div class="card-head"><h3><i class="ti ti-layout-board"></i>Bill of Materials — boards needed</h3></div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Simulated by cutting layout (guillotine panel-saw, '+(prodSettings.kerf||3)+'mm kerf, no rotation) — not a flat area estimate.</div>'
     +'<div style="overflow-x:auto"><table class="data">'
-    +'<thead><tr><th>Material</th><th>Color</th><th>Texture</th><th style="text-align:right">Thickness</th><th style="text-align:right">Total area</th><th>Board size</th><th style="text-align:right">Sheets needed</th><th>Used in areas</th></tr></thead>'
+    +'<thead><tr><th>Material</th><th>Color</th><th>Texture</th><th style="text-align:right">Thickness</th><th style="text-align:right">Total area</th><th>Board size</th><th style="text-align:right">Sheets needed</th><th style="text-align:right">Utilization</th><th>Used in areas</th></tr></thead>'
     +'<tbody>'+bomRows+'</tbody>'
     +'</table></div></div>';
   var hwHtml='';
@@ -21875,8 +21936,8 @@ function prodExportExcel(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cd),'Cutting List');
   var sd=[['Service','Quantity','Unit'],['Panel cutting',svc.cuttingLM||0,'lm'],['Edgebanding (incl. '+prodSettings.ebtWastage+'% wastage)',svc.edgebandingLM||0,'lm'],['Hole boring',svc.holeCount||0,'holes']];
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sd),'Services Summary');
-  var bd=[['Material','Color','Texture','Thickness (mm)','Total Area (sqm)','Board Size','Sheets Needed']];
-  for(var b=0;b<bom.length;b++){var bm=bom[b];bd.push([bm.material,bm.color,bm.texture,bm.thickness,bm.totalArea,bm.boardSize,bm.boardsNeeded]);}
+  var bd=[['Material','Color','Texture','Thickness (mm)','Total Area (sqm)','Board Size','Sheets Needed','Utilization %','Oversized Pieces']];
+  for(var b=0;b<bom.length;b++){var bm=bom[b];bd.push([bm.material,bm.color,bm.texture,bm.thickness,bm.totalArea,bm.boardSize,bm.boardsNeeded,bm.utilizationPct||0,bm.oversizedCount||0]);}
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(bd),'Bill of Materials');
   if(hw.length){
     var hwd=[['Hardware','Qty','Unit','Notes']];
