@@ -21334,6 +21334,29 @@ function _prodApplyJargon(name,cat){
   }
   return name;
 }
+function _prodTokenize(s){
+  return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').split(' ').filter(function(t){return t.length>1;});
+}
+// Real client cutting lists almost never use your exact Price DB SKU names (e.g. "White" vs your
+// catalog's "Real White 18mm PB (Matte)") — this finds plausible catalog matches by word overlap
+// rather than requiring an exact/substring match. Returns every catalog item within striking
+// distance of the best match (not just the single top result), since near-ties (e.g. "Real White"
+// vs "Warm White" both matching a generic "White" mention) are exactly the case that needs a human
+// to pick, not an auto-guess.
+function _prodFindCatalogMatches(query,catalogArr,maxResults){
+  var qTokens=_prodTokenize(query);
+  if(!qTokens.length||!catalogArr||!catalogArr.length) return [];
+  var scored=catalogArr.map(function(item){
+    var itemTokens=_prodTokenize(item.name);
+    var overlap=qTokens.filter(function(t){return itemTokens.indexOf(t)>=0;}).length;
+    return {item:item,score:overlap};
+  }).filter(function(s){return s.score>0;});
+  if(!scored.length) return [];
+  scored.sort(function(a,b){return b.score-a.score;});
+  var topScore=scored[0].score;
+  var close=scored.filter(function(s){return s.score>=topScore*0.6;});
+  return close.slice(0,maxResults||6).map(function(s){return s.item;});
+}
 // Find-or-create a jargon rule (term+category -> dbItem) and persist it. Shared by every place
 // that remembers a correction (materials/hardware/services names, component color/texture/
 // material substitution, and the name-keyed faces/EBT rules below) instead of each re-implementing
@@ -21516,17 +21539,39 @@ function prodComputeBom(comps){
 function prodBuildSummary(result) {
   if (!result||result.error) { prodState.summary=null; return; }
   var applyJargon=_prodApplyJargon;
+  // Real cutting lists almost never use your exact Price DB SKU names — search the actual catalog
+  // by word overlap instead of just carrying the AI's free-text description through as a custom
+  // (unpriced) line. One confident match -> use it directly (real name/unit/price). Multiple
+  // plausible matches (e.g. "Real White" vs "Warm White") -> flag for the user to pick from a
+  // dropdown scoped to just those candidates. No match at all -> flag with an Outsource option,
+  // since that genuinely may not be a catalog item at all.
+  function catalogMatchRow(aiName,mappedName,catalogArr,qty,unit){
+    var candidates=_prodFindCatalogMatches(mappedName,catalogArr,6);
+    var row={aiName:aiName,name:mappedName,qty:qty,unit:unit,include:true,price:0,custom:true,
+      outsource:false,matchCandidates:[],needsReview:false,reviewNote:''};
+    if(candidates.length===1){
+      row.name=candidates[0].name; row.unit=candidates[0].unit||unit; row.price=candidates[0].price||0; row.custom=false;
+    } else if(candidates.length>1){
+      row.matchCandidates=candidates.map(function(c){return c.name;});
+      row.needsReview=true;
+      row.reviewNote=candidates.length+' possible catalog matches found for "'+aiName+'" — pick the right one.';
+    } else {
+      row.needsReview=true;
+      row.reviewNote='No matching item found in your catalog for "'+aiName+'" — pick "Outsource" if this needs to be sourced externally, or edit the name to add it as a one-off.';
+    }
+    return row;
+  }
   var mats=[];var bom=result._bom||[];
   for(var b=0;b<bom.length;b++){
     var bm=bom[b];
     var parts=[bm.material,bm.color,bm.texture?'('+bm.texture+')':'',bm.thickness?bm.thickness+'mm':''];
     var rn=parts.filter(function(s){return s&&s.trim();}).join(' ');
-    mats.push({aiName:rn,name:applyJargon(rn,'materials'),qty:bm.boardsNeeded,unit:'sheet',include:true});
+    mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet'));
   }
   var hws=[];var hw=result.hardware||[];
   for(var h=0;h<hw.length;h++){
     if(!hw[h].name||!(hw[h].qty>0)) continue;
-    hws.push({aiName:hw[h].name,name:applyJargon(hw[h].name,'hardware'),qty:hw[h].qty,unit:hw[h].unit||'pcs',include:true});
+    hws.push(catalogMatchRow(hw[h].name,applyJargon(hw[h].name,'hardware'),dbHardware,hw[h].qty,hw[h].unit||'pcs'));
   }
   // Keyword-matched (not exact-string) against your actual Price DB service catalog — exact-name
   // matching silently dropped any service whose catalog name didn't literally equal one of a
@@ -21574,6 +21619,37 @@ function prodBuildSummary(result) {
   }
   prodState.summary={materials:mats,hardware:hws,services:svcs};
 }
+// Renders one materials/hardware row, including the ambiguous-match dropdown or no-match/Outsource
+// prompt when the catalog search (see catalogMatchRow in prodBuildSummary) didn't land on exactly
+// one confident match. Shared between materials and hardware since both use the same row shape.
+function _prodCatalogRowHtml(cat,idx,row,uopts){
+  var d=row.include?'':'opacity:.45;';
+  var flagStyle=row.needsReview?'background:#fff8ec;border:1px solid var(--amber);border-radius:6px;padding:4px;margin:-4px -4px 1px -4px;':'';
+  var h='<div style="display:grid;grid-template-columns:22px 1fr 68px 78px 26px;gap:4px;margin-bottom:4px;align-items:center;'+flagStyle+'">'
+    +'<input type="checkbox"'+(row.include?' checked':'')+' onchange="prodState.summary.'+cat+'['+idx+'].include=this.checked" style="width:15px;height:15px;cursor:pointer">'
+    +'<input type="text" value="'+escHtml(row.name)+'" onchange="prodState.summary.'+cat+'['+idx+'].name=this.value" style="height:27px;font-size:12px;'+d+'">'
+    +'<input type="number" value="'+row.qty+'" min="0" step="0.01" onchange="prodState.summary.'+cat+'['+idx+'].qty=parseFloat(this.value)||0" style="height:27px;font-size:12px;text-align:center;'+d+'">'
+    +'<select onchange="prodState.summary.'+cat+'['+idx+'].unit=this.value" style="height:27px;font-size:11px;'+d+'">'+uopts(row.unit)+'</select>'
+    +'<button class="btn" onclick="prodRemoveSummaryRow(\''+cat+'\','+idx+')" style="height:27px;width:26px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+    +'</div>';
+  if(row.matchCandidates&&row.matchCandidates.length){
+    var copts='<option value="">— pick the right match —</option>';
+    for(var c=0;c<row.matchCandidates.length;c++) copts+='<option value="'+c+'">'+escHtml(row.matchCandidates[c])+'</option>';
+    h+='<div style="margin:-1px 0 6px 26px;padding:4px 6px;background:#fff;border-radius:4px">'
+      +'<div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:3px"><i class="ti ti-alert-triangle" style="font-size:12px"></i> '+escHtml(row.reviewNote)+'</div>'
+      +'<select onchange="_prodCatalogRowMatchPicked(\''+cat+'\','+idx+',this.value)" style="height:27px;font-size:12px;width:100%">'+copts+'</select>'
+      +'</div>';
+  } else if(row.needsReview){
+    h+='<div style="margin:-1px 0 6px 26px;padding:4px 6px;background:#fff;border-radius:4px">'
+      +'<div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:3px"><i class="ti ti-alert-triangle" style="font-size:12px"></i> '+escHtml(row.reviewNote)+'</div>'
+      +'<label style="font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer">'
+      +'<input type="checkbox"'+(row.outsource?' checked':'')+' onchange="_prodCatalogRowOutsourceToggled(\''+cat+'\','+idx+',this.checked)"> Mark as Outsource (sourced externally, not in catalog)'
+      +'</label></div>';
+  } else if(row.aiName&&row.aiName!==row.name){
+    h+='<div style="font-size:10px;color:var(--text2);margin:-1px 0 5px 26px">AI: <em>'+escHtml(row.aiName)+'</em>&nbsp;<a href="#" onclick="prodSaveJargon(\''+cat+'\','+idx+');return false" style="color:var(--navy)">Save mapping</a></div>';
+  }
+  return h;
+}
 function prodBuildSummaryHtml(){
   var sum=prodState.summary;if(!sum)return'';
   function uopts(sel){var o='';for(var k=0;k<UNIT_OPTS.length;k++)o+='<option value="'+UNIT_OPTS[k].v+'"'+(sel===UNIT_OPTS[k].v?' selected':'')+'>'+UNIT_OPTS[k].v+'</option>';return o;}
@@ -21581,10 +21657,10 @@ function prodBuildSummaryHtml(){
   var h='<div class="card" style="margin-bottom:14px;border:1.5px solid var(--teal)"><div class="card-head" style="background:linear-gradient(135deg,#e8f8f5,#f0faf8)"><h3 style="color:var(--teal)"><i class="ti ti-transfer"></i>Reflect to Quotation &mdash; Editable Summary</h3><button class="btn btn-success" onclick="prodReflectToQuotation()"><i class="ti ti-transfer"></i>Reflect now</button></div><div class="card-body" style="padding:12px 16px"><p style="font-size:11px;color:var(--text2);margin-bottom:10px">Edit below before reflecting. Uncheck rows to exclude.</p>';
   h+='<div class="dvdr" style="margin-bottom:8px"><span><i class="ti ti-cube" style="font-size:10px"></i>&nbsp;Materials / Boards</span><button class="btn" style="font-size:10px;padding:2px 8px;margin-left:8px" onclick="prodAddSummaryRow(\'materials\')"><i class="ti ti-plus"></i>Add</button></div>';
   if(!sum.materials.length){h+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">No materials extracted.</p>';}
-  else{h+=colHdr();for(var m=0;m<sum.materials.length;m++){var mt=sum.materials[m];var d=mt.include?'':'opacity:.45;';h+='<div style="display:grid;grid-template-columns:22px 1fr 68px 78px 26px;gap:4px;margin-bottom:4px;align-items:center"><input type="checkbox"'+(mt.include?' checked':'')+' onchange="prodState.summary.materials['+m+'].include=this.checked" style="width:15px;height:15px;cursor:pointer"><input type="text" value="'+escHtml(mt.name)+'" onchange="prodState.summary.materials['+m+'].name=this.value" style="height:27px;font-size:12px;'+d+'"><input type="number" value="'+mt.qty+'" min="0" step="0.01" onchange="prodState.summary.materials['+m+'].qty=parseFloat(this.value)||0" style="height:27px;font-size:12px;text-align:center;'+d+'"><select onchange="prodState.summary.materials['+m+'].unit=this.value" style="height:27px;font-size:11px;'+d+'">'+uopts(mt.unit)+'</select><button class="btn" onclick="prodRemoveSummaryRow(\'materials\','+m+')" style="height:27px;width:26px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button></div>';if(mt.aiName&&mt.aiName!==mt.name)h+='<div style="font-size:10px;color:var(--text2);margin:-1px 0 5px 26px">AI: <em>'+escHtml(mt.aiName)+'</em>&nbsp;<a href="#" onclick="prodSaveJargon(\'materials\','+m+');return false" style="color:var(--navy)">Save mapping</a></div>';}}
+  else{h+=colHdr();for(var m=0;m<sum.materials.length;m++) h+=_prodCatalogRowHtml('materials',m,sum.materials[m],uopts);}
   h+='<div class="dvdr" style="margin:10px 0 8px"><span><i class="ti ti-settings-2" style="font-size:10px"></i>&nbsp;Hardware</span><button class="btn" style="font-size:10px;padding:2px 8px;margin-left:8px" onclick="prodAddSummaryRow(\'hardware\')"><i class="ti ti-plus"></i>Add</button></div>';
   if(!sum.hardware.length){h+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">No hardware extracted.</p>';}
-  else{h+=colHdr();for(var hi=0;hi<sum.hardware.length;hi++){var hwi=sum.hardware[hi];var hd=hwi.include?'':'opacity:.45;';h+='<div style="display:grid;grid-template-columns:22px 1fr 68px 78px 26px;gap:4px;margin-bottom:4px;align-items:center"><input type="checkbox"'+(hwi.include?' checked':'')+' onchange="prodState.summary.hardware['+hi+'].include=this.checked" style="width:15px;height:15px;cursor:pointer"><input type="text" value="'+escHtml(hwi.name)+'" onchange="prodState.summary.hardware['+hi+'].name=this.value" style="height:27px;font-size:12px;'+hd+'"><input type="number" value="'+hwi.qty+'" min="0" step="1" onchange="prodState.summary.hardware['+hi+'].qty=parseFloat(this.value)||0" style="height:27px;font-size:12px;text-align:center;'+hd+'"><select onchange="prodState.summary.hardware['+hi+'].unit=this.value" style="height:27px;font-size:11px;'+hd+'">'+uopts(hwi.unit)+'</select><button class="btn" onclick="prodRemoveSummaryRow(\'hardware\','+hi+')" style="height:27px;width:26px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button></div>';if(hwi.aiName&&hwi.aiName!==hwi.name)h+='<div style="font-size:10px;color:var(--text2);margin:-1px 0 5px 26px">AI: <em>'+escHtml(hwi.aiName)+'</em>&nbsp;<a href="#" onclick="prodSaveJargon(\'hardware\','+hi+');return false" style="color:var(--navy)">Save mapping</a></div>';}}
+  else{h+=colHdr();for(var hi=0;hi<sum.hardware.length;hi++) h+=_prodCatalogRowHtml('hardware',hi,sum.hardware[hi],uopts);}
   h+='<div class="dvdr" style="margin:10px 0 8px"><span><i class="ti ti-tool" style="font-size:10px"></i>&nbsp;Services</span><button class="btn" style="font-size:10px;padding:2px 8px;margin-left:8px" onclick="prodAddSummaryRow(\'services\')"><i class="ti ti-plus"></i>Add</button></div>';
   if(!sum.services.length){h+='<p style="font-size:12px;color:var(--text2);margin-bottom:8px">No services computed.</p>';}
   else{h+='<div style="display:grid;grid-template-columns:22px 1fr 68px 58px 26px;gap:4px;margin-bottom:4px"><span></span><span style="font-size:10px;color:var(--text2);text-transform:uppercase">Service</span><span style="font-size:10px;color:var(--text2);text-transform:uppercase">Qty</span><span style="font-size:10px;color:var(--text2);text-transform:uppercase">Unit</span><span></span></div>';
@@ -21604,6 +21680,29 @@ function prodBuildSummaryHtml(){
   h+='</div></div>';return h;
 }
 function prodAddSummaryRow(cat){if(!prodState.summary)return;if(cat==='materials')prodState.summary.materials.push({aiName:'',name:'',qty:1,unit:'sheet',include:true});else if(cat==='hardware')prodState.summary.hardware.push({aiName:'',name:'',qty:1,unit:'pcs',include:true});else if(cat==='services')prodState.summary.services.push({aiName:'',name:SERVICES[0].name,svcIdx:0,qty:1,unit:SERVICES[0].unit,include:true});var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
+// User picked the correct catalog item from the ambiguous-match dropdown — resolve the row to that
+// real catalog entry (name/unit/price, custom:false) and remember the pick so the SAME AI-extracted
+// description resolves automatically next time instead of needing to be picked again.
+function _prodCatalogRowMatchPicked(cat,idx,candidateIdxStr){
+  if(candidateIdxStr===''||candidateIdxStr===undefined) return;
+  var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
+  var pickedName=row.matchCandidates[parseInt(candidateIdxStr)]; if(!pickedName) return;
+  var catalogArr=cat==='materials'?dbMaterials:dbHardware;
+  var matched=catalogArr.find(function(c){return c.name===pickedName;});
+  if(matched){ row.name=matched.name; row.unit=matched.unit||row.unit; row.price=matched.price||0; row.custom=false; }
+  else { row.name=pickedName; }
+  row.needsReview=false; row.matchCandidates=[]; row.reviewNote='';
+  _prodSaveJargonRule(row.aiName,cat,row.name);
+  var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
+}
+// No catalog match at all — user is marking it Outsource (resolves the flag) or un-marking it
+// (goes back to needing review, since it's neither matched nor confirmed as outsource).
+function _prodCatalogRowOutsourceToggled(cat,idx,checked){
+  var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
+  row.outsource=checked;
+  row.needsReview=!checked;
+  var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
+}
 function prodRemoveSummaryRow(cat,idx){if(!prodState.summary)return;prodState.summary[cat].splice(idx,1);var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
 function prodSaveJargon(cat,idx){if(!prodState.summary)return;var row=prodState.summary[cat][idx];if(!row||!row.aiName||!row.name||row.aiName===row.name)return;if(!prodSettings.jargonMap)prodSettings.jargonMap=[];var jm=prodSettings.jargonMap;for(var i=0;i<jm.length;i++){if(jm[i].term===row.aiName&&jm[i].category===cat){jm[i].dbItem=row.name;saveProdSettings();var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();return;}}jm.push({term:row.aiName,category:cat,dbItem:row.name,unit:row.unit||''});saveProdSettings();var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
 // A flagged (needsReview) service row got manually corrected — clear the flag and remember the
@@ -21796,16 +21895,25 @@ function prodExportExcel(){
 function prodReflectToQuotation(){
   var sum=prodState.summary;
   if(!sum) return;
-  // Block export while any component is still flagged for review — the whole point of flagging
-  // instead of guessing is that a flagged value hasn't been confirmed correct yet, so it shouldn't
-  // silently flow into a real quotation. Shows every time export is attempted with flags still
-  // outstanding, not just once, since the user could add a new analysis with fresh flags later.
-  var flagged=(prodState.result&&prodState.result.components||[]).filter(function(c){return c.needsReview;});
-  if(flagged.length){
-    alert('Cannot reflect to quotation — '+flagged.length+' component'+(flagged.length>1?'s are':' is')+' still flagged for review.\n\n'
-      +'Please review each flagged item in the Cutting List below: either correct the field(s) noted, or click '
-      +'"Confirm correct" if the extracted value is already right.\n\nFlagged: '
-      +flagged.slice(0,8).map(function(c){return c.name||'(unnamed)';}).join(', ')+(flagged.length>8?', …':''));
+  // Block export while any component OR summary row (materials/hardware/services) is still flagged
+  // for review — the whole point of flagging instead of guessing is that a flagged value hasn't
+  // been confirmed correct yet, so it shouldn't silently flow into a real quotation. Shows every
+  // time export is attempted with flags still outstanding, not just once. Excluded (unchecked) rows
+  // don't block, since they're not being reflected anyway.
+  var flaggedComps=(prodState.result&&prodState.result.components||[]).filter(function(c){return c.needsReview;});
+  var flaggedMats=sum.materials.filter(function(r){return r.needsReview&&r.include;});
+  var flaggedHw=sum.hardware.filter(function(r){return r.needsReview&&r.include;});
+  var flaggedSvc=sum.services.filter(function(r){return r.needsReview&&r.include;});
+  var totalFlagged=flaggedComps.length+flaggedMats.length+flaggedHw.length+flaggedSvc.length;
+  if(totalFlagged){
+    var names=flaggedComps.map(function(c){return c.name||'(unnamed)';})
+      .concat(flaggedMats.map(function(r){return r.aiName||r.name||'(unnamed material)';}))
+      .concat(flaggedHw.map(function(r){return r.aiName||r.name||'(unnamed hardware)';}))
+      .concat(flaggedSvc.map(function(r){return r.aiName||r.name||'(unnamed service)';}));
+    alert('Cannot reflect to quotation — '+totalFlagged+' item'+(totalFlagged>1?'s are':' is')+' still flagged for review.\n\n'
+      +'Please review each flagged item below: correct it, confirm it\'s already right, or (for materials/'
+      +'hardware with no catalog match) mark it Outsource.\n\nFlagged: '
+      +names.slice(0,8).join(', ')+(names.length>8?', …':''));
     return;
   }
   // Init first (resets qAreas, qFabMode, etc.), then populate — NOT before
@@ -21816,15 +21924,23 @@ function prodReflectToQuotation(){
   if(!area.svcItems) area.svcItems=[];
   if(!area.matItems) area.matItems=[];
   if(!area.hwItems)  area.hwItems=[];
-  // Materials (board sheets)
+  if(!area.outsourceMaterials) area.outsourceMaterials=[];
+  if(!area.outsourceHardware)  area.outsourceHardware=[];
+  // Materials (board sheets) — a confident catalog match (custom:false) carries its real price
+  // through instead of landing as an unpriced custom line; marked-Outsource rows go to the area's
+  // outsource list instead of the regular catalog-linked materials list.
   for(var m=0;m<sum.materials.length;m++){
     var mt=sum.materials[m];
-    if(mt.include&&mt.name&&mt.qty>0) area.matItems.push({name:mt.name,qty:mt.qty,unit:mt.unit||'sheet',price:0,custom:true});
+    if(!mt.include||!mt.name||!(mt.qty>0)) continue;
+    if(mt.outsource) area.outsourceMaterials.push({name:mt.name,unit:mt.unit||'sheet',qty:mt.qty,price:mt.price||0,saved:false});
+    else area.matItems.push({name:mt.name,qty:mt.qty,unit:mt.unit||'sheet',price:mt.price||0,custom:mt.custom!==false});
   }
-  // Hardware
+  // Hardware — same catalog-match/outsource split as materials
   for(var h=0;h<sum.hardware.length;h++){
     var hw=sum.hardware[h];
-    if(hw.include&&hw.name&&hw.qty>0) area.hwItems.push({name:hw.name,qty:hw.qty,unit:hw.unit||'pcs',price:0,custom:true});
+    if(!hw.include||!hw.name||!(hw.qty>0)) continue;
+    if(hw.outsource) area.outsourceHardware.push({name:hw.name,unit:hw.unit||'pcs',qty:hw.qty,price:hw.price||0,saved:false});
+    else area.hwItems.push({name:hw.name,qty:hw.qty,unit:hw.unit||'pcs',price:hw.price||0,custom:hw.custom!==false});
   }
   // Services
   for(var s=0;s<sum.services.length;s++){
