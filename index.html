@@ -23908,6 +23908,21 @@ function sendChip(){
 var _lamiWakeRecog=null;
 var _lamiWakeRunning=false;
 var _lamiWakeDeniedNotified=false; // one-time toast when mic/speech access is denied — see onerror below
+// Confirmed by live user testing: voice ("Hi Lami" wake word, and mic generally) works when the app
+// is opened directly (e.g. the GitHub Pages URL) but not through the Google Sites embed. This is the
+// same class of platform limitation already hit and solved for Fullscreen (_fsAvailable() /
+// toggleFullscreen()) — a cross-origin iframe only gets microphone access if the embedding page
+// adds allow="microphone" to the <iframe>, which Google Sites' embed gadget does not expose to site
+// editors. Not fixable from our own code; the fix is the same "open the full app" escape hatch.
+function _lamiInIframe(){ return window.self!==window.top; }
+var _lamiIframeVoiceNotified=false; // one-time chat message per session — see _lamiOfferOpenFullApp
+function _lamiOfferOpenFullApp(){
+  if(_lamiIframeVoiceNotified) return;
+  _lamiIframeVoiceNotified=true;
+  var base=window.location.href.split('?')[0];
+  _chipAppendAi('Voice (wake word + mic) can\'t run inside this embedded view — the browser blocks microphone access for embedded pages here. '
+    +'<a href="#" onclick="window.open(\''+base+'\',\'_blank\');return false;" style="color:var(--navy);font-weight:600">Open Modcraft in a new tab</a> to use voice.');
+}
 // Wake-word conversation mode: listen once with a 5s silence window; if nothing, return to wake word
 function _lamiWakeFollowListen(){
   if(!lamiMicEnabled||!lamiEnabled) return;
@@ -23926,6 +23941,7 @@ function _lamiWakeFollowListen(){
 }
 function _lamiStartWakeWord(){
   if(!lamiWakeWordEnabled||!lamiEnabled) return;
+  if(_lamiInIframe()){ _lamiOfferOpenFullApp(); return; } // don't even attempt — confirmed blocked in the embed
   var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SR) return;
   if(_lamiWakeRunning) return;
@@ -23995,7 +24011,7 @@ function _lamiStopWakeWord(){
 function _lamiSetWakeWord(on){
   lamiWakeWordEnabled=on;
   localStorage.setItem('mc_lami_wake',on?'on':'off');
-  if(on){ _lamiWakeDeniedNotified=false; if(lamiEnabled) _lamiStartWakeWord(); } // re-arm the one-time denial toast on each explicit re-enable
+  if(on){ _lamiWakeDeniedNotified=false; _lamiIframeVoiceNotified=false; if(lamiEnabled) _lamiStartWakeWord(); } // re-arm both one-time notices on each explicit re-enable
   else _lamiStopWakeWord();
   renderLamiSettings();
 }
@@ -24754,6 +24770,8 @@ function _chipCallAI(userMsg){
   var aiDiv=null;         // the live message bubble
   var firstToken=true;
   var inTok=0, outTok=0;
+  var _speakBuf=[];           // sentences held back from TTS until the head-start below is met
+  var _speakHeadStartDone=false; // see speakReady() — real "talks, stalls, talks again" cause
 
   function ensureDiv(){
     if(aiDiv) return;
@@ -24769,6 +24787,17 @@ function _chipCallAI(userMsg){
     var msgs=el('chip-msgs'); if(msgs) msgs.scrollTop=msgs.scrollHeight;
   }
   // Queue any complete sentences that haven't been spoken yet.
+  //
+  // "Talks, then stalls, then talks again" root cause: each sentence was pushed to the TTS queue
+  // (and started speaking) the instant it completed in the stream. A short first sentence speaks
+  // in 1-2s, but the model can easily take longer than that to generate the next one — the queue
+  // runs dry, _ttsPump goes idle, and playback goes silent until the next sentence finally arrives.
+  // Not a broken audio engine; TTS was simply racing ahead of generation speed. Fix: hold back the
+  // very first sentence(s) of a turn until a small head-start buffer (2 sentences, or the final
+  // flush) is ready before handing anything to _ttsAppendClean — gives TTS a cushion to draw from
+  // so a slow-to-generate sentence doesn't immediately starve playback. Only the START of a turn
+  // needs this; once the head start is met, sentences flow through as soon as each completes, same
+  // as before.
   function speakReady(isFinal){
     if(!chipVoiceOn) return;
     while(true){
@@ -24783,9 +24812,12 @@ function _chipCallAI(userMsg){
       var sentence=rest.slice(0,idx);
       spokenLen+=sentence.length;
       var clean=_chipCleanText(_stripMarkers(sentence,false));
-      if(clean) _ttsAppendClean(clean);
+      if(clean) _speakBuf.push(clean);
       if(isFinal) break;
     }
+    if(!_speakHeadStartDone&&!isFinal&&_speakBuf.length<2) return; // still building the head-start cushion
+    _speakHeadStartDone=true;
+    while(_speakBuf.length) _ttsAppendClean(_speakBuf.shift());
   }
 
   function finalize(){
