@@ -22040,25 +22040,102 @@ function _prodApplyJargon(name,cat){
 function _prodTokenize(s){
   return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').split(' ').filter(function(t){return t.length>1;});
 }
+// Known substrate vocabulary + synonyms, longest/most-specific phrase first so e.g. "mdf-mr" is
+// recognized before the plain "mdf" it contains. Canonical values match this app's own convention
+// (see the component schema's "material" field and the cutting-list table).
+var PROD_SUBSTRATE_MAP=[
+  ['compact laminate','Compact Laminate'],['hpl compact','Compact Laminate'],
+  ['mdf-mr','MDF-MR'],['mdf mr','MDF-MR'],['moisture resistant mdf','MDF-MR'],['mr mdf','MDF-MR'],
+  ['pb-mr','PB-MR'],['pb mr','PB-MR'],['moisture resistant particle board','PB-MR'],['moisture resistant pb','PB-MR'],['mr pb','PB-MR'],['mr particle board','PB-MR'],
+  ['particle board','PB'],['particleboard','PB'],['chipboard','PB'],
+  ['medium density fiberboard','MDF'],['medium density fibreboard','MDF'],
+  ['high density fiberboard','HDF'],['high density fibreboard','HDF'],
+  ['marine plywood','Plywood'],['marine ply','Plywood'],['plywood','Plywood'],
+  ['pb','PB'],['mdf','MDF'],['hdf','HDF'],['ply','Plywood']
+];
+// Same canonical list used by the component schema/texture dropdown elsewhere (TEXTURE_OPTS) —
+// duplicated here rather than shared since this file already repeats this exact list in the AI
+// prompt, the strict tool schema, and the cutting-list table's texture <select> without a single
+// shared constant; kept consistent with that existing convention.
+var PROD_TEXTURE_LIST=['supermatte','matte','stipple','crosscut','woodgrain','softwood','hardwood','textile','stone'];
+function _prodEscRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
+// Parses a free-text material description into structured fields (substrate/faces/texture/
+// thickness/color) using the known vocabularies above, independent of word order — "black plywood
+// stipple 18mm 2F" and "plywood 18mm black stipple 2f" parse to the identical descriptor. Used for
+// BOTH the AI-extracted search term and each catalog item's SKU name, so matching compares field-
+// to-field instead of raw bag-of-words overlap. Whatever text is left after removing recognized
+// substrate/face/texture/thickness tokens is treated as the color portion — deliberately NOT split
+// into discrete color words here (that's unreliable from free text alone); comparison is done as an
+// order-independent word-containment check in _prodFieldMatchScore instead.
+function _prodParseMaterialDescriptor(text){
+  var d={substrate:'',faces:0,texture:'',thickness:0,colorText:''};
+  var s=' '+(text||'').toLowerCase()+' ';
+  for(var i=0;i<PROD_SUBSTRATE_MAP.length;i++){
+    var re=new RegExp('\\b'+_prodEscRegex(PROD_SUBSTRATE_MAP[i][0])+'\\b');
+    if(re.test(s)){ d.substrate=PROD_SUBSTRATE_MAP[i][1]; s=s.replace(re,' '); break; }
+  }
+  var face2=[/\btwo[\s-]*face\b/,/\bdouble[\s-]*face\b/,/\bboth[\s-]*face\b/,/\b2[\s-]*face\b/,/\b2f\b/];
+  var face1=[/\bone[\s-]*face\b/,/\bsingle[\s-]*face\b/,/\b1[\s-]*face\b/,/\b1f\b/];
+  for(var i=0;i<face2.length&&!d.faces;i++){ if(face2[i].test(s)){ d.faces=2; s=s.replace(face2[i],' '); } }
+  for(var i=0;i<face1.length&&!d.faces;i++){ if(face1[i].test(s)){ d.faces=1; s=s.replace(face1[i],' '); } }
+  for(var i=0;i<PROD_TEXTURE_LIST.length;i++){
+    var tre=new RegExp('\\b'+PROD_TEXTURE_LIST[i]+'\\b');
+    if(tre.test(s)){ d.texture=PROD_TEXTURE_LIST[i]; s=s.replace(tre,' '); break; }
+  }
+  var tm=s.match(/\b(\d+(?:\.\d+)?)\s*mm\b/);
+  if(tm){ d.thickness=parseFloat(tm[1]); s=s.replace(tm[0],' '); }
+  d.colorText=s.replace(/[()\/,._-]/g,' ').replace(/\b(board|panel|sheet|finish|color|colour|roll|per)\b/g,' ').replace(/\s+/g,' ').trim();
+  return d;
+}
+// Field-aware score for one query-descriptor vs. one catalog-descriptor. A substrate that's known
+// on both sides but DISAGREES is a hard exclude (PB vs MDF is never "close enough") — everything
+// else just adds/subtracts weight, since faces/texture/thickness/color may legitimately be absent
+// from one side's free text without meaning "wrong". Color is compared as order-independent word
+// containment, satisfying "regardless of sequence" for split colors too (e.g. query "black white"
+// vs catalog "white / black laminate" both contain each other's color words).
+function _prodFieldMatchScore(qd,cd){
+  if(qd.substrate&&cd.substrate&&qd.substrate!==cd.substrate) return null; // hard mismatch
+  var score=0;
+  if(qd.substrate&&cd.substrate===qd.substrate) score+=10;
+  if(qd.faces){ if(cd.faces===qd.faces) score+=6; else if(cd.faces) score-=3; }
+  if(qd.texture){ if(cd.texture===qd.texture) score+=6; else if(cd.texture) score-=2; }
+  if(qd.thickness){ if(cd.thickness===qd.thickness) score+=6; else if(cd.thickness) score-=2; }
+  if(qd.colorText){
+    var qWords=qd.colorText.split(' ').filter(function(w){return w.length>1;});
+    if(qWords.length){
+      var matched=qWords.filter(function(w){return cd.colorText.indexOf(w)>=0;}).length;
+      score+=matched*4;
+      if(!matched&&cd.colorText) score-=2;
+    }
+  }
+  return score;
+}
 // Real client cutting lists almost never use your exact Price DB SKU names (e.g. "White" vs your
-// catalog's "Real White 18mm PB (Matte)") — this finds plausible catalog matches by word overlap
-// rather than requiring an exact/substring match. Returns every catalog item within striking
+// catalog's "Real White 18mm PB (Matte)") — this finds plausible catalog matches by blending two
+// signals: structured field agreement (substrate/faces/texture/thickness/color, order-independent
+// — see _prodParseMaterialDescriptor/_prodFieldMatchScore above) and generic word overlap (catches
+// anything the field parser doesn't recognize — brand names, hardware descriptions, etc., where the
+// board-material vocabulary naturally doesn't apply). Returns every catalog item within striking
 // distance of the best match (not just the single top result), since near-ties (e.g. "Real White"
 // vs "Warm White" both matching a generic "White" mention) are exactly the case that needs a human
 // to pick, not an auto-guess.
 function _prodFindCatalogMatches(query,catalogArr,maxResults){
   var qTokens=_prodTokenize(query);
   if(!qTokens.length||!catalogArr||!catalogArr.length) return [];
+  var qDesc=_prodParseMaterialDescriptor(query);
   var scored=catalogArr.map(function(item){
-    // Cache each catalog item's tokenization on the item itself. This runs once per BOM/hardware
-    // material group during a reflect pass (prodBuildSummary), re-tokenizing the ENTIRE dbMaterials/
-    // dbHardware catalog from scratch for every group — for a job with many groups against a large
-    // catalog that's redundant work scaling with catalog size × group count. dbMaterials/dbHardware
-    // are only ever replaced wholesale on a fresh Price DB load (new item objects), so caching on
-    // the item is safe — no stale-cache risk across reloads.
+    // Cache each catalog item's tokenization + parsed descriptor on the item itself. This runs once
+    // per BOM/hardware material group during a reflect pass (prodBuildSummary), re-tokenizing/re-
+    // parsing the ENTIRE dbMaterials/dbHardware catalog from scratch for every group — for a job
+    // with many groups against a large catalog that's redundant work scaling with catalog size ×
+    // group count. dbMaterials/dbHardware are only ever replaced wholesale on a fresh Price DB load
+    // (new item objects), so caching on the item is safe — no stale-cache risk across reloads.
     if(!item.__tok) item.__tok=_prodTokenize(item.name);
+    if(!item.__matDesc) item.__matDesc=_prodParseMaterialDescriptor(item.name);
     var overlap=qTokens.filter(function(t){return item.__tok.indexOf(t)>=0;}).length;
-    return {item:item,score:overlap};
+    var fieldScore=_prodFieldMatchScore(qDesc,item.__matDesc);
+    if(fieldScore===null) return {item:item,score:-Infinity}; // substrate hard-mismatch — excluded below
+    return {item:item,score:overlap+fieldScore};
   }).filter(function(s){return s.score>0;});
   if(!scored.length) return [];
   scored.sort(function(a,b){return b.score-a.score;});
@@ -22299,12 +22376,13 @@ function prodComputeBom(comps){
   var groups={};
   for(var i=0;i<comps.length;i++){
     var c=comps[i];
-    // faces is part of the grouping key: a 1-face and a 2-face board are different purchased
-    // SKUs (different manufacturing cost), not just a display attribute of the same material —
-    // merging them here previously meant the board-count AND the catalog-match name below could
-    // never distinguish a 1F job from a 2F job with the same material/color/texture/thickness.
-    var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0].join('|');
-    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,totalAreaMm2:0,areas:{},pieces:[]};
+    // faces/colorB/textureB are part of the grouping key: a 1-face and a 2-face board are
+    // different purchased SKUs (different manufacturing cost), and a split-face board (e.g. Black
+    // one side / White the other) is a different SKU again from a plain single-color board of the
+    // same primary color — merging any of these previously meant the board-count AND the catalog-
+    // match search term below could never distinguish them.
+    var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0,c.colorB||'',c.textureB||''].join('|');
+    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,colorB:c.colorB||'',textureB:c.textureB||'',totalAreaMm2:0,areas:{},pieces:[]};
     var qty=c.qty||1;
     groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*qty;
     var ar=c.area||'General';
@@ -22328,6 +22406,7 @@ function prodComputeBom(comps){
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,faces:g.faces,
+      colorB:g.colorB,textureB:g.textureB,
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
@@ -22375,8 +22454,11 @@ function prodBuildSummary(result) {
     // faces must be part of the search term — a 1-face and 2-face board are different catalog
     // SKUs/prices; leaving it out let two jobs with genuinely different face counts produce the
     // exact same search text, so the fuzzy matcher (and any saved jargon mapping from it) could
-    // never actually tell them apart.
-    var parts=[bm.material,bm.color,bm.texture?'('+bm.texture+')':'',bm.thickness?bm.thickness+'mm':'',bm.faces?bm.faces+'F':''];
+    // never actually tell them apart. colorB/textureB likewise: a split-face board (e.g. Black one
+    // side / White the other) needs BOTH colors in the search term, not just the primary/front one
+    // — otherwise the fuzzy matcher (and the field-aware scorer in _prodFindCatalogMatches) never
+    // even sees the second color to match against.
+    var parts=[bm.material,bm.color,bm.colorB,bm.texture?'('+bm.texture+')':'',bm.textureB&&bm.textureB!==bm.texture?'('+bm.textureB+')':'',bm.thickness?bm.thickness+'mm':'',bm.faces?bm.faces+'F':''];
     var rn=parts.filter(function(s){return s&&s.trim();}).join(' ');
     mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet'));
   }
