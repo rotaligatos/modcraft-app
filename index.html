@@ -1467,6 +1467,7 @@ tr.cl-row:hover td{background:#f4f7fb}
   <div style="display:flex;gap:4px;border-bottom:.5px solid var(--border);margin-bottom:18px">
     <button id="prod-tab-drawing" onclick="setProdTab('drawing')" class="tab active" style="border-radius:8px 8px 0 0;border-bottom:none"><i class="ti ti-file-analytics"></i>Shop Drawing Analysis</button>
     <button id="prod-tab-mobility" onclick="setProdTab('mobility')" class="tab" style="border-radius:8px 8px 0 0;border-bottom:none"><i class="ti ti-map-route"></i>Mobility &amp; Accommodation</button>
+    <button id="prod-tab-saved" onclick="setProdTab('saved')" class="tab" style="border-radius:8px 8px 0 0;border-bottom:none"><i class="ti ti-history"></i>Saved Analyses</button>
   </div>
   <div id="prod-wrap"></div>
 </div>
@@ -2509,6 +2510,12 @@ var qMobCalc = null;
 // per-material-group guillotine simulation result (boardsNeeded/utilizationPct/oversizedCount).
 // null = no Designers Support analysis was reflected into this quotation (most quotations).
 var qBoardLayout = null;
+// Full Designers Support analysis snapshot captured at "Reflect to quotation" time — unlike
+// qBoardLayout (which only carries the guillotine BOM subset for the future Production Operation
+// app), this carries the RAW uploaded file + the FULL AI output, so it can be re-opened for review/
+// edit and printed later. { fileName, fileType, analyzedAt, rawFileBase64, rawFileMime, result,
+// elevationResult }. null = no Designers Support analysis was reflected into this quotation.
+var qDrawingAnalysis = null;
 var qInstPlanner = null;   // {workNightAccom, perDiem, touristPremium, touristNote, detail} from planner split export
 var qInstTouristPrem = false;  // whether tourist premium toggle is on in the inst card
 var ppicSettings = {installation:{teamsPerDay:1,cabPerTeamDay:3,workdaysPerMonth:22,typeCapacity:{},typeUom:{},customTypes:[]}};
@@ -4149,7 +4156,7 @@ function initQuotation() {
   qInstWorkers=0; qInstDays=0;
   qClientSupplyMat=false; qClientSupplyMatList=[]; qClientMatMultOverride=0;
   qInstRegion='metro'; qInstRegionManual=false;
-  qMobTransport=null; qMobAccom=null; qMobCalc=null; qBoardLayout=null; qInstPlanner=null; qInstTouristPrem=false;
+  qMobTransport=null; qMobAccom=null; qMobCalc=null; qBoardLayout=null; qDrawingAnalysis=null; qInstPlanner=null; qInstTouristPrem=false;
   mobilityState.accomException=null; mobilityState.zone='';
   populateInstRegionSelect();
   _linkedClientId=null;_confirmedFields={};_originalValues={};
@@ -12528,6 +12535,7 @@ function captureQuotationSnapshot(){
     mobAccom:qMobAccom?JSON.parse(JSON.stringify(qMobAccom)):null,
     mobCalc:qMobCalc?JSON.parse(JSON.stringify(qMobCalc)):null,
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
+    drawingAnalysis:qDrawingAnalysis?JSON.parse(JSON.stringify(qDrawingAnalysis)):null,
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null,
     instTouristPrem:qInstTouristPrem,
     clientSupplyMat:qClientSupplyMat,
@@ -12560,6 +12568,7 @@ function restoreQuotationSnapshot(snap){
   qMobAccom=snap.mobAccom?JSON.parse(JSON.stringify(snap.mobAccom)):null;
   qMobCalc=snap.mobCalc?JSON.parse(JSON.stringify(snap.mobCalc)):null;
   qBoardLayout=snap.boardLayout?JSON.parse(JSON.stringify(snap.boardLayout)):null;
+  qDrawingAnalysis=snap.drawingAnalysis?JSON.parse(JSON.stringify(snap.drawingAnalysis)):null;
   qInstPlanner=snap.instPlanner?JSON.parse(JSON.stringify(snap.instPlanner)):null;
   if(snap.mobQaqcPersons) mobilityState.qaqcPersons=snap.mobQaqcPersons;
   qInstTouristPrem=!!snap.instTouristPrem;
@@ -13035,6 +13044,7 @@ function confirmSend(via) {
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
     _saveBoardLayoutToDrive();
+    _saveDrawingAnalysisToDrive();
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus=sentTxt; qInitLockedAt=qInitLockedAt||new Date().toISOString();
@@ -13077,6 +13087,7 @@ function skipSend() {
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
     _saveBoardLayoutToDrive();
+    _saveDrawingAnalysisToDrive();
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus="Not sent"; qInitLockedAt=qInitLockedAt||new Date().toISOString();
@@ -13342,6 +13353,7 @@ function confirmClientApprove(){
   updateFQClientApproveUI();
   _updateQStatusBadge();
   _saveBoardLayoutToDrive();
+  _saveDrawingAnalysisToDrive();
   gSaveQuotation();
 }
 // "Client Declined" — client doesn't want to proceed. Can be triggered from Stage 1 (Initial
@@ -15064,6 +15076,21 @@ function supaUploadQuotationFile(baseSerial,fileName,mimeType,content){
       }).catch(function(e){ console.warn('[supa] quotations storage upload threw',e); });
   }catch(e){ console.warn('[supa] quotations storage upload threw',e); return Promise.resolve(); }
 }
+// Binary-safe variant — supaUploadQuotationFile's new Blob([content]) would wrap a base64 STRING
+// as literal text, not the decoded bytes, corrupting a real file (e.g. a PDF) on download. Decodes
+// via _base64ToBlob first. Same guard clauses/fallback convention as supaUploadQuotationFile.
+function supaUploadQuotationBinaryFile(baseSerial,fileName,mimeType,base64Content){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!baseSerial||!fileName||!base64Content) return Promise.resolve();
+  try{
+    var blob=_base64ToBlob(base64Content,mimeType);
+    var storageKey=_supaSafeStorageKey(baseSerial)+'/'+_supaSafeStorageKey(fileName);
+    return supa.storage.from('quotations').upload(storageKey,blob,{contentType:mimeType,upsert:true})
+      .then(function(r){
+        if(r&&r.error) console.warn('[supa] quotations storage upload error:',r.error.message||r.error);
+        else console.log('[supa] quotations storage uploaded:',storageKey);
+      }).catch(function(e){ console.warn('[supa] quotations storage upload threw',e); });
+  }catch(e){ console.warn('[supa] quotations storage upload threw',e); return Promise.resolve(); }
+}
 // Raw-text Drive download — gApiFetch always calls r.json(), which breaks on
 // non-JSON files like Draft.html. Bypasses that for exact string comparison.
 function _driveDownloadRawText(fileId){
@@ -15582,6 +15609,44 @@ function supaReplaceBoardLayouts(serial,bomRows,analyzedAt){
       else console.log('[supa] board_layouts upserted:',serial,bomRows?bomRows.length:0,'rows');
     }).catch(function(e){ console.warn('[supa] board_layouts upsert threw',e); });
   }catch(e){ console.warn('[supa] board_layouts upsert threw',e); return Promise.resolve(); }
+}
+// — drawing_analyses upsert (dual-write), scoped to ONE quotation's serial (delete-by-serial then
+// insert, same replace pattern as supaReplaceBoardLayouts — a quotation only ever has one linked
+// Designers Support analysis today, since prodReflectToQuotation() always starts a fresh
+// quotation). Deliberately lightweight — metadata + Storage/Drive paths only, never the analysis
+// JSON itself — so the Saved Analyses tab's list query stays fast regardless of how many
+// analyses accumulate; the actual files are fetched on demand only when a row is opened.
+function supaReplaceDrawingAnalysis(serial,meta){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!serial||!meta) return Promise.resolve();
+  try{
+    return supa.from('quotations').upsert({serial:serial},{onConflict:'serial',ignoreDuplicates:true}).then(function(){
+      return supa.from('drawing_analyses').delete().eq('serial',serial);
+    }).then(function(){
+      var row={
+        serial:serial, file_name:meta.fileName||null, file_type:meta.fileType||null,
+        component_count:meta.componentCount||0, analyzed_at:meta.analyzedAt||null,
+        saved_by:meta.savedBy||null, raw_file_path:meta.rawFilePath||null,
+        output_file_path:meta.outputFilePath||null
+      };
+      return supa.from('drawing_analyses').insert([row]);
+    }).then(function(r){
+      if(r&&r.error) console.warn('[supa] drawing_analyses upsert error:',r.error.message||r.error);
+      else console.log('[supa] drawing_analyses upserted:',serial);
+    }).catch(function(e){ console.warn('[supa] drawing_analyses upsert threw',e); });
+  }catch(e){ console.warn('[supa] drawing_analyses upsert threw',e); return Promise.resolve(); }
+}
+// Reads all drawing_analyses rows, joined with quotations for client/company display — powers
+// the Designers Support "Saved Analyses" tab. Returns a Promise resolving to an array (empty on
+// any error/not-ready), same safe-fallback convention as every other supaGet* helper.
+function supaGetDrawingAnalyses(){
+  if(!supaReady()) return Promise.resolve([]);
+  try{
+    return supa.from('drawing_analyses')
+      .select('id,serial,file_name,file_type,component_count,analyzed_at,saved_by,raw_file_path,output_file_path,quotations(client_name,company)')
+      .order('analyzed_at',{ascending:false})
+      .then(function(r){ return (r&&r.data)||[]; })
+      .catch(function(){ return []; });
+  }catch(e){ return Promise.resolve([]); }
 }
 // — user upsert / delete (dual-write) —
 function supaUpsertUser(u){
@@ -16433,6 +16498,36 @@ function _driveUpsertFile(folderId,fileName,mimeType,content){
         +content+'\r\n--'+b+'--';
       return gApiFetch(url,{method:existId?'PATCH':'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body:body});
     });
+}
+// Binary-safe variant of _driveUpsertFile — that function string-concatenates `content` straight
+// into the multipart body assuming plain UTF-8 text (fine for JSON/HTML reports), which would
+// corrupt a real binary upload (e.g. a PDF) if passed a base64 string directly. This declares
+// `Content-Transfer-Encoding: base64` on the file part instead, per standard multipart/related
+// semantics, and passes the base64 string through undecoded — Drive decodes it correctly.
+function _driveUpsertBinaryFile(folderId,fileName,mimeType,base64Content){
+  var qry=encodeURIComponent("name='"+fileName.replace(/'/g,"\\'")+"' and '"+folderId+"' in parents and trashed=false");
+  return _driveGet('files?q='+qry+'&fields=files(id)&'+_DRIVE_FLAGS)
+    .then(function(d){
+      var existId=d.files&&d.files.length?d.files[0].id:null;
+      var meta={name:fileName,mimeType:mimeType};
+      if(!existId) meta.parents=[folderId];
+      var url=existId
+        ?'https://www.googleapis.com/upload/drive/v3/files/'+existId+'?uploadType=multipart&fields=id,webViewLink,name&supportsAllDrives=true'
+        :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name&supportsAllDrives=true';
+      var b='mc_mp_'+Date.now();
+      var body='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
+        +JSON.stringify(meta)+'\r\n--'+b+'\r\nContent-Type: '+mimeType+'\r\nContent-Transfer-Encoding: base64\r\n\r\n'
+        +base64Content+'\r\n--'+b+'--';
+      return gApiFetch(url,{method:existId?'PATCH':'POST',headers:{'Content-Type':'multipart/related; boundary='+b},body:body});
+    });
+}
+// Decodes a base64 string into a real binary Blob (not a text blob of base64 characters) — needed
+// because Blob([base64String]) would just wrap the base64 TEXT, not the decoded bytes.
+function _base64ToBlob(base64,mimeType){
+  var byteChars=atob(base64);
+  var byteNumbers=new Array(byteChars.length);
+  for(var i=0;i<byteChars.length;i++) byteNumbers[i]=byteChars.charCodeAt(i);
+  return new Blob([new Uint8Array(byteNumbers)],{type:mimeType});
 }
 // ── Service Capacity Drive backup ─────────────────────────────────────────
 var _SVC_CAP_FILE = 'modcraft_service_capacity.json';
@@ -19235,6 +19330,7 @@ function getFullQuotationState(){
     instWorkers:qInstWorkers, instDays:qInstDays,
     instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom, mobCalc:qMobCalc,
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
+    drawingAnalysis:qDrawingAnalysis?JSON.parse(JSON.stringify(qDrawingAnalysis)):null,
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null, instTouristPrem:qInstTouristPrem,
     clientSupplyMat:qClientSupplyMat, clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])), clientMatMultOverride:qClientMatMultOverride,
     accomException:mobilityState.accomException||null,
@@ -19392,6 +19488,7 @@ function restoreFullQuotationState(state){
   qMobTransport=state.mobTransport||null; qMobAccom=state.mobAccom||null;
   qMobCalc=state.mobCalc||null;
   qBoardLayout=state.boardLayout||null;
+  qDrawingAnalysis=state.drawingAnalysis||null;
   qInstPlanner=state.instPlanner||null; qInstTouristPrem=!!state.instTouristPrem;
   qClientSupplyMat=!!state.clientSupplyMat; qClientSupplyMatList=Array.isArray(state.clientSupplyMatList)?state.clientSupplyMatList:[]; qClientMatMultOverride=state.clientMatMultOverride||0;
   mobilityState.accomException=state.accomException||null;
@@ -19805,9 +19902,11 @@ function renderProductionPage() {
   var w=el('prod-wrap'); if(!w) return;
   // Route to correct tab
   if(prodTab==='mobility'){w.innerHTML=_buildMobilityCard();return;}
+  if(prodTab==='saved'){w.innerHTML=_buildSavedAnalysesTab();return;}
   // Sync tab button state (in case page was navigated to directly)
   var dt=el('prod-tab-drawing'); if(dt) dt.classList.toggle('active',prodTab==='drawing');
   var mt=el('prod-tab-mobility'); if(mt) mt.classList.toggle('active',prodTab==='mobility');
+  var st=el('prod-tab-saved'); if(st) st.classList.toggle('active',prodTab==='saved');
   // Auto-fill the shared carcass/unit count from production (shop-drawing) analysis
   if(prodState.result&&prodState.result.carcassCount){
     var pc=prodState.result.carcassCount;
@@ -19891,11 +19990,189 @@ function setProdTab(tab){
     var _projLoc=(el('cl-location')&&el('cl-location').value)||'';
     if(_projLoc) mobilityState.destination=_projLoc;
   }
-  ['drawing','mobility'].forEach(function(t){
+  if(tab==='saved') _prodLoadSavedAnalysesList();
+  ['drawing','mobility','saved'].forEach(function(t){
     var btn=el('prod-tab-'+t);
     if(btn){btn.classList.toggle('active',t===tab);}
   });
   renderProductionPage();
+}
+// ── Saved Analyses tab ────────────────────────────────────────────────────
+// Global list, filterable by serial/client/file name — every Designers Support analysis that was
+// reflected into a quotation and survived to a lock/approve event (see _saveDrawingAnalysisToDrive).
+var _prodSavedAnalyses=[];   // cached rows from supaGetDrawingAnalyses()
+var _prodSavedFilter='';
+var _prodSavedLoading=false;
+function _prodLoadSavedAnalysesList(){
+  _prodSavedLoading=true;
+  supaGetDrawingAnalyses().then(function(rows){
+    _prodSavedAnalyses=rows||[];
+    _prodSavedLoading=false;
+    if(prodTab==='saved') renderProductionPage();
+  });
+}
+function _prodSetSavedFilter(v){ _prodSavedFilter=v; renderProductionPage(); }
+function _buildSavedAnalysesTab(){
+  var q=(_prodSavedFilter||'').toLowerCase();
+  var rows=_prodSavedAnalyses.filter(function(r){
+    if(!q) return true;
+    var qo=r.quotations||{};
+    var hay=[r.serial,qo.client_name,qo.company,r.file_name,r.file_type].join(' ').toLowerCase();
+    return hay.indexOf(q)>=0;
+  });
+  var h='<div style="margin-bottom:14px"><h3 style="margin:0 0 4px"><i class="ti ti-history"></i> Saved Analyses</h3>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0">Past Designers Support analyses that were reflected into a quotation and saved when that quotation was locked/approved. View/edit, download the original upload, or reprint.</p></div>'
+    +'<input type="text" placeholder="Search by serial, client, or file name…" value="'+escHtml(_prodSavedFilter)+'" oninput="_prodSetSavedFilter(this.value)" style="height:36px;width:100%;max-width:360px;margin-bottom:12px">';
+  if(!supaReady()){
+    h+='<div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-info-circle"></i>Connect to the fast database to browse saved analyses — Settings → Company &amp; DB → "Fast database (Supabase)".</div>';
+    return h;
+  }
+  if(_prodSavedLoading){ h+='<div style="color:var(--text2);font-size:13px">Loading…</div>'; return h; }
+  if(!rows.length){
+    h+='<div style="color:var(--text2);font-size:13px;padding:20px;text-align:center;background:var(--bg2);border-radius:8px">No saved analyses'
+      +(q?' match your search':' yet — reflect a Designers Support analysis into a quotation, then lock or approve that quotation to save it here')+'.</div>';
+    return h;
+  }
+  h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<thead><tr style="background:var(--bg2)">'
+    +['Date','Serial','Client','File','Type','Components','Actions'].map(function(c){return '<th style="text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)">'+c+'</th>';}).join('')
+    +'</tr></thead><tbody>';
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i];
+    var qo=r.quotations||{};
+    var dt=r.analyzed_at?new Date(r.analyzed_at).toLocaleDateString('en-US',{month:'short',day:'2-digit',year:'numeric'}):'—';
+    h+='<tr style="border-bottom:1px solid var(--border)">'
+      +'<td style="padding:6px 8px;white-space:nowrap">'+dt+'</td>'
+      +'<td style="padding:6px 8px;font-family:monospace">'+escHtml(r.serial||'')+'</td>'
+      +'<td style="padding:6px 8px">'+escHtml(qo.client_name||'—')+'</td>'
+      +'<td style="padding:6px 8px">'+escHtml(r.file_name||'—')+'</td>'
+      +'<td style="padding:6px 8px">'+escHtml(r.file_type||'—')+'</td>'
+      +'<td style="padding:6px 8px;text-align:center">'+(r.component_count||0)+'</td>'
+      +'<td style="padding:6px 8px;white-space:nowrap">'
+        +'<button class="btn" style="font-size:11px;padding:3px 8px;margin-right:4px" onclick="_prodLoadSavedAnalysis('+r.id+')"><i class="ti ti-edit"></i>View/Edit</button>'
+        +'<button class="btn" style="font-size:11px;padding:3px 8px;margin-right:4px" onclick="_prodDownloadSavedRaw('+r.id+')"'+(r.raw_file_path?'':' disabled title="No raw file saved for this one"')+'><i class="ti ti-download"></i>Raw file</button>'
+        +'<button class="btn" style="font-size:11px;padding:3px 8px" onclick="_prodPrintSavedAnalysis('+r.id+')"><i class="ti ti-printer"></i>Print</button>'
+      +'</td></tr>';
+  }
+  h+='</tbody></table></div>';
+  return h;
+}
+// Reopens a saved analysis into the live Shop Drawing Analysis tab for review/editing — reuses the
+// entire existing review UI (prodBuildResultHtml, _prodComponentFieldCorrected, etc.) unchanged,
+// this just repopulates prodState from the saved output JSON.
+function _prodLoadSavedAnalysis(id){
+  var row=_prodSavedAnalyses.find(function(r){return r.id===id;});
+  if(!row||!row.output_file_path){ showToast('Could not find this analysis output.'); return; }
+  if(!supaReady()){ showToast('Connect to the fast database first (Settings → Company & DB).'); return; }
+  showToast('Loading saved analysis…');
+  supa.storage.from('quotations').download(row.output_file_path).then(function(r){
+    if(r.error||!r.data) throw r.error||new Error('empty download');
+    return r.data.text();
+  }).then(function(text){
+    var payload=JSON.parse(text);
+    prodState.file=null;
+    prodState.fileName=payload.fileName||row.file_name||'';
+    prodState.fileType=payload.fileType||row.file_type||'cutting-list';
+    prodState.result=payload.result||null;
+    prodState.elevationResult=payload.elevationResult||null;
+    prodState.phase=prodState.result?'cutting-list':null;
+    prodState.savedAnalysisId=id;
+    prodState.savedRawFilePath=row.raw_file_path||'';
+    setProdTab('drawing');
+    showToast('✓ Loaded saved analysis — '+(prodState.fileName||'untitled'));
+  }).catch(function(e){
+    console.warn('Load saved analysis failed',e);
+    showToast('Could not load this saved analysis.');
+  });
+}
+function _prodDownloadSavedRaw(id){
+  var row=_prodSavedAnalyses.find(function(r){return r.id===id;});
+  if(!row||!row.raw_file_path){ showToast('No raw file was saved for this analysis.'); return; }
+  if(!supaReady()){ showToast('Connect to the fast database first (Settings → Company & DB).'); return; }
+  supa.storage.from('quotations').download(row.raw_file_path).then(function(r){
+    if(r.error||!r.data) throw r.error||new Error('empty download');
+    var url=URL.createObjectURL(r.data);
+    var a=document.createElement('a');
+    a.href=url; a.download=row.raw_file_path.split('/').pop();
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){URL.revokeObjectURL(url);},30000);
+  }).catch(function(e){
+    console.warn('Raw file download failed',e);
+    showToast('Could not download the raw file.');
+  });
+}
+function _prodPrintSavedAnalysis(id){
+  var row=_prodSavedAnalyses.find(function(r){return r.id===id;});
+  if(!row||!row.output_file_path){ showToast('Could not find this analysis output.'); return; }
+  if(!supaReady()){ showToast('Connect to the fast database first (Settings → Company & DB).'); return; }
+  supa.storage.from('quotations').download(row.output_file_path).then(function(r){
+    if(r.error||!r.data) throw r.error||new Error('empty download');
+    return r.data.text();
+  }).then(function(text){
+    var payload=JSON.parse(text);
+    var html=_buildDrawingAnalysisPrintHtml(payload.result,payload.fileType||row.file_type,payload.fileName||row.file_name,row.serial);
+    var blob=new Blob([html],{type:'text/html'});
+    var url=URL.createObjectURL(blob);
+    var w=window.open(url,'_blank');
+    if(w) setTimeout(function(){URL.revokeObjectURL(url);},60000);
+  }).catch(function(e){
+    console.warn('Print load failed',e);
+    showToast('Could not load this analysis for printing.');
+  });
+}
+// Standalone, read-only printable report for a saved analysis — modeled on _buildBomHtml, NOT
+// prodBuildResultHtml (which is tightly coupled to live editing: inputs, onchange handlers, edit
+// buttons — not appropriate for a print view). Works for any fileType ("cutting list or shop
+// drawing") because by the time an analysis is saved, its output has always been expanded into the
+// same full components/services/BOM shape (elevation results only get captured after being
+// approved into a full cutting list) — fileType just changes the printed heading/label.
+function _buildDrawingAnalysisPrintHtml(result,fileType,fileName,serial){
+  var typeLabels={'elevation-drawing':'Elevation Drawing → Shop Drawing → Cutting List','shop-drawing':'Shop Drawing → Cutting List','technical-drawing':'Technical Drawing → Cutting List','cutting-list':'Cutting List'};
+  var typeLabel=typeLabels[fileType]||'Drawing Analysis';
+  var comps=(result&&result.components)||[];
+  var svc=(result&&result._services)||{};
+  var bom=(result&&result._bom)||[];
+  var tdS='padding:6px 9px;border:1px solid #ddd;font-size:11px';
+  var thS='background:#1a3c5e;color:#fff;font-weight:bold;padding:7px 9px;border:1px solid #ccc;text-align:left;font-size:11px';
+  var compRows='';
+  for(var i=0;i<comps.length;i++){
+    var c=comps[i];
+    compRows+='<tr><td style="'+tdS+'">'+escHtml(c.area||'')+'</td><td style="'+tdS+'">'+escHtml(c.name||'')+'</td>'
+      +'<td style="'+tdS+'">'+escHtml(c.material||'')+'</td><td style="'+tdS+'">'+escHtml((c.color||'')+(c.texture?' ('+c.texture+')':''))+'</td>'
+      +'<td style="'+tdS+';text-align:right">'+(c.thickness||0)+'</td><td style="'+tdS+';text-align:right">'+(c.length||0)+'</td>'
+      +'<td style="'+tdS+';text-align:right">'+(c.width||0)+'</td><td style="'+tdS+';text-align:center">'+(c.qty||1)+'</td>'
+      +'<td style="'+tdS+';text-align:center">'+(c.faces||2)+'</td><td style="'+tdS+'">'+escHtml(c.ebt||'')+'</td>'
+      +'<td style="'+tdS+'">'+escHtml(c.grooving||'')+'</td></tr>';
+  }
+  var bomRows='';
+  for(var i=0;i<bom.length;i++){
+    var b=bom[i];
+    bomRows+='<tr><td style="'+tdS+'">'+escHtml((b.material||'')+' '+(b.color||'')+(b.texture?' ('+b.texture+')':'')+' '+(b.thickness||0)+'mm '+(b.faces||0)+'F')+'</td>'
+      +'<td style="'+tdS+'">'+escHtml(b.boardSize||'')+'</td><td style="'+tdS+';text-align:center">'+(b.boardsNeeded||0)+'</td>'
+      +'<td style="'+tdS+';text-align:center">'+(b.utilizationPct||0)+'%</td><td style="'+tdS+'">'+escHtml(b.areas||'')+'</td></tr>';
+  }
+  return '<!doctype html><html><head><meta charset="UTF-8"><title>'+escHtml(serial||'')+' — Drawing Analysis</title></head>'
+    +'<body style="font-family:Arial,sans-serif;font-size:12px;padding:24px;color:#111">'
+    +'<div style="border-bottom:3px solid #1a3c5e;padding-bottom:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">'
+    +'<div><div style="font-size:18px;font-weight:900;color:#1a3c5e">'+escHtml(typeLabel)+'</div><div style="font-size:11px;color:#666">'+escHtml(fileName||'')+'</div></div>'
+    +'<div style="text-align:right;font-size:11px"><b>Quotation #:</b> '+escHtml(serial||'—')+'<br><b>Printed:</b> '+new Date().toLocaleDateString('en-US',{month:'short',day:'2-digit',year:'numeric'})+'</div>'
+    +'</div>'
+    +'<div style="margin-bottom:16px;display:flex;gap:20px;font-size:12px">'
+      +'<div><b>Components:</b> '+comps.length+'</div>'
+      +'<div><b>Cutting:</b> '+(svc.cuttingLM||0)+' lm</div>'
+      +'<div><b>Edgebanding:</b> '+(svc.edgebandingLM||0)+' lm</div>'
+      +'<div><b>Holes:</b> '+(svc.holeCount||0)+'</div>'
+    +'</div>'
+    +'<p style="font-weight:bold;font-size:12px;margin:16px 0 6px">Board / Material Requirements</p>'
+    +'<table style="width:100%;border-collapse:collapse;margin-bottom:16px"><thead><tr>'
+      +['Material','Board size','Boards needed','Utilization','Areas'].map(function(c){return '<th style="'+thS+'">'+c+'</th>';}).join('')
+    +'</tr></thead><tbody>'+(bomRows||'<tr><td colspan="5" style="'+tdS+';color:#999">No board data</td></tr>')+'</tbody></table>'
+    +'<p style="font-weight:bold;font-size:12px;margin:16px 0 6px">Cutting List</p>'
+    +'<table style="width:100%;border-collapse:collapse"><thead><tr>'
+      +['Area','Component','Material','Color/Texture','Thk','L','W','Qty','Faces','EBT','Groove'].map(function(c){return '<th style="'+thS+'">'+c+'</th>';}).join('')
+    +'</tr></thead><tbody>'+(compRows||'<tr><td colspan="11" style="'+tdS+';color:#999">No components</td></tr>')+'</tbody></table>'
+    +'<p style="font-size:9px;color:#999;margin-top:20px;text-align:right">Generated by Modcraft — '+new Date().toLocaleString()+'</p>'
+    +'</body></html>';
 }
 // ── Site Mobility & Accommodation Planner ────────────────────────────────
 var _MOB_ORIGIN_MAP={
@@ -20521,6 +20798,59 @@ function _saveBoardLayoutToDrive(){
     })
     .catch(function(e){console.warn('Board layout Drive save failed:',e);});
   supaReplaceBoardLayouts(baseSerial,qBoardLayout.bom,qBoardLayout.analyzedAt);
+}
+// Persists the FULL Designers Support analysis (qDrawingAnalysis, captured at "Reflect to
+// quotation" time — raw uploaded file + complete AI output, not just the board-layout BOM subset
+// _saveBoardLayoutToDrive handles above) to the quotation's Drive folder AND Supabase Storage, plus
+// a metadata row in the drawing_analyses table so the Designers Support "Saved Analyses" tab can
+// list and re-open it later. Fires at the same lock/approve points as _saveBoardLayoutToDrive (see
+// its 3 call sites) — deliberately the same timing, not earlier: before locking, qSerial is only a
+// preview number (_peekNextSerial()), so saving sooner risks orphaned files if the draft never gets
+// saved. No-ops silently if this quotation never went through Designers Support.
+function _saveDrawingAnalysisToDrive(){
+  if(!gToken||!qSerial||!qDrawingAnalysis||!qDrawingAnalysis.result) return;
+  var baseSerial=qBaseSerial||qSerial;
+  var da=qDrawingAnalysis;
+  var client=driveClientName();
+  var savedBy=gUser?gUser.email:'';
+  var analyzedAt=da.analyzedAt||new Date().toISOString();
+  var outputPayload={
+    fileName:da.fileName||'', fileType:da.fileType||'', analyzedAt:analyzedAt,
+    result:da.result, elevationResult:da.elevationResult||null
+  };
+  var outputFileName=qSerial+' — '+client+' — analysis output.json';
+  var componentCount=(da.result.components||[]).length;
+  var meta={
+    fileName:da.fileName||'', fileType:da.fileType||'', componentCount:componentCount,
+    analyzedAt:analyzedAt, savedBy:savedBy,
+    outputFilePath:_supaSafeStorageKey(baseSerial)+'/'+_supaSafeStorageKey(outputFileName),
+    rawFilePath:''
+  };
+  var driveChain=ensureDriveFolder().then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);});
+  // Output JSON — plain text, uses the same helpers as every other saved-report artifact.
+  driveChain.then(function(fid){
+    supaUploadQuotationFile(baseSerial,outputFileName,'application/json',JSON.stringify(outputPayload,null,2));
+    return _driveUpsertFile(fid,outputFileName,'application/json',JSON.stringify(outputPayload,null,2));
+  }).then(function(r){
+    if(r&&r.id) logActivity('Drawing analysis output saved to Drive folder ('+outputFileName+')');
+    else console.warn('Drawing analysis output Drive save failed:',r&&r.error&&r.error.message);
+  }).catch(function(e){console.warn('Drawing analysis output Drive save failed:',e);})
+  // Raw uploaded file — binary-safe path; only attempted if the async FileReader capture (at
+  // reflect time) actually finished before this fired, which it reliably will have by lock time.
+  .then(function(){
+    if(!da.rawFileBase64) return;
+    var ext=(da.fileName||'').indexOf('.')>=0?da.fileName.split('.').pop():'bin';
+    var rawFileName=qSerial+' — '+client+' — raw upload.'+ext;
+    var rawMime=da.rawFileMime||'application/octet-stream';
+    meta.rawFilePath=_supaSafeStorageKey(baseSerial)+'/'+_supaSafeStorageKey(rawFileName);
+    supaUploadQuotationBinaryFile(baseSerial,rawFileName,rawMime,da.rawFileBase64);
+    return driveChain.then(function(fid){return _driveUpsertBinaryFile(fid,rawFileName,rawMime,da.rawFileBase64);})
+      .then(function(r){
+        if(r&&r.id) logActivity('Drawing analysis raw file saved to Drive folder ('+rawFileName+')');
+        else console.warn('Drawing analysis raw file Drive save failed:',r&&r.error&&r.error.message);
+      });
+  }).catch(function(e){console.warn('Drawing analysis raw file Drive save failed:',e);})
+  .then(function(){ supaReplaceDrawingAnalysis(baseSerial,meta); });
 }
 function _mobCallClaude(prompt, callback){
   fetch('https://api.anthropic.com/v1/messages',{
@@ -22402,6 +22732,35 @@ function prodReflectToQuotation(){
       componentCount:(prodState.result.components||[]).length,
       bom:JSON.parse(JSON.stringify(prodState.result._bom))
     };
+  }
+  // Capture the FULL analysis (raw upload + complete output, not just the board-layout BOM
+  // subset above) so it can be re-opened for review/edit and printed later — see
+  // _saveDrawingAnalysisToDrive(), which persists this at quotation lock/approve time (same
+  // timing as qBoardLayout — before locking, qSerial is only a preview number).
+  if(prodState.result){
+    qDrawingAnalysis={
+      fileName:prodState.fileName||'',
+      fileType:prodState.fileType||'',
+      analyzedAt:new Date().toISOString(),
+      rawFileBase64:'', rawFileMime:'',
+      result:JSON.parse(JSON.stringify(prodState.result)),
+      elevationResult:prodState.elevationResult?JSON.parse(JSON.stringify(prodState.elevationResult)):null
+    };
+    // Raw bytes are filled in async — by the time the user actually locks/approves the
+    // quotation (the point _saveDrawingAnalysisToDrive() fires), this has long since finished.
+    // If the read fails for any reason, the far more valuable analysis output above still
+    // saves fine without it (rawFileBase64 just stays empty).
+    if(prodState.file){
+      var _daSnap=qDrawingAnalysis;
+      var _daReader=new FileReader();
+      _daReader.onload=function(e){
+        var dataUrl=e.target.result;
+        var comma=dataUrl.indexOf(',');
+        _daSnap.rawFileBase64=comma>=0?dataUrl.slice(comma+1):dataUrl;
+        _daSnap.rawFileMime=comma>=0?(dataUrl.slice(5,comma).split(';')[0]||'application/octet-stream'):'application/octet-stream';
+      };
+      _daReader.readAsDataURL(prodState.file);
+    }
   }
   var area=qAreas[0];
   if(!area.svcItems) area.svcItems=[];

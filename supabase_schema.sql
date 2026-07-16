@@ -447,6 +447,41 @@ create trigger trg_board_layouts_updated
 
 
 -- ============================================================================
+-- 12c. DRAWING_ANALYSES  (new — not a Google Sheets tab)
+--     One row per quotation, pointing at the FULL Designers Support analysis
+--     (raw uploaded file + complete AI output) saved to Storage/Drive at
+--     quotation lock/approve time — see _saveDrawingAnalysisToDrive() in
+--     index.html. Unlike board_layouts (write-only, for a future app), this
+--     table IS read back by Modcraft itself: the Designers Support "Saved
+--     Analyses" tab lists these rows so a past analysis can be reopened for
+--     review/edit or reprinted. Deliberately lightweight (metadata + storage
+--     paths only, not the analysis JSON itself) so listing/browsing stays
+--     fast no matter how many analyses accumulate — the actual files are
+--     fetched on demand only when a row is opened.
+-- ============================================================================
+create table if not exists public.drawing_analyses (
+  id                bigint generated always as identity primary key,
+  serial            text not null references public.quotations(serial) on delete cascade,
+  file_name         text,
+  file_type         text,                 -- 'elevation-drawing' | 'shop-drawing' | 'technical-drawing' | 'cutting-list'
+  component_count   integer,
+  analyzed_at       timestamptz,          -- when the Designers Support analysis ran
+  saved_by          text,                 -- email of the user who locked/approved the quotation
+  raw_file_path     text,                 -- Storage/Drive path to the original uploaded file
+  output_file_path  text,                 -- Storage/Drive path to the full analysis output JSON
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+
+create index if not exists idx_drawing_analyses_serial on public.drawing_analyses (serial);
+
+drop trigger if exists trg_drawing_analyses_updated on public.drawing_analyses;
+create trigger trg_drawing_analyses_updated
+  before update on public.drawing_analyses
+  for each row execute function public.set_updated_at();
+
+
+-- ============================================================================
 -- 13. ROW-LEVEL SECURITY  (RLS)
 --     Turn RLS ON for every table, then add ONE permissive starter policy per
 --     table: "any authenticated (logged-in) user can do everything."
@@ -462,7 +497,7 @@ declare
     'user_prefs','approval_requests','activity_log','pending_orders',
     'messages','price_services','price_materials','price_hardware',
     'cabinet_templates','logistics_materials','logistics_trucks','board_layouts',
-    'mapping_audit'
+    'mapping_audit','drawing_analyses'
   ];
 begin
   foreach t in array tbls loop
