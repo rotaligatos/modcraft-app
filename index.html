@@ -22347,14 +22347,20 @@ function prodBuildSummary(result) {
   // plausible matches (e.g. "Real White" vs "Warm White") -> flag for the user to pick from a
   // dropdown scoped to just those candidates. No match at all -> flag with an Outsource option,
   // since that genuinely may not be a catalog item at all.
+  //
+  // matchCandidates is kept on the row PERMANENTLY (even for a single confident auto-match, and
+  // even after the user picks one) so "Not right? Change match" can always reopen the exact same
+  // candidate list later — see _prodCatalogRowHtml/_prodCatalogRowReopenPicker. Previously this was
+  // only populated for the ambiguous (2+ match) case and got wiped to [] the instant a pick was
+  // made, which meant a wrong pick (or a wrong single auto-match) could never be revisited without
+  // retyping the exact catalog name from memory.
   function catalogMatchRow(aiName,mappedName,catalogArr,qty,unit){
     var candidates=_prodFindCatalogMatches(mappedName,catalogArr,6);
     var row={aiName:aiName,name:mappedName,qty:qty,unit:unit,include:true,price:0,custom:true,
-      outsource:false,matchCandidates:[],needsReview:false,reviewNote:''};
+      outsource:false,matchCandidates:candidates.map(function(c){return c.name;}),needsReview:false,reviewNote:''};
     if(candidates.length===1){
       row.name=candidates[0].name; row.unit=candidates[0].unit||unit; row.price=candidates[0].price||0; row.custom=false;
     } else if(candidates.length>1){
-      row.matchCandidates=candidates.map(function(c){return c.name;});
       row.needsReview=true;
       row.reviewNote=candidates.length+' possible catalog matches found for "'+aiName+'" — pick the right one.';
     } else {
@@ -22448,23 +22454,41 @@ function _prodCatalogRowHtml(cat,idx,row,uopts){
     +'<select onchange="prodState.summary.'+cat+'['+idx+'].unit=this.value" style="height:27px;font-size:11px;'+d+'">'+uopts(row.unit)+'</select>'
     +'<button class="btn" onclick="prodRemoveSummaryRow(\''+cat+'\','+idx+')" style="height:27px;width:26px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
     +'</div>';
-  if(row.matchCandidates&&row.matchCandidates.length){
+  if(row.needsReview){
+    // Still unresolved (first time flagged, or reopened via "Change match" below) — one merged
+    // dropdown offers every catalog candidate found PLUS Outsource, so either path is always
+    // reachable regardless of how the search went.
     var copts='<option value="">— pick the right match —</option>';
-    for(var c=0;c<row.matchCandidates.length;c++) copts+='<option value="'+c+'">'+escHtml(row.matchCandidates[c])+'</option>';
+    for(var c=0;c<(row.matchCandidates||[]).length;c++) copts+='<option value="'+c+'">'+escHtml(row.matchCandidates[c])+'</option>';
+    copts+='<option value="outsource">Outsource (sourced externally, not in catalog)</option>';
     h+='<div style="margin:-1px 0 6px 26px;padding:4px 6px;background:#fff;border-radius:4px">'
       +'<div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:3px"><i class="ti ti-alert-triangle" style="font-size:12px"></i> '+escHtml(row.reviewNote)+'</div>'
       +'<select onchange="_prodCatalogRowMatchPicked(\''+cat+'\','+idx+',this.value)" style="height:27px;font-size:12px;width:100%">'+copts+'</select>'
       +'</div>';
-  } else if(row.needsReview){
-    h+='<div style="margin:-1px 0 6px 26px;padding:4px 6px;background:#fff;border-radius:4px">'
-      +'<div style="font-size:12px;color:var(--amber);font-weight:600;margin-bottom:3px"><i class="ti ti-alert-triangle" style="font-size:12px"></i> '+escHtml(row.reviewNote)+'</div>'
-      +'<label style="font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer">'
-      +'<input type="checkbox"'+(row.outsource?' checked':'')+' onchange="_prodCatalogRowOutsourceToggled(\''+cat+'\','+idx+',this.checked)"> Mark as Outsource (sourced externally, not in catalog)'
-      +'</label></div>';
-  } else if(row.aiName&&row.aiName!==row.name){
-    h+='<div style="font-size:10px;color:var(--text2);margin:-1px 0 5px 26px">AI: <em>'+escHtml(row.aiName)+'</em>&nbsp;<a href="#" onclick="prodSaveJargon(\''+cat+'\','+idx+');return false" style="color:var(--navy)">Save mapping</a></div>';
+  } else {
+    // Already resolved (single confident auto-match, a candidate you picked, or marked Outsource)
+    // — "Not right? Change match" stays available permanently so a mistake can always be undone,
+    // instead of the pick being final the moment it's made.
+    var resolvedLabel=row.outsource?'Marked as Outsource':(row.aiName&&row.aiName!==row.name?'AI: '+row.aiName:'');
+    h+='<div style="font-size:10px;color:var(--text2);margin:-1px 0 5px 26px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      +(resolvedLabel?'<span>'+(row.outsource?'<i class="ti ti-truck-delivery" style="font-size:10px;color:var(--navy)"></i> ':'<em>')+escHtml(resolvedLabel)+(row.outsource?'':'</em>')+'</span>':'')
+      +(row.aiName&&row.aiName!==row.name&&!row.outsource?'<a href="#" onclick="prodSaveJargon(\''+cat+'\','+idx+');return false" style="color:var(--navy)">Save mapping</a>':'')
+      +'<a href="#" onclick="_prodCatalogRowReopenPicker(\''+cat+'\','+idx+');return false" style="color:var(--coral)">Not right? Change match</a>'
+      +'</div>';
   }
   return h;
+}
+// Reopens the merged candidate/Outsource picker on an already-resolved row (see the "else" branch
+// above) — sets needsReview back to true so the picker renders and "Reflect to quotation" blocks
+// again until a fresh choice is made, exactly like a brand-new flag would. matchCandidates is never
+// cleared (see catalogMatchRow), so the exact original candidate list is still there to choose from.
+function _prodCatalogRowReopenPicker(cat,idx){
+  var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
+  row.needsReview=true;
+  row.reviewNote=(row.matchCandidates&&row.matchCandidates.length)
+    ? (row.matchCandidates.length+' possible catalog match'+(row.matchCandidates.length>1?'es':'')+' found for "'+row.aiName+'" — pick the right one, or mark it Outsource.')
+    : 'No matching item found in your catalog for "'+row.aiName+'" — pick "Outsource" if this needs to be sourced externally, or edit the name to add it as a one-off.';
+  var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
 }
 function prodBuildSummaryHtml(){
   var sum=prodState.summary;if(!sum)return'';
@@ -22496,27 +22520,25 @@ function prodBuildSummaryHtml(){
   h+='</div></div>';return h;
 }
 function prodAddSummaryRow(cat){if(!prodState.summary)return;if(cat==='materials')prodState.summary.materials.push({aiName:'',name:'',qty:1,unit:'sheet',include:true});else if(cat==='hardware')prodState.summary.hardware.push({aiName:'',name:'',qty:1,unit:'pcs',include:true});else if(cat==='services')prodState.summary.services.push({aiName:'',name:SERVICES[0].name,svcIdx:0,qty:1,unit:SERVICES[0].unit,include:true});var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
-// User picked the correct catalog item from the ambiguous-match dropdown — resolve the row to that
-// real catalog entry (name/unit/price, custom:false) and remember the pick so the SAME AI-extracted
-// description resolves automatically next time instead of needing to be picked again.
-function _prodCatalogRowMatchPicked(cat,idx,candidateIdxStr){
-  if(candidateIdxStr===''||candidateIdxStr===undefined) return;
+// User picked either a catalog candidate or "Outsource" from the merged picker dropdown (see
+// _prodCatalogRowHtml) — resolves the row accordingly. matchCandidates is deliberately NEVER
+// cleared here (unlike the old behavior), so _prodCatalogRowReopenPicker can always bring back the
+// exact same candidate list later if this pick turns out to be wrong too.
+function _prodCatalogRowMatchPicked(cat,idx,val){
+  if(val===''||val===undefined) return;
   var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
-  var pickedName=row.matchCandidates[parseInt(candidateIdxStr)]; if(!pickedName) return;
+  if(val==='outsource'){
+    row.outsource=true; row.needsReview=false; row.reviewNote='';
+    var slot2=el('prod-summary-wrap'); if(slot2) slot2.innerHTML=prodBuildSummaryHtml();
+    return;
+  }
+  var pickedName=row.matchCandidates[parseInt(val)]; if(!pickedName) return;
   var catalogArr=cat==='materials'?dbMaterials:dbHardware;
   var matched=catalogArr.find(function(c){return c.name===pickedName;});
   if(matched){ row.name=matched.name; row.unit=matched.unit||row.unit; row.price=matched.price||0; row.custom=false; }
   else { row.name=pickedName; }
-  row.needsReview=false; row.matchCandidates=[]; row.reviewNote='';
+  row.outsource=false; row.needsReview=false; row.reviewNote='';
   _prodSaveJargonRule(row.aiName,cat,row.name);
-  var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
-}
-// No catalog match at all — user is marking it Outsource (resolves the flag) or un-marking it
-// (goes back to needing review, since it's neither matched nor confirmed as outsource).
-function _prodCatalogRowOutsourceToggled(cat,idx,checked){
-  var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
-  row.outsource=checked;
-  row.needsReview=!checked;
   var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
 }
 function prodRemoveSummaryRow(cat,idx){if(!prodState.summary)return;prodState.summary[cat].splice(idx,1);var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
