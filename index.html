@@ -22381,8 +22381,12 @@ function prodComputeBom(comps){
     // one side / White the other) is a different SKU again from a plain single-color board of the
     // same primary color — merging any of these previously meant the board-count AND the catalog-
     // match search term below could never distinguish them.
-    var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0,c.colorB||'',c.textureB||''].join('|');
-    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,colorB:c.colorB||'',textureB:c.textureB||'',totalAreaMm2:0,areas:{},pieces:[]};
+    // HPL finish is also part of the key — an HPL-laminated panel needs the extra lamination
+    // service + the HPL sheet itself (see prodBuildSummary), a genuinely different job from a
+    // plain melamine-faced board of the same substrate/color/thickness/faces.
+    var isHpl=/\bhpl\b/i.test((c.material||'')+' '+(c.notes||''));
+    var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0,c.colorB||'',c.textureB||'',isHpl].join('|');
+    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,colorB:c.colorB||'',textureB:c.textureB||'',hpl:isHpl,totalAreaMm2:0,areas:{},pieces:[]};
     var qty=c.qty||1;
     groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*qty;
     var ar=c.area||'General';
@@ -22406,7 +22410,7 @@ function prodComputeBom(comps){
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,faces:g.faces,
-      colorB:g.colorB,textureB:g.textureB,
+      colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
@@ -22449,6 +22453,14 @@ function prodBuildSummary(result) {
     return row;
   }
   var mats=[];var bom=result._bom||[];
+  // HPL-laminated groups (bm.hpl, set by prodComputeBom from "hpl" appearing in the component's
+  // material/notes) need two extra lines beyond the substrate board itself: the HPL sheet material,
+  // and a lamination SERVICE whose catalog name depends on the substrate — Plywood takes "Manual
+  // HPL Lamination", PB/MDF (incl. the -MR variants) take "HPL Lamination" — collected here and
+  // resolved into svcs after the keyword-matched service concepts below, same single-best-match
+  // pattern (services always show one dropdown of every catalog service, not a flagged candidate
+  // list like materials/hardware — see svcConcepts).
+  var pendingHplServices=[];
   for(var b=0;b<bom.length;b++){
     var bm=bom[b];
     // faces must be part of the search term — a 1-face and 2-face board are different catalog
@@ -22461,6 +22473,29 @@ function prodBuildSummary(result) {
     var parts=[bm.material,bm.color,bm.colorB,bm.texture?'('+bm.texture+')':'',bm.textureB&&bm.textureB!==bm.texture?'('+bm.textureB+')':'',bm.thickness?bm.thickness+'mm':'',bm.faces?bm.faces+'F':''];
     var rn=parts.filter(function(s){return s&&s.trim();}).join(' ');
     mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet'));
+    if(bm.hpl){
+      // The HPL sheet itself — same catalog-match/review treatment as any other material.
+      var hplName=['HPL',bm.color,bm.colorB,bm.faces?bm.faces+'F':''].filter(function(s){return s&&s.trim();}).join(' ');
+      mats.push(catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,bm.totalArea,'sqm'));
+      // Substrate determines WHICH lamination service — reuse the same field parser built for
+      // catalog matching so "Plywood"/"PB"/"MDF"/"PB-MR"/"MDF-MR" are recognized regardless of how
+      // the AI phrased the material string.
+      var substrate=_prodParseMaterialDescriptor(bm.material).substrate;
+      var facesLabel=bm.faces===1?'1 Face':(bm.faces===2?'2 Face':'');
+      if(!facesLabel||!substrate){
+        pendingHplServices.push({label:'HPL Lamination',qty:bm.totalArea,query:'',
+          needsReview:true,reviewNote:'HPL detected on "'+rn+'" but the face count or substrate wasn\'t clear enough to pick the right lamination service — pick it from the dropdown.'});
+      } else if(substrate==='Plywood'){
+        pendingHplServices.push({label:'Manual HPL Lamination '+facesLabel+' (Plywood)',qty:bm.totalArea,
+          query:'Manual HPL Lamination '+facesLabel+' Plywood'});
+      } else if(substrate==='PB'||substrate==='MDF'||substrate==='PB-MR'||substrate==='MDF-MR'){
+        pendingHplServices.push({label:'HPL Lamination '+facesLabel+' (MDF/PB)',qty:bm.totalArea,
+          query:'HPL Lamination '+facesLabel+' MDF PB'});
+      } else {
+        pendingHplServices.push({label:'HPL Lamination',qty:bm.totalArea,query:'',
+          needsReview:true,reviewNote:'HPL detected on "'+rn+'" but the substrate ('+(bm.material||'unspecified')+') doesn\'t match a known Plywood/PB/MDF lamination rule — pick the right service from the dropdown.'});
+      }
+    }
   }
   var hws=[];var hw=result.hardware||[];
   for(var h=0;h<hw.length;h++){
@@ -22519,6 +22554,39 @@ function prodBuildSummary(result) {
         svcIdx:SERVICES.length?0:-1,qty:Math.round(cpt.qty*100)/100,unit:(SERVICES[0]&&SERVICES[0].unit)||'',
         include:true,needsReview:true,
         reviewNote:'No matching service found in your catalog for "'+cpt.label+'" — pick the right one from the dropdown.'});
+    }
+  }
+  // Resolve the HPL lamination service requests collected during the materials loop above — same
+  // jargon-first-then-search pattern as svcConcepts, just one row per HPL-flagged material group
+  // instead of one fixed set of concepts, since each group can need a different face-count/substrate
+  // variant (and therefore a different catalog service + price).
+  for(var hi=0;hi<pendingHplServices.length;hi++){
+    var hp=pendingHplServices[hi];
+    if(hp.needsReview){
+      svcs.push({aiName:hp.label,name:hp.label,svcIdx:SERVICES.length?0:-1,
+        qty:Math.round(hp.qty*100)/100,unit:(SERVICES[0]&&SERVICES[0].unit)||'sqm',
+        include:true,needsReview:true,reviewNote:hp.reviewNote});
+      continue;
+    }
+    var hMatchIdx=-1;
+    var hJargonName=applyJargon(hp.label,'services');
+    if(hJargonName!==hp.label){
+      for(var x=0;x<SERVICES.length;x++){ if(SERVICES[x].name===hJargonName){ hMatchIdx=x; break; } }
+    }
+    if(hMatchIdx<0){
+      var hMatches=_prodFindCatalogMatches(hp.query,SERVICES,1);
+      if(hMatches.length===1){
+        for(var x=0;x<SERVICES.length;x++){ if(SERVICES[x]===hMatches[0]){ hMatchIdx=x; break; } }
+      }
+    }
+    if(hMatchIdx>=0){
+      svcs.push({aiName:hp.label,name:SERVICES[hMatchIdx].name,
+        svcIdx:hMatchIdx,qty:Math.round(hp.qty*100)/100,unit:SERVICES[hMatchIdx].unit,include:true,needsReview:false});
+    } else {
+      svcs.push({aiName:hp.label,name:hp.label,svcIdx:SERVICES.length?0:-1,
+        qty:Math.round(hp.qty*100)/100,unit:(SERVICES[0]&&SERVICES[0].unit)||'sqm',
+        include:true,needsReview:true,
+        reviewNote:'No matching service found in your catalog for "'+hp.label+'" — pick the right one from the dropdown.'});
     }
   }
   prodState.summary={materials:mats,hardware:hws,services:svcs};
