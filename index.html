@@ -19076,6 +19076,27 @@ function _syncServicesFromDb(){
 //   four together. Never mixes sources (e.g. Services from Supabase but
 //   Materials from Sheets) — that would risk an internally inconsistent
 //   catalog that's hard to reason about. —
+// PostgREST (the API layer Supabase's JS client talks to) caps any unpaginated select() at a
+// server-side default of 1000 rows — silently, with no error, just a truncated result. Materials
+// crossed that threshold long ago (150k+ rows) and the plain select() below was returning only
+// the first 1000, meaning ~99% of the real catalog was invisible to BOM/cutting-list search for
+// any Supabase-connected session (found 2026-07-19 via the Price Database settings preview
+// showing "1000 items" against a verified 153k+ row table). Paginates in 1000-row pages ordered
+// by the identity `id` column (required for range() to reliably return every row with no gaps or
+// duplicates across pages) until a page comes back short, meaning it hit the end.
+function _supaFetchAllRows(table,columns){
+  var PAGE=1000;
+  function fetchPage(offset,acc){
+    return supa.from(table).select(columns).order('id',{ascending:true}).range(offset,offset+PAGE-1).then(function(r){
+      if(r.error) return r;
+      var page=r.data||[];
+      var all=acc.concat(page);
+      if(page.length===PAGE) return fetchPage(offset+PAGE,all);
+      return {data:all,error:null};
+    });
+  }
+  return fetchPage(0,[]);
+}
 function supaGetPriceDb(){
   if(!supaReady()) return Promise.resolve(null);
   try{
@@ -19086,13 +19107,14 @@ function supaGetPriceDb(){
       // (_loadSvcCapFromDrive) was the only thing actually restoring this data, silently. Now
       // Supabase is a genuine, complete source for it too — Drive stays as a resilience backstop
       // (unchanged), not the sole mechanism.
-      // .order('id') matters here specifically (unlike the other 3 selects below): price_services
-      // rows now carry a user-defined drag order (see renderServicesSettings' drag/group feature) —
-      // supaReplaceTable() writes rows via sequential chunked inserts so the identity `id` column
-      // reflects SERVICES' array order at save time; without an explicit order, Postgres makes no
-      // guarantee the read-back matches, which would silently scramble a saved custom order.
+      // .order('id') matters here specifically (unlike the other 2 non-paginated selects below):
+      // price_services rows now carry a user-defined drag order (see renderServicesSettings'
+      // drag/group feature) — supaReplaceTable() writes rows via sequential chunked inserts so the
+      // identity `id` column reflects SERVICES' array order at save time; without an explicit
+      // order, Postgres makes no guarantee the read-back matches, which would silently scramble a
+      // saved custom order.
       supa.from('price_services').select('name,unit,price,svc_type,teams,shifts_per_day,output_per_shift,cost_data').order('id',{ascending:true}),
-      supa.from('price_materials').select('name,unit,price'),
+      _supaFetchAllRows('price_materials','name,unit,price'),
       supa.from('price_hardware').select('name,unit,price'),
       supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price')
     ]).then(function(results){
