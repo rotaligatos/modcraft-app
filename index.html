@@ -15648,18 +15648,95 @@ function _maybeShowSupaConnectBanner(){
   }catch(e){}
   showSupaConnectBanner();
 }
-function showSupaConnectBanner(){
+function showSupaConnectBanner(urgent){
   var b=el('supa-connect-banner');
   if(!b){
     b=document.createElement('div'); b.id='supa-connect-banner';
-    b.style.cssText='position:fixed;bottom:16px;left:16px;z-index:9998;background:#1a3a5c;color:#fff;padding:12px 16px;font-size:13px;display:flex;align-items:center;gap:12px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.25);max-width:380px';
+    b.style.cssText='position:fixed;bottom:16px;left:16px;z-index:9998;color:#fff;padding:12px 16px;font-size:13px;display:flex;align-items:center;gap:12px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.25);max-width:380px';
     document.body.appendChild(b);
   }
-  b.innerHTML='<i class="ti ti-bolt" style="font-size:18px;flex-shrink:0"></i>'
-    +'<span style="flex:1">Speed tip: connect to our faster database for quicker loading.</span>'
-    +'<button onclick="_supaManualConnect();_dismissSupaConnectBanner(false);" style="background:#fff;color:#1a3a5c;border:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0">Connect now</button>'
+  // urgent = a real liveness check just failed (see _supaCheckLiveness) — a genuinely different,
+  // more serious situation than "never got around to connecting" (the plain, soft case below), so
+  // it gets its own color/wording/urgency and is NOT gated by the dismiss cooldown that the soft
+  // case uses — see _supaHandleConfirmedBroken, which calls this directly on every failed check.
+  b.style.background=urgent?'#8a2c1f':'#1a3a5c';
+  var msg=urgent
+    ?'Your fast database connection has stopped working — background sync has paused. Nothing is lost (Sheets stays live), but reconnect when you can.'
+    :'Speed tip: connect to our faster database for quicker loading.';
+  b.innerHTML='<i class="ti '+(urgent?'ti-alert-triangle':'ti-bolt')+'" style="font-size:18px;flex-shrink:0"></i>'
+    +'<span style="flex:1">'+msg+'</span>'
+    +'<button onclick="_supaManualConnect();_dismissSupaConnectBanner(false);" style="background:#fff;color:'+(urgent?'#8a2c1f':'#1a3a5c')+';border:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0">'+(urgent?'Reconnect':'Connect now')+'</button>'
     +'<button onclick="_dismissSupaConnectBanner(true)" title="Dismiss" style="background:transparent;color:#fff;border:none;font-size:16px;cursor:pointer;flex-shrink:0;opacity:.7;line-height:1">&times;</button>';
   b.style.display='flex';
+}
+// ── Supabase liveness check ─────────────────────────────────────────────────
+// supaReady()/renderSupaStatus() historically only checked whether a session OBJECT exists (auth
+// truthiness), never whether Supabase is actually reachable right now. Found 2026-07-19: a real
+// 11-day gap where every dual-write silently no-op'd/failed while the status card kept showing a
+// reassuring green "Connected" pill the entire time, because supaSession never actually went
+// falsy — something else broke underneath (paused/unreachable project, an RLS/policy issue, a
+// network condition) that plain session-truthiness can never catch. This is the SAME failure class
+// as an earlier "9-day gap" incident (see the periodic banner-recheck comment above) recurring in a
+// different shape — that fix solved "checked only once per tab," this one solves "checked but
+// trusted a signal that can lie." Runs a real, cheap query on an interval and treats the result as
+// the actual source of truth for "is this working," independent of session truthiness.
+var _supaLiveOk=null;             // null = never checked yet; true/false = last real check result
+var _supaLiveCheckedAt=0;         // epoch ms of the last check
+var SUPA_LIVE_CHECK_INTERVAL_MS=15*60*1000; // 15 minutes
+var _supaLiveCheckTimer=null;
+function _supaAgoText(ts){
+  if(!ts) return 'never';
+  var mins=Math.round((Date.now()-ts)/60000);
+  return mins<1?'just now':(mins+' min ago');
+}
+function _supaCheckLiveness(){
+  if(!supa||!supaSession){ _supaLiveOk=false; _supaLiveCheckedAt=Date.now(); _supaOnLiveResult(); return; }
+  try{
+    supa.from('quotations').select('serial',{head:true,count:'exact'}).limit(1).then(function(r){
+      _supaLiveOk=!(r&&r.error); _supaLiveCheckedAt=Date.now(); _supaOnLiveResult();
+    }).catch(function(){
+      _supaLiveOk=false; _supaLiveCheckedAt=Date.now(); _supaOnLiveResult();
+    });
+  }catch(e){ _supaLiveOk=false; _supaLiveCheckedAt=Date.now(); _supaOnLiveResult(); }
+}
+function _supaOnLiveResult(){
+  if(typeof renderSupaStatus==='function') renderSupaStatus();
+  if(_supaLiveOk===false) _supaHandleConfirmedBroken();
+  else if(_supaLiveOk===true) _supaClearBrokenSince();
+}
+function _supaBrokenSinceKey(){ return 'mc_supa_broken_since_'+((gUser&&gUser.email)||'unknown').toLowerCase(); }
+// Tracks how long a break has been confirmed (durable across reloads via localStorage, since an
+// in-memory timer would just reset every time the tab closes) and escalates to the Admin once it's
+// been broken for a real stretch — a backstop for exactly the scenario that caused the original
+// incident: the one person seeing the banner is the one whose connection is broken, and they may
+// keep dismissing/missing it. One message per broken episode, not one every 15 minutes.
+function _supaHandleConfirmedBroken(){
+  if(!gUser||!gUser.email||gUser.email==='local') return;
+  var key=_supaBrokenSinceKey();
+  var since=0;
+  try{ since=parseInt(localStorage.getItem(key))||0; }catch(e){}
+  if(!since){ since=Date.now(); try{ localStorage.setItem(key,String(since)); }catch(e){} }
+  showSupaConnectBanner(true); // urgent variant — always shown on a confirmed failure, not cooldown-gated
+  var hoursBroken=(Date.now()-since)/3600000;
+  if(hoursBroken>=24){
+    var notifiedKey=key+'_notified';
+    var already=false;
+    try{ already=localStorage.getItem(notifiedKey)==='1'; }catch(e){}
+    if(!already){
+      try{ localStorage.setItem(notifiedKey,'1'); }catch(e){}
+      var admin=(typeof sheetUsers!=='undefined'?sheetUsers:[]).find(function(u){return u.pos==='Admin'&&u.active;});
+      if(admin&&typeof gSendMessage==='function'){
+        gSendMessage(admin.email,admin.name,
+          'Fast database (Supabase) sync has been failing for '+((gUser&&gUser.name)||gUser.email)+' for over 24 hours (since '+new Date(since).toLocaleString()+'). Nothing is lost — Sheets is still the live record — but background sync has stopped for them. They may need to reconnect via Settings → Company & DB → Connect now.',
+          'urgent','supa_broken:'+gUser.email,function(){});
+      }
+    }
+  }
+}
+function _supaClearBrokenSince(){
+  if(!gUser||!gUser.email) return;
+  var key=_supaBrokenSinceKey();
+  try{ localStorage.removeItem(key); localStorage.removeItem(key+'_notified'); }catch(e){}
 }
 // closedWithoutAction: true when dismissed via the × (ignored/exited the
 // notice) vs false when dismissed via "Go" (already heading to fix it,
@@ -15709,11 +15786,23 @@ function renderSupaStatus(){
       +'<a href="#" onclick="_supaErrorCount=0;renderSupaStatus();return false" style="color:#8a5a00;text-decoration:underline">Dismiss</a>'
       +'</div>';
   }
-  if(supaReady()){
-    var _banner=el('supa-connect-banner'); if(_banner) _banner.style.display='none'; // no longer relevant once actually connected
+  // Three states, not two: session-truthy-and-verified-working, session-truthy-but-a-real-check-
+  // just-failed (the exact "looks connected but isn't" case this was built for), and genuinely
+  // never connected. _supaLiveOk===null means no real check has completed yet (e.g. right after
+  // page load, before the first _supaCheckLiveness() resolves) — treated as provisionally OK rather
+  // than as a failure, since the session itself is truthy and there's simply no verdict yet.
+  if(supaReady()&&_supaLiveOk!==false){
+    var _banner=el('supa-connect-banner'); if(_banner) _banner.style.display='none'; // no longer relevant once actually verified connected
+    var checkNote=_supaLiveCheckedAt?('<div style="font-size:11px;color:var(--text2);margin-top:4px">Verified working '+_supaAgoText(_supaLiveCheckedAt)+'.</div>'):'';
     w.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
       +'<span class="pill pill-teal"><i class="ti ti-circle-check"></i> Connected</span>'
       +'<span style="font-size:12px;color:var(--text2)">Signed in as <b>'+escHtml((supaSession.user&&supaSession.user.email)||'')+'</b> on this browser.</span>'
+      +'</div>'+checkNote+errNote;
+  } else if(supaReady()&&_supaLiveOk===false){
+    w.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      +'<span class="pill pill-coral"><i class="ti ti-alert-triangle"></i> Connection problem</span>'
+      +'<span style="font-size:12px;color:var(--text2)">Signed in, but a live check just failed ('+_supaAgoText(_supaLiveCheckedAt)+') — background sync may be paused. Nothing is lost, Sheets is still live.</span>'
+      +'<button class="btn btn-primary" onclick="_supaManualConnect()" style="font-size:12px"><i class="ti ti-refresh"></i>Reconnect</button>'
       +'</div>'+errNote;
   } else {
     w.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
@@ -16890,6 +16979,13 @@ function gShowApp(){
   // last row) with zero warning, because the old logic only checked once at login and suppressed
   // itself for the rest of that tab's lifetime.
   if(!_supaBannerRecheckTimer) _supaBannerRecheckTimer=setInterval(_maybeShowSupaConnectBanner,_SUPA_BANNER_COOLDOWN_MS);
+  // Real liveness check (not just session truthiness — see _supaCheckLiveness) on a 15-min interval
+  // for as long as this tab stays open, plus one shortly after login rather than waiting a full
+  // interval for the first verdict. This is what actually would have caught the 11-day gap that
+  // motivated it — the banner-recheck timer above only re-checks whether a session object exists,
+  // which stayed truthy the entire time despite nothing actually working underneath.
+  setTimeout(_supaCheckLiveness,8000);
+  if(!_supaLiveCheckTimer) _supaLiveCheckTimer=setInterval(_supaCheckLiveness,SUPA_LIVE_CHECK_INTERVAL_MS);
   // Update topbar role pill
   var rp=el('topbar-role-pill');
   if(rp){
