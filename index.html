@@ -9032,7 +9032,14 @@ function _setReqPendingBadge(type, ctx, reqId){
 // Remove pending badge and apply the approved value to the quotation form
 function _applyApprovedRequest(notif){
   var type=notif.type; var ctx=notif.ctx||'s1';
-  if(type==='nonvat'){
+  // Guard: only touch the live in-memory quotation form if this approval actually belongs to
+  // whichever quotation happens to be open right now. Without this, approving a discount on
+  // Quotation X while Quotation Y is open would silently write X's approved discount onto Y's
+  // in-memory state — and a subsequent Save on Y would persist the wrong value. Scoped to the
+  // five form-mutating types only; 'reactivate' already does its own serial check internally with
+  // a real not-open fallback, and 'client_update' isn't quotation-form-scoped at all.
+  var appliesToOpenQuotation = !notif.serial || notif.serial===(qBaseSerial||qSerial);
+  if(type==='nonvat'&&appliesToOpenQuotation){
     if(ctx==='fq'){
       fqVatApproved=false;
       var r=document.querySelectorAll("[name='fq-vat']"); if(r[1]) r[1].checked=true;
@@ -9045,7 +9052,7 @@ function _applyApprovedRequest(notif){
       recalc();
     }
   }
-  if(type==='discount'){
+  if(type==='discount'&&appliesToOpenQuotation){
     var pct=notif.reqDisc||0;
     if(ctx==='fq'){
       fqDiscPct=pct; fqDiscApproved=true;
@@ -9061,17 +9068,17 @@ function _applyApprovedRequest(notif){
       recalc();
     }
   }
-  if(type==='override'&&notif.cfValues){
+  if(type==='override'&&notif.cfValues&&appliesToOpenQuotation){
     var cfObj=notif.cfValues;
     if(ctx==='fq'){fqCustomCF=cfObj;fqCustomCFApproved=true;renderFQCFStatus();recalcFQ();}
     else {qCustomCF=cfObj;qCustomCFApproved=true;renderCustomCFStatus();recalc();}
     var cbtn=el('ccf-req-btn'); if(cbtn){cbtn.innerHTML='<i class="ti ti-check"></i> Override applied';cbtn.disabled=false;}
   }
-  if(type==='premium'){
+  if(type==='premium'&&appliesToOpenQuotation){
     if(ctx==='fq'){fqPremApproved=true;checkFQSchedule();recalcFQ();}
     else {qPremApproved=true;checkSchedule();recalc();}
   }
-  if(type==='unlock'){
+  if(type==='unlock'&&appliesToOpenQuotation){
     var ubtn2=el(ctx==='fq'?'fq-unlock-btn':'unlock-btn');
     if(ubtn2){ubtn2.innerHTML='<i class="ti ti-lock-open"></i>Request unlock';ubtn2.disabled=false;}
     if(ctx==='fq'){
@@ -9108,6 +9115,70 @@ function _applyApprovedRequest(notif){
       showToast('Reactivation approved — quotation '+ser+' is now active.');
     }
   }
+}
+// Writes an approved value directly into the TARGET quotation's persisted state, independent of
+// whether the requester's browser happens to have that quotation open right now — this is what
+// actually makes an approval durable regardless of timing. _applyApprovedRequest() above remains
+// as an immediate in-memory UI update for the common case where the requester IS looking at the
+// right quotation already, but it was never itself a reliable persistence path (nothing forced a
+// save afterward, and if the requester wasn't on that page at all, nothing happened until they
+// separately reopened and resaved it).
+//
+// Sheets-first deliberately: found 2026-07-19 that this account's Supabase connection had been
+// silently inactive for 11 days with zero visible symptom (every dual-write just no-ops when
+// !supaReady()) -- Sheets only needs the normal login token, no separate connection step, so it's
+// the one path guaranteed to actually run. Supabase is still mirrored best-effort afterward.
+//
+// Only Stage 1 (ctx='s1') fields are part of the saved quotation schema today for
+// nonvat/discount/override/premium -- the Stage 2 equivalents (fqVatApproved, fqDiscPct, etc.)
+// aren't persisted at all yet (confirmed while investigating this), a separate, larger gap held
+// for its own conversation. 'unlock' already persists real fields for both stages, so it's fully
+// covered here.
+function _persistApprovedFieldToQuotation(notif,callback){
+  var serial=notif.serial;
+  if(!serial||!gToken){ if(callback) callback(false); return; }
+  var type=notif.type, ctx=notif.ctx||'s1';
+  var mutate=null;
+  if(type==='nonvat'&&ctx==='s1') mutate=function(s){ s.vatApproved=false; };
+  else if(type==='discount'&&ctx==='s1') mutate=function(s){ s.discPct=notif.reqDisc||0; s.discApproved=true; };
+  else if(type==='override'&&ctx==='s1'&&notif.cfValues) mutate=function(s){ s.customCF=notif.cfValues; s.customCFApproved=true; };
+  else if(type==='premium'&&ctx==='s1') mutate=function(s){ s.premApproved=true; };
+  else if(type==='unlock'&&ctx==='fq') mutate=function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; };
+  else if(type==='unlock') mutate=function(s){ s.locked=false; s.sentStatus=''; };
+  if(!mutate){ if(callback) callback(false); return; } // not yet part of the persisted schema for this type/ctx (Stage 2 nonvat/discount/override/premium)
+
+  _loadQuotationJsonFromSheets(serial,function(state){
+    if(!state){
+      console.warn('[approval] could not load quotation '+serial+' to persist the approval — relying on the requester\'s own session/save to pick it up.');
+      if(callback) callback(false); return;
+    }
+    try{ mutate(state); }catch(e){ console.warn('[approval] mutate failed for '+serial,e); if(callback) callback(false); return; }
+    var json=JSON.stringify(state);
+    if(json.length>QSTATE_CHUNK*QSTATE_COLS){
+      console.warn('[approval] patched state too large to save for '+serial);
+      if(callback) callback(false); return;
+    }
+    var row=_qstateRow(serial,json);
+    function writeRow(rowIdx){ return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]); }
+    var p;
+    if(_qStateRowCache[serial]>0){
+      p=writeRow(_qStateRowCache[serial]);
+    } else {
+      p=sheetsGet('Quotation State!A:A').then(function(d){
+        var vals=(d&&d.values)||[]; var rowIdx=-1;
+        for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
+        if(rowIdx<0) throw new Error('quotation row not found for '+serial);
+        return writeRow(rowIdx);
+      });
+    }
+    p.then(function(){
+      try{ supaUpsertState(serial,state); }catch(e){}
+      if(callback) callback(true);
+    }).catch(function(e){
+      console.warn('[approval] failed to persist approved field for '+serial,e);
+      if(callback) callback(false);
+    });
+  });
 }
 
 // Update the pending badge to show "Counter-offer received" state
@@ -9186,8 +9257,15 @@ function acceptCounter(idx){
   var n=NOTIFS[idx];
   if(!n||n.type!=='discount') return;
   var discPct=n.counterDisc||n.reqDisc||0;
-  // Apply counter discount as if it were an approved request
-  _applyApprovedRequest({type:'discount',reqDisc:discPct,ctx:n.ctx||'s1'});
+  // Apply counter discount as if it were an approved request. serial included so the guard in
+  // _applyApprovedRequest() correctly no-ops if a different quotation happens to be open (this
+  // call previously omitted it entirely, which meant it applied to whatever WAS open, right or
+  // wrong — same class of bug as the un-guarded approval path, fixed here too).
+  var counterNotif={type:'discount',reqDisc:discPct,ctx:n.ctx||'s1',serial:n.serial};
+  _applyApprovedRequest(counterNotif);
+  _persistApprovedFieldToQuotation(counterNotif,function(ok){
+    if(!ok) showToast('⚠ Counter accepted, but could not confirm it saved into the quotation — check '+n.serial+' directly.');
+  });
   _showApprovedBadge('discount',{reqDisc:discPct,by:n.by||''});
   // Update in-memory status
   var byMe=(gUser&&gUser.name)||currentRole;
@@ -9625,7 +9703,12 @@ function doApprovalAction(idx, action) {
   }
 
   // If approved → apply the change to the quotation form (if open)
-  if(action==='approved') _applyApprovedRequest(n);
+  if(action==='approved'){
+    _applyApprovedRequest(n); // immediate in-memory update, only if this happens to be the open quotation
+    _persistApprovedFieldToQuotation(n,function(ok){
+      if(!ok) showToast('⚠ Approved, but could not confirm it saved into the quotation — check '+n.serial+' directly.');
+    });
+  }
 
   // If client update approved → apply changes to directory record
   if(action==='approved'&&n.type==='client_update'&&n.clientId&&n.proposed){
