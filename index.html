@@ -8831,7 +8831,7 @@ function exportReportToPPT() {
 // Load sheetUsers silently on app start so routing works without visiting Users page
 function loadSheetUsersBackground(){
   if(!gToken) return;
-  sheetsGet('User Roles!A:X')
+  sheetsGet('User Roles!A:Y')
     .then(function(data){
       var rows=data.values||[];
       sheetUsers=parseUserRows(rows);
@@ -12660,12 +12660,24 @@ function getDefaultAcc(pos,key){
 function getDefaultAccObj(pos){var o={};for(var k=0;k<ACC_KEYS.length;k++)o[ACC_KEYS[k]]=getDefaultAcc(pos,ACC_KEYS[k]);return o;}
 function parseAccBool(v){return v===true||String(v).toUpperCase()==='TRUE'||v==='yes'||v==='1';}
 
+// Normalizes a raw company string to one of 'wcl'/'mssi'/'cwl' by keyword, not exact
+// match — mirrors _mobOriginFor()'s hardening and the Postgres app_normalize_company()
+// used by RLS, since real Sheet data has typos/spelling drift (e.g. "Module System and
+// Services, Inc." vs the canonical "Module Systems and Services, Inc.").
+function normalizeCompanyKey(raw){
+  var s=(raw||'').toLowerCase();
+  if(!s.trim()) return '';
+  if(s.indexOf('cebu')>=0) return 'cwl';
+  if(s.indexOf('module')>=0) return 'mssi';
+  return 'wcl';
+}
+var COMPANY_KEY_NAMES={wcl:'World Class Laminate, Inc.',mssi:'Module Systems and Services, Inc.',cwl:'Cebu World Laminate, Inc.'};
 function parseUserRows(rows){
   var out=[];
   for(var i=1;i<rows.length;i++){
     var r=rows[i]; if(!r||!r.length) continue;
     var isNew=r[0]&&r[0].indexOf('@')<0&&r[1]&&r[1].indexOf('@')>=0;
-    var name,email,pos,active,company,mac,acc={},delegateTo='',delegateActive=false,receiveAll=false;
+    var name,email,pos,active,company,mac,acc={},delegateTo='',delegateActive=false,receiveAll=false,accessCompanies=[];
     if(isNew){
       name=r[0]||''; email=r[1]||''; pos=r[2]||'Staff'; active=(r[3]||'yes').toLowerCase()==='yes'; company=r[4]||''; mac=r[5]||'';
       for(var k=0;k<8;k++) acc[ACC_KEYS[k]]=r[6+k]!==undefined?parseAccBool(r[6+k]):getDefaultAcc(pos,ACC_KEYS[k]);
@@ -12673,13 +12685,14 @@ function parseUserRows(rows){
       delegateTo=(r[14]||'').trim();
       delegateActive=parseAccBool(r[15]||'');
       receiveAll=parseAccBool(r[16]||'');
+      accessCompanies=(r[24]||'').split(',').map(function(s){return s.trim();}).filter(Boolean);
     } else {
       email=r[0]||''; pos=r[1]||'Staff'; active=(r[2]||'yes').toLowerCase()==='yes'; company=r[3]||''; name=email.split('@')[0]; mac='';
       acc=getDefaultAccObj(pos);
     }
     if(!email) continue;
     var pinHash=r[22]||''; var pinSalt=r[23]||'';
-    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,pinHash:pinHash,pinSalt:pinSalt,rowIdx:i+1});
+    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:pinHash,pinSalt:pinSalt,rowIdx:i+1});
   }
   return out;
 }
@@ -12688,7 +12701,7 @@ function loadUsersFromSheet(){
   var wrap=el('users-wrap');
   if(!gToken){if(wrap)wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Please sign in to manage users.</div>';return;}
   if(wrap)wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text2);font-size:13px"><i class="ti ti-loader" style="font-size:18px"></i> Loading users…</div>';
-  sheetsGet('User Roles!A:X')
+  sheetsGet('User Roles!A:Y')
     .then(function(data){
       sheetUsers=parseUserRows(data.values||[]);
       renderUsers();
@@ -12746,6 +12759,24 @@ function renderUsers(){
       }
     }
 
+    // Additional company access — explicit per-company grant, separate from the
+    // approval-routing "receive all" flag above. Admin/Director already see every
+    // company by role, so this has no effect for them and is hidden accordingly.
+    var accessCoHtml='';
+    if(u.pos!=='Admin'&&u.pos!=='Director'){
+      var ownKey=normalizeCompanyKey(u.company);
+      var acKeys=Object.keys(COMPANY_KEY_NAMES).filter(function(k){return k!==ownKey;});
+      var acBoxes='';
+      for(var ak=0;ak<acKeys.length;ak++){
+        var k2=acKeys[ak];
+        acBoxes+='<label style="display:flex;align-items:center;gap:5px;font-size:12px;'+(isAdmin?'cursor:pointer':'cursor:default;opacity:.55')+'">'
+          +'<input type="checkbox" id="u'+i+'ac_'+k2+'" '+(u.accessCompanies.indexOf(k2)>=0?'checked':'')+(isAdmin?'':' disabled')+'>'+COMPANY_KEY_NAMES[k2]+'</label>';
+      }
+      accessCoHtml='<div class="dvdr" style="margin:10px 0 8px"><span>Additional company access</span></div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-bottom:6px">Grants view/create access to specific other companies\' quotations, clients, and orders — beyond their own ('+(COMPANY_KEY_NAMES[ownKey]||u.company||'—')+').</div>'
+        +'<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px">'+acBoxes+'</div>';
+    }
+
     h+='<div style="background:#fff;border:.5px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:12px;opacity:'+(u.active?1:.6)+'">'
       +'<div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">'
       +'<div style="width:42px;height:42px;border-radius:50%;background:'+(u.active?'#e6edf5':'#eee')+';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:'+(u.active?'var(--navy)':'var(--muted)')+'">'+ini+'</div>'
@@ -12768,6 +12799,7 @@ function renderUsers(){
       +'<div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Feature access</div>'
       +'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">'+accHtml+'</div>'
       +delHtml
+      +accessCoHtml
       +(isAdmin?'<button class="btn btn-primary" onclick="saveUserRow('+i+')" style="font-size:12px;padding:5px 12px"><i class="ti ti-device-floppy"></i> Save changes</button>':'')
       +'</div>'
       +'<div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0">'
@@ -12798,6 +12830,14 @@ function saveUserRow(i){
   var delegateTo=canDelegate?((el('u'+i+'dt')||{}).value||''):u.delegateTo||'';
   var delegateActive=canDelegate?(el('u'+i+'da')?el('u'+i+'da').checked:u.delegateActive):u.delegateActive;
   var receiveAll=canDelegate?(el('u'+i+'ra')?el('u'+i+'ra').checked:u.receiveAll):u.receiveAll;
+  // Additional company access — checkboxes only rendered for non-Admin/Director rows;
+  // preserve the existing value for Admin/Director (always redundant for them anyway).
+  var accessCompanies=u.accessCompanies||[];
+  if(pos!=='Admin'&&pos!=='Director'){
+    accessCompanies=Object.keys(COMPANY_KEY_NAMES).filter(function(k){
+      var cb=el('u'+i+'ac_'+k); return cb?cb.checked:false;
+    });
+  }
   var row=[name.trim(),email.trim().toLowerCase(),pos,u.active?'yes':'no',co.trim(),mac.trim(),
     acc['Dashboard']?'TRUE':'FALSE',acc['KPI']?'TRUE':'FALSE',acc['Reports']?'TRUE':'FALSE',        // G-I
     acc['Profit/Revenue']?'TRUE':'FALSE',acc['Quotations']?'TRUE':'FALSE',acc['Analytics']?'TRUE':'FALSE', // J-L
@@ -12805,10 +12845,11 @@ function saveUserRow(i){
     delegateTo, delegateActive?'TRUE':'FALSE', receiveAll?'TRUE':'FALSE',                           // O-Q
     acc['Projects']?'TRUE':'FALSE',acc['Clients']?'TRUE':'FALSE',                                   // R-S
     acc['Designers Support']?'TRUE':'FALSE',acc['Settings']?'TRUE':'FALSE',acc['Users']?'TRUE':'FALSE', // T-V
-    u.pinHash||'', u.pinSalt||''];                                                                   // W-X
-  sheetsUpdate('User Roles!A'+u.rowIdx+':X'+u.rowIdx,[row])
+    u.pinHash||'', u.pinSalt||'',                                                                    // W-X
+    accessCompanies.join(',')];                                                                      // Y
+  sheetsUpdate('User Roles!A'+u.rowIdx+':Y'+u.rowIdx,[row])
     .then(function(){
-      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',rowIdx:u.rowIdx};
+      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',rowIdx:u.rowIdx};
       supaUpsertUser(sheetUsers[i]);
       renderUsers(); showToast('User saved.');
     })
@@ -12827,7 +12868,7 @@ function toggleUserActive(i){
 function removeUserRow(i){
   var u=sheetUsers[i];
   _confirm('Remove '+u.name+' ('+u.email+')? They will no longer be able to sign in.',function(){
-    sheetsClear('User Roles!A'+u.rowIdx+':X'+u.rowIdx)
+    sheetsClear('User Roles!A'+u.rowIdx+':Y'+u.rowIdx)
       .then(function(){supaDeleteUser(u.email); sheetUsers.splice(i,1); renderUsers(); showToast('User removed.');})
       .catch(function(){showToast('Failed to remove. Check sheet permissions.');});
   });
@@ -12885,11 +12926,12 @@ function submitAddUser(){
   row.push('','FALSE','FALSE');  // O-Q: delegation blank
   for(var k=8;k<ACC_KEYS.length;k++){var cb=el('na'+k);row.push(cb&&cb.checked?'TRUE':'FALSE');}  // R-V (new 5 keys)
   row.push('','');  // W-X: no PIN set on add
+  row.push('');  // Y: no additional company access on add — grant explicitly afterward if needed
   var acc={};
   for(var k=0;k<ACC_KEYS.length;k++){var cb=el('na'+k);acc[ACC_KEYS[k]]=cb?cb.checked:false;}
-  sheetsAppend('User Roles!A:X',[row])
+  sheetsAppend('User Roles!A:Y',[row])
     .then(function(){
-      supaUpsertUser({name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:true,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:'',pinHash:'',pinSalt:''});
+      supaUpsertUser({name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:true,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:'',accessCompanies:[],pinHash:'',pinSalt:''});
       var w=el('add-user-form-wrap');if(w)w.innerHTML=''; loadUsersFromSheet(); showToast('User added.');
     })
     .catch(function(){alert('Failed to add user. Check sheet permissions.');});
@@ -16581,6 +16623,7 @@ function supaUpsertUser(u){
     delegate_to:u.delegateTo||null,
     delegate_active:!!u.delegateActive,
     receive_all:!!u.receiveAll,
+    access_companies:u.accessCompanies||[],
     pin_hash:u.pinHash||null,
     pin_salt:u.pinSalt||null
   };
@@ -16611,7 +16654,7 @@ function supaMigrateUsers(){
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
   _usersMigrationInFlight=true;
   console.log('[migrate] backfilling Users into Supabase from User Roles sheet…');
-  return sheetsGet('User Roles!A:X').then(function(d){
+  return sheetsGet('User Roles!A:Y').then(function(d){
     var rows=(d&&!d.error&&d.values)||[];
     var users=parseUserRows(rows);
     console.log('[migrate] found',users.length,'user row(s) in Sheets — migrating...');
@@ -16919,7 +16962,7 @@ function gCheckRole(){
   // fell into the data.error branch below and showed the misleading "ask your
   // Admin to share the spreadsheet" message — telling the user they lack access
   // when really the server was just briefly busy.
-  _sheetsGetWithRetry('User Roles!A:X',4)
+  _sheetsGetWithRetry('User Roles!A:Y',4)
     .then(function(data){
       if(data.error){
         if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
