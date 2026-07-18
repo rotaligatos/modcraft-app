@@ -5784,7 +5784,7 @@ function recalc(fast) {
   var clCost=qCuttingList.enabled?calcCuttingListCost():0;
   var dcCost=qDesignCharge.enabled?calcDesignChargeCost():0;
   var ocTotals=getOtherCostTotals();
-  var regularBase=fabBase-outsourceBase+clCost+ocTotals.fab; // cutting list + fab-linked Other Cost silently folded into fab
+  var regularBase=fabBase-outsourceBase+clCost; // cutting list silently folded into fab
   var outRates=getOutRates();
   var outsourceFinal=outsourceBase*(1+outRates.contingency/100)*(1+outRates.buffer/100)*(1+outRates.markup/100);
   var totU=getTotU();
@@ -5866,7 +5866,7 @@ function recalc(fast) {
     discBufAmt:discBufAmt,mssiCommAmt:mssiCommAmt,designerCommAmt:designerCommAmt,
     fabContAmt:regularBase*cf/100,mobContAmt:mobBase*cm/100,instContAmt:(instBase+assmBase)*ci/100,
     mobRegionCost:mobRegionCost,mobPlanner:mobPlanner,qaqcBase:qaqcBase,
-    otherCostFabTotal:ocTotals.fab,otherCostInstTotal:ocTotals.inst,otherCostStandaloneTotal:ocTotals.standalone,otherCostStandaloneItems:ocTotals.standaloneItems,
+    otherCostInstTotal:ocTotals.inst,otherCostInstItems:ocTotals.instItems,otherCostStandaloneTotal:ocTotals.standalone,otherCostStandaloneItems:ocTotals.standaloneItems,
     rates:{fabCont:cf,fabBuf:fabBuf,mobCont:cm,mobBuf:mobBuf,mobMk:mobMk,instCont:ci,instBuf:instBuf,instMk:instMk,discBuf:discBuf,vat:vat,outCont:outRates.contingency,outBuf:outRates.buffer,outMarkup:outRates.markup}};
   updateBondInsCostDisplay(biCosts);
   // Live-update carcass item prices and area subtotals
@@ -6071,16 +6071,19 @@ function recalc(fast) {
     }
     lines+='</div>';
   }
-  // Other Cost summary lines
-  if(ocTotals.standalone>0||ocTotals.fab>0||ocTotals.inst>0){
+  // Other Cost summary lines — itemized (not lump sums) so every item's contribution is checkable
+  if(ocTotals.standalone>0||ocTotals.inst>0){
     lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px">'
       +'<div style="font-size:11px;font-weight:600;color:#9a3412;text-transform:uppercase;letter-spacing:.04em;padding:5px 0 3px;display:flex;align-items:center;gap:4px">'
       +'<i class="ti ti-tool" style="font-size:11px"></i>Other Cost</div>';
     for(var oi=0;oi<ocTotals.standaloneItems.length;oi++){
       lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>'+escHtml(ocTotals.standaloneItems[oi].label)+'</span><span>'+fmtMoney(ocTotals.standaloneItems[oi].amount)+'</span></div>';
     }
-    if(ocTotals.fab>0) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border);color:var(--text2)"><span>Added to Fabrication</span><span>+'+fmtMoney(ocTotals.fab)+'</span></div>';
-    if(ocTotals.inst>0) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border);color:var(--text2)"><span>Added to '+(ni?'Installation':'Assembly')+'</span><span>+'+fmtMoney(ocTotals.inst)+'</span></div>';
+    for(var oj=0;oj<ocTotals.instItems.length;oj++){
+      var _oit=ocTotals.instItems[oj];
+      var _oiSub=_oit.capFallback?'flat — set PPIC capacity for day-based distribution':(fmtMoney(_oit.rate)+'/day ÷ '+ocTotals.cap.toFixed(2)+' units/day × '+ocTotals.units+' unit'+(ocTotals.units===1?'':'s'));
+      lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>'+escHtml(_oit.label)+' <span style="font-size:11px;color:var(--text2);display:block">'+_oiSub+' — added to '+(ni?'Installation':'Assembly')+'</span></span><span>+'+fmtMoney(_oit.amount)+'</span></div>';
+    }
     lines+='</div>';
   }
   html("sum-lines",lines);
@@ -14116,22 +14119,36 @@ function updateFQBondInsCostDisplay(biCosts){
 // qBondIns/fqBondIns, which are intentionally separate per stage) — an item
 // added while quoting Stage 1 carries straight into Stage 2 without needing
 // to be re-entered, and there is only one place this can drift out of sync.
-// Each item: {label, active, mode:'installation'|'fabrication'|'standalone', amount, days, rate}
+// Each item: {label, active, mode:'installation'|'standalone', amount, days, rate}
+// 'installation' items are entered as a DAILY rate (not a flat total) — they're
+// injected into the same daily-cost/capacity model the Installation cost
+// breakdown already uses: extra per-unit cost = rate ÷ PPIC capacity (units/day),
+// then × this quotation's own unit count — so a longer job (more units, more
+// days) correctly costs proportionally more of the daily item, same as Admin
+// Cost/Labor/Meals/etc. do in Settings → Cost Breakdown → Installation.
+// 'fabrication' was removed (2026-07-19) — Carcass-mode pricing already bundles
+// materials+hardware+service per unit; folding an ad-hoc cost into that same
+// pool double-counted against a price that's already a complete package.
 function getOtherCostTotals(){
   var list=qOtherCosts||[];
-  var fab=0, inst=0, standalone=0, standaloneItems=[];
+  var cap=_ppicCapacity();
+  var units=getInstallCarcassUnits();
+  var inst=0, instItems=[], standalone=0, standaloneItems=[];
   for(var i=0;i<list.length;i++){
     var o=list[i];
     if(!o||!o.active) continue;
-    if(o.mode==='fabrication') fab+=(parseFloat(o.amount)||0);
-    else if(o.mode==='installation') inst+=(parseFloat(o.amount)||0);
-    else if(o.mode==='standalone'){
-      var amt=(parseFloat(o.days)||0)*(parseFloat(o.rate)||0);
-      standalone+=amt;
-      standaloneItems.push({label:o.label||'Other cost',amount:amt});
+    if(o.mode==='installation'){
+      var rate=parseFloat(o.amount)||0;
+      var amt=cap>0?(rate/cap)*units:rate; // fallback: flat one-time if PPIC capacity isn't set yet
+      inst+=amt;
+      instItems.push({label:o.label||'Other cost',rate:rate,amount:amt,capFallback:!(cap>0)});
+    } else if(o.mode==='standalone'){
+      var amt2=(parseFloat(o.days)||0)*(parseFloat(o.rate)||0);
+      standalone+=amt2;
+      standaloneItems.push({label:o.label||'Other cost',amount:amt2});
     }
   }
-  return {fab:fab,inst:inst,standalone:standalone,standaloneItems:standaloneItems};
+  return {inst:inst,instItems:instItems,standalone:standalone,standaloneItems:standaloneItems,cap:cap,units:units};
 }
 function _otherCostRecalc(){
   if(qStage===2&&typeof recalcFQ==='function') recalcFQ();
@@ -14169,14 +14186,23 @@ function setOtherCostMode(i,mode){
   renderOtherCosts();
   _otherCostRecalc();
 }
+function _otherCostDetailText(o){
+  if(o.mode==='standalone') return '';
+  var cap=_ppicCapacity(), units=getInstallCarcassUnits();
+  var rate=parseFloat(o.amount)||0;
+  if(cap>0) return fmtMoney(rate)+'/day ÷ '+cap.toFixed(2)+' units/day × '+units+' unit'+(units===1?'':'s');
+  return '⚠ Set PPIC capacity (Settings → PPIC) for day-based distribution — using flat '+fmtMoney(rate)+' for now';
+}
 function _otherCostRefreshAmt(i){
   var o=qOtherCosts[i]; if(!o) return;
-  var amt=o.mode==='standalone'?(parseFloat(o.days)||0)*(parseFloat(o.rate)||0):(parseFloat(o.amount)||0);
+  var cap=_ppicCapacity(), units=getInstallCarcassUnits();
+  var amt;
+  if(o.mode==='standalone') amt=(parseFloat(o.days)||0)*(parseFloat(o.rate)||0);
+  else { var rate=parseFloat(o.amount)||0; amt=cap>0?(rate/cap)*units:rate; }
   // Stage 1 and Stage 2 bodies can both exist in the DOM at once (see renderOtherCosts), so the
   // same id can appear twice — patch every match via querySelectorAll, not just the first (el()).
   document.querySelectorAll('[id="oc-amt-'+i+'"]').forEach(function(d){ d.textContent=fmtMoney(amt); });
-  var cu=getInstallCarcassUnits();
-  document.querySelectorAll('[id="oc-perunit-'+i+'"]').forEach(function(pu){ pu.textContent=cu>0?('= '+fmtMoney(amt/cu)+' / carcass (÷'+cu+')'):''; });
+  document.querySelectorAll('[id="oc-detail-'+i+'"]').forEach(function(d){ d.textContent=_otherCostDetailText(o); });
   _otherCostRecalcSoon();
 }
 function renderOtherCosts(){
@@ -14185,24 +14211,26 @@ function renderOtherCosts(){
   // are present, not just the first found.
   var bodies=[el('other-cost-body'),el('fq-other-cost-body')].filter(Boolean);
   if(!bodies.length) return;
-  var carUnits=getInstallCarcassUnits();
   var h='';
   if(!qOtherCosts.length){
     h='<div style="font-size:12px;color:var(--text2);padding:4px 0">No additional costs added. Use this for one-off, client-specific costs outside the normal fabrication/installation scope — e.g. a safety officer requested on site, or extra scaffolding for a high-ceiling area.</div>';
   }
   for(var i=0;i<qOtherCosts.length;i++){
     var o=qOtherCosts[i];
-    var amt=o.mode==='standalone'?(parseFloat(o.days)||0)*(parseFloat(o.rate)||0):(parseFloat(o.amount)||0);
+    var cap=_ppicCapacity(), units=getInstallCarcassUnits();
+    var amt;
+    if(o.mode==='standalone') amt=(parseFloat(o.days)||0)*(parseFloat(o.rate)||0);
+    else { var rate=parseFloat(o.amount)||0; amt=cap>0?(rate/cap)*units:rate; }
+    var toggle='<div style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;flex-shrink:0">'
+      +'<button type="button" onclick="setOtherCostMode('+i+',\'installation\')" style="padding:6px 9px;font-size:11px;border:none;cursor:pointer;background:'+(o.mode==='installation'?'var(--navy)':'transparent')+';color:'+(o.mode==='installation'?'#fff':'var(--text2)')+'">Install</button>'
+      +'<button type="button" onclick="setOtherCostMode('+i+',\'standalone\')" style="padding:6px 9px;font-size:11px;border:none;border-left:1px solid var(--border);cursor:pointer;background:'+(o.mode==='standalone'?'var(--navy)':'transparent')+';color:'+(o.mode==='standalone'?'#fff':'var(--text2)')+'">Standalone</button>'
+      +'</div>';
     h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px'+(o.active?'':';opacity:.55')+'">';
-    h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
-      +'<label style="display:flex;align-items:center;cursor:pointer" title="Active for this quotation"><input type="checkbox" '+(o.active?'checked':'')+' onchange="toggleOtherCostActive('+i+',this.checked)" style="width:15px;height:15px;cursor:pointer"></label>'
-      +'<input type="text" value="'+escHtml(o.label||'')+'" placeholder="e.g. Safety officer on site" oninput="setOtherCostField('+i+',\'label\',this.value)" style="height:32px;font-size:13px;flex:1;min-width:160px">'
-      +'<select onchange="setOtherCostMode('+i+',this.value)" style="height:32px;font-size:12px">'
-        +'<option value="installation"'+(o.mode==='installation'?' selected':'')+'>Add to Installation</option>'
-        +'<option value="fabrication"'+(o.mode==='fabrication'?' selected':'')+'>Add to Fabrication</option>'
-        +'<option value="standalone"'+(o.mode==='standalone'?' selected':'')+'>Standalone (shows on printout)</option>'
-      +'</select>'
-      +'<button class="btn" onclick="removeOtherCost('+i+')" style="height:32px;width:32px;padding:0;justify-content:center;color:var(--coral)" title="Remove"><i class="ti ti-trash"></i></button>'
+    h+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">'
+      +'<label style="display:flex;align-items:center;cursor:pointer;flex-shrink:0" title="Active for this quotation"><input type="checkbox" '+(o.active?'checked':'')+' onchange="toggleOtherCostActive('+i+',this.checked)" style="width:15px;height:15px;cursor:pointer"></label>'
+      +'<input type="text" value="'+escHtml(o.label||'')+'" placeholder="e.g. Safety officer on site" oninput="setOtherCostField('+i+',\'label\',this.value)" style="height:32px;font-size:13px;flex:1;min-width:80px">'
+      +toggle
+      +'<button class="btn" onclick="removeOtherCost('+i+')" style="height:32px;width:32px;padding:0;justify-content:center;color:var(--coral);flex-shrink:0" title="Remove"><i class="ti ti-trash"></i></button>'
       +'</div>';
     if(o.mode==='standalone'){
       h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
@@ -14215,11 +14243,12 @@ function renderOtherCosts(){
         +'<div style="font-size:10.5px;color:var(--text2);margin-top:4px">Standalone — shown as its own line on the printed quotation.</div>';
     } else {
       h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-        +'<div style="font-size:11px;color:var(--text2)">Amount (₱)</div>'
-        +'<input type="number" min="0" value="'+(o.amount||'')+'" oninput="setOtherCostField('+i+',\'amount\',parseFloat(this.value)||0);_otherCostRefreshAmt('+i+')" style="height:32px;font-size:13px;width:130px">'
-        +(o.mode==='fabrication'&&carUnits>0?'<div id="oc-perunit-'+i+'" style="font-size:11px;color:var(--text2)">= '+fmtMoney(amt/carUnits)+' / carcass (÷'+carUnits+')</div>':'')
+        +'<div style="font-size:11px;color:var(--text2)">Cost per day (₱)</div>'
+        +'<input type="number" min="0" value="'+(o.amount||'')+'" oninput="setOtherCostField('+i+',\'amount\',parseFloat(this.value)||0);_otherCostRefreshAmt('+i+')" style="height:32px;font-size:13px;width:110px">'
+        +'<div id="oc-amt-'+i+'" style="font-size:12px;font-weight:700;color:var(--navy);margin-left:auto">'+fmtMoney(amt)+'</div>'
         +'</div>'
-        +'<div style="font-size:10.5px;color:var(--text2);margin-top:4px">Folded into the '+(o.mode==='fabrication'?'Fabrication':'Installation/Assembly')+' total — not its own line on the printout.</div>';
+        +'<div id="oc-detail-'+i+'" style="font-size:10.5px;color:'+(cap>0?'var(--text2)':'var(--amber)')+';margin-top:4px">'+_otherCostDetailText(o)+'</div>'
+        +'<div style="font-size:10px;color:var(--text2);margin-top:2px">Folded into the Installation/Assembly total — not its own line on the printout.</div>';
     }
     h+='</div>';
   }
@@ -14873,7 +14902,7 @@ function recalcFQ() {
   var svSep=qSiteVisit.enabled&&qSiteVisit.chargeMode==='separate';
   var _fqsvd=el('fq-sv-cost-disp'); if(_fqsvd) _fqsvd.textContent=fmtMoney(svCost);
   var ocTotals=getOtherCostTotals();
-  var regularBase=fabBase-outsourceBase+clCost+ocTotals.fab;
+  var regularBase=fabBase-outsourceBase+clCost;
   var regularFabC=regularBase*(1+cf/100)*(ni?(1+fabBuf/100):1);
   var fabC=regularFabC+outsourceFinal;
 
@@ -14941,7 +14970,7 @@ function recalcFQ() {
     discBufAmt:discBufAmt,mssiCommAmt:mssiCommAmt,designerCommAmt:designerCommAmt,
     fabContAmt:regularFabC-regularBase,mobContAmt:mobBase*cm/100,instContAmt:(instBase+assmBase)*ci/100,
     mobRegionCost:mobBase,mobPlanner:0,qaqcBase:qaqcBase,
-    otherCostFabTotal:ocTotals.fab,otherCostInstTotal:ocTotals.inst,otherCostStandaloneTotal:ocTotals.standalone,otherCostStandaloneItems:ocTotals.standaloneItems,
+    otherCostInstTotal:ocTotals.inst,otherCostInstItems:ocTotals.instItems,otherCostStandaloneTotal:ocTotals.standalone,otherCostStandaloneItems:ocTotals.standaloneItems,
     rates:{fabCont:cf,fabBuf:fabBuf,mobCont:cm,mobBuf:mobBuf,mobMk:mobMk,instCont:ci,instBuf:instBuf,instMk:instMk,discBuf:discBuf,vat:vat,outCont:outRates.contingency,outBuf:outRates.buffer,outMarkup:outRates.markup}};
   updateFQBondInsCostDisplay(biCosts);
 
@@ -15037,16 +15066,19 @@ function recalcFQ() {
     for(var bi=0;bi<fqBondIns.insurances.length;bi++){var ins=fqBondIns.insurances[bi];if(ins.type&&ins.cost>0)lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>'+ins.type+'</span><span>'+fmtMoney(ins.cost)+'</span></div>';}
     lines+='</div>';
   }
-  // Other Cost summary lines
-  if(ocTotals.standalone>0||ocTotals.fab>0||ocTotals.inst>0){
+  // Other Cost summary lines — itemized (not lump sums) so every item's contribution is checkable
+  if(ocTotals.standalone>0||ocTotals.inst>0){
     lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px">'
       +'<div style="font-size:11px;font-weight:600;color:#9a3412;text-transform:uppercase;letter-spacing:.04em;padding:5px 0 3px;display:flex;align-items:center;gap:4px">'
       +'<i class="ti ti-tool" style="font-size:11px"></i>Other Cost</div>';
     for(var oi=0;oi<ocTotals.standaloneItems.length;oi++){
       lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>'+escHtml(ocTotals.standaloneItems[oi].label)+'</span><span>'+fmtMoney(ocTotals.standaloneItems[oi].amount)+'</span></div>';
     }
-    if(ocTotals.fab>0) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border);color:var(--text2)"><span>Added to Fabrication</span><span>+'+fmtMoney(ocTotals.fab)+'</span></div>';
-    if(ocTotals.inst>0) lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border);color:var(--text2)"><span>Added to '+(ni?'Installation':'Assembly')+'</span><span>+'+fmtMoney(ocTotals.inst)+'</span></div>';
+    for(var oj=0;oj<ocTotals.instItems.length;oj++){
+      var _oit=ocTotals.instItems[oj];
+      var _oiSub=_oit.capFallback?'flat — set PPIC capacity for day-based distribution':(fmtMoney(_oit.rate)+'/day ÷ '+ocTotals.cap.toFixed(2)+' units/day × '+ocTotals.units+' unit'+(ocTotals.units===1?'':'s'));
+      lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span>'+escHtml(_oit.label)+' <span style="font-size:11px;color:var(--text2);display:block">'+_oiSub+' — added to '+(ni?'Installation':'Assembly')+'</span></span><span>+'+fmtMoney(_oit.amount)+'</span></div>';
+    }
     lines+='</div>';
   }
   html('fq-sum-lines',lines);
