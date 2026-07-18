@@ -3234,9 +3234,28 @@ function findApproverForAction(type, data) {
   }
   return null;
 }
+// Redirects the current user to set a PIN before their originally-intended approval action
+// proceeds — top management's policy is that the "1234" shared fallback shouldn't be
+// something people can just keep relying on. _pendingPinResume survives across the Set PIN
+// modal; submitSetPin()'s success path re-invokes _openPinModal with the same target once a
+// real PIN exists, so the original action (discount/VAT/unlock/etc.) picks up right where it
+// left off instead of the user having to start over.
+var _pendingPinResume=null;
+function _promptPinSetupThenResume(ovId,pinId,errId){
+  openSetPinModal(); // clears any stale _pendingPinResume from an earlier abandoned attempt
+  _pendingPinResume={ovId:ovId,pinId:pinId,errId:errId};
+  showToast('Set your approval PIN first — required before you can approve this.');
+}
 // Open an approval modal with named-approver label + no-PIN warning
 function _openPinModal(ovId, pinId, errId, approverOverride) {
   var appr = approverOverride || _pinModalApprover;
+  // Only intercept when it's genuinely the CURRENT user's own missing PIN — never redirect
+  // someone into setting up a PIN on another approver's behalf.
+  var isSelf = appr && gUser && appr.email && gUser.email && appr.email.toLowerCase()===gUser.email.toLowerCase();
+  if(isSelf && (!appr.pinHash || !appr.pinSalt)){
+    _promptPinSetupThenResume(ovId,pinId,errId);
+    return;
+  }
   var pinEl=el(pinId); if(pinEl) pinEl.value='';
   var errEl=el(errId); if(errEl) errEl.style.display='none';
   var ov=el(ovId);
@@ -17377,6 +17396,7 @@ function closeAvatarMenu() { var m=el('avatar-menu'); if(m) m.style.display='non
 
 // ── Set / Change PIN modal ───────────────────────────────────────────────────
 function openSetPinModal() {
+  _pendingPinResume=null;
   var e1=el('set-pin-current'); if(e1) e1.value='';
   var e2=el('set-pin-new'); if(e2) e2.value='';
   var e3=el('set-pin-confirm'); if(e3) e3.value='';
@@ -17403,8 +17423,13 @@ function submitSetPin() {
       sheetsUpdate('User Roles!W'+me.rowIdx+':X'+me.rowIdx,[[hash,salt]])
         .then(function(){
           me.pinHash=hash; me.pinSalt=salt;
+          supaUpsertUser(me);
           closeModal('ov-set-pin');
           showToast('PIN saved successfully ✓');
+          if(_pendingPinResume){
+            var resume=_pendingPinResume; _pendingPinResume=null;
+            _openPinModal(resume.ovId,resume.pinId,resume.errId);
+          }
         })
         .catch(function(){showToast('Failed to save PIN. Check sheet permissions.');});
     });
