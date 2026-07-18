@@ -14808,6 +14808,33 @@ function gSignInBtnHtml(){
 // Fully guarded + additive: if ANYTHING here fails, the Google Sheets path
 // (the live app) is completely unaffected. Nothing here throws to callers.
 // ════════════════════════════════════════════════════════════════════════
+// Centralized visibility into ANY Supabase write/read failure. Every supa* function across this
+// file already logs failures via console.warn('[supa] ...') (50+ call sites) — but that's only ever
+// visible in the browser's dev console, which nobody opens during normal use. A real incident
+// showed why this matters: this account went 9 days with zero successful Supabase writes and there
+// was no user-facing signal at all (see project_synology_migration memory, 2026-07-17 session).
+// Wrapping console.warn ONCE here catches every existing '[supa] ...' call site without touching
+// each individually, and automatically covers any future one that follows the same convention —
+// far lower risk than hand-editing 50+ separate functions. Rate-limited (5 min) so a burst of
+// failures (e.g. a brief outage) shows one toast, not a flood.
+var _supaErrorCount=0;
+var _supaLastErrorAt=0;
+var _supaErrorToastCooldownUntil=0;
+(function(){
+  var origWarn=console.warn.bind(console);
+  console.warn=function(){
+    if(typeof arguments[0]==='string'&&arguments[0].indexOf('[supa]')===0){
+      _supaErrorCount++;
+      _supaLastErrorAt=Date.now();
+      if(Date.now()>_supaErrorToastCooldownUntil){
+        if(typeof showToast==='function') showToast('⚠ A background sync to the fast database failed — your work still saved normally. See Settings → Company & DB.');
+        _supaErrorToastCooldownUntil=Date.now()+5*60*1000;
+      }
+      if(typeof renderSupaStatus==='function') renderSupaStatus();
+    }
+    return origWarn.apply(console,arguments);
+  };
+})();
 function initSupabase(){
   if(supa) return;
   if(typeof window.supabase==='undefined'||!window.supabase.createClient){ return; }
@@ -14944,18 +14971,33 @@ function _lamiRemindSupaConnect(){
 // to the browser, which this app deliberately never does.
 function renderSupaStatus(){
   var w=el('supa-status-wrap'); if(!w) return;
+  // Surfaces recent background sync failures (see the console.warn wrapper near initSupabase) —
+  // shown regardless of connected/not-connected state, since a write can fail even while otherwise
+  // connected (a permissions rule, a brief outage, a schema mismatch). Sheets/Drive remain the
+  // primary store for everything that has a fallback, so this is deliberately worded as "the faster
+  // copy" rather than implying real data loss — except this note itself doesn't know whether the
+  // specific failed write had a fallback or not, which is exactly why it's worth a look either way.
+  var errNote='';
+  if(_supaErrorCount>0){
+    var mins=Math.round((Date.now()-_supaLastErrorAt)/60000);
+    var whenTxt=mins<1?'just now':(mins+' min ago');
+    errNote='<div style="margin-top:8px;padding:6px 10px;background:#fff8ec;border:1px solid var(--amber);border-radius:6px;font-size:11px;color:#8a5a00">'
+      +'<i class="ti ti-alert-triangle"></i> '+_supaErrorCount+' background sync '+(_supaErrorCount===1?'issue':'issues')+' since this page loaded (last one '+whenTxt+'). '
+      +'<a href="#" onclick="_supaErrorCount=0;renderSupaStatus();return false" style="color:#8a5a00;text-decoration:underline">Dismiss</a>'
+      +'</div>';
+  }
   if(supaReady()){
     var _banner=el('supa-connect-banner'); if(_banner) _banner.style.display='none'; // no longer relevant once actually connected
     w.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
       +'<span class="pill pill-teal"><i class="ti ti-circle-check"></i> Connected</span>'
       +'<span style="font-size:12px;color:var(--text2)">Signed in as <b>'+escHtml((supaSession.user&&supaSession.user.email)||'')+'</b> on this browser.</span>'
-      +'</div>';
+      +'</div>'+errNote;
   } else {
     w.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
       +'<span class="pill pill-muted"><i class="ti ti-circle-x"></i> Not connected</span>'
       +'<span style="font-size:12px;color:var(--text2)">Using the standard connection on this browser — nothing is broken, everything still works.</span>'
       +'<button class="btn btn-primary" onclick="_supaManualConnect()" style="font-size:12px"><i class="ti ti-bolt"></i>Connect now</button>'
-      +'</div>';
+      +'</div>'+errNote;
   }
 }
 // Guards against a second signInWithOAuth() call starting while one is already
@@ -18430,7 +18472,13 @@ function supaGetPriceDb(){
   if(!supaReady()) return Promise.resolve(null);
   try{
     return Promise.all([
-      supa.from('price_services').select('name,unit,price'),
+      // svc_type/teams/shifts_per_day/output_per_shift/cost_data were being written by
+      // _saveServicesToPriceDb() but never selected back here — a half-finished migration that
+      // left Supabase's capacity columns write-only. The Drive-backed SERVICE_CAPACITY backup
+      // (_loadSvcCapFromDrive) was the only thing actually restoring this data, silently. Now
+      // Supabase is a genuine, complete source for it too — Drive stays as a resilience backstop
+      // (unchanged), not the sole mechanism.
+      supa.from('price_services').select('name,unit,price,svc_type,teams,shifts_per_day,output_per_shift,cost_data'),
       supa.from('price_materials').select('name,unit,price'),
       supa.from('price_hardware').select('name,unit,price'),
       supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price')
@@ -18449,6 +18497,27 @@ function loadPriceDatabase(showFeedback) {
     supaGetPriceDb().then(function(data){
       if(data===null){ _loadPriceDatabaseFromSheets(showFeedback); return; }
       dbServices=data.services.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
+      // Completes the previously write-only capacity sync — merge Supabase's own
+      // teams/shifts_per_day/output_per_shift/svc_type/cost_data into SERVICE_CAPACITY, the same
+      // object _syncServicesFromDb() below reads to build SERVICES. Drive backup (loaded
+      // separately by gLoadAppSettings, after this) still overlays on top as a resilience backstop
+      // — unchanged — this just means Supabase alone is now a complete, working source too, not a
+      // column nobody reads.
+      data.services.forEach(function(r){
+        if(!r.name) return;
+        if(!SERVICE_CAPACITY[r.name]) SERVICE_CAPACITY[r.name]={};
+        var sc=SERVICE_CAPACITY[r.name];
+        if(r.svc_type!=null) sc.type=r.svc_type;
+        if(r.teams!=null) sc.teams=parseFloat(r.teams);
+        if(r.shifts_per_day!=null) sc.shiftsPerDay=parseFloat(r.shifts_per_day);
+        if(r.output_per_shift!=null) sc.outputPerShift=parseFloat(r.output_per_shift);
+        var cd=r.cost_data||{};
+        if(cd.expenseRatio!=null) sc.expenseRatio=cd.expenseRatio;
+        if(cd.operatorCost!=null) sc.operatorCost=cd.operatorCost;
+        if(cd.manpowerPct!=null) sc.manpowerPct=cd.manpowerPct;
+        if(cd.capacityPct!=null) sc.capacityPct=cd.capacityPct;
+        if(cd.consumables!=null) sc.consumables=cd.consumables;
+      });
       dbMaterials=data.materials.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
       dbHardware=data.hardware.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
       dbTemplates=data.templates.map(function(r){return {cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0};});
