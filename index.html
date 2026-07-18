@@ -14847,13 +14847,27 @@ function _supaWritePopupPlaceholder(popup){
 // Settings, since the automatic path can end up permanently skipped for a
 // browser that already has an "already tried" guard from a prior failed
 // attempt (see gSignIn/_supaAutoConnect) and will never retry on its own.
-// Dismissal is per-session (sessionStorage) — reappears on the next login if
-// still not connected, rather than being silenced forever after one glance.
+//
+// Dismissal is a TIME-based cooldown (localStorage timestamp), not a one-shot
+// "silenced for the rest of this tab session" flag — a real incident showed
+// why that mattered: Supabase writes silently stopped for 9 days (confirmed
+// via activity_log's last row) with zero warning, because the old logic only
+// checked once at login (setTimeout 6s) and then suppressed itself for the
+// entire lifetime of that browser tab. Anyone who reasonably leaves their
+// browser open for days at a stretch (no forced logout in this app) would
+// never see it again even though the disconnected state persisted the whole
+// time. Now paired with a periodic setInterval recheck (see gShowApp) so a
+// long-lived session keeps getting re-evaluated instead of only at login.
+var _SUPA_BANNER_COOLDOWN_MS=30*60*1000; // 30 minutes
+var _supaBannerRecheckTimer=null;
 function _maybeShowSupaConnectBanner(){
   if(!supa||supaSession) return; // client failed to init (nothing to offer), or already connected (nothing to show)
   if(!gUser||!gUser.email||gUser.email==='local') return;
-  var key='mc_supa_banner_dismissed_'+gUser.email.toLowerCase();
-  try{ if(sessionStorage.getItem(key)) return; }catch(e){}
+  var key='mc_supa_banner_dismissed_at_'+gUser.email.toLowerCase();
+  try{
+    var last=parseInt(localStorage.getItem(key))||0;
+    if(Date.now()-last<_SUPA_BANNER_COOLDOWN_MS) return;
+  }catch(e){}
   showSupaConnectBanner();
 }
 function showSupaConnectBanner(){
@@ -14877,8 +14891,8 @@ function _dismissSupaConnectBanner(closedWithoutAction){
   var b=el('supa-connect-banner'); if(b) b.style.display='none';
   if(closedWithoutAction) _lamiRemindSupaConnect();
   if(!gUser||!gUser.email) return;
-  var key='mc_supa_banner_dismissed_'+gUser.email.toLowerCase();
-  try{ sessionStorage.setItem(key,'1'); }catch(e){}
+  var key='mc_supa_banner_dismissed_at_'+gUser.email.toLowerCase();
+  try{ localStorage.setItem(key,String(Date.now())); }catch(e){}
 }
 // Backup reminder via Lami when the banner is closed without acting on it —
 // a second channel in case the banner itself gets missed/dismissed by habit.
@@ -16075,6 +16089,14 @@ function gShowApp(){
   // round-trip) time to finish first, so this doesn't fire while it's still
   // legitimately in progress.
   setTimeout(_maybeShowSupaConnectBanner,6000);
+  // Also recheck periodically for as long as this tab stays open — the dismissal cooldown below
+  // is time-based (not "silenced for the rest of this tab session"), so someone who leaves the
+  // browser open for days (very plausible — no forced logout) still gets re-warned instead of the
+  // disconnected state silently persisting until they happen to close/reopen the tab. Found via a
+  // real incident: Supabase writes had silently stopped for 9 days (confirmed via activity_log's
+  // last row) with zero warning, because the old logic only checked once at login and suppressed
+  // itself for the rest of that tab's lifetime.
+  if(!_supaBannerRecheckTimer) _supaBannerRecheckTimer=setInterval(_maybeShowSupaConnectBanner,_SUPA_BANNER_COOLDOWN_MS);
   // Update topbar role pill
   var rp=el('topbar-role-pill');
   if(rp){
