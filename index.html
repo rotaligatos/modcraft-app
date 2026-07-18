@@ -16579,6 +16579,8 @@ function supaUpsertUser(u){
     device_id:u.mac||null,
     feature_access:u.acc||{},
     delegate_to:u.delegateTo||null,
+    delegate_active:!!u.delegateActive,
+    receive_all:!!u.receiveAll,
     pin_hash:u.pinHash||null,
     pin_salt:u.pinSalt||null
   };
@@ -16596,6 +16598,40 @@ function supaDeleteUser(email){
       if(r.error) console.warn('[supa] user delete error:',r.error.message||r.error);
     });
   }catch(e){ console.warn('[supa] user delete threw',e); return Promise.resolve(); }
+}
+var _usersMigrationInFlight=false;
+// One-time backfill: public.users only ever gets a row when someone is added/edited/
+// toggled through the app since the dual-write shipped — most real staff never triggered
+// that, so this reads the authoritative User Roles sheet directly and upserts every row.
+// Needed before any RLS policy can key off company/role/receive_all for real users. Safe
+// to re-run — upsert on email, no duplicates, no harm to already-migrated rows.
+function supaMigrateUsers(){
+  if(_usersMigrationInFlight){ console.warn('[migrate] already running — wait for the "Users backfill done" log before running this again.'); return Promise.resolve(null); }
+  if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
+  if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
+  _usersMigrationInFlight=true;
+  console.log('[migrate] backfilling Users into Supabase from User Roles sheet…');
+  return sheetsGet('User Roles!A:X').then(function(d){
+    var rows=(d&&!d.error&&d.values)||[];
+    var users=parseUserRows(rows);
+    console.log('[migrate] found',users.length,'user row(s) in Sheets — migrating...');
+    var stats={ok:0,errors:0};
+    return _migrateBatch(users,3,function(u){
+      return supaUpsertUser(u).then(function(){stats.ok++;}).catch(function(){stats.errors++;});
+    }).then(function(){
+      console.log('[migrate] Users backfill done:',stats);
+      return supa.from('users').select('*',{count:'exact',head:true});
+    }).then(function(r){
+      console.log('[migrate] Supabase "users" row count:',r.count,'— compare against the User Roles sheet row count (minus header row) to confirm completeness.');
+      return stats;
+    });
+  }).catch(function(e){
+    console.warn('[migrate] Users backfill failed',e);
+    return null;
+  }).then(function(result){
+    _usersMigrationInFlight=false;
+    return result;
+  });
 }
 // — user_prefs upsert (FOLLOWED / DASHPREF / DASHALLOW, dual-write) —
 function supaUpsertUserPref(email,prefType,value){
