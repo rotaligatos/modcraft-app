@@ -1265,6 +1265,7 @@ tr.cl-row:hover td{background:#f4f7fb}
                 <button class="btn btn-primary" onclick="importMaterialsExcel()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Import Materials Excel</button>
                 <button class="btn" onclick="dedupeMaterialsSheet()" style="font-size:12px;padding:5px 12px;color:var(--amber)" title="Removes exact name+unit+price duplicate rows (large catalog — may take ~20s)"><i class="ti ti-filter"></i>Clean duplicates</button>
                 <button class="btn" onclick="_confirm('Remove all zero-priced Solid Surface slab items (Aspen Glacier, Aspen Lily, Beige, Athena, All Color Match, Vanity Sink Solid Colors, etc.)? Priced solid-surface items are left untouched. This cannot be undone.', removeZeroPricedSlabMaterials)" style="font-size:12px;padding:5px 12px;color:var(--coral)" title="One-time cleanup: removes zero-priced Solid Surface slab catalog entries only"><i class="ti ti-trash"></i>Remove zero-priced slabs</button>
+                <button class="btn" onclick="_confirm('Remove 9 non-material rows (Advertising, Barcode Charges, Bundle Annex Clearance Board Sale, Consignee Discount, Consignee Sales, Dealers Sales Incentive, Expense, Gate Fee, Sales Discount) that look like leftover rows from a rebate/commission sheet, not real materials? This cannot be undone.', removeFinancialLineItemMaterials)" style="font-size:12px;padding:5px 12px;color:var(--coral)" title="One-time cleanup: removes 9 specific non-material rows (no unit, ₱0 price)"><i class="ti ti-trash"></i>Remove financial/fee rows</button>
               </div>
             </div>
             <div style="border:.5px solid var(--border);border-radius:8px;padding:12px">
@@ -11098,6 +11099,62 @@ function removeZeroPricedSlabMaterials(){
     }).then(function(){
       supaReplaceTable('price_materials',kept.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
       if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removedRows.length+' zero-priced Solid Surface slab item'+(removedRows.length>1?'s':'')+'. '+kept.length+' materials remain. Reload to refresh dropdowns.</div>';
+      loadPriceDatabase(false);
+    });
+  }).catch(function(e){
+    if(s)s.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i> Error: '+escHtml(e.message||e)+'</div>';
+  });
+}
+// One-time cleanup: removes 9 specific rows that were never real materials — leftover rows from
+// what looks like a distributor rebate/commission sheet that got pasted into the same import
+// (all 9 have no unit AND ₱0 price, distinct from the pricing-gap problem elsewhere in Materials).
+// Hardcoded exact-name list rather than a keyword pattern (unlike the slab cleanup) since this is
+// a small, specific, already-confirmed set — safer than a broad ILIKE that could sweep in some
+// future legitimately-named material containing a word like "discount".
+var FINANCIAL_LINE_ITEM_NAMES=['Advertising','Barcode Charges','Bundle Annex Clearance Board Sale','Consignee Discount','Consignee Sales','Dealers Sales Incentive','Expense','Gate Fee','Sales Discount'];
+function removeFinancialLineItemMaterials(){
+  if(!gToken){showToast('Sign in first.');return;}
+  var s=el('db-status-row');
+  var targetSet={}; FINANCIAL_LINE_ITEM_NAMES.forEach(function(n){ targetSet[n.toLowerCase()]=true; });
+  if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Reading Materials sheet…</div>';
+  priceDbGet('Materials!A:C').then(function(data){
+    if(data.error) throw new Error(data.error.message);
+    var rows=(data.values||[]);
+    if(!rows.length){if(s)s.innerHTML='<div class="alert alert-warn">Materials sheet is empty.</div>';return;}
+    var header=rows[0];
+    var kept=[], removedRows=[];
+    for(var i=1;i<rows.length;i++){
+      var r=rows[i];
+      var name=(r[0]||'').toString().trim();
+      if(!name) continue;
+      if(targetSet[name.toLowerCase()]){ removedRows.push(r); continue; }
+      kept.push(r);
+    }
+    if(!removedRows.length){
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> None of the 9 financial/fee line items found — already clean.</div>';
+      return;
+    }
+    if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Removing '+removedRows.length+' non-material row'+(removedRows.length>1?'s':'')+' — rewriting sheet…</div>';
+    return priceDbClear('Materials!A:Z').then(function(){
+      var CHUNK=4000;
+      var all=[header].concat(kept);
+      var batches=[]; for(var b=0;b<all.length;b+=CHUNK) batches.push(all.slice(b,b+CHUNK));
+      var p=Promise.resolve();
+      var rowCursor=1;
+      batches.forEach(function(batch){
+        var startRow=rowCursor;
+        p=p.then(function(){
+          return priceDbUpdate('Materials!A'+startRow,batch).then(function(r){
+            if(r&&r.error) throw new Error(r.error.message||'sheet write error');
+            return new Promise(function(res){ setTimeout(res,150); });
+          });
+        });
+        rowCursor+=batch.length;
+      });
+      return p;
+    }).then(function(){
+      supaReplaceTable('price_materials',kept.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removedRows.length+' non-material row'+(removedRows.length>1?'s':'')+' ('+removedRows.map(function(r){return escHtml(r[0]);}).join(', ')+'). '+kept.length+' materials remain. Reload to refresh dropdowns.</div>';
       loadPriceDatabase(false);
     });
   }).catch(function(e){
