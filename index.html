@@ -2226,7 +2226,8 @@ var CF = {
   siteVisitFee:1500,
   cuttingListPerUnit:500, cuttingListPerArea:0,
   designChargePerUnit:0, designChargePerArea:1500,
-  clientMatServiceMult:1.20
+  clientMatServiceMult:1.20,
+  discountEscalationThreshold:10
 };
 
 // ── Installation cost breakdown ───────────────────────────────────────────
@@ -3193,7 +3194,21 @@ function findApproverForSelf() {
   return sheetUsers.find(function(u){return u.email.toLowerCase()===(gUser&&gUser.email||'').toLowerCase();}) || null;
 }
 // Find the designated approver for a given action type, honouring APPR_ROUTING then delegation
-function findApproverForAction(type) {
+// Discount requests above CF.discountEscalationThreshold always go to a Director (falling
+// back to Admin if no Director is active) regardless of Settings → Approval Routing — top
+// management's stated policy: "any request above this is for Managing Directors decision."
+// Configurable, not hardcoded — Admin/Director set the % in Settings → Approval Routing.
+function findEscalatedDiscountApprover(){
+  var dir=sheetUsers.find(function(u){return u.active&&u.pos==='Director';});
+  if(dir) return dir;
+  return sheetUsers.find(function(u){return u.active&&u.pos==='Admin';})||null;
+}
+function findApproverForAction(type, data) {
+  if(type==='discount'&&data&&(parseFloat(data.discPct)||0)>(CF.discountEscalationThreshold||10)){
+    var esc=findEscalatedDiscountApprover();
+    if(esc) return esc;
+    // No Director/Admin at all — fall through to normal routing below rather than block the request
+  }
   var co = currentUserCompany||'';
   // Check APPR_ROUTING for this company + action type
   var routeEmail = APPR_ROUTING[co] && APPR_ROUTING[co][type];
@@ -6304,12 +6319,20 @@ function confirmVat() {
   });
 }
 function onDiscInput() { qDiscApproved=false; el("disc-ok-msg").style.display="none"; el("disc-req-btn").innerHTML='<i class="ti ti-send"></i>Request'; el("disc-req-btn").className="btn btn-amber"; }
+// A Manager can normally self-approve their own discount via PIN (isApprover()===true skips
+// routing entirely). Above CF.discountEscalationThreshold, top management's policy is that
+// this decision belongs to a Director, so a Manager is routed like anyone else instead of
+// self-approving. Director/Admin are exempt — they ARE the escalation target, so forcing them
+// to route a request to themselves would be circular.
+function _discNeedsEscalation(d){
+  return currentRole==='Manager'&&(parseFloat(d)||0)>(CF.discountEscalationThreshold||10);
+}
 function onDiscRequest() {
   modalCtx='s1';
   var d=parseFloat(el("disc-inp").value);
   if(!d||d<=0){alert("Enter a valid discount %."); return;}
   el("disc-desc").textContent="A discount of "+d+"% has been requested. Approval required.";
-  if(isApprover()){ _pinModalApprover=findApproverForSelf(); _openPinModal("ov-disc","disc-pin","disc-err"); }
+  if(isApprover()&&!_discNeedsEscalation(d)){ _pinModalApprover=findApproverForSelf(); _openPinModal("ov-disc","disc-pin","disc-err"); }
   else { openSendRequest('discount',{discPct:d,ctx:'s1'}); }
 }
 function confirmDisc() {
@@ -8907,7 +8930,7 @@ function openSendRequest(type,data){
   det+='</div>';
   var detEl=el('sreq-details'); if(detEl) detEl.innerHTML=det;
 
-  var apprObj=findApproverForAction(type); // try APPR_ROUTING first
+  var apprObj=findApproverForAction(type,data); // try APPR_ROUTING first
   var appr=apprObj?{name:apprObj.name,email:apprObj.email,via:''}:findApprover();
   var routeEl=el('sreq-route');
   if(routeEl){
@@ -8938,7 +8961,7 @@ function onPremiumRequest(ctx){
 function submitApprovalRequest(){
   var type=_sreqCtx.type; var data=_sreqCtx.data||{};
   var note=(el('sreq-note')||{}).value||'';
-  var apprObj=findApproverForAction(type);
+  var apprObj=findApproverForAction(type,data);
   var appr=apprObj?{name:apprObj.name,email:apprObj.email,via:''}:findApprover();
   // No approver at all — notify Admin
   if(!appr||!appr.email){
@@ -15201,7 +15224,7 @@ function fqOnDiscRequest() {
   var d=parseFloat(el('fq-disc-inp')?el('fq-disc-inp').value:0);
   if(!d||d<=0){alert('Enter a valid discount %.'); return;}
   var dd=el('disc-desc'); if(dd) dd.textContent='A discount of '+d+'% has been requested. Approval required.';
-  if(isApprover()){ _pinModalApprover=findApproverForSelf(); _openPinModal('ov-disc','disc-pin','disc-err'); }
+  if(isApprover()&&!_discNeedsEscalation(d)){ _pinModalApprover=findApproverForSelf(); _openPinModal('ov-disc','disc-pin','disc-err'); }
   else { openSendRequest('discount',{discPct:d,ctx:'fq'}); }
 }
 function fqResetCustomCF() {
@@ -25240,6 +25263,11 @@ function renderApprovalRoutingSettings(){
   var approvers=sheetUsers.filter(function(u){return u.active&&(u.pos==='Manager'||u.pos==='Director'||u.pos==='Admin');});
   var h='<div class="card"><div class="card-head"><h3><i class="ti ti-route"></i> Approval Routing</h3></div><div class="card-body">'
     +'<p style="font-size:12px;color:var(--text2);margin-bottom:14px">Assign a specific approver for each action type per company. Leave blank to use the default routing (delegation → first active Manager/Director/Admin).</p>'
+    +'<div style="display:flex;align-items:flex-end;gap:10px;padding:12px;background:#fdf2e0;border:.5px solid #f5d78e;border-radius:8px;margin-bottom:16px">'
+    +'<div><label class="fld" style="margin-top:0">Discount escalation threshold (%)</label>'
+    +'<input type="number" min="0" max="100" value="'+(CF.discountEscalationThreshold||10)+'" oninput="CF.discountEscalationThreshold=parseFloat(this.value)||0" style="height:32px;width:100px"></div>'
+    +'<div style="font-size:11px;color:var(--text2);padding-bottom:6px;flex:1">A Manager can normally approve a discount themselves via PIN. Above this %, the request always goes to a Director (or Admin, if no Director is active) instead — regardless of who\'s assigned in the table below. Directors/Admin are never affected by this limit.</div>'
+    +'</div>'
     +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
     +'<thead><tr><th style="text-align:left;padding:8px 10px;background:#f5f5f3;border:.5px solid var(--border)">Action</th>';
   for(var ci=0;ci<COMPANIES.length;ci++){
