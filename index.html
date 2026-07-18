@@ -1261,7 +1261,10 @@ tr.cl-row:hover td{background:#f4f7fb}
             <div style="border:.5px solid var(--border);border-radius:8px;padding:12px">
               <div style="font-size:12px;font-weight:600;margin-bottom:4px"><i class="ti ti-box" style="color:var(--navy)"></i> Materials</div>
               <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Expected columns: <b>Name · Supplier · Price · UOM</b> (3 header rows)</div>
-              <button class="btn btn-primary" onclick="importMaterialsExcel()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Import Materials Excel</button>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn btn-primary" onclick="importMaterialsExcel()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Import Materials Excel</button>
+                <button class="btn" onclick="dedupeMaterialsSheet()" style="font-size:12px;padding:5px 12px;color:var(--amber)" title="Removes exact name+unit+price duplicate rows (large catalog — may take ~20s)"><i class="ti ti-filter"></i>Clean duplicates</button>
+              </div>
             </div>
             <div style="border:.5px solid var(--border);border-radius:8px;padding:12px">
               <div style="font-size:12px;font-weight:600;margin-bottom:4px"><i class="ti ti-settings-2" style="color:var(--navy)"></i> Services</div>
@@ -10946,6 +10949,66 @@ function dedupeServicesSheet(){
     }).then(function(){
       supaReplaceTable('price_services',unique.slice(1).map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
       if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removed+' duplicate row'+(removed>1?'s':'')+'. '+(unique.length-1)+' services remain. Reload to refresh dropdowns.</div>';
+      loadPriceDatabase(false);
+    });
+  }).catch(function(e){
+    if(s)s.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i> Error: '+escHtml(e.message||e)+'</div>';
+  });
+}
+// Materials-specific dedupe (not the generic dedupeServicesSheet pattern): the Materials
+// catalog runs 100k+ rows (repeated "Import Materials Excel" runs without clearing first left
+// ~29,600 exact duplicate rows), so unlike Services this dedupes on the full (name,unit,price)
+// tuple — not name alone — since ~32 material names legitimately carry two different units
+// (same price either way) that a name-only dedupe would silently collapse into one. The Sheets
+// rewrite is chunked by row range (not one giant PUT) to stay safely under Sheets API payload
+// limits at this scale; supaReplaceTable() already chunks its own inserts internally.
+function dedupeMaterialsSheet(){
+  if(!gToken){showToast('Sign in first.');return;}
+  var s=el('db-status-row');
+  if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Reading Materials sheet — this is a large catalog, may take a moment…</div>';
+  priceDbGet('Materials!A:C').then(function(data){
+    if(data.error) throw new Error(data.error.message);
+    var rows=(data.values||[]);
+    if(!rows.length){if(s)s.innerHTML='<div class="alert alert-warn">Materials sheet is empty.</div>';return;}
+    var header=rows[0];
+    var seen={};
+    var unique=[];
+    var removed=0;
+    for(var i=1;i<rows.length;i++){
+      var name=(rows[i][0]||'').toString().trim().toLowerCase();
+      var unit=(rows[i][1]||'').toString().trim().toLowerCase();
+      var price=(rows[i][2]!=null?rows[i][2]:'').toString().trim();
+      if(!name) continue;
+      var key=name+'|'+unit+'|'+price;
+      if(seen[key]){removed++;continue;}
+      seen[key]=true;
+      unique.push(rows[i]);
+    }
+    if(!removed){
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> No exact duplicates found ('+(rows.length-1)+' materials).</div>';
+      return;
+    }
+    if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Removing '+removed+' duplicate row'+(removed>1?'s':'')+' out of '+(rows.length-1)+' — rewriting sheet in batches…</div>';
+    return priceDbClear('Materials!A:Z').then(function(){
+      var CHUNK=4000;
+      var all=[header].concat(unique);
+      var batches=[]; for(var b=0;b<all.length;b+=CHUNK) batches.push(all.slice(b,b+CHUNK));
+      var p=Promise.resolve();
+      var rowCursor=1;
+      batches.forEach(function(batch){
+        var startRow=rowCursor;
+        p=p.then(function(){
+          return priceDbUpdate('Materials!A'+startRow,batch).then(function(r){
+            if(r&&r.error) throw new Error(r.error.message||'sheet write error');
+            return new Promise(function(res){ setTimeout(res,150); }); // brief pacing between chunks
+          });
+        });
+        rowCursor+=batch.length;
+      });
+      return p;
+    }).then(function(){
+      supaReplaceTable('price_materials',unique.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removed+' duplicate row'+(removed>1?'s':'')+'. '+unique.length+' materials remain. Reload to refresh dropdowns.</div>';
       loadPriceDatabase(false);
     });
   }).catch(function(e){
