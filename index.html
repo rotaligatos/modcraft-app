@@ -13685,6 +13685,7 @@ function confirmSend(via) {
     saveQuotationToDrive('final','Final Quotation');
     _saveBoardLayoutToDrive();
     _saveDrawingAnalysisToDrive();
+    _copyOrderAttachmentsToQuotationFolder();
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus=sentTxt; qInitLockedAt=qInitLockedAt||new Date().toISOString();
@@ -13728,6 +13729,7 @@ function skipSend() {
     saveQuotationToDrive('final','Final Quotation');
     _saveBoardLayoutToDrive();
     _saveDrawingAnalysisToDrive();
+    _copyOrderAttachmentsToQuotationFolder();
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus="Not sent"; qInitLockedAt=qInitLockedAt||new Date().toISOString();
@@ -13994,6 +13996,7 @@ function confirmClientApprove(){
   _updateQStatusBadge();
   _saveBoardLayoutToDrive();
   _saveDrawingAnalysisToDrive();
+  _copyOrderAttachmentsToQuotationFolder();
   gSaveQuotation();
 }
 // "Client Declined" — client doesn't want to proceed. Can be triggered from Stage 1 (Initial
@@ -21991,6 +21994,55 @@ function _saveDrawingAnalysisToDrive(){
       });
   }).catch(function(e){console.warn('Drawing analysis raw file Drive save failed:',e);})
   .then(function(){ supaReplaceDrawingAnalysis(baseSerial,meta); });
+}
+// Copies the original Wufoo submission's attachment(s) into this quotation's own Drive/
+// Storage folder, so a quotation exported from an order has everything in one place instead
+// of requiring a separate lookup back through Pending Orders. Fires at the same lock/approve
+// points as _saveDrawingAnalysisToDrive() — not at export time — to avoid creating a Drive
+// folder for a quotation that's later abandoned without ever being saved. Idempotent (upsert
+// by filename), safe to call from all three lock/approve hooks. Forward-only by design — does
+// not retroactively backfill quotations exported before this shipped.
+function _copyOrderAttachmentsToQuotationFolder(){
+  if(!gToken||!qSerial||!qSourceOrderId) return;
+  var baseSerial=qBaseSerial||qSerial;
+  var order=null;
+  for(var i=0;i<pendingOrders.length;i++){ if(pendingOrders[i].id===qSourceOrderId){ order=pendingOrders[i]; break; } }
+  if(!order) return;
+  var atts=[order.attach1,order.attach2].filter(Boolean);
+  if(!atts.length) return;
+  var client=driveClientName();
+  var driveChain=ensureDriveFolder().then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);});
+  atts.forEach(function(url,idx){
+    var fileId=_driveFileId(url);
+    // Legacy pre-Drive-migration Wufoo attachments (raw wufoo.com cabinet URLs, not yet
+    // uploaded to Drive) have no extractable Drive file ID — nothing to copy from those.
+    if(!fileId) return;
+    var metaUrl='https://www.googleapis.com/drive/v3/files/'+fileId+'?fields=name%2CmimeType&supportsAllDrives=true';
+    gApiFetch(metaUrl).then(function(meta){
+      var mime=meta.mimeType||'application/octet-stream';
+      var origName=meta.name||'';
+      var dlUrl='https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media&supportsAllDrives=true';
+      return _driveApiFetchBlob(dlUrl).then(function(blob){
+        return new Promise(function(resolve){
+          var reader=new FileReader();
+          reader.onload=function(){
+            var dataUrl=reader.result;
+            var comma=dataUrl.indexOf(',');
+            var b64=comma>=0?dataUrl.slice(comma+1):dataUrl;
+            var ext=origName.indexOf('.')>=0?origName.split('.').pop():(mime.split('/').pop()||'bin');
+            var fileName=baseSerial+' — '+client+' — Wufoo attachment '+(idx+1)+'.'+ext;
+            supaUploadQuotationBinaryFile(baseSerial,fileName,mime,b64);
+            driveChain.then(function(fid){ return _driveUpsertBinaryFile(fid,fileName,mime,b64); })
+              .then(function(r){
+                if(r&&r.id) logActivity('Wufoo attachment copied to quotation folder ('+fileName+')');
+                else console.warn('Wufoo attachment copy to Drive failed:',r&&r.error&&r.error.message);
+              }).then(resolve).catch(resolve);
+          };
+          reader.readAsDataURL(blob);
+        });
+      });
+    }).catch(function(e){ console.warn('Wufoo attachment copy failed:',e); });
+  });
 }
 function _mobCallClaude(prompt, callback){
   fetch('https://api.anthropic.com/v1/messages',{
