@@ -10959,9 +10959,13 @@ function dedupeServicesSheet(){
 // catalog runs 100k+ rows (repeated "Import Materials Excel" runs without clearing first left
 // ~29,600 exact duplicate rows), so unlike Services this dedupes on the full (name,unit,price)
 // tuple — not name alone — since ~32 material names legitimately carry two different units
-// (same price either way) that a name-only dedupe would silently collapse into one. The Sheets
-// rewrite is chunked by row range (not one giant PUT) to stay safely under Sheets API payload
-// limits at this scale; supaReplaceTable() already chunks its own inserts internally.
+// (same price either way, all edgebanding — "lm" and "pc" for the same SKU) that a name-only
+// dedupe would silently collapse into an arbitrary pick. Pass 2 resolves those specifically:
+// edgeband is a linear-metre product, so when the same name+price survives Pass 1 under both
+// "lm" and "pc", the "pc" copy is dropped and "lm" kept — scoped to names containing "edgeband"
+// so it can never misfire on some future non-edgeband item that legitimately has two units.
+// The Sheets rewrite is chunked by row range (not one giant PUT) to stay safely under Sheets API
+// payload limits at this scale; supaReplaceTable() already chunks its own inserts internally.
 function dedupeMaterialsSheet(){
   if(!gToken){showToast('Sign in first.');return;}
   var s=el('db-status-row');
@@ -10971,6 +10975,7 @@ function dedupeMaterialsSheet(){
     var rows=(data.values||[]);
     if(!rows.length){if(s)s.innerHTML='<div class="alert alert-warn">Materials sheet is empty.</div>';return;}
     var header=rows[0];
+    // Pass 1 — exact (name,unit,price) duplicates
     var seen={};
     var unique=[];
     var removed=0;
@@ -10984,14 +10989,36 @@ function dedupeMaterialsSheet(){
       seen[key]=true;
       unique.push(rows[i]);
     }
-    if(!removed){
-      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> No exact duplicates found ('+(rows.length-1)+' materials).</div>';
+    // Pass 2 — edgeband items recorded under both "lm" and "pc" at the same price: keep "lm"
+    var byNamePrice={};
+    unique.forEach(function(r,idx){
+      var nm=(r[0]||'').toString();
+      if(!/edgeband/i.test(nm)) return;
+      var pk=nm.trim().toLowerCase()+'|'+(r[2]!=null?r[2].toString().trim():'');
+      (byNamePrice[pk]=byNamePrice[pk]||[]).push(idx);
+    });
+    var dropIdx={};
+    Object.keys(byNamePrice).forEach(function(pk){
+      var idxs=byNamePrice[pk];
+      if(idxs.length<2) return;
+      var hasLm=idxs.some(function(i){return (unique[i][1]||'').toString().trim().toLowerCase()==='lm';});
+      if(!hasLm) return; // no "lm" copy present — nothing to prefer, leave as-is
+      idxs.forEach(function(i){ if((unique[i][1]||'').toString().trim().toLowerCase()!=='lm') dropIdx[i]=true; });
+    });
+    var unitFixed=Object.keys(dropIdx).length;
+    var finalRows=unique.filter(function(r,idx){ return !dropIdx[idx]; });
+
+    if(!removed&&!unitFixed){
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> No exact duplicates or unit conflicts found ('+(rows.length-1)+' materials).</div>';
       return;
     }
-    if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Removing '+removed+' duplicate row'+(removed>1?'s':'')+' out of '+(rows.length-1)+' — rewriting sheet in batches…</div>';
+    var statusParts=[];
+    if(removed) statusParts.push(removed+' duplicate row'+(removed>1?'s':''));
+    if(unitFixed) statusParts.push(unitFixed+' edgeband unit conflict'+(unitFixed>1?'s':'')+' (kept "lm")');
+    if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Fixing '+statusParts.join(' + ')+' out of '+(rows.length-1)+' — rewriting sheet in batches…</div>';
     return priceDbClear('Materials!A:Z').then(function(){
       var CHUNK=4000;
-      var all=[header].concat(unique);
+      var all=[header].concat(finalRows);
       var batches=[]; for(var b=0;b<all.length;b+=CHUNK) batches.push(all.slice(b,b+CHUNK));
       var p=Promise.resolve();
       var rowCursor=1;
@@ -11007,8 +11034,8 @@ function dedupeMaterialsSheet(){
       });
       return p;
     }).then(function(){
-      supaReplaceTable('price_materials',unique.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
-      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removed+' duplicate row'+(removed>1?'s':'')+'. '+unique.length+' materials remain. Reload to refresh dropdowns.</div>';
+      supaReplaceTable('price_materials',finalRows.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Fixed '+statusParts.join(' + ')+'. '+finalRows.length+' materials remain. Reload to refresh dropdowns.</div>';
       loadPriceDatabase(false);
     });
   }).catch(function(e){
