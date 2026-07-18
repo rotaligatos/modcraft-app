@@ -1264,6 +1264,7 @@ tr.cl-row:hover td{background:#f4f7fb}
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <button class="btn btn-primary" onclick="importMaterialsExcel()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Import Materials Excel</button>
                 <button class="btn" onclick="dedupeMaterialsSheet()" style="font-size:12px;padding:5px 12px;color:var(--amber)" title="Removes exact name+unit+price duplicate rows (large catalog — may take ~20s)"><i class="ti ti-filter"></i>Clean duplicates</button>
+                <button class="btn" onclick="_confirm('Remove all zero-priced Solid Surface slab items (Aspen Glacier, Aspen Lily, Beige, Athena, All Color Match, Vanity Sink Solid Colors, etc.)? Priced solid-surface items are left untouched. This cannot be undone.', removeZeroPricedSlabMaterials)" style="font-size:12px;padding:5px 12px;color:var(--coral)" title="One-time cleanup: removes zero-priced Solid Surface slab catalog entries only"><i class="ti ti-trash"></i>Remove zero-priced slabs</button>
               </div>
             </div>
             <div style="border:.5px solid var(--border);border-radius:8px;padding:12px">
@@ -11036,6 +11037,67 @@ function dedupeMaterialsSheet(){
     }).then(function(){
       supaReplaceTable('price_materials',finalRows.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
       if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Fixed '+statusParts.join(' + ')+'. '+finalRows.length+' materials remain. Reload to refresh dropdowns.</div>';
+      loadPriceDatabase(false);
+    });
+  }).catch(function(e){
+    if(s)s.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i> Error: '+escHtml(e.message||e)+'</div>';
+  });
+}
+// One-time cleanup (not a recurring maintenance tool like the two above): removes the
+// zero-priced Solid Surface slab family (Aspen Glacier/Aspen Lily/Beige/Athena/All Color Match/
+// Vanity Sink Solid Colors etc.) — an entire unpriced product line the user decided not to carry
+// in the catalog going forward, handling it per-quotation via Outsource instead. Deliberately
+// scoped to price=0 ONLY — the same name pattern also matches ~291 rows that already have a real
+// price, which are left untouched (not part of this decision). Confirmed via Supabase query
+// before this was built: none of the target rows are referenced by any saved quotation or
+// cabinet template, so removing them from the catalog doesn't affect anything already quoted.
+function removeZeroPricedSlabMaterials(){
+  if(!gToken){showToast('Sign in first.');return;}
+  var s=el('db-status-row');
+  function isSlabFamily(name){
+    var n=(name||'').toLowerCase();
+    return n.indexOf('slab')>=0||n.indexOf('sachet')>=0||n.indexOf('speckle')>=0||n.indexOf('anti-microbial')>=0||n.indexOf('vanity sink solid')>=0;
+  }
+  if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Reading Materials sheet…</div>';
+  priceDbGet('Materials!A:C').then(function(data){
+    if(data.error) throw new Error(data.error.message);
+    var rows=(data.values||[]);
+    if(!rows.length){if(s)s.innerHTML='<div class="alert alert-warn">Materials sheet is empty.</div>';return;}
+    var header=rows[0];
+    var kept=[], removedRows=[];
+    for(var i=1;i<rows.length;i++){
+      var r=rows[i];
+      var name=(r[0]||'').toString();
+      var price=parseFloat(r[2])||0;
+      if(!name.trim()) continue;
+      if(price===0&&isSlabFamily(name)){ removedRows.push(r); continue; }
+      kept.push(r);
+    }
+    if(!removedRows.length){
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> No zero-priced Solid Surface slab items found.</div>';
+      return;
+    }
+    if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Removing '+removedRows.length+' zero-priced slab item'+(removedRows.length>1?'s':'')+' — rewriting sheet in batches…</div>';
+    return priceDbClear('Materials!A:Z').then(function(){
+      var CHUNK=4000;
+      var all=[header].concat(kept);
+      var batches=[]; for(var b=0;b<all.length;b+=CHUNK) batches.push(all.slice(b,b+CHUNK));
+      var p=Promise.resolve();
+      var rowCursor=1;
+      batches.forEach(function(batch){
+        var startRow=rowCursor;
+        p=p.then(function(){
+          return priceDbUpdate('Materials!A'+startRow,batch).then(function(r){
+            if(r&&r.error) throw new Error(r.error.message||'sheet write error');
+            return new Promise(function(res){ setTimeout(res,150); });
+          });
+        });
+        rowCursor+=batch.length;
+      });
+      return p;
+    }).then(function(){
+      supaReplaceTable('price_materials',kept.map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Removed '+removedRows.length+' zero-priced Solid Surface slab item'+(removedRows.length>1?'s':'')+'. '+kept.length+' materials remain. Reload to refresh dropdowns.</div>';
       loadPriceDatabase(false);
     });
   }).catch(function(e){
