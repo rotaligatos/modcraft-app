@@ -14029,6 +14029,59 @@ function confirmCancelQuotation(){
   if(typeof updateFQLockUI==='function') updateFQLockUI();
   _updateQStatusBadge();
   gSaveQuotation();
+  _cleanupCancelledQuotationFiles();
+}
+// Removes drawing-analysis, board-layout, and Wufoo-attachment-copy files from a cancelled
+// quotation's Drive/Storage folder — the quotation's own record (state, printouts, BOM
+// report, cost detail) is never touched. Allowlist match on filename (only ever deletes a
+// file whose name contains one of these 4 exact markers) rather than a blanket folder wipe,
+// so a bug here can only under-delete, never accidentally remove a real deliverable. Fires
+// once, immediately, from confirmCancelQuotation() — the only place in the app qCancelled
+// gets set, and there's no "un-cancel" action, so there's no undo window to protect.
+// Forward-only: does not retroactively clean up quotations cancelled before this shipped.
+var _SUPPLEMENTARY_FILE_MARKERS=[' — analysis output.',' — raw upload.',' — board layout.',' — Wufoo attachment '];
+function _cleanupCancelledQuotationFiles(){
+  if(!gToken||!qSerial) return;
+  var baseSerial=qBaseSerial||qSerial;
+  var isSupplementary=function(name){
+    return _SUPPLEMENTARY_FILE_MARKERS.some(function(marker){ return name.indexOf(marker)>=0; });
+  };
+
+  ensureDriveFolder().then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);})
+    .then(function(folderId){
+      var q=encodeURIComponent("'"+folderId+"' in parents and trashed=false");
+      return _driveGet('files?q='+q+'&fields=files(id,name)').then(function(d){
+        var files=(d.files||[]).filter(function(f){return isSupplementary(f.name);});
+        return Promise.all(files.map(function(f){
+          return gApiFetch('https://www.googleapis.com/drive/v3/files/'+f.id+'?supportsAllDrives=true',{method:'DELETE'})
+            .then(function(){ logActivity('Removed supplementary file from Drive (quotation cancelled): '+f.name); })
+            .catch(function(e){ console.warn('Drive cleanup delete failed for',f.name,e); });
+        }));
+      });
+    }).catch(function(e){ console.warn('Drive cleanup failed:',e); });
+
+  if(SUPA_DUAL_WRITE&&supaReady()){
+    try{
+      supa.storage.from('quotations').list(_supaSafeStorageKey(baseSerial)).then(function(r){
+        if(r.error||!r.data) return;
+        var toRemove=r.data.filter(function(f){return isSupplementary(f.name);})
+          .map(function(f){return _supaSafeStorageKey(baseSerial)+'/'+f.name;});
+        if(!toRemove.length) return;
+        return supa.storage.from('quotations').remove(toRemove).then(function(r2){
+          if(r2&&r2.error) console.warn('[supa] storage cleanup error:',r2.error.message||r2.error);
+        });
+      }).catch(function(e){ console.warn('[supa] storage cleanup threw',e); });
+    }catch(e){ console.warn('[supa] storage cleanup threw',e); }
+    // Table rows — the structured data itself IS the "supplementary analysis" for these two.
+    try{
+      supa.from('drawing_analyses').delete().eq('serial',baseSerial).then(function(r){
+        if(r&&r.error) console.warn('[supa] drawing_analyses cleanup error:',r.error.message||r.error);
+      });
+      supa.from('board_layouts').delete().eq('serial',baseSerial).then(function(r){
+        if(r&&r.error) console.warn('[supa] board_layouts cleanup error:',r.error.message||r.error);
+      });
+    }catch(e){ console.warn('[supa] table cleanup threw',e); }
+  }
 }
 function updateFQSentStatus() {
   var ss=el('fq-sent-status'); if(!ss) return;
