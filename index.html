@@ -2877,6 +2877,13 @@ var fqDiscApproved = false;
 var fqPremApproved = false;
 var fqCustomCF = null;
 var fqCustomCFApproved = false;
+// True once this quotation's Stage 2 approval fields have been loaded from its own saved record
+// (see restoreFullQuotationState) — tells initFinalQuotation() NOT to overwrite them by copying
+// from Stage 1 again. Stage 2 approvals must stick once set (they're the basis for client payment
+// and PMES, confirmed 2026-07-19) — before this flag existed, reopening a quotation and viewing
+// Stage 2 for the first time in that browser session always re-copied Stage 1's CURRENT values
+// over whatever had actually been approved specifically for Stage 2.
+var fqApprovalsFromSave = false;
 var fqBondIns = {
   enabled: false,
   surety:      { active:false, basis:0,    insuredPct:0, premiumPct:0 },
@@ -4251,7 +4258,7 @@ function initQuotation() {
   // Cost factor override card: only for Fabrication + Installation
   var ccfcInit=el('ccf-card'); if(ccfcInit) ccfcInit.style.display=(svcInit.indexOf('Installation')>=0)?"block":"none";
   // Reset Final Quotation state for fresh start
-  fqLocked=false; fqSentStatus=''; fqInitialized=false;
+  fqLocked=false; fqSentStatus=''; fqInitialized=false; fqApprovalsFromSave=false;
   fqClientApproved=false; fqClientApprovedAt='';
   fqPreviewed=false; fqFabBasis='initial'; fqFabCostOverride=0;
   var fqw=el('fq-cards-wrap'); if(fqw) fqw.innerHTML='';
@@ -4265,7 +4272,7 @@ function initQuotation() {
   if(_alb)_alb.innerHTML='<div style="color:var(--text2);text-align:center;padding:10px">No activity yet.</div>';
   updateLockUI();
   // Always reset to Stage 1 view (s2-wrap may still be visible from a previous Stage 2 session)
-  qStage=1; fqInitialized=false;
+  qStage=1; fqInitialized=false; fqApprovalsFromSave=false;
   el('s1-wrap').style.display='block';
   el('s2-wrap').style.display='none';
   var _s1b=el('s1btn'); if(_s1b) _s1b.classList.add('active');
@@ -9129,23 +9136,28 @@ function _applyApprovedRequest(notif){
 // !supaReady()) -- Sheets only needs the normal login token, no separate connection step, so it's
 // the one path guaranteed to actually run. Supabase is still mirrored best-effort afterward.
 //
-// Only Stage 1 (ctx='s1') fields are part of the saved quotation schema today for
-// nonvat/discount/override/premium -- the Stage 2 equivalents (fqVatApproved, fqDiscPct, etc.)
-// aren't persisted at all yet (confirmed while investigating this), a separate, larger gap held
-// for its own conversation. 'unlock' already persists real fields for both stages, so it's fully
-// covered here.
+// Both stages' approval fields are part of the saved quotation schema (Stage 2's — fqVatApproved,
+// fqDiscPct, fqDiscApproved, fqPremApproved, fqCustomCF/fqCustomCFApproved — added 2026-07-19
+// alongside fqApprovalsFromSave/initFinalQuotation() so Stage 2 approvals stick permanently
+// instead of being silently re-copied from Stage 1 on next reopen; confirmed with the user that
+// Stage 2 is the basis for client payment and PMES, so this had to be real, not just Stage 1).
 function _persistApprovedFieldToQuotation(notif,callback){
   var serial=notif.serial;
   if(!serial||!gToken){ if(callback) callback(false); return; }
   var type=notif.type, ctx=notif.ctx||'s1';
   var mutate=null;
-  if(type==='nonvat'&&ctx==='s1') mutate=function(s){ s.vatApproved=false; };
-  else if(type==='discount'&&ctx==='s1') mutate=function(s){ s.discPct=notif.reqDisc||0; s.discApproved=true; };
-  else if(type==='override'&&ctx==='s1'&&notif.cfValues) mutate=function(s){ s.customCF=notif.cfValues; s.customCFApproved=true; };
-  else if(type==='premium'&&ctx==='s1') mutate=function(s){ s.premApproved=true; };
-  else if(type==='unlock'&&ctx==='fq') mutate=function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; };
-  else if(type==='unlock') mutate=function(s){ s.locked=false; s.sentStatus=''; };
-  if(!mutate){ if(callback) callback(false); return; } // not yet part of the persisted schema for this type/ctx (Stage 2 nonvat/discount/override/premium)
+  if(type==='nonvat') mutate=ctx==='fq'?function(s){ s.fqVatApproved=false; }:function(s){ s.vatApproved=false; };
+  else if(type==='discount') mutate=ctx==='fq'
+    ?function(s){ s.fqDiscPct=notif.reqDisc||0; s.fqDiscApproved=true; }
+    :function(s){ s.discPct=notif.reqDisc||0; s.discApproved=true; };
+  else if(type==='override'&&notif.cfValues) mutate=ctx==='fq'
+    ?function(s){ s.fqCustomCF=notif.cfValues; s.fqCustomCFApproved=true; }
+    :function(s){ s.customCF=notif.cfValues; s.customCFApproved=true; };
+  else if(type==='premium') mutate=ctx==='fq'?function(s){ s.fqPremApproved=true; }:function(s){ s.premApproved=true; };
+  else if(type==='unlock') mutate=ctx==='fq'
+    ?function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; }
+    :function(s){ s.locked=false; s.sentStatus=''; };
+  if(!mutate){ if(callback) callback(false); return; }
 
   _loadQuotationJsonFromSheets(serial,function(state){
     if(!state){
@@ -14716,13 +14728,20 @@ function renderBondIns(){
 
 // ── Final Quotation (Stage 2) functions ──────────────────────────────────
 function initFinalQuotation() {
-  // Deep-copy Stage 1 state into FQ state so values pre-populate but are independent
-  fqVatApproved  = qVatApproved;
-  fqDiscPct      = qDiscPct;
-  fqDiscApproved = qDiscApproved;
-  fqPremApproved = qPremApproved;
-  fqCustomCF     = qCustomCF  ? JSON.parse(JSON.stringify(qCustomCF))  : null;
-  fqCustomCFApproved = qCustomCFApproved;
+  // Deep-copy Stage 1 state into FQ state so values pre-populate, but ONLY as a starting point
+  // the first time this quotation ever reaches Stage 2. If it already has its OWN saved Stage 2
+  // approval record (fqApprovalsFromSave, set in restoreFullQuotationState), that must win instead
+  // — Stage 2 approvals are the basis for client payment and PMES, so they can never be silently
+  // reset back to whatever Stage 1 currently has just because the quotation was reopened and this
+  // ran again.
+  if(!fqApprovalsFromSave){
+    fqVatApproved  = qVatApproved;
+    fqDiscPct      = qDiscPct;
+    fqDiscApproved = qDiscApproved;
+    fqPremApproved = qPremApproved;
+    fqCustomCF     = qCustomCF  ? JSON.parse(JSON.stringify(qCustomCF))  : null;
+    fqCustomCFApproved = qCustomCFApproved;
+  }
   fqBondIns      = JSON.parse(JSON.stringify(qBondIns));
   fqInstRateOverride = null;
   fqAssmRateOverride = null;
@@ -20252,6 +20271,8 @@ function getFullQuotationState(){
     qCancelled:qCancelled, qCancelledAt:qCancelledAt, qCancelReason:qCancelReason,
     fqLocked:fqLocked, fqSentStatus:fqSentStatus,
     fqClientApproved:fqClientApproved, fqClientApprovedAt:fqClientApprovedAt,
+    fqVatApproved:fqVatApproved, fqDiscPct:fqDiscPct, fqDiscApproved:fqDiscApproved, fqPremApproved:fqPremApproved,
+    fqCustomCF:fqCustomCF?JSON.parse(JSON.stringify(fqCustomCF)):null, fqCustomCFApproved:fqCustomCFApproved,
     sourceOrderId:qSourceOrderId||'',
     savedAt:(function(){ var t=new Date().toISOString(); qLoadedSavedAt=t; qLoadedSavedBy=gUser?(gUser.email||''):''; return t; })(),
     savedBy:gUser?(gUser.email||''):''
@@ -20367,6 +20388,20 @@ function restoreFullQuotationState(state){
   // setting them here before that lazy init runs is sufficient — no other change needed.
   fqLocked=!!state.fqLocked; fqSentStatus=state.fqSentStatus||'';
   fqClientApproved=!!state.fqClientApproved; fqClientApprovedAt=state.fqClientApprovedAt||'';
+  // Stage 2's OWN approval state (VAT/discount/premium/CF override), if this quotation has ever
+  // saved one — see fqApprovalsFromSave above. state.fqVatApproved!==undefined distinguishes "this
+  // quotation has its own Stage 2 approval record" from "old save from before this existed, or
+  // Stage 2 was never customized" — in the latter case fqApprovalsFromSave stays false and
+  // initFinalQuotation() falls back to copying Stage 1's values as a starting point, same as always.
+  if(state.fqVatApproved!==undefined){
+    fqVatApproved=state.fqVatApproved; fqDiscPct=state.fqDiscPct||0; fqDiscApproved=!!state.fqDiscApproved;
+    fqPremApproved=!!state.fqPremApproved;
+    fqCustomCF=state.fqCustomCF?JSON.parse(JSON.stringify(state.fqCustomCF)):null;
+    fqCustomCFApproved=!!state.fqCustomCFApproved;
+    fqApprovalsFromSave=true;
+  } else {
+    fqApprovalsFromSave=false;
+  }
   qCancelled=!!state.qCancelled; qCancelledAt=state.qCancelledAt||''; qCancelReason=state.qCancelReason||'';
   qBaseSerial=state.baseSerial||'';
   qActiveOptionId=state.activeOptionId||0;
