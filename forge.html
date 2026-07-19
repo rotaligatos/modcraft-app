@@ -81,6 +81,11 @@
   .add-custom-grid .full { grid-column:1/3; }
   #part-info { position:absolute; bottom:8px; left:8px; background:rgba(15,18,27,.97); color:#fff; border:1px solid rgba(255,157,46,.35); border-radius:10px; padding:12px 14px; font-size:12px; line-height:1.6; max-width:300px; display:none; box-shadow:0 6px 24px rgba(0,0,0,.5); }
   #part-info b { color:var(--accent); }
+  #multi-menu { position:fixed; display:none; background:rgba(15,18,27,.98); color:#fff; border:1px solid rgba(255,157,46,.4); border-radius:10px; padding:10px 12px; font-size:12px; z-index:50; box-shadow:0 8px 28px rgba(0,0,0,.5); min-width:200px; }
+  #multi-menu button,#multi-menu select { display:block; width:100%; margin-top:6px; padding:6px 8px; border-radius:6px; border:1px solid rgba(255,255,255,.18); background:rgba(255,255,255,.08); color:#fff; font-size:12px; cursor:pointer; }
+  #multi-menu .mm-del { background:rgba(255,92,92,.2); border-color:rgba(255,92,92,.4); color:#ff9b9b; }
+  #multi-menu .mm-row { margin-top:6px; }
+  #multi-menu .mm-row label { display:block; font-size:10px; color:var(--muted); margin-bottom:2px; }
   .ebt-edit { display:flex; align-items:center; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.12); }
   .ebt-edit .estep { display:flex; align-items:center; gap:4px; background:rgba(255,255,255,.06); border-radius:6px; padding:2px 4px; }
   .ebt-edit button { width:20px; height:20px; border:none; border-radius:4px; background:var(--accent); color:#191100; font-weight:800; cursor:pointer; font-size:12px; line-height:1; }
@@ -198,6 +203,7 @@
         <label><input type="checkbox" id="explode-toggle"> Explode</label>
       </div>
       <div id="part-info"></div>
+      <div id="multi-menu"></div>
     </div>
     <div class="tables">
       <div class="summary" id="summary"></div>
@@ -673,6 +679,7 @@ var PART_COLORS={
 };
 var scene,camera,renderer,controls,cabGroup,composer,bloomPass;
 var explodedOn=false, solidOn=true, selectableMeshes=[], selectedMeshes=[];
+var doorOpenState={}, doorGroupRegistry={}, doorTargetAngle={}, DOOR_OPEN_ANGLE=Math.PI*0.55;   // ~99° -- swings past perpendicular so "open" reads clearly
 var RAY=null, MOUSE=null;
 var EDGE_GLOW=0x22e8ff, EDGE_BANDED=0xff4d4d, SELECT_GLOW=0xff9d2e;   // TRON edges: cyan=no edgeband, red=has edgeband, amber=selected (bloom makes these actually glow)
 function initThree(){
@@ -694,10 +701,19 @@ function initThree(){
   window.addEventListener('resize',resizeToHost);
   document.addEventListener('fullscreenchange',resizeToHost);
   document.addEventListener('webkitfullscreenchange',resizeToHost);
-  (function animate(){ requestAnimationFrame(animate); controls.update(); composer.render(); })();
+  (function animate(){
+    requestAnimationFrame(animate);
+    controls.update();
+    Object.keys(doorGroupRegistry).forEach(function(key){
+      var entry=doorGroupRegistry[key], target=doorTargetAngle[key]||0, cur=entry.group.rotation.y;
+      entry.group.rotation.y=(Math.abs(target-cur)>0.005)?(cur+(target-cur)*0.2):target;   // simple ease toward target -- a real swing, not an instant snap
+    });
+    composer.render();
+  })();
   RAY=new THREE.Raycaster(); MOUSE=new THREE.Vector2();
   renderer.domElement.addEventListener('click',onCanvasClick);
   renderer.domElement.addEventListener('contextmenu',onCanvasRightClick);
+  renderer.domElement.addEventListener('mousedown',onCanvasMouseDown);
 }
 /* Selection highlight helpers -- selectedMeshes is always an array now: one mesh for
    part-level selection, every mesh belonging to a cabinet for whole-cabinet selection. */
@@ -709,7 +725,19 @@ function highlightMeshes(meshes){
   meshes.forEach(function(m){ m.userData.origOpacity=m.material.opacity; m.material.color.setHex(SELECT_GLOW); m.material.opacity=.9; });
   selectedMeshes=meshes;
 }
+/* Clicking a real door part-level toggles it open/closed -- swings around its hinge edge
+   (see renderScene's isHingedDoor branch), not an instant snap. The hinge side itself is a
+   fixed engine default for now (left for a single door, outer edge for each double-door
+   leaf) -- not user-changeable yet. */
+function toggleDoorOpen(cabIndex,partName,boxIndex){
+  var key=cabIndex+'::'+partName+'::'+boxIndex;
+  var isOpen=!doorOpenState[key];
+  doorOpenState[key]=isOpen;
+  var entry=doorGroupRegistry[key];
+  if(entry) doorTargetAngle[key]=isOpen?entry.hingeSign*DOOR_OPEN_ANGLE:0;
+}
 function onCanvasClick(ev){
+  if(_suppressNextClick){ _suppressNextClick=false; return; }   // a marquee drag just finished -- don't also fire a normal click selection
   var rect=renderer.domElement.getBoundingClientRect();
   MOUSE.x=((ev.clientX-rect.left)/rect.width)*2-1;
   MOUSE.y=-((ev.clientY-rect.top)/rect.height)*2+1;
@@ -723,6 +751,7 @@ function onCanvasClick(ev){
     if(partLevel){
       highlightMeshes([m]);
       showPartInfo(m.userData);
+      if(m.userData.isDoor) toggleDoorOpen(m.userData.cabinetIndex,m.userData.partName,m.userData.boxIndex);
     } else {
       var cabMeshes=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===m.userData.cabinetIndex; });
       highlightMeshes(cabMeshes);
@@ -743,13 +772,90 @@ function onCanvasRightClick(ev){
   RAY.setFromCamera(MOUSE,camera);
   var hits=RAY.intersectObjects(selectableMeshes);
   if(!hits.length) return;
-  isolatedCabinetIndex=hits[0].object.userData.cabinetIndex;
+  isolatedCabinetIndices=[hits[0].object.userData.cabinetIndex];
   renderCombinedScene(window._sceneCabinets);
 }
 function clearIsolation(){
-  isolatedCabinetIndex=null;
+  isolatedCabinetIndices=null;
   if(window._sceneCabinets && window._sceneCabinets.length) renderCombinedScene(window._sceneCabinets);
 }
+/* Ctrl+drag a box over multiple cabinets to select them together, then choose a bulk
+   action from the popup menu. Only meaningful in combined (AI multi-cabinet) mode. */
+var marqueeStart=null, marqueeEl=null, multiSelectedCabinets=[], _suppressNextClick=false;
+function onCanvasMouseDown(ev){
+  if(!(ev.ctrlKey||ev.metaKey) || !window._sceneCabinets || !window._sceneCabinets.length) return;
+  marqueeStart={x:ev.clientX,y:ev.clientY};
+  marqueeEl=document.createElement('div');
+  marqueeEl.style.cssText='position:fixed;border:1px dashed #ff9d2e;background:rgba(255,157,46,.12);z-index:60;pointer-events:none;';
+  document.body.appendChild(marqueeEl);
+  updateMarqueeRect(ev.clientX,ev.clientY);
+  document.addEventListener('mousemove',onMarqueeMove);
+  document.addEventListener('mouseup',onMarqueeUp);
+}
+function updateMarqueeRect(x2,y2){
+  var x1=marqueeStart.x,y1=marqueeStart.y;
+  marqueeEl.style.left=Math.min(x1,x2)+'px'; marqueeEl.style.top=Math.min(y1,y2)+'px';
+  marqueeEl.style.width=Math.abs(x2-x1)+'px'; marqueeEl.style.height=Math.abs(y2-y1)+'px';
+}
+function onMarqueeMove(ev){ if(marqueeStart) updateMarqueeRect(ev.clientX,ev.clientY); }
+function onMarqueeUp(ev){
+  document.removeEventListener('mousemove',onMarqueeMove);
+  document.removeEventListener('mouseup',onMarqueeUp);
+  if(!marqueeStart) return;
+  var x1=marqueeStart.x,y1=marqueeStart.y,x2=ev.clientX,y2=ev.clientY;
+  var moved=Math.abs(x2-x1)>6||Math.abs(y2-y1)>6;
+  if(marqueeEl){ marqueeEl.remove(); marqueeEl=null; }
+  marqueeStart=null;
+  if(!moved) return;   // too small a drag -- let the normal click handler treat it as a regular click
+  _suppressNextClick=true;
+  var rect=renderer.domElement.getBoundingClientRect();
+  var minX=Math.min(x1,x2),maxX=Math.max(x1,x2),minY=Math.min(y1,y2),maxY=Math.max(y1,y2);
+  var cabsHit={}, vp=new THREE.Vector3();
+  selectableMeshes.forEach(function(m){
+    m.getWorldPosition(vp); vp.project(camera);
+    var sx=rect.left+(vp.x*0.5+0.5)*rect.width, sy=rect.top+(1-(vp.y*0.5+0.5))*rect.height;
+    if(sx>=minX&&sx<=maxX&&sy>=minY&&sy<=maxY) cabsHit[m.userData.cabinetIndex]=true;
+  });
+  multiSelectedCabinets=Object.keys(cabsHit).map(Number);
+  if(multiSelectedCabinets.length<2){ multiSelectedCabinets=[]; return; }   // need at least 2 cabinets to make "multi-select" meaningful
+  clearSelectionHighlight();
+  highlightMeshes(selectableMeshes.filter(function(m){ return multiSelectedCabinets.indexOf(m.userData.cabinetIndex)>=0; }));
+  showMultiSelectMenu(ev.clientX,ev.clientY);
+}
+function showMultiSelectMenu(x,y){
+  var el=document.getElementById('multi-menu');
+  var hostRect=document.getElementById('canvas-host').getBoundingClientRect();
+  el.style.left=Math.min(x,hostRect.right-220)+'px'; el.style.top=Math.min(y,hostRect.bottom-260)+'px'; el.style.display='block';
+  el.innerHTML='<div style="font-weight:700;">'+multiSelectedCabinets.length+' cabinets selected</div>'
+    +'<button type="button" class="mm-del" id="mm-delete">🗑 Delete these cabinets</button>'
+    +'<div class="mm-row"><label>Door for all</label><select id="mm-door"><option value="">— choose —</option>'+DOOR_OPTS.map(function(o){return '<option value="'+o+'">'+o+'</option>';}).join('')+'</select></div>'
+    +'<div class="mm-row"><label>Split all into</label><select id="mm-split"><option value="">— choose —</option>'+[1,2,3,4].map(function(n){return '<option value="'+n+'">'+n+(n===1?' (none)':'')+'</option>';}).join('')+'</select></div>'
+    +'<button type="button" id="mm-view">👁 View only these</button>'
+    +'<button type="button" id="mm-cancel">Cancel</button>';
+  document.getElementById('mm-delete').addEventListener('click',function(){
+    multiSelectedCabinets.forEach(function(idx){ manualDeletedCabinets[idx]=true; });
+    hideMultiMenu(); applyAllAiCabinets();
+  });
+  document.getElementById('mm-door').addEventListener('change',function(){
+    var v=this.value; if(!v) return;
+    multiSelectedCabinets.forEach(function(idx){ manualDoorOverrides[idx]=v; });
+    multiSelectedCabinets.forEach(function(idx){ refreshCabinet(idx); });
+    hideMultiMenu();
+  });
+  document.getElementById('mm-split').addEventListener('change',function(){
+    var n=+this.value; if(!this.value) return;
+    multiSelectedCabinets.forEach(function(idx){ if(n<=1) delete manualModuleCount[idx]; else manualModuleCount[idx]=n; });
+    multiSelectedCabinets.forEach(function(idx){ refreshCabinet(idx); });
+    hideMultiMenu();
+  });
+  document.getElementById('mm-view').addEventListener('click',function(){
+    isolatedCabinetIndices=multiSelectedCabinets.slice();
+    renderCombinedScene(window._sceneCabinets);
+    hideMultiMenu();
+  });
+  document.getElementById('mm-cancel').addEventListener('click',hideMultiMenu);
+}
+function hideMultiMenu(){ document.getElementById('multi-menu').style.display='none'; multiSelectedCabinets=[]; clearSelectionHighlight(); hidePartInfo(); }
 function toggleFullscreen(){
   var host=document.getElementById('canvas-host');
   if(!document.fullscreenElement && !document.webkitFullscreenElement){
@@ -879,6 +985,7 @@ function adjustEbt(cabIndex,partName,which,delta){
 function renderScene(groups){
   while(cabGroup.children.length) cabGroup.remove(cabGroup.children[0]);
   selectableMeshes=[]; selectedMeshes=[]; hidePartInfo();
+  doorGroupRegistry={};   // live Three.js refs don't survive a rebuild -- doorOpenState (the actual open/closed fact) does, and gets re-applied to each new group below
   var S=0.001, used={};
   groups.forEach(function(grp){
     var xOff=grp.xOffset||0, yOff=grp.yOffset||0, cabIdx=grp.cabinetIndex||1;
@@ -906,18 +1013,37 @@ function renderScene(groups){
         used[pt.role]=true; return;
       }
       if(!pt.boxes || !pt.boxes.length) return; used[pt.role]=true;
-      pt.boxes.forEach(function(b){
+      var isHingedDoor=/door/i.test(pt.name) && !/drawer|pull-?out/i.test(pt.name);   // real swinging doors only -- not drawer/pull-out fronts
+      pt.boxes.forEach(function(b,bi){
         var ex=0,ey=0,ez=0;
         if(explodedOn){
           var dx=b.x-cx, dy=b.y-cy, dz=b.z-cz, len=Math.sqrt(dx*dx+dy*dy+dz*dz)||1, dist=260;
           ex=dx/len*dist; ey=dy/len*dist; ez=dz/len*dist;
         }
         var g=new THREE.BoxGeometry(b.sx*S,b.sy*S,b.sz*S);
-        var m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color:col,transparent:opacity<1,opacity:opacity}));
-        m.position.set((b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
-        m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col};
-        cabGroup.add(m); selectableMeshes.push(m);
-        var e=new THREE.LineSegments(new THREE.EdgesGeometry(g),new THREE.LineBasicMaterial({color:edgeCol})); e.position.copy(m.position); cabGroup.add(e);
+        var mat=new THREE.MeshLambertMaterial({color:col,transparent:opacity<1,opacity:opacity});
+        var m=new THREE.Mesh(g,mat);
+        var eGeo=new THREE.EdgesGeometry(g), e=new THREE.LineSegments(eGeo,new THREE.LineBasicMaterial({color:edgeCol}));
+        if(isHingedDoor){
+          // double doors: leaf 0 (leftmost) hinges on its LEFT edge, leaf 1 hinges on its RIGHT edge (opens outward, like French doors); a lone single door defaults to a LEFT hinge.
+          var hingeSign=(pt.boxes.length>1)?(bi===0?1:-1):1;
+          var hingeX=b.x+(hingeSign>0?-b.sx/2:b.sx/2);
+          var grp=new THREE.Group();
+          grp.position.set((hingeX+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
+          var localX=(hingeSign>0?1:-1)*(b.sx/2);
+          m.position.set(localX*S,0,0); e.position.copy(m.position);
+          grp.add(m); grp.add(e); cabGroup.add(grp);
+          var dkey=cabIdx+'::'+pt.name+'::'+bi;
+          grp.rotation.y=doorOpenState[dkey]?hingeSign*DOOR_OPEN_ANGLE:0;
+          doorGroupRegistry[dkey]={group:grp,hingeSign:hingeSign};
+          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,isDoor:true,boxIndex:bi};
+        } else {
+          m.position.set((b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
+          e.position.copy(m.position);
+          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col};
+          cabGroup.add(m); cabGroup.add(e);
+        }
+        selectableMeshes.push(m);
       });
     });
   });
@@ -1186,8 +1312,9 @@ function refreshCabinet(cabIndex){
    the AI's own left-to-right index, not raw array order — the AI doesn't always return
    cabinets in reading order) and at their real height off the floor, instead of one
    cabinet at a time all sitting on the ground. */
+var manualDeletedCabinets={};   // whole-cabinet delete (multi-select), keyed by cabinet index -- distinct from manualDeletedParts (one part within a cabinet)
 function applyAllAiCabinets(){
-  var cabinets=(window._aiCabinets||[]).filter(function(c){ return SUPPORTED_TYPES.indexOf(c.type)>=0; });
+  var cabinets=(window._aiCabinets||[]).filter(function(c){ return SUPPORTED_TYPES.indexOf(c.type)>=0 && !manualDeletedCabinets[c.index]; });
   if(!cabinets.length){ document.getElementById('ai-status').textContent='No auto-fillable cabinets to combine.'; return; }
   cabinets=cabinets.slice().sort(function(a,b){ return (a.index||0)-(b.index||0); });
   var xOff=0, built=[];
@@ -1201,10 +1328,10 @@ function applyAllAiCabinets(){
   renderCombinedScene(built);
   document.getElementById('ai-status').textContent='Rendered '+built.length+' cabinet(s) as one combined 3D twin — left-click a part to inspect/edit it, right-click a cabinet to isolate it, toggle Exploded view above the canvas.';
 }
-var isolatedCabinetIndex=null;
+var isolatedCabinetIndices=null;   // array of cabinet indices, or null = show all. Set by both single right-click isolation and multi-select "View only these".
 function renderCombinedScene(built){
-  var visible=isolatedCabinetIndex!=null?built.filter(function(b){return b.index===isolatedCabinetIndex;}):built;
-  renderScene(visible.map(function(b){ return {parts:b.result.parts,xOffset:isolatedCabinetIndex!=null?0:b.xOffset,yOffset:isolatedCabinetIndex!=null?0:b.yOffset,cabinetIndex:b.index}; }));
+  var visible=isolatedCabinetIndices!=null?built.filter(function(b){return isolatedCabinetIndices.indexOf(b.index)>=0;}):built;
+  renderScene(visible.map(function(b){ return {parts:b.result.parts,xOffset:b.xOffset,yOffset:b.yOffset,cabinetIndex:b.index}; }));   // real offsets preserved even when isolating several at once, so they stay correctly positioned relative to each other -- renderScene's own auto X/Z-centering frames whatever's visible
   var bd=BOARDS['4x8']; BOARD=bd;   // combined view: default board for the estimate (per-cabinet material choice is a future refinement)
   var tb=document.querySelector('#parts tbody'); tb.innerHTML='';
   var hb=document.querySelector('#hw tbody'); hb.innerHTML='';
@@ -1230,7 +1357,7 @@ function renderCombinedScene(built){
   });
   var sheets=(boardArea/((bd.w/1000)*(bd.h/1000))).toFixed(2);
   document.getElementById('summary').innerHTML=
-    '<div class="stat"><b>'+visible.length+'</b><span>cabinet'+(visible.length===1?'':'s')+(isolatedCabinetIndex!=null?' (isolated)':' combined')+'</span></div>'
+    '<div class="stat"><b>'+visible.length+'</b><span>cabinet'+(visible.length===1?'':'s')+(isolatedCabinetIndices!=null?' (isolated)':' combined')+'</span></div>'
    +'<div class="stat"><b>'+totalPieces+'</b><span>total pieces</span></div>'
    +'<div class="stat"><b>'+(totalTape/1000).toFixed(2)+' m</b><span>edge tape</span></div>'
    +'<div class="stat"><b>'+boardArea.toFixed(2)+' m²</b><span>board area</span></div>'
@@ -1238,7 +1365,7 @@ function renderCombinedScene(built){
    +(spCount>0?'<div class="stat" style="background:#fde2e2"><b style="color:#c01616">'+spCount+'</b><span>special cut(s)</span></div>':'')
    +(divCount>0?'<div class="stat" style="background:#fff0e0"><b style="color:#c2680e">'+divCount+'</b><span>over board → divide</span></div>':'');
   var isoBtn=document.getElementById('isolation-btn');
-  if(isoBtn){ isoBtn.style.display=isolatedCabinetIndex!=null?'inline-flex':'none'; isoBtn.textContent='← Show all (viewing Cabinet '+isolatedCabinetIndex+')'; }
+  if(isoBtn){ isoBtn.style.display=isolatedCabinetIndices!=null?'inline-flex':'none'; isoBtn.textContent=isolatedCabinetIndices!=null?('← Show all (viewing '+(isolatedCabinetIndices.length===1?'Cabinet '+isolatedCabinetIndices[0]:isolatedCabinetIndices.length+' cabinets')+')'):''; }
 }
 function applyAiCabinet(idx){
   var c=(window._aiCabinets||[])[idx]; if(!c) return;
