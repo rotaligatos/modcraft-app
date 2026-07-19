@@ -67,7 +67,7 @@
 <div class="wrap">
   <div class="panel">
     <div class="ai-box">
-      <h2 style="margin-top:0;">Phase 4 · AI reads a drawing <span class="tag" style="margin-left:4px;">base cabinets only</span></h2>
+      <h2 style="margin-top:0;">Phase 4 · AI reads a drawing <span class="tag" style="margin-left:4px;">multi-cabinet · 9 confirmed types</span></h2>
       <div class="fld"><label>Claude API key</label><input id="ai-key" type="password" placeholder="sk-ant-..."></div>
       <div class="fld"><label>Elevation / technical drawing (image)</label><input id="ai-file" type="file" accept="image/*"></div>
       <button id="ai-btn" type="button">Analyze drawing</button>
@@ -696,13 +696,24 @@ function typeDefaults(type){
    exactly as it does for manual slider input. Base cabinets only, this pass.
    ============================================================ */
 var AI_KEY_STORAGE='pocClaudeKey';
-var AI_PROMPT = "You are looking at a furniture elevation / technical drawing / dimensioned sketch. "
- +"Your ONLY job is to extract INTENT: what type of cabinet this is, its overall outer dimensions, and its material. "
+var SUPPORTED_TYPES=['base','wall','tall','drawer','sink','corner','cornerwall','openshelf','microwave'];
+var TYPE_LABELS={base:'Base cabinet',wall:'Wall / upper cabinet',tall:'Tall / pantry cabinet',drawer:'Drawer base',sink:'Sink / open base',corner:'Corner base (L-shape)',cornerwall:'Corner wall (L-shape)',openshelf:'Open shelf unit',microwave:'Microwave / appliance cabinet'};
+var CORNER_RW_DEFAULT={corner:900,cornerwall:600};
+var AI_PROMPT = "You are looking at a furniture elevation / technical drawing that may show ONE OR MORE cabinets side by side. "
+ +"Identify EVERY distinct cabinet in the drawing, left to right. For each cabinet, extract INTENT ONLY: its type, overall outer dimensions, and material. "
  +"Do NOT compute panel breakdowns, edge-banding (EBT) codes, or hardware — a separate deterministic rules engine does that from the numbers you give it. "
- +"A 'base cabinet' is a floor-standing cabinet that sits on toe-kick/legs, typically ~720mm tall, meant to sit under a countertop — NOT a wall/upper cabinet, NOT a tall/pantry unit, NOT a corner unit. "
+ +"Use shared context across the WHOLE drawing (the floor line, toe-kick, common dimension lines, adjacent cabinets) to judge each cabinet correctly, even if that one cabinet's own dimensioning looks incomplete on its own — e.g. a toe-kick drawn once for the whole run still means every floor-standing cabinet in that run has one. "
+ +"Classify each cabinet as ONE of exactly these supported types, or 'unsupported' if it clearly doesn't match any: "
+ +"'base' (floor-standing, sits on toe-kick/legs, ~720mm tall, single/double door or open, not a drawer stack, not under a sink), "
+ +"'wall' (hangs on the wall, no toe-kick, shallower depth, typically ~300-450mm from floor-standing cabinets), "
+ +"'tall' (floor-standing pantry/tall unit, much taller than base, e.g. >1400mm), "
+ +"'drawer' (floor-standing, front is all/mostly stacked drawer fronts, not a single door), "
+ +"'sink' (floor-standing, open underneath or has a plumbing cutout, positioned under a sink/counter), "
+ +"'corner' (L-shaped floor-standing corner unit), 'cornerwall' (L-shaped wall-hung corner unit), "
+ +"'openshelf' (no doors at all, open shelving), 'microwave' (wall-hung with an open appliance cavity). "
  +"Respond with ONLY a single JSON object, no markdown fences, no other text, in exactly this shape:\n"
- +'{"isBaseCabinet":true|false,"detectedTypeGuess":"short description of what it actually looks like","width_mm":number,"height_mm":number,"depth_mm":number,"material":"pb"|"compact","confidence":"high"|"medium"|"low","notes":"any ambiguity, illegible dimension, or assumption you made"}\n'
- +"If a dimension is not legible or not given, make your best estimate from proportions/scale in the drawing and say so in notes — never leave a numeric field blank.";
+ +'{"cabinets":[{"index":1,"type":"base"|"wall"|"tall"|"drawer"|"sink"|"corner"|"cornerwall"|"openshelf"|"microwave"|"unsupported","detectedTypeGuess":"short description — required if type is unsupported or unclear","width_mm":number,"height_mm":number,"depth_mm":number,"material":"pb"|"compact","confidence":"high"|"medium"|"low","notes":"any ambiguity, illegible dimension, or shared-context assumption you made for THIS cabinet"}],"overallNotes":"anything about the drawing as a whole"}\n'
+ +"List cabinets left to right as they appear. If a dimension is not legible or not given for a specific cabinet, make your best estimate from proportions/scale/shared dimension lines and say so in notes — never leave a numeric field blank. If you see only one cabinet, return an array with one entry.";
 function fileToBase64(file){
   return new Promise(function(resolve,reject){
     var r=new FileReader();
@@ -752,38 +763,56 @@ function analyzeDrawing(){
     btn.disabled=false; btn.textContent='Analyze drawing';
   });
 }
-function renderAiResult(r){
+function renderAiResult(data){
   var resultEl=document.getElementById('ai-result');
-  if(!r.isBaseCabinet){
-    resultEl.innerHTML='<div class="ai-result flag">'
-      +'<b style="color:#c2680e">Not auto-filled</b> — this first pass only wires up base cabinets.<br>'
-      +"AI's guess: <i>"+(r.detectedTypeGuess||'unclear')+'</i>'
-      +(r.notes?('<div class="note">Notes: '+r.notes+'</div>'):'')
-      +'<div class="note">Select the type manually on the left, or wait for Phase 4 to expand to more types.</div>'
+  var cabinets=(data&&data.cabinets)||[];
+  if(!cabinets.length){ resultEl.innerHTML='<div class="ai-result flag">AI did not return any cabinets. Try a clearer image.</div>'; return; }
+  window._aiCabinets=cabinets;
+  var html='';
+  if(data.overallNotes) html+='<div class="note" style="margin:2px 0 8px;">Overall: '+data.overallNotes+'</div>';
+  cabinets.forEach(function(c,i){
+    var num=c.index||(i+1);
+    if(SUPPORTED_TYPES.indexOf(c.type)<0){
+      html+='<div class="ai-result flag">'
+        +'<b style="color:#c2680e">Cabinet '+num+' — not auto-fillable</b><br>'
+        +"AI's guess: <i>"+(c.detectedTypeGuess||c.type||'unclear')+'</i>'
+        +(c.notes?('<div class="note">Notes: '+c.notes+'</div>'):'')
+        +'<div class="note">Select the type manually on the left for this one, or wait for Phase 4 to expand.</div>'
+        +'</div>';
+      return;
+    }
+    var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,2700), d=clampDim(c.depth_mm,280,650);
+    var clamped=(w!==Math.round(c.width_mm)||h!==Math.round(c.height_mm)||d!==Math.round(c.depth_mm));
+    html+='<div class="ai-result">'
+      +'<div><b>Cabinet '+num+':</b> '+(TYPE_LABELS[c.type]||c.type)+' <span class="tag">confidence: '+(c.confidence||'?')+'</span></div>'
+      +'<div>Width × Height × Depth: '+w+' × '+h+' × '+d+' mm'+(clamped?' <span class="op">(clamped to engine range)</span>':'')+'</div>'
+      +'<div>Material: '+(c.material==='compact'?'Compact laminate':'PB / MDF / Plywood')+'</div>'
+      +(c.notes?('<div class="note">Notes: '+c.notes+'</div>'):'')
+      +'<button type="button" class="ai-apply-cab-btn" data-idx="'+i+'">Apply cabinet '+num+' to engine →</button>'
       +'</div>';
-    return;
-  }
-  var w=clampDim(r.width_mm,300,1200), h=clampDim(r.height_mm,300,2700), d=clampDim(r.depth_mm,280,650);
-  var clamped=(w!==Math.round(r.width_mm)||h!==Math.round(r.height_mm)||d!==Math.round(r.depth_mm));
-  resultEl.innerHTML='<div class="ai-result">'
-    +'<div><b>Detected:</b> Base cabinet <span class="tag">confidence: '+(r.confidence||'?')+'</span></div>'
-    +'<div>Width × Height × Depth: '+w+' × '+h+' × '+d+' mm'+(clamped?' <span class="op">(clamped to engine range)</span>':'')+'</div>'
-    +'<div>Material: '+(r.material==='compact'?'Compact laminate':'PB / MDF / Plywood')+'</div>'
-    +(r.notes?('<div class="note">Notes: '+r.notes+'</div>'):'')
-    +'<button id="ai-apply-btn" type="button">Apply to engine →</button>'
-    +'</div>';
-  document.getElementById('ai-apply-btn').addEventListener('click',function(){ applyAiResult(w,h,d,r.material); });
+  });
+  resultEl.innerHTML=html;
+  Array.prototype.forEach.call(resultEl.querySelectorAll('.ai-apply-cab-btn'),function(btn){
+    btn.addEventListener('click',function(){ applyAiCabinet(+btn.getAttribute('data-idx')); });
+  });
 }
-function applyAiResult(w,h,d,material){
-  document.getElementById('p-type').value='base';
-  applyTypeUI('base');
+function applyAiCabinet(idx){
+  var c=(window._aiCabinets||[])[idx]; if(!c) return;
+  var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,2700), d=clampDim(c.depth_mm,280,650);
+  document.getElementById('p-type').value=c.type;
+  applyTypeUI(c.type);
   document.getElementById('p-w').value=w;
   document.getElementById('p-h').value=h;
   document.getElementById('p-d').value=d;
-  document.getElementById('p-material').value=(material==='compact'?'compact':'pb');
+  document.getElementById('p-material').value=(c.material==='compact'?'compact':'pb');
+  var note='';
+  if(CORNER_RW_DEFAULT[c.type]){
+    document.getElementById('p-rwidth').value=CORNER_RW_DEFAULT[c.type];
+    note=' Right-leg width defaulted to '+CORNER_RW_DEFAULT[c.type]+'mm — an elevation view alone doesn\'t show it; check the plan view and adjust manually if needed.';
+  }
   updateBoardOptions();
   render();
-  document.getElementById('ai-status').textContent='Applied — engine generated the cut list below from AI-extracted dimensions.';
+  document.getElementById('ai-status').textContent='Applied cabinet '+(c.index||(idx+1))+' ('+(TYPE_LABELS[c.type]||c.type)+') — engine generated the cut list below.'+note;
 }
 
 function render(){
