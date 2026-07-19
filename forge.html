@@ -415,6 +415,13 @@ function buildWall(p){
   return {parts:parts,hardware:hw};
 }
 var MODULE_MAX=2440;   // 8ft — a tall cabinet taller than this is split into stacked modular cabinets
+/* Only 'tall' actually supports the stacked-module build path (buildTall's own auto-split,
+   or a manual Split choice) -- every other type is a single carcass, so its real-world
+   height ceiling stays 2700mm. Without this, a genuinely tall unit read off a real drawing
+   (e.g. a 4000mm+ floor-to-ceiling wardrobe wall) got silently clamped down to 2700mm here,
+   before buildTall ever saw it -- defeating the whole point of MODULE_MAX stacking and
+   under-reporting the cabinet's true height by however much was clamped away. */
+function maxHeightForType(type){ return type==='tall'?(MODULE_MAX*4):2700; }
 function buildTall(p){
   // > 8ft: divide the height into N stacked modular cabinets (each a complete cabinet), stacked to the total height
   // skipAutoModuleSplit: the user already chose an explicit manual split count (or independent modules) upstream -- don't let this auto-split add MORE modules on top of that choice.
@@ -920,7 +927,7 @@ function buildCabActionsHtml(cabIndex){
     +'<button type="button" id="add-shelf-btn">+ Shelf</button>';
   if(isModule){
     var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
-    html+='<div class="mm-row"><label>Module '+(entry?entry.moduleIdx:'?')+'/'+(entry?entry.moduleOf:'?')+' — height (mm)</label>'
+    html+='<div class="mm-row"><label>Module '+(entry?entry.moduleIdx:'?')+'/'+(entry?entry.moduleOf:'?')+' — height (mm) — the other module'+((entry&&entry.moduleOf>2)?'s':'')+' will auto-adjust to keep the total height</label>'
       +'<div style="display:flex;gap:6px;"><input type="number" id="module-height-input" value="'+(entry?Math.round(entry.params.h):'')+'" style="flex:1;"><button type="button" id="apply-module-height-btn" style="width:auto;padding:4px 8px;">Apply</button></div></div>';
   } else {
     html+='<span>Split:</span><select id="module-select">'+[1,2,3,4].map(function(nn){return '<option value="'+nn+'"'+(nn===n?' selected':'')+'>'+nn+(nn===1?' (none)':'')+'</option>';}).join('')+'</select>';
@@ -951,7 +958,7 @@ function wireCabActionsHandlers(cabIndex){
   document.getElementById('add-shelf-btn').addEventListener('click',function(){ addShelf(cabIndex); });
   if(isModule){
     document.getElementById('apply-module-height-btn').addEventListener('click',function(){
-      var h=+document.getElementById('module-height-input').value; if(h>0){ manualHeightOverride[cabIndex]=h; refreshIndependentModule(cabIndex); showCabinetInfo(cabIndex); }
+      var h=+document.getElementById('module-height-input').value; if(h>0){ applyModuleHeightWithCompensation(cabIndex,h); showCabinetInfo(cabIndex); }
     });
   } else {
     document.getElementById('module-select').addEventListener('change',function(){ changeModuleCount(cabIndex,+this.value); });
@@ -1284,7 +1291,7 @@ function renderAiResult(data){
         +'</div>';
       return;
     }
-    var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,2700), d=clampDim(c.depth_mm,280,650);
+    var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,maxHeightForType(c.type)), d=clampDim(c.depth_mm,280,650);
     var clamped=(w!==Math.round(c.width_mm)||h!==Math.round(c.height_mm)||d!==Math.round(c.depth_mm));
     var nv=c.needsVerification||{}, flags=['type','width','height','depth','door','floorOffset'].filter(function(k){return nv[k];});
     var verifyHtml=flags.length?'<div style="color:#c2680e;font-weight:600;font-size:11px;margin-top:2px;">⚠ Verify: '+flags.map(function(k){return k==='floorOffset'?'Mount height':(k[0].toUpperCase()+k.slice(1));}).join(', ')+' — see notes</div>':'';
@@ -1315,8 +1322,8 @@ function renderAiResult(data){
    the AI never reads (backing type, exposed ends, handle, thickness) with sensible
    defaults — same defaults the manual sidebar controls start with. */
 function buildParamsFromAiCabinet(c){
-  var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,2700), d=clampDim(c.depth_mm,280,650);
   var type=SUPPORTED_TYPES.indexOf(c.type)>=0?c.type:'base';
+  var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,maxHeightForType(type)), d=clampDim(c.depth_mm,280,650);
   var door=['single','double','bifold','pullout','none'].indexOf(c.door)>=0?c.door:'single';
   var shelfType=(c.shelfType==='fixed')?'fixed':'adjustable';
   var shelfCount=clampDim(c.shelfCount!=null?c.shelfCount:1,0,6);
@@ -1437,6 +1444,24 @@ function refreshIndependentModule(subIndex){
     if(idx>=0) window._sceneCabinets[idx]=mm; else window._sceneCabinets.push(mm);
   });
   renderCombinedScene(window._sceneCabinets);
+}
+/* Resizing one independent module's height must not silently change the cabinet's overall
+   height -- the other sibling module(s) auto-adjust (evenly split the remaining height) so
+   the total stays exactly what the AI originally read off the drawing. Without this, each
+   module's height was independent with no relationship to the others at all. */
+function applyModuleHeightWithCompensation(subIndex,newH){
+  var entry=(window._sceneCabinets||[]).filter(function(b){ return b.index===subIndex; })[0];
+  if(!entry){ manualHeightOverride[subIndex]=newH; refreshIndependentModule(subIndex); return; }
+  var parentIndex=entry.parentIndex, n=entry.moduleOf;
+  var c=(window._aiCabinets||[]).filter(function(cc){ return (cc.index||0)===parentIndex; })[0];
+  var siblings=[]; for(var i=1;i<=n;i++){ var si=parentIndex+'.'+i; if(si!==subIndex) siblings.push(si); }
+  if(!c || !siblings.length){ manualHeightOverride[subIndex]=newH; refreshIndependentModule(subIndex); return; }
+  var totalH=buildParamsFromAiCabinet(c).h;
+  newH=Math.min(newH,Math.max(50,totalH-50*siblings.length));   // leave every sibling at least 50mm so none collapses to zero/negative
+  manualHeightOverride[subIndex]=newH;
+  var each=Math.max(50,(totalH-newH)/siblings.length);
+  siblings.forEach(function(si){ manualHeightOverride[si]=each; });
+  refreshIndependentModule(subIndex);
 }
 /* Routes an edit action's refresh to the right mechanism depending on whether the index is
    a normal cabinet (number) or an independent module (a "N.M" sub-index string). */
