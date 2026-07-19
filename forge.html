@@ -718,7 +718,59 @@ var scene,camera,renderer,controls,cabGroup,composer,bloomPass;
 var explodedOn=false, solidOn=true, selectableMeshes=[], selectedMeshes=[], _partLevelSelected=false;
 var doorOpenState={}, doorGroupRegistry={}, doorTargetAngle={}, DOOR_OPEN_ANGLE=Math.PI*0.55;   // ~99° -- swings past perpendicular so "open" reads clearly
 var RAY=null, MOUSE=null;
-var EDGE_GLOW=0x22e8ff, EDGE_BANDED=0xff4d4d, SELECT_GLOW=0xff9d2e;   // TRON edges: cyan=no edgeband, red=has edgeband, amber=selected (bloom makes these actually glow)
+var EDGE_GLOW=0x22e8ff, EDGE_BANDED=0x39ff6a, SELECT_GLOW=0xff9d2e;   // TRON edges: cyan=part outline (no banding-location info), neon green=edgeband (see edgeBandStrips), amber=selected (bloom makes these actually glow)
+/* Edge-banding visualization: highlights WHICH specific panel edges are banded, not just
+   "this part has banding somewhere" -- the old whole-part red/cyan outline told you nothing
+   about location, which is what made it hard to actually see on a real part. Only meaningful
+   for genuinely flat panels (one axis clearly thin relative to the other two, matched against
+   the part's own recorded thickness pt.t) -- corner cabinets' L-shaped poly parts fall back to
+   the older whole-part outline color below since polygon-edge banding isn't modeled yet.
+   Count-based, not per-named-edge (see Round 2's documented EBT scope limit): when only 1 of
+   2 short/long edges is banded we can't know WHICH one from the data, so this canonically
+   lights up the "near" (-axis) side first, then the "far" (+axis) side if both are banded --
+   consistent every render, not necessarily the exact physical edge if only 1 of 2 is banded. */
+function edgeBandStrips(b,pt){
+  var dims=[b.sx,b.sy,b.sz], t=pt.t||18;
+  var tAxis=0; for(var i=1;i<3;i++){ if(Math.abs(dims[i]-t)<Math.abs(dims[tAxis]-t)) tAxis=i; }
+  var plane=[0,1,2].filter(function(i){ return i!==tAxis; }), a0=plane[0], a1=plane[1];
+  if(Math.min(dims[a0],dims[a1])<=dims[tAxis]*1.3) return [];   // not a clearly-flat panel (legs, blocks, small hardware) -- skip, whole-part outline still shows
+  var longAxis=dims[a0]>=dims[a1]?a0:a1, shortAxis=(longAxis===a0)?a1:a0;
+  var ev=parseEbt(pt.ebt), bw=Math.max(3,Math.min(10,dims[tAxis]*0.5)), strips=[];
+  function mk(crossAxis,crossSign){
+    var size=[dims[0]*1.02,dims[1]*1.02,dims[2]*1.02]; size[crossAxis]=bw;   // slight inflate on the other 2 axes so the band doesn't z-fight the parent panel's own surface
+    var off=[0,0,0]; off[crossAxis]=crossSign*(dims[crossAxis]/2-bw/2);
+    return {size:size,offset:off};
+  }
+  if(ev.l>=1) strips.push(mk(shortAxis,-1));
+  if(ev.l>=2) strips.push(mk(shortAxis,1));
+  if(ev.s>=1) strips.push(mk(longAxis,-1));
+  if(ev.s>=2) strips.push(mk(longAxis,1));
+  return strips;
+}
+/* Builds and attaches the actual band mesh(es) for one box: solid view = filled neon-green
+   fill (visible from any angle, matches the user's "shade the whole area" request); glass/
+   TRON view = a green wireframe outline of just that edge strip (not the whole part), so the
+   existing part silhouette stays visually distinct from the banding indicator. parentObj is
+   either cabGroup (regular part) or the door's hinge THREE.Group (so bands swing with the
+   door); localOffset/localScale let the caller pass the same S-scaled world/local transform
+   convention already used for the part's own mesh. */
+function addEdgeBandMeshes(parentObj,b,pt,S,basePos){
+  var strips=edgeBandStrips(b,pt);
+  strips.forEach(function(st){
+    var pos=[basePos[0]+st.offset[0]*S, basePos[1]+st.offset[1]*S, basePos[2]+st.offset[2]*S];
+    if(solidOn){
+      var g=new THREE.BoxGeometry(st.size[0]*S,st.size[1]*S,st.size[2]*S);
+      var mesh=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:EDGE_BANDED}));
+      mesh.position.set(pos[0],pos[1],pos[2]);
+      parentObj.add(mesh);
+    } else {
+      var g2=new THREE.BoxGeometry(st.size[0]*S,st.size[1]*S,st.size[2]*S);
+      var outline=new THREE.LineSegments(new THREE.EdgesGeometry(g2),new THREE.LineBasicMaterial({color:EDGE_BANDED}));
+      outline.position.set(pos[0],pos[1],pos[2]);
+      parentObj.add(outline);
+    }
+  });
+}
 function initThree(){
   var host=document.getElementById('canvas-host');
   scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070c);
@@ -1083,7 +1135,7 @@ function renderScene(groups){
       if(!pt.role) return;
       var col=PART_COLORS[pt.role].c;
       var opacity=solidOn?1:((pt.role==='door')?.3:.5);   // solid = legend colors read clearly; glass = TRON glow-through look
-      var evv=parseEbt(pt.ebt), edgeCol=(evv.s>0||evv.l>0)?EDGE_BANDED:EDGE_GLOW;   // red edge outline = this part has edgeband somewhere, cyan = none
+      var evv=parseEbt(pt.ebt), edgeCol=(evv.s>0||evv.l>0)?EDGE_BANDED:EDGE_GLOW;   // poly (L-shaped corner) parts only -- box parts get precise per-edge bands via edgeBandStrips below instead. Green = has banding somewhere, cyan = none.
       if(pt.poly){
         var shape=new THREE.Shape();
         pt.poly.forEach(function(pp,idx){ if(idx===0) shape.moveTo((pp[0]+xOff)*S,pp[1]*S); else shape.lineTo((pp[0]+xOff)*S,pp[1]*S); });
@@ -1110,7 +1162,7 @@ function renderScene(groups){
         var g=new THREE.BoxGeometry(b.sx*S,b.sy*S,b.sz*S);
         var mat=new THREE.MeshLambertMaterial({color:col,transparent:opacity<1,opacity:opacity});
         var m=new THREE.Mesh(g,mat);
-        var eGeo=new THREE.EdgesGeometry(g), e=new THREE.LineSegments(eGeo,new THREE.LineBasicMaterial({color:edgeCol}));
+        var eGeo=new THREE.EdgesGeometry(g), e=new THREE.LineSegments(eGeo,new THREE.LineBasicMaterial({color:EDGE_GLOW}));   // whole-part outline is always neutral now -- edgeBandStrips below carries the actual banding info, at the actual banded edge location
         if(isHingedDoor){
           // double doors: leaf trueIndex 0 (leftmost) hinges on its LEFT edge, any other leaf hinges on its RIGHT edge (opens outward, like French doors); based on the box's TRUE original leaf identity so a surviving leaf keeps its correct hinge side even after its sibling is deleted.
           var hingeSign=(trueIndex===0)?1:-1;
@@ -1124,11 +1176,13 @@ function renderScene(groups){
           grp.rotation.y=doorOpenState[dkey]?hingeSign*DOOR_OPEN_ANGLE:0;
           doorGroupRegistry[dkey]={group:grp,hingeSign:hingeSign};
           m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,isDoor:true,boxIndex:trueIndex};
+          addEdgeBandMeshes(grp,b,pt,S,[localX*S,0,0]);   // band meshes join the hinge group so they swing with the door
         } else {
           m.position.set((b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
           e.position.copy(m.position);
           m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:trueIndex};
           cabGroup.add(m); cabGroup.add(e);
+          addEdgeBandMeshes(cabGroup,b,pt,S,[(b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S]);
         }
         selectableMeshes.push(m);
       });
@@ -1142,8 +1196,8 @@ function renderScene(groups){
   var lg=document.getElementById('legend'),html='';
   Object.keys(PART_COLORS).forEach(function(role){ if(!used[role])return; var hex='#'+PART_COLORS[role].c.toString(16).padStart(6,'0'); html+='<div class="li"><span class="sw" style="background:'+hex+'"></span>'+PART_COLORS[role].label+'</div>'; });
   html+='<div class="ebt-key">'
-    +'<div class="li"><span class="sw" style="background:#'+EDGE_BANDED.toString(16).padStart(6,'0')+'"></span>Outline = has edgeband</div>'
-    +'<div class="li"><span class="sw" style="background:#'+EDGE_GLOW.toString(16).padStart(6,'0')+'"></span>Outline = no edgeband</div>'
+    +'<div class="li"><span class="sw" style="background:#'+EDGE_BANDED.toString(16).padStart(6,'0')+'"></span>'+(solidOn?'Shaded edge':'Green outline')+' = has edgeband here</div>'
+    +'<div class="li"><span class="sw" style="background:#'+EDGE_GLOW.toString(16).padStart(6,'0')+'"></span>Part outline (no banding info)</div>'
     +'</div>';
   lg.innerHTML=html;
 }
