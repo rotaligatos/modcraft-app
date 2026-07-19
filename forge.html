@@ -1112,8 +1112,13 @@ function toggleFullscreen(){
 function buildCabActionsHtml(cabIndex){
   var isModule=typeof cabIndex==='string' && cabIndex.indexOf('.')>=0;
   var n=isModule?1:(manualModuleCount[cabIndex]||1);
-  var html='<div class="cab-actions">'
-    +'<span>Door:</span><select id="door-select">'+DOOR_OPTS.map(function(o){return '<option value="'+o+'"'+(o===(manualDoorOverrides[cabIndex]||_currentDoorOf(cabIndex))?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'
+  var html='<div class="cab-actions">';
+  if(!isModule){
+    // type change is CABINET-level only, not per-module -- an independent stack's modules all share one type; reclassifying one module alone would break the stacking logic (tk/legs, join hardware) in ways not worth the complexity
+    var curType=_currentTypeOf(cabIndex);
+    html+='<span>Type:</span><select id="type-select">'+SUPPORTED_TYPES.map(function(t){return '<option value="'+t+'"'+(t===curType?' selected':'')+'>'+(TYPE_LABELS[t]||t)+'</option>';}).join('')+'</select>';
+  }
+  html+='<span>Door:</span><select id="door-select">'+DOOR_OPTS.map(function(o){return '<option value="'+o+'"'+(o===(manualDoorOverrides[cabIndex]||_currentDoorOf(cabIndex))?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'
     +'<span class="shelf-stepper"><button type="button" id="sub-shelf-btn">− Shelf</button><button type="button" id="add-shelf-btn">+ Shelf</button></span>';
   if(isModule){
     var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
@@ -1152,6 +1157,8 @@ function buildCabActionsHtml(cabIndex){
 }
 function wireCabActionsHandlers(cabIndex){
   var isModule=typeof cabIndex==='string' && cabIndex.indexOf('.')>=0;
+  var typeSelect=document.getElementById('type-select');
+  if(typeSelect) typeSelect.addEventListener('change',function(){ changeType(cabIndex,this.value); });
   document.getElementById('door-select').addEventListener('change',function(){ changeDoor(cabIndex,this.value); });
   document.getElementById('add-shelf-btn').addEventListener('click',function(){ addShelf(cabIndex); });
   document.getElementById('sub-shelf-btn').addEventListener('click',function(){ subShelf(cabIndex); });
@@ -1310,6 +1317,25 @@ function changeModuleCount(cabIndex,n){
 function _currentDoorOf(cabIndex){
   var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
   return entry?entry.params.door:'single';
+}
+function _currentTypeOf(cabIndex){
+  var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
+  return entry?entry.params.type:'base';
+}
+/* "Change of cabinet type" -- reclassify an already-detected/positioned cabinet (e.g. a
+   base misread as a sink, or just trying a different type on the same footprint) without
+   starting over. Type-dependent defaults (toe-kick, corner return-wall width, back panel
+   thickness) recompute for the NEW type, same logic buildParamsFromAiCabinet itself uses
+   for a fresh cabinet -- width/height/depth/door/shelf carry over as-is (best effort).
+   Known limitation, accepted rather than engineered around (same as Round 15's shelf-
+   type-split note): part-level overrides (deletes/resizes/EBT) keyed by the OLD type's
+   part names go harmlessly orphaned after a type change, since the new type's parts are
+   named/shaped differently -- a full reclassification is expected to need re-editing. */
+function changeType(cabIndex,newType){
+  if(SUPPORTED_TYPES.indexOf(newType)<0) return;
+  manualTypeOverrides[cabIndex]=newType;
+  refreshAny(cabIndex);
+  showCabinetInfo(cabIndex);
 }
 function deletePart(cabIndex,partName,boxIndex){
   manualDeletedParts[cabIndex+'::'+partName+'::'+boxIndex]=true;
@@ -1504,14 +1530,14 @@ function _currentOverridesSnapshot(){
     manualDoorOverrides:manualDoorOverrides, manualShelfDelta:manualShelfDelta, manualDeletedParts:manualDeletedParts,
     manualCustomParts:manualCustomParts, manualModuleCount:manualModuleCount, manualModuleIndependent:manualModuleIndependent,
     manualModuleHeights:manualModuleHeights, manualHeightOverride:manualHeightOverride, manualDeletedCabinets:manualDeletedCabinets,
-    manualEbtOverrides:manualEbtOverrides, manualPartSizeOverrides:manualPartSizeOverrides
+    manualEbtOverrides:manualEbtOverrides, manualPartSizeOverrides:manualPartSizeOverrides, manualTypeOverrides:manualTypeOverrides
   };
 }
 function _restoreOverridesSnapshot(ov){
   manualDoorOverrides=ov.manualDoorOverrides||{}; manualShelfDelta=ov.manualShelfDelta||{}; manualDeletedParts=ov.manualDeletedParts||{};
   manualCustomParts=ov.manualCustomParts||{}; manualModuleCount=ov.manualModuleCount||{}; manualModuleIndependent=ov.manualModuleIndependent||{};
   manualModuleHeights=ov.manualModuleHeights||{}; manualHeightOverride=ov.manualHeightOverride||{}; manualDeletedCabinets=ov.manualDeletedCabinets||{};
-  manualEbtOverrides=ov.manualEbtOverrides||{}; manualPartSizeOverrides=ov.manualPartSizeOverrides||{};
+  manualEbtOverrides=ov.manualEbtOverrides||{}; manualPartSizeOverrides=ov.manualPartSizeOverrides||{}; manualTypeOverrides=ov.manualTypeOverrides||{};
 }
 function saveDraft(){
   if(!window._aiCabinets || !window._aiCabinets.length){ alert('Nothing to save yet — analyze a drawing first.'); return; }
@@ -1559,11 +1585,20 @@ function loadDraftFile(file){
   r.onerror=function(){ _setDraftStatus('Could not read that file.','error'); };
   r.readAsText(file);
 }
-var SUPPORTED_TYPES=['base','wall','tall','drawer','sink','corner','cornerwall','openshelf','microwave'];
-var TYPE_LABELS={base:'Base cabinet',wall:'Wall / upper cabinet',tall:'Tall / pantry cabinet',drawer:'Drawer base',sink:'Sink / open base',corner:'Corner base (L-shape)',cornerwall:'Corner wall (L-shape)',openshelf:'Open shelf unit',microwave:'Microwave / appliance cabinet'};
+/* 'filler' added 2026-07-19 for fascia/soffit/bulkhead trim boards -- a real drawing
+   (MSSI "AFRICA SO" elevation) had a 100mm fascia strip across the top of the cabinet
+   run that the AI pipeline had no concept of at all (every other type is a full cabinet
+   carcass; this is just a single flat trim panel). buildFiller() already existed as a
+   PARKED, not-yet-plant-verified type (ported from poc_cabinet.html, never wired up to
+   the AI pipeline or SUPPORTED_TYPES) -- promoting it here since it's geometrically
+   exactly what a fascia is: a flat board of arbitrary width/height/thickness, positioned
+   via floorOffset_mm like a wall cabinet. First pass, same as every other type's initial
+   rollout this project -- expect follow-up fixes once tested against more real drawings. */
+var SUPPORTED_TYPES=['base','wall','tall','drawer','sink','corner','cornerwall','openshelf','microwave','filler'];
+var TYPE_LABELS={base:'Base cabinet',wall:'Wall / upper cabinet',tall:'Tall / pantry cabinet',drawer:'Drawer base',sink:'Sink / open base',corner:'Corner base (L-shape)',cornerwall:'Corner wall (L-shape)',openshelf:'Open shelf unit',microwave:'Microwave / appliance cabinet',filler:'Filler / fascia / trim panel'};
 var CORNER_RW_DEFAULT={corner:900,cornerwall:600};
 var AI_PROMPT = "You are looking at a furniture elevation / technical drawing that may show ONE OR MORE cabinets side by side. "
- +"Identify EVERY distinct cabinet in the drawing, left to right. For each cabinet, extract INTENT ONLY: its type, overall outer dimensions, and material. "
+ +"Identify EVERY distinct cabinet in the drawing, left to right, AND every fascia/soffit/bulkhead trim board (see the 'filler' type below — these are easy to miss since they're thin and drawn along the very top or bottom edge of the run, not a full cabinet box; a real drawing missed one exactly this way, so check specifically for a labeled or dimensioned strip above the topmost cabinets, below the bottommost, or between runs before finishing). For each cabinet or trim board, extract INTENT ONLY: its type, overall outer dimensions, and material. "
  +"Do NOT compute panel breakdowns, edge-banding (EBT) codes, or hardware — a separate deterministic rules engine does that from the numbers you give it. \n"
  +"STEP 1 — ESTABLISH BOUNDARIES FIRST, before anything else. Do this before reading doors, shelves, or fixtures. Find the drawing's own dimension chain for the cabinet run and read each cabinet's LEFT and RIGHT edge from its own individual opening/door-span number in that chain — e.g. if the chain reads 100 | 30 FILLER | 640 | 800 | 500 | 30 FILLER | 100, the three cabinets' own widths are 640, 800, and 500; the outer 100mm numbers belong to the wall/slab, never to a cabinet. Convert this into a running left-to-right position for each cabinet (e.g. cabinet 1 = 0-640, cabinet 2 = 640-1440, cabinet 3 = 1440-1940) and use that as the ground truth for every other step below. \n"
  +"STEP 2 — ATTRIBUTE EVERY PIECE OF EVIDENCE STRICTLY WITHIN ITS CABINET'S OWN BOUNDARY from Step 1. A shelf label/line, a door mark, a fixture symbol, or a dimension figure only counts as evidence for a cabinet if it falls clearly INSIDE that cabinet's boundary range. If something sits ON or straddles the line between two cabinets, or you are not confident which side it belongs to, do NOT force it onto either cabinet — treat it as ambiguous for BOTH neighboring cabinets, flag the affected field(s) in needsVerification for both, and explain the ambiguity in notes. Misreading which cabinet an element belongs to (not the element itself) is the most common source of error in this task, so re-check each element's x-position against the boundaries from Step 1 before attributing it. This applies just as much to door-swing/hinge dotted lines and other hardware marks as it does to text labels: a mark — door indicator, shelf line, hardware symbol, or note — belongs to the cabinet it is physically drawn INSIDE; it only belongs to a different cabinet if a visible leader line/pointer explicitly connects it there. Do not let a mark drawn near a boundary 'drift' onto the neighboring cabinet just because that cabinet still needs a door/shelf value. \n"
@@ -1575,7 +1610,8 @@ var AI_PROMPT = "You are looking at a furniture elevation / technical drawing th
  +"'drawer' (floor-standing, front is all/mostly stacked drawer fronts, not a single door), "
  +"'sink' (floor-standing, positioned under a sink/counter, has a plumbing cutout THROUGH THE BACK PANEL — its bottom panel is SOLID, same as a base cabinet, it is NOT open-bottom. A WCLI sink cabinet NEVER has a shelf, for pipe clearance — a cabinet with any shelf, shelf-pin holes, or an 'ADJ SHELF'/'FIXED SHELF' label CANNOT be type 'sink', no matter how close a fixture symbol appears to it), "
  +"'corner' (L-shaped floor-standing corner unit), 'cornerwall' (L-shaped wall-hung corner unit), "
- +"'openshelf' (no doors at all, open shelving), 'microwave' (wall-hung with an open appliance cavity). "
+ +"'openshelf' (no doors at all, open shelving), 'microwave' (wall-hung with an open appliance cavity), "
+ +"'filler' (a flat, thin, NON-cabinet trim/fascia/soffit board -- no carcass, no door, no shelves. Most commonly a horizontal strip running across the TOP of a run of wall/tall cabinets to close the gap to the ceiling or a bulkhead, but can also be a horizontal strip at the BOTTOM of a run, or a narrow VERTICAL strip between two cabinets/at a wall. Look for a short dimension (often ~50-150mm) set apart from the main cabinet-height dimension chain, sometimes with its own small leader/label like 'FASCIA' or with the trim's material called out separately (e.g. matching one of the cabinet finish notes). Its 'width_mm' is however much of the run it spans -- it is NOT bound by a single cabinet's own width the way other types are, so measure it against the dimension chain like you would the overall run width, not a single cabinet span. Its 'height_mm' is the trim board's own (usually small) height, not a cabinet height -- do not confuse the two.) "
  +"Match fixture symbols (faucet, sink basin, stove, etc.) to the cabinet whose horizontal span the symbol actually falls within — check its x-position against each cabinet's boundaries, don't just pick the nearest cabinet in reading order. Precise left-right fixture placement is a common source of error — if you classified a cabinet's type partly or fully because of a nearby fixture symbol rather than a structural difference visible in that cabinet's OWN carcass, set needsVerification.type=true and state exactly which fixture symbol and its position you used as evidence, so a human can double-check the placement. \n"
  +"TYPE CROSS-CHECK — apply this before finalizing 'sink': a WCLI sink cabinet never has a shelf (pipe clearance). If a cabinet clearly shows a shelf (a shelf line, shelf-pin holes, or an 'ADJ SHELF'/'FIXED SHELF' label), it cannot be 'sink' even if a fixture symbol sits above it — reconsider which OTHER cabinet in the group has no shelf and sits under/near that fixture instead.\n"
  +"Also read each cabinet's DOOR configuration and SHELF info directly from the drawing: 'door' is one of 'single' (one door leaf), 'double' (two door leaves side by side), 'bifold' (corner-style folding doors), 'pullout' (a full-height sliding/pull-out larder front), or 'none' (open front, no door drawn). Do NOT assume a door exists just because cabinets typically have one — only report 'single'/'double'/'bifold'/'pullout' when you see an ACTUAL recognizable graphic cue for it: a door-panel outline distinct from any shelf lines, a swing-direction indicator (dashed lines converging at a hinge-side point), visible hinge/knob/pull hardware marks, or explicit door callout text. A single diagonal line across a panel more often indicates GLAZING (glass), not a generic 'this is a door' marker — don't treat it as door confirmation by itself. If you don't see a clear door cue, set door to 'none', set needsVerification.door=true, and say in notes that no clear door indicator was found — never default to 'single' just because the opening looks door-shaped. 'shelfType' is 'adjustable' if shelf-pin holes or an 'ADJ SHELF'/'ADJUSTABLE' label or note is shown, otherwise 'fixed'. 'shelfCount' is the number of shelves you can count drawn inside the cabinet body (0 if none are shown). \n"
@@ -1583,11 +1619,11 @@ var AI_PROMPT = "You are looking at a furniture elevation / technical drawing th
  +"WIDTH: a dimension chain often includes an outer/reference number spanning from a wall or reveal to the first filler or edge of the whole cabinet run (e.g. a wall-offset or counter/slab overhang) — that outer number is NOT part of any individual cabinet's width. Use that cabinet's own door/opening span, or the distance between its own bounding edges, instead. If you had to infer a cabinet's width from a span rather than an explicit edge-to-edge dimension for that cabinet, note it.\n"
  +"HEIGHT: a floor-to-top dimension line's upper end may land at the top of a rendered countertop/slab/backsplash (shown as hatching, stippling, or a distinct material texture sitting ON TOP of or overlapping the cabinet doors) rather than at the actual top edge of the cabinet carcass. Look for evidence IN THIS DRAWING — does the slab/counter rendering visibly overlap the cabinet top? Does a dimension elsewhere in the drawing (e.g. a slab overhang or offset) suggest a consistent amount to subtract? If so, subtract it and explain the specific visual/dimensional evidence you used — do not apply a generic 'typical' countertop allowance with no evidence from the drawing itself.\n"
  +"DEPTH: elevation views never show depth directly — it is always an assumption unless a plan view or explicit depth callout is present.\n"
- +"VERTICAL MOUNTING HEIGHT ('floorOffset_mm'): for wall-mounted types ('wall','cornerwall','microwave'), read the height in mm from the FLOOR to the BOTTOM of that cabinet, from the drawing's own vertical dimension chain (e.g. a floor-to-underside dimension, or floor-to-countertop height plus the gap dimension above it). Do NOT assume a generic 'typical' mounting height with no evidence from the drawing — cite the specific dimensions you used in notes. For all floor-standing types (base, tall, drawer, sink, corner, openshelf), floorOffset_mm is always 0. If a wall-mounted cabinet's floor height can't be determined from the drawing, estimate from proportions/scale relative to the floor-standing cabinets in the same drawing, say so in notes, and set needsVerification.floorOffset=true.\n"
+ +"VERTICAL MOUNTING HEIGHT ('floorOffset_mm'): for wall-mounted types ('wall','cornerwall','microwave'), read the height in mm from the FLOOR to the BOTTOM of that cabinet, from the drawing's own vertical dimension chain (e.g. a floor-to-underside dimension, or floor-to-countertop height plus the gap dimension above it). Do NOT assume a generic 'typical' mounting height with no evidence from the drawing — cite the specific dimensions you used in notes. For all floor-standing types (base, tall, drawer, sink, corner, openshelf), floorOffset_mm is always 0. If a wall-mounted cabinet's floor height can't be determined from the drawing, estimate from proportions/scale relative to the floor-standing cabinets in the same drawing, say so in notes, and set needsVerification.floorOffset=true. A TOP fascia/filler's floorOffset_mm is the height from the floor to ITS OWN bottom edge -- typically that's the top of the cabinets/bulkhead it sits on, so it's usually (floor-standing cabinet height) + (any wall-cabinet floorOffset + wall-cabinet height) if it sits above wall cabinets, or read directly from the drawing's own top dimension if one is given. A BOTTOM or VERTICAL filler's floorOffset_mm follows the same floor-to-its-own-bottom-edge logic as any other type.\n"
  +"For EVERY cabinet, set needsVerification.width/height/depth to true for any dimension you derived, adjusted, or assumed rather than read directly off an explicit dimension line for that exact edge — even if you're confident in the number. Only set a field to false when you read it directly off an unambiguous dimension line for that cabinet's own boundary.\n"
  +"Respond with ONLY a single JSON object, no markdown fences, no other text, in exactly this shape:\n"
- +'{"cabinets":[{"index":1,"type":"base"|"wall"|"tall"|"drawer"|"sink"|"corner"|"cornerwall"|"openshelf"|"microwave"|"unsupported","detectedTypeGuess":"short description — required if type is unsupported or unclear","width_mm":number,"height_mm":number,"depth_mm":number,"floorOffset_mm":number,"material":"pb"|"compact","door":"single"|"double"|"bifold"|"pullout"|"none","shelfType":"adjustable"|"fixed","shelfCount":number,"confidence":"high"|"medium"|"low","needsVerification":{"type":true|false,"width":true|false,"height":true|false,"depth":true|false,"door":true|false,"floorOffset":true|false},"notes":"explain your reasoning for type/width/height/depth/door/floorOffset — especially any dimension or classification you derived, assumed, or adjusted, and the specific evidence from the drawing you used"}],"overallNotes":"anything about the drawing as a whole"}\n'
- +"List cabinets left to right as they appear. If a dimension is not legible or not given for a specific cabinet, make your best estimate from proportions/scale/shared dimension lines, say so in notes, and flag it in needsVerification — never leave a numeric field blank. If you see only one cabinet, return an array with one entry.";
+ +'{"cabinets":[{"index":1,"type":"base"|"wall"|"tall"|"drawer"|"sink"|"corner"|"cornerwall"|"openshelf"|"microwave"|"filler"|"unsupported","detectedTypeGuess":"short description — required if type is unsupported or unclear","width_mm":number,"height_mm":number,"depth_mm":number,"floorOffset_mm":number,"material":"pb"|"compact","door":"single"|"double"|"bifold"|"pullout"|"none","shelfType":"adjustable"|"fixed","shelfCount":number,"confidence":"high"|"medium"|"low","needsVerification":{"type":true|false,"width":true|false,"height":true|false,"depth":true|false,"door":true|false,"floorOffset":true|false},"notes":"explain your reasoning for type/width/height/depth/door/floorOffset — especially any dimension or classification you derived, assumed, or adjusted, and the specific evidence from the drawing you used"}],"overallNotes":"anything about the drawing as a whole"}\n'
+ +"List cabinets AND filler/fascia boards left to right (or bottom to top, if stacked) as they appear. For a 'filler' entry, door/shelfType/shelfCount don't apply -- report door as 'none' and shelfCount as 0. If a dimension is not legible or not given for a specific cabinet or trim board, make your best estimate from proportions/scale/shared dimension lines, say so in notes, and flag it in needsVerification — never leave a numeric field blank. If you see only one cabinet, return an array with one entry.";
 function fileToBase64(file){
   return new Promise(function(resolve,reject){
     var r=new FileReader();
@@ -1660,7 +1696,7 @@ function renderAiResult(data){
         +'</div>';
       return;
     }
-    var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,maxHeightForType(c.type)), d=clampDim(c.depth_mm,280,650);
+    var w=clampDim(c.width_mm,300,c.type==='filler'?4000:1200), h=clampDim(c.height_mm,c.type==='filler'?30:300,maxHeightForType(c.type)), d=clampDim(c.depth_mm,280,650);
     var clamped=(w!==Math.round(c.width_mm)||h!==Math.round(c.height_mm)||d!==Math.round(c.depth_mm));
     var nv=c.needsVerification||{}, flags=['type','width','height','depth','door','floorOffset'].filter(function(k){return nv[k];});
     var verifyHtml=flags.length?'<div style="color:#c2680e;font-weight:600;font-size:11px;margin-top:2px;">⚠ Verify: '+flags.map(function(k){return k==='floorOffset'?'Mount height':(k[0].toUpperCase()+k.slice(1));}).join(', ')+' — see notes</div>':'';
@@ -1692,13 +1728,14 @@ function renderAiResult(data){
    defaults — same defaults the manual sidebar controls start with. */
 function buildParamsFromAiCabinet(c){
   var type=SUPPORTED_TYPES.indexOf(c.type)>=0?c.type:'base';
-  var w=clampDim(c.width_mm,300,1200), h=clampDim(c.height_mm,300,maxHeightForType(type)), d=clampDim(c.depth_mm,280,650);
+  var maxW=type==='filler'?4000:1200, minH=type==='filler'?30:300;   // a fascia/filler can span much wider than any cabinet, and its "height" is often just a thin trim strip (e.g. 100mm) -- the normal 300mm cabinet-height floor would silently inflate it
+  var w=clampDim(c.width_mm,300,maxW), h=clampDim(c.height_mm,minH,maxHeightForType(type)), d=clampDim(c.depth_mm,280,650);
   var door=['single','double','bifold','pullout','none'].indexOf(c.door)>=0?c.door:'single';
   var shelfType=(c.shelfType==='fixed')?'fixed':'adjustable';
   var shelfCount=clampDim(c.shelfCount!=null?c.shelfCount:1,0,6);
   return {
     type:type, w:w, h:h, d:d, rw:CORNER_RW_DEFAULT[type]||900, t:18,
-    tk:(type==='wall'||type==='cornerwall'||type==='microwave')?0:100,
+    tk:(type==='wall'||type==='cornerwall'||type==='microwave'||type==='filler')?0:100,
     back:(type==='sink'?'6':'18'),
     shelf:shelfCount, shelftype:shelfType, drawers:3,
     door:door, handle:'knob', exposed:'none', endfinish:'endpanel', mount:'floor'
@@ -1709,14 +1746,17 @@ function buildParamsFromAiCabinet(c){
    drawing's vertical dimension chain when given; otherwise fall back to a standard mounting
    height rather than defaulting to the floor. */
 function computeFloorOffset(c){
-  var wallMounted=(c.type==='wall'||c.type==='cornerwall'||c.type==='microwave');
-  if(c.floorOffset_mm!=null) return clampDim(c.floorOffset_mm,0,2200);
-  return wallMounted?1400:0;
+  var effType=manualTypeOverrides[c.index]||c.type;   // a type reclassification (e.g. floor cabinet -> wall) should also flip its mounting height, not just its geometry
+  var wallMounted=(effType==='wall'||effType==='cornerwall'||effType==='microwave'||effType==='filler');
+  if(!wallMounted) return 0;   // floor-standing types always sit at floor level -- ignore any floorOffset_mm the AI read before a reclassification made this cabinet floor-standing
+  var maxOff=effType==='filler'?4000:2200;   // a top fascia can sit above a tall cabinet/wall-cabinet run well past the normal 2200mm wall-cabinet ceiling
+  if(c.floorOffset_mm!=null) return clampDim(c.floorOffset_mm,0,maxOff);
+  return 1400;
 }
 /* Per-cabinet manual overrides layered on top of the AI's own reading — each keyed by
    cabinet index (or cabIndex::partName for part-level ones), applied fresh every time a
    cabinet is rebuilt so they survive re-renders without mutating the engine's output. */
-var manualDoorOverrides={}, manualShelfDelta={}, manualDeletedParts={}, manualCustomParts={}, manualModuleCount={};
+var manualDoorOverrides={}, manualShelfDelta={}, manualDeletedParts={}, manualCustomParts={}, manualModuleCount={}, manualTypeOverrides={};
 var manualModuleIndependent={}, manualModuleHeights={}, manualHeightOverride={};   // module-split independence options
 var manualPartSizeOverrides={};   // cabIndex::partName::boxIndex -> {L,W,t} manual resize of an existing part instance
 var DOOR_OPTS=['single','double','bifold','pullout','none'];
@@ -1749,8 +1789,24 @@ function splitCabinetIntoModules(p,n,customHeights){
   hw.push({name:'HiLo / chipboard screw 4×32',qty:(n-1)*8,unit:'pcs',rule:'stack/join modules (cabinet-to-cabinet)'});
   return {parts:parts,hardware:hw};
 }
+/* Applies a manual type reclassification (changeType) -- recomputes the type-dependent
+   defaults (toe-kick, corner return-wall width, back thickness) the same way
+   buildParamsFromAiCabinet does for a fresh cabinet, since a base cabinet reclassified to
+   'wall' needs tk=0, a plain cabinet reclassified to 'corner' needs a return-wall width,
+   etc. Width/height/depth/door/shelf carry over untouched -- best-effort reuse of what
+   the AI already read, not a re-derivation. */
+function _applyTypeOverride(p,cabIndex){
+  var t=manualTypeOverrides[cabIndex];
+  if(t==null || t===p.type) return p;
+  p=Object.assign({},p,{type:t});
+  p.rw=CORNER_RW_DEFAULT[t]||900;
+  p.tk=(t==='wall'||t==='cornerwall'||t==='microwave'||t==='filler')?0:100;
+  p.back=(t==='sink'?'6':'18');
+  return p;
+}
 function buildCabinetWithOverrides(c,cabIndex){
   var p=buildParamsFromAiCabinet(c);
+  p=_applyTypeOverride(p,cabIndex);
   if(manualDoorOverrides[cabIndex]!=null) p.door=manualDoorOverrides[cabIndex];
   if(manualShelfDelta[cabIndex]) p.shelf=clampDim(p.shelf+manualShelfDelta[cabIndex],0,6);
   if(manualHeightOverride[cabIndex]!=null) p.h=manualHeightOverride[cabIndex];
@@ -1770,7 +1826,7 @@ function buildCabinetWithOverrides(c,cabIndex){
    mechanism as a normal cabinet -- a module IS a normal cabinet as far as the rest of the
    app is concerned, it just has a decimal index and a parentIndex/moduleOf/moduleIdx tag. */
 function buildIndependentModules(c,parentIndex,n){
-  var baseP=buildParamsFromAiCabinet(c), totalH=baseP.h, built=[], yCursor=0;
+  var baseP=_applyTypeOverride(buildParamsFromAiCabinet(c),parentIndex), totalH=baseP.h, built=[], yCursor=0;
   var moduleHeights=[]; for(var hi=0;hi<n;hi++){ var si=parentIndex+'.'+(hi+1); moduleHeights.push(manualHeightOverride[si]!=null?manualHeightOverride[si]:(totalH/n)); }
   var shelfCounts=_distributeInt(baseP.shelf||0,moduleHeights);   // proportional baseline by height share -- manualShelfDelta below still lets the user hand-adjust any one module afterward, now on top of a sane starting point instead of the full duplicated count
   for(var i=0;i<n;i++){
@@ -1802,6 +1858,7 @@ function refreshCabinet(cabIndex){
   if(!entry||!c) return;
   var rebuilt=buildCabinetWithOverrides(c,cabIndex);
   entry.params=rebuilt.params; entry.result=rebuilt.result;
+  entry.yOffset=computeFloorOffset(c);   // a type change (e.g. wall -> base) can flip floor-standing vs wall-mounted -- yOffset must be recomputed here too, not just params/result, or a reclassified cabinet keeps floating at its OLD type's mounting height
   renderCombinedScene(window._sceneCabinets);
 }
 /* Rebuilds just ONE independent module (sub-index like "1.2") in place -- re-derives all of
@@ -1860,6 +1917,16 @@ function applyAllAiCabinets(){
   var xOff=0, built=[];
   cabinets.forEach(function(c,i){
     var cabIndex=c.index||(i+1);
+    // 'filler'/fascia entries don't occupy their own slot in the left-to-right run the way a
+    // real cabinet does -- a top/bottom fascia's own width_mm is meant to span ACROSS other
+    // cabinets (see the AI prompt), so it always starts at xOffset=0 (the run's left edge)
+    // instead of advancing past whatever's already been placed; it also never consumes xOff
+    // for anything positioned after it.
+    if(c.type==='filler'){
+      var bf=buildCabinetWithOverrides(c,cabIndex);
+      built.push({index:cabIndex,type:c.type,params:bf.params,result:bf.result,xOffset:0,yOffset:computeFloorOffset(c)});
+      return;
+    }
     var n=manualModuleCount[cabIndex]||1;
     if(n>1 && manualModuleIndependent[cabIndex]){
       var mods=buildIndependentModules(c,cabIndex,n), baseFloorOffset=computeFloorOffset(c);
