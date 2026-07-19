@@ -28,7 +28,7 @@
   details.manual-override summary { cursor:pointer; font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); padding:8px 0; user-select:none; }
   details.manual-override summary:hover { color:var(--accent); }
   #view { display:flex; flex-direction:column; }
-  #canvas-host { width:100%; height:56%; background:radial-gradient(ellipse at 50% 40%,#1a2030,#0a0d14 75%); position:relative; }
+  #canvas-host { width:100%; height:56%; background:radial-gradient(ellipse at 50% 40%,#0e1620,#05070c 75%); position:relative; }
   #legend { position:absolute; top:8px; left:8px; background:rgba(18,22,31,.92); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11px; line-height:1.7; color:var(--ink); box-shadow:0 4px 14px rgba(0,0,0,.4); }
   #legend .li { display:flex; align-items:center; gap:6px; }
   #legend .sw { width:12px; height:12px; border-radius:3px; border:1px solid rgba(255,255,255,.2); flex:none; }
@@ -193,6 +193,12 @@
 
 <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 <script>
 /* ============================================================
    WCLI RULES ENGINE  —  one part = {name, L, W, t, grain, ebt, ops, role, boxes:[{sx,sy,sz,x,y,z}]}
@@ -647,21 +653,27 @@ var PART_COLORS={
   centrerail:{c:0xa855f7,label:'Support / hanging rail'}, shelf:{c:0xeab308,label:'Shelf'},
   toekick:{c:0x78716c,label:'Toe kick'}, endpanel:{c:0xec4899,label:'End panel'}, door:{c:0x60a5fa,label:'Door / drawer front'}
 };
-var scene,camera,renderer,controls,cabGroup;
+var scene,camera,renderer,controls,cabGroup,composer,bloomPass;
 var explodedOn=false, selectableMeshes=[], selectedMesh=null;
 var RAY=null, MOUSE=null;
+var EDGE_GLOW=0x22e8ff, SELECT_GLOW=0xff9d2e;   // TRON-style neon edge / selection colors — bloom makes these actually glow
 function initThree(){
   var host=document.getElementById('canvas-host');
-  scene=new THREE.Scene(); scene.background=new THREE.Color(0xdfe4f0);
+  scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070c);
   camera=new THREE.PerspectiveCamera(45,host.clientWidth/host.clientHeight,1,100000);
   renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setSize(host.clientWidth,host.clientHeight); renderer.setPixelRatio(window.devicePixelRatio);
   host.appendChild(renderer.domElement);
-  scene.add(new THREE.HemisphereLight(0xffffff,0x888899,1.1));
-  var dir=new THREE.DirectionalLight(0xffffff,.5); dir.position.set(1,2,1.5); scene.add(dir);
+  scene.add(new THREE.HemisphereLight(0x1c3a44,0x05070c,.5));
+  var dir=new THREE.DirectionalLight(0x8fdfff,.3); dir.position.set(1,2,1.5); scene.add(dir);
+  var grid=new THREE.GridHelper(8,40,0x00e5ff,0x0c2b33); grid.position.y=-0.01; scene.add(grid);
   controls=new THREE.OrbitControls(camera,renderer.domElement); controls.enableDamping=true;
   cabGroup=new THREE.Group(); scene.add(cabGroup);
-  window.addEventListener('resize',function(){ camera.aspect=host.clientWidth/host.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(host.clientWidth,host.clientHeight); });
-  (function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); })();
+  composer=new THREE.EffectComposer(renderer);
+  composer.addPass(new THREE.RenderPass(scene,camera));
+  bloomPass=new THREE.UnrealBloomPass(new THREE.Vector2(host.clientWidth,host.clientHeight),1.35,.55,.12);
+  composer.addPass(bloomPass);
+  window.addEventListener('resize',function(){ camera.aspect=host.clientWidth/host.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(host.clientWidth,host.clientHeight); composer.setSize(host.clientWidth,host.clientHeight); });
+  (function animate(){ requestAnimationFrame(animate); controls.update(); composer.render(); })();
   RAY=new THREE.Raycaster(); MOUSE=new THREE.Vector2();
   renderer.domElement.addEventListener('click',onCanvasClick);
 }
@@ -670,11 +682,12 @@ function onCanvasClick(ev){
   MOUSE.x=((ev.clientX-rect.left)/rect.width)*2-1;
   MOUSE.y=-((ev.clientY-rect.top)/rect.height)*2+1;
   RAY.setFromCamera(MOUSE,camera);
-  if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh=null; }
+  if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh.material.opacity=selectedMesh.userData.origOpacity; selectedMesh=null; }
   var hits=RAY.intersectObjects(selectableMeshes);
   if(hits.length){
     var m=hits[0].object;
-    m.material.color.setHex(0xffffff);
+    m.userData.origOpacity=m.material.opacity;
+    m.material.color.setHex(SELECT_GLOW); m.material.opacity=.9;
     selectedMesh=m;
     showPartInfo(m.userData);
   } else {
@@ -696,7 +709,7 @@ function showPartInfo(d){
     btn.addEventListener('click',function(){ adjustEbt(d.cabinetIndex,d.partName,btn.getAttribute('data-w'),+btn.getAttribute('data-dd')); });
   });
 }
-function hidePartInfo(){ document.getElementById('part-info').style.display='none'; if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh=null; } }
+function hidePartInfo(){ document.getElementById('part-info').style.display='none'; if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh.material.opacity=selectedMesh.userData.origOpacity; selectedMesh=null; } }
 /* "Give me access to the edge": lets a user directly set how many short (S) / long (L)
    edges are banded on a selected part, mapped to the engine's own EBT code (e.g. "1s/2l").
    Saved as a durable override so it survives re-renders (explode toggle, re-applying, etc.). */
@@ -711,8 +724,10 @@ function adjustEbt(cabIndex,partName,which,delta){
   else render();
   var m=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===cabIndex && mm.userData.partName===partName; })[0];
   if(m){
-    if(selectedMesh) selectedMesh.material.color.setHex(selectedMesh.userData.origColor);
-    m.material.color.setHex(0xffffff); selectedMesh=m;
+    if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh.material.opacity=selectedMesh.userData.origOpacity; }
+    m.userData.origOpacity=m.material.opacity;
+    m.material.color.setHex(SELECT_GLOW); m.material.opacity=.9;
+    selectedMesh=m;
     showPartInfo(m.userData);
   }
 }
@@ -734,17 +749,17 @@ function renderScene(groups){
     cx/=n; cy/=n; cz/=n;
     grp.parts.forEach(function(pt){
       if(!pt.role) return;
-      var col=PART_COLORS[pt.role].c, opacity=(pt.role==='door')?.5:1;
+      var col=PART_COLORS[pt.role].c, opacity=(pt.role==='door')?.3:.5;   // TRON dark-glass panels — glow comes from the edges, not the fill
       if(pt.poly){
         var shape=new THREE.Shape();
         pt.poly.forEach(function(pp,idx){ if(idx===0) shape.moveTo((pp[0]+xOff)*S,pp[1]*S); else shape.lineTo((pp[0]+xOff)*S,pp[1]*S); });
         var yt=(pt.yt||18), levels=pt.polyY||[pt.y0||0];
         levels.forEach(function(y0){
           var geo=new THREE.ExtrudeGeometry(shape,{depth:yt*S,bevelEnabled:false});
-          var m=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:col,transparent:opacity<1,opacity:opacity}));
+          var m=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:col,transparent:true,opacity:opacity}));
           m.rotation.x=Math.PI/2; m.position.y=(y0+yt)*S; m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col};
           cabGroup.add(m); selectableMeshes.push(m);
-          var e=new THREE.LineSegments(new THREE.EdgesGeometry(geo),new THREE.LineBasicMaterial({color:0x33405e})); e.rotation.x=Math.PI/2; e.position.y=(y0+yt)*S; cabGroup.add(e);
+          var e=new THREE.LineSegments(new THREE.EdgesGeometry(geo),new THREE.LineBasicMaterial({color:EDGE_GLOW})); e.rotation.x=Math.PI/2; e.position.y=(y0+yt)*S; cabGroup.add(e);
         });
         used[pt.role]=true; return;
       }
@@ -756,11 +771,11 @@ function renderScene(groups){
           ex=dx/len*dist; ey=dy/len*dist; ez=dz/len*dist;
         }
         var g=new THREE.BoxGeometry(b.sx*S,b.sy*S,b.sz*S);
-        var m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color:col,transparent:opacity<1,opacity:opacity}));
+        var m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color:col,transparent:true,opacity:opacity}));
         m.position.set((b.x+xOff+ex)*S,(b.y+ey)*S,(b.z+ez)*S);
         m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col};
         cabGroup.add(m); selectableMeshes.push(m);
-        var e=new THREE.LineSegments(new THREE.EdgesGeometry(g),new THREE.LineBasicMaterial({color:0x33405e})); e.position.copy(m.position); cabGroup.add(e);
+        var e=new THREE.LineSegments(new THREE.EdgesGeometry(g),new THREE.LineBasicMaterial({color:EDGE_GLOW})); e.position.copy(m.position); cabGroup.add(e);
       });
     });
   });
