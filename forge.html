@@ -100,7 +100,8 @@
   .resize-edit { margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.12); }
   .resize-row { display:flex; align-items:center; gap:4px; font-size:11px; flex-wrap:wrap; }
   .resize-row input { width:52px; font-size:11px; padding:3px 4px; border-radius:4px; border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#fff; }
-  .resize-row button { background:var(--accent); color:#191100; border:none; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer; }
+  .resize-row select { font-size:11px; padding:3px 4px; border-radius:4px; border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#fff; }
+  .resize-edit > button, .resize-row button { background:var(--accent); color:#191100; border:none; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer; }
   .rs-warn { color:#ffb238; font-size:10.5px; margin-top:4px; }
   .rs-ok { color:#39ff6a; font-size:10.5px; margin-top:4px; }
   .mm-row label { display:block; font-size:10px; color:var(--muted); margin-bottom:2px; }
@@ -301,14 +302,20 @@ function applyEbtOverrides(parts,cabIndex){
     if(ov!=null) pt.ebt=ov;
   });
 }
-/* A manual per-instance size override (L/W/t), keyed cabIndex::partName::boxIndex using the
-   part's TRUE original box index -- same identity scheme deletion uses (see
-   deleteAppliedToParts below). Applied to freshly-built parts BEFORE deletion runs -- at that
-   point the array's own loop index already IS the true original index, since nothing has
-   been filtered/compacted yet, so no extra _origBoxIndex tagging is needed here. Resizing
-   remaps the new L/W/t onto whichever box axis (sx/sy/sz) actually represents each one for
-   THIS box (axisRoles -- box orientation varies by part/grain direction, there's no fixed
-   sx=L,sy=t,sz=W convention in this engine), center-anchored (position untouched). */
+/* A manual per-instance size+position override, keyed cabIndex::partName::boxIndex using
+   the part's TRUE original box index -- same identity scheme deletion uses (see
+   deleteAppliedToParts below). Applied to freshly-built parts BEFORE deletion runs -- at
+   that point the array's own loop index already IS the true original index, since nothing
+   has been filtered/compacted yet, so no extra _origBoxIndex tagging is needed here.
+   Two independent things an override can carry:
+   - {L,W,t}: resizing remaps the new dims onto whichever box axis (sx/sy/sz) actually
+     represents each one for THIS box (axisRoles -- box orientation varies by part/grain
+     direction, there's no fixed sx=L,sy=t,sz=W convention in this engine).
+   - {posMode,posValue}: repositions the box vertically -- 'top'/'bottom' keep the box's
+     top/bottom FACE flush with where the ORIGINAL (pre-resize) box's face was (e.g. a
+     shortened door re-anchored to the top or bottom of its original opening), 'custom'
+     sets an absolute cabinet-relative Y in mm. Default ('center', or no posMode) leaves
+     the box's vertical center exactly where the engine originally placed it. */
 function applySizeOverrides(parts,cabIndex){
   return parts.map(function(pt){
     if(!pt.boxes || !pt.boxes.length) return pt;
@@ -316,16 +323,62 @@ function applySizeOverrides(parts,cabIndex){
     var newBoxes=pt.boxes.map(function(b,bi){
       var ov=manualPartSizeOverrides[cabIndex+'::'+pt.name+'::'+bi];
       if(!ov) return b;
-      var roles=axisRoles([b.sx,b.sy,b.sz],pt.t);
-      if(!roles) return b;   // not a clearly-flat panel -- resize isn't well-defined here, skip silently
+      var nb=Object.assign({},b);
+      if(ov.L!=null && ov.W!=null && ov.t!=null){
+        var roles=axisRoles([b.sx,b.sy,b.sz],pt.t);
+        if(roles){   // not a clearly-flat panel -- resize isn't well-defined here, skip silently (position below still applies)
+          var nd=[b.sx,b.sy,b.sz];
+          nd[roles.longAxis]=ov.L; nd[roles.shortAxis]=ov.W; nd[roles.tAxis]=ov.t;
+          nb.sx=nd[0]; nb.sy=nd[1]; nb.sz=nd[2];
+        }
+      }
+      if(ov.posMode==='top') nb.y=(b.y+b.sy/2)-nb.sy/2;
+      else if(ov.posMode==='bottom') nb.y=(b.y-b.sy/2)+nb.sy/2;
+      else if(ov.posMode==='custom' && ov.posValue!=null) nb.y=ov.posValue;
       changed=true;
-      var nd=[b.sx,b.sy,b.sz];
-      nd[roles.longAxis]=ov.L; nd[roles.shortAxis]=ov.W; nd[roles.tAxis]=ov.t;
-      return Object.assign({},b,{sx:nd[0],sy:nd[1],sz:nd[2]});
+      return nb;
     });
     if(!changed) return pt;
     return Object.assign({},pt,{boxes:newBoxes});
   });
+}
+/* "Convert movable shelves to a fixed one" -- a per-instance shelf-type override. The
+   engine builds ALL shelves in a cabinet as ONE uniformly-typed part ("Adjustable shelf"
+   or "Fixed shelf", see addShelves) since a cabinet's shelfType is a single AI-read field.
+   When one or more individual shelf instances are converted to the opposite type, this
+   splits that one part into two (one per type, each keeping only its own boxes), so the
+   cutting list and hardware stay accurate for a genuinely mixed cabinet instead of lying
+   about what every shelf actually is. Runs AFTER applySizeOverrides (so any per-instance
+   resize is trusted as-is) but BEFORE deletion, using the same natural-loop-index==true-
+   original-index identity applySizeOverrides relies on.
+   Dimension convention (matches addShelves exactly): adjustable shelves are 2mm narrower
+   (1mm clearance per side for the pin system) and fully edgebanded (2s/2l); fixed shelves
+   are full width, front-edge-only banded (1l). A box that was ALSO manually resized keeps
+   its explicit L untouched -- the +/-2mm convention only auto-applies to a box using the
+   engine's own default size, never overriding an explicit manual number. */
+function applyShelfTypeOverrides(res,cabIndex){
+  var parts=res.parts;
+  var shelfIdx=parts.findIndex(function(pt){ return pt.role==='shelf' && pt.boxes && pt.boxes.length && (pt.name==='Adjustable shelf'||pt.name==='Fixed shelf'); });
+  if(shelfIdx<0) return res;
+  var shelfPart=parts[shelfIdx], curType=shelfPart.name==='Adjustable shelf'?'adjustable':'fixed';
+  var adjBoxes=[], fixBoxes=[];
+  shelfPart.boxes.forEach(function(b,bi){
+    var ov=manualPartSizeOverrides[cabIndex+'::'+shelfPart.name+'::'+bi];
+    var eff=(ov&&ov.shelfType)?ov.shelfType:curType;
+    var manuallySized=!!(ov&&ov.L!=null);
+    var delta=(manuallySized||eff===curType)?0:(curType==='adjustable'?2:-2);   // moving to the OTHER type from the engine's own default -- adjustable is 2mm narrower than fixed
+    (eff==='fixed'?fixBoxes:adjBoxes).push(Object.assign({},b,{sx:b.sx+delta}));
+  });
+  if(!adjBoxes.length || !fixBoxes.length) return res;   // still uniform (nothing converted, or everything converted the same way) -- leave the engine's original single part+hardware alone
+  var adjL=curType==='adjustable'?shelfPart.L:shelfPart.L+2, fixL=curType==='fixed'?shelfPart.L:shelfPart.L-2;
+  var newParts=parts.slice(); newParts.splice(shelfIdx,1,
+    {name:'Adjustable shelf',L:adjL,W:shelfPart.W,t:shelfPart.t,grain:shelfPart.grain,ebt:'2s/2l',ops:'',role:'shelf',boxes:adjBoxes},
+    {name:'Fixed shelf',L:fixL,W:shelfPart.W,t:shelfPart.t,grain:shelfPart.grain,ebt:'1l',ops:'',role:'shelf',boxes:fixBoxes});
+  var newHw=res.hardware.filter(function(h){ return !/^Shelf support pin$/.test(h.name) && !/^\(drill\) shelf pin holes$/.test(h.name) && !/^Fixed-shelf fastener/.test(h.name); });
+  newHw.push({name:'Shelf support pin',qty:adjBoxes.length*4,unit:'pcs',rule:'4 per adjustable shelf (1 per row × 2 sides)'});
+  newHw.push({name:'(drill) shelf pin holes',qty:adjBoxes.length*12,unit:'holes',rule:'2 rows × 2 sides; 3 holes/shelf @50mm pitch'});
+  newHw.push({name:'Fixed-shelf fastener (screw 4×50 / Minifix)',qty:fixBoxes.length*4,unit:'pcs',rule:'4 per fixed shelf'});
+  return {parts:newParts,hardware:newHw};
 }
 /* Deletion is per-INSTANCE (cabIndex::partName::boxIndex), not per part NAME -- several
    real components (all the shelves in a cabinet, a corner cabinet's multiple L-shaped
@@ -1130,35 +1183,69 @@ function showPartInfo(d){
     +'<span class="estep">S<button type="button" data-w="s" data-dd="-1">−</button><span class="ecount">'+v.s+'</span><button type="button" data-w="s" data-dd="1">+</button></span>'
     +'<span class="estep">L<button type="button" data-w="l" data-dd="-1">−</button><span class="ecount">'+v.l+'</span><button type="button" data-w="l" data-dd="1">+</button></span>'
     +'</div>'
-    +(editable?('<div class="resize-edit">Resize this part:<div class="resize-row">'
-      +'L <input type="number" id="rs-l" value="'+Math.round(d.L)+'"> '
-      +'W <input type="number" id="rs-w" value="'+Math.round(d.W)+'"> '
-      +'T <input type="number" id="rs-t" value="'+Math.round(d.t)+'"> '
-      +'<button type="button" id="rs-apply-btn">Resize</button></div><div id="rs-feedback"></div></div>'):'')
+    +(editable?_resizeFormHtml(d):'')
     +(editable?('<div class="part-actions"><button type="button" class="del-part-btn" id="del-part-btn">🗑 Delete this part</button></div>'+buildCabActionsHtml(d.cabinetIndex)):'');
   Array.prototype.forEach.call(el.querySelectorAll('.ebt-edit button'),function(btn){
     btn.addEventListener('click',function(){ adjustEbt(d.cabinetIndex,d.partName,btn.getAttribute('data-w'),+btn.getAttribute('data-dd')); });
   });
   if(!editable) return;
   document.getElementById('del-part-btn').addEventListener('click',function(){ deletePart(d.cabinetIndex,d.partName,d.boxIndex); });
+  _wireResizeForm(d);
+  wireCabActionsHandlers(d.cabinetIndex);
+}
+/* Resize/reposition form HTML -- L/W/T (see resizePart), a Position select (Center/Top/
+   Bottom/Custom -- "for doors that were shortened, position it to the top, bottom, or
+   custom"), and, only for shelf-role parts, a Shelf type select ("convert movable shelves
+   to a fixed one"). Prefilled from any existing override on this exact box instance so
+   reopening the panel shows the current state, not always a reset default. */
+function _resizeFormHtml(d){
+  var ov=manualPartSizeOverrides[d.cabinetIndex+'::'+d.partName+'::'+d.boxIndex]||{};
+  var posMode=ov.posMode||'center', posY=ov.posValue!=null?ov.posValue:Math.round(d.y||0);
+  var curShelfType=/^Adjustable/.test(d.partName)?'adjustable':'fixed', shelfTypeSel=ov.shelfType||curShelfType;
+  var html='<div class="resize-edit">Resize / reposition this part:<div class="resize-row">'
+    +'L <input type="number" id="rs-l" value="'+Math.round(d.L)+'"> '
+    +'W <input type="number" id="rs-w" value="'+Math.round(d.W)+'"> '
+    +'T <input type="number" id="rs-t" value="'+Math.round(d.t)+'"></div>'
+    +'<div class="resize-row">Position: <select id="rs-pos">'
+    +['center','top','bottom','custom'].map(function(m){ var lbl={center:'Center (as built)',top:'Top',bottom:'Bottom',custom:'Custom'}[m]; return '<option value="'+m+'"'+(m===posMode?' selected':'')+'>'+lbl+'</option>'; }).join('')
+    +'</select><input type="number" id="rs-pos-y" value="'+Math.round(posY)+'" style="'+(posMode==='custom'?'':'display:none;')+'"></div>';
+  if(d.role==='shelf'){
+    html+='<div class="resize-row">Shelf type: <select id="rs-shelftype">'
+      +'<option value="adjustable"'+(shelfTypeSel==='adjustable'?' selected':'')+'>Adjustable (pins)</option>'
+      +'<option value="fixed"'+(shelfTypeSel==='fixed'?' selected':'')+'>Fixed (screwed)</option>'
+      +'</select></div>';
+  }
+  html+='<button type="button" id="rs-apply-btn">Apply</button><div id="rs-feedback"></div></div>';
+  return html;
+}
+function _wireResizeForm(d){
   var rsL=document.getElementById('rs-l'), rsW=document.getElementById('rs-w'), rsT=document.getElementById('rs-t'), rsFb=document.getElementById('rs-feedback');
+  var rsPos=document.getElementById('rs-pos'), rsPosY=document.getElementById('rs-pos-y'), rsShelfType=document.getElementById('rs-shelftype');
   function refreshRsFeedback(){
     var warn=sizeMismatchWarnings(d.cabinetIndex,+rsL.value,+rsW.value,+rsT.value);
     rsFb.innerHTML=warn.length?warn.map(function(w){ return '<div class="rs-warn">⚠ '+w+'</div>'; }).join(''):'<div class="rs-ok">✓ Looks consistent with the cabinet</div>';
   }
   [rsL,rsW,rsT].forEach(function(inp){ inp.addEventListener('input',refreshRsFeedback); });
   refreshRsFeedback();
-  document.getElementById('rs-apply-btn').addEventListener('click',function(){ resizePart(d.cabinetIndex,d.partName,d.boxIndex,+rsL.value,+rsW.value,+rsT.value); });
-  wireCabActionsHandlers(d.cabinetIndex);
+  rsPos.addEventListener('change',function(){ rsPosY.style.display=(this.value==='custom')?'':'none'; });
+  document.getElementById('rs-apply-btn').addEventListener('click',function(){
+    resizePart(d.cabinetIndex,d.partName,d.boxIndex,+rsL.value,+rsW.value,+rsT.value,rsPos.value,+rsPosY.value,rsShelfType?rsShelfType.value:null);
+  });
 }
-/* "Change the size of the component" -- a manual per-instance L/W/t override, with feedback
-   (not a hard block) when the new size looks physically inconsistent with the cabinet it
-   belongs to. Center-anchored: only the box's own dimensions change, not its position. */
-function resizePart(cabIndex,partName,boxIndex,L,W,t){
+/* "Change the size of the component" -- a manual per-instance L/W/t + position (+ shelf
+   type, for shelves) override, with feedback (not a hard block) when the new size looks
+   physically inconsistent with the cabinet it belongs to. posMode 'center' clears any
+   stored position override (back to as-built); 'top'/'bottom'/'custom' store it -- see
+   applySizeOverrides for how each is actually applied to the box geometry. */
+function resizePart(cabIndex,partName,boxIndex,L,W,t,posMode,posValue,shelfType){
   if(!(L>0)||!(W>0)||!(t>0)) return;
-  manualPartSizeOverrides[cabIndex+'::'+partName+'::'+boxIndex]={L:L,W:W,t:t};
+  var ov={L:L,W:W,t:t};
+  if(posMode && posMode!=='center'){ ov.posMode=posMode; ov.posValue=posValue; }
+  if(shelfType) ov.shelfType=shelfType;
+  manualPartSizeOverrides[cabIndex+'::'+partName+'::'+boxIndex]=ov;
   refreshAny(cabIndex);
-  var m=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===cabIndex && mm.userData.partName===partName && mm.userData.boxIndex===boxIndex; })[0];
+  // a shelf-type conversion can split/rename the part (see applyShelfTypeOverrides) -- re-find by boxIndex+role instead of assuming partName still matches after the rebuild
+  var m=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===cabIndex && mm.userData.boxIndex===boxIndex && (mm.userData.partName===partName || mm.userData.role==='shelf'); })[0];
   if(m){ highlightMeshes([m]); showPartInfo(m.userData); } else showCabinetInfo(cabIndex);
 }
 /* General-purpose sanity check for a manual resize: does this new size look like it still
@@ -1310,12 +1397,12 @@ function renderScene(groups){
           var dkey=cabIdx+'::'+pt.name+'::'+trueIndex;
           grp.rotation.y=doorOpenState[dkey]?hingeSign*DOOR_OPEN_ANGLE:0;
           doorGroupRegistry[dkey]={group:grp,hingeSign:hingeSign};
-          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,isDoor:true,boxIndex:trueIndex};
+          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,isDoor:true,boxIndex:trueIndex,role:pt.role,y:b.y};
           addEdgeBandMeshes(grp,b,pt,S,[localX*S,0,0]);   // band meshes join the hinge group so they swing with the door
         } else {
           m.position.set((b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
           e.position.copy(m.position);
-          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:trueIndex};
+          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:trueIndex,role:pt.role,y:b.y};
           cabGroup.add(m); cabGroup.add(e);
           addEdgeBandMeshes(cabGroup,b,pt,S,[(b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S]);
         }
@@ -1647,6 +1734,7 @@ function buildCabinetWithOverrides(c,cabIndex){
   var n=manualModuleCount[cabIndex]||1;
   var res=n>1?splitCabinetIntoModules(p,n,manualModuleHeights[cabIndex]):buildCabinet(p);
   res.parts=applySizeOverrides(res.parts,cabIndex);
+  res=applyShelfTypeOverrides(res,cabIndex);
   res.parts=deleteAppliedToParts(res.parts,cabIndex);
   if(manualCustomParts[cabIndex]) res.parts=res.parts.concat(manualCustomParts[cabIndex]);
   applyEbtOverrides(res.parts,cabIndex);
@@ -1668,6 +1756,7 @@ function buildIndependentModules(c,parentIndex,n){
     if(manualShelfDelta[subIndex]) mp.shelf=clampDim(mp.shelf+manualShelfDelta[subIndex],0,6);
     var res=buildCabinet(mp);
     res.parts=applySizeOverrides(res.parts,subIndex);
+    res=applyShelfTypeOverrides(res,subIndex);
     res.parts=deleteAppliedToParts(res.parts,subIndex);
     if(manualCustomParts[subIndex]) res.parts=res.parts.concat(manualCustomParts[subIndex]);
     applyEbtOverrides(res.parts,subIndex);
