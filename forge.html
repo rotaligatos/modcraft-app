@@ -527,13 +527,34 @@ var MODULE_MAX=2440;   // 8ft — a tall cabinet taller than this is split into 
    before buildTall ever saw it -- defeating the whole point of MODULE_MAX stacking and
    under-reporting the cabinet's true height by however much was clamped away. */
 function maxHeightForType(type){ return type==='tall'?(MODULE_MAX*4):2700; }
+/* Splits an integer total proportionally across N weighted buckets (e.g. each module's
+   share of a cabinet's total shelf count, weighted by that module's own height) so the
+   result always sums to EXACTLY `total` -- largest-remainder method, not naive rounding.
+   Used to fix a real bug: every module-building function used to hand the FULL original
+   shelf count to EVERY module (each module independently called addShelves with the
+   cabinet's own p.shelf, unchanged), so splitting a 2-shelf cabinet into 2 modules
+   produced 4 shelves total, not 2 -- visually reading as extra/misplaced shelves stacked
+   on top of a genuinely-correct doubled top/bottom panel pair at the module seam (each
+   module IS a complete standalone carcass, screwed to its neighbor -- that doubled panel
+   is real, intentional construction, not a bug). */
+function _distributeInt(total,weights){
+  total=total||0;
+  var sum=weights.reduce(function(a,b){return a+b;},0)||1;
+  var raw=weights.map(function(w){ return total*w/sum; });
+  var out=raw.map(Math.floor);
+  var used=out.reduce(function(a,b){return a+b;},0), remainder=total-used;
+  var order=raw.map(function(r,i){ return {i:i,frac:r-Math.floor(r)}; }).sort(function(a,b){ return b.frac-a.frac; });
+  for(var k=0;k<remainder;k++) out[order[k].i]++;
+  return out;
+}
 function buildTall(p){
   // > 8ft: divide the height into N stacked modular cabinets (each a complete cabinet), stacked to the total height
   // skipAutoModuleSplit: the user already chose an explicit manual split count (or independent modules) upstream -- don't let this auto-split add MORE modules on top of that choice.
   if(p.h<=MODULE_MAX || p.skipAutoModuleSplit) return buildTallSingle(p);
   var n=Math.ceil(p.h/MODULE_MAX), mh=p.h/n, parts=[], hw=[];
+  var shelfCounts=_distributeInt(p.shelf||0,Array(n).fill(mh));
   for(var i=0;i<n;i++){
-    var mp=Object.assign({},p,{h:mh,tk:(i===0?p.tk:0)});   // only the bottom module gets toe kick + legs
+    var mp=Object.assign({},p,{h:mh,shelf:shelfCounts[i],tk:(i===0?p.tk:0)});   // only the bottom module gets toe kick + legs
     var mod=buildTallSingle(mp), yOff=(i===0?0:(p.tk+i*mh)), lbl='[Module '+(i+1)+'/'+n+'] ';
     mod.parts.forEach(function(pt){ pt.name=lbl+pt.name; pt.boxes.forEach(function(b){ b.y+=yOff; }); parts.push(pt); });
     mod.hardware.forEach(function(h){ if(i>0&&/Adjustable leg/.test(h.name)) return; h.name=lbl+h.name; hw.push(h); });
@@ -1709,10 +1730,12 @@ var CUSTOM_PART_ROLES=['side','bottom','rail','back','centrerail','shelf','toeki
    for the fully-independent alternative) -- modules stay one logical cabinet here. */
 function splitCabinetIntoModules(p,n,customHeights){
   var heights=(customHeights&&customHeights.length===n)?customHeights:null;
+  var moduleHeights=[]; for(var hi=0;hi<n;hi++) moduleHeights.push(heights?heights[hi]:(p.h/n));
+  var shelfCounts=_distributeInt(p.shelf||0,moduleHeights);   // proportional by each module's own height share -- not the full count duplicated into every module
   var parts=[], hw=[], yCursor=0;
   for(var i=0;i<n;i++){
-    var mh=heights?heights[i]:(p.h/n);
-    var mp=Object.assign({},p,{h:mh,tk:(i===0?p.tk:0),skipAutoModuleSplit:true});   // the user already chose n modules here -- don't let buildTall's own MODULE_MAX auto-split add more on top of this
+    var mh=moduleHeights[i];
+    var mp=Object.assign({},p,{h:mh,shelf:shelfCounts[i],tk:(i===0?p.tk:0),skipAutoModuleSplit:true});   // the user already chose n modules here -- don't let buildTall's own MODULE_MAX auto-split add more on top of this
     var mod=buildCabinet(mp), yOff=(i===0?0:(p.tk+yCursor)), lbl='[Module '+(i+1)+'/'+n+'] ';
     mod.parts.forEach(function(pt){
       pt.name=lbl+pt.name;
@@ -1748,10 +1771,12 @@ function buildCabinetWithOverrides(c,cabIndex){
    app is concerned, it just has a decimal index and a parentIndex/moduleOf/moduleIdx tag. */
 function buildIndependentModules(c,parentIndex,n){
   var baseP=buildParamsFromAiCabinet(c), totalH=baseP.h, built=[], yCursor=0;
+  var moduleHeights=[]; for(var hi=0;hi<n;hi++){ var si=parentIndex+'.'+(hi+1); moduleHeights.push(manualHeightOverride[si]!=null?manualHeightOverride[si]:(totalH/n)); }
+  var shelfCounts=_distributeInt(baseP.shelf||0,moduleHeights);   // proportional baseline by height share -- manualShelfDelta below still lets the user hand-adjust any one module afterward, now on top of a sane starting point instead of the full duplicated count
   for(var i=0;i<n;i++){
     var subIndex=parentIndex+'.'+(i+1);
-    var mh=manualHeightOverride[subIndex]!=null?manualHeightOverride[subIndex]:(totalH/n);
-    var mp=Object.assign({},baseP,{h:mh,tk:(i===0?baseP.tk:0),skipAutoModuleSplit:true});   // same reasoning as splitCabinetIntoModules -- n independent modules were explicitly chosen, buildTall must not further subdivide any one of them
+    var mh=moduleHeights[i];
+    var mp=Object.assign({},baseP,{h:mh,shelf:shelfCounts[i],tk:(i===0?baseP.tk:0),skipAutoModuleSplit:true});   // same reasoning as splitCabinetIntoModules -- n independent modules were explicitly chosen, buildTall must not further subdivide any one of them
     if(manualDoorOverrides[subIndex]!=null) mp.door=manualDoorOverrides[subIndex];
     if(manualShelfDelta[subIndex]) mp.shelf=clampDim(mp.shelf+manualShelfDelta[subIndex],0,6);
     var res=buildCabinet(mp);
