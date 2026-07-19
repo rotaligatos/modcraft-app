@@ -22552,6 +22552,12 @@ function prodBuildPrompt(){
   var wasteMult=(1+(prodSettings.ebtWastage||0)/100).toFixed(3);
   return 'You are a furniture manufacturing specialist. Analyze this '+ftDesc+' of modular furniture.\n\n'
     +'Return ONLY valid JSON — no markdown code blocks, no explanation text before or after — just the raw JSON object.\n\n'
+    +'THE "summary" FIELD IS NEVER A SUBSTITUTE FOR THE "components" ARRAY — this is critical and has caused real failures: '
+    +'a brief, specific-sounding summary (e.g. naming furniture groups and counts like "Cabinet A (11 components), Cabinet B (20 components)...") '
+    +'is worthless on its own if those components are not ALSO extracted as individual rows in the components array. '
+    +'The summary is a 1-2 sentence high-level description ONLY — write it, then still do the full row-by-row extraction regardless of how long that takes or how many components there are. '
+    +'If the file has many sections or 50+ individual parts, extract EVERY SINGLE ONE as its own row — do not generalize, abbreviate, average similar parts together, or describe a group in prose instead of listing each part. '
+    +'Before you finish, check that the number of entries in your components array actually matches what you said in the summary — if you described 5 furniture groups with specific component counts but your components array is empty or far short of that total, you have not finished the task; keep extracting.\n\n'
     +'Required JSON structure:\n'
     +'{\n'
     +'  "summary": "brief description of the furniture item(s)",\n'
@@ -22788,12 +22794,12 @@ function prodApiCall(bodyObj,toolDef){
     if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
     var reader=r.body.getReader();
     var decoder=new TextDecoder();
-    var buf='',fullText='',toolJson='',inTok=0,outTok=0;
+    var buf='',fullText='',toolJson='',inTok=0,outTok=0,stopReason=null;
     function pump(){
       return reader.read().then(function(res){
         if(res.done){
           _tkRecord('drawing',inTok,outTok);
-          return prodParseResponse(toolDef?toolJson:fullText);
+          return prodParseResponse(toolDef?toolJson:fullText,stopReason);
         }
         buf+=decoder.decode(res.value,{stream:true});
         var lines=buf.split('\n'); buf=lines.pop();
@@ -22806,7 +22812,7 @@ function prodApiCall(bodyObj,toolDef){
           if(ev.type==='message_start'&&ev.message&&ev.message.usage){ inTok=ev.message.usage.input_tokens||0; }
           else if(ev.type==='content_block_delta'&&ev.delta&&ev.delta.type==='text_delta'&&typeof ev.delta.text==='string'){ fullText+=ev.delta.text; }
           else if(ev.type==='content_block_delta'&&ev.delta&&ev.delta.type==='input_json_delta'&&typeof ev.delta.partial_json==='string'){ toolJson+=ev.delta.partial_json; }
-          else if(ev.type==='message_delta'&&ev.usage&&typeof ev.usage.output_tokens==='number'){ outTok=ev.usage.output_tokens; }
+          else if(ev.type==='message_delta'){ if(ev.delta&&ev.delta.stop_reason) stopReason=ev.delta.stop_reason; if(ev.usage&&typeof ev.usage.output_tokens==='number') outTok=ev.usage.output_tokens; }
           else if(ev.type==='error'){ throw new Error((ev.error&&ev.error.message)||'stream error'); }
         }
         return pump();
@@ -23509,7 +23515,14 @@ function _prodComponentFieldCorrected(idx,field,newVal){
   r._bom=prodComputeBom(r.components);
   renderProductionPage();
 }
-function prodParseResponse(text){
+// stopReason: the stream's message_delta.stop_reason (see prodApiCall) -- captured
+// separately from JSON.parse success/failure because a response can hit max_tokens and
+// STILL happen to produce syntactically-valid (but incomplete/short) JSON, e.g. if the
+// model senses it's running low and wraps up its arrays early rather than mid-token. In
+// that case the old code silently treated it as a clean success with no truncation
+// warning -- exactly the confusing "Analysis complete!" + empty results symptom a real
+// 75-component cutting list produced.
+function prodParseResponse(text,stopReason){
   var json=text.trim()
     .replace(/^```(?:json)?\r?\n?/i,'')
     .replace(/\r?\n?```\s*$/,'');
@@ -23520,6 +23533,8 @@ function prodParseResponse(text){
     r.components=_prodApplyComponentJargon(r.components||[]);
     r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
     r._bom=prodComputeBom(r.components||[]);
+    if(stopReason==='max_tokens') r._truncated=true;
+    _prodFlagIncompleteExtraction(r);
     return r;
   }catch(err1){
     try{
@@ -23529,12 +23544,27 @@ function prodParseResponse(text){
       r2.components=_prodApplyComponentJargon(r2.components||[]);
       r2._services=prodComputeServices(r2.components||[],r2.holeSchedule||[]);
       r2._bom=prodComputeBom(r2.components||[]);
+      _prodFlagIncompleteExtraction(r2);
       return r2;
     }catch(err2){
       var tail=text.length>300?'\n...\n'+text.substring(text.length-200):'';
       return {error:'Could not parse AI response. Error: '+err1.message+'\n\nRaw output (first 500 chars):\n'+text.substring(0,500)+tail};
     }
   }
+}
+// Detects a real failure mode found via live testing: the model writes a detailed,
+// specific prose summary (naming components and counts) but never actually populates
+// the structured components array -- describing the cutting list instead of extracting
+// it. The tool schema only requires "components" to be PRESENT (an array), not non-
+// empty, so this satisfies strict validation while silently returning nothing usable.
+// Heuristic: a summary that mentions a number (a component/section count) is a strong
+// signal real content was seen, so an empty/near-empty components array alongside it is
+// suspicious rather than a genuinely blank drawing.
+function _prodFlagIncompleteExtraction(r){
+  var summary=r.summary||'';
+  var compCount=(r.components||[]).length;
+  var summaryImpliesContent=summary.length>40&&/\d/.test(summary);
+  if(compCount===0&&summaryImpliesContent) r._possibleIncompleteExtraction=true;
 }
 
 // EBT code → [shortSideCount, longSideCount]
@@ -24133,7 +24163,19 @@ function prodBuildResultHtml(result){
     +'<button class="btn btn-success" onclick="prodReflectToQuotation()"><i class="ti ti-transfer"></i>Reflect to quotation</button>'
     +'<button class="btn" onclick="prodClearFile()"><i class="ti ti-refresh"></i>New analysis</button>'
     +'</div>';
-  return '<div class="alert alert-success" style="margin-bottom:14px"><i class="ti ti-circle-check"></i><b>Analysis complete!</b>'+(result.summary?' '+escHtml(result.summary):'')+'</div>'
+  // The model can write a detailed, specific prose summary (naming components/sections/
+  // counts) while never actually populating the components array -- describing the
+  // cutting list instead of extracting it row-by-row. That satisfies the tool schema
+  // (components just needs to be present, not non-empty) so it looks like a clean
+  // success with nothing in the table -- confirmed via live testing on a real 75-
+  // component, 5-section cutting list. Surface this distinctly instead of a plain green
+  // "Analysis complete!" that contradicts an empty result right below it.
+  var topBanner=result._possibleIncompleteExtraction
+    ? '<div class="alert alert-warn" style="margin-bottom:14px"><i class="ti ti-alert-triangle"></i><div><b>The AI described this file but didn\'t extract any components into the table.</b><br>'
+      +'Its summary: "'+escHtml(result.summary)+'"<br>'
+      +'This is a known failure mode on large/complex files — the model can write a good description without doing the tedious full row-by-row extraction. Try <b>New analysis</b> again (sometimes a retry succeeds), or if the file has multiple sections/furniture groups, split it and analyze each one separately.</div></div>'
+    : '<div class="alert alert-success" style="margin-bottom:14px"><i class="ti ti-circle-check"></i><b>Analysis complete!</b>'+(result.summary?' '+escHtml(result.summary):'')+'</div>';
+  return topBanner
     +actHtml+'<div id="prod-summary-wrap">'+prodBuildSummaryHtml()+'</div>'
     +bomHtml+hwHtml+svcHtml+kpiHtml+compHtml+holeHtml; // order per user request: Bill of Materials -> Hardware -> Services -> totals -> Cutting List (last, most detailed) -> Hole schedule
 }
