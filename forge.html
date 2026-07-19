@@ -30,12 +30,10 @@
   details.drafts-box { margin-bottom:14px; background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
   details.drafts-box summary { cursor:pointer; font-size:12px; font-weight:700; color:var(--ink); padding:4px 0; user-select:none; }
   details.drafts-box summary:hover { color:var(--accent); }
-  details.drafts-box #draft-save-btn { width:100%; padding:8px; border:none; border-radius:7px; font-weight:700; font-size:12px; cursor:pointer; background:var(--accent); color:#191100; margin-bottom:8px; }
-  .draft-row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 0; border-top:1px solid var(--line); }
-  .draft-info { font-size:11px; }
-  .draft-actions { display:flex; gap:5px; flex-shrink:0; }
-  .draft-actions button { border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:11px; cursor:pointer; background:var(--bg); color:var(--ink); }
-  .draft-actions button.danger { background:rgba(255,92,92,.15); border-color:rgba(255,92,92,.4); color:#e05a5a; }
+  details.drafts-box #draft-save-btn, details.drafts-box #draft-load-btn { width:100%; padding:8px; border:none; border-radius:7px; font-weight:700; font-size:12px; cursor:pointer; margin-bottom:6px; }
+  details.drafts-box #draft-save-btn { background:var(--accent); color:#191100; }
+  details.drafts-box #draft-load-btn { background:var(--bg); color:var(--ink); border:1px solid var(--line); }
+  #draft-status { min-height:14px; }
   #view { display:flex; flex-direction:column; min-width:0; }
   #canvas-host { width:100%; height:56%; background:radial-gradient(ellipse at 50% 40%,#0e1620,#05070c 75%); position:relative; }
   #legend { position:absolute; top:8px; left:8px; background:rgba(18,22,31,.92); border:1px solid var(--line); border-radius:8px; padding:9px 12px; font-size:11px; color:var(--ink); box-shadow:0 4px 14px rgba(0,0,0,.4); width:190px; }
@@ -131,9 +129,11 @@
     </div>
     <details class="drafts-box">
       <summary>💾 Drafts — save/reload instead of re-analyzing (saves API tokens)</summary>
-      <p class="note">Saves the uploaded image + the AI's result + all your edits (deletes/doors/resizes/etc) to this browser. Reload a draft instantly with no API call, so we can iterate on bugs without re-spending tokens each time.</p>
-      <button type="button" id="draft-save-btn">💾 Save current as a draft</button>
-      <div id="draft-list"></div>
+      <p class="note">Saves the uploaded image + the AI's result + all your edits (deletes/doors/resizes/etc) to a .json file on your computer — no browser storage limit. Reload that file instantly with no API call, so we can iterate on bugs without re-spending tokens each time.</p>
+      <button type="button" id="draft-save-btn">💾 Save current as a draft file</button>
+      <button type="button" id="draft-load-btn">📂 Load a draft file</button>
+      <input type="file" id="draft-file-input" accept=".json,application/json" style="display:none;">
+      <div id="draft-status" class="note"></div>
     </details>
     <details class="manual-override">
     <summary>⚙ Manual override / fine-tune a single cabinet</summary>
@@ -1383,8 +1383,14 @@ var AI_KEY_STORAGE='forgeClaudeKey';
 /* Drafts: save the uploaded image + the AI's analysis result + every manual override to
    localStorage, so we can reload an exact prior state instantly while iterating on bugs --
    no re-upload, no re-running the (paid, per-token) AI analysis. Deliberately a dev/testing
-   aid, not a "project file" concept -- one flat list in localStorage, not per-user/per-cloud. */
-var DRAFTS_KEY='forgeDrafts', _lastUploadedImage=null;
+   aid, not a "project file" concept. FILE-based, not localStorage -- localStorage has a
+   hard ~5-10MB per-origin quota shared across everything the site stores, and each draft
+   embeds the full uploaded image as base64 (often 1-3MB on its own), so 2-4 saved drafts
+   was enough to hit "storage full" in real use. A downloaded .json file has no such limit
+   and is a better fit for "load the previous one and check the changes" anyway -- it's a
+   real file you can keep, rename, or hand to someone else, not something opaque and
+   silently capped inside the browser. */
+var _lastUploadedImage=null;
 function _currentOverridesSnapshot(){
   return {
     manualDoorOverrides:manualDoorOverrides, manualShelfDelta:manualShelfDelta, manualDeletedParts:manualDeletedParts,
@@ -1399,42 +1405,38 @@ function _restoreOverridesSnapshot(ov){
   manualModuleHeights=ov.manualModuleHeights||{}; manualHeightOverride=ov.manualHeightOverride||{}; manualDeletedCabinets=ov.manualDeletedCabinets||{};
   manualEbtOverrides=ov.manualEbtOverrides||{}; manualPartSizeOverrides=ov.manualPartSizeOverrides||{};
 }
-function listDrafts(){ try{ return JSON.parse(localStorage.getItem(DRAFTS_KEY)||'[]'); }catch(e){ return []; } }
 function saveDraft(){
   if(!window._aiCabinets || !window._aiCabinets.length){ alert('Nothing to save yet — analyze a drawing first.'); return; }
-  var label=prompt('Label this draft (e.g. "kitchen run — testing shelf delete"):','Draft '+new Date().toLocaleString());
+  var label=prompt('Label this draft (used in the downloaded filename):','draft-'+new Date().toISOString().slice(0,16).replace(/[:T]/g,'-'));
   if(label==null) return;
-  var drafts=listDrafts();
-  drafts.push({id:'d'+Date.now()+'_'+Math.floor(Math.random()*1e6), label:label, savedAt:new Date().toISOString(),
-    image:_lastUploadedImage, aiCabinets:window._aiCabinets, overrides:_currentOverridesSnapshot(), isolatedCabinetIndices:isolatedCabinetIndices});
-  try{ localStorage.setItem(DRAFTS_KEY,JSON.stringify(drafts)); }
-  catch(e){ alert('Could not save — browser storage is full (each draft includes the full image). Delete an older draft first.'); return; }
-  renderDraftList();
+  var draft={label:label, savedAt:new Date().toISOString(),
+    image:_lastUploadedImage, aiCabinets:window._aiCabinets, overrides:_currentOverridesSnapshot(), isolatedCabinetIndices:isolatedCabinetIndices};
+  var blob=new Blob([JSON.stringify(draft)],{type:'application/json'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url; a.download='forge-draft-'+label.replace(/[^a-z0-9_-]+/gi,'_')+'.json';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); },1000);
+  document.getElementById('draft-status').textContent='Saved — check your Downloads folder for "'+a.download+'".';
 }
-function loadDraft(id){
-  var d=listDrafts().filter(function(x){ return x.id===id; })[0];
-  if(!d) return;
-  window._aiCabinets=d.aiCabinets; _lastUploadedImage=d.image||null;
-  _restoreOverridesSnapshot(d.overrides||{});
-  isolatedCabinetIndices=d.isolatedCabinetIndices||null;
-  renderAiResult({cabinets:d.aiCabinets});   // rebuilds the results panel + Apply-all button exactly as a fresh analysis would
-  applyAllAiCabinets();
-  document.getElementById('ai-status').textContent='Loaded draft "'+d.label+'" ('+new Date(d.savedAt).toLocaleString()+') — no API call made.';
-}
-function deleteDraft(id){
-  localStorage.setItem(DRAFTS_KEY,JSON.stringify(listDrafts().filter(function(x){ return x.id!==id; })));
-  renderDraftList();
-}
-function renderDraftList(){
-  var el=document.getElementById('draft-list'); if(!el) return;
-  var drafts=listDrafts();
-  if(!drafts.length){ el.innerHTML='<div class="note">No saved drafts yet.</div>'; return; }
-  el.innerHTML=drafts.slice().reverse().map(function(d){
-    return '<div class="draft-row"><div class="draft-info"><b>'+String(d.label||'Untitled').replace(/</g,'&lt;')+'</b><br><span class="note">'+new Date(d.savedAt).toLocaleString()+' · '+((d.aiCabinets&&d.aiCabinets.length)||0)+' cabinet(s)</span></div>'
-      +'<div class="draft-actions"><button type="button" data-load="'+d.id+'">Load</button><button type="button" class="danger" data-del="'+d.id+'">✕</button></div></div>';
-  }).join('');
-  Array.prototype.forEach.call(el.querySelectorAll('[data-load]'),function(b){ b.addEventListener('click',function(){ loadDraft(this.getAttribute('data-load')); }); });
-  Array.prototype.forEach.call(el.querySelectorAll('[data-del]'),function(b){ b.addEventListener('click',function(){ if(confirm('Delete this draft?')) deleteDraft(this.getAttribute('data-del')); }); });
+function loadDraftFile(file){
+  var statusEl=document.getElementById('draft-status');
+  if(!file) return;
+  var r=new FileReader();
+  r.onload=function(){
+    var d;
+    try{ d=JSON.parse(String(r.result)); }
+    catch(e){ statusEl.textContent='Could not read that file — is it a FORGE draft .json?'; return; }
+    if(!d.aiCabinets){ statusEl.textContent='That file doesn\'t look like a FORGE draft (no cabinet data found).'; return; }
+    window._aiCabinets=d.aiCabinets; _lastUploadedImage=d.image||null;
+    _restoreOverridesSnapshot(d.overrides||{});
+    isolatedCabinetIndices=d.isolatedCabinetIndices||null;
+    renderAiResult({cabinets:d.aiCabinets});   // rebuilds the results panel + Apply-all button exactly as a fresh analysis would
+    applyAllAiCabinets();
+    statusEl.textContent='Loaded "'+(d.label||file.name)+'" ('+(d.savedAt?new Date(d.savedAt).toLocaleString():'?')+') — no API call made.';
+  };
+  r.onerror=function(){ statusEl.textContent='Could not read that file.'; };
+  r.readAsText(file);
 }
 var SUPPORTED_TYPES=['base','wall','tall','drawer','sink','corner','cornerwall','openshelf','microwave'];
 var TYPE_LABELS={base:'Base cabinet',wall:'Wall / upper cabinet',tall:'Tall / pantry cabinet',drawer:'Drawer base',sink:'Sink / open base',corner:'Corner base (L-shape)',cornerwall:'Corner wall (L-shape)',openshelf:'Open shelf unit',microwave:'Microwave / appliance cabinet'};
@@ -1859,7 +1861,8 @@ window.addEventListener('DOMContentLoaded',function(){
   var savedKey=localStorage.getItem(AI_KEY_STORAGE); if(savedKey) document.getElementById('ai-key').value=savedKey;
   document.getElementById('ai-btn').addEventListener('click',analyzeDrawing);
   document.getElementById('draft-save-btn').addEventListener('click',saveDraft);
-  renderDraftList();
+  document.getElementById('draft-load-btn').addEventListener('click',function(){ document.getElementById('draft-file-input').click(); });
+  document.getElementById('draft-file-input').addEventListener('change',function(){ loadDraftFile(this.files[0]); this.value=''; });
   document.getElementById('isolation-btn').addEventListener('click',clearIsolation);
   document.getElementById('fullscreen-btn').addEventListener('click',toggleFullscreen);
   document.getElementById('solid-toggle').addEventListener('change',function(){
