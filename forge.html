@@ -67,6 +67,16 @@
   #canvas-toolbar { position:absolute; top:8px; right:8px; max-width:min(45%,220px); background:rgba(18,22,31,.92); border:1px solid var(--line); border-radius:8px; padding:7px 9px; font-size:11px; display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:6px 10px; color:var(--ink); box-shadow:0 4px 14px rgba(0,0,0,.4); }
   #canvas-toolbar label { display:flex; align-items:center; gap:4px; font-weight:600; cursor:pointer; white-space:nowrap; }
   #canvas-toolbar input[type=checkbox] { accent-color:var(--accent); }
+  #isolation-btn { background:var(--accent2); color:#052030; border:none; border-radius:6px; padding:5px 9px; font-size:11px; font-weight:700; cursor:pointer; white-space:nowrap; }
+  .part-actions,.cab-actions { margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.12); display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  .part-actions button,.cab-actions button { background:rgba(255,255,255,.1); color:#fff; border:1px solid rgba(255,255,255,.18); border-radius:6px; padding:4px 8px; font-size:11px; cursor:pointer; }
+  .part-actions .del-part-btn { background:rgba(255,92,92,.2); border-color:rgba(255,92,92,.4); color:#ff9b9b; }
+  .cab-actions select { background:var(--panel); color:#fff; border:1px solid rgba(255,255,255,.2); border-radius:5px; font-size:11px; padding:2px 4px; }
+  .add-custom { width:100%; margin-top:4px; }
+  .add-custom summary { cursor:pointer; font-size:11px; color:var(--accent2); }
+  .add-custom-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:6px; }
+  .add-custom-grid input,.add-custom-grid select { width:100%; font-size:11px; padding:3px 5px; border-radius:4px; border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#fff; }
+  .add-custom-grid .full { grid-column:1/3; }
   #part-info { position:absolute; bottom:8px; left:8px; background:rgba(15,18,27,.97); color:#fff; border:1px solid rgba(255,157,46,.35); border-radius:10px; padding:12px 14px; font-size:12px; line-height:1.6; max-width:300px; display:none; box-shadow:0 6px 24px rgba(0,0,0,.5); }
   #part-info b { color:var(--accent); }
   .ebt-edit { display:flex; align-items:center; gap:6px; margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.12); }
@@ -180,6 +190,7 @@
     <div id="canvas-host">
       <div id="legend"></div>
       <div id="canvas-toolbar">
+        <button type="button" id="isolation-btn" style="display:none;"></button>
         <label><input type="checkbox" id="solid-toggle" checked> Solid</label>
         <label><input type="checkbox" id="explode-toggle"> Explode</label>
       </div>
@@ -680,6 +691,7 @@ function initThree(){
   (function animate(){ requestAnimationFrame(animate); controls.update(); composer.render(); })();
   RAY=new THREE.Raycaster(); MOUSE=new THREE.Vector2();
   renderer.domElement.addEventListener('click',onCanvasClick);
+  renderer.domElement.addEventListener('contextmenu',onCanvasRightClick);
 }
 function onCanvasClick(ev){
   var rect=renderer.domElement.getBoundingClientRect();
@@ -698,20 +710,92 @@ function onCanvasClick(ev){
     hidePartInfo();
   }
 }
+/* Right-click a cabinet in the combined scene to isolate it -- dim/hide the other cabinets
+   and frame the camera on just this one for close inspection. */
+function onCanvasRightClick(ev){
+  ev.preventDefault();
+  if(!window._sceneCabinets || !window._sceneCabinets.length) return;   // isolation only applies to the combined multi-cabinet view
+  var rect=renderer.domElement.getBoundingClientRect();
+  MOUSE.x=((ev.clientX-rect.left)/rect.width)*2-1;
+  MOUSE.y=-((ev.clientY-rect.top)/rect.height)*2+1;
+  RAY.setFromCamera(MOUSE,camera);
+  var hits=RAY.intersectObjects(selectableMeshes);
+  if(!hits.length) return;
+  isolatedCabinetIndex=hits[0].object.userData.cabinetIndex;
+  renderCombinedScene(window._sceneCabinets);
+}
+function clearIsolation(){
+  isolatedCabinetIndex=null;
+  if(window._sceneCabinets && window._sceneCabinets.length) renderCombinedScene(window._sceneCabinets);
+}
 function showPartInfo(d){
   var el=document.getElementById('part-info');
   el.style.display='block';
   var v=parseEbt(d.ebt);
+  var editable=!!(window._sceneCabinets && window._sceneCabinets.length);   // delete/door/add actions only make sense in the AI combined-scene mode, which has an override layer to persist them
   el.innerHTML='<b>Cabinet '+d.cabinetIndex+'</b><br>'+d.partName+'<br>'
     +Math.round(d.L)+' × '+Math.round(d.W)+' × '+d.t+'mm · grain '+d.grain+'<br>'
     +'EBT: '+(d.ebt||'—')+(d.ops?'<br>'+d.ops:'')
     +'<div class="ebt-edit">Edgeband:'
     +'<span class="estep">S<button type="button" data-w="s" data-dd="-1">−</button><span class="ecount">'+v.s+'</span><button type="button" data-w="s" data-dd="1">+</button></span>'
     +'<span class="estep">L<button type="button" data-w="l" data-dd="-1">−</button><span class="ecount">'+v.l+'</span><button type="button" data-w="l" data-dd="1">+</button></span>'
-    +'</div>';
+    +'</div>'
+    +(editable?(
+      '<div class="part-actions"><button type="button" class="del-part-btn" id="del-part-btn">🗑 Delete this part</button></div>'
+      +'<div class="cab-actions">'
+      +'<span>Door:</span><select id="door-select">'+DOOR_OPTS.map(function(o){return '<option value="'+o+'"'+(o===(manualDoorOverrides[d.cabinetIndex]||_currentDoorOf(d.cabinetIndex))?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'
+      +'<button type="button" id="add-shelf-btn">+ Shelf</button>'
+      +'<details class="add-custom"><summary>+ Custom part</summary><div class="add-custom-grid">'
+      +'<input type="text" id="cp-name" placeholder="Part name" class="full">'
+      +'<input type="number" id="cp-l" placeholder="Length mm">'
+      +'<input type="number" id="cp-w" placeholder="Width mm">'
+      +'<input type="number" id="cp-t" placeholder="Thk mm" value="18">'
+      +'<select id="cp-role">'+CUSTOM_PART_ROLES.map(function(r){return '<option value="'+r+'">'+PART_COLORS[r].label+'</option>';}).join('')+'</select>'
+      +'<input type="number" id="cp-x" placeholder="X mm" value="0">'
+      +'<input type="number" id="cp-y" placeholder="Y mm" value="0">'
+      +'<input type="number" id="cp-z" placeholder="Z mm" value="0">'
+      +'<button type="button" id="add-custom-btn" class="full">Add part</button>'
+      +'</div></details>'
+      +'</div>'
+    ):'');
   Array.prototype.forEach.call(el.querySelectorAll('.ebt-edit button'),function(btn){
     btn.addEventListener('click',function(){ adjustEbt(d.cabinetIndex,d.partName,btn.getAttribute('data-w'),+btn.getAttribute('data-dd')); });
   });
+  if(!editable) return;
+  document.getElementById('del-part-btn').addEventListener('click',function(){ deletePart(d.cabinetIndex,d.partName); });
+  document.getElementById('door-select').addEventListener('change',function(){ changeDoor(d.cabinetIndex,this.value); });
+  document.getElementById('add-shelf-btn').addEventListener('click',function(){ addShelf(d.cabinetIndex); });
+  document.getElementById('add-custom-btn').addEventListener('click',function(){ addCustomPart(d.cabinetIndex); });
+}
+function _currentDoorOf(cabIndex){
+  var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
+  return entry?entry.params.door:'single';
+}
+function deletePart(cabIndex,partName){
+  manualDeletedParts[cabIndex+'::'+partName]=true;
+  hidePartInfo();
+  refreshCabinet(cabIndex);
+}
+function changeDoor(cabIndex,doorVal){
+  manualDoorOverrides[cabIndex]=doorVal;
+  refreshCabinet(cabIndex);
+  var m=selectableMeshes.filter(function(mm){return mm.userData.cabinetIndex===cabIndex && mm.userData.partName==='Door';})[0];
+  if(m){ m.material.color.setHex(SELECT_GLOW); m.userData.origOpacity=m.material.opacity; m.material.opacity=.9; selectedMesh=m; showPartInfo(m.userData); }
+  else hidePartInfo();
+}
+function addShelf(cabIndex){
+  manualShelfDelta[cabIndex]=(manualShelfDelta[cabIndex]||0)+1;
+  refreshCabinet(cabIndex);
+}
+function addCustomPart(cabIndex){
+  var name=document.getElementById('cp-name').value.trim()||'Custom part';
+  var L=+document.getElementById('cp-l').value||100, W=+document.getElementById('cp-w').value||100, t=+document.getElementById('cp-t').value||18;
+  var role=document.getElementById('cp-role').value;
+  var x=+document.getElementById('cp-x').value||0, y=+document.getElementById('cp-y').value||0, z=+document.getElementById('cp-z').value||0;
+  if(!manualCustomParts[cabIndex]) manualCustomParts[cabIndex]=[];
+  manualCustomParts[cabIndex].push({name:name,L:L,W:W,t:t,grain:'length',ebt:'N/A',ops:'manually added',role:role,boxes:[B(L,W,t,x,y,z)]});
+  hidePartInfo();
+  refreshCabinet(cabIndex);
 }
 function hidePartInfo(){ document.getElementById('part-info').style.display='none'; if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh.material.opacity=selectedMesh.userData.origOpacity; selectedMesh=null; } }
 /* "Give me access to the edge": lets a user directly set how many short (S) / long (L)
@@ -994,6 +1078,34 @@ function computeFloorOffset(c){
   if(c.floorOffset_mm!=null) return clampDim(c.floorOffset_mm,0,2200);
   return wallMounted?1400:0;
 }
+/* Per-cabinet manual overrides layered on top of the AI's own reading — each keyed by
+   cabinet index (or cabIndex::partName for part-level ones), applied fresh every time a
+   cabinet is rebuilt so they survive re-renders without mutating the engine's output. */
+var manualDoorOverrides={}, manualShelfDelta={}, manualDeletedParts={}, manualCustomParts={};
+var DOOR_OPTS=['single','double','bifold','pullout','none'];
+var CUSTOM_PART_ROLES=['side','bottom','rail','back','centrerail','shelf','toekick','endpanel','door'];
+function buildCabinetWithOverrides(c,cabIndex){
+  var p=buildParamsFromAiCabinet(c);
+  if(manualDoorOverrides[cabIndex]!=null) p.door=manualDoorOverrides[cabIndex];
+  if(manualShelfDelta[cabIndex]) p.shelf=clampDim(p.shelf+manualShelfDelta[cabIndex],0,6);
+  var res=buildCabinet(p);
+  res.parts=res.parts.filter(function(pt){ return !manualDeletedParts[cabIndex+'::'+pt.name]; });
+  if(manualCustomParts[cabIndex]) res.parts=res.parts.concat(manualCustomParts[cabIndex]);
+  applyEbtOverrides(res.parts,cabIndex);
+  return {params:p,result:res};
+}
+/* Rebuilds just ONE cabinet (after a delete/door-change/add-shelf/add-part edit) and
+   re-renders the whole combined scene so the change is reflected everywhere — tables,
+   3D view, legend — without needing to re-run the AI or touch any other cabinet. */
+function refreshCabinet(cabIndex){
+  if(!window._sceneCabinets) return;
+  var entry=window._sceneCabinets.filter(function(b){ return b.index===cabIndex; })[0];
+  var c=(window._aiCabinets||[]).filter(function(cc){ return (cc.index||0)===cabIndex; })[0];
+  if(!entry||!c) return;
+  var rebuilt=buildCabinetWithOverrides(c,cabIndex);
+  entry.params=rebuilt.params; entry.result=rebuilt.result;
+  renderCombinedScene(window._sceneCabinets);
+}
 /* The core "virtual twin" capability: build every auto-fillable detected cabinet and
    render them all together, positioned left-to-right same as the real drawing (sorted by
    the AI's own left-to-right index, not raw array order — the AI doesn't always return
@@ -1005,23 +1117,24 @@ function applyAllAiCabinets(){
   cabinets=cabinets.slice().sort(function(a,b){ return (a.index||0)-(b.index||0); });
   var xOff=0, built=[];
   cabinets.forEach(function(c,i){
-    var p=buildParamsFromAiCabinet(c);
-    var res=buildCabinet(p);
-    applyEbtOverrides(res.parts,c.index||(i+1));
-    built.push({index:c.index||(i+1),type:c.type,params:p,result:res,xOffset:xOff,yOffset:computeFloorOffset(c)});
-    xOff+=p.w+50;   // 50mm visual gap between cabinets in the combined scene
+    var cabIndex=c.index||(i+1);
+    var b1=buildCabinetWithOverrides(c,cabIndex);
+    built.push({index:cabIndex,type:c.type,params:b1.params,result:b1.result,xOffset:xOff,yOffset:computeFloorOffset(c)});
+    xOff+=b1.params.w+50;   // 50mm visual gap between cabinets in the combined scene
   });
   window._sceneCabinets=built;
   renderCombinedScene(built);
-  document.getElementById('ai-status').textContent='Rendered '+built.length+' cabinet(s) as one combined 3D twin — click any part to inspect it, toggle Exploded view above the canvas.';
+  document.getElementById('ai-status').textContent='Rendered '+built.length+' cabinet(s) as one combined 3D twin — left-click a part to inspect/edit it, right-click a cabinet to isolate it, toggle Exploded view above the canvas.';
 }
+var isolatedCabinetIndex=null;
 function renderCombinedScene(built){
-  renderScene(built.map(function(b){ return {parts:b.result.parts,xOffset:b.xOffset,yOffset:b.yOffset,cabinetIndex:b.index}; }));
+  var visible=isolatedCabinetIndex!=null?built.filter(function(b){return b.index===isolatedCabinetIndex;}):built;
+  renderScene(visible.map(function(b){ return {parts:b.result.parts,xOffset:isolatedCabinetIndex!=null?0:b.xOffset,yOffset:isolatedCabinetIndex!=null?0:b.yOffset,cabinetIndex:b.index}; }));
   var bd=BOARDS['4x8']; BOARD=bd;   // combined view: default board for the estimate (per-cabinet material choice is a future refinement)
   var tb=document.querySelector('#parts tbody'); tb.innerHTML='';
   var hb=document.querySelector('#hw tbody'); hb.innerHTML='';
   var totalPieces=0,totalTape=0,boardArea=0,spCount=0,divCount=0,rowIdx=0;
-  built.forEach(function(b){
+  visible.forEach(function(b){
     b.result.parts.forEach(function(pt){
       var qty=(pt.qty!=null)?pt.qty:pt.boxes.length, ebt=pt.ebt;
       var pieces=splitForBoard(pt.L,pt.W,bd), split=pieces.length>1;
@@ -1042,13 +1155,15 @@ function renderCombinedScene(built){
   });
   var sheets=(boardArea/((bd.w/1000)*(bd.h/1000))).toFixed(2);
   document.getElementById('summary').innerHTML=
-    '<div class="stat"><b>'+built.length+'</b><span>cabinets combined</span></div>'
+    '<div class="stat"><b>'+visible.length+'</b><span>cabinet'+(visible.length===1?'':'s')+(isolatedCabinetIndex!=null?' (isolated)':' combined')+'</span></div>'
    +'<div class="stat"><b>'+totalPieces+'</b><span>total pieces</span></div>'
    +'<div class="stat"><b>'+(totalTape/1000).toFixed(2)+' m</b><span>edge tape</span></div>'
    +'<div class="stat"><b>'+boardArea.toFixed(2)+' m²</b><span>board area</span></div>'
    +'<div class="stat"><b>~'+sheets+'</b><span>4×8 ft sheets (raw, approx)</span></div>'
    +(spCount>0?'<div class="stat" style="background:#fde2e2"><b style="color:#c01616">'+spCount+'</b><span>special cut(s)</span></div>':'')
    +(divCount>0?'<div class="stat" style="background:#fff0e0"><b style="color:#c2680e">'+divCount+'</b><span>over board → divide</span></div>':'');
+  var isoBtn=document.getElementById('isolation-btn');
+  if(isoBtn){ isoBtn.style.display=isolatedCabinetIndex!=null?'inline-flex':'none'; isoBtn.textContent='← Show all (viewing Cabinet '+isolatedCabinetIndex+')'; }
 }
 function applyAiCabinet(idx){
   var c=(window._aiCabinets||[])[idx]; if(!c) return;
@@ -1123,6 +1238,7 @@ window.addEventListener('DOMContentLoaded',function(){
   initThree();
   var savedKey=localStorage.getItem(AI_KEY_STORAGE); if(savedKey) document.getElementById('ai-key').value=savedKey;
   document.getElementById('ai-btn').addEventListener('click',analyzeDrawing);
+  document.getElementById('isolation-btn').addEventListener('click',clearIsolation);
   document.getElementById('solid-toggle').addEventListener('change',function(){
     solidOn=this.checked;
     if(window._sceneCabinets && window._sceneCabinets.length) renderCombinedScene(window._sceneCabinets);
