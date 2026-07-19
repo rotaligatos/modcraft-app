@@ -275,6 +275,25 @@ function applyEbtOverrides(parts,cabIndex){
     if(ov!=null) pt.ebt=ov;
   });
 }
+/* Deletion is per-INSTANCE (cabIndex::partName::boxIndex), not per part NAME -- several
+   real components (all the shelves in a cabinet, a corner cabinet's multiple L-shaped
+   shelf levels) are aggregated into ONE named part with several boxes/polyY levels, so a
+   name-only delete used to wipe out every shelf at once instead of just the one clicked. */
+function deleteAppliedToParts(parts,cabIndex){
+  return parts.reduce(function(acc,pt){
+    if(pt.boxes && pt.boxes.length){
+      var kept=pt.boxes.filter(function(b,bi){ return !manualDeletedParts[cabIndex+'::'+pt.name+'::'+bi]; });
+      if(kept.length===0) return acc;   // every instance of this part deleted -- drop it entirely
+      if(kept.length!==pt.boxes.length) pt=Object.assign({},pt,{boxes:kept});
+    } else if(pt.polyY && pt.polyY.length){
+      var keptY=pt.polyY.filter(function(y0,li){ return !manualDeletedParts[cabIndex+'::'+pt.name+'::'+li]; });
+      if(keptY.length===0) return acc;
+      if(keptY.length!==pt.polyY.length) pt=Object.assign({},pt,{polyY:keptY});
+    }
+    acc.push(pt);
+    return acc;
+  },[]);
+}
 
 // --- shared sub-builders ---
 function addSides(parts,p){
@@ -748,10 +767,10 @@ function onCanvasClick(ev){
   var partLevel=!combinedMode || explodedOn || ev.ctrlKey || ev.metaKey;   // manual single-cabinet mode always acts per-part; combined mode defaults to whole-cabinet unless exploded or Ctrl-held
   if(hits.length){
     var m=hits[0].object;
+    if(m.userData.isDoor) toggleDoorOpen(m.userData.cabinetIndex,m.userData.partName,m.userData.boxIndex);   // door open/close always fires on a door click, in ANY selection mode -- not only when part-level
     if(partLevel){
       highlightMeshes([m]);
       showPartInfo(m.userData);
-      if(m.userData.isDoor) toggleDoorOpen(m.userData.cabinetIndex,m.userData.partName,m.userData.boxIndex);
     } else {
       var cabMeshes=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===m.userData.cabinetIndex; });
       highlightMeshes(cabMeshes);
@@ -908,7 +927,7 @@ function showPartInfo(d){
     btn.addEventListener('click',function(){ adjustEbt(d.cabinetIndex,d.partName,btn.getAttribute('data-w'),+btn.getAttribute('data-dd')); });
   });
   if(!editable) return;
-  document.getElementById('del-part-btn').addEventListener('click',function(){ deletePart(d.cabinetIndex,d.partName); });
+  document.getElementById('del-part-btn').addEventListener('click',function(){ deletePart(d.cabinetIndex,d.partName,d.boxIndex); });
   wireCabActionsHandlers(d.cabinetIndex);
 }
 /* Whole-cabinet selection (the new default click behavior in combined mode, non-exploded,
@@ -928,17 +947,17 @@ function showCabinetInfo(cabIndex){
 }
 function changeModuleCount(cabIndex,n){
   if(n<=1) delete manualModuleCount[cabIndex]; else manualModuleCount[cabIndex]=n;
-  hidePartInfo();   // part names change (gain/lose "[Module i/N]" prefixes) so the old selection no longer matches anything
   refreshCabinet(cabIndex);
+  showCabinetInfo(cabIndex);   // part names change ("[Module i/N]" prefixes) so the old part-level selection no longer matches anything -- drop to the cabinet-level view instead of closing the panel entirely
 }
 function _currentDoorOf(cabIndex){
   var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
   return entry?entry.params.door:'single';
 }
-function deletePart(cabIndex,partName){
-  manualDeletedParts[cabIndex+'::'+partName]=true;
-  hidePartInfo();
+function deletePart(cabIndex,partName,boxIndex){
+  manualDeletedParts[cabIndex+'::'+partName+'::'+boxIndex]=true;
   refreshCabinet(cabIndex);
+  showCabinetInfo(cabIndex);   // that specific part is gone -- fall back to the cabinet-level view rather than closing the panel
 }
 function changeDoor(cabIndex,doorVal){
   manualDoorOverrides[cabIndex]=doorVal;
@@ -958,8 +977,8 @@ function addCustomPart(cabIndex){
   var x=+document.getElementById('cp-x').value||0, y=+document.getElementById('cp-y').value||0, z=+document.getElementById('cp-z').value||0;
   if(!manualCustomParts[cabIndex]) manualCustomParts[cabIndex]=[];
   manualCustomParts[cabIndex].push({name:name,L:L,W:W,t:t,grain:'length',ebt:'N/A',ops:'manually added',role:role,boxes:[B(L,W,t,x,y,z)]});
-  hidePartInfo();
   refreshCabinet(cabIndex);
+  showCabinetInfo(cabIndex);   // keep the panel (and the "+ Custom part" form) open so several parts can be added in a row without re-navigating back to it each time
 }
 function hidePartInfo(){ document.getElementById('part-info').style.display='none'; clearSelectionHighlight(); }
 /* "Give me access to the edge": lets a user directly set how many short (S) / long (L)
@@ -1003,10 +1022,10 @@ function renderScene(groups){
         var shape=new THREE.Shape();
         pt.poly.forEach(function(pp,idx){ if(idx===0) shape.moveTo((pp[0]+xOff)*S,pp[1]*S); else shape.lineTo((pp[0]+xOff)*S,pp[1]*S); });
         var yt=(pt.yt||18), levels=pt.polyY||[pt.y0||0];
-        levels.forEach(function(y0){
+        levels.forEach(function(y0,li){
           var geo=new THREE.ExtrudeGeometry(shape,{depth:yt*S,bevelEnabled:false});
           var m=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:col,transparent:opacity<1,opacity:opacity}));
-          m.rotation.x=Math.PI/2; m.position.y=(y0+yt+yOff)*S; m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col};
+          m.rotation.x=Math.PI/2; m.position.y=(y0+yt+yOff)*S; m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:li};
           cabGroup.add(m); selectableMeshes.push(m);
           var e=new THREE.LineSegments(new THREE.EdgesGeometry(geo),new THREE.LineBasicMaterial({color:edgeCol})); e.rotation.x=Math.PI/2; e.position.y=(y0+yt+yOff)*S; cabGroup.add(e);
         });
@@ -1040,7 +1059,7 @@ function renderScene(groups){
         } else {
           m.position.set((b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
           e.position.copy(m.position);
-          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col};
+          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:bi};
           cabGroup.add(m); cabGroup.add(e);
         }
         selectableMeshes.push(m);
@@ -1290,7 +1309,7 @@ function buildCabinetWithOverrides(c,cabIndex){
   if(manualShelfDelta[cabIndex]) p.shelf=clampDim(p.shelf+manualShelfDelta[cabIndex],0,6);
   var n=manualModuleCount[cabIndex]||1;
   var res=n>1?splitCabinetIntoModules(p,n):buildCabinet(p);
-  res.parts=res.parts.filter(function(pt){ return !manualDeletedParts[cabIndex+'::'+pt.name]; });
+  res.parts=deleteAppliedToParts(res.parts,cabIndex);
   if(manualCustomParts[cabIndex]) res.parts=res.parts.concat(manualCustomParts[cabIndex]);
   applyEbtOverrides(res.parts,cabIndex);
   return {params:p,result:res};
