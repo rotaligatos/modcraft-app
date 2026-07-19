@@ -417,7 +417,8 @@ function buildWall(p){
 var MODULE_MAX=2440;   // 8ft — a tall cabinet taller than this is split into stacked modular cabinets
 function buildTall(p){
   // > 8ft: divide the height into N stacked modular cabinets (each a complete cabinet), stacked to the total height
-  if(p.h<=MODULE_MAX) return buildTallSingle(p);
+  // skipAutoModuleSplit: the user already chose an explicit manual split count (or independent modules) upstream -- don't let this auto-split add MORE modules on top of that choice.
+  if(p.h<=MODULE_MAX || p.skipAutoModuleSplit) return buildTallSingle(p);
   var n=Math.ceil(p.h/MODULE_MAX), mh=p.h/n, parts=[], hw=[];
   for(var i=0;i<n;i++){
     var mp=Object.assign({},p,{h:mh,tk:(i===0?p.tk:0)});   // only the bottom module gets toe kick + legs
@@ -707,7 +708,7 @@ var PART_COLORS={
   toekick:{c:0x78716c,label:'Toe kick'}, endpanel:{c:0xec4899,label:'End panel'}, door:{c:0x60a5fa,label:'Door / drawer front'}
 };
 var scene,camera,renderer,controls,cabGroup,composer,bloomPass;
-var explodedOn=false, solidOn=true, selectableMeshes=[], selectedMeshes=[];
+var explodedOn=false, solidOn=true, selectableMeshes=[], selectedMeshes=[], _partLevelSelected=false;
 var doorOpenState={}, doorGroupRegistry={}, doorTargetAngle={}, DOOR_OPEN_ANGLE=Math.PI*0.55;   // ~99° -- swings past perpendicular so "open" reads clearly
 var RAY=null, MOUSE=null;
 var EDGE_GLOW=0x22e8ff, EDGE_BANDED=0xff4d4d, SELECT_GLOW=0xff9d2e;   // TRON edges: cyan=no edgeband, red=has edgeband, amber=selected (bloom makes these actually glow)
@@ -743,6 +744,20 @@ function initThree(){
   renderer.domElement.addEventListener('click',onCanvasClick);
   renderer.domElement.addEventListener('contextmenu',onCanvasRightClick);
   renderer.domElement.addEventListener('mousedown',onCanvasMouseDown);
+  document.addEventListener('keydown',onGlobalKeyDown);
+}
+/* Delete/Backspace deletes the single currently-selected part, mirroring the "Delete this
+   part" button -- but only when exactly one real part (not a whole cabinet, not a marquee
+   multi-select) is selected, and never while the user is typing in a form field. */
+function onGlobalKeyDown(ev){
+  if(ev.key!=='Delete' && ev.key!=='Backspace') return;
+  var tag=(document.activeElement&&document.activeElement.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='textarea'||tag==='select'||(document.activeElement&&document.activeElement.isContentEditable)) return;
+  if(!_partLevelSelected || selectedMeshes.length!==1) return;
+  if(!window._sceneCabinets || !window._sceneCabinets.length) return;
+  ev.preventDefault();
+  var d=selectedMeshes[0].userData;
+  deletePart(d.cabinetIndex,d.partName,d.boxIndex);
 }
 /* Selection highlight helpers -- selectedMeshes is always an array now: one mesh for
    part-level selection, every mesh belonging to a cabinet for whole-cabinet selection. */
@@ -848,6 +863,7 @@ function onMarqueeUp(ev){
   multiSelectedCabinets=Object.keys(cabsHit).map(Number);
   if(multiSelectedCabinets.length<2){ multiSelectedCabinets=[]; _suppressNextClick=false; return; }   // not really a multi-select (a real click almost always has a few px of jitter) -- let the normal click still fire instead of silently swallowing it
   clearSelectionHighlight();
+  _partLevelSelected=false;   // several whole cabinets selected -- Delete key must not act on "one part" here
   highlightMeshes(selectableMeshes.filter(function(m){ return multiSelectedCabinets.indexOf(m.userData.cabinetIndex)>=0; }));
   showMultiSelectMenu(ev.clientX,ev.clientY);
 }
@@ -951,6 +967,7 @@ function wireCabActionsHandlers(cabIndex){
   document.getElementById('add-custom-btn').addEventListener('click',function(){ addCustomPart(cabIndex); });
 }
 function showPartInfo(d){
+  _partLevelSelected=true;   // exactly one real part is selected -- Delete key can act on it
   var el=document.getElementById('part-info');
   el.style.display='block';
   var v=parseEbt(d.ebt);
@@ -974,6 +991,7 @@ function showPartInfo(d){
    no Ctrl held) -- shows the cabinet-level summary + the same door/shelf/split/add-part
    actions, without any single part's EBT/delete controls since none is specifically picked. */
 function showCabinetInfo(cabIndex){
+  _partLevelSelected=false;   // whole-cabinet selection -- Delete key must not act on "one part" here
   if(!window._sceneCabinets || !window._sceneCabinets.length) return;
   var entry=window._sceneCabinets.filter(function(b){ return b.index===cabIndex; })[0];
   if(!entry) return;
@@ -1021,7 +1039,7 @@ function addCustomPart(cabIndex){
   refreshAny(cabIndex);
   showCabinetInfo(cabIndex);   // keep the panel (and the "+ Custom part" form) open so several parts can be added in a row without re-navigating back to it each time
 }
-function hidePartInfo(){ document.getElementById('part-info').style.display='none'; clearSelectionHighlight(); }
+function hidePartInfo(){ _partLevelSelected=false; document.getElementById('part-info').style.display='none'; clearSelectionHighlight(); }
 /* "Give me access to the edge": lets a user directly set how many short (S) / long (L)
    edges are banded on a selected part, mapped to the engine's own EBT code (e.g. "1s/2l").
    Saved as a durable override so it survives re-renders (explode toggle, re-applying, etc.). */
@@ -1338,7 +1356,7 @@ function splitCabinetIntoModules(p,n,customHeights){
   var parts=[], hw=[], yCursor=0;
   for(var i=0;i<n;i++){
     var mh=heights?heights[i]:(p.h/n);
-    var mp=Object.assign({},p,{h:mh,tk:(i===0?p.tk:0)});
+    var mp=Object.assign({},p,{h:mh,tk:(i===0?p.tk:0),skipAutoModuleSplit:true});   // the user already chose n modules here -- don't let buildTall's own MODULE_MAX auto-split add more on top of this
     var mod=buildCabinet(mp), yOff=(i===0?0:(p.tk+yCursor)), lbl='[Module '+(i+1)+'/'+n+'] ';
     mod.parts.forEach(function(pt){
       pt.name=lbl+pt.name;
@@ -1375,7 +1393,7 @@ function buildIndependentModules(c,parentIndex,n){
   for(var i=0;i<n;i++){
     var subIndex=parentIndex+'.'+(i+1);
     var mh=manualHeightOverride[subIndex]!=null?manualHeightOverride[subIndex]:(totalH/n);
-    var mp=Object.assign({},baseP,{h:mh,tk:(i===0?baseP.tk:0)});
+    var mp=Object.assign({},baseP,{h:mh,tk:(i===0?baseP.tk:0),skipAutoModuleSplit:true});   // same reasoning as splitCabinetIntoModules -- n independent modules were explicitly chosen, buildTall must not further subdivide any one of them
     if(manualDoorOverrides[subIndex]!=null) mp.door=manualDoorOverrides[subIndex];
     if(manualShelfDelta[subIndex]) mp.shelf=clampDim(mp.shelf+manualShelfDelta[subIndex],0,6);
     var res=buildCabinet(mp);
