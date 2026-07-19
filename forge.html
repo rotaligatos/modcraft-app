@@ -102,6 +102,13 @@
   .resize-row input { width:52px; font-size:11px; padding:3px 4px; border-radius:4px; border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#fff; }
   .resize-row select { font-size:11px; padding:3px 4px; border-radius:4px; border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#fff; }
   .resize-edit > button, .resize-row button { background:var(--accent); color:#191100; border:none; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer; }
+  details.pos-debug { margin:4px 0 10px; background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  details.pos-debug summary { cursor:pointer; font-size:11px; font-weight:700; color:var(--ink); }
+  .pos-debug-table { width:100%; border-collapse:collapse; margin-top:6px; font-size:10.5px; }
+  .pos-debug-table th,.pos-debug-table td { border:1px solid var(--line); padding:3px 5px; text-align:left; }
+  .pos-debug-table th { color:var(--muted); font-weight:600; }
+  .pos-debug-table tr.pos-warn td { background:rgba(255,92,92,.15); color:#ff9b9b; }
+  .raw-json { max-height:220px; overflow:auto; font-size:10px; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px; white-space:pre-wrap; word-break:break-word; }
   .rs-warn { color:#ffb238; font-size:10.5px; margin-top:4px; }
   .rs-ok { color:#39ff6a; font-size:10.5px; margin-top:4px; }
   .mm-row label { display:block; font-size:10px; color:var(--muted); margin-bottom:2px; }
@@ -1544,7 +1551,7 @@ function saveDraft(){
   var label=prompt('Label this draft (used in the downloaded filename):','draft-'+new Date().toISOString().slice(0,16).replace(/[:T]/g,'-'));
   if(label==null) return;
   var draft={label:label, savedAt:new Date().toISOString(),
-    image:_lastUploadedImage, aiCabinets:window._aiCabinets, overrides:_currentOverridesSnapshot(), isolatedCabinetIndices:isolatedCabinetIndices};
+    image:_lastUploadedImage, aiCabinets:window._aiCabinets, overrides:_currentOverridesSnapshot(), isolatedCabinetIndices:isolatedCabinetIndices, rawAiText:window._lastAiRawText||null};
   var blob=new Blob([JSON.stringify(draft)],{type:'application/json'});
   var url=URL.createObjectURL(blob);
   var a=document.createElement('a');
@@ -1570,6 +1577,7 @@ function loadDraftFile(file){
     if(!d || !Array.isArray(d.aiCabinets)){ _setDraftStatus('That file doesn\'t look like a FORGE draft (no cabinet array found).','error'); return; }
     if(!d.aiCabinets.length){ _setDraftStatus('That draft has 0 cabinets saved in it — nothing to load.','error'); return; }
     window._aiCabinets=d.aiCabinets; _lastUploadedImage=d.image||null;
+    window._lastAiRawText=d.rawAiText||null;
     _restoreOverridesSnapshot(d.overrides||{});
     isolatedCabinetIndices=d.isolatedCabinetIndices||null;
     renderAiResult({cabinets:d.aiCabinets});   // rebuilds the results panel + Apply-all button exactly as a fresh analysis would
@@ -1669,6 +1677,7 @@ function analyzeDrawing(){
   }).then(function(d){
     var text=(d.content&&d.content[0]&&d.content[0].text)||'';
     if(d.stop_reason==='max_tokens') throw new Error('Response was cut off before finishing (ran out of output space) — try again with fewer cabinets in one image, or a simpler/clearer drawing.');
+    window._lastAiRawText=text;   // kept for the "raw AI response" debug view -- diagnosing a positioning/ordering bug from a screenshot alone is much harder than reading the actual x_mm/width/index values the AI reported
     renderAiResult(extractJson(text));
     statusEl.textContent='';
   }).catch(function(e){
@@ -1676,6 +1685,39 @@ function analyzeDrawing(){
   }).then(function(){
     btn.disabled=false; btn.textContent='Analyze drawing';
   });
+}
+/* Diagnostic view: a screenshot of a mispositioned/overlapping combined scene can't tell
+   you WHY -- this table shows exactly what the AI reported for x_mm/width/floorOffset per
+   cabinet, flags any two DIFFERENT-column cabinets whose horizontal spans overlap (a real,
+   detectable sign the AI misread a boundary somewhere -- two cabinets can legitimately
+   share the same x_mm, stacked wall-over-base per Round 18, but two DIFFERENT x_mm values
+   should never produce overlapping spans), and includes the full raw JSON response for
+   anything the table doesn't surface. Built after repeated "I can't tell what's wrong from
+   the render" reports -- this turns that into inspectable data instead of another guess. */
+function _buildPositionDebugHtml(cabinets){
+  var rows=cabinets.map(function(c,i){
+    var x=c.x_mm!=null?c.x_mm:null, w=c.width_mm!=null?Math.round(c.width_mm):null;
+    return {index:c.index||(i+1), type:c.type, x:x, w:w, right:(x!=null&&w!=null)?x+w:null, floorOffset:c.floorOffset_mm};
+  });
+  var overlaps={};
+  for(var i=0;i<rows.length;i++){
+    for(var j=i+1;j<rows.length;j++){
+      var a=rows[i], b=rows[j];
+      if(a.type==='filler'||b.type==='filler') continue;   // fillers intentionally span across other cabinets -- not a real overlap
+      if(a.x==null||b.x==null||a.right==null||b.right==null||a.x===b.x) continue;   // same x_mm = intentionally stacked (Round 18), not an overlap
+      if(Math.min(a.right,b.right)-Math.max(a.x,b.x)>5){ overlaps[a.index]=true; overlaps[b.index]=true; }
+    }
+  }
+  var html='<details class="pos-debug"><summary>🔍 Position debug (x_mm / overlap check)</summary>'
+    +'<table class="pos-debug-table"><thead><tr><th>Idx</th><th>Type</th><th>x_mm</th><th>width</th><th>right edge</th><th>floorOffset</th></tr></thead><tbody>'
+    +rows.map(function(r){
+      return '<tr'+(overlaps[r.index]?' class="pos-warn"':'')+'><td>'+r.index+'</td><td>'+r.type+'</td><td>'+(r.x!=null?r.x:'—')+'</td><td>'+(r.w!=null?r.w:'—')+'</td><td>'+(r.right!=null?r.right:'—')+'</td><td>'+(r.floorOffset!=null?r.floorOffset:'—')+'</td></tr>';
+    }).join('')
+    +'</tbody></table>'
+    +(Object.keys(overlaps).length?('<div class="rs-warn">⚠ Cabinet(s) '+Object.keys(overlaps).join(', ')+' have overlapping horizontal spans despite different x_mm — the AI likely misread a boundary for one of them.</div>'):'<div class="rs-ok">✓ No horizontal overlaps detected between different-column cabinets</div>')
+    +'<details style="margin-top:6px;"><summary>Raw AI response (JSON)</summary><pre class="raw-json">'+(window._lastAiRawText?window._lastAiRawText.replace(/</g,'&lt;'):JSON.stringify({cabinets:cabinets},null,1).replace(/</g,'&lt;'))+'</pre></details>'
+    +'</details>';
+  return html;
 }
 function renderAiResult(data){
   var resultEl=document.getElementById('ai-result');
@@ -1685,6 +1727,7 @@ function renderAiResult(data){
   var supportedCount=cabinets.filter(function(c){ return SUPPORTED_TYPES.indexOf(c.type)>=0; }).length;
   var html='<div style="font-weight:600;font-size:13px;margin-bottom:6px;">Detected '+cabinets.length+' cabinet'+(cabinets.length===1?'':'s')
     +(supportedCount<cabinets.length?' ('+supportedCount+' auto-fillable)':'')+'</div>';
+  html+=_buildPositionDebugHtml(cabinets);
   if(supportedCount>1) html+='<button type="button" id="ai-apply-all-btn">✨ Apply ALL '+supportedCount+' cabinets as one combined 3D twin →</button>';
   if(data.overallNotes) html+='<div class="note" style="margin:2px 0 8px;">Overall: '+data.overallNotes+'</div>';
   cabinets.forEach(function(c,i){
