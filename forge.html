@@ -759,6 +759,7 @@ function showPartInfo(d){
       +'<div class="cab-actions">'
       +'<span>Door:</span><select id="door-select">'+DOOR_OPTS.map(function(o){return '<option value="'+o+'"'+(o===(manualDoorOverrides[d.cabinetIndex]||_currentDoorOf(d.cabinetIndex))?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'
       +'<button type="button" id="add-shelf-btn">+ Shelf</button>'
+      +'<span>Split:</span><select id="module-select">'+[1,2,3,4].map(function(n){return '<option value="'+n+'"'+(n===(manualModuleCount[d.cabinetIndex]||1)?' selected':'')+'>'+n+(n===1?' (none)':'')+'</option>';}).join('')+'</select>'
       +'<details class="add-custom"><summary>+ Custom part</summary><div class="add-custom-grid">'
       +'<input type="text" id="cp-name" placeholder="Part name" class="full">'
       +'<input type="number" id="cp-l" placeholder="Length mm">'
@@ -779,7 +780,13 @@ function showPartInfo(d){
   document.getElementById('del-part-btn').addEventListener('click',function(){ deletePart(d.cabinetIndex,d.partName); });
   document.getElementById('door-select').addEventListener('change',function(){ changeDoor(d.cabinetIndex,this.value); });
   document.getElementById('add-shelf-btn').addEventListener('click',function(){ addShelf(d.cabinetIndex); });
+  document.getElementById('module-select').addEventListener('change',function(){ changeModuleCount(d.cabinetIndex,+this.value); });
   document.getElementById('add-custom-btn').addEventListener('click',function(){ addCustomPart(d.cabinetIndex); });
+}
+function changeModuleCount(cabIndex,n){
+  if(n<=1) delete manualModuleCount[cabIndex]; else manualModuleCount[cabIndex]=n;
+  hidePartInfo();   // part names change (gain/lose "[Module i/N]" prefixes) so the old selection no longer matches anything
+  refreshCabinet(cabIndex);
 }
 function _currentDoorOf(cabIndex){
   var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
@@ -1096,14 +1103,36 @@ function computeFloorOffset(c){
 /* Per-cabinet manual overrides layered on top of the AI's own reading — each keyed by
    cabinet index (or cabIndex::partName for part-level ones), applied fresh every time a
    cabinet is rebuilt so they survive re-renders without mutating the engine's output. */
-var manualDoorOverrides={}, manualShelfDelta={}, manualDeletedParts={}, manualCustomParts={};
+var manualDoorOverrides={}, manualShelfDelta={}, manualDeletedParts={}, manualCustomParts={}, manualModuleCount={};
 var DOOR_OPTS=['single','double','bifold','pullout','none'];
 var CUSTOM_PART_ROLES=['side','bottom','rail','back','centrerail','shelf','toekick','endpanel','door'];
+/* Manually forces ANY cabinet into N stacked modules regardless of its height (shipping/
+   handling reasons, not just the automatic >8ft rule buildTall already applies for tall
+   units). Same mechanism as buildTall's own auto-split -- rebuild the cabinet N times at
+   height/N, stack + offset each module, dedupe legs to the bottom module only, add the
+   module-join screws -- generalized to call buildCabinet() so it works for any type. */
+function splitCabinetIntoModules(p,n){
+  var mh=p.h/n, parts=[], hw=[];
+  for(var i=0;i<n;i++){
+    var mp=Object.assign({},p,{h:mh,tk:(i===0?p.tk:0)});
+    var mod=buildCabinet(mp), yOff=(i===0?0:(p.tk+i*mh)), lbl='[Module '+(i+1)+'/'+n+'] ';
+    mod.parts.forEach(function(pt){
+      pt.name=lbl+pt.name;
+      if(pt.boxes&&pt.boxes.length) pt.boxes.forEach(function(b){ b.y+=yOff; });
+      if(pt.polyY) pt.polyY=pt.polyY.map(function(y0){ return y0+yOff; });
+      parts.push(pt);
+    });
+    mod.hardware.forEach(function(h){ if(i>0&&/Adjustable leg/.test(h.name)) return; h.name=lbl+h.name; hw.push(h); });
+  }
+  hw.push({name:'HiLo / chipboard screw 4×32',qty:(n-1)*8,unit:'pcs',rule:'stack/join modules (cabinet-to-cabinet)'});
+  return {parts:parts,hardware:hw};
+}
 function buildCabinetWithOverrides(c,cabIndex){
   var p=buildParamsFromAiCabinet(c);
   if(manualDoorOverrides[cabIndex]!=null) p.door=manualDoorOverrides[cabIndex];
   if(manualShelfDelta[cabIndex]) p.shelf=clampDim(p.shelf+manualShelfDelta[cabIndex],0,6);
-  var res=buildCabinet(p);
+  var n=manualModuleCount[cabIndex]||1;
+  var res=n>1?splitCabinetIntoModules(p,n):buildCabinet(p);
   res.parts=res.parts.filter(function(pt){ return !manualDeletedParts[cabIndex+'::'+pt.name]; });
   if(manualCustomParts[cabIndex]) res.parts=res.parts.concat(manualCustomParts[cabIndex]);
   applyEbtOverrides(res.parts,cabIndex);
