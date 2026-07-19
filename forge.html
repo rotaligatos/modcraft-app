@@ -672,7 +672,7 @@ var PART_COLORS={
   toekick:{c:0x78716c,label:'Toe kick'}, endpanel:{c:0xec4899,label:'End panel'}, door:{c:0x60a5fa,label:'Door / drawer front'}
 };
 var scene,camera,renderer,controls,cabGroup,composer,bloomPass;
-var explodedOn=false, solidOn=true, selectableMeshes=[], selectedMesh=null;
+var explodedOn=false, solidOn=true, selectableMeshes=[], selectedMeshes=[];
 var RAY=null, MOUSE=null;
 var EDGE_GLOW=0x22e8ff, EDGE_BANDED=0xff4d4d, SELECT_GLOW=0xff9d2e;   // TRON edges: cyan=no edgeband, red=has edgeband, amber=selected (bloom makes these actually glow)
 function initThree(){
@@ -699,19 +699,35 @@ function initThree(){
   renderer.domElement.addEventListener('click',onCanvasClick);
   renderer.domElement.addEventListener('contextmenu',onCanvasRightClick);
 }
+/* Selection highlight helpers -- selectedMeshes is always an array now: one mesh for
+   part-level selection, every mesh belonging to a cabinet for whole-cabinet selection. */
+function clearSelectionHighlight(){
+  selectedMeshes.forEach(function(m){ m.material.color.setHex(m.userData.origColor); m.material.opacity=m.userData.origOpacity; });
+  selectedMeshes=[];
+}
+function highlightMeshes(meshes){
+  meshes.forEach(function(m){ m.userData.origOpacity=m.material.opacity; m.material.color.setHex(SELECT_GLOW); m.material.opacity=.9; });
+  selectedMeshes=meshes;
+}
 function onCanvasClick(ev){
   var rect=renderer.domElement.getBoundingClientRect();
   MOUSE.x=((ev.clientX-rect.left)/rect.width)*2-1;
   MOUSE.y=-((ev.clientY-rect.top)/rect.height)*2+1;
   RAY.setFromCamera(MOUSE,camera);
-  if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh.material.opacity=selectedMesh.userData.origOpacity; selectedMesh=null; }
+  clearSelectionHighlight();
   var hits=RAY.intersectObjects(selectableMeshes);
+  var combinedMode=!!(window._sceneCabinets && window._sceneCabinets.length);
+  var partLevel=!combinedMode || explodedOn || ev.ctrlKey || ev.metaKey;   // manual single-cabinet mode always acts per-part; combined mode defaults to whole-cabinet unless exploded or Ctrl-held
   if(hits.length){
     var m=hits[0].object;
-    m.userData.origOpacity=m.material.opacity;
-    m.material.color.setHex(SELECT_GLOW); m.material.opacity=.9;
-    selectedMesh=m;
-    showPartInfo(m.userData);
+    if(partLevel){
+      highlightMeshes([m]);
+      showPartInfo(m.userData);
+    } else {
+      var cabMeshes=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===m.userData.cabinetIndex; });
+      highlightMeshes(cabMeshes);
+      showCabinetInfo(m.userData.cabinetIndex);
+    }
   } else {
     hidePartInfo();
   }
@@ -742,6 +758,33 @@ function toggleFullscreen(){
     (document.exitFullscreen||document.webkitExitFullscreen).call(document);
   }
 }
+/* Shared cabinet-level action controls (door/shelf/split/add-custom-part) -- reused by
+   both the per-part info panel and the whole-cabinet info panel, since both let you act
+   on the cabinet as a whole regardless of which specific part triggered the selection. */
+function buildCabActionsHtml(cabIndex){
+  return '<div class="cab-actions">'
+    +'<span>Door:</span><select id="door-select">'+DOOR_OPTS.map(function(o){return '<option value="'+o+'"'+(o===(manualDoorOverrides[cabIndex]||_currentDoorOf(cabIndex))?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'
+    +'<button type="button" id="add-shelf-btn">+ Shelf</button>'
+    +'<span>Split:</span><select id="module-select">'+[1,2,3,4].map(function(n){return '<option value="'+n+'"'+(n===(manualModuleCount[cabIndex]||1)?' selected':'')+'>'+n+(n===1?' (none)':'')+'</option>';}).join('')+'</select>'
+    +'<details class="add-custom"><summary>+ Custom part</summary><div class="add-custom-grid">'
+    +'<input type="text" id="cp-name" placeholder="Part name" class="full">'
+    +'<input type="number" id="cp-l" placeholder="Length mm">'
+    +'<input type="number" id="cp-w" placeholder="Width mm">'
+    +'<input type="number" id="cp-t" placeholder="Thk mm" value="18">'
+    +'<select id="cp-role">'+CUSTOM_PART_ROLES.map(function(r){return '<option value="'+r+'">'+PART_COLORS[r].label+'</option>';}).join('')+'</select>'
+    +'<input type="number" id="cp-x" placeholder="X mm" value="0">'
+    +'<input type="number" id="cp-y" placeholder="Y mm" value="0">'
+    +'<input type="number" id="cp-z" placeholder="Z mm" value="0">'
+    +'<button type="button" id="add-custom-btn" class="full">Add part</button>'
+    +'</div></details>'
+    +'</div>';
+}
+function wireCabActionsHandlers(cabIndex){
+  document.getElementById('door-select').addEventListener('change',function(){ changeDoor(cabIndex,this.value); });
+  document.getElementById('add-shelf-btn').addEventListener('click',function(){ addShelf(cabIndex); });
+  document.getElementById('module-select').addEventListener('change',function(){ changeModuleCount(cabIndex,+this.value); });
+  document.getElementById('add-custom-btn').addEventListener('click',function(){ addCustomPart(cabIndex); });
+}
 function showPartInfo(d){
   var el=document.getElementById('part-info');
   el.style.display='block';
@@ -754,34 +797,28 @@ function showPartInfo(d){
     +'<span class="estep">S<button type="button" data-w="s" data-dd="-1">−</button><span class="ecount">'+v.s+'</span><button type="button" data-w="s" data-dd="1">+</button></span>'
     +'<span class="estep">L<button type="button" data-w="l" data-dd="-1">−</button><span class="ecount">'+v.l+'</span><button type="button" data-w="l" data-dd="1">+</button></span>'
     +'</div>'
-    +(editable?(
-      '<div class="part-actions"><button type="button" class="del-part-btn" id="del-part-btn">🗑 Delete this part</button></div>'
-      +'<div class="cab-actions">'
-      +'<span>Door:</span><select id="door-select">'+DOOR_OPTS.map(function(o){return '<option value="'+o+'"'+(o===(manualDoorOverrides[d.cabinetIndex]||_currentDoorOf(d.cabinetIndex))?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'
-      +'<button type="button" id="add-shelf-btn">+ Shelf</button>'
-      +'<span>Split:</span><select id="module-select">'+[1,2,3,4].map(function(n){return '<option value="'+n+'"'+(n===(manualModuleCount[d.cabinetIndex]||1)?' selected':'')+'>'+n+(n===1?' (none)':'')+'</option>';}).join('')+'</select>'
-      +'<details class="add-custom"><summary>+ Custom part</summary><div class="add-custom-grid">'
-      +'<input type="text" id="cp-name" placeholder="Part name" class="full">'
-      +'<input type="number" id="cp-l" placeholder="Length mm">'
-      +'<input type="number" id="cp-w" placeholder="Width mm">'
-      +'<input type="number" id="cp-t" placeholder="Thk mm" value="18">'
-      +'<select id="cp-role">'+CUSTOM_PART_ROLES.map(function(r){return '<option value="'+r+'">'+PART_COLORS[r].label+'</option>';}).join('')+'</select>'
-      +'<input type="number" id="cp-x" placeholder="X mm" value="0">'
-      +'<input type="number" id="cp-y" placeholder="Y mm" value="0">'
-      +'<input type="number" id="cp-z" placeholder="Z mm" value="0">'
-      +'<button type="button" id="add-custom-btn" class="full">Add part</button>'
-      +'</div></details>'
-      +'</div>'
-    ):'');
+    +(editable?('<div class="part-actions"><button type="button" class="del-part-btn" id="del-part-btn">🗑 Delete this part</button></div>'+buildCabActionsHtml(d.cabinetIndex)):'');
   Array.prototype.forEach.call(el.querySelectorAll('.ebt-edit button'),function(btn){
     btn.addEventListener('click',function(){ adjustEbt(d.cabinetIndex,d.partName,btn.getAttribute('data-w'),+btn.getAttribute('data-dd')); });
   });
   if(!editable) return;
   document.getElementById('del-part-btn').addEventListener('click',function(){ deletePart(d.cabinetIndex,d.partName); });
-  document.getElementById('door-select').addEventListener('change',function(){ changeDoor(d.cabinetIndex,this.value); });
-  document.getElementById('add-shelf-btn').addEventListener('click',function(){ addShelf(d.cabinetIndex); });
-  document.getElementById('module-select').addEventListener('change',function(){ changeModuleCount(d.cabinetIndex,+this.value); });
-  document.getElementById('add-custom-btn').addEventListener('click',function(){ addCustomPart(d.cabinetIndex); });
+  wireCabActionsHandlers(d.cabinetIndex);
+}
+/* Whole-cabinet selection (the new default click behavior in combined mode, non-exploded,
+   no Ctrl held) -- shows the cabinet-level summary + the same door/shelf/split/add-part
+   actions, without any single part's EBT/delete controls since none is specifically picked. */
+function showCabinetInfo(cabIndex){
+  if(!window._sceneCabinets || !window._sceneCabinets.length) return;
+  var entry=window._sceneCabinets.filter(function(b){ return b.index===cabIndex; })[0];
+  if(!entry) return;
+  var el=document.getElementById('part-info');
+  el.style.display='block';
+  el.innerHTML='<b>Cabinet '+cabIndex+'</b> — '+(TYPE_LABELS[entry.type]||entry.type)+'<br>'
+    +Math.round(entry.params.w)+' × '+Math.round(entry.params.h)+' × '+Math.round(entry.params.d)+'mm'
+    +'<div class="note">Ctrl+click a part to select it individually.</div>'
+    +buildCabActionsHtml(cabIndex);
+  wireCabActionsHandlers(cabIndex);
 }
 function changeModuleCount(cabIndex,n){
   if(n<=1) delete manualModuleCount[cabIndex]; else manualModuleCount[cabIndex]=n;
@@ -801,7 +838,7 @@ function changeDoor(cabIndex,doorVal){
   manualDoorOverrides[cabIndex]=doorVal;
   refreshCabinet(cabIndex);
   var m=selectableMeshes.filter(function(mm){return mm.userData.cabinetIndex===cabIndex && mm.userData.partName==='Door';})[0];
-  if(m){ m.material.color.setHex(SELECT_GLOW); m.userData.origOpacity=m.material.opacity; m.material.opacity=.9; selectedMesh=m; showPartInfo(m.userData); }
+  if(m){ highlightMeshes([m]); showPartInfo(m.userData); }
   else hidePartInfo();
 }
 function addShelf(cabIndex){
@@ -818,27 +855,21 @@ function addCustomPart(cabIndex){
   hidePartInfo();
   refreshCabinet(cabIndex);
 }
-function hidePartInfo(){ document.getElementById('part-info').style.display='none'; if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh.material.opacity=selectedMesh.userData.origOpacity; selectedMesh=null; } }
+function hidePartInfo(){ document.getElementById('part-info').style.display='none'; clearSelectionHighlight(); }
 /* "Give me access to the edge": lets a user directly set how many short (S) / long (L)
    edges are banded on a selected part, mapped to the engine's own EBT code (e.g. "1s/2l").
    Saved as a durable override so it survives re-renders (explode toggle, re-applying, etc.). */
 function adjustEbt(cabIndex,partName,which,delta){
   var key=cabIndex+'::'+partName;
   var cur=manualEbtOverrides[key];
-  if(cur==null && selectedMesh && selectedMesh.userData.cabinetIndex===cabIndex && selectedMesh.userData.partName===partName) cur=selectedMesh.userData.ebt;
+  if(cur==null && selectedMeshes.length===1 && selectedMeshes[0].userData.cabinetIndex===cabIndex && selectedMeshes[0].userData.partName===partName) cur=selectedMeshes[0].userData.ebt;
   var v=parseEbt(cur);
   if(which==='s') v.s=Math.max(0,Math.min(2,v.s+delta)); else v.l=Math.max(0,Math.min(2,v.l+delta));
   manualEbtOverrides[key]=serializeEbt(v.s,v.l);
   if(window._sceneCabinets && window._sceneCabinets.length) renderCombinedScene(window._sceneCabinets);
   else render();
   var m=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===cabIndex && mm.userData.partName===partName; })[0];
-  if(m){
-    if(selectedMesh){ selectedMesh.material.color.setHex(selectedMesh.userData.origColor); selectedMesh.material.opacity=selectedMesh.userData.origOpacity; }
-    m.userData.origOpacity=m.material.opacity;
-    m.material.color.setHex(SELECT_GLOW); m.material.opacity=.9;
-    selectedMesh=m;
-    showPartInfo(m.userData);
-  }
+  if(m){ highlightMeshes([m]); showPartInfo(m.userData); }
 }
 
 /* renderScene: draws one or more cabinets ("groups") into one shared 3D scene.
@@ -847,7 +878,7 @@ function adjustEbt(cabIndex,partName,which,delta){
    outward from their own cabinet's local center) and click-to-select (see onCanvasClick). */
 function renderScene(groups){
   while(cabGroup.children.length) cabGroup.remove(cabGroup.children[0]);
-  selectableMeshes=[]; selectedMesh=null; hidePartInfo();
+  selectableMeshes=[]; selectedMeshes=[]; hidePartInfo();
   var S=0.001, used={};
   groups.forEach(function(grp){
     var xOff=grp.xOffset||0, yOff=grp.yOffset||0, cabIdx=grp.cabinetIndex||1;
