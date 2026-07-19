@@ -282,13 +282,23 @@ function applyEbtOverrides(parts,cabIndex){
 function deleteAppliedToParts(parts,cabIndex){
   return parts.reduce(function(acc,pt){
     if(pt.boxes && pt.boxes.length){
-      var kept=pt.boxes.filter(function(b,bi){ return !manualDeletedParts[cabIndex+'::'+pt.name+'::'+bi]; });
+      var origBoxes=pt.boxes, kept=[];
+      origBoxes.forEach(function(b,bi){
+        if(!manualDeletedParts[cabIndex+'::'+pt.name+'::'+bi]) kept.push(Object.assign({},b,{_origBoxIndex:bi}));   // tag survivors with their TRUE original index BEFORE the array gets compacted -- filtering alone would silently re-number them (0,1,2... instead of e.g. 1,2), breaking every later delete/select on the same part
+      });
       if(kept.length===0) return acc;   // every instance of this part deleted -- drop it entirely
-      if(kept.length!==pt.boxes.length) pt=Object.assign({},pt,{boxes:kept});
+      // shelves specifically: re-space the survivors evenly across the same interior span instead of leaving a gap where the deleted one was
+      if(kept.length!==origBoxes.length && pt.role==='shelf' && origBoxes.length>=2){
+        var ys=origBoxes.map(function(b){return b.y;}).slice().sort(function(a,b){return a-b;});
+        var spacing=ys[1]-ys[0], bottom=ys[0]-spacing, top=ys[ys.length-1]+spacing, m=kept.length;
+        kept.forEach(function(b,i){ b.y=bottom+(top-bottom)/(m+1)*(i+1); });
+      }
+      pt=Object.assign({},pt,{boxes:kept});
     } else if(pt.polyY && pt.polyY.length){
-      var keptY=pt.polyY.filter(function(y0,li){ return !manualDeletedParts[cabIndex+'::'+pt.name+'::'+li]; });
+      var origY=pt.polyY, keptY=[], keptIdx=[];
+      origY.forEach(function(y0,li){ if(!manualDeletedParts[cabIndex+'::'+pt.name+'::'+li]){ keptY.push(y0); keptIdx.push(li); } });
       if(keptY.length===0) return acc;
-      if(keptY.length!==pt.polyY.length) pt=Object.assign({},pt,{polyY:keptY});
+      pt=Object.assign({},pt,{polyY:keptY,_origPolyIndex:keptIdx});
     }
     acc.push(pt);
     return acc;
@@ -1054,9 +1064,10 @@ function renderScene(groups){
         pt.poly.forEach(function(pp,idx){ if(idx===0) shape.moveTo((pp[0]+xOff)*S,pp[1]*S); else shape.lineTo((pp[0]+xOff)*S,pp[1]*S); });
         var yt=(pt.yt||18), levels=pt.polyY||[pt.y0||0];
         levels.forEach(function(y0,li){
+          var trueLi=(pt._origPolyIndex&&pt._origPolyIndex[li]!=null)?pt._origPolyIndex[li]:li;
           var geo=new THREE.ExtrudeGeometry(shape,{depth:yt*S,bevelEnabled:false});
           var m=new THREE.Mesh(geo,new THREE.MeshLambertMaterial({color:col,transparent:opacity<1,opacity:opacity}));
-          m.rotation.x=Math.PI/2; m.position.y=(y0+yt+yOff)*S; m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:li};
+          m.rotation.x=Math.PI/2; m.position.y=(y0+yt+yOff)*S; m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:trueLi};
           cabGroup.add(m); selectableMeshes.push(m);
           var e=new THREE.LineSegments(new THREE.EdgesGeometry(geo),new THREE.LineBasicMaterial({color:edgeCol})); e.rotation.x=Math.PI/2; e.position.y=(y0+yt+yOff)*S; cabGroup.add(e);
         });
@@ -1065,6 +1076,7 @@ function renderScene(groups){
       if(!pt.boxes || !pt.boxes.length) return; used[pt.role]=true;
       var isHingedDoor=/door/i.test(pt.name) && !/drawer|pull-?out/i.test(pt.name);   // real swinging doors only -- not drawer/pull-out fronts
       pt.boxes.forEach(function(b,bi){
+        var trueIndex=(b._origBoxIndex!=null)?b._origBoxIndex:bi;   // stable identity across deletions -- the array is re-compacted by deleteAppliedToParts, so the loop's own bi shifts after every delete
         var ex=0,ey=0,ez=0;
         if(explodedOn){
           var dx=b.x-cx, dy=b.y-cy, dz=b.z-cz, len=Math.sqrt(dx*dx+dy*dy+dz*dz)||1, dist=260;
@@ -1075,22 +1087,22 @@ function renderScene(groups){
         var m=new THREE.Mesh(g,mat);
         var eGeo=new THREE.EdgesGeometry(g), e=new THREE.LineSegments(eGeo,new THREE.LineBasicMaterial({color:edgeCol}));
         if(isHingedDoor){
-          // double doors: leaf 0 (leftmost) hinges on its LEFT edge, leaf 1 hinges on its RIGHT edge (opens outward, like French doors); a lone single door defaults to a LEFT hinge.
-          var hingeSign=(pt.boxes.length>1)?(bi===0?1:-1):1;
+          // double doors: leaf trueIndex 0 (leftmost) hinges on its LEFT edge, any other leaf hinges on its RIGHT edge (opens outward, like French doors); based on the box's TRUE original leaf identity so a surviving leaf keeps its correct hinge side even after its sibling is deleted.
+          var hingeSign=(trueIndex===0)?1:-1;
           var hingeX=b.x+(hingeSign>0?-b.sx/2:b.sx/2);
           var grp=new THREE.Group();
           grp.position.set((hingeX+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
           var localX=(hingeSign>0?1:-1)*(b.sx/2);
           m.position.set(localX*S,0,0); e.position.copy(m.position);
           grp.add(m); grp.add(e); cabGroup.add(grp);
-          var dkey=cabIdx+'::'+pt.name+'::'+bi;
+          var dkey=cabIdx+'::'+pt.name+'::'+trueIndex;
           grp.rotation.y=doorOpenState[dkey]?hingeSign*DOOR_OPEN_ANGLE:0;
           doorGroupRegistry[dkey]={group:grp,hingeSign:hingeSign};
-          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,isDoor:true,boxIndex:bi};
+          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,isDoor:true,boxIndex:trueIndex};
         } else {
           m.position.set((b.x+xOff+ex)*S,(b.y+yOff+ey)*S,(b.z+ez)*S);
           e.position.copy(m.position);
-          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:bi};
+          m.userData={cabinetIndex:cabIdx,partName:pt.name,L:pt.L,W:pt.W,t:pt.t,ebt:pt.ebt,ops:pt.ops,grain:pt.grain,origColor:col,boxIndex:trueIndex};
           cabGroup.add(m); cabGroup.add(e);
         }
         selectableMeshes.push(m);
