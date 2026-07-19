@@ -27,6 +27,15 @@
   details.manual-override { margin-top:4px; }
   details.manual-override summary { cursor:pointer; font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); padding:8px 0; user-select:none; }
   details.manual-override summary:hover { color:var(--accent); }
+  details.drafts-box { margin-bottom:14px; background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+  details.drafts-box summary { cursor:pointer; font-size:12px; font-weight:700; color:var(--ink); padding:4px 0; user-select:none; }
+  details.drafts-box summary:hover { color:var(--accent); }
+  details.drafts-box #draft-save-btn { width:100%; padding:8px; border:none; border-radius:7px; font-weight:700; font-size:12px; cursor:pointer; background:var(--accent); color:#191100; margin-bottom:8px; }
+  .draft-row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 0; border-top:1px solid var(--line); }
+  .draft-info { font-size:11px; }
+  .draft-actions { display:flex; gap:5px; flex-shrink:0; }
+  .draft-actions button { border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:11px; cursor:pointer; background:var(--bg); color:var(--ink); }
+  .draft-actions button.danger { background:rgba(255,92,92,.15); border-color:rgba(255,92,92,.4); color:#e05a5a; }
   #view { display:flex; flex-direction:column; min-width:0; }
   #canvas-host { width:100%; height:56%; background:radial-gradient(ellipse at 50% 40%,#0e1620,#05070c 75%); position:relative; }
   #legend { position:absolute; top:8px; left:8px; background:rgba(18,22,31,.92); border:1px solid var(--line); border-radius:8px; padding:9px 12px; font-size:11px; color:var(--ink); box-shadow:0 4px 14px rgba(0,0,0,.4); width:190px; }
@@ -90,6 +99,17 @@
   .ebt-edit .estep { display:flex; align-items:center; gap:4px; background:rgba(255,255,255,.06); border-radius:6px; padding:2px 4px; }
   .ebt-edit button { width:20px; height:20px; border:none; border-radius:4px; background:var(--accent); color:#191100; font-weight:800; cursor:pointer; font-size:12px; line-height:1; }
   .ebt-edit .ecount { min-width:14px; text-align:center; font-weight:700; }
+  .resize-edit { margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,.12); }
+  .resize-row { display:flex; align-items:center; gap:4px; font-size:11px; flex-wrap:wrap; }
+  .resize-row input { width:52px; font-size:11px; padding:3px 4px; border-radius:4px; border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#fff; }
+  .resize-row button { background:var(--accent); color:#191100; border:none; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer; }
+  .rs-warn { color:#ffb238; font-size:10.5px; margin-top:4px; }
+  .rs-ok { color:#39ff6a; font-size:10.5px; margin-top:4px; }
+  .mm-row label { display:block; font-size:10px; color:var(--muted); margin-bottom:2px; }
+  .mm-boxes { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+  .mm-boxes input { width:56px; font-size:11px; padding:3px 4px; border-radius:4px; border:1px solid rgba(255,255,255,.2); background:var(--panel); color:#fff; }
+  .mm-boxes button { background:var(--accent); color:#191100; border:none; border-radius:6px; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer; }
+  .shelf-stepper { display:flex; gap:4px; }
 </style>
 </head>
 <body>
@@ -109,6 +129,12 @@
       <div id="ai-result"></div>
       <p class="note">AI extracts type + overall dimensions only — never geometry, EBT, or hardware. The rules engine below computes everything else from those numbers, same as manual entry.</p>
     </div>
+    <details class="drafts-box">
+      <summary>💾 Drafts — save/reload instead of re-analyzing (saves API tokens)</summary>
+      <p class="note">Saves the uploaded image + the AI's result + all your edits (deletes/doors/resizes/etc) to this browser. Reload a draft instantly with no API call, so we can iterate on bugs without re-spending tokens each time.</p>
+      <button type="button" id="draft-save-btn">💾 Save current as a draft</button>
+      <div id="draft-list"></div>
+    </details>
     <details class="manual-override">
     <summary>⚙ Manual override / fine-tune a single cabinet</summary>
     <h2>Cabinet type</h2>
@@ -273,6 +299,32 @@ function applyEbtOverrides(parts,cabIndex){
   parts.forEach(function(pt){
     var key=cabIndex+'::'+pt.name, ov=manualEbtOverrides[key];
     if(ov!=null) pt.ebt=ov;
+  });
+}
+/* A manual per-instance size override (L/W/t), keyed cabIndex::partName::boxIndex using the
+   part's TRUE original box index -- same identity scheme deletion uses (see
+   deleteAppliedToParts below). Applied to freshly-built parts BEFORE deletion runs -- at that
+   point the array's own loop index already IS the true original index, since nothing has
+   been filtered/compacted yet, so no extra _origBoxIndex tagging is needed here. Resizing
+   remaps the new L/W/t onto whichever box axis (sx/sy/sz) actually represents each one for
+   THIS box (axisRoles -- box orientation varies by part/grain direction, there's no fixed
+   sx=L,sy=t,sz=W convention in this engine), center-anchored (position untouched). */
+function applySizeOverrides(parts,cabIndex){
+  return parts.map(function(pt){
+    if(!pt.boxes || !pt.boxes.length) return pt;
+    var changed=false;
+    var newBoxes=pt.boxes.map(function(b,bi){
+      var ov=manualPartSizeOverrides[cabIndex+'::'+pt.name+'::'+bi];
+      if(!ov) return b;
+      var roles=axisRoles([b.sx,b.sy,b.sz],pt.t);
+      if(!roles) return b;   // not a clearly-flat panel -- resize isn't well-defined here, skip silently
+      changed=true;
+      var nd=[b.sx,b.sy,b.sz];
+      nd[roles.longAxis]=ov.L; nd[roles.shortAxis]=ov.W; nd[roles.tAxis]=ov.t;
+      return Object.assign({},b,{sx:nd[0],sy:nd[1],sz:nd[2]});
+    });
+    if(!changed) return pt;
+    return Object.assign({},pt,{boxes:newBoxes});
   });
 }
 /* Deletion is per-INSTANCE (cabIndex::partName::boxIndex), not per part NAME -- several
@@ -729,12 +781,24 @@ var EDGE_GLOW=0x22e8ff, EDGE_BANDED=0x39ff6a, SELECT_GLOW=0xff9d2e;   // TRON ed
    2 short/long edges is banded we can't know WHICH one from the data, so this canonically
    lights up the "near" (-axis) side first, then the "far" (+axis) side if both are banded --
    consistent every render, not necessarily the exact physical edge if only 1 of 2 is banded. */
-function edgeBandStrips(b,pt){
-  var dims=[b.sx,b.sy,b.sz], t=pt.t||18;
+/* Shared by edgeBandStrips (which axis is thickness/long/short determines where the
+   banding strips go) and applySizeOverrides (a manual L/W/t resize needs to know which
+   box axis each of those semantic dimensions maps to, since box orientation varies by
+   part/grain direction -- there's no fixed sx=L,sy=t,sz=W convention in this engine).
+   Returns null (not a valid axis split) when no axis is clearly thinner than the other
+   two -- callers should fall back to their own default behavior in that case. */
+function axisRoles(dims,t){
   var tAxis=0; for(var i=1;i<3;i++){ if(Math.abs(dims[i]-t)<Math.abs(dims[tAxis]-t)) tAxis=i; }
   var plane=[0,1,2].filter(function(i){ return i!==tAxis; }), a0=plane[0], a1=plane[1];
-  if(Math.min(dims[a0],dims[a1])<=dims[tAxis]*1.3) return [];   // not a clearly-flat panel (legs, blocks, small hardware) -- skip, whole-part outline still shows
+  if(Math.min(dims[a0],dims[a1])<=dims[tAxis]*1.3) return null;   // not a clearly-flat panel (legs, blocks, small hardware)
   var longAxis=dims[a0]>=dims[a1]?a0:a1, shortAxis=(longAxis===a0)?a1:a0;
+  return {tAxis:tAxis,longAxis:longAxis,shortAxis:shortAxis};
+}
+function edgeBandStrips(b,pt){
+  var dims=[b.sx,b.sy,b.sz], t=pt.t||18;
+  var roles=axisRoles(dims,t);
+  if(!roles) return [];   // not a clearly-flat panel -- skip, whole-part outline still shows
+  var tAxis=roles.tAxis, longAxis=roles.longAxis, shortAxis=roles.shortAxis;
   var ev=parseEbt(pt.ebt), bw=Math.max(3,Math.min(10,dims[tAxis]*0.5)), strips=[];
   function mk(crossAxis,crossSign){
     var size=[dims[0]*1.02,dims[1]*1.02,dims[2]*1.02]; size[crossAxis]=bw;   // slight inflate on the other 2 axes so the band doesn't z-fight the parent panel's own surface
@@ -976,7 +1040,7 @@ function buildCabActionsHtml(cabIndex){
   var n=isModule?1:(manualModuleCount[cabIndex]||1);
   var html='<div class="cab-actions">'
     +'<span>Door:</span><select id="door-select">'+DOOR_OPTS.map(function(o){return '<option value="'+o+'"'+(o===(manualDoorOverrides[cabIndex]||_currentDoorOf(cabIndex))?' selected':'')+'>'+o+'</option>';}).join('')+'</select>'
-    +'<button type="button" id="add-shelf-btn">+ Shelf</button>';
+    +'<span class="shelf-stepper"><button type="button" id="sub-shelf-btn">− Shelf</button><button type="button" id="add-shelf-btn">+ Shelf</button></span>';
   if(isModule){
     var entry=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
     html+='<div class="mm-row"><label>Module '+(entry?entry.moduleIdx:'?')+'/'+(entry?entry.moduleOf:'?')+' — height (mm) — the other module'+((entry&&entry.moduleOf>2)?'s':'')+' will auto-adjust to keep the total height</label>'
@@ -985,9 +1049,17 @@ function buildCabActionsHtml(cabIndex){
     html+='<span>Split:</span><select id="module-select">'+[1,2,3,4].map(function(nn){return '<option value="'+nn+'"'+(nn===n?' selected':'')+'>'+nn+(nn===1?' (none)':'')+'</option>';}).join('')+'</select>';
     if(n>1){
       html+='<label style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:400;"><input type="checkbox" id="module-independent-toggle"'+(manualModuleIndependent[cabIndex]?' checked':'')+'> Independent modules (edit each separately)</label>';
-      if(!manualModuleIndependent[cabIndex]){
-        html+='<div class="mm-row"><label>Module heights, mm, comma-separated (grouped — blank = even split)</label><input type="text" id="module-heights-input" value="'+((manualModuleHeights[cabIndex]||[]).join(','))+'" placeholder="e.g. 1200,1230"></div>';
+      var entry2=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0];
+      var totalH2=entry2?entry2.params.h:0;
+      var indep2=!!manualModuleIndependent[cabIndex];
+      var mmHeights=[];
+      for(var mi=0;mi<n;mi++){
+        if(indep2) mmHeights.push(manualHeightOverride[cabIndex+'.'+(mi+1)]!=null?manualHeightOverride[cabIndex+'.'+(mi+1)]:(totalH2/n));
+        else mmHeights.push((manualModuleHeights[cabIndex]&&manualModuleHeights[cabIndex].length===n)?manualModuleHeights[cabIndex][mi]:(totalH2/n));
       }
+      html+='<div class="mm-row"><label>Module heights (mm) — one box per module, '+n+' total</label><div class="mm-boxes">'
+        +mmHeights.map(function(h,i){ return '<input type="number" class="mm-h-input" value="'+Math.round(h)+'">'; }).join('')
+        +'<button type="button" id="apply-module-heights-btn">Apply</button></div><div id="mm-heights-feedback"></div></div>';
     }
   }
   html+='<details class="add-custom"><summary>+ Custom part</summary><div class="add-custom-grid">'
@@ -1008,6 +1080,7 @@ function wireCabActionsHandlers(cabIndex){
   var isModule=typeof cabIndex==='string' && cabIndex.indexOf('.')>=0;
   document.getElementById('door-select').addEventListener('change',function(){ changeDoor(cabIndex,this.value); });
   document.getElementById('add-shelf-btn').addEventListener('click',function(){ addShelf(cabIndex); });
+  document.getElementById('sub-shelf-btn').addEventListener('click',function(){ subShelf(cabIndex); });
   if(isModule){
     document.getElementById('apply-module-height-btn').addEventListener('click',function(){
       var h=+document.getElementById('module-height-input').value; if(h>0){ applyModuleHeightWithCompensation(cabIndex,h); showCabinetInfo(cabIndex); }
@@ -1015,13 +1088,32 @@ function wireCabActionsHandlers(cabIndex){
   } else {
     document.getElementById('module-select').addEventListener('change',function(){ changeModuleCount(cabIndex,+this.value); });
     var indepToggle=document.getElementById('module-independent-toggle');
-    if(indepToggle) indepToggle.addEventListener('change',function(){ manualModuleIndependent[cabIndex]=this.checked; applyAllAiCabinets(); });
-    var heightsInput=document.getElementById('module-heights-input');
-    if(heightsInput) heightsInput.addEventListener('change',function(){
-      var vals=this.value.split(',').map(function(s){return +s.trim();}).filter(function(v){return v>0;});
-      if(vals.length) manualModuleHeights[cabIndex]=vals; else delete manualModuleHeights[cabIndex];
-      refreshAny(cabIndex); showCabinetInfo(cabIndex);
-    });
+    if(indepToggle) indepToggle.addEventListener('change',function(){ manualModuleIndependent[cabIndex]=this.checked; applyAllAiCabinets(); showCabinetInfo(cabIndex); });
+    var mmInputs=document.querySelectorAll('.mm-h-input'), mmFb=document.getElementById('mm-heights-feedback');
+    function mmRefreshFeedback(){
+      if(!mmFb) return;
+      var vals=Array.prototype.map.call(mmInputs,function(inp){ return +inp.value||0; }), sum=vals.reduce(function(a,b){return a+b;},0);
+      var entry3=(window._sceneCabinets||[]).filter(function(b){return b.index===cabIndex;})[0], totalH3=entry3?entry3.params.h:0, diff=Math.round(sum-totalH3);
+      mmFb.innerHTML=(Math.abs(diff)<=1)
+        ?('<div class="rs-ok">✓ Total '+Math.round(sum)+'mm matches the cabinet height</div>')
+        :('<div class="rs-warn">⚠ Total '+Math.round(sum)+'mm is '+Math.abs(diff)+'mm '+(diff>0?'MORE':'LESS')+' than the cabinet height ('+Math.round(totalH3)+'mm)</div>');
+    }
+    if(mmInputs.length){
+      Array.prototype.forEach.call(mmInputs,function(inp){ inp.addEventListener('input',mmRefreshFeedback); });
+      mmRefreshFeedback();
+      document.getElementById('apply-module-heights-btn').addEventListener('click',function(){
+        var vals=Array.prototype.map.call(mmInputs,function(inp){ return +inp.value||0; });
+        if(vals.some(function(v){return !(v>0);})) return;   // every module needs a real height -- silently no-op rather than half-applying
+        if(manualModuleIndependent[cabIndex]){
+          vals.forEach(function(h,i){ manualHeightOverride[cabIndex+'.'+(i+1)]=h; });
+          applyAllAiCabinets();
+        } else {
+          manualModuleHeights[cabIndex]=vals;
+          refreshAny(cabIndex);
+        }
+        showCabinetInfo(cabIndex);
+      });
+    }
   }
   document.getElementById('add-custom-btn').addEventListener('click',function(){ addCustomPart(cabIndex); });
 }
@@ -1038,13 +1130,52 @@ function showPartInfo(d){
     +'<span class="estep">S<button type="button" data-w="s" data-dd="-1">−</button><span class="ecount">'+v.s+'</span><button type="button" data-w="s" data-dd="1">+</button></span>'
     +'<span class="estep">L<button type="button" data-w="l" data-dd="-1">−</button><span class="ecount">'+v.l+'</span><button type="button" data-w="l" data-dd="1">+</button></span>'
     +'</div>'
+    +(editable?('<div class="resize-edit">Resize this part:<div class="resize-row">'
+      +'L <input type="number" id="rs-l" value="'+Math.round(d.L)+'"> '
+      +'W <input type="number" id="rs-w" value="'+Math.round(d.W)+'"> '
+      +'T <input type="number" id="rs-t" value="'+Math.round(d.t)+'"> '
+      +'<button type="button" id="rs-apply-btn">Resize</button></div><div id="rs-feedback"></div></div>'):'')
     +(editable?('<div class="part-actions"><button type="button" class="del-part-btn" id="del-part-btn">🗑 Delete this part</button></div>'+buildCabActionsHtml(d.cabinetIndex)):'');
   Array.prototype.forEach.call(el.querySelectorAll('.ebt-edit button'),function(btn){
     btn.addEventListener('click',function(){ adjustEbt(d.cabinetIndex,d.partName,btn.getAttribute('data-w'),+btn.getAttribute('data-dd')); });
   });
   if(!editable) return;
   document.getElementById('del-part-btn').addEventListener('click',function(){ deletePart(d.cabinetIndex,d.partName,d.boxIndex); });
+  var rsL=document.getElementById('rs-l'), rsW=document.getElementById('rs-w'), rsT=document.getElementById('rs-t'), rsFb=document.getElementById('rs-feedback');
+  function refreshRsFeedback(){
+    var warn=sizeMismatchWarnings(d.cabinetIndex,+rsL.value,+rsW.value,+rsT.value);
+    rsFb.innerHTML=warn.length?warn.map(function(w){ return '<div class="rs-warn">⚠ '+w+'</div>'; }).join(''):'<div class="rs-ok">✓ Looks consistent with the cabinet</div>';
+  }
+  [rsL,rsW,rsT].forEach(function(inp){ inp.addEventListener('input',refreshRsFeedback); });
+  refreshRsFeedback();
+  document.getElementById('rs-apply-btn').addEventListener('click',function(){ resizePart(d.cabinetIndex,d.partName,d.boxIndex,+rsL.value,+rsW.value,+rsT.value); });
   wireCabActionsHandlers(d.cabinetIndex);
+}
+/* "Change the size of the component" -- a manual per-instance L/W/t override, with feedback
+   (not a hard block) when the new size looks physically inconsistent with the cabinet it
+   belongs to. Center-anchored: only the box's own dimensions change, not its position. */
+function resizePart(cabIndex,partName,boxIndex,L,W,t){
+  if(!(L>0)||!(W>0)||!(t>0)) return;
+  manualPartSizeOverrides[cabIndex+'::'+partName+'::'+boxIndex]={L:L,W:W,t:t};
+  refreshAny(cabIndex);
+  var m=selectableMeshes.filter(function(mm){ return mm.userData.cabinetIndex===cabIndex && mm.userData.partName===partName && mm.userData.boxIndex===boxIndex; })[0];
+  if(m){ highlightMeshes([m]); showPartInfo(m.userData); } else showCabinetInfo(cabIndex);
+}
+/* General-purpose sanity check for a manual resize: does this new size look like it still
+   belongs in the cabinet it's part of? Not role-aware (doesn't know "a shelf must fit the
+   interior width exactly") -- just flags a size that's implausible relative to the whole
+   cabinet's own footprint, or a thickness outside any real panel material. Non-blocking:
+   the resize still applies, this is feedback, not validation that prevents saving. */
+function sizeMismatchWarnings(cabIndex,L,W,t){
+  var warn=[];
+  var entry=(window._sceneCabinets||[]).filter(function(b){ return b.index===cabIndex; })[0];
+  if(entry){
+    var maxDim=Math.max(entry.params.w,entry.params.d,entry.params.h);
+    if(L>maxDim+1) warn.push('Length '+L+'mm is bigger than the whole cabinet ('+Math.round(maxDim)+'mm max dimension)');
+    if(W>maxDim+1) warn.push('Width '+W+'mm is bigger than the whole cabinet');
+  }
+  if(!(t>=1)||t>60) warn.push('Thickness '+t+'mm is outside a realistic panel range (1–60mm)');
+  return warn;
 }
 /* Whole-cabinet selection (the new default click behavior in combined mode, non-exploded,
    no Ctrl held) -- shows the cabinet-level summary + the same door/shelf/split/add-part
@@ -1086,6 +1217,10 @@ function changeDoor(cabIndex,doorVal){
 }
 function addShelf(cabIndex){
   manualShelfDelta[cabIndex]=(manualShelfDelta[cabIndex]||0)+1;
+  refreshAny(cabIndex);
+}
+function subShelf(cabIndex){
+  manualShelfDelta[cabIndex]=(manualShelfDelta[cabIndex]||0)-1;   // buildCabinetWithOverrides/buildIndependentModules already clampDim(p.shelf+delta,0,6), so this can't go negative
   refreshAny(cabIndex);
 }
 function addCustomPart(cabIndex){
@@ -1245,6 +1380,62 @@ function typeDefaults(type){
    exactly as it does for manual slider input. Base cabinets only, this pass.
    ============================================================ */
 var AI_KEY_STORAGE='forgeClaudeKey';
+/* Drafts: save the uploaded image + the AI's analysis result + every manual override to
+   localStorage, so we can reload an exact prior state instantly while iterating on bugs --
+   no re-upload, no re-running the (paid, per-token) AI analysis. Deliberately a dev/testing
+   aid, not a "project file" concept -- one flat list in localStorage, not per-user/per-cloud. */
+var DRAFTS_KEY='forgeDrafts', _lastUploadedImage=null;
+function _currentOverridesSnapshot(){
+  return {
+    manualDoorOverrides:manualDoorOverrides, manualShelfDelta:manualShelfDelta, manualDeletedParts:manualDeletedParts,
+    manualCustomParts:manualCustomParts, manualModuleCount:manualModuleCount, manualModuleIndependent:manualModuleIndependent,
+    manualModuleHeights:manualModuleHeights, manualHeightOverride:manualHeightOverride, manualDeletedCabinets:manualDeletedCabinets,
+    manualEbtOverrides:manualEbtOverrides, manualPartSizeOverrides:manualPartSizeOverrides
+  };
+}
+function _restoreOverridesSnapshot(ov){
+  manualDoorOverrides=ov.manualDoorOverrides||{}; manualShelfDelta=ov.manualShelfDelta||{}; manualDeletedParts=ov.manualDeletedParts||{};
+  manualCustomParts=ov.manualCustomParts||{}; manualModuleCount=ov.manualModuleCount||{}; manualModuleIndependent=ov.manualModuleIndependent||{};
+  manualModuleHeights=ov.manualModuleHeights||{}; manualHeightOverride=ov.manualHeightOverride||{}; manualDeletedCabinets=ov.manualDeletedCabinets||{};
+  manualEbtOverrides=ov.manualEbtOverrides||{}; manualPartSizeOverrides=ov.manualPartSizeOverrides||{};
+}
+function listDrafts(){ try{ return JSON.parse(localStorage.getItem(DRAFTS_KEY)||'[]'); }catch(e){ return []; } }
+function saveDraft(){
+  if(!window._aiCabinets || !window._aiCabinets.length){ alert('Nothing to save yet — analyze a drawing first.'); return; }
+  var label=prompt('Label this draft (e.g. "kitchen run — testing shelf delete"):','Draft '+new Date().toLocaleString());
+  if(label==null) return;
+  var drafts=listDrafts();
+  drafts.push({id:'d'+Date.now()+'_'+Math.floor(Math.random()*1e6), label:label, savedAt:new Date().toISOString(),
+    image:_lastUploadedImage, aiCabinets:window._aiCabinets, overrides:_currentOverridesSnapshot(), isolatedCabinetIndices:isolatedCabinetIndices});
+  try{ localStorage.setItem(DRAFTS_KEY,JSON.stringify(drafts)); }
+  catch(e){ alert('Could not save — browser storage is full (each draft includes the full image). Delete an older draft first.'); return; }
+  renderDraftList();
+}
+function loadDraft(id){
+  var d=listDrafts().filter(function(x){ return x.id===id; })[0];
+  if(!d) return;
+  window._aiCabinets=d.aiCabinets; _lastUploadedImage=d.image||null;
+  _restoreOverridesSnapshot(d.overrides||{});
+  isolatedCabinetIndices=d.isolatedCabinetIndices||null;
+  renderAiResult({cabinets:d.aiCabinets});   // rebuilds the results panel + Apply-all button exactly as a fresh analysis would
+  applyAllAiCabinets();
+  document.getElementById('ai-status').textContent='Loaded draft "'+d.label+'" ('+new Date(d.savedAt).toLocaleString()+') — no API call made.';
+}
+function deleteDraft(id){
+  localStorage.setItem(DRAFTS_KEY,JSON.stringify(listDrafts().filter(function(x){ return x.id!==id; })));
+  renderDraftList();
+}
+function renderDraftList(){
+  var el=document.getElementById('draft-list'); if(!el) return;
+  var drafts=listDrafts();
+  if(!drafts.length){ el.innerHTML='<div class="note">No saved drafts yet.</div>'; return; }
+  el.innerHTML=drafts.slice().reverse().map(function(d){
+    return '<div class="draft-row"><div class="draft-info"><b>'+String(d.label||'Untitled').replace(/</g,'&lt;')+'</b><br><span class="note">'+new Date(d.savedAt).toLocaleString()+' · '+((d.aiCabinets&&d.aiCabinets.length)||0)+' cabinet(s)</span></div>'
+      +'<div class="draft-actions"><button type="button" data-load="'+d.id+'">Load</button><button type="button" class="danger" data-del="'+d.id+'">✕</button></div></div>';
+  }).join('');
+  Array.prototype.forEach.call(el.querySelectorAll('[data-load]'),function(b){ b.addEventListener('click',function(){ loadDraft(this.getAttribute('data-load')); }); });
+  Array.prototype.forEach.call(el.querySelectorAll('[data-del]'),function(b){ b.addEventListener('click',function(){ if(confirm('Delete this draft?')) deleteDraft(this.getAttribute('data-del')); }); });
+}
 var SUPPORTED_TYPES=['base','wall','tall','drawer','sink','corner','cornerwall','openshelf','microwave'];
 var TYPE_LABELS={base:'Base cabinet',wall:'Wall / upper cabinet',tall:'Tall / pantry cabinet',drawer:'Drawer base',sink:'Sink / open base',corner:'Corner base (L-shape)',cornerwall:'Corner wall (L-shape)',openshelf:'Open shelf unit',microwave:'Microwave / appliance cabinet'};
 var CORNER_RW_DEFAULT={corner:900,cornerwall:600};
@@ -1302,6 +1493,7 @@ function analyzeDrawing(){
   localStorage.setItem(AI_KEY_STORAGE,key);
   btn.disabled=true; btn.textContent='Analyzing…'; statusEl.textContent='';
   fileToBase64(file).then(function(b64){
+    _lastUploadedImage={b64:b64,mediaType:file.type};   // captured here so a draft save can persist "what was uploaded" without re-reading the file input
     return fetch('https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
@@ -1403,6 +1595,7 @@ function computeFloorOffset(c){
    cabinet is rebuilt so they survive re-renders without mutating the engine's output. */
 var manualDoorOverrides={}, manualShelfDelta={}, manualDeletedParts={}, manualCustomParts={}, manualModuleCount={};
 var manualModuleIndependent={}, manualModuleHeights={}, manualHeightOverride={};   // module-split independence options
+var manualPartSizeOverrides={};   // cabIndex::partName::boxIndex -> {L,W,t} manual resize of an existing part instance
 var DOOR_OPTS=['single','double','bifold','pullout','none'];
 var CUSTOM_PART_ROLES=['side','bottom','rail','back','centrerail','shelf','toekick','endpanel','door'];
 /* Manually forces ANY cabinet into N stacked modules regardless of its height (shipping/
@@ -1438,6 +1631,7 @@ function buildCabinetWithOverrides(c,cabIndex){
   if(manualHeightOverride[cabIndex]!=null) p.h=manualHeightOverride[cabIndex];
   var n=manualModuleCount[cabIndex]||1;
   var res=n>1?splitCabinetIntoModules(p,n,manualModuleHeights[cabIndex]):buildCabinet(p);
+  res.parts=applySizeOverrides(res.parts,cabIndex);
   res.parts=deleteAppliedToParts(res.parts,cabIndex);
   if(manualCustomParts[cabIndex]) res.parts=res.parts.concat(manualCustomParts[cabIndex]);
   applyEbtOverrides(res.parts,cabIndex);
@@ -1458,6 +1652,7 @@ function buildIndependentModules(c,parentIndex,n){
     if(manualDoorOverrides[subIndex]!=null) mp.door=manualDoorOverrides[subIndex];
     if(manualShelfDelta[subIndex]) mp.shelf=clampDim(mp.shelf+manualShelfDelta[subIndex],0,6);
     var res=buildCabinet(mp);
+    res.parts=applySizeOverrides(res.parts,subIndex);
     res.parts=deleteAppliedToParts(res.parts,subIndex);
     if(manualCustomParts[subIndex]) res.parts=res.parts.concat(manualCustomParts[subIndex]);
     applyEbtOverrides(res.parts,subIndex);
@@ -1663,6 +1858,8 @@ window.addEventListener('DOMContentLoaded',function(){
   initThree();
   var savedKey=localStorage.getItem(AI_KEY_STORAGE); if(savedKey) document.getElementById('ai-key').value=savedKey;
   document.getElementById('ai-btn').addEventListener('click',analyzeDrawing);
+  document.getElementById('draft-save-btn').addEventListener('click',saveDraft);
+  renderDraftList();
   document.getElementById('isolation-btn').addEventListener('click',clearIsolation);
   document.getElementById('fullscreen-btn').addEventListener('click',toggleFullscreen);
   document.getElementById('solid-toggle').addEventListener('change',function(){
