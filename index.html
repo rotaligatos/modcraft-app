@@ -1282,6 +1282,7 @@ tr.cl-row:hover td{background:#f4f7fb}
           </div>
         </div>
         <div id="db-preview" style="margin-top:14px"></div>
+        <div id="mto-tag-wrap" style="margin-top:14px"></div>
       </div>
     </div>
   </div>
@@ -2535,7 +2536,11 @@ var qBoardLayout = null;
 var qDrawingAnalysis = null;
 var qInstPlanner = null;   // {workNightAccom, perDiem, touristPremium, touristNote, detail} from planner split export
 var qInstTouristPrem = false;  // whether tourist premium toggle is on in the inst card
-var ppicSettings = {installation:{teamsPerDay:1,cabPerTeamDay:3,workdaysPerMonth:22,typeCapacity:{},typeUom:{},customTypes:[]}};
+var ppicSettings = {installation:{teamsPerDay:1,cabPerTeamDay:3,workdaysPerMonth:22,typeCapacity:{},typeUom:{},customTypes:[]},
+  // Made-to-Order lead time by melamine/laminate texture (days WCLI needs to produce a board that
+  // isn't a stock/catalog SKU) — used by Designers Support to suggest a default when a cutting-list
+  // material is tagged MTO, and editable per-line afterward since it's only ever a starting guess.
+  materialLeadTime:{'Stipple':4,'Matte':0,'Supermatte':0,'Woodgrain':0,'Crosscut':8,'Stone':0,'Linen':0,'Softwood':0,'Hardwood':0}};
 // UOM options per cabinet type (types not listed default to 'unit')
 var CABINET_UOM_OPTS = {
   'Wall Cladding':    ['sqm','lm','board','unit'],
@@ -2608,6 +2613,32 @@ function _ppicUomChange(idx, val){
 function _ppicRemoveIdx(idx){
   var name=getInstTypes()[idx]; if(!name) return;
   ppicRemoveCustomType(name);
+}
+// Material lead time (MTO) — plain object edits, no re-render on the number input itself
+// (would drop focus mid-typing, same lesson as _ppicCapChange above).
+function _ppicMltChange(texture,val){
+  if(!ppicSettings.materialLeadTime) ppicSettings.materialLeadTime={};
+  ppicSettings.materialLeadTime[texture]=Math.max(0,parseFloat(val)||0);
+}
+var _ppicMltAddOpen=false;
+function ppicMltToggleAdd(){ _ppicMltAddOpen=!_ppicMltAddOpen; renderPpicPage(); if(_ppicMltAddOpen){ setTimeout(function(){ var f=el('ppic-mlt-name'); if(f) f.focus(); },50); } }
+function ppicMltSaveNew(){
+  var nameEl=el('ppic-mlt-name'), daysEl=el('ppic-mlt-days');
+  var name=nameEl?(nameEl.value||'').trim():'';
+  var days=daysEl?Math.max(0,parseFloat(daysEl.value)||0):0;
+  if(!name){ showToast('Enter a texture name'); if(nameEl) nameEl.focus(); return; }
+  if(!ppicSettings.materialLeadTime) ppicSettings.materialLeadTime={};
+  if(Object.prototype.hasOwnProperty.call(ppicSettings.materialLeadTime,name)){ showToast('Texture already exists: '+name); return; }
+  ppicSettings.materialLeadTime[name]=days;
+  _ppicMltAddOpen=false;
+  renderPpicPage();
+  showToast('Added texture: '+name+' — Save settings to keep it');
+}
+function _ppicMltRemove(texture){
+  if(!ppicSettings.materialLeadTime) return;
+  delete ppicSettings.materialLeadTime[texture];
+  renderPpicPage();
+  showToast('Removed texture: '+texture);
 }
 function _zaChange(zk, val){
   if(!INST_COST.zoneAddons) INST_COST.zoneAddons={};
@@ -2924,6 +2955,38 @@ var supaSession=null;      // current Supabase auth session (null until Google s
 var _supaPreOpenedPopup=null; // popup pre-opened synchronously on the Sign-in click, for the one-time Supabase auto-connect (see gSignIn/_supaAutoConnect)
 var supaStorageUsage=null; // {totalBytes,quotBytes,logoBytes,fileCount,computedAt} — cached, session-only; refreshed via _refreshStorageUsage()
 var dbServices=[]; var dbMaterials=[]; var dbHardware=[]; var dbTemplates=[];
+// Made-to-Order tag for catalog materials — a SKU can flip between "we stock it" and "MTO" as WCLI's
+// production/inventory situation changes, so this is a plain name-keyed list (not a Materials sheet
+// column): "Import Materials Excel" fully replaces the Materials sheet with fresh rows from the
+// uploaded file every time, with no positional relationship to the old rows, so a 4th sheet column
+// would silently attach the wrong tag to the wrong material the next time anyone re-imports. Matching
+// by name at load time (same pattern the rest of this pipeline already uses) is immune to that.
+var mtoMaterialNames=[];
+function _mtoNameKey(name){ return (name||'').toString().trim().toLowerCase(); }
+function isMtoMaterialName(name){
+  var k=_mtoNameKey(name);
+  for(var i=0;i<mtoMaterialNames.length;i++) if(_mtoNameKey(mtoMaterialNames[i])===k) return true;
+  return false;
+}
+function _applyMtoTags(){ dbMaterials.forEach(function(m){ m.mto=isMtoMaterialName(m.name); }); }
+// Default lead-time suggestion for a texture, from Settings -> PPIC -> Material Lead Time.
+// Case-insensitive match since the AI-extracted texture string and the settings key aren't
+// guaranteed to agree on casing; falls back to 0 (editable) for an unmapped/blank texture.
+function _mtoDefaultLeadDays(texture){
+  if(!texture) return 0;
+  var mlt=ppicSettings.materialLeadTime||{};
+  var tKey=texture.toString().trim().toLowerCase();
+  for(var k in mlt){ if(mlt.hasOwnProperty(k)&&k.toLowerCase()===tKey) return parseFloat(mlt[k])||0; }
+  return 0;
+}
+// Bidirectional — a SKU can be tagged AND untagged as MTO status changes with WCLI's own production.
+function setMtoMaterialName(name,on){
+  var k=_mtoNameKey(name);
+  var idx=mtoMaterialNames.findIndex(function(n){return _mtoNameKey(n)===k;});
+  if(on&&idx<0) mtoMaterialNames.push(name);
+  else if(!on&&idx>=0) mtoMaterialNames.splice(idx,1);
+  _applyMtoTags();
+}
 var dbLoaded=false;
 var gToken=null;
 var gUser=null;
@@ -3492,6 +3555,38 @@ function renderPpicPage(){
     for(var _ui=0;_ui<COMMON_UOM_OPTS.length;_ui++) h+='<option value="'+escHtml(COMMON_UOM_OPTS[_ui])+'">'+escHtml(COMMON_UOM_OPTS[_ui])+'</option>';
     h+='</select></div>';
     h+='<button class="btn" onclick="ppicSaveNewType()" style="height:32px;font-size:12px;padding:0 16px;background:var(--teal);color:#fff;border:none"><i class="ti ti-check"></i> Add</button>';
+    h+='</div>';
+  }
+  h+='</div></div>';
+  // ── Material lead time (Made to Order) ──────────────────────────────────────
+  h+='<div class="card" style="margin-bottom:14px">';
+  h+='<div class="card-head" style="display:flex;align-items:center;justify-content:space-between">'
+    +'<h3><i class="ti ti-clock-hour-4"></i>Material Lead Time (Made to Order)</h3></div>';
+  h+='<div class="card-body">';
+  h+='<p style="font-size:12px;color:var(--text2);margin-bottom:12px">Some laminated boards aren\'t stock/catalog SKUs — WCLI has to produce them, and how long that takes depends on the texture. Set the default lead time per texture here; Designers Support suggests it automatically when a cutting-list material is tagged Made to Order (MTO), and it stays editable per line since production speed changes over time and a specific order may vary.</p>';
+  h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">';
+  var mlt=ppicSettings.materialLeadTime||{};
+  var mltKeys=Object.keys(mlt);
+  for(var mi=0;mi<mltKeys.length;mi++){
+    var mtex=mltKeys[mi];
+    h+='<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#f8f9ff;border-radius:6px;border:.5px solid var(--border)">';
+    h+='<span style="font-size:12px;flex:1 1 90px;min-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(mtex)+'">'+escHtml(mtex)+'</span>';
+    h+='<input type="number" min="0" step="1" value="'+(parseFloat(mlt[mtex])||0)+'" oninput="_ppicMltChange(\''+escHtml(mtex).replace(/'/g,"\\'")+'\',this.value)" style="height:28px;width:56px;flex:0 0 auto;font-size:12px;text-align:center">';
+    h+='<span style="font-size:11px;color:var(--text2);flex:0 0 auto">days</span>';
+    h+='<button onclick="_ppicMltRemove(\''+escHtml(mtex).replace(/'/g,"\\'")+'\')" title="Remove this texture" style="background:none;border:none;cursor:pointer;color:var(--coral);font-size:14px;padding:0;line-height:1;flex-shrink:0;margin-left:auto">✕</button>';
+    h+='</div>';
+  }
+  h+='</div>';
+  h+='<div style="margin-top:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">';
+  h+='<button class="btn" onclick="ppicMltToggleAdd()" style="font-size:12px;padding:4px 12px;background:'+(_ppicMltAddOpen?'#6b7280':'var(--teal)')+';color:#fff;border:none"><i class="ti ti-'+(_ppicMltAddOpen?'x':'plus')+'"></i> '+(_ppicMltAddOpen?'Cancel':'Add texture')+'</button>';
+  h+='</div>';
+  if(_ppicMltAddOpen){
+    h+='<div style="margin-top:10px;padding:12px;background:#f0f9f4;border:1px solid #a7d9be;border-radius:8px;display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap">';
+    h+='<div style="flex:1 1 200px;min-width:160px"><label class="fld" style="font-size:11px">Texture name</label>'
+      +'<input id="ppic-mlt-name" type="text" placeholder="e.g. Sandwash" onkeydown="if(event.key===\'Enter\')ppicMltSaveNew()" style="height:32px;width:100%"></div>';
+    h+='<div style="flex:0 0 110px"><label class="fld" style="font-size:11px">Lead time (days)</label>'
+      +'<input id="ppic-mlt-days" type="number" min="0" step="1" value="0" style="height:32px;width:100%"></div>';
+    h+='<button class="btn" onclick="ppicMltSaveNew()" style="height:32px;font-size:12px;padding:0 16px;background:var(--teal);color:#fff;border:none"><i class="ti ti-check"></i> Add</button>';
     h+='</div>';
   }
   h+='</div></div>';
@@ -5081,6 +5176,66 @@ function removeMatItem(a,i){
   qAreas[a].matItems.splice(i,1);
   renderItems();
 }
+// Shared MTO badge/toggle for a quotation material line — used by both cutting-list/services mode
+// (qAreas[a].matItems) and BOM mode (qAreas[a].bomItems[ci].materials), since both need the exact
+// same tag/lead-time/remember-in-catalog UI, just addressing a different array path. A SKU's MTO
+// status isn't permanent — WCLI's stock/production situation changes — so this always stays a
+// toggle, never a one-way flag.
+function _matMtoBadgeHtml(mi,toggleOnExpr,toggleOffExpr,leadChangeExpr,rememberExpr){
+  if(!mi) return '';
+  if(mi.mto){
+    var already=isMtoMaterialName(mi.name);
+    return '<div style="display:flex;align-items:center;gap:6px;margin:-3px 0 6px 2px;font-size:10px;flex-wrap:wrap">'
+      +'<span style="font-weight:700;color:#fff;background:var(--amber);border-radius:3px;padding:1px 5px"><i class="ti ti-clock-hour-4" style="font-size:9px"></i> MTO</span>'
+      +'<span style="color:var(--text2)">Lead time:</span>'
+      +'<input type="number" min="0" step="1" value="'+(mi.mtoLeadDays||0)+'" onchange="'+leadChangeExpr+'" style="height:20px;width:44px;font-size:10px;padding:0 3px;text-align:center">'
+      +'<span style="color:var(--text2)">days</span>'
+      +'<a href="#" onclick="'+toggleOffExpr+';return false" style="color:var(--coral)">Untag</a>'
+      +(already?'':'<a href="#" onclick="'+rememberExpr+';return false" style="color:var(--navy)">Remember in catalog</a>')
+      +'</div>';
+  }
+  return '<div style="margin:-3px 0 6px 2px"><a href="#" onclick="'+toggleOnExpr+';return false" style="font-size:10px;color:var(--text2)"><i class="ti ti-clock-hour-4" style="font-size:10px"></i> Mark as Made to Order</a></div>';
+}
+function _qMatMtoRowHtml(a,i,mi){
+  return _matMtoBadgeHtml(mi,
+    '_qMatSetMto('+a+','+i+',true)','_qMatSetMto('+a+','+i+',false)',
+    'qAreas['+a+'].matItems['+i+'].mtoLeadDays=Math.max(0,parseFloat(this.value)||0);recalcSoon()',
+    '_qMatRememberMtoCatalog('+a+','+i+')');
+}
+function _qMatSetMto(a,i,on){
+  var mi=qAreas[a].matItems[i]; if(!mi) return;
+  mi.mto=on;
+  if(on&&!mi.mtoLeadDays) mi.mtoLeadDays=_mtoDefaultLeadDays(_prodParseMaterialDescriptor(mi.name||'').texture);
+  if(!on) mi.mtoLeadDays=0;
+  recalcSoon();
+  renderItems();
+}
+function _qMatRememberMtoCatalog(a,i){
+  var mi=qAreas[a].matItems[i]; if(!mi||!mi.name) return;
+  setMtoMaterialName(mi.name,true);
+  showToast('Remembered "'+mi.name+'" as MTO in the catalog — Save settings in Settings → Price Database to keep it.');
+  renderItems();
+}
+function _bomMatMtoRowHtml(a,ci,r,row){
+  return _matMtoBadgeHtml(row,
+    '_bomMatSetMto('+a+','+ci+','+r+',true)','_bomMatSetMto('+a+','+ci+','+r+',false)',
+    'qAreas['+a+'].bomItems['+ci+'].materials['+r+'].mtoLeadDays=Math.max(0,parseFloat(this.value)||0);recalcSoon()',
+    '_bomMatRememberMtoCatalog('+a+','+ci+','+r+')');
+}
+function _bomMatSetMto(a,ci,r,on){
+  var row=qAreas[a].bomItems[ci].materials[r]; if(!row) return;
+  row.mto=on;
+  if(on&&!row.mtoLeadDays) row.mtoLeadDays=_mtoDefaultLeadDays(_prodParseMaterialDescriptor(row.name||'').texture);
+  if(!on) row.mtoLeadDays=0;
+  recalcSoon();
+  renderItems();
+}
+function _bomMatRememberMtoCatalog(a,ci,r){
+  var row=qAreas[a].bomItems[ci].materials[r]; if(!row||!row.name) return;
+  setMtoMaterialName(row.name,true);
+  showToast('Remembered "'+row.name+'" as MTO in the catalog — Save settings in Settings → Price Database to keep it.');
+  renderItems();
+}
 function addHwItem(a){
   if(!qAreas[a].hwItems) qAreas[a].hwItems=[];
   var src=getHwSource();
@@ -5527,7 +5682,8 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
           +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)" style="height:28px;font-size:12px;text-align:center">'
           +'<input id="bom-price-'+a+'-'+ci+'-'+cat+'-'+r+'" type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)" style="height:28px;font-size:12px;text-align:right">'
           +'<span id="bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
-          +removeBtn+'</div>';
+          +removeBtn+'</div>'
+          +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       } else {
         // Free-text mode: name input + unit select
         var uopts='<option value="pc">pc</option><option value="lm">lm</option><option value="sqm">sqm</option><option value="sheet">sheet</option><option value="hole">hole</option><option value="set">set</option><option value="lot">lot</option><option value="hr">hr</option>';
@@ -5538,7 +5694,8 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
           +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)" style="height:28px;font-size:12px;text-align:center">'
           +'<input type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)" style="height:28px;font-size:12px;text-align:right">'
           +'<span id="bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
-          +removeBtn+'</div>';
+          +removeBtn+'</div>'
+          +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       }
     }
   }
@@ -5721,6 +5878,7 @@ function renderItems() {
               : '<span style="font-size:11px;color:var(--muted);text-align:center">—</span>')
             +'<button class="btn" onclick="removeMatItem('+a+','+i+')" style="height:30px;width:30px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
             +'</div>'
+            +_qMatMtoRowHtml(a,i,mi)
             ;
         }
       }
@@ -19588,6 +19746,7 @@ function loadPriceDatabase(showFeedback) {
       dbMaterials=data.materials.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
       dbHardware=data.hardware.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
       dbTemplates=data.templates.map(function(r){return {cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0};});
+      _applyMtoTags();
       _syncServicesFromDb();
       dbLoaded=true;
       renderPriceDbSettings();
@@ -19617,6 +19776,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
       dbMaterials=(matData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbHardware=(hwData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
+      _applyMtoTags();
       _syncServicesFromDb();
       dbLoaded=true;
       renderPriceDbSettings(); // always refresh settings panel counts
@@ -19756,6 +19916,61 @@ function renderPriceDbSettings() {
     +(tmplTypes?'<div style="font-size:11px;color:var(--text2)">'+dbTemplates.length+' rows across '+tmplTypes+' cabinet types loaded.</div>':'<div style="font-size:11px;color:var(--text2)">None loaded — run Initialize DB.</div>')
     +'</div></div>';
   prev.innerHTML=h;
+  renderMtoTagTool();
+}
+// Made-to-Order tagging tool — separate from the read-only preview above since Materials has no
+// per-row editor at all otherwise. Search box + results list follow the same "patch only the
+// results div, never the input itself" pattern as the Designers Support catalog search (a full
+// re-render on every keystroke there was a real bug that dropped focus after one character).
+function renderMtoTagTool(){
+  var w=el('mto-tag-wrap'); if(!w) return;
+  var h='<div class="card"><div class="card-head" style="display:flex;align-items:center;justify-content:space-between">'
+    +'<h3><i class="ti ti-clock-hour-4"></i>Made to Order (MTO) tagging</h3>'
+    +'<span id="mto-tag-count" style="font-size:11px;color:var(--text2);font-weight:400">'+mtoMaterialNames.length+' tagged</span></div>';
+  h+='<div class="card-body">';
+  h+='<p style="font-size:12px;color:var(--text2);margin-bottom:10px">Tag a material SKU as Made to Order when WCLI has to produce it rather than pull it from stock. A SKU\'s status can change either way as stock/production shifts — untag it anytime the same way.</p>';
+  h+='<input id="mto-search-input" type="text" placeholder="Search materials to tag/untag…" oninput="_mtoTagSearchInput(this.value)" style="height:32px;width:100%;margin-bottom:8px">';
+  h+='<div id="mto-tag-results" style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">'+_mtoTagResultsHtml('')+'</div>';
+  h+='</div></div>';
+  w.innerHTML=h;
+}
+function _mtoTagResultsHtml(query){
+  var q=(query||'').trim().toLowerCase();
+  var rows;
+  if(!q){
+    // Nothing typed — show what's already tagged (so untagging doesn't require remembering the
+    // exact name), not a dump of the whole catalog.
+    rows=dbMaterials.filter(function(m){return m.mto;});
+    if(!rows.length) return '<div style="font-size:11px;color:var(--text2);padding:8px">No materials tagged MTO yet. Type above to search '+dbMaterials.length+' catalog item(s).</div>';
+  } else {
+    var words=q.split(/\s+/).filter(Boolean);
+    rows=dbMaterials.filter(function(m){
+      var n=(m.name||'').toLowerCase();
+      return words.every(function(wd){return n.indexOf(wd)>=0;});
+    });
+    if(!rows.length) return '<div style="font-size:11px;color:var(--text2);padding:8px">No catalog materials match "'+escHtml(query)+'".</div>';
+  }
+  var shown=rows.slice(0,60);
+  var htmlRows=shown.map(function(m){
+    var safeName=escHtml(m.name).replace(/'/g,"\\'");
+    return '<label style="display:flex;align-items:center;gap:8px;padding:5px 8px;font-size:12px;border-bottom:1px solid #f0f0f0;cursor:pointer">'
+      +'<input type="checkbox"'+(m.mto?' checked':'')+' onchange="_mtoTagToggle(\''+safeName+'\',this.checked)" style="width:15px;height:15px;cursor:pointer">'
+      +'<span style="flex:1">'+escHtml(m.name)+'</span>'
+      +'<span style="color:var(--text2);font-size:10px">'+escHtml(m.unit||'')+'</span>'
+      +(m.mto?'<span style="font-size:9px;font-weight:700;color:#fff;background:var(--amber);border-radius:3px;padding:1px 5px">MTO</span>':'')
+      +'</label>';
+  }).join('');
+  return htmlRows+(rows.length>shown.length?'<div style="font-size:10px;color:var(--text2);padding:4px 8px">+'+(rows.length-shown.length)+' more — keep typing to narrow</div>':'');
+}
+function _mtoTagSearchInput(val){
+  var slot=el('mto-tag-results'); if(slot) slot.innerHTML=_mtoTagResultsHtml(val);
+}
+function _mtoTagToggle(name,checked){
+  setMtoMaterialName(name,checked);
+  var cnt=el('mto-tag-count'); if(cnt) cnt.textContent=mtoMaterialNames.length+' tagged';
+  var searchEl=el('mto-search-input');
+  var slot=el('mto-tag-results'); if(slot) slot.innerHTML=_mtoTagResultsHtml(searchEl?searchEl.value:'');
+  showToast((checked?'Tagged':'Untagged')+' MTO: '+name+' — Save settings to keep it');
 }
 
 // ── Clients sheet ─────────────────────────────────────────────────────────
@@ -19896,7 +20111,8 @@ function _collectAppSettings(){
     ppicSettings: JSON.parse(JSON.stringify(ppicSettings)),
     msgMailerUrl:(el('s-msg-mailer')?el('s-msg-mailer').value.trim():MSG_MAILER_URL)||MSG_MAILER_URL||'',
     serialClaimUrl:(el('s-serial-claim')?el('s-serial-claim').value.trim():SERIAL_CLAIM_URL)||SERIAL_CLAIM_URL||'',
-    approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING))
+    approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING)),
+    mtoMaterials: mtoMaterialNames.slice()
   };
 }
 function _applyAppSettings(s){
@@ -20008,6 +20224,18 @@ function _applyAppSettings(s){
     if(pi.typeUom&&typeof pi.typeUom==='object') ppicSettings.installation.typeUom=pi.typeUom;
     if(Array.isArray(pi.customTypes)) ppicSettings.installation.customTypes=pi.customTypes;
   }
+  // materialLeadTime lives alongside .installation on ppicSettings, not inside it — restore it
+  // explicitly (merge over the hardcoded defaults so a newly-added default texture isn't lost if
+  // an older saved settings row predates it).
+  if(s.ppicSettings&&s.ppicSettings.materialLeadTime&&typeof s.ppicSettings.materialLeadTime==='object'){
+    if(!ppicSettings.materialLeadTime) ppicSettings.materialLeadTime={};
+    for(var _mltk in s.ppicSettings.materialLeadTime){
+      if(s.ppicSettings.materialLeadTime.hasOwnProperty(_mltk)) ppicSettings.materialLeadTime[_mltk]=s.ppicSettings.materialLeadTime[_mltk];
+    }
+  }
+  // Re-apply regardless of whether this runs before or after loadPriceDatabase() — whichever
+  // finishes last would otherwise leave dbMaterials tagged against the wrong (stale/empty) list.
+  if(Array.isArray(s.mtoMaterials)){ mtoMaterialNames=s.mtoMaterials.slice(); _applyMtoTags(); }
 }
 function gSaveAppSettings(){
   if(!gToken){showSheetsToast(false,'Sign in to save settings.');return;}
@@ -23744,18 +23972,30 @@ function prodBuildSummary(result) {
   // only populated for the ambiguous (2+ match) case and got wiped to [] the instant a pick was
   // made, which meant a wrong pick (or a wrong single auto-match) could never be revisited without
   // retyping the exact catalog name from memory.
-  function catalogMatchRow(aiName,mappedName,catalogArr,qty,unit){
+  // texture (materials only) seeds the Made-to-Order lead-time suggestion if this row ends up
+  // flagged with no catalog match, or carries an mto tag through automatically when it confidently
+  // matches a catalog SKU that's itself already tagged MTO (see setMtoMaterialName/_applyMtoTags).
+  function catalogMatchRow(aiName,mappedName,catalogArr,qty,unit,texture){
     var candidates=_prodFindCatalogMatches(mappedName,catalogArr,6);
+    var isMaterial=(catalogArr===dbMaterials);
     var row={aiName:aiName,name:mappedName,qty:qty,unit:unit,include:true,price:0,custom:true,
-      outsource:false,matchCandidates:candidates.map(function(c){return c.name;}),needsReview:false,reviewNote:''};
+      outsource:false,mto:false,mtoLeadDays:0,texture:texture||'',
+      matchCandidates:candidates.map(function(c){return c.name;}),needsReview:false,reviewNote:''};
     if(candidates.length===1){
       row.name=candidates[0].name; row.unit=candidates[0].unit||unit; row.price=candidates[0].price||0; row.custom=false;
+      if(isMaterial&&candidates[0].mto){ row.mto=true; row.mtoLeadDays=_mtoDefaultLeadDays(texture); }
     } else if(candidates.length>1){
       row.needsReview=true;
       row.reviewNote=candidates.length+' possible catalog matches found for "'+aiName+'" — pick the right one.';
     } else {
       row.needsReview=true;
-      row.reviewNote='No matching item found in your catalog for "'+aiName+'" — pick "Outsource" if this needs to be sourced externally, or edit the name to add it as a one-off.';
+      // The old text here promised "edit the name to add it as a one-off" -- nothing ever cleared
+      // the flag when you did that, so it was a dead option (found via real user testing). Replaced
+      // with the two options that actually work: Outsource (both categories), and — materials only —
+      // Made to Order, since WCLI produces custom laminated boards in-house that aren't stock SKUs.
+      row.reviewNote=isMaterial
+        ?'No matching item found in your catalog for "'+aiName+'" — pick "Outsource" if this is sourced externally, or "Made to Order" if WCLI will produce it as a custom board.'
+        :'No matching item found in your catalog for "'+aiName+'" — pick "Outsource" if this is sourced externally, or "Keep as custom item" to price it manually.';
     }
     return row;
   }
@@ -23779,11 +24019,11 @@ function prodBuildSummary(result) {
     // even sees the second color to match against.
     var parts=[bm.material,bm.color,bm.colorB,bm.texture?'('+bm.texture+')':'',bm.textureB&&bm.textureB!==bm.texture?'('+bm.textureB+')':'',bm.thickness?bm.thickness+'mm':'',bm.faces?bm.faces+'F':''];
     var rn=parts.filter(function(s){return s&&s.trim();}).join(' ');
-    mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet'));
+    mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet',bm.texture));
     if(bm.hpl){
       // The HPL sheet itself — same catalog-match/review treatment as any other material.
       var hplName=['HPL',bm.color,bm.colorB,bm.faces?bm.faces+'F':''].filter(function(s){return s&&s.trim();}).join(' ');
-      mats.push(catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,bm.totalArea,'sqm'));
+      mats.push(catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,bm.totalArea,'sqm',bm.texture));
       // Substrate determines WHICH lamination service — reuse the same field parser built for
       // catalog matching so "Plywood"/"PB"/"MDF"/"PB-MR"/"MDF-MR" are recognized regardless of how
       // the AI phrased the material string.
@@ -23923,13 +24163,14 @@ function _prodCatalogRowHtml(cat,idx,row,uopts){
       +_prodCatalogSearchHtml(cat,idx,row)
       +'</div>';
   } else {
-    // Already resolved (single confident auto-match, a candidate you picked, or marked Outsource)
-    // — "Not right? Change match" stays available permanently so a mistake can always be undone,
-    // instead of the pick being final the moment it's made.
-    var resolvedLabel=row.outsource?'Marked as Outsource':(row.aiName&&row.aiName!==row.name?'AI: '+row.aiName:'');
+    // Already resolved (single confident auto-match, a candidate you picked, marked Outsource, or
+    // — materials only — Made to Order) — "Not right? Change match" stays available permanently so
+    // a mistake can always be undone, instead of the pick being final the moment it's made.
+    var resolvedLabel=row.outsource?'Marked as Outsource':(row.mto?'':(row.aiName&&row.aiName!==row.name?'AI: '+row.aiName:''));
     h+='<div style="font-size:10px;color:var(--text2);margin:-1px 0 5px 26px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      +(row.mto?'<span style="display:inline-flex;align-items:center;gap:4px"><span style="font-size:9px;font-weight:700;color:#fff;background:var(--amber);border-radius:3px;padding:1px 5px"><i class="ti ti-clock-hour-4" style="font-size:9px"></i> MTO</span>Lead time: <input type="number" min="0" step="1" value="'+(row.mtoLeadDays||0)+'" onchange="prodState.summary.'+cat+'['+idx+'].mtoLeadDays=Math.max(0,parseFloat(this.value)||0)" style="height:20px;width:44px;font-size:10px;padding:0 3px;text-align:center"> days</span>':'')
       +(resolvedLabel?'<span>'+(row.outsource?'<i class="ti ti-truck-delivery" style="font-size:10px;color:var(--navy)"></i> ':'<em>')+escHtml(resolvedLabel)+(row.outsource?'':'</em>')+'</span>':'')
-      +(row.aiName&&row.aiName!==row.name&&!row.outsource?'<a href="#" onclick="prodSaveJargon(\''+cat+'\','+idx+');return false" style="color:var(--navy)">Save mapping</a>':'')
+      +(row.aiName&&row.aiName!==row.name&&!row.outsource&&!row.mto?'<a href="#" onclick="prodSaveJargon(\''+cat+'\','+idx+');return false" style="color:var(--navy)">Save mapping</a>':'')
       +'<a href="#" onclick="_prodCatalogRowReopenPicker(\''+cat+'\','+idx+');return false" style="color:var(--coral)">Not right? Change match</a>'
       +'</div>';
   }
@@ -23941,10 +24182,13 @@ function _prodCatalogRowHtml(cat,idx,row,uopts){
 // cleared (see catalogMatchRow), so the exact original candidate list is still there to choose from.
 function _prodCatalogRowReopenPicker(cat,idx){
   var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
-  row.needsReview=true; row._searchQuery=''; // start fresh on the AI-suggested candidates again, not a stale search from last time
+  var isMaterial=(cat==='materials');
+  row.needsReview=true; row._searchQuery=''; row.mto=false; row.mtoLeadDays=0; // start fresh — a genuinely wrong pick shouldn't carry a stale MTO tag into whatever's picked next
   row.reviewNote=(row.matchCandidates&&row.matchCandidates.length)
-    ? (row.matchCandidates.length+' possible catalog match'+(row.matchCandidates.length>1?'es':'')+' found for "'+row.aiName+'" — pick the right one, or mark it Outsource.')
-    : 'No matching item found in your catalog for "'+row.aiName+'" — pick "Outsource" if this needs to be sourced externally, or edit the name to add it as a one-off.';
+    ? (row.matchCandidates.length+' possible catalog match'+(row.matchCandidates.length>1?'es':'')+' found for "'+row.aiName+'" — pick the right one, or mark it Outsource'+(isMaterial?' / Made to Order':'')+'.')
+    : (isMaterial
+        ?'No matching item found in your catalog for "'+row.aiName+'" — pick "Outsource" if this is sourced externally, or "Made to Order" if WCLI will produce it as a custom board.'
+        :'No matching item found in your catalog for "'+row.aiName+'" — pick "Outsource" if this is sourced externally, or "Keep as custom item" to price it manually.');
   var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
 }
 function prodBuildSummaryHtml(){
@@ -24015,9 +24259,15 @@ function _prodCatalogResultsHtml(cat,idx,row){
 }
 function _prodCatalogSearchHtml(cat,idx,row){
   var resId='prod-cat-results-'+cat+'-'+idx;
-  return '<input type="text" value="'+escHtml(row._searchQuery||'')+'" placeholder="Search the full catalog…" oninput="_prodCatalogSearchInput(\''+cat+'\','+idx+',this.value)" style="height:27px;font-size:12px;width:100%;margin-bottom:4px">'
+  var h='<input type="text" value="'+escHtml(row._searchQuery||'')+'" placeholder="Search the full catalog…" oninput="_prodCatalogSearchInput(\''+cat+'\','+idx+',this.value)" style="height:27px;font-size:12px;width:100%;margin-bottom:4px">'
     +'<div id="'+resId+'" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-bottom:4px">'+_prodCatalogResultsHtml(cat,idx,row)+'</div>'
+    +'<div style="display:flex;gap:14px;flex-wrap:wrap">'
     +'<a href="#" onclick="_prodCatalogRowPicked(\''+cat+'\','+idx+',\'\',true);return false" style="font-size:11px;color:var(--text2)"><i class="ti ti-truck-delivery" style="font-size:11px"></i> None of these — mark as Outsource (sourced externally)</a>';
+  h+=(cat==='materials')
+    ?'<a href="#" onclick="_prodCatalogRowMarkMto(\''+cat+'\','+idx+');return false" style="font-size:11px;color:var(--amber)"><i class="ti ti-clock-hour-4" style="font-size:11px"></i> Made to Order (WCLI produces this board)</a>'
+    :'<a href="#" onclick="_prodCatalogRowKeepCustom(\''+cat+'\','+idx+');return false" style="font-size:11px;color:var(--text2)"><i class="ti ti-edit" style="font-size:11px"></i> Keep as custom item (I\'ll price it manually)</a>';
+  h+='</div>';
+  return h;
 }
 // Patches only the results div, leaving the <input> itself untouched — a full
 // summary-panel re-render here was the root cause of the "can't type continuously" bug.
@@ -24033,17 +24283,40 @@ function _prodCatalogSearchInput(cat,idx,val){
 function _prodCatalogRowPicked(cat,idx,itemName,isOutsource){
   var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
   if(isOutsource){
-    row.outsource=true; row.needsReview=false; row.reviewNote=''; row._searchQuery='';
+    row.outsource=true; row.mto=false; row.mtoLeadDays=0; row.needsReview=false; row.reviewNote=''; row._searchQuery='';
     var slot2=el('prod-summary-wrap'); if(slot2) slot2.innerHTML=prodBuildSummaryHtml();
     return;
   }
   if(!itemName) return;
   var catalogArr=cat==='materials'?dbMaterials:dbHardware;
   var matched=catalogArr.find(function(c){return c.name===itemName;});
-  if(matched){ row.name=matched.name; row.unit=matched.unit||row.unit; row.price=matched.price||0; row.custom=false; }
-  else { row.name=itemName; }
+  if(matched){
+    row.name=matched.name; row.unit=matched.unit||row.unit; row.price=matched.price||0; row.custom=false;
+    // Carries the catalog SKU's own MTO tag through — same as a confident auto-match in catalogMatchRow.
+    row.mto=(cat==='materials'&&!!matched.mto); row.mtoLeadDays=row.mto?_mtoDefaultLeadDays(row.texture):0;
+  } else { row.name=itemName; row.mto=false; row.mtoLeadDays=0; }
   row.outsource=false; row.needsReview=false; row.reviewNote=''; row._searchQuery='';
   _prodSaveJargonRule(row.aiName,cat,row.name);
+  var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
+}
+// "Made to Order" resolution (materials only) — for a laminated board WCLI produces in-house
+// rather than pulls from stock. Keeps NORMAL material cost rates (unlike Outsource, which routes
+// through its own dedicated contingency/buffer/markup chain) — just tags the row + suggests a lead
+// time from Settings -> PPIC -> Material Lead Time by the component's own detected texture.
+function _prodCatalogRowMarkMto(cat,idx){
+  var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
+  row.mto=true; row.mtoLeadDays=_mtoDefaultLeadDays(row.texture); row.custom=true;
+  row.outsource=false; row.needsReview=false; row.reviewNote=''; row._searchQuery='';
+  var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
+}
+// "Keep as custom item" resolution (hardware, or any row with no MTO concept) — a plain unpriced
+// custom line, price filled in later on the quotation itself. Fixes the same dead-UI-text bug MTO
+// fixes for materials: the old reviewNote promised "edit the name to add it as a one-off" but
+// nothing ever cleared the flag when you did that.
+function _prodCatalogRowKeepCustom(cat,idx){
+  var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
+  row.custom=true; row.outsource=false; row.mto=false; row.mtoLeadDays=0;
+  row.needsReview=false; row.reviewNote=''; row._searchQuery='';
   var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
 }
 function prodRemoveSummaryRow(cat,idx){if(!prodState.summary)return;prodState.summary[cat].splice(idx,1);var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
@@ -24336,7 +24609,9 @@ function prodReflectToQuotation(){
     var mt=sum.materials[m];
     if(!mt.include||!mt.name||!(mt.qty>0)) continue;
     if(mt.outsource) area.outsourceMaterials.push({name:mt.name,unit:mt.unit||'sheet',qty:mt.qty,price:mt.price||0,saved:false});
-    else area.matItems.push({name:mt.name,qty:mt.qty,unit:mt.unit||'sheet',price:mt.price||0,custom:mt.custom!==false});
+    // MTO items land in the regular matItems list (normal cost rates), never outsourceMaterials —
+    // the whole point of MTO vs Outsource is that MTO stays on standard material pricing.
+    else area.matItems.push({name:mt.name,qty:mt.qty,unit:mt.unit||'sheet',price:mt.price||0,custom:mt.custom!==false,mto:!!mt.mto,mtoLeadDays:mt.mto?(mt.mtoLeadDays||0):0});
   }
   // Hardware — same catalog-match/outsource split as materials
   for(var h=0;h<sum.hardware.length;h++){
