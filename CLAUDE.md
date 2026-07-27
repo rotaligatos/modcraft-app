@@ -2012,6 +2012,60 @@ git push origin main
 # Takes ~90 seconds; poll with: curl -s URL | grep -q "some-new-string"
 ```
 
+## What was changed on 2026-07-24/27 (session — MSSI website build)
+
+> All work in `C:\Users\WCLI Rommel\Desktop\MSSI Webpage` — the **separate MSSI public site**,
+> not the deployed `index.html`. **Full detail in that folder's `HANDOFF.md`** (file map, decisions,
+> open items). Only the ModCraft-relevant points are summarised here.
+>
+> ⚠️ The MSSI Webpage folder is **not a git repo** — only two backup HTML files protect it.
+
+**Strategy — two client lanes, one queue.** Fabricators/installers (their own cutting lists,
+usually Fabrication-only) vs GCs/developers + homeowners going direct (drawings, full service).
+Discriminator is `cl-service`, already on every quotation. Three intake channels — webpage /
+internal (Wufoo → eventually native) / offline — should land in `pending_orders` with a `source`
+field, giving per-source SLA and conversion reporting. Goal: **no order enters the business
+except through a form.**
+
+**Cutting list built and ported** (12 design iterations against real client samples). Fields are
+deliberately shaped to drop into the Designers Support pipeline pre-structured, skipping AI
+extraction. Confirmed rules that matter to ModCraft:
+- Edge codes **L/S not W/H** (follows the piece, so height>width can't confuse it); `4S` = all
+  round, matching ModCraft's own EBT code — no dialect translation needed
+- **Edgebanding lives in the materials database**, not a separate catalogue
+- **HPL is a finish laminated onto a substrate**, never a board — substrate + faces derive the
+  service (plywood → manual · MDF/PB → machine · else flagged), thickness comes from the
+  **substrate only**. 1F melamine is a valid substrate
+- Per-LM services carry **along L / along W**; curved work = Manual Edgebanding with a manual mm run
+- Off-catalogue entries flagged gold = the estimator's to-do list, and a signal for what to add
+  to the catalogue. Same flag-not-guess philosophy as Designers Support
+- **Still stand-in SKUs** — wiring Supabase `price_materials` + services is what makes the
+  variability reduction real
+
+**Order form now captures what a quotation needs:** `cl-service`, `cl-delivery`, `cl-segment`,
+`cl-lead`. (`cl-type` defaults Direct; `cl-agent` assigned on pickup.)
+
+**Aftercare / warranty surfaced publicly** — reply within the hour, assess within 48 h, close in
+4–5 days, 6 months from Certificate of Completion. Positioning: MSSI is priced above backyard
+shops, so the site's job is justifying the gap.
+
+**⚠️ Privacy rules now standing (apply to ModCraft too):** no employee names published; **no
+residential client names** — a private home is identified by property or area only. Corporate
+clients stay named. Recorded in the plan doc.
+
+**Google Drive findings:**
+- Project photos are in `SCM Photos / WCLI` (owner `wcli-it-admin`), 12 folders
+- **Drive files are private — verified all three embed methods blocked.** Drive cannot serve
+  images to a public site, and making them public is unwise (hotlink throttling; 3–6 MB originals)
+- **Drive IS synced on this machine at `G:`**, but `SCM Photos` isn't in the synced set (arrives
+  via "Shared with me", which Drive for desktop doesn't sync). Fix = add a shortcut to My Drive
+- Right architecture for site imagery: **Drive = archive · admin page = curation · Supabase
+  Storage = public delivery.** The admin mockup's "Sync now" button already promises this
+
+**Scope terminology corrected:** "interior fit-out" removed everywhere — the Installation card
+claimed *"feature walls, ceilings, and full interior fit-out"*, work MSSI doesn't do and a
+scope-dispute risk. Now **architectural joinery**.
+
 ## Testing approach
 - Use the `preview_start` / `preview_eval` MCP tools to load `index.html` locally
 - Mock `window.gApiFetch`, `window.sheetsGet/Append/Update`, `window.gToken` for unit tests
