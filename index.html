@@ -10010,6 +10010,27 @@ function supaGetPendingOrders(){
     }).catch(function(){ return null; });
   }catch(e){ return Promise.resolve(null); }
 }
+// — The website's cutting list lives in its own table, one row per order. Totals are
+//   cheap and drive the card summary, so they ride along with the queue; the panel /
+//   HPL / hardware arrays are only fetched when someone actually opens the list. —
+function supaGetOrderCutListTotals(){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('order_cutting_lists').select('order_id,totals').then(function(r){
+      if(r.error||!r.data) return null;
+      return r.data;
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
+function supaGetOrderCutList(orderId){
+  if(!supaReady()) return Promise.resolve(null);
+  try{
+    return supa.from('order_cutting_lists').select('*').eq('order_id',orderId).limit(1).then(function(r){
+      if(r.error||!r.data||!r.data.length) return null;
+      return r.data[0];
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 function gLoadPendingOrders(cb) {
   if(!gToken){if(cb)cb();return;}
   if(USE_SUPABASE&&supaReady()){
@@ -10058,7 +10079,19 @@ function gLoadPendingOrders(cb) {
       });
       ordersLoaded=true;
       _updateOrdersBadge();
-      if(cb)cb();
+      // Card summary for cutting-list orders — one extra query, totals only. The card
+      // has always had a "attached but not loaded yet" branch; nothing ever filled it.
+      supaGetOrderCutListTotals().then(function(tot){
+        if(tot&&tot.length){
+          var byId={};
+          for(var t=0;t<tot.length;t++) byId[tot[t].order_id]=tot[t].totals||null;
+          for(var p=0;p<pendingOrders.length;p++){
+            if(byId[pendingOrders[p].id]) pendingOrders[p].cutList=byId[pendingOrders[p].id];
+          }
+          if(typeof renderOrders==='function'&&el('orders-wrap')) renderOrders();
+        }
+        if(cb)cb();
+      });
     });
     return;
   }
@@ -10366,6 +10399,7 @@ function renderOrders(){
       +'<div style="display:flex;gap:4px;flex-wrap:wrap">'+attachHtml+'</div>'
       +'<div style="display:flex;gap:6px">'
       +'<button class="btn" onclick="viewOrderDetail(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-eye"></i> View</button>'
+      +(_kind==='Cutting List'?'<button class="btn" onclick="openOrderCuttingList(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-list-details"></i> Cutting list</button>':'')
       +(!_finished?'<button class="btn btn-primary" onclick="exportOrderToQuotation(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-file-plus"></i> Export to Quotation</button>':'')
       +(o.status==='In Progress'&&o.quotSerial?'<button class="btn" onclick="markOrderDoneManual(\''+escHtml(o.id)+'\')" style="font-size:12px;color:var(--teal);border-color:var(--teal)"><i class="ti ti-check"></i> Mark Done</button>':'')
       +(!_finished?'<button class="btn" onclick="cancelOrder(\''+escHtml(o.id)+'\')" style="font-size:12px;color:var(--coral);border-color:var(--coral)"><i class="ti ti-ban"></i> Cancel</button>':'')
@@ -10377,6 +10411,197 @@ function renderOrders(){
   }
   h+='</div>';
   wrap.innerHTML=h;
+}
+
+/* ══ Website cutting list → Designers Support components ══════════════════
+   The client typed this list themselves, so unlike an uploaded drawing there is
+   nothing to extract — the numbers are already exact. What it needs is TRANSLATION.
+   The site and this app share a vocabulary but not a notation, and every mismatch
+   below is silent rather than loud: nothing throws, the number is just wrong.      */
+
+// 1 — EDGE CODES. The site codes LONG/SHORT edges so a code follows the piece
+//     ('1L 1S' = one long edge + one short edge, whichever dimension those are).
+//     EBT_CODE_MAP here is keyed on the LENGTH/WIDTH *fields* — [short,long] applied
+//     as width/length. The two agree only while length >= width, so convert through
+//     the piece's real dimensions. Untranslated, the legacy T/B/L/R fallback in
+//     prodComputeServices reads '1L 1S' as one long edge and nothing else, which
+//     under-counts the edge banding without ever raising an error.
+var _WEB_EBT={'':[0,0],'1L':[1,0],'2L':[2,0],'1S':[0,1],'2S':[0,2],
+              '1L 1S':[1,1],'2L 1S':[2,1],'1L 2S':[1,2],'4S':[2,2]};        // [long,short]
+var _EBT_BY_COUNT={'0|0':'','1|0':'1s','2|0':'2s','0|1':'1l','0|2':'2l',
+                   '1|1':'1s/1l','1|2':'1s/2l','2|1':'2s/1l','2|2':'4s'};   // 'short|long'
+function _webEbtToModcraft(code,L,W){
+  var raw=(code||'').trim().toUpperCase().replace(/\s+/g,' ');
+  var ls=_WEB_EBT[raw];
+  if(!ls) return {ebt:'',unknown:raw!==''};
+  var longIsLength=(+L||0)>=(+W||0);
+  var lc=longIsLength?ls[0]:ls[1];      // edges measured along the length field
+  var sc=longIsLength?ls[1]:ls[0];      // edges measured along the width field
+  var out=_EBT_BY_COUNT[sc+'|'+lc];
+  return {ebt:out===undefined?'':out,unknown:false};
+}
+
+// 2 — GRAIN. The site stores the effective per-row direction as L / W.
+function _webGrainToModcraft(g){
+  var v=(g||'').trim().toUpperCase();
+  return v==='L'?'length':(v==='W'?'width':'');
+}
+
+// 3 — MATERIAL. Only words actually present in the label are used; a substrate is
+//     never inferred from an SKU prefix. An unrecognised label falls through to the
+//     catalog matcher as free text, exactly as an AI-extracted name would.
+var _WEB_MAT_FAMILY=[
+  [/\bcompact\s*laminate\b/i,'Compact Laminate'],
+  [/\bplywood\b|\bmarine\s*ply\b/i,'Plywood'],
+  [/\bmdf[\s\-]*mr\b/i,'MDF-MR'],[/\bmdf\b/i,'MDF'],
+  [/\bpb[\s\-]*mr\b/i,'PB-MR'],[/\bparticle\s*board\b/i,'PB'],
+  [/\bmelamine\b/i,'Melamine'],[/\bveneer\b/i,'Veneer'],[/\bhdf\b/i,'HDF']
+];
+// Longest first: 'supermatte' must win over 'matte'.
+var _WEB_TEXTURES=['supermatte','woodgrain','crosscut','hardwood','softwood','textile','stipple','stone','matte'];
+function _webMatFamily(s){
+  for(var i=0;i<_WEB_MAT_FAMILY.length;i++) if(_WEB_MAT_FAMILY[i][0].test(s||'')) return _WEB_MAT_FAMILY[i][1];
+  return '';
+}
+function _webTextureOf(s){
+  var t=(s||'').toLowerCase().replace(/\s+/g,'');
+  for(var i=0;i<_WEB_TEXTURES.length;i++) if(t.indexOf(_WEB_TEXTURES[i])>=0) return _WEB_TEXTURES[i];
+  return '';
+}
+
+// Converts one order_cutting_lists row into the exact shape prodLoadStructuredList
+// wants. Flags rather than guesses, in the same spirit as the AI path.
+function _cutListToAnalysis(cl,order){
+  var panels=(cl&&cl.panels)||[], hplRows=(cl&&cl.hpl)||[], hw=(cl&&cl.hardware)||[];
+  var jobGrain=_webGrainToModcraft(cl&&cl.grain)||'length';
+  // Rebuild the composite labels the site's material dropdown offered, so a panel
+  // reading "Warm White Matte on White Back Panel · 2F" resolves back to its PARTS —
+  // substrate, finish, face count — instead of this app parsing a display string.
+  var builds={};
+  for(var i=0;i<hplRows.length;i++){
+    var hr=hplRows[i];
+    var shortSub=String(hr.sub||'').split(' — ')[0].trim();
+    var shortFin=String(hr.fin||'').split(' — ')[0].trim();
+    if(!shortSub||!shortFin) continue;
+    builds[shortFin+' on '+shortSub+' · '+(hr.faces||'')]={sub:hr.sub,fin:hr.fin,faces:hr.faces==='2F'?2:1};
+  }
+  var comps=[], warn=[], facesUnknown=0;
+  for(var p=0;p<panels.length;p++){
+    var pn=panels[p];
+    var notes=[], review=[];
+    var L=+pn.L||0, W=+pn.W||0;
+    var label=String(pn.mat||'').trim();
+    var b=builds[label];
+    var material='', color='', faces=0;
+    if(b){
+      var subName=String(b.sub).split(' — ')[0].trim();
+      material=_webMatFamily(b.sub)||subName;
+      color=String(b.fin).split(' — ')[0].trim();
+      faces=b.faces;
+      // 'HPL' in the notes is what prodComputeBom's detector keys on. It then adds the
+      // HPL sheet plus the substrate-correct lamination service from the PANEL area,
+      // which is single-side by this app's convention. Feeding the site's own hpl[]
+      // rows in as components as well would count those laminated boards twice — and
+      // the site's 2F area is already doubled, so together that bills four faces.
+      // The finish name usually already says HPL — don't stutter. The word has to
+      // survive either way: it is what prodComputeBom's detector keys on.
+      notes.push((/\bhpl\b/i.test(color)?color:'HPL '+color)+' laminated onto '+subName+' ('+b.faces+'F)');
+      var subSku=String(b.sub).split(' — ')[1]; if(subSku) notes.push('substrate SKU '+subSku.trim());
+      var finSku=String(b.fin).split(' — ')[1]; if(finSku) notes.push('HPL SKU '+finSku.trim());
+    } else {
+      var cut=label.lastIndexOf(' — ');
+      var mname=cut>=0?label.slice(0,cut).trim():label;
+      var sku=cut>=0?label.slice(cut+3).trim():'';
+      var fam=_webMatFamily(label);
+      material=fam||mname; color=fam?mname:'';
+      if(sku) notes.push('SKU '+sku);
+      facesUnknown++;
+      if(pn.matCustom) review.push('the client typed this material instead of picking it from the catalogue');
+    }
+    var eb=_webEbtToModcraft(pn.ebt,L,W);
+    if(eb.unknown) review.push('edge code "'+pn.ebt+'" was not recognised — set the banding manually');
+    if(pn.emat) notes.push('edge tape: '+pn.emat);
+    // Per-piece services. Grooving has a field of its own; the rest carry no
+    // deterministic quantity on this path, so they become notes and flags, not guesses.
+    var grooving='';
+    var svcs=pn.svcs||[];
+    for(var v=0;v<svcs.length;v++){
+      var sv=String(svcs[v]||'').trim(); if(!sv) continue;
+      if(/groov/i.test(sv)){
+        grooving=sv;
+        review.push('grooving is one word on the form but three prices in the catalogue (3mm melamine / compact laminate / router) — pick the right one');
+      } else if(/bor/i.test(sv)){
+        // prodComputeServices prices boring PER HOLE and drops the service entirely at
+        // qty 0, so an unflagged boring request would vanish without a trace.
+        review.push('boring was requested but the web form collects no hole count — add it to the hole schedule');
+      } else {
+        notes.push('service: '+sv);
+        review.push('"'+sv+'" has no automatic quantity on this path — add it by hand');
+      }
+    }
+    var gr=pn.grain?_webGrainToModcraft(pn.grain):'';
+    comps.push({
+      area:String(pn.group||'General'), name:String(pn.part||''),
+      material:material, color:color, texture:_webTextureOf(label),
+      colorB:'', textureB:'',
+      thickness:+pn.th||0, length:L, width:W, qty:+pn.qty||1,
+      faces:faces, grain:gr||jobGrain,
+      ebt:eb.ebt, grooving:grooving,
+      needsReview:review.length>0, reviewNote:review.join('; '),
+      notes:notes.join(' · ')
+    });
+  }
+  if(facesUnknown) warn.push(facesUnknown+' panel'+(facesUnknown===1?' has':'s have')
+    +' no face count — the web form never asks 1F/2F, so the catalogue match cannot tell a 1-face board from a 2-face one');
+  var hardware=[];
+  for(var h=0;h<hw.length;h++){
+    var it=hw[h];
+    if(!String(it.item||'').trim()) continue;
+    hardware.push({name:String(it.item).trim(),qty:+it.qty||0,unit:String(it.unit||'pc'),notes:String(it.notes||'')});
+  }
+  var t=(cl&&cl.totals)||{};
+  var head='Cutting list filed by the client on the MSSI website'
+    +(order&&order.id?' (order '+order.id+')':'')+'. '
+    +(t.rows||panels.length)+' rows · '+(t.pieces||0)+' pieces'
+    +(t.area?' · '+Number(t.area).toFixed(3)+' m²':'')
+    +'. These values were typed by the client, not extracted — check them, do not re-derive them.';
+  if(hplRows.length) head+=' '+hplRows.length+' HPL build'+(hplRows.length===1?' is':'s are')
+    +' applied through the panels that use them, so they are not listed again as their own components.';
+  if(warn.length) head+=' \u26a0 '+warn.join('. ')+'.';
+  return {summary:head,
+    projectName:(order&&(order.projectName||order.clientName))||'',
+    components:comps, hardware:hardware, holeSchedule:[], carcassCount:0,
+    _warnings:warn};
+}
+
+// Loads an order's cutting list into Designers Support. Used by the order card and,
+// silently, by exportOrderToQuotation.
+function openOrderCuttingList(orderId,silent){
+  var o=null;
+  for(var i=0;i<pendingOrders.length;i++){ if(pendingOrders[i].id===orderId){ o=pendingOrders[i]; break; } }
+  if(!supaReady()){
+    if(!silent) showToast('Connect to the fast database first (Settings → Company & DB) — website cutting lists live there.');
+    return Promise.resolve(null);
+  }
+  return supaGetOrderCutList(orderId).then(function(cl){
+    if(!cl){ if(!silent) showToast('No cutting list is attached to order '+orderId+'.'); return null; }
+    var payload=_cutListToAnalysis(cl,o);
+    prodLoadStructuredList(payload,'Order '+orderId+' — cutting list');
+    var flagged=0;
+    for(var c=0;c<payload.components.length;c++) if(payload.components[c].needsReview) flagged++;
+    logActivity('Cutting list from order '+orderId+' loaded into Designers Support — '+payload.components.length+' components');
+    if(!silent){
+      setProdTab('drawing');   // set the tab first — navigate() renders the page itself
+      navigate('production');
+      showToast('✓ '+payload.components.length+' components from order '+orderId
+        +(flagged?' — '+flagged+' need review':' — nothing flagged'));
+    }
+    return payload;
+  }).catch(function(e){
+    console.warn('openOrderCuttingList failed',e);
+    if(!silent) showToast('Could not load the cutting list for '+orderId+'.');
+    return null;
+  });
 }
 
 function exportOrderToQuotation(orderId){
@@ -10415,8 +10640,21 @@ function exportOrderToQuotation(orderId){
     }
     _setOrderStatus(orderId,'In Progress','');
     renderOrders && _updateOrdersBadge();
-    logActivity('Quotation created from Wufoo Order #'+orderId+(o.clientName?' — '+o.clientName:''));
+    logActivity('Quotation created from Order #'+orderId+(o.clientName?' — '+o.clientName:''));
     showToast('Order #'+orderId+' loaded — client fields pre-filled.');
+    // A cutting-list order carries the line items the quotation gets built from. They
+    // belong in Designers Support as COMPONENTS, not as quotation lines: length, width,
+    // grain and edge codes are what the nesting and edge-banding maths run on, and a
+    // quotation line has nowhere to keep them.
+    if(orderKind(o)==='Cutting List'){
+      openOrderCuttingList(orderId,true).then(function(pl){
+        if(!pl) return;
+        var fl=0;
+        for(var c=0;c<pl.components.length;c++) if(pl.components[c].needsReview) fl++;
+        showToast('Cutting list staged in Designers Support — '+pl.components.length
+          +' components'+(fl?', '+fl+' need review':'')+'.');
+      });
+    }
   }
   setTimeout(_fillOrderFields,300);
   }); // confirmUnsavedThen
@@ -23275,6 +23513,53 @@ function prodSendText(csvText){
   });
 }
 
+// ── Non-AI entry point ───────────────────────────────────────────────────
+// prodSendPdf and prodSendText both go through Claude, because a drawing or a
+// spreadsheet has to be READ before it can be structured. A list that arrives already
+// structured — the MSSI website's, and anything else that speaks this shape — has
+// nothing to read, so it must not pay for an extraction pass that can only introduce
+// error into numbers that were already exact. Everything downstream is untouched:
+// prodComputeBom, the nesting simulation, prodBuildSummary and Reflect to quotation
+// neither know nor care where the components came from.
+function prodLoadStructuredList(payload,fileName){
+  var r={
+    summary:String((payload&&payload.summary)||''),
+    projectName:String((payload&&payload.projectName)||''),
+    components:(((payload&&payload.components)||[]).map(_prodNormalizeComponent)),
+    hardware:(payload&&payload.hardware)||[],
+    holeSchedule:(payload&&payload.holeSchedule)||[],
+    carcassCount:(payload&&payload.carcassCount)||0,
+    _structured:true   // nothing was analyzed here — the banner says so
+  };
+  r._bom=prodComputeBom(r.components);
+  r._services=prodComputeServices(r.components,r.holeSchedule);
+  prodState.file=null;
+  prodState.fileName=fileName||'structured cutting list';
+  prodState.fileType='cutting-list';
+  prodState.analyzing=false;
+  prodState.result=r;
+  prodState.elevationResult=null;
+  prodState.phase='cutting-list';
+  prodState.summary=null;
+  prodState.savedAnalysisId=null;
+  prodState.savedRawFilePath='';
+  return r;
+}
+// Every field the review UI and the strict tool schema expect, defaulted — a structured
+// source may legitimately not carry all of them, and a missing one must not read as 0.
+function _prodNormalizeComponent(c){
+  c=c||{};
+  return {
+    area:String(c.area||'General'),name:String(c.name||''),material:String(c.material||''),
+    color:String(c.color||''),texture:String(c.texture||''),colorB:String(c.colorB||''),
+    textureB:String(c.textureB||''),thickness:+c.thickness||0,length:+c.length||0,
+    width:+c.width||0,qty:+c.qty||1,faces:+c.faces||0,
+    grain:(c.grain==='length'||c.grain==='width')?c.grain:'none',
+    ebt:String(c.ebt||''),grooving:String(c.grooving||''),
+    needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||'')
+  };
+}
+
 // ── Elevation Phase 1: analyze elevation drawing ─────────────────────────
 function prodBuildElevationPrompt(){
   return 'You are a furniture manufacturing specialist. Analyze this elevation drawing.\n\n'
@@ -24691,7 +24976,9 @@ function prodBuildResultHtml(result){
     ? '<div class="alert alert-warn" style="margin-bottom:14px"><i class="ti ti-alert-triangle"></i><div><b>The AI described this file but didn\'t extract any components into the table.</b><br>'
       +'Its summary: "'+escHtml(result.summary)+'"<br>'
       +'This is a known failure mode on large/complex files — the model can write a good description without doing the tedious full row-by-row extraction. Try <b>New analysis</b> again (sometimes a retry succeeds), or if the file has multiple sections/furniture groups, split it and analyze each one separately.</div></div>'
-    : '<div class="alert alert-success" style="margin-bottom:14px"><i class="ti ti-circle-check"></i><b>Analysis complete!</b>'+(result.summary?' '+escHtml(result.summary):'')+'</div>';
+    : '<div class="alert alert-success" style="margin-bottom:14px"><i class="ti ti-circle-check"></i><b>'
+      +(result._structured?'Cutting list loaded.':'Analysis complete!')+'</b>'
+      +(result.summary?' '+escHtml(result.summary):'')+'</div>';
   return topBanner
     +actHtml+'<div id="prod-summary-wrap">'+prodBuildSummaryHtml()+'</div>'
     +bomHtml+hwHtml+svcHtml+kpiHtml+compHtml+holeHtml; // order per user request: Bill of Materials -> Hardware -> Services -> totals -> Cutting List (last, most detailed) -> Hole schedule
