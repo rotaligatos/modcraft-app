@@ -1461,17 +1461,20 @@ tr.cl-row:hover td{background:#f4f7fb}
         <p style="color:var(--text2);font-size:13px;margin-top:2px">Wufoo form submissions — track response time from received to sent</p>
       </div>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <select id="orders-filter" onchange="renderOrders()" style="height:32px;font-size:12px;border-radius:6px;border:.5px solid var(--border);padding:0 8px;background:#fff">
-          <option value="active">Pending &amp; In Progress</option>
-          <option value="done">Done</option>
-          <option value="all">All orders</option>
-        </select>
+        <input type="hidden" id="orders-filter" value="new">
+        <span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)">Sort
+          <select id="orders-sort" onchange="renderOrders()" style="height:32px;font-size:12px;border-radius:6px;border:.5px solid var(--border);padding:0 8px;background:#fff">
+            <option value="new">Newest first</option>
+            <option value="old">Oldest first</option>
+          </select>
+        </span>
         <button class="btn" onclick="gLoadPendingOrders(function(){renderOrders();})"><i class="ti ti-refresh"></i> Refresh</button>
         <button class="btn btn-primary" onclick="navigate('settings');setTimeout(function(){setStTab('orders-sla')},150)" style="font-size:12px"><i class="ti ti-settings"></i> SLA Settings</button>
       </div>
     </div>
   </div>
-  <div id="orders-wrap"></div>
+  <div id="orders-tabs" style="display:flex;gap:2px;border-bottom:1px solid var(--border);margin:14px 0 4px;flex-wrap:wrap"></div>
+      <div id="orders-wrap"></div>
 </div>
 
 
@@ -6427,6 +6430,8 @@ function doCloseProject(){
   _confirm('Mark this project as Closed?\n\nThis means the project is complete. No further edits or new options can be created.\n\nThis cannot be undone without manager unlock.',function(){
   qClosedAt=new Date().toISOString();
   logActivity('Project closed.');
+  // the order that started this quotation is finished with — take it out of the queue
+  try{ _archiveOrdersForQuotation(qSerial,'project closed'); }catch(e){}
   var statusEl=el('q-status');
   if(statusEl){statusEl.textContent='Closed';statusEl.className='pill pill-teal';}
   var cpb=el('close-project-btn'); if(cpb) cpb.style.display='none';
@@ -10129,6 +10134,7 @@ function supaMigrateOrders(){
 }
 
 function _updateOrdersBadge(){
+  // live work only — Completed/Cancelled/Archived are not waiting on anyone
   var cnt=pendingOrders.filter(function(o){return o.status==='Pending'||o.status==='In Progress';}).length;
   var b=el('orders-badge');
   if(b){b.textContent=cnt;b.style.display=cnt>0?'inline':'none';}
@@ -10187,13 +10193,52 @@ function _orderSlaClass(mins, slaHours){
   return 'color:#16a34a'; // OK
 }
 
+// Sub-tabs across the top of the Orders page. Counts are live so you can see what
+// is waiting without switching tabs.
+var ORDER_TABS=[
+  {key:'new',      label:'New',       match:function(o){return o.status==='Pending';}},
+  {key:'active',   label:'On going',  match:function(o){return o.status==='In Progress';}},
+  {key:'done',     label:'Completed', match:function(o){return o.status==='Done';}},
+  {key:'cancelled',label:'Cancelled', match:function(o){return o.status==='Cancelled';}},
+  {key:'archived', label:'Archived',  match:function(o){return o.status==='Archived';}},
+  {key:'all',      label:'All',       match:function(){return true;}}
+];
+function ordersTabMatch(key){
+  for(var i=0;i<ORDER_TABS.length;i++) if(ORDER_TABS[i].key===key) return ORDER_TABS[i].match;
+  return ORDER_TABS[0].match;
+}
+function setOrdersTab(key){
+  var f=el('orders-filter'); if(f) f.value=key;
+  renderOrders();
+}
+function renderOrdersTabs(){
+  var bar=el('orders-tabs'); if(!bar) return;
+  var cur=(el('orders-filter')||{}).value||'active';
+  var h='';
+  for(var i=0;i<ORDER_TABS.length;i++){
+    var t=ORDER_TABS[i];
+    var n=pendingOrders.filter(t.match).length;
+    var on=(t.key===cur);
+    h+='<button onclick="setOrdersTab(\''+t.key+'\')" style="border:none;background:none;cursor:pointer;'
+      +'padding:8px 14px;font-size:13px;font-weight:'+(on?'600':'500')+';'
+      +'color:'+(on?'var(--navy)':'var(--text2)')+';'
+      +'border-bottom:2px solid '+(on?'var(--navy)':'transparent')+';margin-bottom:-1px">'
+      +t.label+(n?' <span style="font-size:11px;color:var(--text2);font-weight:500">'+n+'</span>':'')
+      +'</button>';
+  }
+  bar.innerHTML=h;
+}
 function renderOrders(){
+  renderOrdersTabs();
   var wrap=el('orders-wrap'); if(!wrap) return;
-  var filter=(el('orders-filter')||{}).value||'active';
-  var list=pendingOrders.filter(function(o){
-    if(filter==='active') return o.status==='Pending'||o.status==='In Progress';
-    if(filter==='done') return o.status==='Done';
-    return true;
+  var filter=(el('orders-filter')||{}).value||'new';
+  var list=pendingOrders.filter(ordersTabMatch(filter));
+  // Received-at drives the order. Oldest-first is the one to use when working the
+  // queue down — it is the order closest to breaching its SLA.
+  var _sortDir=(el('orders-sort')||{}).value||'new';
+  list.sort(function(a,b){
+    var ta=Date.parse(a.receivedAt||'')||0, tb=Date.parse(b.receivedAt||'')||0;
+    return _sortDir==='old' ? ta-tb : tb-ta;
   });
   if(!ordersLoaded){
     wrap.innerHTML='<div class="alert alert-info"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Loading orders…</div>';
@@ -10207,16 +10252,19 @@ function renderOrders(){
   var h='<div style="display:flex;flex-direction:column;gap:10px">';
   for(var i=0;i<list.length;i++){
     var o=list[i];
-    var elapsed=o.status==='Done'?calcWorkingMinutes(o.receivedAt,o.sentAt,o.sourceCompany||currentUserCompany):calcWorkingMinutes(o.receivedAt,now,o.sourceCompany||currentUserCompany);
+    // A finished order's clock stops — leaving it running made every closed order
+    // read as massively overdue, which is why the whole queue showed red.
+    var _finished=(o.status==='Done'||o.status==='Cancelled'||o.status==='Archived');
+    var _noClock=_finished&&!o.sentAt;
+    var elapsed=_finished?calcWorkingMinutes(o.receivedAt,o.sentAt||o.receivedAt,o.sourceCompany||currentUserCompany):calcWorkingMinutes(o.receivedAt,now,o.sourceCompany||currentUserCompany);
     var slaHours=ordersSlaSettings.defaultHours;
     var slaMins=slaHours*60;
     var pct=elapsed!==null?Math.min(100,Math.round(elapsed/slaMins*100)):0;
     var barColor=elapsed===null?'#94a3b8':elapsed>=slaMins?'#dc2626':elapsed>=slaMins*0.75?'#f59e0b':'#16a34a';
-    var statusBadge=o.status==='Done'
-      ?'<span class="pill" style="background:#d1fae5;color:#065f46">Done</span>'
-      :o.status==='In Progress'
-      ?'<span class="pill" style="background:#dbeafe;color:#1e40af">In Progress</span>'
-      :'<span class="pill" style="background:#fef3c7;color:#92400e">Pending</span>';
+    var _sb={'Done':['#d1fae5','#065f46','Completed'],'In Progress':['#dbeafe','#1e40af','In Progress'],
+             'Cancelled':['#fee2e2','#991b1b','Cancelled'],'Archived':['#e5e7eb','#4b5563','Archived'],
+             'Pending':['#fef3c7','#92400e','New']}[o.status]||['#fef3c7','#92400e','New'];
+    var statusBadge='<span class="pill" style="background:'+_sb[0]+';color:'+_sb[1]+'">'+_sb[2]+'</span>';
     var reqBadge=o.reqType==='Revision'
       ?'<span class="pill" style="background:#fce7f3;color:#9d174d;font-size:10px">Revision</span>'
       :'<span class="pill" style="background:#e0f2fe;color:#075985;font-size:10px">New</span>';
@@ -10240,12 +10288,12 @@ function renderOrders(){
       // Timer
       +'<div style="text-align:right">'
       +'<div style="font-size:11px;color:var(--text2)">'+(o.status==='Done'?'Response time':'Elapsed')+'</div>'
-      +'<div style="font-size:16px;font-weight:700;'+_orderSlaClass(elapsed,slaHours)+'">'+fmtWorkMins(elapsed)+'</div>'
+      +'<div style="font-size:16px;font-weight:700;'+(_noClock?'color:var(--text2)':_orderSlaClass(elapsed,slaHours))+'">'+(_noClock?'—':fmtWorkMins(elapsed))+'</div>'
       +'<div style="font-size:10px;color:var(--text2)">SLA: '+slaHours+'h working</div>'
       +'</div>'
       +'</div>'
       // Progress bar
-      +(o.status!=='Done'?'<div style="height:4px;background:#e5e7eb;border-radius:4px;margin:8px 0"><div style="width:'+pct+'%;height:100%;background:'+barColor+';border-radius:4px;transition:width .3s"></div></div>':'<div style="height:4px;margin:8px 0"></div>')
+      +(!_finished?'<div style="height:4px;background:#e5e7eb;border-radius:4px;margin:8px 0"><div style="width:'+pct+'%;height:100%;background:'+barColor+';border-radius:4px;transition:width .3s"></div></div>':'<div style="height:4px;margin:8px 0"></div>')
       // Row 2: client info
       +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:6px 14px;font-size:12px;margin-bottom:10px">'
       +'<div><span style="color:var(--text2)">Client: </span><b>'+escHtml(o.clientName)+'</b></div>'
@@ -10264,8 +10312,11 @@ function renderOrders(){
       +'<div style="display:flex;gap:4px;flex-wrap:wrap">'+attachHtml+'</div>'
       +'<div style="display:flex;gap:6px">'
       +'<button class="btn" onclick="viewOrderDetail(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-eye"></i> View</button>'
-      +(o.status!=='Done'?'<button class="btn btn-primary" onclick="exportOrderToQuotation(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-file-plus"></i> Export to Quotation</button>':'')
+      +(!_finished?'<button class="btn btn-primary" onclick="exportOrderToQuotation(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-file-plus"></i> Export to Quotation</button>':'')
       +(o.status==='In Progress'&&o.quotSerial?'<button class="btn" onclick="markOrderDoneManual(\''+escHtml(o.id)+'\')" style="font-size:12px;color:var(--teal);border-color:var(--teal)"><i class="ti ti-check"></i> Mark Done</button>':'')
+      +(!_finished?'<button class="btn" onclick="cancelOrder(\''+escHtml(o.id)+'\')" style="font-size:12px;color:var(--coral);border-color:var(--coral)"><i class="ti ti-ban"></i> Cancel</button>':'')
+      +((o.status==='Cancelled'||o.status==='Archived')?'<button class="btn" onclick="reopenOrder(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-rotate"></i> Reopen</button>':'')
+      +(currentRole==='Admin'?'<button class="btn" onclick="deleteOrder(\''+escHtml(o.id)+'\')" style="font-size:12px;color:var(--coral);border-color:var(--coral)" title="Remove this order permanently"><i class="ti ti-trash"></i></button>':'')
       +'</div>'
       +'</div>'
       +'</div></div>';
@@ -10517,6 +10568,56 @@ function viewOrderAttachment(url){
   });
 }
 
+// Cancel an order that will not be quoted. Kept, not deleted — the record of a
+// request that came in and went nowhere is worth having.
+function cancelOrder(orderId){
+  var o=null;
+  for(var i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId) o=pendingOrders[i];
+  if(!o) return;
+  if(!confirm('Cancel order #'+orderId+(o.clientName?' ('+o.clientName+')':'')+'?\n\nIt moves to the Cancelled tab and stops the response clock. You can reopen it later.')) return;
+  _setOrderStatus(orderId,'Cancelled',o.quotSerial||'');
+  logActivity('Order #'+orderId+' cancelled');
+  renderOrders();
+  showToast('Order #'+orderId+' cancelled');
+}
+function reopenOrder(orderId){
+  var o=null;
+  for(var i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId) o=pendingOrders[i];
+  if(!o) return;
+  _setOrderStatus(orderId, o.quotSerial?'In Progress':'Pending', o.quotSerial||'');
+  logActivity('Order #'+orderId+' reopened');
+  renderOrders();
+  showToast('Order #'+orderId+' reopened');
+}
+// Archive is the resting place for finished work — set automatically when the
+// linked quotation closes or is cancelled, so the queue only shows live orders.
+function archiveOrder(orderId,why){
+  _setOrderStatus(orderId,'Archived','');
+  logActivity('Order #'+orderId+' archived'+(why?' — '+why:''));
+}
+// Called when a quotation is closed or cancelled: the order behind it is done with.
+function _archiveOrdersForQuotation(serial,why){
+  if(!serial) return;
+  for(var i=0;i<pendingOrders.length;i++){
+    var o=pendingOrders[i];
+    if(o.quotSerial===serial&&o.status!=='Archived') archiveOrder(o.id,why||('quotation '+serial+' closed'));
+  }
+}
+// Admin only, and permanent — for development noise and true mistakes.
+function deleteOrder(orderId){
+  if(currentRole!=='Admin'){showToast('Only an Admin can delete an order');return;}
+  var o=null,idx=-1;
+  for(var i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId){o=pendingOrders[i];idx=i;}
+  if(!o) return;
+  if(!confirm('Permanently delete order #'+orderId+(o.clientName?' ('+o.clientName+')':'')+'?\n\nThis cannot be undone. To keep the record but take it out of the queue, use Cancel instead.')) return;
+  pendingOrders.splice(idx,1);
+  _updateOrdersBadge();
+  renderOrders();
+  if(gToken) sheetsDeleteRowByKey('Pending Orders',orderId,function(){});
+  try{ supaDeleteOrder(orderId); }catch(e){}
+  logActivity('Order #'+orderId+' deleted');
+  showToast('Order #'+orderId+' deleted');
+}
 function _setOrderStatus(orderId, status, quotSerial){
   for(var i=0;i<pendingOrders.length;i++){
     if(pendingOrders[i].id===orderId){
@@ -14250,6 +14351,7 @@ function confirmCancelQuotation(){
   qCancelled=true;
   qCancelledAt=new Date().toISOString();
   qCancelReason=reason;
+  try{ _archiveOrdersForQuotation(qSerial,'quotation cancelled'); }catch(e){}
   logActivity('Quotation cancelled — client declined to proceed ('+(_cancelCtx==='fq'?'Final Quotation':'Initial Quotation')+' stage). Reason: '+reason);
   updateLockUI();
   if(typeof updateFQLockUI==='function') updateFQLockUI();
@@ -17057,6 +17159,14 @@ function supaUpdateOrderStatus(orderId,status,quotSerial,sentAt){
       if(r.error) console.warn('[supa] order status update error:',r.error.message||r.error);
     });
   }catch(e){ console.warn('[supa] order status update threw',e); return Promise.resolve(); }
+}
+function supaDeleteOrder(orderId){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!orderId) return Promise.resolve();
+  try{
+    return supa.from('pending_orders').delete().eq('id',String(orderId)).then(function(r){
+      if(r.error) console.warn('[supa] order delete error:',r.error.message||r.error);
+    });
+  }catch(e){ console.warn('[supa] order delete threw',e); return Promise.resolve(); }
 }
 // — messages insert / mark-read (dual-write) —
 function supaInsertMessage(m){
