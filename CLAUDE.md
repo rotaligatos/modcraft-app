@@ -960,7 +960,7 @@ Refine the 4 new types per plant feedback, then either continue wide (corner, ov
 
 ### Attachment via Google Drive (COMPLETED)
 12. **GAS `_uploadAttachment()` function** — downloads attachment from Wufoo at webhook time, uploads to Team Drive folder (`1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB`), stores Drive URL instead of Wufoo-protected URL; falls back to original URL on failure
-13. **Wufoo API key obtained** — `FCNJ-5BIO-MQJW-HKKK`; placed in GAS script; `doGet` run manually once for Drive OAuth approval
+13. **Wufoo API key obtained** — ``<in the Apps Script project — NOT recorded here, see Security below>``; placed in GAS script; `doGet` run manually once for Drive OAuth approval
 14. **Auth fix** — original `_uploadAttachment` sent `Authorization: Basic` header; Wufoo cabinet URLs are **pre-signed Amazon S3 URLs** (auth already embedded in query string); adding a second auth mechanism caused AWS 400 `InvalidArgument` error; fixed by removing the header — fetch the URL directly with no auth header
 15. **Verified working** — `testAttachment()` returns a `drive.google.com` URL; new Wufoo submissions store Drive links instead of Wufoo cabinet URLs
 
@@ -1755,7 +1755,7 @@ A single quotation (Fabrication-only + Assembly, Site Visit enabled, Cutting lis
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
 - **`SERVICES.price` deferred** — price field kept in Services tab for now; it is actively used by `getAreaSubtotal()` for services-mode cost calculation; editable in Cost Breakdown card header; full redesign deferred to Phase 3
 - **Semantic duplicates in Price DB** — "Clean duplicates" button only catches exact-name matches; user must manually standardize semantically similar service names using the amber similarity highlight in Settings → Services tab
-- **Wufoo attachment via Drive (DONE ✓)** — API key `FCNJ-5BIO-MQJW-HKKK` deployed; Drive OAuth approved; new submissions automatically upload to Team Drive; fetch URL directly (no auth header — S3 pre-signed URL)
+- **Wufoo attachment via Drive (DONE ✓)** — API key ``<in the Apps Script project — NOT recorded here, see Security below>`` deployed; Drive OAuth approved; new submissions automatically upload to Team Drive; fetch URL directly (no auth header — S3 pre-signed URL)
 - **Phase 2 Cost Breakdown — output/shift not yet set** — most services still have `outputPerShift=0`; until this is filled in Settings → Services, monthly capacity = 0 and Op Cost / Gross Margin show `—` in Cost Breakdown
 - **Phase 3 onward** — capacity wired to schedule load checks (Phase 3), PPIC page (Phase 4), profitability reports (Phase 5) all pending
 
@@ -2127,17 +2127,23 @@ Supabase. **Not** all of June — 48 of the 58 June orders have real client data
 created 2026-07-27 for a real client — a stale one-way link, safe to drop.
 **The 10 are still in the Sheets tab** — see Open items.
 
-### Gap 1 is NOT fully closed — two stores, neither complete
-This is the most important thing for the next session:
+### Gap 1 — ~~two stores, neither complete~~ CORRECTED 2026-07-29
+**This section was wrong.** The Wufoo webhook already dual-writes to Supabase — the local
+`_gas_wufoo_webhook_updated.gs` has a `_supaInsertOrder()` posting to the
+`insert_pending_order` RPC, and it is deployed. Verified rather than assumed: **75** of 135
+`pending_orders` rows carry a `raw` jsonb holding the Wufoo POST (`Field2`, `EntryId`),
+which only the Apps Script produces — `supaMigrateOrders()` reads the Sheet and never writes
+that column. Newest bridged order 2026-07-28.
 
-- **Wufoo orders → Sheets only.** The GAS webhook writes to the sheet. They reach Supabase only
-  when someone manually runs `supaMigrateOrders()`. Last backfill covers up to 2026-07-28.
-- **Website orders → Supabase only.** Route B writes directly; nothing writes them to Sheets.
+So the stores are:
+- **Wufoo → Sheet AND Supabase** (webhook dual-writes).
+- **Website → Supabase only.**
 
-So each store is missing half the queue. `gLoadPendingOrders` is Supabase-first with a Sheets
-fallback, which means **a user whose session has not connected to Supabase sees no website
-orders at all**. Options: teach the GAS webhook to also POST to Supabase (one store, cleanest),
-or have the app write website orders back to Sheets. Undecided.
+**Supabase is therefore the complete queue; the Sheet holds Wufoo's half.** The problem was never
+the bridge — it is the *fallback*. `gLoadPendingOrders` is Supabase-first, so a session that has
+not connected drops to the Sheet and silently sees a short queue that looks complete. Fixed
+2026-07-29: the Orders page now says so, on the empty branch too. The lasting fix is that everyone
+stays connected (auto-connect, 2026-07-05) — not a second copy of the data.
 
 Related: the live Pending Orders sheet header is still 27 columns. `ensurePendingOrdersTab` only
 writes the header when the tab is missing — unlike Quotations, there is no header self-heal.
@@ -2153,7 +2159,7 @@ Reading `A:AI` on a 27-column sheet is harmless (undefined becomes ''), but the 
 - **Site visit flow undecided** — it lands and is off-SLA, but what it does next (become a site
   visit charge on a quotation? schedule?) is open. `qSiteVisit` has no date or coordinates.
 
-### Gap 2 / Gap 3 — the agreed next build
+### Gap 2 / Gap 3 — BUILT 2026-07-29 (commit `4154cc8`) — spec kept below for reference
 `exportOrderToQuotation` copies **client fields only**. For a cutting-list order it must also
 hand the line items to Designers Support as **components** (not quotation line items, or the
 geometry is lost). That runs into Gap 3: Designers Support has **no non-AI entry point** —
@@ -2202,3 +2208,73 @@ Everything downstream is reusable unchanged:
 `index.html` is **CRLF**. Any patch script matching or inserting multi-line strings must use
 `\r\n`, or matches silently find nothing. Helper used this session:
 `const crlf = s => s.split('\n').join('\r\n')` applied to both the pattern and the replacement.
+
+## What was changed on 2026-07-29 (session — website cutting list → Designers Support)
+
+### Decision taken: Wufoo is NOT being retired yet
+Rommel: *"it really depends on the acceptance of the website as new order form of clients."*
+So the bridge stays — which is the option that holds either way, because retiring Wufoo later
+costs nothing more than switching the webhook off.
+
+### The Wufoo bridge was already built — see the corrected Gap 1 section above
+75 of 135 `pending_orders` rows were written by the Apps Script, not by a backfill. Both
+handoff docs claimed nothing bridged the stores; neither was checked against the database.
+**Method worth reusing:** `raw` is written only by the webhook, never by `supaMigrateOrders()`,
+so it discriminates *how* a row arrived. When a doc claims a pipeline is missing, find a column
+only that pipeline writes and count it.
+
+### Gap 3 — `prodLoadStructuredList()`: a non-AI entry point (commit `4154cc8`)
+`prodSendPdf`/`prodSendText` both call Claude, because a drawing has to be READ before it can
+be structured. A list the client typed is already exact, so it must not pay for an extraction
+pass that can only introduce error. The new entry point sets `prodState.result` directly and
+computes `_bom`/`_services` itself. Everything downstream is untouched —
+`prodComputeBom` → nesting → `prodBuildSummary` → Reflect to quotation neither know nor care
+where the components came from. `_prodNormalizeComponent()` defaults every field the strict
+tool schema and the review UI expect. The green banner reads **"Cutting list loaded."** rather
+than "Analysis complete!" (`result._structured`), because nothing was analysed.
+
+### Gap 2 — `_cutListToAnalysis()`: the translation (same commit)
+`exportOrderToQuotation` now stages a cutting-list order into Designers Support as
+**components**; the order card also gets its own **Cutting list** button
+(`openOrderCuttingList`). Components, not quotation lines — length, width, grain and edge codes
+are what the nesting and edge-banding maths run on, and a quotation line has nowhere to keep them.
+
+**Edge codes — the fix is not a lookup table.** The site codes LONG/SHORT so a code follows the
+piece; `EBT_CODE_MAP` is keyed on the length/width *fields*. Those agree only while
+length ≥ width, so `_webEbtToModcraft(code,L,W)` converts through the piece's real dimensions
+and emits whichever ModCraft code yields the same banded metres. Verified: all 9 site codes give
+identical LM whichever way round a piece is entered. The old path scored `1L 1S` at 0.80 m where
+1.20 m was banded — silent, because the T/B/L/R fallback matched the `L` and ignored the rest.
+
+**HPL — send the parts, not the label.** A panel whose material is a composite build resolves
+back through the order's own `hpl[]` rows to substrate + finish + face count. The `hpl[]` rows
+are deliberately **not** emitted as components: this app derives the sheet and the
+substrate-correct lamination service from the *panel* area, so emitting both would count the
+boards twice — and the site's 2F area is already doubled, which together bills **four faces**.
+Confirmed by test: the HPL door carries 0.560 m² single-side, not 1.120.
+
+**Flags, never guesses** — matching the AI path's philosophy:
+| Input | Why it cannot be derived | What happens |
+|---|---|---|
+| Boring | priced per hole; `prodComputeServices` drops a service at qty 0 | flagged per component — it would otherwise vanish without trace |
+| Grooving | one word on the form, three catalogue prices | lands in `grooving`, flagged to pick which |
+| Client-typed material | not a catalogue pick | flagged, not fuzzy-matched |
+| 1F/2F | the form never asks | stated **once** in the summary, not on every row |
+
+Material family is only taken from words actually present in the label — never inferred from an
+SKU prefix. An unrecognised label falls through to the catalog matcher as free text, exactly as an
+AI-extracted name would.
+
+### Also
+- `order_cutting_lists` totals now load with the queue (`supaGetOrderCutListTotals`), so the
+  card's long-dead *"attached but not loaded yet"* branch finally resolves.
+- Orders page states plainly when it is running off the Sheets fallback (commit `2376b01`).
+
+### ⚠ SECURITY — the Wufoo API key is published
+`rotaligatos/modcraft-app` is a **public** repo and `CLAUDE.md` is tracked, so the Wufoo API
+key sat on `raw.githubusercontent.com` in plain text. It reads form entries — every order
+submission, with client names, emails and phone numbers. Redacted from this file 2026-07-29, but
+**git history still holds it, so redaction is not the fix: rotate the key in Wufoo
+(Account → API Information), then update `WUFOO_API_KEY` in the Apps Script project.** The
+Supabase publishable key alongside it is fine — that one is designed to be public.
+Rule going forward: **no live secret in a tracked file.** Keys live in the Apps Script project.
