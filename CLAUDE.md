@@ -2071,3 +2071,134 @@ scope-dispute risk. Now **architectural joinery**.
 - Mock `window.gApiFetch`, `window.sheetsGet/Append/Update`, `window.gToken` for unit tests
 - Always verify no console errors after changes
 - Always commit + push after verified changes
+
+## What was changed on 2026-07-28/29 (session — MSSI website → ModCraft order pipeline)
+
+Two apps this session: **ModCraft `index.html`** and the **separate MSSI Webpage folder**
+(now a git repo — see its own `HANDOFF.md`).
+
+### Quotation: Project name (commit `d1019a2`)
+New `cl-project` field in client information, below Project location / Pickup-Delivery, full
+width. Persists in `getFullQuotationState().client.project`, restores, clears on new quotation,
+and prints as the first row of the client details table.
+
+Also surfaced in the directory, which reads the **Quotations sheet** not the state JSON — so it
+had to become a real column: **T · Project Name**, ranges `A:S → A:T` (7 places). The existing
+header self-heal widens live sheets automatically. Directory column sits between Client and
+Service, on by default, toggleable; search matches project name alongside client/serial/service.
+Supabase: `project_name` column + partial index, wired into the dual-write and `supaMigrateAll`.
+
+### Orders: sub-tabs, statuses, delete (commit `ff2532d`)
+The queue was one flat dropdown-filtered list, 144 deep, **every card red** — because a finished
+order's response clock never stopped, so a job closed in 3h eventually read as 300h overdue.
+
+- Sub-tabs with live counts: **New** (Pending) · **On going** (In Progress) · **Completed** ·
+  **Cancelled** · **Archived** · **All**. New is split from On going so fresh arrivals cannot be
+  buried; it is the default tab.
+- Sort by received date, newest/oldest. Oldest-first is the working order — closest to breaching.
+- `Cancelled` (manual, keeps the record) and `Archived` (automatic when the linked quotation is
+  closed or cancelled, via `_archiveOrdersForQuotation` hooked into `doCloseProject` and
+  `confirmCancelQuotation`). Both stop the clock. Both reopenable.
+- Finished order with no sent time shows an em dash, not a misleading `0m`.
+- **Delete is Admin-only, enforced twice**: the button only renders for an Admin, and
+  `deleteOrder` re-checks the role before touching anything. Removes from Sheets **and** Supabase
+  (`supaDeleteOrder`, added — it did not exist). Confirm text steers toward Cancel instead.
+
+### Orders: website fields + form kind (commit `548a6e7`)
+8 columns appended **AB..AI** — Order Kind, Address, Project Name, Delivery, Segment, Lead
+Source, Target Date, Notes. **Appended, never inserted**: `_setOrderStatus` writes Status /
+Quotation Serial / Sent At by column letter (X:Z). Range `A:AA → A:AI` in all three places.
+
+`Request Type` already means New vs Revision (Wufoo), so form kind needed its own column.
+`ORDER_KINDS`: Wufoo (default, existing rows unaffected) · Cutting List · Service Request ·
+Site Visit. **Site Visit is exempt from the SLA** — no timer, neutral bar, elapsed shows a dash.
+
+Card renders by kind: Wufoo keeps Board/Floor/service flags; a website order hides them (always
+blank) and shows project/delivery/address/segment/lead source/notes. A cutting-list order is
+summarised by contents — pieces · materials · HPL · hardware · area.
+
+Supabase: same 8 columns + **`order_cutting_lists`** (one row per order; `panels`/`hpl`/
+`hardware` jsonb + totals). Anon may insert; staff read only if they can see the parent order.
+
+### Data
+Deleted 10 development-era June orders (blank client **and** company, 06-08 to 06-09) from
+Supabase. **Not** all of June — 48 of the 58 June orders have real client data. One of the 10
+(#8693) claimed quotation `QT-W00000026`, but that quotation's `source_order` is null and it was
+created 2026-07-27 for a real client — a stale one-way link, safe to drop.
+**The 10 are still in the Sheets tab** — see Open items.
+
+### Gap 1 is NOT fully closed — two stores, neither complete
+This is the most important thing for the next session:
+
+- **Wufoo orders → Sheets only.** The GAS webhook writes to the sheet. They reach Supabase only
+  when someone manually runs `supaMigrateOrders()`. Last backfill covers up to 2026-07-28.
+- **Website orders → Supabase only.** Route B writes directly; nothing writes them to Sheets.
+
+So each store is missing half the queue. `gLoadPendingOrders` is Supabase-first with a Sheets
+fallback, which means **a user whose session has not connected to Supabase sees no website
+orders at all**. Options: teach the GAS webhook to also POST to Supabase (one store, cleanest),
+or have the app write website orders back to Sheets. Undecided.
+
+Related: the live Pending Orders sheet header is still 27 columns. `ensurePendingOrdersTab` only
+writes the header when the tab is missing — unlike Quotations, there is no header self-heal.
+Reading `A:AI` on a 27-column sheet is harmless (undefined becomes ''), but the header is stale.
+
+### Other open items from this session
+- **No spam protection.** `pending_orders` allows anon insert with `check(true)`. Anyone with the
+  publishable key can file unlimited orders. Fine for launch-day, not for long.
+- **The webpage cutting list still uses stand-in SKUs** — not wired to the live ModCraft
+  catalogue. Materials will arrive as sample SKUs that will not resolve.
+- **135 open orders**, none with a quotation serial, all clocks running. Real enquiries handled
+  outside the app. Archiving them would make the queue meaningful again — user has not decided.
+- **Site visit flow undecided** — it lands and is off-SLA, but what it does next (become a site
+  visit charge on a quotation? schedule?) is open. `qSiteVisit` has no date or coordinates.
+
+### Gap 2 / Gap 3 — the agreed next build
+`exportOrderToQuotation` copies **client fields only**. For a cutting-list order it must also
+hand the line items to Designers Support as **components** (not quotation line items, or the
+geometry is lost). That runs into Gap 3: Designers Support has **no non-AI entry point** —
+`prodSendPdf`/`prodSendText` both call Claude. A pre-structured list must populate the components
+array directly with `needsReview:false`.
+
+Everything downstream is reusable unchanged:
+`components → prodComputeBom → nesting → prodBuildSummary → Reflect to quotation`.
+
+**Two conversions are required in that step, both verified as real problems:**
+1. **EBT format.** Same vocabulary, different notation for combinations —
+   webpage `1L 1S` / `2L 1S` / `1L 2S` vs ModCraft `1s/1l` / `1s/2l` / `2s/1l`. Singles match
+   case-insensitively. ModCraft's fallback parser looks for T/B/L/R, so `1L 1S` scores as *one
+   long edge and nothing else* — a **silent under-count of edge banding**, not an error.
+2. **Grain.** `L`/`W` to `length`/`width`, per-row flips resolved against the job default.
+
+### Findings worth keeping (from reading both codebases)
+- **Grain is captured everywhere and used nowhere.** `prodState.woodgrainDir` appears 3 times —
+  default, dropdown, and **inside the AI prompt**. `c.grain` appears twice — a table cell and an
+  Excel column. The packer's rotation comes from a *global* `machineType` (panelsaw = never
+  rotate, cnc = always). So a piece marked grain-along-width packs identically to one along
+  length. Wiring per-piece grain into `allowRotate` is the single biggest yield gain available.
+- **Edge banding has no material line on the Designers Support path.** `prodBuildSummary` pushes
+  materials for the substrate board and the HPL sheet only; edge banding emerges solely as a
+  *service* from `edgebandingLM`. The tape itself is never costed there. (Edge tape *does* exist
+  as a material in the catalogue and in cabinet templates — the gap is this path.)
+- **HPL is inferred, not declared.** `/\bhpl\b/i` on material+notes, then substrate parsed from a
+  phrase, faces guessed, `needsReview` when unclear. The webpage states all three explicitly.
+- **The webpage flattens the HPL composite into a display string** —
+  `HPL_BUILDS["HPL-WHT-MT on MDF-18R · 2F"] = {th:18}` — so ModCraft would have to parse it back
+  out. Send the parts, not the label.
+- **HPL area conventions differ.** Webpage `area = L×W×qty×2` for 2F (both faces counted);
+  ModCraft uses **single-side area** priced with a 2-Face SKU at 2× rate. Feeding one into the
+  other bills **four faces**. Silent — the number just doubles.
+- **A real SKU retires the whole matching subsystem.** `catalogMatchRow`,
+  `_prodFindCatalogMatches`, the field-aware scorer and the jargon-learning loop exist *only*
+  because the AI produces free text. A client-typed SKU is an exact key — on that path all of it
+  can be skipped and the row marked resolved on arrival.
+- **Boring is priced per hole** in ModCraft (₱3–₱20 by type); the webpage records it per piece
+  with no hole count. That number cannot be computed from what the form collects today — a gap in
+  the **form**, not in ModCraft.
+- **Grooving specificity** — the webpage says "Grooving"; ModCraft prices three
+  (₱15 melamine / ₱20 compact laminate / ₱65 router).
+
+### Convention reinforced
+`index.html` is **CRLF**. Any patch script matching or inserting multi-line strings must use
+`\r\n`, or matches silently find nothing. Helper used this session:
+`const crlf = s => s.split('\n').join('\r\n')` applied to both the pattern and the replacement.
