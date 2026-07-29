@@ -9427,6 +9427,18 @@ function submitApprovalRequest(){
     }
   }
 
+  // The approver only ever learned about this from the in-app poll, so a request raised while
+  // they were away sat unseen. Route it through gSendMessage, which writes the in-app message and
+  // then fans out to whatever channels are configured (email, Google Chat).
+  var _reqLabels={nonvat:'Non-VAT treatment',discount:'Discount',override:'Cost factor adjustment',
+                  premium:'Holiday/weekend premium',unlock:'Unlock'};
+  var _who=(gUser&&gUser.name)||currentRole;
+  var _detail=(type==='discount'&&data.discPct)?(' of '+data.discPct+'%'):'';
+  var _reason=(data.reason||note||'');
+  gSendMessage(appr.email,appr.name,
+    _who+' is requesting your approval — '+(_reqLabels[type]||type)+_detail+' on '+serial
+      +' for '+client+(_reason?('. Reason: '+_reason):'')+'.',
+    'normal','approval_request:'+type+':'+serial,function(){});
   var overrideReason=type==='override'?(data.reason||note||''):null;
   var msgMap={
     nonvat:'Non-VAT treatment requested'+(note?' — '+note:'')+'.',
@@ -10211,6 +10223,16 @@ function doApprovalAction(idx, action) {
     }).then(function(){ supaUpsertApprovalRequest(updReq); }).catch(function(e){console.warn('Failed to persist approval action',e);});
   }
 
+  // The requester was only told by their own in-app poll, which needs them to be looking. Same
+  // fan-out as the request itself.
+  if(n.fromEmail&&n.fromEmail.toLowerCase()!==((gUser&&gUser.email)||'').toLowerCase()){
+    var _outLabels={approved:'approved',rejected:'rejected',countered:'answered with a counter-offer'};
+    var _tl={nonvat:'Non-VAT',discount:'Discount',override:'Cost factor',premium:'Holiday premium',unlock:'Unlock'};
+    gSendMessage(n.fromEmail,n.from,
+      'Your '+(_tl[n.type]||n.type)+' request for '+n.serial+' was '+(_outLabels[action]||action)+' by '+byName
+        +(action==='countered'&&counterDisc?(' — '+counterDisc+'%'):'')+'.',
+      action==='approved'?'normal':'normal','approval_result:'+n.type+':'+n.serial,function(){});
+  }
   // If approved → apply the change to the quotation form (if open)
   if(action==='approved'){
     _applyApprovedRequest(n); // immediate in-memory update, only if this happens to be the open quotation
@@ -20819,6 +20841,7 @@ function _collectAppSettings(){
     instCost: JSON.parse(JSON.stringify(INST_COST)),
     ppicSettings: JSON.parse(JSON.stringify(ppicSettings)),
     msgMailerUrl:(el('s-msg-mailer')?el('s-msg-mailer').value.trim():MSG_MAILER_URL)||MSG_MAILER_URL||'',
+    chatWebhookUrl:(el('s-chat-webhook')?el('s-chat-webhook').value.trim():CHAT_WEBHOOK_URL)||CHAT_WEBHOOK_URL||'',
     serialClaimUrl:(el('s-serial-claim')?el('s-serial-claim').value.trim():SERIAL_CLAIM_URL)||SERIAL_CLAIM_URL||'',
     approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING)),
     mtoMaterials: mtoMaterialNames.slice()
@@ -20827,6 +20850,7 @@ function _collectAppSettings(){
 function _applyAppSettings(s){
   if(!s) return;
   if(s.msgMailerUrl!==undefined){ MSG_MAILER_URL=s.msgMailerUrl||''; localStorage.setItem('mc_msg_mailer_url',MSG_MAILER_URL); var _mm=el('s-msg-mailer'); if(_mm) _mm.value=MSG_MAILER_URL; }
+  if(s.chatWebhookUrl!==undefined){ CHAT_WEBHOOK_URL=s.chatWebhookUrl||''; localStorage.setItem('mc_chat_webhook_url',CHAT_WEBHOOK_URL); var _cw=el('s-chat-webhook'); if(_cw) _cw.value=CHAT_WEBHOOK_URL; }
   if(s.serialClaimUrl!==undefined){ SERIAL_CLAIM_URL=s.serialClaimUrl||''; localStorage.setItem('mc_serial_claim_url',SERIAL_CLAIM_URL); var _sc=el('s-serial-claim'); if(_sc) _sc.value=SERIAL_CLAIM_URL; }
   if(s.CF&&typeof s.CF==='object'){ for(var k in s.CF){ if(s.CF.hasOwnProperty(k)) CF[k]=s.CF[k]; } }
   if(Array.isArray(s.MOB_LOCATIONS)){ MOB_LOCATIONS.length=0; for(var i=0;i<s.MOB_LOCATIONS.length;i++) MOB_LOCATIONS.push(s.MOB_LOCATIONS[i]); }
@@ -26751,6 +26775,15 @@ function renderLamiSettings(){
         +'<button class="btn" onclick="_msgTestMailer()" style="font-size:12px;padding:4px 12px;white-space:nowrap"><i class="ti ti-send"></i> Send test</button>'
       +'</div>'
       +'<div style="font-size:11px;color:var(--text2);margin-top:6px">Saved with <b>Save settings</b>. The script must accept a POST with JSON <code>{to,subject,body}</code> and call <code>MailApp.sendEmail</code>. The test sends to your own address ('+escHtml((gUser&&gUser.email)||'your account')+').</div>'
+      +'<div style="font-size:13px;font-weight:600;color:var(--text1);margin:14px 0 6px">Google Chat</div>'
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Posts every message and approval request into a Chat space, so people are nudged on their phone rather than having to be in the app. '
+        +'In Google Chat: open the space → space name → <b>Apps &amp; integrations</b> → <b>Webhooks</b> → <b>Add webhook</b>, then paste the URL here.</div>'
+      +'<div style="display:flex;gap:6px">'
+        +'<input id="s-chat-webhook" type="text" value="'+escHtml(CHAT_WEBHOOK_URL)+'" placeholder="https://chat.googleapis.com/v1/spaces/…" '
+          +'oninput="CHAT_WEBHOOK_URL=this.value.trim();localStorage.setItem(\'mc_chat_webhook_url\',CHAT_WEBHOOK_URL)" style="flex:1;height:30px;font-size:12px">'
+        +'<button class="btn" onclick="_chatTestWebhook()" style="font-size:12px;padding:4px 12px;white-space:nowrap"><i class="ti ti-send"></i> Send test</button>'
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:6px">Delivered <b>through the Apps Script above</b> — a browser cannot post to a Chat webhook directly (CORS). The script must also handle a POST carrying <code>{chatWebhook,chatText}</code>; ask Claude for the snippet if it has not been added yet. Leave blank to use email only.</div>'
     +'</div>';
   }
 
@@ -27633,6 +27666,7 @@ var messagesData=[];      // messages involving the current user (sent or receiv
 var _msgSeen={};          // {id:true} — message IDs already announced this session
 var _msgTabReady=false;
 var _msgAudioCtx=null;
+var CHAT_WEBHOOK_URL = localStorage.getItem('mc_chat_webhook_url')||'';   // Google Chat space webhook
 var MSG_MAILER_URL=localStorage.getItem('mc_msg_mailer_url')||'';    // optional GAS web-app endpoint for automated email fallback
 var SERIAL_CLAIM_URL=localStorage.getItem('mc_serial_claim_url')||''; // optional GAS web-app endpoint for atomic (race-free) serial claiming
 
@@ -27702,6 +27736,7 @@ function gSendMessage(toEmail,toName,text,priority,ctx,cb){
       supaInsertMessage(messagesData[0]);
       _msgSeen[id]=true; // never toast our own outgoing message
       _sendMessageEmail(toEmail,fromName,text,priority);
+      _sendMessageChat(toName,fromName,text,priority);
       try{logActivity('Message sent to '+(toName||toEmail)+(priority==='urgent'?' (URGENT)':''));}catch(e){}
       if(cb)cb(true);
     }).catch(function(e){ if(cb)cb(false,e); });
@@ -27771,6 +27806,25 @@ function _lamiRecipientList(){
     .map(function(u){return u.name||u.email;}).slice(0,40).join(', ')||'(no other users found)';
 }
 // Email fallback: automated via GAS endpoint if configured, else Gmail compose for urgent.
+// Google Chat delivery.
+// A browser cannot POST to a Chat webhook directly: the API wants application/json, which
+// triggers a CORS preflight that chat.googleapis.com does not answer, and dropping to a
+// no-cors text/plain request is not something Chat reliably accepts. So it goes through the
+// Apps Script that already sends the mail — server-side, no CORS, and one place to configure.
+// Fire-and-forget for the same reason the mailer is: no-cors means the response is unreadable,
+// so a failure here is silent by construction. The in-app message is always written first and
+// remains the record; this is only the nudge.
+function _sendMessageChat(toName,fromName,text,priority){
+  if(!CHAT_WEBHOOK_URL||!MSG_MAILER_URL) return;
+  var urgent=(priority==='urgent');
+  var msg=(urgent?'🔴 *URGENT* ':'💬 ')+'*'+fromName+'* → *'+(toName||'you')+'*\n'+text
+    +'\n_Modcraft — open the app to reply._';
+  try{
+    fetch(MSG_MAILER_URL,{method:'POST',mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({chatWebhook:CHAT_WEBHOOK_URL,chatText:msg})});
+  }catch(e){}
+}
 function _sendMessageEmail(toEmail,fromName,text,priority){
   if(!toEmail) return;
   var urgent=priority==='urgent';
@@ -27783,6 +27837,20 @@ function _sendMessageEmail(toEmail,fromName,text,priority){
     var url='https://mail.google.com/mail/?view=cm&fs=1&to='+encodeURIComponent(toEmail)+'&su='+encodeURIComponent(subject)+'&body='+encodeURIComponent(body);
     window.open(url,'_blank');
   }
+}
+// Fires a test line into the Chat space. no-cors means the response cannot be read, so this
+// confirms the request left the browser — not that Chat accepted it. If nothing lands in the
+// space, the Apps Script is the place to look.
+function _chatTestWebhook(){
+  var inp=el('s-chat-webhook');
+  var url=(inp?inp.value.trim():'')||CHAT_WEBHOOK_URL;
+  if(!url){ showToast('Paste the Chat webhook URL first.'); return; }
+  if(url.indexOf('chat.googleapis.com')<0){ showToast('That does not look like a Google Chat webhook URL.'); return; }
+  if(!MSG_MAILER_URL){ showToast('Set the Apps Script URL above first — Chat messages are relayed through it.'); return; }
+  CHAT_WEBHOOK_URL=url;
+  localStorage.setItem('mc_chat_webhook_url',CHAT_WEBHOOK_URL);
+  _sendMessageChat('the team',(gUser&&gUser.name)||'Modcraft','Test message from Modcraft settings.','normal');
+  showToast('Test sent — check the Chat space. Nothing there means the Apps Script needs the chat relay.');
 }
 // Send a test email through the configured mailer to the current user.
 function _msgTestMailer(){
