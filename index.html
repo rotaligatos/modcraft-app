@@ -8735,6 +8735,12 @@ function _buildCostReportHtml(serial,state,cr){
     +'</div>';
   // A carcass type with no template cannot be costed, so its margin stays counted as cost and
   // this quotation's profit reads low. Say which ones, rather than let it look like thin margin.
+  if(cr.materialMarginCounts===false){
+    h+='<div style="background:#eef2ff;border:.5px solid #b0c0e8;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--text1)">'
+      +'<b>Material margin excluded.</b> This quotation is for World Class Laminate, Inc., which is '
+      +'transferred materials rather than sold them — so the margin inside material and hardware '
+      +'prices is not counted here. Services and installation margin are unaffected.</div>';
+  }
   if(cr.carcassNoTemplate&&cr.carcassNoTemplate.length){
     h+='<div style="background:#fef3e2;border:.5px solid #f59e0b;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#7c4a03">'
       +'<b>Margin not counted for '+cr.carcassNoTemplate.length+' cabinet type'
@@ -22822,12 +22828,38 @@ function _matMarginPct(){
   var v=(src&&src.materialMarginPct!=null)?src.materialMarginPct:CF.materialMarginPct;
   return (v==null?0:v);
 }
+// Whose P&L the margin inside material and hardware prices belongs to, for THIS quotation.
+// Direct client        -> it is a real sale, the margin is ours.
+// Subsidiary = WCLI    -> materials are transferred, not sold, so the margin is not MSSI's.
+// Subsidiary = CWLI    -> a genuine sale between companies; it counts.
+// Matched on keywords rather than the exact string: company names in this data carry real
+// spelling drift ("Module System" vs "Module Systems"), and an exact compare has locked people
+// out before. "Cebu World Laminate" does not contain "world class", so the two never collide.
+function _companyKey(name){
+  var n=(name||'').toLowerCase();
+  if(n.indexOf('cebu')>=0) return 'CWL';
+  if(n.indexOf('world class')>=0) return 'WCL';
+  if(n.indexOf('module')>=0) return 'MSSI';
+  return '';
+}
+function _materialMarginCounts(){
+  var t=(el('cl-type')?el('cl-type').value:'Direct');
+  if(t!=='Subsidiary') return true;
+  return _companyKey(el('cl-company-sel')?el('cl-company-sel').value:'')!=='WCL';
+}
 function _fabMaterialMarginTotal(){
-  if(typeof isDirectClient==='function' && !isDirectClient()) return 0;
+  if(!_materialMarginCounts()) return 0;
   var pct=_matMarginPct();
   if(!(pct>0)) return 0;
   var base=0, a, i;
   if(qFabMode==='services'){
+    // getAreaSubtotal only bills materials and hardware to Direct clients in this mode, so for a
+    // Subsidiary there is no material revenue and therefore no margin to recognise. Counting it
+    // anyway would credit profit on something the client was never charged for.
+    // NOTE: this currently withholds CWLI's material margin too, because CWLI is not billed
+    // materials either. Recognising it means first charging for them — a pricing change, not a
+    // reporting one. Raised with Rommel 2026-07-29; not changed unilaterally.
+    if(typeof isDirectClient==='function' && !isDirectClient()) return 0;
     for(a=0;a<qAreas.length;a++) base+=getAreaMatSubtotal(a)+getAreaHwSubtotal(a);
   } else if(qFabMode==='bom'){
     for(a=0;a<qAreas.length;a++){
@@ -22852,10 +22884,10 @@ function _fabMaterialMarginTotal(){
 //   hardware  -> price x (1 - materialMarginPct)
 // margin = CARCASS_PRICES[type] - that cost.
 //
-// No Direct-client gate here, unlike _fabMaterialMarginTotal: in carcass mode the materials are
-// not billed as their own line that a Subsidiary is spared — they are inside the cabinet price,
-// which every client pays. The 30% is being used to estimate what the cabinet costs us, not to
-// reclassify a separately-billed material line.
+// The same client rule applies here as everywhere else (_materialMarginCounts). Where the
+// material margin is not ours — a WCLI client — the template's materials and hardware are costed
+// at their FULL price, so no material margin is recognised inside the cabinet. The services part
+// of the carcass margin still counts either way: that is our labour, not transferred stock.
 //
 // Returns the skipped types too, so an uncomputable cabinet is reported rather than quietly
 // understating. A template that lists only part of a cabinet would produce a cost that is too
@@ -22868,7 +22900,8 @@ function _carcassTemplateSource(){
 function _fabCarcassMargin(){
   var out={margin:0,skipped:[]};
   if(qFabMode!=='carcass') return out;
-  var pct=_matMarginPct(), costFactor=1-(pct>0?pct:0)/100;
+  var pct=_materialMarginCounts()?_matMarginPct():0;
+  var costFactor=1-(pct>0?pct:0)/100;
   var src=_carcassTemplateSource();
   // index the template once — this runs on every recalc
   var byCab={};
@@ -22938,6 +22971,7 @@ function _buildCostReportSnapshot(){
     fabCarcassMargin:_carcassRep.margin,
     carcassNoTemplate:_carcassRep.skipped,
     materialMarginPct:_matMarginPct(),
+    materialMarginCounts:_materialMarginCounts(),
     mobBase:p.mobBase,mobRegionCost:p.mobRegionCost||0,mobPlanner:p.mobPlanner||0,
     instBase:p.instBase,assmBase:p.assmBase,qaqcBase:p.qaqcBase||0,
     dcCost:p.dcCost,svCost:p.svCost,biTotal:p.biTotal,
