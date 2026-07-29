@@ -2088,6 +2088,11 @@ tr.cl-row:hover td{background:#f4f7fb}
 // ── Pure data (no template literals with nested backticks) ──────────────────
 var CARCASS_PRICES = {"Kitchen Base Cabinet":6495.85,"Sink Cabinet":8121.25,"Kitchen Tall Cabinet":19615.25,"Kitchen Hanging Cabinet":593.82,"Fridge Cabinet":4827.70,"Kitchen Drawer Cabinet":13588.40,"Work Space Table":16639.30,"Wardrobe / Closet":28826.05,"Overhead Cabinet":7614.38,"Luggage Cabinet":6665.70,"Vanity Cabinet":7864.65,"Toilet Partition":8500,"Wall Cladding":2200};
 var CARCASS_NAMES = Object.keys(CARCASS_PRICES);
+// How many components (panels/parts) one unit of each type breaks down into — the POC's
+// parametric engine is what establishes these, so they are entered per type rather than guessed
+// here. Empty means "not established yet": detection then declines rather than inventing a
+// number, and the user enters the project size by hand.
+var CARCASS_COMPONENTS = {};
 var CABINET_TYPES = CARCASS_NAMES;
 var CABINET_BASE_COSTS = CARCASS_PRICES;
 var MOB_OPTS = [["Metro Manila",3500],["Outside Metro Manila (Luzon)",7500],["Visayas",15000],["Mindanao",18000]];
@@ -5715,11 +5720,40 @@ function onFabModeChange(mode) {
 // Shown only in cutting-list (services) mode, where Installation/Assembly need
 // the manual carcass-unit-count override (see getInstallCarcassUnits above).
 // Carcass/BOM mode already has a real cabinet count from item quantities.
-// Detected from the fabrication scope: the same unit count Installation and Assembly already
-// bill against, so it follows whichever mode the quotation is in (carcass item quantities, BOM
-// item quantities, or the cutting list's service quantities) without a second way of counting.
-function _autoProjectSize(){ return getTotU()||0; }
-// What the quotation and the printout should show.
+// Project size counts COMPONENTS, not cabinets. Where it comes from depends on the mode:
+//   carcass / BOM  — the cabinet type is the reference, expanded by its components-per-unit
+//                    (Settings → Carcass pricing), which is what the POC's parametric engine
+//                    establishes. Any type without a count makes the whole total unknowable, so
+//                    detection declines rather than reporting a number that is quietly short.
+//   cutting list   — the Designers Support analysis, which counts real components. That pipeline
+//                    is not reliable yet, so with no analysis attached this falls to manual entry.
+// Returns {n, source, missing[]} so the card can say WHY it cannot detect, instead of showing 0.
+function _projectSizeDetect(){
+  var a,i,n=0,missing=[],seen={};
+  if(qFabMode==='carcass'||qFabMode==='bom'){
+    var rows=[];
+    for(a=0;a<qAreas.length;a++){
+      var list=(qFabMode==='carcass')?(qAreas[a].items||[]):(qAreas[a].bomItems||[]);
+      for(i=0;i<list.length;i++) if(list[i].type&&(list[i].qty||0)>0) rows.push(list[i]);
+    }
+    if(!rows.length) return {n:0,source:'empty',missing:[]};
+    for(i=0;i<rows.length;i++){
+      var per=parseFloat(CARCASS_COMPONENTS[rows[i].type])||0;
+      if(per<=0){ if(!seen[rows[i].type]){seen[rows[i].type]=1;missing.push(rows[i].type);} continue; }
+      n+=per*(rows[i].qty||0);
+    }
+    if(missing.length) return {n:0,source:'missing-type-counts',missing:missing};
+    return {n:n,source:qFabMode==='carcass'?'carcass types':'BOM types',missing:[]};
+  }
+  // Cutting-list mode — the analysis is the only real component count available.
+  var da=qDrawingAnalysis;
+  var cnt=da?((da.result&&da.result.components&&da.result.components.length)||da.componentCount||0):0;
+  if(cnt>0) return {n:cnt,source:'Designers Support analysis',missing:[]};
+  return {n:0,source:'no-analysis',missing:[]};
+}
+function _autoProjectSize(){ return _projectSizeDetect().n||0; }
+// What the quotation and the printout should show. A manual entry always wins — it is the
+// fallback for everything detection cannot reach.
 function projectSizeValue(){ return qProjectSize>0?qProjectSize:_autoProjectSize(); }
 function onProjectSizeChange(){
   var e=el('project-size');
@@ -5728,10 +5762,34 @@ function onProjectSizeChange(){
 }
 function renderProjectSizeNote(){
   var n=el('project-size-note'); if(!n) return;
-  var auto=_autoProjectSize();
-  n.innerHTML=qProjectSize>0
-    ? 'Manual override. Detected from the fabrication scope: <b>'+auto+'</b> — clear the box to use it.'
-    : 'Detected from the fabrication scope: <b>'+auto+'</b>. Type a number to override it.';
+  var d=_projectSizeDetect();
+  var warn='color:var(--coral);font-weight:500';
+  if(qProjectSize>0){
+    n.innerHTML=d.n>0
+      ? 'Manual override. Detected <b>'+d.n+'</b> components from '+escHtml(d.source)+' — clear the box to use that.'
+      : 'Manual entry. Nothing to detect from automatically.';
+  } else if(d.n>0){
+    n.innerHTML='<b>'+d.n+'</b> components, from '+escHtml(d.source)+'. Type a number to override.';
+  } else if(d.source==='missing-type-counts'){
+    n.innerHTML='<span style="'+warn+'">Cannot count components automatically</span> — no components-per-unit set for: <b>'
+      +escHtml(d.missing.join(', '))+'</b>. Set it in Settings → Carcass pricing, or type the project size here.';
+  } else if(d.source==='no-analysis'){
+    n.innerHTML='<span style="'+warn+'">No Designers Support analysis on this quotation</span>, so components cannot be counted automatically — type the project size here.';
+  } else {
+    n.innerHTML='<span style="'+warn+'">Add fabrication items first</span>, or type the project size here.';
+  }
+  _updateLockGate();
+}
+// Lock needs a project size. Nothing downstream can be trusted without one, and it is far
+// cheaper to ask now than to find a locked quotation with no size on it later.
+function _updateLockGate(){
+  var lb=el('lock-btn'); if(!lb) return;
+  if(qLocked||qCancelled) return;   // updateLockUI owns the button in those states
+  var ok=projectSizeValue()>0;
+  lb.disabled=!ok;
+  lb.style.opacity=ok?'1':'.5';
+  lb.style.cursor=ok?'':'not-allowed';
+  lb.title=ok?'':'Set the project size (no. of components) before locking';
 }
 function _updateCarcassCountCardVisibility(){
   var card=el('carcass-count-card');
@@ -6095,6 +6153,7 @@ function renderItems() {
   }
   wrap.innerHTML=h;
   recalc();
+  if(typeof renderProjectSizeNote==='function') renderProjectSizeNote();
 }
 
 // Debounced recalc — fast path skips sum-lines rebuild; full path deferred 120ms
@@ -11931,6 +11990,12 @@ function renderCarcassSettings() {
       +'<div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;color:var(--text2)">₱</span>'
       +'<input id="carcass-price-'+domId+'" type="number" value="'+CABINET_BASE_COSTS[n]+'" oninput="CABINET_BASE_COSTS[\''+ni+'\']=parseFloat(this.value)||0;CARCASS_PRICES[\''+ni+'\']=parseFloat(this.value)||0;_refreshCarcassSyncLine(\''+ni+'\')" style="width:110px;height:28px;text-align:right;font-size:13px">'
       +'<span style="font-size:11px;color:var(--text2)">/unit</span>'
+      +'<span style="font-size:11px;color:var(--text2);margin-left:10px">components</span>'
+      +'<input id="carcass-comp-'+domId+'" type="number" min="0" step="1" value="'+(CARCASS_COMPONENTS[n]||'')+'" placeholder="—" '
+        +'oninput="CARCASS_COMPONENTS[\''+ni+'\']=parseFloat(this.value)||0;renderProjectSizeNote()" '
+        +'title="How many components one unit of this type breaks down into — used for Project Size" '
+        +'style="width:70px;height:28px;text-align:right;font-size:13px">'
+      +'<span style="font-size:11px;color:var(--text2)">/unit</span>'
       +'<button class="btn" onclick="removeCarcassType(\''+ni+'\')" title="Remove type" style="height:28px;width:28px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash" style="font-size:13px"></i></button>'
       +'</div></div>';
   }
@@ -14165,6 +14230,7 @@ function syncOptionUI(){
   if(typeof initSiteVisitCard==='function') initSiteVisitCard();
   if(typeof renderBondIns==='function'&&qBondIns.enabled) renderBondIns();
   if(typeof onServiceChange==='function') onServiceChange();
+  if(typeof _updateLockGate==='function') _updateLockGate();   // must have the last word
 }
 function createNewOption(){
   // Require lock before creating next option
@@ -14348,6 +14414,13 @@ function doLock() {
 }
 function doLockOnly(){
   if(qLocked||qCancelled) return;
+  if(!(projectSizeValue()>0)){
+    showToast('Set the project size (no. of components) before locking — see the Project Size card.');
+    var _pc=el('project-size-card');
+    if(_pc){ _pc.scrollIntoView({behavior:'smooth',block:'center'}); }
+    var _pi=el('project-size'); if(_pi) setTimeout(function(){_pi.focus();},400);
+    return;
+  }
   qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
   // Also mark the current option object as locked
   if(qActiveOptionId>0){var _lo=qOptionsList.find(function(o){return o.id===qActiveOptionId;});if(_lo){_lo.locked=true;_lo.saved=true;}}
@@ -20825,6 +20898,7 @@ function _collectAppSettings(){
       msg:(el('s-msgtpl-msg')?el('s-msgtpl-msg').value:'')||MSG_TPL_DEFAULTS.msg
     },
     carcassPrices: (function(){ var o={}; for(var k in CARCASS_PRICES){ if(CARCASS_PRICES.hasOwnProperty(k)) o[k]=CARCASS_PRICES[k]; } return o; })(),
+    carcassComponents: (function(){ var o={}; for(var k in CARCASS_COMPONENTS){ if(CARCASS_COMPONENTS.hasOwnProperty(k)) o[k]=CARCASS_COMPONENTS[k]; } return o; })(),
     ordersSla: { defaultHours: ordersSlaSettings.defaultHours, webhookUrl: ordersSlaSettings.webhookUrl, companies: ordersSlaSettings.companies },
     logisticsDbId:(el('s-logistics-db-id')?el('s-logistics-db-id').value.trim():'')||LOGISTICS_DB_ID||'',
     serviceCapacity: (function(){ var o={}; for(var k in SERVICE_CAPACITY){ if(SERVICE_CAPACITY.hasOwnProperty(k)) o[k]=SERVICE_CAPACITY[k]; } return o; })(),
@@ -20854,6 +20928,9 @@ function _applyAppSettings(s){
   if(s.serialClaimUrl!==undefined){ SERIAL_CLAIM_URL=s.serialClaimUrl||''; localStorage.setItem('mc_serial_claim_url',SERIAL_CLAIM_URL); var _sc=el('s-serial-claim'); if(_sc) _sc.value=SERIAL_CLAIM_URL; }
   if(s.CF&&typeof s.CF==='object'){ for(var k in s.CF){ if(s.CF.hasOwnProperty(k)) CF[k]=s.CF[k]; } }
   if(Array.isArray(s.MOB_LOCATIONS)){ MOB_LOCATIONS.length=0; for(var i=0;i<s.MOB_LOCATIONS.length;i++) MOB_LOCATIONS.push(s.MOB_LOCATIONS[i]); }
+  if(s.carcassComponents&&typeof s.carcassComponents==='object'){
+    for(var cc in s.carcassComponents){ if(s.carcassComponents.hasOwnProperty(cc)) CARCASS_COMPONENTS[cc]=s.carcassComponents[cc]; }
+  }
   if(s.carcassPrices&&typeof s.carcassPrices==='object'){
     for(var ck in s.carcassPrices){
       if(!s.carcassPrices.hasOwnProperty(ck)) continue;
