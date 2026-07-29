@@ -1797,6 +1797,11 @@ tr.cl-row:hover td{background:#f4f7fb}
             <label class="fld">Discount buffer (%) <span id="ccf-def-discBuf" style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span></label>
             <input type="number" id="ccf-discBuf" style="height:32px" oninput="_ccfUpdateProfit()">
           </div>
+          <div>
+            <label class="fld">Material margin in price (%) <span id="ccf-def-matMargin" style="font-size:10px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0"></span></label>
+            <input type="number" id="ccf-matMargin" min="0" max="99" style="height:32px" oninput="_ccfUpdateProfit()">
+            <div style="font-size:10px;color:var(--muted);margin-top:2px">Share of the catalogue material &amp; hardware price that is margin, not cost. Reporting only &mdash; the client&rsquo;s total does not change. Direct clients only.</div>
+          </div>
         </div>
         <div class="g3" style="display:none"><!-- kept for legacy compat -->
           <div><input type="number" id="ccf-buf" style="height:32px;display:none"></div>
@@ -2226,6 +2231,11 @@ var CF = {
   mobContingency:0, mobBuffer:0, mobMarkup:0,
   instContingency:0, instBuffer:0, instMarkup:0,
   discountBuffer:0,
+  // Materials and hardware are sold at catalogue price with the margin already inside it.
+  // There is no landed-cost/COGS data to measure it from, so it is stated as a percentage
+  // OF THE SELLING PRICE (30% => a ₱100 material cost ₱70). Reporting only: it never changes
+  // the quotation total or what the client pays, it only stops the margin being counted as cost.
+  materialMarginPct:30,
   mssiCommPct:0, mssiCommissionEnabled:false,
   designersCommPct:0, designersCommissionEnabled:false,
   outMarkup:20, outContingency:5, outBuffer:5,
@@ -7157,6 +7167,10 @@ function _setCCFFields(src) {
   el("ccf-instBuf").value=src.instBuffer||0;
   el("ccf-instMk").value=src.instMarkup||0;
   el("ccf-discBuf").value=src.discountBuffer||0;
+  var _mm=el("ccf-matMargin");
+  if(_mm) _mm.value=(src.materialMarginPct!=null?src.materialMarginPct:(CF.materialMarginPct||0));
+  var _mmd=el("ccf-def-matMargin");
+  if(_mmd) _mmd.textContent="(global: "+(CF.materialMarginPct||0)+"%)";
   el("ccf-def-fab").textContent="(global: "+CF.fabContingency+"%)";
   el("ccf-def-fabBuf").textContent="(global: "+(CF.fabBuffer||0)+"%)";
   el("ccf-def-mob").textContent="(global: "+CF.mobContingency+"%)";
@@ -7328,7 +7342,11 @@ function _readCCFFields() {
     instContingency:parseFloat(el("ccf-inst").value)||CF.instContingency,
     instBuffer:parseFloat(el("ccf-instBuf").value)||0,
     instMarkup:parseFloat(el("ccf-instMk").value)||0,
-    discountBuffer:parseFloat(el("ccf-discBuf").value)||0
+    discountBuffer:parseFloat(el("ccf-discBuf").value)||0,
+    materialMarginPct:(function(){
+      var e=el("ccf-matMargin"); if(!e||e.value==='') return (CF.materialMarginPct||0);
+      var v=parseFloat(e.value); return isNaN(v)?(CF.materialMarginPct||0):v;
+    })()
   };
 }
 function confirmCustomCF() {
@@ -7474,6 +7492,10 @@ function renderCostFactors() {
     +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Grand Total</div>'
     +'<div class="g3" style="margin-bottom:10px">'
     +'<div><label class="fld">Discount buffer (%)</label><input type="number" value="'+(CF.discountBuffer||0)+'" oninput="CF.discountBuffer=parseFloat(this.value)||0" style="height:32px"><div style="font-size:10px;color:var(--muted);margin-top:2px">Buffer baked into combined total to absorb future discounts</div></div>'
+    +'</div>'
+    +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Material &amp; hardware margin</div>'
+    +'<div class="g3" style="margin-bottom:10px">'
+    +'<div><label class="fld">Margin already in the price (%)</label><input type="number" min="0" max="99" value="'+(CF.materialMarginPct||0)+'" oninput="CF.materialMarginPct=parseFloat(this.value)||0;recalcSoon()" style="height:32px"><div style="font-size:10px;color:var(--muted);margin-top:2px">Share of the catalogue material &amp; hardware price that is margin rather than cost (30% = a &#8369;100 item cost &#8369;70). Reporting only &mdash; it never changes the quotation total. Counted for Direct clients only, since a Subsidiary is transferred materials rather than sold them. Overridable per quotation.</div></div>'
     +'</div>'
     +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Client-supplied materials</div>'
     +'<div class="g3" style="margin-bottom:10px">'
@@ -22732,13 +22754,47 @@ function _doAccomSplitExport(){
 // the cutting-list charge (carried inside regularBase) and bond & insurance, and it never got
 // the fabrication-service-margin reclassification added 2026-07-02. Same quotation, different
 // profit depending on which screen you were looking at.
+// The margin sitting inside catalogue material + hardware prices, in pesos.
+// Gated on Direct clients: for a Subsidiary the materials are transferred rather than sold,
+// so there is no margin in them to take back out. Carcass mode has no material lines at all —
+// its margin is buried in CARCASS_PRICES, which is a separate gap and deliberately not guessed at.
+function _matMarginPct(){
+  var stage2=(_pCalc&&_pCalc.stage===2);
+  var src=stage2?((fqCustomCFApproved&&fqCustomCF)?fqCustomCF:CF)
+                :((qCustomCFApproved&&qCustomCF)?qCustomCF:CF);
+  var v=(src&&src.materialMarginPct!=null)?src.materialMarginPct:CF.materialMarginPct;
+  return (v==null?0:v);
+}
+function _fabMaterialMarginTotal(){
+  if(typeof isDirectClient==='function' && !isDirectClient()) return 0;
+  var pct=_matMarginPct();
+  if(!(pct>0)) return 0;
+  var base=0, a, i;
+  if(qFabMode==='services'){
+    for(a=0;a<qAreas.length;a++) base+=getAreaMatSubtotal(a)+getAreaHwSubtotal(a);
+  } else if(qFabMode==='bom'){
+    for(a=0;a<qAreas.length;a++){
+      var bi=qAreas[a].bomItems||[];
+      for(var b=0;b<bi.length;b++){
+        var per=0;
+        var mat=bi[b].materials||[];
+        for(i=0;i<mat.length;i++) per+=(parseFloat(mat[i].qty)||0)*(parseFloat(mat[i].price)||0);
+        var hw=bi[b].hardware||[];
+        for(i=0;i<hw.length;i++) per+=(parseFloat(hw[i].qty)||0)*(parseFloat(hw[i].price)||0);
+        base+=per*(bi[b].qty||1);
+      }
+    }
+  }
+  return base*pct/100;
+}
 function _directCostFromPCalc(p,fabMargin){
   p=p||{};
   if(fabMargin==null) fabMargin=_fabServiceMarginTotal();
   return (p.regularBase!=null?p.regularBase:(p.fabBaseRaw||0))
     +(p.outsourceBase||0)+(p.mobBase||0)+(p.instBase||0)+(p.assmBase||0)
     +(p.dcCost||0)+(p.svCost||0)+(p.biTotal||0)
-    -fabMargin;
+    -fabMargin
+    -_fabMaterialMarginTotal();
 }
 function _buildCostReportSnapshot(){
   var p=_pCalc;
@@ -22754,6 +22810,8 @@ function _buildCostReportSnapshot(){
     grand:p.grand,vatAmt:p.vatAmt,premAmt:p.premAmt,discAmt:p.discAmt,discPct:p.discPct,
     fabBase:p.regularBase!=null?p.regularBase:p.fabBaseRaw,outsourceBase:p.outsourceBase,outsourceFinal:p.outsourceFinal,
     fabServiceMargin:fabServiceMargin,
+    fabMaterialMargin:_fabMaterialMarginTotal(),
+    materialMarginPct:_matMarginPct(),
     mobBase:p.mobBase,mobRegionCost:p.mobRegionCost||0,mobPlanner:p.mobPlanner||0,
     instBase:p.instBase,assmBase:p.assmBase,qaqcBase:p.qaqcBase||0,
     dcCost:p.dcCost,svCost:p.svCost,biTotal:p.biTotal,
