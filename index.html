@@ -7162,6 +7162,7 @@ function _setCCFFields(src) {
 }
 function openCustomCF() {
   modalCtx='s1';
+  _ccfTargetSerial='';   // no routed request — the target is the open quotation
   if(isApprover()){
     var src=(qCustomCFApproved&&qCustomCF)?qCustomCF:CF;
     _setCCFFields(src);
@@ -7176,8 +7177,19 @@ function openCustomCF() {
   }
 }
 // Open CF override modal from an approval request (approver acting on a routed request)
-function openCustomCFFromRequest(reqNote, reqFrom) {
-  var src=(qCustomCFApproved&&qCustomCF)?qCustomCF:CF;
+// _ccfTargetSerial — which quotation this override belongs to. Empty means "the one open".
+// An approver almost always acts from the Approvals page, so the target is usually NOT open;
+// everything below has to be scoped by it rather than assuming the open quotation is the right one.
+var _ccfTargetSerial='';
+function openCustomCFFromRequest(reqNote, reqFrom, reqCtx, reqSerial) {
+  // modalCtx was never set here. Left over from a previous action it could be 'fq', sending a
+  // Stage 1 override into Stage 2 — the same defect fixed in requestUnlock on 2026-06-20.
+  modalCtx=(reqCtx==='fq')?'fq':'s1';
+  _ccfTargetSerial=reqSerial||'';
+  var _isOpen=!_ccfTargetSerial||_ccfTargetSerial===(qBaseSerial||qSerial);
+  // Seed from the target's own current override only when the target is actually open. Otherwise
+  // seeding from qCustomCF would show another quotation's rates as this request's starting point.
+  var src=(_isOpen&&qCustomCFApproved&&qCustomCF)?qCustomCF:CF;
   _setCCFFields(src);
   _ccfShowReqNote(reqNote, reqFrom);
   _ccfUpdateProfit();
@@ -7196,6 +7208,17 @@ function _ccfShowReqNote(note, from) {
   }
 }
 function _ccfUpdateProfit() {
+  // These come from _pCalc — the quotation currently loaded. If this override belongs to a
+  // different one there is nothing here to compute from, and showing the open quotation's
+  // numbers would read as the target's.
+  if(_ccfTargetSerial && _ccfTargetSerial!==(qBaseSerial||qSerial)){
+    ['ccf-sale','ccf-raw-cost','ccf-est-profit'].forEach(function(id){
+      var e=el(id); if(e){ e.textContent='—'; e.style.color='var(--text2)'; }
+    });
+    var mE=el('ccf-margin-pct');
+    if(mE){ mE.textContent='(open '+_ccfTargetSerial+' to see its cost)'; mE.style.color='var(--text2)'; }
+    return;
+  }
   var fabBase=(_pCalc.fabBaseRaw||0)+(_pCalc.outsourceBase||0);
   var mobBase=_pCalc.mobBase||0;
   var instBase=(_pCalc.instBase||0)+(_pCalc.assmBase||0);
@@ -7254,22 +7277,27 @@ function confirmCustomCF() {
   _verifyApproverPin((el("ccf-pin")||{}).value||'').then(function(ok){
     if(!ok){var e=el("ccf-err");if(e)e.style.display="block";return;}
     var cfObj=_readCCFFields();
-    if(modalCtx==='fq'){
-      fqCustomCF=cfObj; fqCustomCFApproved=true;
-      closeModal("ov-custom-cf");
-      renderFQCFStatus(); recalcFQ();
-    } else {
-      qCustomCF=cfObj; qCustomCFApproved=true;
-      closeModal("ov-custom-cf");
-      renderCustomCFStatus(); recalc();
+    closeModal("ov-custom-cf");
+    // Only touch the in-memory form when the override really is for the quotation on screen.
+    // Approving from the Approvals page used to write the requested rates straight onto whatever
+    // quotation happened to be loaded — the target never got them, the bystander silently did,
+    // and a later Save on the bystander made that permanent.
+    var _onOpen=!_ccfTargetSerial||_ccfTargetSerial===(qBaseSerial||qSerial);
+    if(_onOpen){
+      if(modalCtx==='fq'){ fqCustomCF=cfObj; fqCustomCFApproved=true; renderFQCFStatus(); recalcFQ(); }
+      else { qCustomCF=cfObj; qCustomCFApproved=true; renderCustomCFStatus(); recalc(); }
     }
-    logActivity('Cost factor override applied by '+((gUser&&gUser.name)||currentRole));
-    showToast('Cost factor override applied ✓');
-    // If actioning a routed override request, mark it approved and notify requester
+    logActivity('Cost factor override applied'+(_ccfTargetSerial?' to '+_ccfTargetSerial:'')
+      +' by '+((gUser&&gUser.name)||currentRole));
+    // If actioning a routed override request, mark it approved, persist it to the TARGET
+    // quotation, and notify the requester.
     if(_pendingOverrideNotifIdx>=0){
       _markOverrideApproved(_pendingOverrideNotifIdx,cfObj);
       _pendingOverrideNotifIdx=-1;
+    } else {
+      showToast('Cost factor override applied ✓');
     }
+    _ccfTargetSerial='';
   });
 }
 function resetCustomCF() {
@@ -9872,7 +9900,7 @@ function openApprovalAction(idx) {
   if(n.type==='override'){
     _pendingOverrideNotifIdx=idx;
     modalCtx=n.ctx||'s1';
-    openCustomCFFromRequest(n.note||'',n.from);
+    openCustomCFFromRequest(n.note||'',n.from,n.ctx||'s1',n.serial||'');
     return;
   }
   el("appr-title").textContent="Approval: "+n.client;
@@ -9906,6 +9934,18 @@ function _markOverrideApproved(idx,cfObj){
   // Persist approval to Sheets
   var updReq={id:n.reqId,_update:true,status:'approved',by:n.by,actionDate:n.actionDate,cfValues:cfObj};
   gSaveApprovalRequest(updReq,function(){});
+  // Write the rates into the TARGET quotation's saved state. Every other approval type has done
+  // this since 2026-07-19 (doApprovalAction); the CF override got its own dedicated approve path
+  // in 2026-06-16 and was never wired to it — so the values were only ever applied to whatever
+  // quotation was open in the approver's browser, and the requested one silently kept the global
+  // rates while the requester was told it had been applied.
+  _persistApprovedFieldToQuotation(n,function(ok){
+    if(ok){
+      showToast('Override applied to '+n.serial+' ✓');
+    } else {
+      showToast('⚠ Approved, but the new rates could not be saved into '+n.serial+' — open that quotation and set them there.');
+    }
+  });
   if(typeof currentPage!=='undefined'&&currentPage==='approvals') renderApprovals();
 }
 function doApprovalAction(idx, action) {
