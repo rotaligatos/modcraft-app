@@ -2278,3 +2278,153 @@ submission, with client names, emails and phone numbers. Redacted from this file
 (Account → API Information), then update `WUFOO_API_KEY` in the Apps Script project.** The
 Supabase publishable key alongside it is fine — that one is designed to be public.
 Rule going forward: **no live secret in a tracked file.** Keys live in the Apps Script project.
+
+
+## What was changed on 2026-07-29 (session 2 — cost-factor override, margin recognition, SKU search, notifications)
+
+Twelve commits, `d59b591`..`d098e28`. Started from three user reports — override percentages not
+reflecting, margin looking too low, and no visible project cost in the override — and the thread
+kept turning up adjacent defects.
+
+### The cost-factor override never reached the quotation it was for
+The override got its own approve path on 2026-06-16 (`openCustomCFFromRequest` → `confirmCustomCF`
+→ `_markOverrideApproved`) and was **never wired to `_persistApprovedFieldToQuotation`**, which every
+other approval type has used since 2026-07-19. So `confirmCustomCF` wrote the rates into whatever
+quotation was loaded in the approver's browser — and an approver acts from the Approvals page,
+where that is usually a different quotation or none.
+
+Reproduced before fixing: request for QT-W00000027 with QT-W00000031 open. The rates landed on
+QT-W00000031, QT-W00000027 kept the global rates, the request was marked approved, and the
+requester was messaged "has been reviewed and applied". **Two failures** — the target silently
+missed the change, and a bystander silently received it, which a later Save would have made
+permanent. (`d59b591`)
+
+Three more defects in the same modal, found while fixing it:
+- `openCustomCFFromRequest` **never set `modalCtx`** — a leftover `'fq'` sent a Stage 1 override into
+  Stage 2. Same defect as the unlock bug fixed 2026-06-20.
+- Its fields seeded from `qCustomCF`, i.e. another quotation's rates shown as the starting point.
+- The Sale/Cost/Profit strip reads `_pCalc` — the *open* quotation. Now shows "—" and names the
+  quotation to open instead of four confident figures belonging to a different job.
+
+### The requester's screen never updated (the "have to refresh the whole app" report)
+`_mergeApprovalReqsIntoNotifs()` copied `status` and `by` from the polled record **but not
+`cfValues`**. A requester's own notif is created when they SEND the request, and an override
+request carries no numbers at that point — the approver supplies them. `_applyApprovedRequest()`
+gates the override branch on `notif.cfValues`, so with it still null the branch was skipped: badge
+flipped to Approved, toast fired, quotation kept the old rates. `cfValues`/`reqDisc`/`ctx` now come
+across whenever present, since they carry the approver's decision and are always newer than
+anything held locally. Verified 189,118.54 → 118,366.24 with no refresh. (`5561a0a`)
+
+### Override figures now match the Cost Report
+They had **separate definitions of direct cost**. The modal omitted the cutting-list charge (inside
+`regularBase`), bond & insurance, and the fabrication-service-margin reclassification added
+2026-07-02 — so the same quotation showed a different profit depending on the screen, and the
+modal always read pessimistic. Both now call one **`_directCostFromPCalc()`**.
+
+Also: **Total (incl. VAT)** added to the strip. The old figures were a second simplified copy of
+`recalc()`'s tail that stopped at subtotal-before-commissions, so "Sale (ex-VAT)" did not equal the
+quotation's own ex-VAT subtotal. Rather than extend the copy, the panel now applies the entered
+rates, runs **the quotation's own `recalc()`**, reads the result and restores — the numbers are the
+quotation's by construction. Typing path debounced 180 ms since a recalc rebuilds line items.
+(`d207773`, `5561a0a`)
+
+### The approval request appeared to need sending twice
+"Send request" opened a **second** approval screen with its own "Send request" button. Users
+reported exactly that. The second screen only added the routing line and an optional note, and the
+reason box already collects the reason — so it now sends on one click and shows who it routes to
+before you send. (`d207773`)
+
+### Margin recognition — what is cost and what is margin
+Fabrication is services + materials + hardware, but **only services** ever had their built-in
+margin taken back out (`_fabServiceMarginTotal`, 2026-07-02). `dbMaterials` is `{name,unit,price}` —
+no cost field anywhere — so the full catalogue price counted as direct cost.
+
+- **Materials + hardware** (`fe1701f`): `CF.materialMarginPct`, default **30% OF THE SELLING PRICE**
+  (a ₱100 material cost ₱70), confirmed with Rommel. No landed-cost/COGS data exists, so it is a
+  **stated assumption, not a measurement** — global in Cost Factors, overridable per quotation,
+  reported as its own line. Reporting only; never changes the client's total.
+- **Client rule** (`d57b994`): `_materialMarginCounts()` replaced the blanket `isDirectClient()` gate.
+  Direct → counts. Subsidiary **WCLI** → does NOT (materials are transferred, not sold).
+  Subsidiary **CWLI** → counts (genuine inter-company sale). Applies in **every mode**. Company
+  matched by **keyword, not exact string** — this data has real spelling drift and exact compares
+  have locked people out before; "Cebu World Laminate" does not contain "world class".
+- **Carcass** (`5702108`): `CARCASS_PRICES` is one selling price with no cost side, so the whole
+  margin counted as cost. Cost is now built from the cabinet template — services at their true
+  `opCost`, materials/hardware at (100 − pct)% of price — and margin = price − that. A type with
+  **no template contributes nothing** and the Cost Report names it, because an incomplete template
+  would compute too low a cost and **overstate** profit invisibly. All 13 types have full templates,
+  so it only fires on a newly added type. No Direct gate here: in carcass mode materials are inside
+  the cabinet price everyone pays, not a separate line a Subsidiary is spared.
+- **opCost guard** (`5702108`): `opCost = totalExpense / capacity`, so a service with capacity set but
+  **no cost breakdown entered** computes 0 — and both callers were crediting its ENTIRE price as
+  margin. That is "not costed yet", not "free". Both now require `opCost > 0`. **This bug was in the
+  July services fix too**, not just the new carcass code. These figures decide how far a price can
+  be cut, so they must never err high.
+
+Verified: ₱60,000 of materials+hardware → Direct reclassifies ₱18,000 (profit 182,853.18 →
+200,853.18, margin 54.5% → 59.8%), Subsidiary WCLI ₱0, client total unchanged throughout.
+
+### ⚠ SKU search — "some users cannot find a SKU, I can" (`edbc607`)
+Reported with DuraSave. **The data was never missing.** Every material row rendered a `<datalist>`
+containing the **entire catalogue**, and `price_materials` is **153,552 rows / 124,132 distinct
+names**. Measured at that size: **6.19 MB of HTML and 445 ms to build, per row, per render.**
+Browsers cap how many datalist suggestions they render and degrade long before that, so which SKUs
+appeared came down to the machine and browser. Nothing errored — the item simply was not among the
+ones the browser chose to show.
+
+Filtering now happens in JS with at most **60 options** handed over, refreshed as the user types
+(the browser was already doing case-insensitive substring matching, so behaviour is unchanged —
+only bounded and deterministic). Applied to all four pickers with the same pattern: cutting-list
+materials, cutting-list hardware, BOM rows, outsource rows. Also **memoised
+`getMatSource()`/`getHwSource()`**, which rebuilt a merged 153k array plus a seen-map on every
+keystroke. Verified with DuraSave planted at index 140,000: found by typing, picking fills
+name/unit/₱3,000, keystroke 28 ms vs 445 ms.
+
+### Quotation additions
+- **Project size** (`6619bad`) — card under Carcass / Unit Count, visible in every mode. Blank =
+  detected from the fabrication scope via `getTotU()` (the same count Installation/Assembly bill
+  against, so it follows the mode); a number overrides; clearing returns to detection. Prints
+  between the client details table and the line-item table. Presentational only.
+- **Additional notes** (`664f525`) — box at the bottom of the services list, appearing once a
+  service is chosen. Free text per area, prints as an ADDITIONAL NOTES block. `oninput` writes
+  straight to the model with **no re-render**, deliberately.
+
+### Messaging & notifications
+- **Disappearing message** (`4ca2a85`) — `renderMsgPanel()` rebuilds the composer's innerHTML and the
+  poll calls it **every 45 s** while the panel is open, throwing away anything half-typed. The
+  composer is now left alone while in use (text present, or focus in it); it still rebuilds when
+  idle so a late-loading user list appears.
+- **Approvals reach people off-app** (`aa20fa4`) — `submitApprovalRequest` **never messaged the
+  approver at all**, and `doApprovalAction` never messaged the requester with the outcome. Both only
+  announced themselves through the in-app poll. Both now go through `gSendMessage`, which fans out
+  to every configured channel.
+- **Google Chat** (`aa20fa4`) — `CHAT_WEBHOOK_URL` setting + `_sendMessageChat()`. **Relayed through
+  the existing Apps Script mailer, deliberately: a browser cannot POST to a Chat webhook, because
+  the API wants `application/json` and that triggers a CORS preflight `chat.googleapis.com` does not
+  answer.** Requires `_gas_mailer_with_chat.gs` (in the repo) pasted over `doPost` in the mailer
+  project → Deploy → **New version of the existing deployment** (a New *deployment* mints a
+  different `/exec` URL and silently leaves the old code serving). Both relays are fire-and-forget:
+  `no-cors` means failures are **silent by construction**; the in-app message is always written
+  first and stays the record.
+
+### Lami's icon disappearing (`d098e28`)
+The chip is draggable and its position is saved, but `_lamiApplyPos()` wrote the saved left/top back
+**with no bounds check**, and nothing re-checked it. A narrower window, the Google Sites iframe, or
+leaving fullscreen could place it past the edge — where it stayed permanently, since dragging it
+back requires reaching it. Now clamped to the current viewport, the corrected value written back,
+plus a resize listener. Verified at 1280×720: `{3400,1800}` → `{1220,660}`; a sane `{120,90}`
+untouched; narrowing to 600px pulls x=1200 → 540.
+
+### Open decisions from this session (none started)
+1. **CWLI is not billed materials in cutting-list mode**, so its material margin computes to ₱0 —
+   a genuine conflict with the client rule, not an oversight. Recognising it means **charging** for
+   them: `isDirectClient()` in `getAreaSubtotal()` becoming "not WCLI". That is a pricing change and
+   was deliberately not done unilaterally.
+2. **BOM mode bills materials and hardware to Subsidiary clients**; cutting-list mode does not.
+   Pre-dates this work.
+3. **153,552 material rows / 124,132 distinct names** — worth reviewing for duplicates now that
+   search is bounded.
+4. **Hardware moves off the assumed 30%** when the procurement cost data lands.
+5. **Google Chat posts to a space**, so everyone in it sees approval requests including client
+   name, serial and the stated reason — relevant to the no-client-names rule. Per-person DMs need a
+   Chat app in a Google Cloud project, a much larger job.
