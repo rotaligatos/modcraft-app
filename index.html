@@ -8733,6 +8733,17 @@ function _buildCostReportHtml(serial,state,cr){
     +'<div class="kpi"><div class="lbl">Est. profit (ex-VAT)</div><div class="val" style="color:'+marginColor+'">'+fmtMoney(cr.profit||0)+'</div></div>'
     +'<div class="kpi"><div class="lbl">Margin</div><div class="val" style="color:'+marginColor+'">'+(cr.marginPct!=null?cr.marginPct.toFixed(1):'—')+'%</div></div>'
     +'</div>';
+  // A carcass type with no template cannot be costed, so its margin stays counted as cost and
+  // this quotation's profit reads low. Say which ones, rather than let it look like thin margin.
+  if(cr.carcassNoTemplate&&cr.carcassNoTemplate.length){
+    h+='<div style="background:#fef3e2;border:.5px solid #f59e0b;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#7c4a03">'
+      +'<b>Margin not counted for '+cr.carcassNoTemplate.length+' cabinet type'
+      +(cr.carcassNoTemplate.length===1?'':'s')+':</b> '
+      +escHtml(cr.carcassNoTemplate.join(', '))
+      +'. There is no template for '+(cr.carcassNoTemplate.length===1?'it':'them')
+      +' in the Price Database, so the full selling price is still counted as cost and the profit '
+      +'below is understated. Add the template in Settings → Price Database → CabinetTemplates.</div>';
+  }
   // Two-column tables: direct costs | margins & add-ons
   h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start">';
   h+='<table style="width:100%;border-collapse:collapse;background:#fff;border:.5px solid #dde;border-radius:8px;overflow:hidden">'
@@ -8749,10 +8760,17 @@ function _buildCostReportHtml(serial,state,cr){
     +(cr.dcCost?row('Design charge',cr.dcCost):'')
     +(cr.svCost?row('Site visit (separate)',cr.svCost):'')
     +(cr.biTotal?row('Bond & insurance cost',cr.biTotal):'')
+    +(cr.fabMaterialMargin?row('less: material &amp; hardware margin',-cr.fabMaterialMargin,
+        'Assumed '+(cr.materialMarginPct||0)+'% of the catalogue price is margin, not cost — Direct clients only'):'')
+    +(cr.fabCarcassMargin?row('less: carcass margin',-cr.fabCarcassMargin,
+        'Built from each cabinet\'s template — services at their true cost, materials &amp; hardware at '
+        +(100-(cr.materialMarginPct||0))+'% of price'):'')
     +'</tbody><tfoot>'+totRow('TOTAL DIRECT COST',cr.directCost,'var(--amber)')+'</tfoot></table>';
   h+='<table style="width:100%;border-collapse:collapse;background:#fff;border:.5px solid #dde;border-radius:8px;overflow:hidden">'
     +'<thead><tr style="background:var(--navy)"><th colspan="2" style="padding:8px 12px;text-align:left;font-size:12px;color:#fff">Contingency, buffer, markup &amp; taxes</th></tr></thead><tbody>'
     +(cr.fabServiceMargin?row('Fabrication service margin (built-in)',cr.fabServiceMargin,'Margin embedded in service prices — set in Cost Breakdown → Services'):'')
+    +(cr.fabMaterialMargin?row('Material &amp; hardware margin (built-in)',cr.fabMaterialMargin,'Assumed '+(cr.materialMarginPct||0)+'% of the catalogue price — no landed-cost data, so this is a stated assumption'):'')
+    +(cr.fabCarcassMargin?row('Carcass margin (built-in)',cr.fabCarcassMargin,'Carcass price less the cost of its template contents'):'')
     +row('Fabrication contingency'+pct(r.fabCont),cr.fabContAmt)
     +(r.fabBuf?row('Fabrication buffer'+pct(r.fabBuf),cr.regularBase*(r.fabBuf/100)):'')
     +row('Mobilization contingency'+pct(r.mobCont),cr.mobContAmt)
@@ -12220,7 +12238,9 @@ function _fabServiceMarginTotal(){
   function addLine(svc,qty){
     if(!svc) return;
     var cc=computeServiceCosts(svc);
-    if(cc.monthlyCapacity>0) margin+=((svc.price||0)*mult-cc.opCost)*(qty||0);
+    // opCost>0 as well as capacity: a service with capacity set but no cost breakdown entered
+    // computes opCost 0, and crediting its whole price as margin would overstate profit.
+    if(cc.monthlyCapacity>0&&cc.opCost>0) margin+=((svc.price||0)*mult-cc.opCost)*(qty||0);
   }
   if(qFabMode==='services'){
     for(var a=0;a<qAreas.length;a++){
@@ -22824,6 +22844,71 @@ function _fabMaterialMarginTotal(){
   }
   return base*pct/100;
 }
+// Carcass mode sells a cabinet at one price (CARCASS_PRICES) with no cost side, so unlike
+// services and materials there was nothing to subtract and the whole margin counted as cost.
+// The cabinet template does describe what goes into it, so the cost can be built:
+//   services  -> their true opCost from Settings → Cost Breakdown
+//   materials -> price x (1 - materialMarginPct)      (the same 30% used elsewhere)
+//   hardware  -> price x (1 - materialMarginPct)
+// margin = CARCASS_PRICES[type] - that cost.
+//
+// No Direct-client gate here, unlike _fabMaterialMarginTotal: in carcass mode the materials are
+// not billed as their own line that a Subsidiary is spared — they are inside the cabinet price,
+// which every client pays. The 30% is being used to estimate what the cabinet costs us, not to
+// reclassify a separately-billed material line.
+//
+// Returns the skipped types too, so an uncomputable cabinet is reported rather than quietly
+// understating. A template that lists only part of a cabinet would produce a cost that is too
+// low and therefore a margin that is too high, so anything without template rows contributes
+// nothing at all.
+function _carcassTemplateSource(){
+  return dbTemplates.length?dbTemplates
+    :INIT_TEMPLATES.map(function(t){return {cabinet:t[0],category:t[1],name:t[2],unit:t[3],qty:t[4],price:t[5]};});
+}
+function _fabCarcassMargin(){
+  var out={margin:0,skipped:[]};
+  if(qFabMode!=='carcass') return out;
+  var pct=_matMarginPct(), costFactor=1-(pct>0?pct:0)/100;
+  var src=_carcassTemplateSource();
+  // index the template once — this runs on every recalc
+  var byCab={};
+  for(var t=0;t<src.length;t++){
+    var row=src[t]; if(!row||!row.cabinet) continue;
+    (byCab[row.cabinet]=byCab[row.cabinet]||[]).push(row);
+  }
+  var svcByName={};
+  for(var v=0;v<SERVICES.length;v++) svcByName[(SERVICES[v].name||'').trim().toLowerCase()]=SERVICES[v];
+  var seenSkipped={};
+  for(var a=0;a<qAreas.length;a++){
+    var items=qAreas[a].items||[];
+    for(var i=0;i<items.length;i++){
+      var type=items[i].type, qty=items[i].qty||0;
+      if(!type||!qty) continue;
+      var rows=byCab[type];
+      if(!rows||!rows.length){
+        if(!seenSkipped[type]){ seenSkipped[type]=1; out.skipped.push(type); }
+        continue;   // no template — leave the whole price counted as cost
+      }
+      var unitCost=0;
+      for(var r=0;r<rows.length;r++){
+        var rw=rows[r], line=(rw.qty||0)*(rw.price||0);
+        if(rw.category==='services'){
+          var svc=svcByName[(rw.name||'').trim().toLowerCase()];
+          var cc=svc?computeServiceCosts(svc):null;
+          // No capacity — or capacity but no cost breakdown, which computes opCost 0 — means the
+          // true cost is unknowable. Fall back to the full price, understating the margin rather
+          // than inventing one.
+          unitCost+=(cc&&cc.monthlyCapacity>0&&cc.opCost>0)?(cc.opCost*(rw.qty||0)):line;
+        } else {
+          unitCost+=line*costFactor;   // materials + hardware
+        }
+      }
+      out.margin+=((CARCASS_PRICES[type]||0)-unitCost)*qty;
+    }
+  }
+  return out;
+}
+function _fabCarcassMarginTotal(){ return _fabCarcassMargin().margin; }
 function _directCostFromPCalc(p,fabMargin){
   p=p||{};
   if(fabMargin==null) fabMargin=_fabServiceMarginTotal();
@@ -22831,13 +22916,15 @@ function _directCostFromPCalc(p,fabMargin){
     +(p.outsourceBase||0)+(p.mobBase||0)+(p.instBase||0)+(p.assmBase||0)
     +(p.dcCost||0)+(p.svCost||0)+(p.biTotal||0)
     -fabMargin
-    -_fabMaterialMarginTotal();
+    -_fabMaterialMarginTotal()
+    -_fabCarcassMarginTotal();
 }
 function _buildCostReportSnapshot(){
   var p=_pCalc;
   if(!p||!p.grand) return null;
   var revenueExVat=(p.grand||0)-(p.vatAmt||0);
   var fabServiceMargin=_fabServiceMarginTotal();
+  var _carcassRep=_fabCarcassMargin();
   var directCost=_directCostFromPCalc(p,fabServiceMargin);
   var profit=revenueExVat-directCost;
   return {
@@ -22848,6 +22935,8 @@ function _buildCostReportSnapshot(){
     fabBase:p.regularBase!=null?p.regularBase:p.fabBaseRaw,outsourceBase:p.outsourceBase,outsourceFinal:p.outsourceFinal,
     fabServiceMargin:fabServiceMargin,
     fabMaterialMargin:_fabMaterialMarginTotal(),
+    fabCarcassMargin:_carcassRep.margin,
+    carcassNoTemplate:_carcassRep.skipped,
     materialMarginPct:_matMarginPct(),
     mobBase:p.mobBase,mobRegionCost:p.mobRegionCost||0,mobPlanner:p.mobPlanner||0,
     instBase:p.instBase,assmBase:p.assmBase,qaqcBase:p.qaqcBase||0,
