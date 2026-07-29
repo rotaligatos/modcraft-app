@@ -5144,9 +5144,37 @@ function renderClientMatSection(){
   b.innerHTML=h;
 }
 // ── Search-as-you-type helpers (native datalist) ──────────────────────────
+// A <datalist> holding the whole catalogue is not a search box. price_materials is ~153k rows
+// (~124k distinct names) and one datalist was being emitted PER ROW containing every single one.
+// Browsers cap how many datalist suggestions they will render, and degrade badly long before
+// that, so WHICH SKUs actually appeared depended on the machine and the browser — which is
+// exactly why one person could find "DuraSave" and another could not. Filter here and hand the
+// browser a short list instead; the browser was doing a case-insensitive substring match, so
+// this keeps the same behaviour, just bounded and deterministic.
+var DL_MAX=60;
+function _dlOptions(src,query,max){
+  max=max||DL_MAX;
+  var q=(query||'').trim().toLowerCase(), out='', n=0;
+  for(var k=0;k<src.length&&n<max;k++){
+    var nm=src[k].name||''; if(!nm) continue;
+    if(q&&nm.toLowerCase().indexOf(q)<0) continue;
+    out+='<option value="'+escHtml(nm)+'">'; n++;
+  }
+  return out;
+}
+function _refillDatalist(dlId,src,query,max){
+  var dl=el(dlId); if(dl) dl.innerHTML=_dlOptions(src,query,max);
+}
+// getMatSource()/getHwSource() rebuild a merged array (and a seen-map) on every call, and they
+// are called on every keystroke as well as on every render. At 153k rows that allocation is the
+// single most expensive thing in the typing path. Cache it; the underlying catalogues are only
+// ever replaced wholesale by loadPriceDatabase, so length is a sufficient invalidation key.
+var _matSrcCache=null,_matSrcKey='',_hwSrcCache=null,_hwSrcKey='';
+function _srcKey(a,b){ return a.length+'/'+b.length; }
 function onMatSearch(inp,a,i){
   // Live: update model name; if it matches a source item auto-fill price+unit+recalc
   var name=inp.value; qAreas[a].matItems[i].name=name;
+  _refillDatalist('mat-dl-'+a+'-'+i,getMatSource(),name);
   var f=lookupInSource(getMatSource(),name);
   if(f){qAreas[a].matItems[i].unit=f.unit||qAreas[a].matItems[i].unit;qAreas[a].matItems[i].price=f.price||0;}
   qAreas[a].matItems[i].custom=!f;
@@ -5158,6 +5186,7 @@ function onMatPick(inp,a,i){
 }
 function onHwSearch(inp,a,i){
   var name=inp.value; qAreas[a].hwItems[i].name=name;
+  _refillDatalist('hw-dl-'+a+'-'+i,getHwSource(),name);
   var f=lookupInSource(getHwSource(),name);
   if(f){qAreas[a].hwItems[i].unit=f.unit||qAreas[a].hwItems[i].unit;qAreas[a].hwItems[i].price=f.price||0;}
   qAreas[a].hwItems[i].custom=!f;
@@ -5187,16 +5216,22 @@ function _svcEffectivePrice(si){
 // ── Mat/Hw source helpers — DB when loaded, local catalog as fallback ─────
 function getMatSource(){
   if(!dbMaterials.length) return MAT_CATALOG;
+  var key=_srcKey(dbMaterials,MAT_CATALOG);
+  if(_matSrcCache&&_matSrcKey===key) return _matSrcCache;
   var seen={},r=[];
   for(var k=0;k<dbMaterials.length;k++){seen[dbMaterials[k].name]=1;r.push(dbMaterials[k]);}
   for(var k=0;k<MAT_CATALOG.length;k++){if(!seen[MAT_CATALOG[k].name])r.push(MAT_CATALOG[k]);}
+  _matSrcCache=r; _matSrcKey=key;
   return r;
 }
 function getHwSource(){
   if(!dbHardware.length) return HW_CATALOG;
+  var key=_srcKey(dbHardware,HW_CATALOG);
+  if(_hwSrcCache&&_hwSrcKey===key) return _hwSrcCache;
   var seen={},r=[];
   for(var k=0;k<dbHardware.length;k++){seen[dbHardware[k].name]=1;r.push(dbHardware[k]);}
   for(var k=0;k<HW_CATALOG.length;k++){if(!seen[HW_CATALOG[k].name])r.push(HW_CATALOG[k]);}
+  _hwSrcCache=r; _hwSrcKey=key;
   return r;
 }
 function lookupInSource(src,name){
@@ -5395,6 +5430,7 @@ function onBOMRowChange(a,ci,cat,ri,field,val) {
 function onBOMItemSearch(inp,a,ci,cat,ri){
   var db=_dbForCat(cat);
   var name=inp.value;
+  _refillDatalist('bom-dl-'+a+'-'+ci+'-'+cat+'-'+ri,db,name);
   var nameLC=name.trim().toLowerCase();
   var matchedIdx=-1;
   for(var k=0;k<db.length;k++){ if(db[k].name.trim().toLowerCase()===nameLC){matchedIdx=k;break;} }
@@ -5568,6 +5604,7 @@ function onOutsourceRowChange(a,ci,cat,ri,field,val) {
 function onOutsourceItemSearch(inp,a,ci,cat,ri){
   var db=(cat==='outsourceMaterials')?dbMaterials:dbHardware;
   var name=inp.value;
+  _refillDatalist('out-dl-'+a+'-'+ci+'-'+cat+'-'+ri,db,name);
   var nameLC=name.trim().toLowerCase();
   var matchedIdx=-1;
   for(var k=0;k<db.length;k++){ if(db[k].name.trim().toLowerCase()===nameLC){matchedIdx=k;break;} }
@@ -5712,7 +5749,7 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
         for(var k=0;k<db.length;k++){if(db[k].name.trim().toLowerCase()===rowNameLC){matchedIdx=k;break;}}
         var matched=(matchedIdx>=0);
         var dlId='bom-dl-'+a+'-'+ci+'-'+cat+'-'+r;
-        var dlOpts=''; for(var k2=0;k2<db.length;k2++){ dlOpts+='<option value="'+escHtml(db[k2].name)+'">'; }
+        var dlOpts=_dlOptions(db,row.name);
         var inpStyle='height:28px;font-size:11px'+(matched?'':';color:#e07000;border-color:#f59e0b');
         h+='<div style="display:grid;grid-template-columns:2fr 55px 65px 90px 80px 28px;gap:4px;margin-bottom:4px;align-items:center">'
           +'<span><input list="'+dlId+'" value="'+escHtml(row.name||'')+'" placeholder="Type to search…" '
@@ -5770,7 +5807,7 @@ function renderOutsourceSection(a,ci) {
         ?'<button class="btn" disabled title="Already saved to DB" style="height:28px;width:30px;padding:0;justify-content:center;color:#16a34a;cursor:default"><i class="ti ti-check" style="font-size:11px"></i></button>'
         :'<button class="btn" onclick="saveOutsourceToDB('+a+','+ci+',\''+cat+'\','+r+')" title="Save to Price Database" style="height:28px;width:30px;padding:0;justify-content:center;color:#b45309"><i class="ti ti-device-floppy" style="font-size:11px"></i></button>';
       var dlId='out-dl-'+a+'-'+ci+'-'+cat+'-'+r;
-      var dlOpts=''; for(var k3=0;k3<db.length;k3++){ dlOpts+='<option value="'+escHtml(db[k3].name)+'">'; }
+      var dlOpts=_dlOptions(db,row.name);
       s+='<div style="display:grid;grid-template-columns:2fr 55px 65px 90px 80px 30px 28px;gap:4px;margin-bottom:4px;align-items:center">'
         +'<span><input list="'+dlId+'" value="'+escHtml(row.name||'')+'" '
           +'oninput="onOutsourceItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')" onchange="onOutsourceItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')" '
@@ -5906,7 +5943,7 @@ function renderItems() {
         var matSrc=getMatSource();
         for(var i=0;i<matItems.length;i++){
           var mi=matItems[i];
-          var matDlOpts=''; for(var k=0;k<matSrc.length;k++) matDlOpts+='<option value="'+escHtml(matSrc[k].name)+'">';
+          var matDlOpts=_dlOptions(matSrc,mi.name);
           h+='<datalist id="mat-dl-'+a+'-'+i+'">'+matDlOpts+'</datalist>';
           h+='<div style="display:grid;grid-template-columns:2fr 58px 60px 88px 88px 30px;gap:5px;margin-bottom:6px;align-items:center">'
             +'<input type="text" list="mat-dl-'+a+'-'+i+'" value="'+escHtml(mi.name||'')+'" placeholder="Type to search…" oninput="onMatSearch(this,'+a+','+i+')" onchange="onMatPick(this,'+a+','+i+')" style="height:30px;font-size:12px">'
@@ -5946,7 +5983,7 @@ function renderItems() {
         var hwSrc=getHwSource();
         for(var i=0;i<hwItems.length;i++){
           var hi=hwItems[i];
-          var hwDlOpts=''; for(var k=0;k<hwSrc.length;k++) hwDlOpts+='<option value="'+escHtml(hwSrc[k].name)+'">';
+          var hwDlOpts=_dlOptions(hwSrc,hi.name);
           h+='<datalist id="hw-dl-'+a+'-'+i+'">'+hwDlOpts+'</datalist>';
           h+='<div style="display:grid;grid-template-columns:2fr 58px 60px 88px 88px 30px;gap:5px;margin-bottom:6px;align-items:center">'
             +'<input type="text" list="hw-dl-'+a+'-'+i+'" value="'+escHtml(hi.name||'')+'" placeholder="Type to search…" oninput="onHwSearch(this,'+a+','+i+')" onchange="onHwPick(this,'+a+','+i+')" style="height:30px;font-size:12px">'
