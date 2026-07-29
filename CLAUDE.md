@@ -2428,3 +2428,134 @@ untouched; narrowing to 600px pulls x=1200 → 540.
 5. **Google Chat posts to a space**, so everyone in it sees approval requests including client
    name, serial and the stated reason — relevant to the no-client-names rule. Per-person DMs need a
    Chat app in a Google Cloud project, a much larger job.
+
+
+## What was changed on 2026-07-29 (session 2, continued — project size reworked, per-service notes)
+
+Two further commits after the docs above: `b9aa411`, `926087d`.
+
+### Project size counts COMPONENTS, not cabinets
+The first pass used `getTotU()` — the unit count Installation and Assembly bill against. Wrong
+measure. Components now come from the cabinet **type**, which is the reference the POC's parametric
+engine establishes, via a components-per-unit figure entered once per type in
+**Settings → Carcass pricing** (`CARCASS_COMPONENTS`). Carcass and BOM both use it (a BOM item
+carries a type too). Cutting-list mode takes the count from the **Designers Support analysis**;
+that pipeline is not reliable yet, so with no analysis attached it falls to manual entry.
+
+**Detection declines rather than under-reporting.** If any type in the quotation has no
+components-per-unit set, the total would be quietly short — so it reports nothing and names the
+types that need a figure. A typed number always wins and is the fallback for everything detection
+cannot reach.
+
+**Locking now requires a project size.** Lock is disabled with the reason in its tooltip, and
+`doLockOnly()` refuses outright and scrolls to the card — the button is not the only way in.
+`_updateLockGate()` runs at the end of `updateLockUI()`, which re-enables the button, so the gate
+has the last word. **Stage 2 lock is NOT gated** — only Stage 1.
+
+Follow-up fix in `926087d`: the refresh was hooked into `renderItems()`, but changing a carcass type
+or quantity calls `recalcSoon()` only and never re-renders the list — so the count went stale on
+exactly the edits that change it. Moved into `recalc()`. The detected figure now also shows in the
+field as its placeholder; previously the box stayed empty and the number was buried in the note,
+which made it look dead.
+
+### Additional notes moved to one per service
+First pass put a single box per area under the subtotal. Corrected: **one box per performed
+service, directly beneath that service**, so adding another service adds another box. Stored on the
+service item (`svcItems[i].note`); the printout labels each note with its service name. A note saved
+under the old per-area shape (`area.svcNote`) still prints.
+
+### Decision taken: Google Chat space is restricted, not private
+A webhook can only post to a **space**, never a DM, and the posted text carries client name,
+quotation serial, discount percentage and the requester's stated reason — which routes around the
+app's own role gating (`canViewCostReport()` restricts margin data to Admin/Director/Manager).
+**Rommel's decision 2026-07-29: limit the space to Managers and up.** No code needed; membership
+only.
+
+Two consequences, accepted: Staff/Encoders get no Chat nudge (email + in-app still reach them, and
+approvals flow upward anyway), and managers see every message including person-to-person ones
+addressed to others.
+
+**Parked, not urgent:** send only *approval* notifications to Chat and leave person-to-person
+messages on email + in-app (~10 min). And proper **direct messages** — genuinely solves the privacy
+problem since only the recipient sees it, but a webhook cannot do it: needs a Google Cloud project,
+a configured Chat app, a service account, and **admin publishing the app to the domain**. The API
+path is settled (`spaces.setup` with `spaceType: DIRECT_MESSAGE` + `chat.bot` scope, then
+`spaces.messages.create`) — realistically half a day, mostly console config rather than code.
+
+---
+
+# ⚠ OPEN — read before continuing (as of 2026-07-30)
+
+Everything below is pending. Nothing here is started.
+
+### 1 + 2. Subsidiary material billing — these are ONE problem, not two
+The three modes disagree about whether a subsidiary is billed for materials:
+
+| Mode | Materials billed to |
+|---|---|
+| Carcass | everyone — they are inside `CARCASS_PRICES` |
+| BOM | everyone — billed as line items |
+| **Cutting list** | **Direct only** (`isDirectClient()` in `getAreaSubtotal`) |
+
+Cutting-list is the outlier. Rommel's rule — WCLI is *transferred* materials, CWLI is a *genuine
+sale* — implies the gate should be **"not WCLI"**, neither "Direct only" nor "everyone". Applying
+that consistently in `getAreaSubtotal` and `getBOMItemUnitCost` fixes both items at once.
+
+**Measured against the 152 saved quotation states** (rather than assumed):
+
+| | Count |
+|---|---|
+| Direct | 143 |
+| Subsidiary — CWLI | 3 (all carcass) |
+| Subsidiary — WCLI | 4 (2 carcass, 1 BOM, 1 cutting-list) |
+| Subsidiary — unset | 2 carcass |
+
+So subsidiaries are **9 of 152 (~6%)**, and 7 of those are carcass where materials cannot be
+separated either way. **Item 1 affects zero existing quotations** — CWLI has only ever used carcass
+mode, and there its material margin is *already* recognised, because `_fabCarcassMargin` applies
+`_materialMarginCounts()` and CWLI passes it. **Item 2 affects two quotations.**
+
+It is a **pricing change** (CWLI cutting-list totals go up, WCLI BOM totals go down), so it was not
+made unilaterally. **Residual that no gate fixes:** carcass always bills materials to WCLI, because
+they are inside `CARCASS_PRICES`. Separating that needs a cost/price split per cabinet type — the
+same data gap as item 4.
+
+### 3. 153,552 material rows / 124,132 distinct names
+Every row is a distinct `(name,unit,price)`, so ~29,000 share a name at a different price. Some are
+genuine variants; a previous session confirmed real duplicates in the source Sheet. No longer
+urgent now that the datalist is bounded (`edbc607`), but it clutters every picker.
+**Remember:** a direct Google Sheet edit does not reach Supabase — run `supaMigratePriceDb()` after.
+
+### 4. Hardware off the assumed 30%
+Rommel has procurement/COGS data for **hardware** to load, either into Modcraft or an admin
+procurement app. When it lands, hardware moves from the stated 30% assumption to measured cost —
+same mechanism services already use via `computeServiceCosts()`. Materials stay assumed until
+landed cost exists for them too.
+
+### 5. ⚠ Wufoo API key still needs rotating
+Redacted from `CLAUDE.md` on 2026-07-29 but **git history still holds it, and this repo is public**.
+Rotate in Wufoo (Account → API Information), then update `WUFOO_API_KEY` in the Apps Script project.
+
+### 6. Website order pipeline (parked 2026-07-29)
+Gap 2 + Gap 3 shipped. Left: wire the **live ModCraft catalogue** into the webpage cutting list
+(stand-in SKUs currently land in the fuzzy matcher an exact SKU would let it skip), and two gaps in
+the **form** — boring needs a hole count (priced per hole; a service at qty 0 is dropped entirely)
+and grooving needs its three variants.
+
+### 7. Components-per-unit not yet filled in
+`CARCASS_COMPONENTS` is empty for all 13 types. Until it is populated, carcass/BOM project size
+cannot auto-detect and users type it manually (which still satisfies the lock gate, so nobody is
+blocked). Deliberately not seeded — the POC types (base, wall, tall, drawer, sink, corner…) do not
+map onto the catalogue names (Fridge Cabinet, Luggage Cabinet, Wall Cladding…), and invented counts
+would put wrong numbers on quotations.
+
+### 8. Stage 2 lock is not gated on project size
+Only Stage 1's `doLockOnly()` enforces it. Decide whether Final Quotation should too.
+
+### 9. Intermittent outbound connection failures — WATCH
+Twice on 2026-07-29: the browser showed `ERR_CONNECTION_TIMED_OUT` on every Supabase REST call, and
+`git push` failed twice with "Failed to connect to github.com port 443" — while `curl` reached both
+hosts from the same machine in under a second. Third attempts succeeded. Not a code fault and not
+the services. If staff report the app hanging, orders not loading, or the Sheets-fallback banner
+appearing, this is the likely cause. Note the notification relays post `no-cors`, so a dropped
+request is **silent by construction** — a Chat/email nudge can vanish with no error anywhere.
