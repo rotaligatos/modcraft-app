@@ -1862,7 +1862,7 @@ User raised a real concern: even with just 5 users, the app was already slowing 
 - **Phase 4d (Orders)** — still on hold; new Wufoo submissions land via a separate Google Apps Script webhook writing straight to Sheets, bypassing Supabase entirely; flipping this read would show nothing for new orders until that separate script (outside this file) is also updated. Not started.
 - **Phase 5 (single-file size)** — lowest priority; the 1.5MB/23,000-line single-file architecture itself wasn't the main cause of the reported slowness (that was almost entirely the Sheets backend + inactive Supabase migration), so this remains deferred until/unless it becomes the bottleneck.
 - **Drawing-analysis auto-save needs same-session continuity** — reflecting a Designers Support analysis into a quotation stashes the full raw file + output in memory (`qDrawingAnalysis`), but it's only written to Storage/Drive at Stage 1/2 lock or Client Approve (same timing `qBoardLayout` already used). If the browser is closed between reflecting and locking, only a lightweight summary (fileName/fileType/analyzedAt/componentCount) survives in the saved draft — locking in a later session without re-analyzing correctly no-ops rather than resurrecting stale data, but the user needs to keep the tab open from reflect through lock/approve for the save to actually happen.
-- **HPL lamination auto-detect is regex-based, English-only** — `prodComputeBom()` flags a component as HPL via `/\bhpl\b/i` against `material`+`notes`; only recognizes 2 substrate buckets (Plywood → Manual HPL Lamination; PB/MDF/-MR variants → HPL Lamination) per the user's specified rule. Compact Laminate, HDF, or an undetectable substrate/face-count correctly flags for manual review rather than guessing — expected, not a bug, but worth remembering if a real cutting list's HPL note uses unusual phrasing that the regex still catches but the substrate parser doesn't.
+- **HPL lamination auto-detect is regex-based, English-only** — `prodComputeBom()` flags a component as HPL via `/\bhpl\b/i` against `material`+`notes`; only recognizes 2 substrate buckets (Plywood → `HPL Lamination (Plywood, N Face)`; PB/MDF/-MR variants → `HPL Lamination (MDF/PB, N Face)` — renamed 2026-07-30, see that session) per the user's specified rule. Compact Laminate, HDF, or an undetectable substrate/face-count correctly flags for manual review rather than guessing — expected, not a bug, but worth remembering if a real cutting list's HPL note uses unusual phrasing that the regex still catches but the substrate parser doesn't.
 
 ## What was changed on 2026-07-16 (session — Lami TTS fix, client-supplied materials, cutting-list print mode, perf, quality-of-life)
 
@@ -1898,7 +1898,7 @@ User raised a real concern: even with just 5 users, the app was already slowing 
 
 ## What was changed on 2026-07-17 (session — HPL lamination auto-detect)
 
-1. **Designers Support now auto-detects HPL and adds the lamination service + sheet material** (commit `7799af2`) — when a component's `material`/`notes` mentions "HPL" (`/\bhpl\b/i`), `prodComputeBom()` flags the BOM group (`hpl` added to the grouping key, so an HPL-laminated panel is never silently merged with a plain melamine-faced board of the same substrate/color/thickness/faces) and `prodBuildSummary()` adds two extra lines beyond the substrate board: the HPL sheet as a normal matched/flagged material row, and a lamination SERVICE whose catalog name depends on substrate (via `_prodParseMaterialDescriptor`) — **Plywood → "Manual HPL Lamination 1/2 Face (Plywood)"**, **PB/MDF (incl. -MR variants) → "HPL Lamination 1/2 Face (MDF/PB)"** — these 4 exact service names/prices already existed in `INIT_SERVICES` (~line 18105-18108), just not wired to the drawing-analysis pipeline before. Quantity is the panel's own area (sqm), not doubled for 2-face, since the 1F/2F SKUs are already priced ~2x apart in the catalog for the extra labor. Unrecognized substrate or undetectable face count flags for manual review rather than guessing, consistent with the pipeline's flag-not-guess philosophy.
+1. **Designers Support now auto-detects HPL and adds the lamination service + sheet material** (commit `7799af2`) — when a component's `material`/`notes` mentions "HPL" (`/\bhpl\b/i`), `prodComputeBom()` flags the BOM group (`hpl` added to the grouping key, so an HPL-laminated panel is never silently merged with a plain melamine-faced board of the same substrate/color/thickness/faces) and `prodBuildSummary()` adds two extra lines beyond the substrate board: the HPL sheet as a normal matched/flagged material row, and a lamination SERVICE whose catalog name depends on substrate (via `_prodParseMaterialDescriptor`) — **Plywood → "HPL Lamination (Plywood, 1/2 Face)"**, **PB/MDF (incl. -MR variants) → "HPL Lamination (MDF/PB, 1/2 Face)"** *(names as renamed on 2026-07-30; originally "Manual HPL Lamination …(Plywood)" and "HPL Lamination … (MDF/PB)")* — these 4 exact service names/prices already existed in `INIT_SERVICES` (~line 18105-18108), just not wired to the drawing-analysis pipeline before. Quantity is the panel's own area (sqm), not doubled for 2-face, since the 1F/2F SKUs are already priced ~2x apart in the catalog for the extra labor. Unrecognized substrate or undetectable face count flags for manual review rather than guessing, consistent with the pipeline's flag-not-guess philosophy.
 
 ## What was changed on 2026-07-18 (session — Supabase liveness/RLS/access grants, critical Stage 2 crash fix, Wufoo consolidation, approval authority)
 
@@ -2538,6 +2538,85 @@ Both reports resolved to deliberate behaviour, not bugs:
 
 **Pattern worth keeping:** two of three "missing data" reports this session were not missing data.
 Measure the mechanism before hunting for the record.
+
+---
+
+## What was changed on 2026-07-30 (session 2 — HPL SKU rename, and what it turned up)
+
+### The names were actively misleading
+Rommel: *"for the HPL Lamination we do things by manual only regardless of substrate. Traditional
+but it lasts a lifetime… we laminate the whole 4 x 8 or by component really depends."*
+
+I read that as meaning the word **Manual** in the SKU denoted the *method*, concluded the PB/MDF
+rows were a machine service nobody performs, and rewrote `prodBuildSummary`'s routing to send every
+substrate to the manual SKU. Wrong. Rommel: *"This two are different, the Manual HPL Lamination is
+for plywood."* Both are hand-laid; the price differs because **plywood is more work**. The original
+substrate split was correct, and my change would have over-quoted every MDF/PB panel by 2.55x.
+Reverted, and the commit pair was dropped before pushing — the live app never contained it.
+
+**The lesson is the naming, not the mistake.** "Manual HPL Lamination" gives no hint it means
+plywood. So the four SKUs were renamed to lead with the substrate:
+
+| Was | Now | ₱ |
+|---|---|---|
+| `HPL Lamination 1 Face (MDF/PB)` | `HPL Lamination (MDF/PB, 1 Face)` | 351 |
+| `HPL Lamination 2 Face (MDF/PB)` | `HPL Lamination (MDF/PB, 2 Face)` | 702 |
+| `Manual HPL Lamination (1 FACE)` | `HPL Lamination (Plywood, 1 Face)` | 896 |
+| `Manual HPL Lamination (2 FACE)` | `HPL Lamination (Plywood, 2 Face)` | 1791 |
+
+### Everywhere a service name is a key — checked before touching anything
+- **`quotation_states`: 0 of 157** reference any HPL service, so no saved quotation needed migrating.
+  Worth knowing the two mechanisms differ: services mode stores `svcItems[].svcIdx`, a **positional
+  index**; BOM mode stores a **name** and resolves by exact lowercase match. A rename breaks the
+  second; a reorder breaks the first.
+- **`price_services`** — updated **in place**. Never delete+insert: `supaGetPriceDb()` reads it back
+  `.order('id')` precisely because `svcIdx` is positional, so moving a row would silently repoint
+  every saved line item after it.
+- **`cabinet_templates`** — 1 row (Wall Cladding).
+- **CONFIG `serviceCapacity` and `serviceCostData`** — keyed by name; all 4 keys renamed with their
+  values carried, or the capacity and cost breakdown would have been orphaned.
+- **`index.html`** — `INIT_SERVICES`, the Wall Cladding `INIT_TEMPLATES` row, and the routing.
+- **MSSI website** — `hplSvcName()` in `portal.html` *and* `cutlist-template.html` still emitted the
+  old strings; every website cutting list would have arrived with a name the catalogue no longer
+  contains, landing in the fuzzy matcher that form exists to avoid.
+
+### ⚠ The Google Sheet Price DB still holds the OLD names
+Supabase is a mirror. **Running `supaMigratePriceDb()` before the Sheet is updated re-imports the old
+names and undoes all of this.** The fix is one pass through the app: open Settings → **Save settings**,
+which runs `_saveServicesToPriceDb()` and rewrites the Services sheet from the now-renamed `SERVICES`.
+Do that **before** any future price-DB migration.
+
+### Cabinet templates are quietly disconnected from the catalogue (pre-existing)
+Rommel asked to check the carcass templates. **30 template lines reference names that do not exist in
+any catalogue** — unrelated to the rename (no HPL name appears among them, which is itself the proof
+the rename landed cleanly).
+
+Three look like stale spellings of live services, and account for most of it:
+
+| Template says | Catalogue has | Lines |
+|---|---|---|
+| `Boring 35mm dia. (Hinges)` | `Boring 35mm (Hinges)` | 8 cabinet types |
+| `Boring (Hinges)` | `Boring 35mm (Hinges)` | 1 |
+| `Boring (Glider)` | `Boring 8mm (Glider)` | 1 |
+
+Four have no catalogue equivalent at all — a business question, not a typo: **Assembly labor**,
+**Drawer box Assembly**, **Installation Handle**, **Tapering**. Plus 4 materials and 7 hardware lines
+on Toilet Partition and Wall Cladding.
+
+**5 of the 7 orphan service names still hold `serviceCapacity` entries** with no catalogue row behind
+them — invisible dead data, since the Services tab is built from the Price DB. (The same is true of
+two older HPL orphans, `HPL Lamination (1 Face)` / `(2 Face)`, left from an earlier rename.)
+
+**Impact:** an orphan line still prices, at whatever the template hardcoded — so it never follows a
+catalogue price change, and its margin cannot be recognised (`opCost` is unresolvable, and the
+`opCost > 0` guard conservatively counts it as pure cost). Nothing is broken; it is drift.
+**Not fixed — it changes what future BOM quotations charge, so it is Rommel's call.**
+
+### Also noticed, not changed
+`INIT_SERVICES` prices these per **sqm**; the live catalogue rows say **piece** at the same numbers,
+and the drawing pipeline passes `qty: bm.totalArea` in **sqm**. Either the unit label is wrong or the
+basis changed without the price following. Worth settling — it decides whether a 0.5 sqm panel bills
+₱175 or ₱351.
 
 ---
 
