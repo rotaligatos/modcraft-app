@@ -2482,6 +2482,65 @@ a configured Chat app, a service account, and **admin publishing the app to the 
 path is settled (`spaces.setup` with `spaceType: DIRECT_MESSAGE` + `chat.bot` scope, then
 `spaces.messages.create`) — realistically half a day, mostly console config rather than code.
 
+## What was changed on 2026-07-30 (session — SKU search root cause, client-supplied materials)
+
+Four commits, `b202e59`..`759f9b5`. Two user reports, both traced to something other than what
+they looked like.
+
+### ⚠ "jhover cannot find a SKU" — the data was never missing
+Reported as *High Gloss Real White* and *DuraSave* absent from the material pickers in both the
+quotation and Designers Support. Neither was missing. Two separate causes, found by measuring
+rather than by searching for the names:
+
+1. **Word order.** The picker matched on a substring, so *"real white high gloss"* found nothing
+   while *"high gloss real white"* found it. Now tokenised and scored: every typed word must
+   appear somewhere in the name, in any order (`b202e59`). Whoever typed the words the way the
+   SKU happens to read them found it; whoever did not, did not — which is exactly why one person
+   could see an item another could not.
+2. **A blank-unit twin shadowing the good row.** `lookupInSource` returned the *first* name match.
+   Now it returns the best one — a populated unit first, then a non-zero price (`2b594b8`).
+
+**Why the twins exist — the real finding.** The Price DB Materials sheet has **153,552 rows /
+124,132 distinct names**, and roughly **39,420 of them have a blank unit**: about **29,420 shadow a
+good row of the same name**, and about **10,000 have no populated alternative at all**. The unit
+column simply stops being filled from around alphabetical position ~93,000 onward (the boundary
+sits near *"Toast MDF 4x8 2F Floor Sample…"*) — so this is one truncated import, not scattered
+data entry.
+
+**Therefore: never "clean up" by deleting blank-unit rows.** ~10,000 SKUs exist only as a
+blank-unit row and would be destroyed. The app was made immune instead, which is why this is a
+fix and not a data migration. The agreed tidy-up, if it ever happens, is **fill the missing units,
+delete nothing**, against a copy of the tab, dry-run first. Parked at Rommel's request.
+
+### Client-supplied materials — the rules, stated by Rommel
+> *"Current system, it is just an information for the client. this is to avoid miscommunication
+> thinking that the material they commit is included in the cost rather than what they commit to
+> bring. The client material cost must show only if they click it on because not everyone want to
+> supply their own material."* … *"Material supplied by the client should have no price field."*
+
+So: the printed table is **information only**, it appears **only when the toggle is on**, and those
+rows carry **no price**. `qClientSupplyMatList` has no price field and is never summed — which was
+already true.
+
+Two corrections of my own in the same thread, both worth remembering:
+- I claimed the client-facing line *"excluded from the quoted material cost"* contradicted the
+  code. It did not — I had conflated it with the 2026-07-16 change to the **Materials section**
+  (where the company's own materials do count). Reverted in `759f9b5`.
+- `3c5cff0` had ungated the table so it printed whether or not the toggle was on. Also reverted.
+  **Read the toggle as the user's stated intent, not as a state to defend against.**
+
+### "Prices missing under a Triplestar SKU" (stephanie) — false alarm, twice
+Both reports resolved to deliberate behaviour, not bugs:
+- **Subsidiary** clients have materials excluded from cutting-list cost (`isDirectClient()` in
+  `getAreaSubtotal` — see OPEN item 1+2, still undecided).
+- `hideMatPricing` blanks unit price and amount on the *Services, Materials & Hardware* printout
+  for **World Class Laminate, Inc.** quotations specifically (2026-07-16).
+
+**Pattern worth keeping:** two of three "missing data" reports this session were not missing data.
+Measure the mechanism before hunting for the record.
+
+---
+
 ---
 
 # ⚠ OPEN — read before continuing (as of 2026-07-30)
@@ -2520,10 +2579,17 @@ made unilaterally. **Residual that no gate fixes:** carcass always bills materia
 they are inside `CARCASS_PRICES`. Separating that needs a cost/price split per cabinet type — the
 same data gap as item 4.
 
-### 3. 153,552 material rows / 124,132 distinct names
-Every row is a distinct `(name,unit,price)`, so ~29,000 share a name at a different price. Some are
-genuine variants; a previous session confirmed real duplicates in the source Sheet. No longer
-urgent now that the datalist is bounded (`edbc607`), but it clutters every picker.
+### 3. Price DB Materials — ~39,420 blank-unit rows (root cause found 2026-07-30)
+153,552 rows / 124,132 distinct names. The "duplicates" are mostly **blank-unit twins**: ~29,420
+shadow a good row of the same name, and ~10,000 have **no populated alternative**. The unit column
+stops being filled from roughly alphabetical position ~93,000 (near *"Toast MDF 4x8 2F Floor
+Sample…"*), so it is one truncated import.
+
+**⚠ Do not delete blank-unit rows** — ~10,000 SKUs exist only as one. The app is already immune
+(`lookupInSource` prefers the populated row, `2b594b8`), so nothing is broken; the rows just
+clutter. If tidied: **fill the missing units, delete nothing**, on a copy of the tab, dry-run
+first. Parked at Rommel's request.
+
 **Remember:** a direct Google Sheet edit does not reach Supabase — run `supaMigratePriceDb()` after.
 
 ### 4. Hardware off the assumed 30%
@@ -2536,11 +2602,16 @@ landed cost exists for them too.
 Redacted from `CLAUDE.md` on 2026-07-29 but **git history still holds it, and this repo is public**.
 Rotate in Wufoo (Account → API Information), then update `WUFOO_API_KEY` in the Apps Script project.
 
-### 6. Website order pipeline (parked 2026-07-29)
+### 6. Website order pipeline (parked 2026-07-29; site work continued 2026-07-30)
 Gap 2 + Gap 3 shipped. Left: wire the **live ModCraft catalogue** into the webpage cutting list
 (stand-in SKUs currently land in the fuzzy matcher an exact SKU would let it skip), and two gaps in
 the **form** — boring needs a hole count (priced per hole; a service at qty 0 is dropped entirely)
-and grooving needs its three variants.
+and grooving needs its three variants. The form also never asks **1F/2F**.
+
+The website itself moved on 2026-07-30 (design polish, live WCL finish ranges, logo vectors, map
+fixes) — **its own pending list lives in `MSSI Webpage/HANDOFF.md`**, which is the authority for
+that side. Nothing there changes Modcraft; the three gaps above are still the whole Modcraft-facing
+ask.
 
 ### 7. Components-per-unit not yet filled in
 `CARCASS_COMPONENTS` is empty for all 13 types. Until it is populated, carcass/BOM project size
