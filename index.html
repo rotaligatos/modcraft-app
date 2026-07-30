@@ -5174,14 +5174,86 @@ function renderClientMatSection(){
 // browser a short list instead; the browser was doing a case-insensitive substring match, so
 // this keeps the same behaviour, just bounded and deterministic.
 var DL_MAX=60;
+// Bounding the list (above) was necessary but not sufficient, and this is what
+// jhover hit. Three compounding faults, all fixed here:
+//
+//  1. SUBSTRING, SO ORDER-DEPENDENT. The catalogue names the gloss boards
+//     "REAL WHITE PLYWOOD 4X8 18mm HIGH GLOSS/HIGH GLOSS". Typing the words in
+//     the order a human says them — "high gloss real white" — matched NOTHING,
+//     because that exact phrase never occurs. Same for "durasave real white"
+//     against "DuraSave Plywood 1F Real White 18mm". The SKU looked missing
+//     when it was there all along. Now every typed word must appear somewhere
+//     in the name, in any order — the same rule Designers Support's own manual
+//     search already used.
+//  2. THE CAP WAS APPLIED UNRANKED. "real white" matches 30,012 rows, because
+//     it is the second face of tens of thousands of two-face combinations
+//     (Acacia/Real White, Black/Real White …). Taking the first 60 in catalogue
+//     order meant the specific board was unreachable however long you scrolled.
+//     Results are now scored and the best 60 shown.
+//  3. NO DEDUPE. 153,552 rows carry 124,132 distinct names, so duplicates were
+//     burning slots in a 60-slot list.
+//
+// Lowercase is cached per item (__lc) — the old code lowercased every one of
+// 153k names on every keystroke, so this is cheaper than what it replaces.
+function _dlTokens(q){ return q.split(/\s+/).filter(Boolean); }
+function _dlScore(lc,q,words){
+  if(lc===q) return 100000;                        // exact name
+  var s=0;
+  if(lc.indexOf(q)===0)      s+=4000;              // starts with what was typed
+  else if(lc.indexOf(q)>=0)  s+=2500;              // contains it as a phrase
+  var pos=0;
+  for(var i=0;i<words.length;i++) pos+=lc.indexOf(words[i]);
+  s+=Math.max(0,1200-pos*3);                       // matched words appear early
+  s+=Math.max(0,600-lc.length*2);                  // prefer the more specific name
+  return s;
+}
+// Ranking every match meant scanning all 153k rows and allocating an object per
+// hit on every keystroke — 70-130ms, which is laggy to type through. So the
+// catalogue is indexed ONCE into two flat string arrays (deduped, pre-lowercased)
+// and the per-keystroke path allocates only primitives. Keyed off the source
+// array's identity, and getMatSource()/getHwSource() already return a stable
+// cached array that is only ever replaced wholesale by loadPriceDatabase.
+var _dlIdx=(typeof WeakMap!=='undefined')?new WeakMap():null;
+function _dlIndex(src){
+  var hit=_dlIdx&&_dlIdx.get(src);
+  if(hit&&hit.n===src.length) return hit;
+  var lc=[],nm=[],seen=Object.create(null),k,n,l;
+  for(k=0;k<src.length;k++){
+    n=src[k].name; if(!n) continue;
+    l=n.toLowerCase();
+    if(seen[l]) continue;                            // one entry per distinct name
+    seen[l]=1; lc.push(l); nm.push(n);
+  }
+  var idx={lc:lc,nm:nm,n:src.length};
+  if(_dlIdx) _dlIdx.set(src,idx);
+  return idx;
+}
 function _dlOptions(src,query,max){
   max=max||DL_MAX;
-  var q=(query||'').trim().toLowerCase(), out='', n=0;
-  for(var k=0;k<src.length&&n<max;k++){
-    var nm=src[k].name||''; if(!nm) continue;
-    if(q&&nm.toLowerCase().indexOf(q)<0) continue;
-    out+='<option value="'+escHtml(nm)+'">'; n++;
+  var q=(query||'').trim().toLowerCase();
+  var words=_dlTokens(q);
+  var ix=_dlIndex(src), lc=ix.lc, nm=ix.nm, N=lc.length, out='', k, w;
+
+  // Nothing typed, or a single character: there is nothing meaningful to rank,
+  // so take the first N and stop walking the catalogue.
+  if(q.length<2){
+    for(k=0;k<N&&k<max;k++){
+      if(q&&lc[k].indexOf(q)<0) continue;
+      out+='<option value="'+escHtml(nm[k])+'">';
+    }
+    return out;
   }
+
+  var mIdx=[],mScore=[],s,ok;
+  for(k=0;k<N;k++){
+    s=lc[k]; ok=true;
+    for(w=0;w<words.length;w++){ if(s.indexOf(words[w])<0){ ok=false; break; } }
+    if(!ok) continue;
+    mIdx.push(k); mScore.push(_dlScore(s,q,words));
+  }
+  var order=mIdx.map(function(_,i){return i;});
+  if(order.length>max) order.sort(function(a,b){return mScore[b]-mScore[a];});
+  for(k=0;k<order.length&&k<max;k++) out+='<option value="'+escHtml(nm[mIdx[order[k]]])+'">';
   return out;
 }
 function _refillDatalist(dlId,src,query,max){
@@ -10554,7 +10626,7 @@ function supaMigrateOrders(){
 }
 
 function _updateOrdersBadge(){
-  // live work only — Completed/Cancelled/Archived are not waiting on anyone
+  // live work only — Completed/Cancelled/Archived are not waiting on anyone
   var cnt=pendingOrders.filter(function(o){return o.status==='Pending'||o.status==='In Progress';}).length;
   var b=el('orders-badge');
   if(b){b.textContent=cnt;b.style.display=cnt>0?'inline':'none';}
@@ -25263,10 +25335,20 @@ function _prodCatalogResultsHtml(cat,idx,row){
     var names=row.matchCandidates||[];
     results=names.map(function(n){ return catalogArr.find(function(c){return c.name===n;})||{name:n}; });
   } else {
-    var words=q.toLowerCase().split(/\s+/).filter(Boolean);
+    // Matching here was already order-independent (every typed word must appear),
+    // which is why the manual search could find things the quotation pickers
+    // could not. But the 40-row cut was unranked, so a broad query like
+    // "real white" — 11k+ hits, because it is the second face of thousands of
+    // two-face boards — showed an arbitrary 40. Ranked with the same scorer the
+    // quotation pickers use, so both behave identically.
+    var ql=q.toLowerCase();
+    var words=ql.split(/\s+/).filter(Boolean);
     results=catalogArr.filter(function(item){
       var n=(item.name||'').toLowerCase();
       return words.every(function(w){return n.indexOf(w)>=0;});
+    }).sort(function(x,y){
+      return _dlScore((y.name||'').toLowerCase(),ql,words)
+           - _dlScore((x.name||'').toLowerCase(),ql,words);
     });
   }
   var shown=results.slice(0,40);
