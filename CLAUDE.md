@@ -2610,7 +2610,32 @@ two older HPL orphans, `HPL Lamination (1 Face)` / `(2 Face)`, left from an earl
 **Impact:** an orphan line still prices, at whatever the template hardcoded — so it never follows a
 catalogue price change, and its margin cannot be recognised (`opCost` is unresolvable, and the
 `opCost > 0` guard conservatively counts it as pure cost). Nothing is broken; it is drift.
-**Not fixed — it changes what future BOM quotations charge, so it is Rommel's call.**
+**The three stale spellings ARE now fixed** (Rommel, 2026-07-30: "go with 1, then 2 I'll take care of
+later"). 11 template rows renamed in Supabase, names only — qty, price and unit untouched:
+
+| Was | Now | Rows |
+|---|---|---|
+| `Boring 35mm dia. (Hinges)` | `Boring 35mm (Hinges)` | 9 |
+| `Boring (Hinges)` | `Boring 35mm (Hinges)` | 1 |
+| `Boring (Glider)` | `Boring 8mm (Glider)` | 1 |
+
+Service orphans went **19 lines to 8**. Ten of the eleven matched the catalogue price exactly.
+**One did not and was left alone:** Overhead Cabinet reads `qty 0.8 x P40` where every other
+cabinet reads `qty 4 x P10` and the catalogue is P10/hole — it looks like the line total was
+typed into the price field. Correcting it changes what an Overhead Cabinet quotes, so it belongs
+with the missing-SKU pile.
+
+**Still open (Rommel is handling):** 19 orphan lines remain — 8 services (`Assembly labor`,
+`Drawer box Assembly`, `Installation Handle`, `Tapering`), 4 materials and 7 hardware,
+mostly on Toilet Partition and Wall Cladding. Those need **adding to the catalogue** — pricing, not
+spelling.
+
+### ⚠ A third spelling lives in the app defaults
+`INIT_SERVICES` uses `Boring (Hinges 35mm)` — matching neither the live catalogue
+(`Boring 35mm (Hinges)`) nor the old template spelling. The defaults are internally consistent,
+so **Initialize DB** would overwrite the Services tab with its own names and re-orphan everything
+just reconnected, plus more. Left alone: aligning the defaults to the live catalogue is a much
+bigger job than a typo fix. **Just know that button is loaded.**
 
 ### Also noticed, not changed
 `INIT_SERVICES` prices these per **sqm**; the live catalogue rows say **piece** at the same numbers,
