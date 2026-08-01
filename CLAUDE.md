@@ -2727,7 +2727,20 @@ would put wrong numbers on quotations.
 ### 8. Stage 2 lock is not gated on project size
 Only Stage 1's `doLockOnly()` enforces it. Decide whether Final Quotation should too.
 
-### 9. Intermittent outbound connection failures — WATCH
+### 9. ⚠ PMES is readable with no login — waiting on its Google sign-in
+The 22 `pmes_*` tables carry anon SELECT policies and `pmes_production_jobs` exposes
+`quotation_serial`, `payment_status`, `payment_reference`. **Not a policy mistake:** the PMES app
+makes no auth calls and uses the website's own publishable key, so it depends on them. Rommel has
+confirmed PMES will get Google sign-in. **Do not drop the anon policies before that lands** — it
+would take PMES down. When it does: drop the 22 anon policies and revoke the 7 RLS-free `pmes_*`
+views from anon. Full detail in the 2026-08-01 session 2 entry below.
+
+### 10. Exercise a signed attachment link once in the real app
+`viewOrderAttachment` mints a one-hour signed link for website attachments. The storage policy is
+proven across five identities, but the call itself needs a signed-in staff session, which these
+sessions cannot produce. Open one website-filed attachment in the real app to close it out.
+
+### 11. Intermittent outbound connection failures — WATCH
 Twice on 2026-07-29: the browser showed `ERR_CONNECTION_TIMED_OUT` on every Supabase REST call, and
 `git push` failed twice with "Failed to connect to github.com port 443" — while `curl` reached both
 hosts from the same machine in under a second. Third attempts succeeded. Not a code fault and not
@@ -2785,3 +2798,103 @@ Fix it in the **Sheet**, not Supabase — a Supabase-only edit is undone by the 
 Worth knowing why it matters: ModCraft **drops a service at qty 0**, so a boring line with no hole
 count does not arrive vague — it disappears. The website now collects the count
 (`Boring 35mm (Hinges) × 4 holes`), which is the other half of the same fix.
+
+---
+
+## What was changed on 2026-08-01 (session 2 — the website cutting list proven, and two data leaks closed)
+
+Worked alongside the MSSI website (`MSSI Webpage/HANDOFF.md` is the authority for that side).
+Two ModCraft commits, `d7fac3f` and `e67421b`, plus Supabase policy work.
+
+### 1. The cutting list was discarding data the website already sends
+The launch question was whether a website cutting list, exported to a quotation and fed to
+Designers Support, produces an *accurate* result. It did not — `_cutListToAnalysis` was written
+against the **old** form and the website moved on when it went onto the real catalogue (2026-08-01
+session 1). Two things arrived and were thrown away:
+
+| Website sends | ModCraft produced (before) |
+|---|---|
+| `Real White PB 4x8 **2F** (18mm, Matte)` | `faces: 0` + "the web form never asks 1F/2F" |
+| `Boring 35mm (Hinges) **× 4 holes**` | "the web form collects no hole count" |
+
+**Faces.** The SKU *is* the spec, and this app already owns a parser for that exact string —
+`_prodParseMaterialDescriptor` returns `{substrate:'PB', faces:2, texture:'matte', thickness:18}`.
+The website path simply never called it. That matters because `prodComputeBom`'s grouping key is
+`[material,color,texture,thickness,**faces**,colorB,textureB,isHpl]` and `_prodFieldMatchScore`
+matches on faces too — so a 2-face board was grouped and matched as though the face count were
+unknown.
+
+**Holes.** `prodComputeServices` sums `holeSchedule[].qty` into `holeCount`, and a service at
+qty 0 is dropped entirely — so a boring request was not arriving vague, **it was disappearing**.
+The count is now parsed into `holeSchedule` with the diameter and hole type read off the service
+name. A chip with genuinely no count still flags rather than pricing at zero.
+
+**Verified by driving the real functions.** All nine of the site's edge codes, in both
+orientations (18 cases), convert to identical banded length — including `1L` on a 400×800 piece,
+where the long edge sits in the *width* field, correctly becoming `1s`. A five-row two-cabinet
+list mixing a 1F and a 2F board of the same substrate and thickness now yields cutting 10.45 LM,
+edgebanding 14.84 LM (14.132 × 1.05 wastage), 20 holes, and two BOM groups split correctly by
+face count at 1.72 and 1.23 m² — every figure matching an independently hand-computed
+expectation, **zero rows flagged for review**.
+
+**Not a bug, confirmed:** an unrecognised edge code zeroes that row's banding but flags it
+loudly, so it can never go out silently short. (The site's all-round code is `4S`; `2L 2S` is not
+one of its nine and correctly flags.)
+
+### 2. Client shop drawings were world-readable AND world-listable
+`order-attachments` was a **public** bucket *and* carried a policy `"anyone can read order
+attachments"` granting SELECT to `public`. Anyone holding the publishable key — printed in the
+website's own source — could **list every attachment by name**, getting the order reference and
+the client's own filename, then download each one without logging in. Proven against a
+rolled-back test row before changing anything, with a `quotations` row as a control (correctly
+returned nothing).
+
+Caught while the bucket still held **zero files**, so there was nothing to repair.
+
+Bucket is private, the public read policy is dropped, and two scoped policies replace it: staff
+read attachments belonging to an order they can already see (matched on the first path segment,
+which is the order id), and a signed-in client reads their own. Admin tier included so an
+orphaned upload is never stranded. **Anonymous UPLOAD is untouched** — the order form has to stay
+able to attach a drawing.
+
+`viewOrderAttachment` now mints a **one-hour signed link on click** for `supabase://` references.
+**The file itself never expires** — the clock starts when staff click, so a drawing filed on a
+Friday opens fine on Monday, after a long holiday, or a year later. What dies is a link copied
+out of ModCraft into an email or a screenshot.
+
+Verified across five identities: owning-company staff and the owning client see the file; a
+different client, another company's staff and an anonymous outsider see nothing; Admin sees it.
+Drive and Wufoo attachments are untouched and still open exactly as before.
+
+> **Not verified from here:** the signed link is created by a signed-in staff session, which
+> these sessions cannot produce. The policy it depends on is proven; exercise the call once in
+> the real app.
+
+### 3. Corrections to stale figures in this file
+- **`pending_orders` holds 53 rows, not 135** (oldest 2026-07-05, 52 of 53 written by the Wufoo
+  webhook). The "135 open orders" line was already stale before this session.
+- Every table holding client information returns **zero rows to anon** — clients, quotations,
+  pending_orders, order_cutting_lists, job_applications, users, messages, settings. The wide
+  SELECT *grants* look alarming in the catalog but carry no anon policy, so they yield nothing.
+  RLS fails closed.
+
+### 4. ⚠ PMES is readable by anyone, and it is not a policy mistake
+The 22 `pmes_*` tables each carry an anon SELECT policy. `pmes_production_jobs` exposes
+`quotation_serial`, `payment_status` and `payment_reference`. Verified why: the PMES app
+(`Desktop/Modcraft Product Manufacturing Execution System (PMES)/modcraft-pmes-app`) makes **no
+auth calls at all** — `grep` for `signInWith|auth.|getSession` returns nothing — and `config.js:15`
+holds **the same publishable key as the public website**. So the anon policies exist because PMES
+depends on them.
+
+**Do NOT drop those policies before PMES has sign-in — it would take the app down.** Rommel has
+confirmed PMES *will* get Google sign-in; when it lands, drop the 22 anon policies and revoke the
+7 RLS-free `pmes_*` views from anon. Adding auth there is cheap: one client at `app.js:18`, every
+read through the `Data.*` helpers, and all 22 tables already have `authenticated` policies.
+
+Also worth knowing: **that folder is not a git repo** — ~3,000 lines with no version control.
+
+### 5. New Supabase objects this session (not in `supabase_schema.sql`)
+`rate_limit_hits`, `app_client_fingerprint()`, `app_rate_limit_ok()`, `catalogue_search()`,
+`catalogue_resolve()`, `catalogue_list()`, `client_companies`, `client_accounts`,
+`client_company_invites`, `client_company_id()`, `client_company_emails()`. See the MSSI handoff
+for what they are for.
