@@ -2735,12 +2735,16 @@ confirmed PMES will get Google sign-in. **Do not drop the anon policies before t
 would take PMES down. When it does: drop the 22 anon policies and revoke the 7 RLS-free `pmes_*`
 views from anon. Full detail in the 2026-08-01 session 2 entry below.
 
-### 10. Exercise a signed attachment link once in the real app
+### 10. Attachments now carry up to 10 files — see session 3 below
+`pending_orders.attachments` holds the full list; `attachment_1/2` mirror the
+first two for the Wufoo webhook. Order cards list each file by its own name.
+
+### 11. Exercise a signed attachment link once in the real app
 `viewOrderAttachment` mints a one-hour signed link for website attachments. The storage policy is
 proven across five identities, but the call itself needs a signed-in staff session, which these
 sessions cannot produce. Open one website-filed attachment in the real app to close it out.
 
-### 11. Intermittent outbound connection failures — WATCH
+### 12. Intermittent outbound connection failures — WATCH
 Twice on 2026-07-29: the browser showed `ERR_CONNECTION_TIMED_OUT` on every Supabase REST call, and
 `git push` failed twice with "Failed to connect to github.com port 443" — while `curl` reached both
 hosts from the same machine in under a second. Third attempts succeeded. Not a code fault and not
@@ -2898,3 +2902,69 @@ Also worth knowing: **that folder is not a git repo** — ~3,000 lines with no v
 `catalogue_resolve()`, `catalogue_list()`, `client_companies`, `client_accounts`,
 `client_company_invites`, `client_company_id()`, `client_company_emails()`. See the MSSI handoff
 for what they are for.
+
+---
+
+## What was changed on 2026-08-01 (session 3 — attachments, tripwires, and the silent-loss rule)
+
+Continues session 2 in the same sitting. ModCraft commits `2bc7e71`, `73c101c`,
+`cccf68f`. The MSSI side is in `MSSI Webpage/HANDOFF.md` session 3.
+
+### 1. Show every attachment, not just the first two (`2bc7e71`)
+A website order can now carry **10 files at 100MB** (was 2 at 25MB — both numbers
+were ours, and the cap silently discarded the rest). `pending_orders.attachments`
+holds the full list; `attachment_1/2` still mirror the first two so the Wufoo
+webhook and Sheets columns V/W are untouched. The order card lists each file
+**by its own filename** rather than "File 1 / File 2", truncating at 26 chars
+with the full name on hover. Rows without `attachments[]` fall back to the two
+legacy columns, so every existing row renders exactly as before.
+
+### 2. The tripwire — refuse to trust a parse that does not match (`73c101c`)
+**This is the important one.** Three separate faults in one day were the same
+shape: data arrived correctly, part of it was quietly dropped, and the result was
+simply SMALLER — indistinguishable from a correct one. Rommel's point stands:
+*"you cannot really check every time especially during peak season."*
+
+Every cutting list already carried totals the **client's browser** computed, and
+nothing ever compared them. `_cutListToAnalysis` now checks rows, pieces, and
+payload panels against what it built. A mismatch puts
+**"⚠ THIS LIST DID NOT ARRIVE INTACT"** at the FRONT of the summary, naming the
+exact difference, and `_integrity` carries the declared and parsed figures.
+
+**It flags and still imports, deliberately** — refusing on a false positive would
+strand a real job at the busiest moment.
+
+> **Standing rule, both codebases: anything that caps, skips, or fails to parse
+> must be LOUD, never short.** A crash announces itself; a quietly smaller result
+> does not.
+
+### 3. Flag a row that adds nothing to the board count (`cccf68f`)
+Checked rather than assumed whether the stages after import can lose a row. They
+mostly cannot: a blank material becomes an **"Unknown"** group that is still
+counted and still allocated a board, and a zero quantity is treated as one. The
+one real gap — a row with no length or width contributes no area and no boards
+and says nothing — is now flagged per row, naming the missing dimension. A
+missing quantity is flagged too, since being silently counted as one is a
+decision the estimator should see.
+
+### 4. Corrections to what I claimed earlier in the day
+- I called the MSSI Excel template broken (10 columns where the importer reads
+  12). **False alarm.** I read the `.xlsx` sitting in the folder instead of
+  tracing the download button, which builds the workbook fresh in the browser.
+  Checking the artifact instead of the path is the same mistake as trusting a
+  stale doc.
+- I implied a broad unguarded region downstream of import. **Overstated** — see
+  item 3; the BOM stage does not silently shrink.
+
+### 5. ⚠ PMES — Rommel has confirmed it will get Google sign-in
+Until it does, **do not drop the 22 anon policies** — that app makes no auth
+calls and uses the public website's own publishable key, so removing them takes
+it down. When sign-in lands: drop the 22 anon SELECT policies and revoke the 7
+RLS-free `pmes_*` views from anon.
+
+### 6. Do not patch this file with Python heredocs
+Python silently turns `\n` and `\b` inside a string into real control characters.
+It put literal newlines inside a regex literal in `portal.html` and broke the
+whole script — every hoisted function stayed callable, so the page looked
+perfectly healthy while its tail had never run. Use the Edit tool, or node.
+Always re-verify with `new Function()` over each `<script>` block afterwards.
