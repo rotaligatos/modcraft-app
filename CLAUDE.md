@@ -2734,3 +2734,54 @@ hosts from the same machine in under a second. Third attempts succeeded. Not a c
 the services. If staff report the app hanging, orders not loading, or the Sheets-fallback banner
 appearing, this is the likely cause. Note the notification relays post `no-cors`, so a dropped
 request is **silent by construction** — a Chat/email nudge can vanish with no error anywhere.
+
+## What was changed on 2026-08-01 (session — page width, and the catalogue opened to the website)
+
+Mostly an MSSI-website session (see that folder's `HANDOFF.md`), but three things land here.
+
+### 1. `.page` was capped at a reading width (commit `1579707`)
+Every page sat in a **1080px** column with ~420px of empty screen down each side of a 1920
+display. That is a prose measure, and this app is dashboards, project tables, order queues and
+quotation grids. Raised to **1700px** — one number, and `1080px` appeared exactly once in the
+file. On anything narrower nothing changes, because max-width only ever caps.
+
+**Rommel's standing rule, recorded so it applies by default:** *"if it can [be] viewed in one
+screen by utilizing screen then it should be design like that… its more efficient."* Do not ask
+when the answer is obvious; build it wide. A centred reading column is for prose.
+
+> **Noted, NOT fixed:** at 1280px the app scrolls sideways to 1349px. The overflow is in the
+> **topbar** — the fullscreen button and avatar cluster — and is byte-for-byte identical with the
+> old 1080px value, so it predates the change.
+
+### 2. Three price-free catalogue views now exist in Supabase
+The MSSI order form is anonymous, but `price_materials` / `price_hardware` / `price_services` are
+readable only by authenticated users. Rather than opening those tables:
+
+| View | Exposes | Rows |
+|---|---|---|
+| `catalogue_materials` | name, unit, category | 124,132 |
+| `catalogue_hardware` | name, unit | 143 |
+| `catalogue_services` | name, unit | 57 |
+
+**Price is deliberately never exposed** — the client picks a SKU, ModCraft prices it afterwards.
+Granted to `anon` and `authenticated`.
+
+Each view **groups by name**, which collapses the ~29,420 blank-unit duplicate rows that shadow
+good ones and keeps the populated unit. Two indexes were added to `price_materials`:
+`_name_trgm` (GIN/pg_trgm — `ILIKE '%x%'` cannot use a btree, and was seq-scanning 153k rows per
+keystroke; a three-word search is now **17.7ms**) and `_name_btree` (the trigram index cannot
+answer an exact-name lookup, which is what a pasted SKU is).
+
+**These views read from `price_materials`, so anything that rewrites that table flows through.**
+The standing rule still applies: a direct edit to the Price DB **Sheet** does not reach Supabase —
+run `supaMigratePriceDb()` afterwards.
+
+### 3. A data error to fix in the Price DB Sheet
+**`Boring 59mm (Grommet)` is priced `/lm`. All boring is per hole** — confirmed by Rommel. The
+website's cutting list already treats every boring service as per hole; the catalogue does not.
+Fix it in the **Sheet**, not Supabase — a Supabase-only edit is undone by the next
+`supaMigratePriceDb()`.
+
+Worth knowing why it matters: ModCraft **drops a service at qty 0**, so a boring line with no hole
+count does not arrive vague — it disappears. The website now collects the count
+(`Boring 35mm (Hinges) × 4 holes`), which is the other half of the same fix.
