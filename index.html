@@ -260,6 +260,10 @@ tr.cl-row:hover td{background:#f4f7fb}
         <div id="msg-panel-list" style="max-height:300px;overflow-y:auto"></div>
       </div>
     </div>
+    <!-- Audit-trail backlog. Hidden unless entries are genuinely stuck: a missing
+         log entry is invisible by nature, so it has to announce itself. -->
+    <span id="log-outbox-badge" onclick="flushLogOutbox().then(function(n){showToast(n?n+' log entries still pending — check your connection.':'All log entries saved.');})"
+          style="display:none;align-items:center;gap:5px;cursor:pointer;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:11px;padding:3px 10px;font-size:11px;font-weight:600;margin-right:8px"></span>
     <div style="position:relative">
       <button class="btn" id="notif-btn" onclick="toggleNotifPanel(event)" style="padding:6px 8px">
         <i class="ti ti-bell" style="font-size:18px"></i>
@@ -18590,6 +18594,10 @@ function gShowApp(){
   // which stayed truthy the entire time despite nothing actually working underneath.
   setTimeout(_supaCheckLiveness,8000);
   if(!_supaLiveCheckTimer) _supaLiveCheckTimer=setInterval(_supaCheckLiveness,SUPA_LIVE_CHECK_INTERVAL_MS);
+  // Drain any audit entries queued while signed out or offline. Delayed so the
+  // token and the Supabase session are both up first, or the flush just re-queues.
+  _updateLogOutboxBadge();
+  setTimeout(function(){ flushLogOutbox(); },12000);
   // Update topbar role pill
   var rp=el('topbar-role-pill');
   if(rp){
@@ -22348,11 +22356,69 @@ function restoreFullQuotationState(state){
 }
 
 // ── Log activity to Sheets ────────────────────────────────────────────────
+// ── Audit trail: nothing logged may be silently lost ──────────────────────
+// The durable trail is Supabase `activity_log` (INSERT + SELECT policies only —
+// no UPDATE, no DELETE, so it cannot be altered or erased from the app) mirrored
+// into the Activity Log sheet.
+//
+// It used to drop entries three ways, all silent: it returned early when the token
+// or user was not ready, swallowed a failed Sheets append with .catch(function(){}),
+// and supaInsertActivity gave up quietly when not connected. In every case the entry
+// still appeared in the on-screen activity log, so it LOOKED recorded.
+//
+// Now an entry that cannot be written durably is queued in localStorage and retried;
+// it is never discarded. A queue that will not drain becomes visible rather than
+// staying quiet — a missing audit entry is exactly the kind of gap nobody notices.
+var LOG_OUTBOX_KEY='mc_log_outbox', _logOutboxTimer=null;
+function _logOutboxLoad(){ try{ return JSON.parse(localStorage.getItem(LOG_OUTBOX_KEY)||'[]'); }catch(e){ return []; } }
+function _logOutboxSave(a){ try{ localStorage.setItem(LOG_OUTBOX_KEY,JSON.stringify(a.slice(-500))); }catch(e){} }
+function _logOutboxAdd(e){ var a=_logOutboxLoad(); a.push(e); _logOutboxSave(a); _updateLogOutboxBadge(); }
+function logOutboxCount(){ return _logOutboxLoad().length; }
+// Writes one entry to whichever destinations it still owes. Resolves with what is
+// left owing, so a partial success is not mistaken for a complete one.
+function _writeLogEntry(e){
+  var jobs=[], owe={sheets:!!e.needSheets, supa:!!e.needSupa};
+  if(e.needSheets && gToken && gUser){
+    jobs.push(sheetsAppend('Activity Log!A:E',[[e.disp,e.email,e.action,e.serial,'']])
+      .then(function(r){ if(!r||!r.error) owe.sheets=false; })
+      .catch(function(){}));
+  }
+  if(e.needSupa && typeof supaReady==='function' && supaReady()){
+    jobs.push(supa.from('activity_log').insert({user_email:e.email||null,action:e.action,serial:e.serial||null})
+      .then(function(r){ if(!r.error) owe.supa=false; })
+      .catch(function(){}));
+  }
+  return Promise.all(jobs).then(function(){ return owe; });
+}
+function flushLogOutbox(){
+  var a=_logOutboxLoad(); if(!a.length) return Promise.resolve(0);
+  return Promise.all(a.map(function(e){
+    return _writeLogEntry(e).then(function(owe){
+      if(!owe.sheets && !owe.supa) return null;      // fully written — drop it
+      e.needSheets=owe.sheets; e.needSupa=owe.supa; return e;
+    });
+  })).then(function(rest){
+    var left=rest.filter(Boolean);
+    _logOutboxSave(left); _updateLogOutboxBadge();
+    return left.length;
+  });
+}
+function _updateLogOutboxBadge(){
+  var n=logOutboxCount(), b=el('log-outbox-badge');
+  if(!b) return;
+  b.style.display=n?'inline-flex':'none';
+  b.textContent='⚠ '+n+' log entr'+(n===1?'y':'ies')+' not yet saved';
+  b.title='Activity that could not be written to the audit trail yet. It is kept and retried — nothing is discarded.';
+}
 function gLogToSheets(action){
-  if(!gToken||!gUser) return;
-  var now=new Date().toLocaleString('en-PH',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-  sheetsAppend('Activity Log!A:E',[[now,gUser.email||'',action,qSerial,'']]).catch(function(){});
-  supaInsertActivity(action,qSerial);
+  var e={ at:new Date().toISOString(),
+          disp:new Date().toLocaleString('en-PH',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}),
+          email:(gUser&&gUser.email)||'', action:action, serial:qSerial||'',
+          needSheets:true, needSupa:true };
+  _writeLogEntry(e).then(function(owe){
+    if(owe.sheets||owe.supa){ e.needSheets=owe.sheets; e.needSupa=owe.supa; _logOutboxAdd(e); }
+  });
+  if(!_logOutboxTimer){ _logOutboxTimer=setInterval(function(){ if(!document.hidden) flushLogOutbox(); },120000); }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
