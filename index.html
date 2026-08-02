@@ -8098,7 +8098,17 @@ function gLoadDirData(cb){
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var ser=r[0],m=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
-        if(seen[baseS]){var p=seen[baseS];if(_statusRank(r[5])>_statusRank(p.status)) p.status=r[5];continue;}
+        // Revisions share a base serial, so they collapse to one row.
+        // A later revision SUPERSEDES: take its identity and its state, or the row
+        // would open the old version and report the old version's status.
+        // Equal revisions are option variants — there, keep the most advanced status.
+        if(seen[baseS]){var p=seen[baseS];
+          if(_revisionOf(ser)>_revisionOf(p.id)){
+            p.id=ser; p.status=r[5]||'Draft'; p.locked=r[9]==='Yes'; p.stage=r[10]||p.stage;
+          } else if(_revisionOf(ser)===_revisionOf(p.id) && _statusRank(r[5])>_statusRank(p.status)){
+            p.status=r[5];
+          }
+          continue;}
         var entry={id:ser,baseSerial:baseS,created:r[1]||'',client:r[2]||'',contact:r[4]||'',type:r[12]||'',
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,user:r[7]||'',segment:r[8]||'',
           status:r[5]||'Draft',locked:r[9]==='Yes',stage:r[10]||'Initial',options:parseInt(r[11])||1,
@@ -15181,6 +15191,22 @@ function requestUnlock() {
   if(isApprover()){ _pinModalApprover=findApproverForSelf(); _openPinModal("ov-unlock","unlock-pin","unlock-err"); }
   else { openSendRequest('unlock',{ctx:'s1'}); }
 }
+// Moves the OPEN quotation onto the next revision of its own serial. The previously
+// locked row keeps its number and stays in the sheet as the issued version — this is
+// deliberately not a rename, so the superseded document remains findable.
+function _applyRevisionBump(){
+  var old=qSerial;
+  if(!old) return;
+  qSerial=_bumpRevision(old);
+  qRevisedFrom=old;
+  qSerialCommitted=false;          // the new number still has to be written
+  if(qBaseSerial) qBaseSerial=_serialStem(qBaseSerial);
+  var s=el('q-serial'); if(s) s.textContent=qSerial;
+  var b=el('banner-revised');
+  if(b){ b.style.display='inline'; b.textContent='Revised from: '+old; }
+  if(typeof _updateQStatusBadge==='function') _updateQStatusBadge();
+  logActivity('Revision '+qSerial+' created from '+old+'.');
+}
 function confirmUnlock() {
   if(!_pinModalApprover) _pinModalApprover=findApproverForSelf();   // safety net if modal opened without setting approver
   var pin=(el("unlock-pin")||{}).value||'';
@@ -15188,14 +15214,20 @@ function confirmUnlock() {
   if(!ok){var e=el("unlock-err");if(e)e.style.display="block";return;}
   var reason=el("unlock-reason")?el("unlock-reason").value:"(no reason given)";
   closeModal("ov-unlock");
+  // Unlocking supersedes an issued version, so the serial gains a revision marker
+  // BEFORE any editing. Bumped on every unlock, not only when the quotation was
+  // sent: over-numbering is harmless, whereas two different documents sharing one
+  // number is the failure this exists to prevent. No makeSerial() and no counter
+  // touched — the revision is derived from the serial already held.
+  _applyRevisionBump();
   if(modalCtx==='fq'){
     fqLocked=false; fqSentStatus="";
     fqClientApproved=false; fqClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
-    logActivity("Final quotation unlocked. Reason: "+reason);
+    logActivity("Final quotation unlocked ("+qSerial+"). Reason: "+reason);
     updateFQLockUI(); updateFQSentStatus(); _updateQStatusBadge();
   } else {
     qLocked=false; qSentStatus="";
-    logActivity("Quotation unlocked by Manager/Supervisor. Reason: "+reason);
+    logActivity("Quotation unlocked by Manager/Supervisor ("+qSerial+"). Reason: "+reason);
     updateLockUI(); updateSentStatus();
   }
   }); // end _verifyApproverPin.then
@@ -15543,9 +15575,15 @@ function renderDirectory(){
         var baseM=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
         var baseS=baseM?baseM[1]:ser; // strip option suffix (e.g. -1, -2) but not 4-digit serial part
         if(seen[baseS]){
-          // Update if newer or higher status
           var prev=seen[baseS];
-          if(_statusRank(r[5])>_statusRank(prev.status)) prev.status=r[5];
+          // A later revision SUPERSEDES: take its identity and its state, or the row
+          // opens the old version and reports the old version's status.
+          // Equal revisions are option variants — keep the most advanced status.
+          if(_revisionOf(ser)>_revisionOf(prev.id)){
+            prev.id=ser; prev.status=r[5]||'Draft'; prev.locked=r[9]==='Yes'; prev.stage=r[10]||prev.stage;
+          } else if(_revisionOf(ser)===_revisionOf(prev.id) && _statusRank(r[5])>_statusRank(prev.status)){
+            prev.status=r[5];
+          }
           continue;
         }
         var entry={id:ser,baseSerial:baseS,created:r[1]||'',client:r[2]||'',
@@ -21795,6 +21833,27 @@ function _saveConflictReload(){
   _pendingSaveConflict=null;
 }
 // Advances the shared counter to at least one past the given serial's number
+// ── Revision suffix on the serial ─────────────────────────────────────────
+// Unlocking a LOCKED quotation supersedes a version that has already been issued,
+// but the serial never changed — so a client could end up holding two different
+// documents bearing the same number, with nothing on either to say which is newer.
+// (confirmRevise had the opposite problem: it minted a brand-new, unrelated serial,
+// so the link to the original survived only in a "Revised from:" field.)
+//
+// Format is `.R1`, chosen because a DASH already means an option (QT-M00001-3).
+// A revision of an option therefore reads QT-M00001-3.R1 and stays unambiguous.
+//
+// Safe by construction: every base-serial regex in this file is start-anchored
+// (/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/), so the suffix is stripped wherever the base
+// is needed — directory grouping, Drive folders, dedup. _claimPeekedSerial's
+// $-anchored regex only ever sees a freshly minted serial, before any suffix exists.
+function _serialStem(serial){ return String(serial||'').replace(/\.R\d+$/,''); }
+function _revisionOf(serial){
+  var m=String(serial||'').match(/\.R(\d+)$/);
+  return m?parseInt(m[1],10):0;
+}
+function _bumpRevision(serial){ return _serialStem(serial)+'.R'+(_revisionOf(serial)+1); }
+
 // (only if it isn't already), so a previewed-then-successfully-claimed serial
 // isn't handed out again as the "next" preview for a subsequent quotation.
 function _claimPeekedSerial(serial){
