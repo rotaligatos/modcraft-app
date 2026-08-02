@@ -2717,15 +2717,30 @@ fixes) — **its own pending list lives in `MSSI Webpage/HANDOFF.md`**, which is
 that side. Nothing there changes Modcraft; the three gaps above are still the whole Modcraft-facing
 ask.
 
-### 7. Components-per-unit not yet filled in
-`CARCASS_COMPONENTS` is empty for all 13 types. Until it is populated, carcass/BOM project size
-cannot auto-detect and users type it manually (which still satisfies the lock gate, so nobody is
-blocked). Deliberately not seeded — the POC types (base, wall, tall, drawer, sink, corner…) do not
-map onto the catalogue names (Fridge Cabinet, Luggage Cabinet, Wall Cladding…), and invented counts
-would put wrong numbers on quotations.
+### 7. Components-per-unit — DONE 2026-08-02 (Rommel filled it in)
+`CARCASS_COMPONENTS` now holds all 13 types (Settings → Carcass pricing):
+Wardrobe/Closet 31 · Work Space Table 28 · Kitchen Drawer 25 · Sink 10 · Vanity 10 ·
+Overhead 10 · Kitchen Base 9 · Kitchen Tall 8 · Luggage 8 · Fridge 7 · Kitchen Hanging 7 ·
+Toilet Partition 5 · Wall Cladding 1.
 
-### 8. Stage 2 lock is not gated on project size
-Only Stage 1's `doLockOnly()` enforces it. Decide whether Final Quotation should too.
+Carcass and BOM project size therefore **auto-detects**. Verified against the 17 approved
+carcass quotations awaiting a Final Quotation lock: zero unmapped types, and detection
+yields real numbers (490, 357, 260, 250, 250, 110 …).
+
+> ⚠ This entry previously read "empty for all 13 types" and was **stale**, which produced a
+> wrong impact estimate for the Stage 2 gate (27 blocked, when the true figure is 10). If a
+> claim here decides anything, re-check it against the CONFIG row — `value->'carcassComponents'`
+> in the `settings` table — rather than trusting this file.
+
+### 8. Stage 2 lock gate — DONE 2026-08-02
+Final Quotation lock now requires a project size, same as Stage 1. Both stages share one rule
+(`_projectSizeGateOk` / `_projectSizeGateFail` / `_applyGateToBtn`) rather than a copy each.
+Stage 2 sends the user to Stage 1 first, because the Project Size card lives inside `#s1-wrap`
+and is hidden on Stage 2.
+
+**Remaining exposure: 10 quotations** — approved, awaiting a Final Quotation lock, cutting-list
+(services) mode, no Designers Support analysis, so nothing can detect a count for them. Each
+needs a project size typed once. The other 17 auto-detect (see item 7).
 
 ### 9. ⚠ PMES is readable with no login — waiting on its Google sign-in
 The 22 `pmes_*` tables carry anon SELECT policies and `pmes_production_jobs` exposes
