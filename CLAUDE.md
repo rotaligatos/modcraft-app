@@ -2647,6 +2647,95 @@ basis changed without the price following. Worth settling — it decides whether
 
 ---
 
+## What was changed on 2026-08-02 (session — duplicate clients, website→directory sync, Stage 2 lock gate)
+
+Four commits: `3f72bd5`, `455cedc`, `876c9f2`, plus a docs correction. Everything below was found
+by querying live data or driving the real function — nothing by reading code alone.
+
+### 1. ModCraft was creating a second record for clients it already had (`3f72bd5`)
+**Evidence, not theory:** clients `22` and `23` are both `LIMSHEN`, created 55 minutes apart. The
+second quotation had a business name typed, and the matcher's contact-name branch was gated on
+`&&!bizName`, so typing a business name **disabled** it — while the business branch could not
+match row 22's empty one. A match was impossible; a duplicate was certain.
+
+Three call sites each had their own copy of the matching logic and the reopen-link at
+`getFullQuotationState` did not even lowercase. One `_findExistingClient(email,biz,contact,list)`
+now serves all three: **email → business name → contact name**, the last only where the business
+names do not CONTRADICT, so two people of the same name at different firms stay separate. Names
+normalise for case, repeated spaces and a trailing period (`Studio Tille Inc` finds
+`STUDIO TILLE INC.`). On a match it backfills only **missing** fields — client 22 has no email
+today purely because the duplicate carried it. The client search box now searches email too.
+
+### 2. Registered website client → ModCraft directory row (`455cedc`, `supabase_client_directory_sync.sql`)
+A Postgres trigger on `client_accounts`. **Not for duplicates** — (1) fixed those. The prize is the
+**email**: 11 of 20 client records carry none, so matching falls back to names, and someone
+registering as "Studio Tille Interiors" against a record reading "STUDIO TILLE INC." cannot be tied
+together by anything. The trigger **matches before it inserts**, same three keys and order as the
+JS — a naive insert-per-account would be a duplicate factory, since most registrants are existing
+customers. New rows get company `Module Systems and Services, Inc.` (what the website stamps on its
+own orders) and a numeric id.
+
+> ⚠ **The id must stay numeric.** `index.html` picks the next one with `Math.max(mx, c.id||0)`, so a
+> single non-numeric id makes that `NaN` and every client created afterwards gets `id: NaN`. Proven
+> in node before the insert was written.
+>
+> ⚠ **The SQL and JS matchers must change together** or this becomes what it was built to prevent.
+
+Testing note: a test address collided with a REAL client (35 already held
+`interiors@studiotille.com`), so the trigger correctly matched and backfilled two blank fields on a
+live record. Reverted. **Use `*.example` addresses when testing against production.**
+
+### 3. Final Quotation lock now needs a project size (`876c9f2`)
+Stage 1 has required one since 2026-07-29; Stage 2 had **no gate at all**, so a quotation could
+reach a locked Final Quotation with no size — the hole the Stage 1 gate was opened to close. Both
+stages now share `_projectSizeGateOk` / `_projectSizeGateFail` / `_applyGateToBtn`. One deliberate
+difference: the Project Size card lives inside `#s1-wrap`, so on Stage 2 it is hidden and scrolling
+to it would do nothing — Stage 2 sends the user to Stage 1 first. `_updateFQLockGate` runs LAST in
+`updateFQLockUI`, because the branch above re-enables the button.
+
+**Impact: 10 quotations, not 27** (see the correction below). All cutting-list mode with no
+Designers Support analysis, so nothing can derive a count; each needs a number typed once, only at
+the moment someone locks the Final Quotation. Nine of the ten are test data.
+
+### 4. ⚠ A doc claim I repeated without checking, and it was the only thing wrong
+OPEN item 7 said `CARCASS_COMPONENTS` was empty. Rommel had filled all 13 types in that morning.
+Every other figure in that message was verified against the database; that one line came from this
+file, and it was the one that was wrong. **Any claim here that a setting is empty is one query
+against where the setting lives** — `settings.CONFIG -> 'carcassComponents'`.
+
+### 5. Found while checking one quotation — `fqLocked` missing on 9 legacy states (NOT fixed, parked)
+13 quotations have `quotations.final_locked_at` set. Only 4 carry `fqLocked: true` in their state
+JSON. The **9 that disagree were all final-locked on or before 2026-07-06**; every one locked after
+`QT-M00000016` (same day) is correct — a clean cutoff, so **the bug is already fixed and nothing is
+still breaking**. They also lack `fqSentStatus` / `fqClientApproved`.
+
+Consequence: reopening one shows **Stage 2 as unlocked**, so a quotation the client already has
+could be edited and re-locked. Repair offered (set `fqLocked` + `fqSentStatus` from each row's own
+`final_locked_at`, only where the activity log confirms a final lock; never invent
+`fqClientApproved` — a client sign-off is a real business fact). **PARKED at Rommel's request**
+until he has spoken to the users, because `QT-260619-3668` is in both this set and item 6.
+
+### 6. `QT-260619-3668` (MABA CONSTRAK) — stored as ₱0.00, should be ~₱32,981.26
+Real work: created from **Wufoo Order #8724**, locked, approved and *"Final quotation locked. Sent
+via email."* by **Joanna Marie Buenconsejo** on 19 June. Its saved `pCalc` has **every field zero**
+while the state holds ₱26,245 of materials and hardware. Recomputed with the app's own
+`getAreaSubtotal`/`getAreaMatSubtotal`/`getAreaHwSubtotal` and the quotation's own rates
+(fab contingency 10%, VAT 12%, no fab buffer since Fabrication-only): **₱32,981.26**.
+
+**It is the only such record** — across all 175 states, no other quotation has a zero total with
+real line value. So there is no code fix indicated on this evidence. The all-zero `pCalc` looks
+like a snapshot taken before a recalc ran, not a pricing error. **Whether the client's emailed PDF
+was also zero is unknown** — the printout rebuilds from a live recalc at print time, not from the
+stored total. Matters because the Project List, dashboard and all revenue/KPI reporting read
+`quotations.total`, so this job currently counts as ₱0 revenue. **Rommel is checking with the users
+before anything is changed.**
+
+### Worth knowing
+`isDirectClient()` reads the **live DOM** (`el('cl-type').value`), not the saved state — so any
+cost path that depends on it is evaluating the form as it stands, not the quotation as saved.
+
+---
+
 # ⚠ OPEN — read before continuing (as of 2026-07-30)
 
 Everything below is pending. Nothing here is started.
