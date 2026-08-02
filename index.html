@@ -2155,7 +2155,10 @@ var KPI_DEFS = {
   totalQuotes:{label:'Total quotations',icon:'ti-receipt-2',color:'navy',fmt:'number',calc:function(){return DEMO_PROJS.length+308;}},
   winRate:{label:'Win rate',icon:'ti-target',color:'teal',fmt:'pct',calc:function(){var q=DEMO_USERS.reduce(function(s,u){return s+u.quotes;},0);var c=DEMO_USERS.reduce(function(s,u){return s+u.converted;},0);return q?Math.round(c/q*100):0;}},
   revenueYTD:{label:'Revenue YTD',icon:'ti-currency-peso',color:'amber',fmt:'money',calc:function(){return DEMO_USERS.reduce(function(s,u){return s+u.revenue;},0);}},
-  archived:{label:'Archived quotations',icon:'ti-archive',color:'muted',fmt:'number',calc:function(){return 3;}},
+  archived:{label:'Archived quotations',icon:'ti-archive',color:'muted',fmt:'number',calc:function(){return _quotAgeCount('archived');}},
+  // The one worth acting on: quotations sitting with a client past the follow-up
+  // mark. These are sent proposals nobody has chased, not housekeeping.
+  followUp:{label:'Need follow-up',icon:'ti-bell-ringing',color:'coral',fmt:'number',calc:function(){return _quotAgeCount('alert')+_quotAgeCount('inactive');}},
   avgDeal:{label:'Avg. deal value',icon:'ti-chart-bar',color:'navy',fmt:'money',calc:function(){var t=DEMO_PROJS.reduce(function(s,p){return s+p.value;},0);return DEMO_PROJS.length?Math.round(t/DEMO_PROJS.length):0;}},
   openPipeline:{label:'Open pipeline',icon:'ti-git-branch',color:'teal',fmt:'money',calc:function(){return DEMO_PROJS.filter(function(p){return p.status==='On-going';}).reduce(function(s,p){return s+p.value;},0);}},
   avgResponse:{label:'Avg. response time',icon:'ti-clock',color:'teal',fmt:'hours',calc:function(){var u=DEMO_USERS;return Math.round(u.reduce(function(s,x){return s+x.avgHrs;},0)/u.length*10)/10;}},
@@ -15237,6 +15240,86 @@ var _STATUS_PILL_COLOR={
 var _STATUS_RANK={'Draft':0,'Locked':1,'Initial Quotation':1,'Approved':2,'In Final Quotation':2,
   'Awaiting Client Approval':3,'Client Approved':4,'Cancelled':5,'Closed':6};
 function _statusRank(s){ return _STATUS_RANK[s]!==undefined?_STATUS_RANK[s]:0; }
+
+// ── Quotation ageing: follow-up → Inactive → Archived ─────────────────────
+// The lifecycle was described in Help, in Settings and on the dashboard since the
+// early days, but was never implemented: nothing ever wrote 'Archived', the KPI
+// returned a hardcoded 3, and the archive table was a demo row. So 100 quotations
+// going back to May sat "live" and nobody was prompted to chase any of them.
+//
+// DERIVED, never stored. _computeQuotationStatus() rebuilds `status` from the
+// quotation's own flags on every save, so an 'Archived' written into that column
+// would be silently wiped on the next save — and worse, would look like it worked
+// until someone reopened the quotation. Deriving it also means no migration, and
+// no way for this to corrupt a real status.
+var QUOT_AGE={alert:25,inactive:30,archive:35};
+// Forward-only grace period. Measuring from the real sent date would have archived
+// ~116 quotations the moment this shipped, with no warning to anyone. Instead the
+// clock starts no earlier than the day this went live, so the oldest can only reach
+// Inactive after 30 more days — long enough to see the follow-up prompts working
+// first. Delete this constant to switch to true sent-date ageing.
+var QUOT_AGE_START='2026-08-02';
+// Only quotations that are actually with the client and awaiting a reply. A Draft
+// was never sent, so there is no response to wait for; Client Approved is won;
+// Cancelled and Closed are already finished.
+var _QUOT_AGE_STATUSES={'Initial Quotation':1,'In Final Quotation':1,'Awaiting Client Approval':1,
+                        'Locked':1,'Approved':1};   // legacy strings map to the first two
+// Restoring an archived quotation — the client went quiet, then came back.
+// Kept as a Settings key rather than a new Quotations column: the sheet would have
+// needed a header migration and 9 range strings widened, for a handful of serials.
+// This rides the same mechanism as FOLLOWED_/DASHPREF_, so it is already shared
+// across users and already dual-written to Supabase. { serial: ISO date }
+var QUOT_REVIVED={};
+function _quotAgeAnchor(e){
+  if(!e) return null;
+  // Latest milestone that put it in front of the client; final beats initial.
+  var raw=e.finalLockedAt||e.initLockedAt||'';
+  if(!raw) return null;
+  var d=new Date(raw);
+  if(isNaN(d)) return null;
+  var floor=new Date(QUOT_AGE_START);
+  if(!isNaN(floor)&&d<floor) d=floor;
+  // Fresh contact restarts the clock rather than exempting the quotation, so a
+  // revived one that goes quiet again ages out normally instead of living forever.
+  var rev=QUOT_REVIVED[e.id||e.serial||''];
+  if(rev){ var r=new Date(rev); if(!isNaN(r)&&r>d) d=r; }
+  return d;
+}
+// Called from the Project List on an archived row.
+function restoreQuotation(serial){
+  if(!serial) return;
+  _confirm('Bring '+serial+' back into the active list?\n\nUse this when the client has come back to you. The follow-up clock restarts from today, so it will age out again if it goes quiet.',function(){
+    QUOT_REVIVED[serial]=new Date().toISOString();
+    if(typeof gSaveAppSettings==='function') gSaveAppSettings();
+    logActivity('Quotation '+serial+' restored from archive — client active again.');
+    renderDirectory();
+    showToast(serial+' restored — follow-up clock restarted.');
+  });
+}
+// 'active' | 'alert' | 'inactive' | 'archived' | '' (not ageing at all)
+function quotAgeStage(e){
+  if(!e||!_QUOT_AGE_STATUSES[e.status||'']) return '';
+  var a=_quotAgeAnchor(e); if(!a) return '';
+  var days=Math.floor((Date.now()-a.getTime())/86400000);
+  if(days>=QUOT_AGE.archive)  return 'archived';
+  if(days>=QUOT_AGE.inactive) return 'inactive';
+  if(days>=QUOT_AGE.alert)    return 'alert';
+  return 'active';
+}
+function quotAgeDays(e){
+  var a=_quotAgeAnchor(e); if(!a) return null;
+  return Math.floor((Date.now()-a.getTime())/86400000);
+}
+// Counts across the real directory + this session's saves, the same merge the
+// Project List uses, so a KPI can never disagree with the list it links to.
+function _quotAgeCount(stage){
+  var merged={};
+  (dirData||[]).forEach(function(e){merged[e.id]=e;});
+  Object.keys(sessionQuotations||{}).forEach(function(k){merged[k]=sessionQuotations[k];});
+  var n=0;
+  Object.keys(merged).forEach(function(k){ if(quotAgeStage(merged[k])===stage) n++; });
+  return n;
+}
 function _updateQStatusBadge(){
   var statusEl=el('q-status'); if(!statusEl) return;
   var st=_computeQuotationStatus();
@@ -15485,7 +15568,8 @@ function renderDirectoryTable(){
   Object.keys(sessionQuotations).forEach(function(k){merged[k]=sessionQuotations[k];});
   var list=Object.values(merged).slice();
   // Count archived before filtering so the toggle button can show the number
-  var archivedCount=Object.values(merged).filter(function(e){return (e.status||'')==='Archived';}).length;
+  // Was (e.status==='Archived'), which could never be true — nothing ever wrote it.
+  var archivedCount=Object.values(merged).filter(function(e){return quotAgeStage(e)==='archived';}).length;
   var archBtn=el('dir-archive-toggle');
   if(archBtn){
     archBtn.style.display=archivedCount?'':'none';
@@ -15497,7 +15581,7 @@ function renderDirectoryTable(){
     archBtn.style.borderColor=dirShowArchived?'var(--muted)':'';
   }
   list=list.filter(function(p){
-    if(!dirShowArchived&&(p.status||'')==='Archived') return false;
+    if(!dirShowArchived&&quotAgeStage(p)==='archived') return false;
     var matchS=!search||((p.client||'').toLowerCase().indexOf(search)>=0||(p.id||'').toLowerCase().indexOf(search)>=0||((p.project||'').toLowerCase().indexOf(search)>=0)||((p.type||'').toLowerCase().indexOf(search)>=0));
     var matchSt=!statusF||_normalizeStatusLabel(p.status)===statusF;
     var matchY=!yearF||(p.created||'').indexOf(yearF)===0;
@@ -15573,6 +15657,7 @@ function renderDirectoryTable(){
     if(dirColPrefs.closedAt)      h+='<td style="font-size:12px;color:var(--text2)">'+fmtDT(p.closedAt)+'</td>';
     if(dirColPrefs.sourceOrder)   h+='<td style="font-size:12px;color:var(--text2)">'+(p.sourceOrder?'<span style="background:#e8f4fd;color:#1a73e8;border:1px solid #acd;border-radius:4px;padding:1px 6px">📋 #'+escHtml(p.sourceOrder)+'</span>':'—')+'</td>';
     h+='<td style="white-space:nowrap" onclick="event.stopPropagation()">'
+      +(quotAgeStage(p)==='archived'?' <button class="btn" style="font-size:11px;padding:3px 8px;color:var(--navy);border-color:var(--navy)" onclick="restoreQuotation(\''+escHtml(p.id)+'\')" title="Client is active again — restart the follow-up clock"><i class="ti ti-rotate"></i>Restore</button>':'')
       +(!isClosed?' <button class="btn" style="font-size:11px;padding:3px 8px;color:var(--teal)" onclick="openNewOptionFromDir(\''+p.id+'\')" title="Create new option variant"><i class="ti ti-layers-difference"></i>New Option</button>':'')
       +(currentRole==='Admin'?' <button class="btn" style="font-size:11px;padding:3px 8px;color:var(--coral);border-color:var(--coral)" onclick="deleteQuotation(\''+escHtml(p.id)+'\')" title="Delete quotation"><i class="ti ti-trash"></i></button>':'')
       +'</td>';
@@ -21172,6 +21257,7 @@ function _collectAppSettings(){
     instCost: JSON.parse(JSON.stringify(INST_COST)),
     ppicSettings: JSON.parse(JSON.stringify(ppicSettings)),
     msgMailerUrl:(el('s-msg-mailer')?el('s-msg-mailer').value.trim():MSG_MAILER_URL)||MSG_MAILER_URL||'',
+    quotRevived:(function(){var o={};for(var k in QUOT_REVIVED){if(QUOT_REVIVED.hasOwnProperty(k))o[k]=QUOT_REVIVED[k];}return o;})(),
     chatWebhookUrl:(el('s-chat-webhook')?el('s-chat-webhook').value.trim():CHAT_WEBHOOK_URL)||CHAT_WEBHOOK_URL||'',
     serialClaimUrl:(el('s-serial-claim')?el('s-serial-claim').value.trim():SERIAL_CLAIM_URL)||SERIAL_CLAIM_URL||'',
     approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING)),
@@ -21181,6 +21267,7 @@ function _collectAppSettings(){
 function _applyAppSettings(s){
   if(!s) return;
   if(s.msgMailerUrl!==undefined){ MSG_MAILER_URL=s.msgMailerUrl||''; localStorage.setItem('mc_msg_mailer_url',MSG_MAILER_URL); var _mm=el('s-msg-mailer'); if(_mm) _mm.value=MSG_MAILER_URL; }
+  if(s.quotRevived){ QUOT_REVIVED={}; for(var _qr in s.quotRevived){ if(s.quotRevived.hasOwnProperty(_qr)) QUOT_REVIVED[_qr]=s.quotRevived[_qr]; } }
   if(s.chatWebhookUrl!==undefined){ CHAT_WEBHOOK_URL=s.chatWebhookUrl||''; localStorage.setItem('mc_chat_webhook_url',CHAT_WEBHOOK_URL); var _cw=el('s-chat-webhook'); if(_cw) _cw.value=CHAT_WEBHOOK_URL; }
   if(s.serialClaimUrl!==undefined){ SERIAL_CLAIM_URL=s.serialClaimUrl||''; localStorage.setItem('mc_serial_claim_url',SERIAL_CLAIM_URL); var _sc=el('s-serial-claim'); if(_sc) _sc.value=SERIAL_CLAIM_URL; }
   if(s.CF&&typeof s.CF==='object'){ for(var k in s.CF){ if(s.CF.hasOwnProperty(k)) CF[k]=s.CF[k]; } }
