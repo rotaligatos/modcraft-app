@@ -287,6 +287,9 @@ tr.cl-row:hover td{background:#f4f7fb}
       <div id="avatar-menu" style="display:none;position:absolute;top:38px;right:0;background:#fff;border:.5px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);min-width:180px;z-index:9999;padding:6px 0">
         <div id="avatar-menu-name" style="padding:8px 14px;font-size:12px;color:var(--text2);border-bottom:.5px solid var(--border);margin-bottom:4px"></div>
         <button id="avatar-set-pin-btn" onclick="closeAvatarMenu();openSetPinModal()" style="display:none;width:100%;text-align:left;padding:7px 14px;font-size:13px;border:none;background:transparent;cursor:pointer;color:var(--navy)"><i class="ti ti-lock"></i> Set / Change PIN</button>
+        <!-- Everyone, not just approvers: a signature belongs to the person, and the
+             preparer is the one whose signature lands on the quotation at lock. -->
+        <button onclick="closeAvatarMenu();openMySignatureModal()" style="width:100%;text-align:left;padding:7px 14px;font-size:13px;border:none;background:transparent;cursor:pointer;color:var(--navy)"><i class="ti ti-signature"></i> My signature</button>
         <button onclick="closeAvatarMenu();gSignOut()" style="width:100%;text-align:left;padding:7px 14px;font-size:13px;border:none;background:transparent;cursor:pointer;color:var(--coral)"><i class="ti ti-logout"></i> Sign out</button>
       </div>
     </div>
@@ -1638,6 +1641,23 @@ tr.cl-row:hover td{background:#f4f7fb}
   </div>
 </div>
 
+<div class="overlay" id="ov-my-signature">
+  <div class="modal">
+    <div class="modal-head"><h3><i class="ti ti-signature"></i> My signature</h3><button class="modal-close" onclick="closeModal('ov-my-signature')">×</button></div>
+    <div class="modal-body">
+      <div class="alert alert-info" style="margin-bottom:12px;font-size:12px"><i class="ti ti-info-circle"></i>
+        Upload your signature once. When you lock a quotation it is placed on the <b>Prepared by</b> line automatically.
+        A PNG with a transparent background looks best — it sits on the ruled line rather than in a white box.</div>
+      <div id="my-sig-preview" style="min-height:96px;border:1px dashed var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fafafa;margin-bottom:12px;padding:8px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="uploadMySignature()" style="font-size:13px"><i class="ti ti-upload"></i> Upload signature</button>
+        <button class="btn" id="my-sig-remove" onclick="removeMySignature()" style="font-size:13px;color:var(--coral);border-color:var(--coral);display:none"><i class="ti ti-trash"></i> Remove</button>
+      </div>
+      <p style="font-size:11px;color:var(--text2);margin:12px 0 0">
+        Quotations already locked keep the signature they were locked with — changing this does not alter a document that has been issued.</p>
+    </div>
+  </div>
+</div>
 <div class="overlay" id="ov-set-pin">
   <div class="modal">
     <div class="modal-head"><h3><i class="ti ti-lock"></i> Set / Change Approval PIN</h3><button class="modal-close" onclick="closeModal('ov-set-pin')">×</button></div>
@@ -2531,6 +2551,10 @@ var qLoadedSavedAt = null;    // savedAt of the state as last loaded/saved by TH
 var qLoadedSavedBy = '';      // savedBy of the state as last loaded/saved by THIS session
 var qSerial = makeSerial();
 var qRevisedFrom = "";
+// Signatures captured ON this quotation, copied in at lock time so an issued
+// document never changes if someone later edits their signature.
+// `prepared` is live; checked/noted are the seam for the approver flow.
+var qSignatures = {};   // { prepared:{name,email,role,img,at}, checked:{...}, noted:{...} }
 // Set when a locked quotation is unlocked — the unlock is what makes it a revision.
 // The .Rn suffix is only STAMPED when it is locked again, so a draft in progress
 // never displays a revision number for a version no client has seen.
@@ -4373,7 +4397,7 @@ function initQuotation() {
   // Neither was cleared before, so a new quotation started right after revising one
   // inherited the old "Revised from:" line on its printout, and an owed revision
   // would have stamped .R1 onto a brand-new serial.
-  qRevisedFrom=''; qRevisionPending=false;
+  qRevisedFrom=''; qRevisionPending=false; qSignatures={};
   var _bR=el('banner-revised'); if(_bR){ _bR.style.display='none'; _bR.textContent=''; }
   // Baseline the change log against the empty quotation, so building it up is
   // recorded as additions rather than compared against the previous quotation.
@@ -7188,8 +7212,25 @@ function _buildPrintBody() {
   var crHtml=""; for(var i=0;i<clientRows.length;i++){crHtml+='<tr><td style="text-align:right;font-weight:bold;padding:5px 12px 5px 0;font-size:12px;border:none;width:36%">'+clientRows[i][0]+':</td><td style="border:none;border-bottom:1px solid #999;font-family:monospace;font-size:12px;padding:5px 0">'+(clientRows[i][1]||'')+'</td></tr>';}
   var payterms=el("s-payterms")?el("s-payterms").value:"";
   var tnc=el("s-tnc")?el("s-tnc").value:"";
-  var sigRows=[["PREPARED BY","Cost Estimator"],["CHECKED BY",""],["NOTED BY",""],["CONFORME","SIGNATURE OVER PRINTED NAME"]];
-  var sigHtml=""; for(var i=0;i<sigRows.length;i++){sigHtml+='<div><p style="margin:0 0 28px;font-weight:bold;font-size:11px">'+sigRows[i][0]+':</p><div style="border-top:1px solid #000;padding-top:3px"><p style="margin:0;font-size:10px">'+sigRows[i][1]+'</p></div></div>';}
+  // key = which qSignatures slot fills this block. Only `prepared` is wired so far;
+  // checked/noted are ready for the approver flow and print as before until then.
+  var sigRows=[["PREPARED BY","Cost Estimator","prepared"],["CHECKED BY","","checked"],
+               ["NOTED BY","","noted"],["CONFORME","SIGNATURE OVER PRINTED NAME",""]];
+  var sigHtml="";
+  for(var i=0;i<sigRows.length;i++){
+    var sg=sigRows[i][2]?((qSignatures||{})[sigRows[i][2]]||null):null;
+    // The image sits IN the gap above the rule, so a signed block is exactly the
+    // same height as an unsigned one and the four columns stay aligned.
+    var gap=sg&&sg.img
+      ? '<div style="height:28px;margin:0 0 0;display:flex;align-items:flex-end"><img src="'+sg.img+'" style="max-height:34px;max-width:150px;object-fit:contain;margin-bottom:-4px"></div>'
+      : '<div style="height:28px"></div>';
+    var sub=sg&&sg.name
+      ? '<p style="margin:0;font-size:10px;font-weight:bold">'+escHtml(sg.name)+'</p>'
+        +(sigRows[i][1]?'<p style="margin:0;font-size:9px;color:#555">'+sigRows[i][1]+'</p>':'')
+      : '<p style="margin:0;font-size:10px">'+sigRows[i][1]+'</p>';
+    sigHtml+='<div><p style="margin:0;font-weight:bold;font-size:11px">'+sigRows[i][0]+':</p>'
+      +gap+'<div style="border-top:1px solid #000;padding-top:3px">'+sub+'</div></div>';
+  }
   var pCoColor=pCoName.indexOf("Module")>=0?"#c0392b":pCoName.indexOf("World Class")>=0?"#1a6e3c":"#2e3a8c";
   var pNameColor=pCoName.indexOf("Cebu")>=0?pCoColor:"#000000";
   var pLogo=_getCompanyLogo(pCoName);
@@ -11843,6 +11884,75 @@ function gSaveLogoRow(key,val,okMsg){
   }).then(function(){ supaUpsertSetting(key,val||''); showToast(okMsg||'Logo saved to database ✓');})
     .catch(function(e){console.warn('Logo save failed',e);showToast('Logo save failed — check connection.');});
 }
+// ── Signatures ────────────────────────────────────────────────────────────
+// One per person, stored as SIG_<email> in the Settings sheet — the same row
+// mechanism the company logos already use, so it is shared across devices and
+// mirrored to Supabase for free.
+//
+// When a quotation is locked, the locker's signature is COPIED INTO the quotation
+// rather than looked up at print time. A document that has been issued must not
+// change afterwards: if someone updates or removes their signature later, every
+// quotation they already locked would otherwise silently reprint differently.
+var userSignatures={};                 // { email: dataUrl } — everyone's, loaded from Settings
+function _sigKey(email){ return 'SIG_'+String(email||'').trim().toLowerCase(); }
+function mySignature(){ return (gUser&&userSignatures[String(gUser.email||'').trim().toLowerCase()])||''; }
+function openMySignatureModal(){ renderMySignature(); openModal('ov-my-signature'); }
+function renderMySignature(){
+  var box=el('my-sig-preview'), rm=el('my-sig-remove'); if(!box) return;
+  var sig=mySignature();
+  if(sig){
+    box.innerHTML='<img src="'+sig+'" alt="Your signature" style="max-height:80px;max-width:100%;object-fit:contain">';
+    if(rm) rm.style.display='inline-flex';
+  } else {
+    box.innerHTML='<span style="font-size:12px;color:var(--text2)">No signature uploaded yet</span>';
+    if(rm) rm.style.display='none';
+  }
+}
+function uploadMySignature(){
+  if(!gUser){ showToast('Sign in first.'); return; }
+  var inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
+  inp.onchange=function(e){
+    var f=e.target.files[0]; if(!f) return;
+    var r=new FileReader();
+    r.onload=function(ev){
+      // Same shrink the logos use: caps the data URI under the Sheets 45k cell limit
+      // and falls back to JPEG-on-white only if a PNG will not fit.
+      _shrinkLogoDataUrl(ev.target.result,function(small){
+        if(!small){ showToast('Could not read that image — try a PNG or JPG.'); return; }
+        var em=String(gUser.email||'').trim().toLowerCase();
+        userSignatures[em]=small;
+        renderMySignature();
+        gSaveLogoRow(_sigKey(em),small,'Signature saved ✓');
+        logActivity('Signature uploaded.');
+      });
+    };
+    r.readAsDataURL(f);
+  };
+  inp.click();
+}
+function removeMySignature(){
+  if(!gUser) return;
+  _confirm('Remove your signature?\n\nQuotations you have already locked keep the signature they were locked with — those are unaffected.',function(){
+    var em=String(gUser.email||'').trim().toLowerCase();
+    delete userSignatures[em];
+    renderMySignature();
+    gSaveLogoRow(_sigKey(em),'','Signature removed');
+    logActivity('Signature removed.');
+  });
+}
+// Stamps the locker onto the quotation. Called at lock; does nothing if there is
+// already a prepared-by signature, so re-locking a revision keeps the original
+// preparer rather than reassigning it to whoever unlocked it.
+function _stampPreparedBySignature(){
+  if(!gUser) return;
+  if(qSignatures && qSignatures.prepared && qSignatures.prepared.img) return;
+  var sig=mySignature();
+  if(!sig) return;                     // no signature on file — the line just prints blank, as before
+  qSignatures=qSignatures||{};
+  qSignatures.prepared={ name:(gUser.name||gUser.email||''), email:(gUser.email||''),
+                         role:currentRole||'', img:sig, at:new Date().toISOString() };
+  logActivity('Signature applied to Prepared by ('+(gUser.name||gUser.email)+').');
+}
 function uploadAppLogo() {
   var inp=document.createElement("input"); inp.type="file"; inp.accept="image/*";
   inp.onchange=function(e){
@@ -14774,6 +14884,7 @@ function doLockOnly(){
   if(qLocked||qCancelled) return;
   if(!_projectSizeGateOk()){ _projectSizeGateFail(false); return; }
   if(qRevisionPending) _applyRevisionBump();   // stamp the revision as it is issued
+  _stampPreparedBySignature();
   qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
   // Also mark the current option object as locked
   if(qActiveOptionId>0){var _lo=qOptionsList.find(function(o){return o.id===qActiveOptionId;});if(_lo){_lo.locked=true;_lo.saved=true;}}
@@ -15033,6 +15144,7 @@ function confirmSend(via) {
   // Stamp the owed revision BEFORE gSaveQuotation, so the row is written under the
   // new serial and the superseded one is left untouched.
   if(qRevisionPending) _applyRevisionBump();
+  _stampPreparedBySignature();
   if(modalCtx==='fq'){
     fqLocked=true; fqSentStatus=sentTxt; fqLockedAt=new Date().toISOString();
     logActivity(stage+" locked. "+sentTxt+".");
@@ -21721,6 +21833,11 @@ function _applyLoadedSettingsMap(map){
     if(k.indexOf('LOGO_CO_')===0){
       var v=map[k];
       if(v){companyLogos[k.substring(8)]=v;_cacheLogoDims(v);} else delete companyLogos[k.substring(8)];
+    } else if(k.indexOf('SIG_')===0){
+      // Everyone's signature is loaded, not just the current user's — the approver
+      // blocks (Checked by / Noted by) will need them, and it costs one pass here.
+      var em=k.substring(4), sv=map[k];
+      if(sv) userSignatures[em]=sv; else delete userSignatures[em];
     }
   });
   updateAppLogo();
@@ -22157,6 +22274,7 @@ function getFullQuotationState(){
     // reopened; revisionPending is the unlock-owes-a-revision flag, which has to
     // survive a save or a draft reopened tomorrow would lock without its revision.
     revisedFrom:qRevisedFrom, revisionPending:qRevisionPending,
+    signatures:JSON.parse(JSON.stringify(qSignatures||{})),
     instWorkers:qInstWorkers, instDays:qInstDays,
     instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom, mobCalc:qMobCalc,
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
@@ -22333,6 +22451,7 @@ function restoreFullQuotationState(state){
   qProjectSize=state.projectSize||0;
   qRevisedFrom=state.revisedFrom||'';
   qRevisionPending=!!state.revisionPending;
+  qSignatures=state.signatures?JSON.parse(JSON.stringify(state.signatures)):{};
   // Baseline AFTER the restore and its recalc have run, or the first save would
   // report every line in the quotation as newly added.
   setTimeout(_auditBaseline,0);
