@@ -2527,6 +2527,10 @@ var qLoadedSavedAt = null;    // savedAt of the state as last loaded/saved by TH
 var qLoadedSavedBy = '';      // savedBy of the state as last loaded/saved by THIS session
 var qSerial = makeSerial();
 var qRevisedFrom = "";
+// Set when a locked quotation is unlocked — the unlock is what makes it a revision.
+// The .Rn suffix is only STAMPED when it is locked again, so a draft in progress
+// never displays a revision number for a version no client has seen.
+var qRevisionPending = false;
 var qOptionsList = [];      // [{id, label, snapshot, status:'active'|'approved'|'archived', grand}]
 var qBaseSerial = '';       // base serial without option suffix
 var qActiveOptionId = 0;    // 0 = no options, 1+ = current option number
@@ -4362,6 +4366,11 @@ function initQuotation() {
   qCustomCF=null; qCustomCFApproved=false;
   qOutMarkup=null; qOutContingency=null; qOutBuffer=null;
   qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
+  // Neither was cleared before, so a new quotation started right after revising one
+  // inherited the old "Revised from:" line on its printout, and an owed revision
+  // would have stamped .R1 onto a brand-new serial.
+  qRevisedFrom=''; qRevisionPending=false;
+  var _bR=el('banner-revised'); if(_bR){ _bR.style.display='none'; _bR.textContent=''; }
   // Clear all client input fields
   var _cf=['cl-name','cl-bizname','cl-contact','cl-email','cl-address','cl-city','cl-attn','cl-location','cl-project','cl-agent','cl-lead','cl-lead-other','cl-delivery'];
   for(var _i=0;_i<_cf.length;_i++){var _fe=el(_cf[_i]);if(_fe)_fe.value='';}
@@ -14737,6 +14746,7 @@ function doLock() {
 function doLockOnly(){
   if(qLocked||qCancelled) return;
   if(!_projectSizeGateOk()){ _projectSizeGateFail(false); return; }
+  if(qRevisionPending) _applyRevisionBump();   // stamp the revision as it is issued
   qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
   // Also mark the current option object as locked
   if(qActiveOptionId>0){var _lo=qOptionsList.find(function(o){return o.id===qActiveOptionId;});if(_lo){_lo.locked=true;_lo.saved=true;}}
@@ -14993,6 +15003,9 @@ function confirmSend(via) {
   closeModal("ov-lock");
   var em=el("cl-email")?el("cl-email").value:"";
   var stage=modalCtx==='fq'?'Final quotation':'Quotation';
+  // Stamp the owed revision BEFORE gSaveQuotation, so the row is written under the
+  // new serial and the superseded one is left untouched.
+  if(qRevisionPending) _applyRevisionBump();
   if(modalCtx==='fq'){
     fqLocked=true; fqSentStatus=sentTxt; fqLockedAt=new Date().toISOString();
     logActivity(stage+" locked. "+sentTxt+".");
@@ -15194,9 +15207,11 @@ function requestUnlock() {
 // Moves the OPEN quotation onto the next revision of its own serial. The previously
 // locked row keeps its number and stays in the sheet as the issued version — this is
 // deliberately not a rename, so the superseded document remains findable.
+// Called at LOCK time, never at unlock: a draft is an unfinished edit, not a version.
 function _applyRevisionBump(){
   var old=qSerial;
   if(!old) return;
+  qRevisionPending=false;
   qSerial=_bumpRevision(old);
   qRevisedFrom=old;
   qSerialCommitted=false;          // the new number still has to be written
@@ -15214,12 +15229,11 @@ function confirmUnlock() {
   if(!ok){var e=el("unlock-err");if(e)e.style.display="block";return;}
   var reason=el("unlock-reason")?el("unlock-reason").value:"(no reason given)";
   closeModal("ov-unlock");
-  // Unlocking supersedes an issued version, so the serial gains a revision marker
-  // BEFORE any editing. Bumped on every unlock, not only when the quotation was
-  // sent: over-numbering is harmless, whereas two different documents sharing one
-  // number is the failure this exists to prevent. No makeSerial() and no counter
-  // touched — the revision is derived from the serial already held.
-  _applyRevisionBump();
+  // Unlocking supersedes an issued version, so a revision is now owed — but it is
+  // only STAMPED when the quotation is locked again. While it sits in draft it is
+  // not a new version yet, it is an unfinished edit, and showing .R1 on a draft
+  // would put a revision number on something no client has ever seen.
+  qRevisionPending=true;
   if(modalCtx==='fq'){
     fqLocked=false; fqSentStatus="";
     fqClientApproved=false; fqClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
@@ -22045,6 +22059,11 @@ function getFullQuotationState(){
     bondIns:JSON.parse(JSON.stringify(qBondIns)),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     projectSize:qProjectSize,
+    // Neither of these was persisted before. revisedFrom drives the "Revised from:"
+    // line on the printout, so it was silently lost whenever a quotation was
+    // reopened; revisionPending is the unlock-owes-a-revision flag, which has to
+    // survive a save or a draft reopened tomorrow would lock without its revision.
+    revisedFrom:qRevisedFrom, revisionPending:qRevisionPending,
     instWorkers:qInstWorkers, instDays:qInstDays,
     instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom, mobCalc:qMobCalc,
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
@@ -22219,6 +22238,13 @@ function restoreFullQuotationState(state){
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
   qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
   qProjectSize=state.projectSize||0;
+  qRevisedFrom=state.revisedFrom||'';
+  qRevisionPending=!!state.revisionPending;
+  var _bRev=el('banner-revised');
+  if(_bRev){
+    _bRev.style.display=qRevisedFrom?'inline':'none';
+    if(qRevisedFrom) _bRev.textContent='Revised from: '+qRevisedFrom;
+  }
   var _psEl=el('project-size'); if(_psEl) _psEl.value=qProjectSize||'';
   qInstWorkers=state.instWorkers||0; qInstDays=state.instDays||0;
   qInstRegion=state.instRegion||'z1'; if(qInstRegion==='metro')qInstRegion='z1'; if(qInstRegion==='outside')qInstRegion='z2';
