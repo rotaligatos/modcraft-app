@@ -2730,9 +2730,71 @@ stored total. Matters because the Project List, dashboard and all revenue/KPI re
 `quotations.total`, so this job currently counts as ₱0 revenue. **Rommel is checking with the users
 before anything is changed.**
 
+### 7. "Share via apps" never closed the order — the SLA clock ran on (`a38924e`)
+Of the five buttons in the Share modal, `doShareNative` was the **only** one that never called
+`orderMarkSentFromQuotation`. It did everything else on success — closed the modal, set
+`qSentStatus='Shared'`, logged *"shared via device share sheet with PDF attached"*, saved — so it
+was an omission, not a decision.
+
+The worst one to miss: it is the top button, the only one that genuinely **attaches the PDF**, and
+the natural choice on mobile. The quotation reached the client, the log said so, and the order sat
+in *On going* with the clock still running against the staff member.
+
+The call sits inside `navigate.share()`'s `.then()`, so it fires only on a real send — verified with
+a mocked share sheet that an `AbortError` (user dismissed it) and a generic rejection both leave the
+order **open**. Falsely closing an order would be worse than the bug.
+
+> **Still true, left deliberately:** *Copy to clipboard* closes the order (copying is not proof
+> anything reached the client — a judgement call, not a defect), and **Lock & Send's "Send via
+> email" does NOT** close it. If the team treats that as really sending, it needs the same call.
+
+### 8. Orders: "Completed" → **IQ Lock/Sent** (`62c1793`)
+Rommel's rename, and a better name: the order is not finished, the *Initial Quotation* has gone to
+the client. Changed in **both** places so they cannot drift — `ORDER_TABS` and the green pill on the
+card. Stored status is still `'Done'`; nothing written, filtered or synced changed.
+
+**The lifecycle, confirmed in code:** New (`Pending`) → **Export to Quotation** → On going
+(`In Progress`) → **share the quotation** → IQ Lock/Sent (`Done`, clock stops at `sentAt`). Lock and
+approve touch the order at **all** — only sharing does.
+**Archived** has no trigger in the Orders page at all: it happens only from the quotation side, via
+`doCloseProject` or `confirmCancelQuotation`, and only for orders linked by `quotSerial` — so the
+53 orders with no serial can never reach it. Their only exit is Cancel.
+> ⚠ Untested risk: `orderMarkSentFromQuotation` writes `qSerial||qBaseSerial` (which carries an
+> option suffix, e.g. `-3`) while `_archiveOrdersForQuotation` matches on `qSerial` at close time.
+> Different active option → no match → the order never archives. No order has a serial yet, so this
+> is unproven, but the app does use option serials.
+
+### 9. Quotation ageing lifecycle — built at last (`59367ba`)
+See the OPEN list item 8 above for the full entry. Short version: described everywhere since the
+early days, never implemented (`calc:function(){return 3;}`, demo archive row, nothing ever wrote
+`'Archived'`). Now **derived, never stored** — `_computeQuotationStatus()` rebuilds `status` from
+flags on every save, so a stored `'Archived'` would be silently wiped. Forward-only via
+`QUOT_AGE_START`; only quotations actually with a client age.
+**Restore** (`QUOT_REVIVED`, a Settings key like `FOLLOWED_`) **restarts** the clock rather than
+exempting the quotation, so one that goes quiet again ages out normally.
+
+### 10. Order cards show which channel they came from (`9a990dc` → `bd79263`)
+`ORDER_KINDS` gained `channel` (`wufoo` | `web`); the mark leads the existing kind pill rather than
+adding a sixth badge. **Wufoo = the real logo** (`Wufoo logo.jpg`, data URI in a CSS class injected
+once — ~15KB, so never inlined per card; it is a JPEG on white, so `border-radius:50%` clips the
+corners or every pill shows a white square). **Website = an "M" monogram**, cream on MSSI dark.
+
+> Two failed attempts, and the lesson is the useful part: **nothing containing the word "MSSI"
+> survives 11px.** The wordmark read as a smudge; the favicon rendered as a plain black square. No
+> better source file fixes either — the shape is wrong for the size. Wufoo reads because it is ONE
+> letter in a solid shape. The M is a **channel initial, not MSSI's logo**; the real wordmark needs
+> a taller pill.
+>
+> Found only by taking a **screenshot**. The DOM checks all passed — correct sizes, correct fills,
+> no errors — while the thing was visually unusable. When a change is visual, look at it.
+
 ### Worth knowing
 `isDirectClient()` reads the **live DOM** (`el('cl-type').value`), not the saved state — so any
 cost path that depends on it is evaluating the form as it stands, not the quotation as saved.
+
+A `<use>` whose referenced `<symbol>` is missing renders **0×0 with no error** — silent, and it bit
+me mid-session when a test wiped `document.body.innerHTML`. `_ensureChannelSprite()` re-creates the
+sprite if absent, but that is the failure mode if these marks ever go blank.
 
 ---
 
