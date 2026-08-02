@@ -2798,7 +2798,168 @@ sprite if absent, but that is the failure mode if these marks ever go blank.
 
 ---
 
-# ⚠ OPEN — read before continuing (as of 2026-07-30)
+## What was changed on 2026-08-02/03 (session 2 — revisions, audit trail, signatures, and a delete that never deleted)
+
+Eleven commits, `7f08478`..`abc112a`. Everything below was found by running the code
+or by Rommel using the app — none of it by reading.
+
+### 1. A revision now shows on the serial (`7f08478`, `791aed0`)
+Unlocking a locked quotation superseded a version already issued, but the serial never
+changed — so a client could hold two different documents bearing the **same number**.
+(`confirmRevise` had the opposite fault: a brand-new unrelated serial, with the link to
+the original surviving only in a "Revised from:" field.)
+
+Format `.R1` — a **dash already means an option** (`QT-M00000012-3`), so a revision of an
+option reads `QT-M00000012-3.R1` and stays unambiguous. **Unlock creates the revision;
+the suffix is STAMPED at re-lock**, so a draft mid-edit never displays a revision number
+for a version no client has seen (Rommel: *"no revision should appear if only draft"*).
+
+Safe by construction: every base-serial regex in the file is start-anchored, so the suffix
+is stripped wherever the base is needed — directory grouping, Drive folders, dedup.
+Both directory loaders updated: a later revision **supersedes**, taking its identity AND
+status; equal revisions are option variants and keep the existing most-advanced-status merge.
+
+> Two pre-existing bugs surfaced: **`qRevisedFrom` was never persisted** (so the printout's
+> "Revised from:" vanished on reopen) and **never cleared in `initQuotation`** (so a new
+> quotation inherited the previous one's). Same shape as the ✓ Verified badge bug from June.
+
+### 2. Audit trail — nothing logged can be lost, and it now says WHAT changed (`ec0e136`, `763a4fb`)
+Rommel: *all changes must be recorded in the log and cannot be erased.*
+
+**"Cannot be erased" was already true** and is worth knowing: Supabase `activity_log` has
+INSERT + SELECT policies only — **no UPDATE, no DELETE**. 458 entries, 84 quotations,
+5 users, unbroken since 2026-07-02.
+
+**"All changes recorded" was not.** `gLogToSheets` dropped entries three silent ways:
+returned early when the token/user was not ready, swallowed a failed Sheets append with
+`.catch(function(){})`, and `supaInsertActivity` gave up quietly when not connected. In all
+three the entry still appeared in the on-screen log, so it **looked** recorded. Now queued
+in localStorage and retried (next log, every 2 min, 12s after login), never discarded, with
+owed destinations tracked per entry so a partial write is not mistaken for a complete one.
+An amber topbar badge appears only when entries are genuinely stuck.
+
+Saves also now diff against the previous save and record the money fields plus any line whose
+**quantity or price** changed:
+`Changed: Total ₱21,309.06 → ₱24,185.24 (+₱2,876.18) · Wardrobe / Closet qty 4 → 6`.
+Cosmetic edits are ignored on purpose. Capped at six line changes but **states the count**
+("and 5 more changes") rather than truncating silently.
+
+### 3. ⚠ Deleting a quotation never removed it from Supabase (`0075b40`)
+`deleteQuotation` and `deleteSelectedQuotations` cleared memory and both Sheets tabs and
+**never touched Supabase**. There was no `supaDeleteQuotation` at all, though
+`supaDeleteOrder` and `supaDeleteUser` exist. Not cosmetic: `loadQuotationJson` reads
+**Supabase first**, so a deleted quotation's state could still load, and the moment the
+Project List moves off Sheets every quotation ever "deleted" would reappear.
+`quotation_states`, `board_layouts` and `drawing_analyses` are `ON DELETE CASCADE`.
+
+### 4. Signatures on the printout (`cd84047`, `e400104`, `4f0d9f2`)
+Four signature blocks existed with no way to fill any without printing and signing by hand.
+**Anyone** uploads their own from the avatar menu; **an Admin** can upload on a user's behalf
+from Settings → Users (Admin-only, guarded twice, and the activity log records BOTH names —
+it is one person putting another's mark on documents). Stored as `SIG_<email>` in Settings,
+the same row mechanism as the company logos; reuses `_shrinkLogoDataUrl` (45k cell cap).
+
+**Copied INTO the quotation at lock, not looked up at print time** — an issued document must
+not change if someone later edits their signature. Re-locking does not reassign the preparer.
+Centred on the rule; the image lives in the fixed-height gap so signed and unsigned blocks
+stay the same height.
+
+Only `prepared` is wired. `qSignatures` carries `checked`/`noted` slots and the printout
+already reads them — **the approver flow is still Rommel's to define** (he has said it will
+use the PIN).
+
+### 5. Cost Breakdown header showed a stale op cost and margin (`982172f`)
+One card read 61.34% in the header and 59.53% in its summary bar — same
+`computeServiceCosts` call, the header simply never refreshed. The gap was exactly
+₱1.4474/lm, the consumable just added. The header block had **no id**, so
+`_refreshCbdSummary` could not patch it. Not consumable-specific: price, capacity %,
+operator cost and allocation all left it stale. Other cards looked right only because they
+had not been edited in that session.
+
+### 6. Client autofill filled 6 of 8 fields (`8c4fb5a`)
+Picking a known client left **City** blank and the **account type** on whatever was already
+selected, though both are stored on every record. Account type decides Direct vs Subsidiary,
+which changes what materials are billed. Now 8 of 8, with `_lastAcceptedClType` re-baselined
+so the fill is not read as a user-initiated change offering to renumber the serial.
+
+> Related, and the actual cause of "why does autofill barely fill anything": the client
+> directory is mostly empty — of 20 records, **address 4, contact 7, email 9**, and **7 are
+> completely bare**. The matcher fix from earlier (`3f72bd5`) backfills blanks on save, so
+> records fill in as quotations are worked.
+
+### 7. Quantity fields could not show thousands (`abc112a`)
+A `type=number` input loses ~17px to the spinner arrows, so usable text space was 16px
+(services, 55px col), 19px (materials/hardware, 58px) and 31px (carcass, 70px) — five digits
+need 32px. **Every one was short.** All line-item quantity columns are now 78px (39px usable,
+six digits fit). Width comes from the 2fr name column, which truncates anyway — this matters
+because the app is embedded in a Google Site where total width is whatever the iframe grants.
+
+> I widened the row grids first and left a header at 58px, offsetting every column after it
+> by 20px. Header and row templates must always be changed together.
+
+### Layout — proposed, mockup shown, NOT built
+Rommel asked whether to make the quotation page double-column and full width. Measured
+first: `#s1-wrap` is **2046px tall with no line items**, the total sits **1710px down**, and
+removing the 800px cap (one line, `index.html:381`) gains 425px of width but saves **zero**
+height. Client information alone is **657px** and is filled once.
+
+So: **not** a symmetric double column, and full width is limited by the Google Sites iframe
+anyway (`_fsAvailable()` is false there, so users cannot fullscreen to compensate).
+Recommended instead, in order: (1) **sticky running total** with Lock/Preview, (2) **collapse
+Client information** once filled, (3) widen fluid to ~1400px, (4) pair the short 40px cards.
+A scrollable before/after mockup was sent: scroll height **1754px → 838px**, total stays on
+screen. **Awaiting Rommel's decision, and the embed's actual width** — if narrow, the rail
+should become a slim bar pinned to the bottom instead of a 224px side column.
+
+---
+
+# ⚠ OPEN — read before continuing (updated 2026-08-03)
+
+### A. Supabase cleanup — SQL agreed, NOT RUN YET
+Rommel approved deleting the testing-period quotations. As of session end: **209
+quotations / 180 states, 98 still pending deletion.** The statement (his to run, in the
+Supabase SQL editor — I do not execute permanent deletes):
+```sql
+delete from quotations
+where created_at::date <= '2026-07-12'
+  and initial_locked_at is null and final_locked_at is null
+  and (source_order is null or btrim(source_order) = '');
+```
+Expect **98 rows**; 209 → 111. Children cascade. Supabase only — the Sheet is unaffected.
+
+> ⚠ The `never locked` conditions are deliberate and were argued for. Dropping them takes
+> 77 more, including **`QT-260619-3668` (MABA CONSTRAK)**, which is under investigation
+> (item B), and the 9 `fqLocked` rows (item C). **Do NOT use "old serial format" or a bare
+> date cutoff as the rule** — 137 quotations are old-format, including everything Joanna
+> Buenconsejo and Andrei Salvador ever produced. Real staff were working well before
+> 12 July: Andrei from 5 Jun, Joanna 19 Jun, Jhover 23 Jun.
+
+### B. `QT-260619-3668` (MABA CONSTRAK) — stored ₱0.00, should be ~₱32,981.26
+Unchanged. Real Wufoo order, locked and emailed by Joanna on 19 June. Rommel is checking
+with the users. Only such record across all states. See the 2026-08-02 session for detail.
+
+### C. 9 quotations final-locked but state never recorded it
+Unchanged, parked. Already fixed in-app on 2026-07-06; these are legacy rows. Repair is
+ready. Held because MABA is in both sets.
+
+### D. Signature flow for Checked by / Noted by
+`qSignatures.checked` / `.noted` exist and the printout reads them. Rommel will use the PIN;
+the flow (stamp automatically on PIN approval vs a separate deliberate "sign" action) is
+his decision and not yet made.
+
+### E. Quotation page layout
+Mockup sent and approved in principle? — not yet. Needs his go-ahead **and the Google Sites
+embed's actual width** before choosing side rail vs bottom bar. See the session entry above.
+
+### F. Signature image quality
+Rommel's uploaded signature has a grey box because the source image has an opaque
+background. A tight transparent PNG (~400px wide) fixes it. If a genuinely transparent PNG
+still boxes, the JPEG fallback in `_shrinkLogoDataUrl` is firing at the 45k cap and the PNG
+budget should be raised rather than worked around.
+
+---
+
+# ⚠ OPEN — earlier items (as of 2026-07-30)
 
 Everything below is pending. Nothing here is started.
 
