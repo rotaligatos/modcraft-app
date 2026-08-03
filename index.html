@@ -729,6 +729,33 @@ tr.cl-row:hover td{background:#f4f7fb}
           </div>
         </div>
       </div>
+      <!-- Fabrication-only counterpart to the Cost factor override card below. On a fab+install
+           quotation the override card owns this; on fabrication only it was hidden and there was
+           no way to touch the contingency at all. Mutually exclusive with ccf-card. -->
+      <div class="card" id="fabcont-card" style="display:none">
+        <div class="card-head">
+          <h3><i class="ti ti-shield-half"></i>Contingency &amp; charges
+            <span class="pill pill-muted" id="fabcont-pill" style="font-size:10px;margin-left:6px">Global default</span>
+          </h3>
+        </div>
+        <div class="card-body">
+          <div class="g2">
+            <div>
+              <label class="fld">Contingency rate (%)</label>
+              <input type="number" id="fabcont-pct" min="0" step="0.5" oninput="onFabContInput()" onchange="onFabContCommit()">
+              <div style="font-size:11px;color:var(--text2);margin-top:5px" id="fabcont-amt">&mdash;</div>
+            </div>
+            <div>
+              <label class="fld">Charge under</label>
+              <div style="display:flex;gap:16px;align-items:center;padding-top:6px;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fabcontmode" value="line" checked onchange="onFabContMode()"> Separate line item</label>
+                <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fabcontmode" value="folded" onchange="onFabContMode()"> Included in fabrication</label>
+              </div>
+              <div style="font-size:11px;color:var(--text2);margin-top:6px" id="fabcont-mode-hint"></div>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="card" id="ccf-card">
         <div class="card-head">
           <h3><i class="ti ti-adjustments-alt"></i>Cost factor override
@@ -2581,6 +2608,12 @@ var qOutMarkup = null;
 var qOutContingency = null;
 var qOutBuffer = null;
 var qSiteVisit = {enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
+// Fabrication-only contingency control. pct null = use CF.fabContingency (the global default);
+// mode 'line' prints its own "Contingency & charges" row, 'folded' rolls it into the fabrication
+// subtotal with no separate row. Only consulted when the service is Fabrication only — on
+// fab+install the Cost factor override card owns the rate, so a stale value here can never
+// silently apply to a quotation whose service type changed later.
+var qFabCont = {pct:null,mode:'line'};
 var qOtherCosts = []; // shared Stage 1 + Stage 2: [{label,active,mode:'installation'|'fabrication'|'standalone',amount,days,rate}]
 var qAssembly = {enabled:false};
 // Single shared "how many cabinet units does this represent" override — used by
@@ -4470,6 +4503,7 @@ function initQuotation() {
   initOutRatesCard();
   // Reset site visit
   qSiteVisit={enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
+  qFabCont={pct:null,mode:'line'}; _fabContLast=null; syncFabContUI();
   initSiteVisitCard();
   // Reset assembly
   qAssembly={enabled:false};
@@ -4970,6 +5004,10 @@ function onServiceChange() {
   // Cost factor override: only meaningful for Fabrication + Installation
   var ccfc=el("ccf-card");
   if(ccfc) ccfc.style.display=ni?"block":"none";
+  // Its fabrication-only counterpart — never both at once.
+  var fcc=el("fabcont-card");
+  if(fcc) fcc.style.display=(svc==="Fabrication only")?"block":"none";
+  syncFabContUI();
   _updateCarcassCountCardVisibility();
   _updateProjLocationLock(ni);
   recalc();
@@ -5735,6 +5773,75 @@ function initOutRatesCard() {
   var card=el('outsource-rates-card');
   if(card) card.style.display=(qFabMode==='bom'?'block':'none');
 }
+// ── Fabrication-only contingency ──────────────────────────────────────────
+// Any user may change this; it is not approval-gated (Rommel, 2026-08-03). Reducing it lowers
+// the price by the same amount a discount would, so every committed change is written to the
+// activity log with the old and new rate, and the card says so on its face. _fabContLast holds
+// the last COMMITTED value so typing "1", "12" on the way to "12.5" logs once, not three times.
+var _fabContLast=null;
+function fabContRate(){
+  return (qFabCont&&qFabCont.pct!=null)?qFabCont.pct:(CF.fabContingency||0);
+}
+function fabContIsReduced(){
+  return qFabCont&&qFabCont.pct!=null&&qFabCont.pct<(CF.fabContingency||0);
+}
+function onFabContInput(){
+  var e=el('fabcont-pct'); if(!e) return;
+  var v=e.value.trim();
+  var n=parseFloat(v);
+  qFabCont.pct=(v===''||isNaN(n))?null:Math.max(0,n);   // blank = fall back to the global rate
+  syncFabContUI(true);
+  recalcSoon();
+}
+function onFabContCommit(){
+  var now=(qFabCont.pct==null)?null:qFabCont.pct;
+  if(now===_fabContLast) return;
+  var was=(_fabContLast==null)?(CF.fabContingency||0)+'% (global)':_fabContLast+'%';
+  var is=(now==null)?(CF.fabContingency||0)+'% (global)':now+'%';
+  _fabContLast=now;
+  logActivity('Fabrication contingency changed: '+was+' → '+is+'.');
+  recalc();
+}
+function onFabContMode(){
+  var radios=document.querySelectorAll('input[name="fabcontmode"]');
+  var prev=qFabCont.mode;
+  for(var i=0;i<radios.length;i++) if(radios[i].checked) qFabCont.mode=radios[i].value;
+  if(qFabCont.mode!==prev){
+    logActivity('Contingency & charges shown as: '+(qFabCont.mode==='folded'?'included in fabrication (no separate line)':'a separate line item')+'.');
+  }
+  syncFabContUI();
+  recalc();
+}
+// live=true when called mid-typing: leaves the input alone so the caret doesn't jump.
+function syncFabContUI(live){
+  var inp=el('fabcont-pct');
+  if(inp&&!live) inp.value=(qFabCont&&qFabCont.pct!=null)?qFabCont.pct:'';
+  if(inp) inp.placeholder=(CF.fabContingency||0)+' (global default)';
+  var radios=document.querySelectorAll('input[name="fabcontmode"]');
+  for(var i=0;i<radios.length;i++) radios[i].checked=(radios[i].value===((qFabCont&&qFabCont.mode)||'line'));
+  var pill=el('fabcont-pill');
+  if(pill){
+    if(!qFabCont||qFabCont.pct==null){ pill.textContent='Global default'; pill.className='pill pill-muted'; }
+    else if(fabContIsReduced()){ pill.textContent='Reduced to '+qFabCont.pct+'%'; pill.className='pill pill-coral'; }
+    else { pill.textContent='Set to '+qFabCont.pct+'%'; pill.className='pill pill-teal'; }
+    pill.style.fontSize='10px'; pill.style.marginLeft='6px';
+  }
+  var amt=el('fabcont-amt');
+  if(amt){
+    var a=(typeof _pCalc==='object'&&_pCalc)?(_pCalc.fabContAmt||0):0;
+    var glob=CF.fabContingency||0;
+    amt.innerHTML=fabContRate()+'% &mdash; <b>'+fmtMoney(a)+'</b>'
+      +((qFabCont&&qFabCont.pct!=null&&qFabCont.pct!==glob)
+          ? ' <span style="color:var(--coral)">(global is '+glob+'%)</span>' : '')
+      +'<br>Leave blank to use the global rate.';
+  }
+  var hint=el('fabcont-mode-hint');
+  if(hint){
+    hint.innerHTML=(qFabCont&&qFabCont.mode==='folded')
+      ? 'Rolled into the fabrication subtotal — no separate row on the quotation. The subtotal will read higher than the sum of the area rows above it by this amount.'
+      : 'Prints as its own row named <b>Contingency &amp; charges</b>.';
+  }
+}
 // ── Site Visit helpers ────────────────────────────────────────────────────
 function getSiteVisitCost() {
   if(!qSiteVisit.enabled) return 0;
@@ -6377,6 +6484,10 @@ function recalc(fast) {
   var ni=svc.indexOf("Installation")>=0;
   // Discount buffer only applies to Fabrication + Installation quotations
   var discBuf=ni?(aCF.discountBuffer||0):0, vat=CF.vatRate;
+  // Fabrication-only quotations can set their own contingency rate (Contingency & charges card).
+  // Deliberately gated on !ni: on fab+install the Cost factor override owns the rate, so a value
+  // left behind from when the quotation was fabrication-only cannot quietly apply after a switch.
+  if(!ni&&qFabCont&&qFabCont.pct!=null) cf=qFabCont.pct;
   var na=ni||(svc==="Fabrication only"&&qAssembly.enabled);
 
   // Per-area subtotals
@@ -6480,6 +6591,7 @@ function recalc(fast) {
     otherCostInstTotal:ocTotals.inst,otherCostInstItems:ocTotals.instItems,otherCostStandaloneTotal:ocTotals.standalone,otherCostStandaloneItems:ocTotals.standaloneItems,
     rates:{fabCont:cf,fabBuf:fabBuf,mobCont:cm,mobBuf:mobBuf,mobMk:mobMk,instCont:ci,instBuf:instBuf,instMk:instMk,discBuf:discBuf,vat:vat,outCont:outRates.contingency,outBuf:outRates.buffer,outMarkup:outRates.markup}};
   updateBondInsCostDisplay(biCosts);
+  syncFabContUI(true);   // refresh the peso amount on the Contingency & charges card
   // Live-update carcass item prices and area subtotals
   if(qFabMode==='carcass'){
     for(var _ca=0;_ca<qAreas.length;_ca++){
@@ -7197,6 +7309,10 @@ function _buildPrintBody() {
   // Overhead = contingencies + buffer + markup + cutting list charge + outsource margin
   var overheadAmt=(pC.preDisc||0)-(pC.fabBaseRaw||0)-(pC.outsourceBase||0)-pMobBase-pInstBase-pAssmBase-dcCost-pSvCost;
   var grandFabSvc=pC.grand||0;
+  // "Included in fabrication": no separate row, the amount lands in the Fabrication subtotal.
+  // Only ever applies where the row would otherwise have printed — a fabrication-only quotation
+  // with nothing (mob/install/assembly) to absorb it into. Grand total is untouched either way.
+  var foldCont=!(pNi||pNa||pInstBase>0)&&overheadAmt>0&&qFabCont&&qFabCont.mode==='folded';
   var tdS='padding:7px 9px;border:1px solid #ddd;font-size:11px;vertical-align:top';
   var thS='background:#f5c518;font-weight:bold;padding:7px 9px;border:1px solid #ccc;text-align:center;font-size:11px';
   var pType=el("cl-type")?el("cl-type").value:"Direct";
@@ -7279,9 +7395,9 @@ function _buildPrintBody() {
         :'<th style="'+thS+'">Area</th><th style="'+thS+'">Cabinet / Scope</th><th style="'+thS+'">Type of Materials</th><th style="'+thS+'">No. of Units</th><th style="'+thS+'">Total Material &amp; Fabrication</th>')
       +'</tr></thead>'
     + '<tbody>'+itemRows
-    + '<tr style="background:#f5f5f5"><td colspan="3" style="'+tdS+';text-align:right;font-weight:bold">Fabrication subtotal</td><td style="'+tdS+';text-align:center;font-weight:bold">'+totU+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(totVal)+'</td></tr>'
+    + '<tr style="background:#f5f5f5"><td colspan="3" style="'+tdS+';text-align:right;font-weight:bold">Fabrication subtotal</td><td style="'+tdS+';text-align:center;font-weight:bold">'+totU+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(totVal+(foldCont?overheadAmt:0))+'</td></tr>'
     + ((pNi||pNa||pInstBase>0)?'<tr><td colspan="4" style="'+tdS+'">'+(pNi?'Mobilization &amp; Installation':(pNa?'Assembly':'Installation'))+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(pMobBase+pInstBase+pAssmBase+overheadAmt)+'</td></tr>':
-       (overheadAmt>0?'<tr><td colspan="4" style="'+tdS+'">Service charges</td><td style="'+tdS+';text-align:right">'+fmtMoney(overheadAmt)+'</td></tr>':''))
+       ((overheadAmt>0&&!foldCont)?'<tr><td colspan="4" style="'+tdS+'">Contingency &amp; charges</td><td style="'+tdS+';text-align:right">'+fmtMoney(overheadAmt)+'</td></tr>':''))
     + (dcCost>0?'<tr style="background:#e0f2fe"><td colspan="4" style="'+tdS+';color:#0369a1;font-weight:600"><i class="ti ti-pencil-bolt"></i> Design charge</td><td style="'+tdS+';text-align:right;color:#0369a1;font-weight:600">'+fmtMoney(dcCost)+'</td></tr>':'')
     + (pSvCost>0?'<tr><td colspan="4" style="'+tdS+'">Site visit</td><td style="'+tdS+';text-align:right">'+fmtMoney(pSvCost)+'</td></tr>':'')
     + ((pC.otherCostStandaloneItems||[]).map(function(oc){return '<tr><td colspan="4" style="'+tdS+'">'+escHtml(oc.label||'Other cost')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(oc.amount)+'</td></tr>';}).join(''))
@@ -14667,6 +14783,7 @@ function captureQuotationSnapshot(){
     carcassUnitCount:qCarcassUnitCount,
     prevSerials:JSON.parse(JSON.stringify(qPrevSerials||[])),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
+    fabCont:JSON.parse(JSON.stringify(qFabCont||{pct:null,mode:'line'})),
     cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
     designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
     bondIns:JSON.parse(JSON.stringify(qBondIns)),
@@ -14700,6 +14817,8 @@ function restoreQuotationSnapshot(snap){
   qPrevSerials=snap.prevSerials?JSON.parse(JSON.stringify(snap.prevSerials)):[];
   renderPrevSerialNote();
   qSiteVisit=JSON.parse(JSON.stringify(snap.siteVisit));
+  qFabCont=snap.fabCont?JSON.parse(JSON.stringify(snap.fabCont)):{pct:null,mode:'line'};
+  _fabContLast=qFabCont.pct; syncFabContUI();
   qCuttingList=JSON.parse(JSON.stringify(snap.cuttingList));
   qDesignCharge=JSON.parse(JSON.stringify(snap.designCharge));
   qBondIns=JSON.parse(JSON.stringify(snap.bondIns));
@@ -17024,6 +17143,7 @@ function recalcFQ() {
   var ni=svc.indexOf('Installation')>=0;
   // Discount buffer only applies to Fabrication + Installation quotations
   var discBuf=ni?(aCF.discountBuffer||0):0;
+  if(!ni&&qFabCont&&qFabCont.pct!=null) cf=qFabCont.pct;   // see recalc() — same rule, both stages
   var na=ni||(svc==='Fabrication only'&&qAssembly&&qAssembly.enabled);
 
   var fabBase=0;
@@ -22438,6 +22558,7 @@ function getFullQuotationState(){
     vatApproved:qVatApproved, discApproved:qDiscApproved, discPct:qDiscPct, premApproved:qPremApproved,
     bondIns:JSON.parse(JSON.stringify(qBondIns)),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
+    fabCont:JSON.parse(JSON.stringify(qFabCont||{pct:null,mode:'line'})),
     projectSize:qProjectSize,
     // Neither of these was persisted before. revisedFrom drives the "Revised from:"
     // line on the printout, so it was silently lost whenever a quotation was
@@ -22618,6 +22739,8 @@ function restoreFullQuotationState(state){
   qDiscApproved=!!state.discApproved; qDiscPct=state.discPct||0; qPremApproved=!!state.premApproved;
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
   qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
+  qFabCont=state.fabCont?JSON.parse(JSON.stringify(state.fabCont)):{pct:null,mode:'line'};
+  _fabContLast=qFabCont.pct; syncFabContUI();
   qProjectSize=state.projectSize||0;
   qRevisedFrom=state.revisedFrom||'';
   qRevisionPending=!!state.revisionPending;
