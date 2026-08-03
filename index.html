@@ -2618,6 +2618,93 @@ var qSiteVisit = {enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMo
 // fab+install the Cost factor override card owns the rate, so a stale value here can never
 // silently apply to a quotation whose service type changed later.
 var qFabCont = {pct:null,mode:'line'};
+// Rates a quotation was LOCKED at. null = not locked, or unlocked for editing, in which case
+// today's live rates apply as before.
+//
+// A locked quotation was not frozen: it recomputed from whatever Settings said TODAY, and
+// doApprove / confirmSend / skipSend / every doShare* / confirmClientApprove /
+// confirmCancelQuotation all write that back over the stored total. All of those happen AFTER
+// locking, so sharing a quotation issued last month silently repriced it. Demonstrated: one
+// issued at P90,720 reprinted and re-saved at P100,800 after the design rate changed.
+//
+// Whole objects are copied rather than a list of named fields, so a rate added later is frozen
+// too without anyone remembering to add it here.
+var qLockedRates = null;   // {at, by, cf, carcassPrices, mobLocations, instCost}
+function _capturePricingRates(){
+  var cp=function(o){ try{ return JSON.parse(JSON.stringify(o)); }catch(e){ return null; } };
+  return {at:new Date().toISOString(), by:(gUser&&(gUser.name||gUser.email))||'',
+          cf:cp(CF), carcassPrices:cp(typeof CARCASS_PRICES!=='undefined'?CARCASS_PRICES:{}),
+          mobLocations:cp(typeof MOB_LOCATIONS!=='undefined'?MOB_LOCATIONS:[]),
+          instCost:cp(typeof INST_COST!=='undefined'?INST_COST:{})};
+}
+// Swaps the rate globals for the frozen set, runs fn, and always puts them back — one place
+// instead of threading a rate object through every pricing function. try/finally matters: if
+// anything inside throws, the app must not be left running on a dead quotation's rates.
+function _withFrozenRates(fn){
+  if(!qLockedRates||!qLockedRates.cf) return fn();
+  var sCF=CF, sCP=(typeof CARCASS_PRICES!=='undefined')?CARCASS_PRICES:null,
+      sML=(typeof MOB_LOCATIONS!=='undefined')?MOB_LOCATIONS:null,
+      sIC=(typeof INST_COST!=='undefined')?INST_COST:null;
+  try{
+    CF=qLockedRates.cf;
+    if(sCP!==null&&qLockedRates.carcassPrices) CARCASS_PRICES=qLockedRates.carcassPrices;
+    if(sML!==null&&qLockedRates.mobLocations)  MOB_LOCATIONS=qLockedRates.mobLocations;
+    if(sIC!==null&&qLockedRates.instCost)      INST_COST=qLockedRates.instCost;
+    return fn();
+  } finally {
+    CF=sCF;
+    if(sCP!==null) CARCASS_PRICES=sCP;
+    if(sML!==null) MOB_LOCATIONS=sML;
+    if(sIC!==null) INST_COST=sIC;
+  }
+}
+function _freezeRates(why){
+  if(qLockedRates) return;                    // already frozen — a re-lock must not re-price
+  qLockedRates=_capturePricingRates();
+  logActivity('Pricing rates frozen at lock'+(why?' ('+why+')':'')+'.');
+  _renderFrozenRatePill();
+}
+// Releasing the frozen rates can move the price the instant it happens — that is the whole point
+// of freezing them. It must never be a surprise, so the change is measured and shown, not just
+// applied. Rommel, 2026-08-04: "it ensures the user is aware, rather than the app silently
+// adjusting because of these changes."
+function _thawRatesVisible(why){
+  if(!qLockedRates) return;
+  var before=(_pCalc&&_pCalc.grand)||0;
+  _thawRates(why);
+  var after=(_pCalc&&_pCalc.grand)||0;
+  var d=after-before;
+  if(Math.abs(d)>=0.005){
+    showToast('Rates released — current rates apply. Total '+(d>0?'rose':'fell')+' by '
+      +fmtMoney(Math.abs(d))+' ('+fmtMoney(before)+' → '+fmtMoney(after)+').');
+    logActivity('Unlock repriced at current rates: '+fmtMoney(before)+' → '+fmtMoney(after)
+      +' ('+(d>0?'+':'−')+fmtMoney(Math.abs(d))+').');
+  } else {
+    showToast('Rates released — current rates apply. Total is unchanged.');
+  }
+}
+function _thawRates(why){
+  if(!qLockedRates) return;
+  qLockedRates=null;
+  logActivity('Pricing rates released — this quotation now uses current rates'+(why?' ('+why+')':'')+'.');
+  _renderFrozenRatePill();
+  recalc();
+}
+// Never silent: if a quotation is priced at anything other than today's rates, it says so.
+function _renderFrozenRatePill(){
+  var host=el('q-serial'); if(!host||!host.parentNode) return;
+  var p=el('q-frozen-rates');
+  if(!qLockedRates){ if(p) p.style.display='none'; return; }
+  if(!p){
+    p=document.createElement('span'); p.id='q-frozen-rates'; p.className='pill pill-muted';
+    p.style.cssText='font-size:10px;margin-left:6px';
+    host.parentNode.insertBefore(p,host.nextSibling);
+  }
+  p.style.display='';
+  p.innerHTML='<i class="ti ti-lock-dollar"></i> Rates as at lock';
+  p.title='Priced at the cost factors in force when this quotation was locked ('
+    +(qLockedRates.at?new Date(qLockedRates.at).toLocaleString():'')+'). Unlock to use current rates.';
+}
 var qOtherCosts = []; // shared Stage 1 + Stage 2: [{label,active,mode:'installation'|'fabrication'|'standalone',amount,days,rate}]
 var qAssembly = {enabled:false};
 // Single shared "how many cabinet units does this represent" override — used by
@@ -4423,7 +4510,7 @@ function initQuotation() {
   var _qpsn=el('q-prev-serial-note'); if(_qpsn) _qpsn.style.display='none';
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}],outsourceMaterials:[],outsourceHardware:[]}];
   qFabMode="carcass"; qHasCuttingList=false;
-  qLocked=false; qApproved=false; qSaved=false; qSentStatus='';
+  qLocked=false; qApproved=false; qSaved=false; qSentStatus=''; qLockedRates=null;
   qInitLockedAt=''; qInitApprovedAt=''; fqLockedAt=''; qClosedAt='';
   qCancelled=false; qCancelledAt=''; qCancelReason='';
   qLog=[]; qPieces=[]; _pCalc={};
@@ -6528,7 +6615,8 @@ function recalcSoon(){
   _recalcTimer=setTimeout(recalc,120); // deferred: rebuild line items too
 }
 
-function recalc(fast) {
+function recalc(fast){ return _withFrozenRates(function(){ return _recalcCore(fast); }); }
+function _recalcCore(fast) {
   clearTimeout(_recalcTimer); _recalcTimer=null; // cancel any pending debounce
   var aCF=(qCustomCFApproved&&qCustomCF)?qCustomCF:CF;
   var cf=aCF.fabContingency||0, fabBuf=aCF.fabBuffer||0;
@@ -7339,7 +7427,8 @@ function buildItemizedPrintRows(hideMatPricing){
   return rows;
 }
 
-function _buildPrintBody() {
+function _buildPrintBody(){ return _withFrozenRates(function(){ return _buildPrintBodyCore(); }); }
+function _buildPrintBodyCore() {
   // Returns the inner HTML for the quotation printout (no side effects).
   // Use openPrint() to display it; use buildFullQuotationHtml() to save to Drive.
   var useFQ=(qStage===2);
@@ -10054,6 +10143,7 @@ function _applyApprovedRequest(notif){
     if(ubtn2){ubtn2.innerHTML='<i class="ti ti-lock-open"></i>Request unlock';ubtn2.disabled=false;}
     if(ctx==='fq'){
       fqLocked=false; fqSentStatus='';
+      _thawRatesVisible('unlock approved');
       fqClientApproved=false; fqClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
       logActivity('Final quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+').');
       if(typeof updateFQLockUI==='function') updateFQLockUI();
@@ -10061,6 +10151,7 @@ function _applyApprovedRequest(notif){
       if(typeof _updateQStatusBadge==='function') _updateQStatusBadge();
     } else {
       qLocked=false; qSentStatus='';
+      _thawRatesVisible('unlock approved');
       logActivity('Quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+').');
       if(typeof updateLockUI==='function') updateLockUI();
       if(typeof updateSentStatus==='function') updateSentStatus();
@@ -14844,6 +14935,7 @@ function captureQuotationSnapshot(){
     prevSerials:JSON.parse(JSON.stringify(qPrevSerials||[])),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     fabCont:JSON.parse(JSON.stringify(qFabCont||{pct:null,mode:'line'})),
+    lockedRates:qLockedRates?JSON.parse(JSON.stringify(qLockedRates)):null,
     cuttingList:JSON.parse(JSON.stringify(qCuttingList)),
     designCharge:JSON.parse(JSON.stringify(qDesignCharge)),
     bondIns:JSON.parse(JSON.stringify(qBondIns)),
@@ -14878,6 +14970,7 @@ function restoreQuotationSnapshot(snap){
   renderPrevSerialNote();
   qSiteVisit=JSON.parse(JSON.stringify(snap.siteVisit));
   qFabCont=snap.fabCont?JSON.parse(JSON.stringify(snap.fabCont)):{pct:null,mode:'line'};
+  qLockedRates=snap.lockedRates?JSON.parse(JSON.stringify(snap.lockedRates)):null;
   _fabContLast=qFabCont.pct; syncFabContUI();
   qCuttingList=JSON.parse(JSON.stringify(snap.cuttingList));
   qDesignCharge=JSON.parse(JSON.stringify(snap.designCharge));
@@ -14975,7 +15068,7 @@ function _doCreateNewOption(){
   qOptionsList.push({id:newId,label:'Option '+newId,snapshot:newSnap,status:'active',locked:false,saved:false,grand:_pCalc.grand||0});
   switchToOption(newId);
   // New option starts unlocked so user can freely edit before locking and sending
-  qLocked=false; qSaved=false; qSentStatus='';
+  qLocked=false; qSaved=false; qSentStatus=''; qLockedRates=null;
   var lb=el('lock-btn');
   if(lb){lb.disabled=false;lb.style.background='var(--navy)';lb.style.opacity='1';lb.innerHTML='<i class="ti ti-lock"></i>Lock &amp; Send';}
   var sb=el('sent-status'); if(sb) sb.style.display='none';
@@ -15124,6 +15217,7 @@ function doLockOnly(){
   if(qRevisionPending) _applyRevisionBump();   // stamp the revision as it is issued
   _stampPreparedBySignature();
   qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
+  _freezeRates('Stage 1 lock');
   // Also mark the current option object as locked
   if(qActiveOptionId>0){var _lo=qOptionsList.find(function(o){return o.id===qActiveOptionId;});if(_lo){_lo.locked=true;_lo.saved=true;}}
   logActivity('Quotation locked.');
@@ -15385,6 +15479,7 @@ function confirmSend(via) {
   _stampPreparedBySignature();
   if(modalCtx==='fq'){
     fqLocked=true; fqSentStatus=sentTxt; fqLockedAt=new Date().toISOString();
+    _freezeRates('Final Quotation lock');
     logActivity(stage+" locked. "+sentTxt+".");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -15394,6 +15489,7 @@ function confirmSend(via) {
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus=sentTxt; qInitLockedAt=qInitLockedAt||new Date().toISOString();
+    _freezeRates('Stage 1 lock & send');
     logActivity(stage+" locked. "+sentTxt+".");
     gSaveQuotation(); updateLockUI(); updateSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -15432,6 +15528,7 @@ function skipSend() {
   closeModal("ov-lock");
   if(modalCtx==='fq'){
     fqLocked=true; fqSentStatus="Not sent"; fqLockedAt=new Date().toISOString();
+    _freezeRates('Final Quotation lock');
     logActivity("Final quotation locked. Not sent to client.");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -15441,6 +15538,7 @@ function skipSend() {
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus="Not sent"; qInitLockedAt=qInitLockedAt||new Date().toISOString();
+    _freezeRates('Stage 1 lock');
     logActivity("Quotation locked. Not sent to client.");
     gSaveQuotation(); updateLockUI(); updateSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -15613,11 +15711,13 @@ function confirmUnlock() {
   qRevisionPending=true;
   if(modalCtx==='fq'){
     fqLocked=false; fqSentStatus="";
+    _thawRatesVisible('Final Quotation unlocked');
     fqClientApproved=false; fqClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
     logActivity("Final quotation unlocked ("+qSerial+"). Reason: "+reason);
     updateFQLockUI(); updateFQSentStatus(); _updateQStatusBadge();
   } else {
     qLocked=false; qSentStatus="";
+    _thawRatesVisible('quotation unlocked');
     logActivity("Quotation unlocked by Manager/Supervisor ("+qSerial+"). Reason: "+reason);
     updateLockUI(); updateSentStatus();
   }
@@ -17193,7 +17293,8 @@ function checkFQSchedule() {
   var po=el('fq-prem-ok');  if(po) po.style.display=fqPremApproved?'block':'none';
 }
 
-function recalcFQ() {
+function recalcFQ(){ return _withFrozenRates(function(){ return _recalcFQCore(); }); }
+function _recalcFQCore() {
   var aCF=(fqCustomCFApproved&&fqCustomCF)?fqCustomCF:CF;
   var cf=aCF.fabContingency||0, fabBuf=aCF.fabBuffer||0;
   var cm=aCF.mobContingency||0, mobBuf=aCF.mobBuffer||0, mobMk=aCF.mobMarkup||0;
@@ -22619,6 +22720,7 @@ function getFullQuotationState(){
     bondIns:JSON.parse(JSON.stringify(qBondIns)),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     fabCont:JSON.parse(JSON.stringify(qFabCont||{pct:null,mode:'line'})),
+    lockedRates:qLockedRates?JSON.parse(JSON.stringify(qLockedRates)):null,
     projectSize:qProjectSize,
     // Neither of these was persisted before. revisedFrom drives the "Revised from:"
     // line on the printout, so it was silently lost whenever a quotation was
@@ -22800,6 +22902,8 @@ function restoreFullQuotationState(state){
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
   qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
   qFabCont=state.fabCont?JSON.parse(JSON.stringify(state.fabCont)):{pct:null,mode:'line'};
+  qLockedRates=state.lockedRates?JSON.parse(JSON.stringify(state.lockedRates)):null;
+  _renderFrozenRatePill();
   _fabContLast=qFabCont.pct; syncFabContUI();
   qProjectSize=state.projectSize||0;
   qRevisedFrom=state.revisedFrom||'';
