@@ -745,7 +745,7 @@ tr.cl-row:hover td{background:#f4f7fb}
               <label class="fld">VAT treatment <span class="pill pill-teal" style="font-size:10px;margin-left:4px">Default: Vatable</span></label>
               <div style="display:flex;gap:8px;margin-top:4px;align-items:flex-start;flex-wrap:wrap">
                 <div style="display:flex;gap:16px;align-items:center;flex:1;flex-wrap:wrap;padding-top:6px">
-                  <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="vat" value="y" checked onchange="recalc()"> Vatable (12%)</label>
+                  <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="vat" value="y" checked onchange="onVatable()"> Vatable (12%)</label>
                   <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="vat" value="n" onchange="onNonVat()"> Non-vatable</label>
                 </div>
                 <button id="vat-req-btn" class="btn btn-amber" onclick="onNonVat()" style="white-space:nowrap" data-lock-exempt="1"><i class="ti ti-receipt-tax"></i>Request Non-VAT</button>
@@ -4568,8 +4568,8 @@ function initQuotation() {
   var _vrb=el('vat-req-btn');if(_vrb){_vrb.innerHTML='<i class="ti ti-receipt-tax"></i>Request Non-VAT';_vrb.className='btn btn-amber';_vrb.disabled=false;}
   var _drb=el('disc-req-btn');if(_drb){_drb.innerHTML='<i class="ti ti-send"></i>Request';_drb.className='btn btn-amber';_drb.disabled=false;_drb.onclick=function(){onDiscRequest();};}
   var _crb=el('ccf-req-btn');if(_crb){_crb.innerHTML='<i class="ti ti-lock"></i>Request override';_crb.disabled=false;_crb.onclick=function(){openCustomCF();};}
-  var _vr=document.querySelectorAll('[name="vat"]');
-  for(var _vi=0;_vi<_vr.length;_vi++) _vr[_vi].checked=(_vr[_vi].value==='y');
+  qVatApproved=(_vatDefaultForType(el('cl-type')?el('cl-type').value:'Direct')==='y');
+  _syncVatUI();
   // Clear close project button
   var _cpb=el('close-project-btn');if(_cpb)_cpb.style.display='none';
   // Clear send button / show lock button
@@ -4697,7 +4697,52 @@ function renderClientCompanyField() {
   }
   updateBanner();
 }
-function onClientTypeChange() { renderClientCompanyField(); renderItems(); _onQuotationCompanyMightChange(); }
+function onClientTypeChange() { renderClientCompanyField(); renderItems(); _applyVatDefaultForType(); _onQuotationCompanyMightChange(); }
+// VAT default follows who is being billed (Rommel, 2026-08-04). A Direct client is billed VAT
+// here. A Subsidiary — WCLI, CWLI — transfers the cost into its own system, which computes VAT
+// itself; quoting them VAT-inclusive means the same 12% is charged twice.
+// So for a Subsidiary, VAT-exclusive is the CORRECT treatment, not an exception, and it does not
+// go through the non-VAT approval. Approval exists to stop VAT being dropped on a real sale, and
+// that still applies to Direct. Adding VAT back is never gated — it cannot under-charge.
+function _vatDefaultForType(type){ return (type==='Subsidiary')?'n':'y'; }
+function _vatIsDefaultTreatment(){
+  var type=el('cl-type')?el('cl-type').value:'Direct';
+  return _vatDefaultForType(type)==='n';    // non-VAT needs no approval for a Subsidiary
+}
+// Never silent: this moves the total by 12%, so it is announced and logged.
+function _applyVatDefaultForType(announce){
+  var type=el('cl-type')?el('cl-type').value:'Direct';
+  var want=_vatDefaultForType(type);
+  var wantVat=(want==='y');
+  if(!!qVatApproved===wantVat){ _syncVatUI(); return; }
+  var before=(_pCalc&&_pCalc.grand)||0;
+  qVatApproved=wantVat;
+  if(typeof fqVatApproved!=='undefined') fqVatApproved=wantVat;
+  _syncVatUI();
+  recalc();
+  var after=(_pCalc&&_pCalc.grand)||0;
+  logActivity('VAT treatment set to '+(wantVat?'Vatable (12%)':'Non-VAT')+' — default for a '+type+' account.');
+  if(announce!==false&&typeof showToast==='function'){
+    showToast(wantVat
+      ? 'VAT applied (12%) — the default for a Direct account. Total '+fmtMoney(before)+' → '+fmtMoney(after)+'.'
+      : 'VAT removed — a Subsidiary adds VAT in its own system, so quoting it here would charge it twice. Total '+fmtMoney(before)+' → '+fmtMoney(after)+'.');
+  }
+}
+function _syncVatUI(){
+  var r=document.querySelectorAll('[name="vat"]');
+  for(var i=0;i<r.length;i++) r[i].checked=(r[i].value===(qVatApproved?'y':'n'));
+  var fr=document.querySelectorAll('[name="fq-vat"]');
+  for(var j=0;j<fr.length;j++) fr[j].checked=(fr[j].value===(qVatApproved?'y':'n'));
+  // The "Request Non-VAT" button is meaningless where non-VAT is already the correct treatment.
+  var btn=el('vat-req-btn');
+  if(btn) btn.style.display=_vatIsDefaultTreatment()?'none':'';
+  var tag=el('vat-ok-tag'), wrap=el('vat-ok-wrap');
+  if(_vatIsDefaultTreatment()&&!qVatApproved){
+    if(tag){ tag.style.display='inline'; tag.style.color='var(--text2)';
+             tag.innerHTML='<i class="ti ti-info-circle"></i> Non-VAT — default for a Subsidiary account'; }
+    if(wrap) wrap.style.display='flex';
+  }
+}
 // ── Serial prefix follows the quotation's company (see _serialPrefix) ─────
 // Called only from the two explicit user-interaction entry points above
 // (cl-type change, cl-company-sel change) — deliberately NOT from
@@ -7159,9 +7204,23 @@ function confirmRevise() {
 }
 function onNonVat() {
   modalCtx='s1';
+  // Subsidiary: non-VAT IS the default treatment, so it is applied directly — no PIN, no request.
+  if(_vatIsDefaultTreatment()){
+    qVatApproved=false; _syncVatUI();
+    logActivity('VAT treatment set to Non-VAT — default for a Subsidiary account.');
+    recalc(); return;
+  }
   document.querySelectorAll("[name='vat']")[0].checked=true;
   if(isApprover()){ _pinModalApprover=findApproverForSelf(); _openPinModal("ov-vat","vat-pin","vat-err"); }
   else { openSendRequest('nonvat',{ctx:'s1'}); }
+}
+// Choosing Vatable is never gated — it cannot under-charge. Wired to the "Vatable" radio so a
+// Subsidiary quotation that genuinely needs VAT can just be switched back.
+function onVatable(){
+  if(qVatApproved) return;
+  qVatApproved=true; _syncVatUI();
+  logActivity('VAT treatment set to Vatable (12%).');
+  recalc();
 }
 function confirmVat() {
   _verifyApproverPin((el("vat-pin")||{}).value||'').then(function(ok){
