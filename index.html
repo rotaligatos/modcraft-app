@@ -5428,10 +5428,10 @@ function getHwSource(){
 // costs the same single pass as before.
 function lookupInSource(src,name){
   if(!name) return null;
-  var nl=name.toLowerCase(), best=null;
+  var nl=String(name).trim().toLowerCase(), best=null;
   for(var k=0;k<src.length;k++){
     var it=src[k];
-    if(!it.name||it.name.toLowerCase()!==nl) continue;
+    if(!it.name||String(it.name).trim().toLowerCase()!==nl) continue;
     var hasUnit=!!(it.unit&&String(it.unit).trim());
     var hasPrice=(parseFloat(it.price)||0)>0;
     if(hasUnit&&hasPrice) return it;            // nothing can beat this
@@ -5635,12 +5635,13 @@ function onBOMItemSearch(inp,a,ci,cat,ri){
   var db=_dbForCat(cat);
   var name=inp.value;
   _refillDatalist('bom-dl-'+a+'-'+ci+'-'+cat+'-'+ri,db,name);
-  var nameLC=name.trim().toLowerCase();
-  var matchedIdx=-1;
-  for(var k=0;k<db.length;k++){ if(db[k].name.trim().toLowerCase()===nameLC){matchedIdx=k;break;} }
+  // Was a hand-rolled "first exact name match wins". lookupInSource picks the BEST of the
+  // duplicates instead — a populated unit and a non-zero price beat a blank twin — which is
+  // what the cutting-list picker has done since the blank-unit rows were found. Same SKU,
+  // same answer, whichever mode you are in.
   var curRow=qAreas[a].bomItems[ci][cat][ri];
-  if(matchedIdx>=0){
-    var item=db[matchedIdx];
+  var item=lookupInSource(db,name);
+  if(item){
     var price=parseFloat(item.price)||0;
     var curQty=curRow.qty||1;
     qAreas[a].bomItems[ci][cat][ri]={name:item.name,unit:item.unit,qty:curQty,price:price};
@@ -5809,13 +5810,10 @@ function onOutsourceItemSearch(inp,a,ci,cat,ri){
   var db=(cat==='outsourceMaterials')?dbMaterials:dbHardware;
   var name=inp.value;
   _refillDatalist('out-dl-'+a+'-'+ci+'-'+cat+'-'+ri,db,name);
-  var nameLC=name.trim().toLowerCase();
-  var matchedIdx=-1;
-  for(var k=0;k<db.length;k++){ if(db[k].name.trim().toLowerCase()===nameLC){matchedIdx=k;break;} }
   var row=_outRowsArr(a,ci,cat)[ri];
   if(!row) return;
-  if(matchedIdx>=0){
-    var item=db[matchedIdx];
+  var item=lookupInSource(db,name);   // best duplicate, not first — see onBOMItemSearch
+  if(item){
     row.name=item.name; row.unit=item.unit; row.price=parseFloat(item.price)||0; row.saved=true;
     var unitEl=el('out-unit-'+a+'-'+ci+'-'+cat+'-'+ri);
     var priceEl=el('out-price-'+a+'-'+ci+'-'+cat+'-'+ri);
@@ -6049,10 +6047,9 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
         // & hardware pickers — onMatSearch/onMatPick — rather than a long
         // scrolling <select>). Item selector auto-fills unit & price on an
         // exact catalog match; qty & price stay editable either way.
-        var rowNameLC=(row.name||'').trim().toLowerCase();
-        var matchedIdx=-1;
-        for(var k=0;k<db.length;k++){if(db[k].name.trim().toLowerCase()===rowNameLC){matchedIdx=k;break;}}
-        var matched=(matchedIdx>=0);
+        // Same matcher the handler uses, so the amber "not in the catalogue" flag can never
+        // disagree with what actually happens when the row is picked.
+        var matched=!!lookupInSource(db,row.name||'');
         var dlId='bom-dl-'+a+'-'+ci+'-'+cat+'-'+r;
         var dlOpts=_dlOptions(db,row.name);
         var inpStyle='height:28px;font-size:11px'+(matched?'':';color:#e07000;border-color:#f59e0b');
@@ -21181,27 +21178,59 @@ function _syncServicesFromDb(){
 // every row with no gaps or duplicates across pages) until a page in a batch comes back short of
 // the page size, meaning it hit the end — any pages after a short one are guaranteed empty (a
 // short page is definitionally the last real range), so nothing after it needs fetching.
+// Two assumptions were load-bearing and neither was checked, which is how a catalogue can come
+// back short and still look complete — every SKU past the cut simply absent from the pickers,
+// no error, no warning, just "that SKU isn't in the system".
+//
+//  1. THE PAGE SIZE WE ASK FOR IS NOT THE PAGE SIZE WE GET. PostgREST applies its own ceiling
+//     (pgrst.db_max_rows, 10000 on this project today — exactly equal to PAGE, so it currently
+//     works by coincidence, not by design). Lower that ceiling and the FIRST page comes back
+//     short, a short page reads as "end of table", and the loader stops there and reports
+//     success. The real page size is now taken from what the server actually returned.
+//  2. NOBODY COMPARED THE TOTAL. One exact count settles whether the whole table arrived. If it
+//     did not, this now says so and returns an error, so supaGetPriceDb falls back to Sheets —
+//     a slower complete catalogue beats a fast one missing rows nobody can identify.
 function _supaFetchAllRows(table,columns){
-  var PAGE=10000, CONCURRENCY=3;
-  function fetchBatch(startOffset,acc){
-    var reqs=[];
-    for(var k=0;k<CONCURRENCY;k++){
-      var offset=startOffset+k*PAGE;
-      reqs.push(supa.from(table).select(columns).order('id',{ascending:true}).range(offset,offset+PAGE-1));
+  var PAGE=10000, CONCURRENCY=3, total=null;
+  function verify(all){
+    if(total!=null&&all.length<total){
+      console.warn('[supa] '+table+' loaded short: '+all.length+' of '+total+' rows — falling back to the standard connection so nothing is missing');
+      return {data:null,error:{message:table+' truncated at '+all.length+'/'+total}};
     }
-    return Promise.all(reqs).then(function(results){
-      for(var i=0;i<results.length;i++){ if(results[i].error) return results[i]; }
-      var all=acc, hitEnd=false;
-      for(var i=0;i<results.length;i++){
-        var page=results[i].data||[];
-        all=all.concat(page);
-        if(page.length<PAGE){ hitEnd=true; break; }
-      }
-      if(hitEnd) return {data:all,error:null};
-      return fetchBatch(startOffset+CONCURRENCY*PAGE,all);
-    });
+    return {data:all,error:null};
   }
-  return fetchBatch(0,[]);
+  return supa.from(table).select(columns,{count:'exact'}).order('id',{ascending:true}).range(0,PAGE-1)
+    .then(function(first){
+      if(first.error) return first;
+      var page0=first.data||[];
+      total=(typeof first.count==='number')?first.count:null;   // null = server didn't say; behave as before
+      var step=page0.length;                                    // the server's real page size, not ours
+      if(!step) return verify(page0);
+      if(total!=null&&page0.length>=total) return verify(page0);
+      function batch(startOffset,acc){
+        var reqs=[];
+        for(var k=0;k<CONCURRENCY;k++){
+          var offset=startOffset+k*step;
+          reqs.push(supa.from(table).select(columns).order('id',{ascending:true}).range(offset,offset+step-1));
+        }
+        return Promise.all(reqs).then(function(results){
+          for(var i=0;i<results.length;i++){ if(results[i].error) return results[i]; }
+          var all=acc, hitEnd=false;
+          for(var i=0;i<results.length;i++){
+            var page=results[i].data||[];
+            all=all.concat(page);
+            if(page.length<step){ hitEnd=true; break; }
+          }
+          if(hitEnd) return verify(all);
+          if(total!=null&&all.length>=total) return verify(all);
+          return batch(startOffset+CONCURRENCY*step,all);
+        });
+      }
+      return batch(step,page0);
+    }).catch(function(e){
+      console.warn('[supa] '+table+' paged read threw',e);
+      return {data:null,error:{message:String((e&&e.message)||e)}};
+    });
 }
 function supaGetPriceDb(){
   if(!supaReady()) return Promise.resolve(null);
