@@ -3295,3 +3295,189 @@ It put literal newlines inside a regex literal in `portal.html` and broke the
 whole script — every hoisted function stayed callable, so the page looked
 perfectly healthy while its tail had never run. Use the Edit tool, or node.
 Always re-verify with `new Function()` over each `<script>` block afterwards.
+
+## What was changed on 2026-08-03/04 (session — silent-loss sweep, contingency control, rate freeze, VAT by account type, Team performance)
+
+17 commits, `a840e1e`..`e196559`, all deployed and verified live on GitHub Pages. Almost every
+item below was found by RUNNING the code or by Rommel using the page — not by reading it.
+
+### The recurring shape
+Nine of the twelve bugs were the same failure: **something arrives, part of it is quietly
+dropped, and the smaller result looks identical to a correct one.** Where a fix was possible the
+rule applied was: **loud, never short.**
+
+### Fixed
+1. **Orders never archived** (`a840e1e`) — `_archiveOrdersForQuotation` compared serials with
+   `===`. The order stores whichever serial was live when it was *shared*; closing happens on
+   whatever is live *then*. Driven against the real functions: **4 of 6** share/close combinations
+   failed, including both revision cases (`.R1`, new the day before). A loop matching nothing
+   raises nothing, so the order sat in *IQ Lock/Sent* forever. New `_serialRoot()` strips both the
+   option (`-2`) and revision (`.R1`) suffixes. Not yet triggered in production.
+2. **Supabase saves could fail silently** (`ac62d86`) — `QT-W00000038` was renumbered, logged as
+   "Final quotation draft saved", and never reached Supabase; saves either side of it landed.
+   Three causes: `supaUpsertQuotation` had **no `.catch`** (a network rejection never sets
+   `r.error` and the surrounding try/catch cannot see an async rejection — confirmed zero warnings
+   raised by the old code); `supaUpsertState` **discarded the parent-stub's error**, reporting the
+   symptom not the cause; and the failure counter was **memory-only**, so a refresh erased the
+   evidence. Failures now persist to `localStorage` with their text, and Settings → Company & DB
+   lists the last five with time and serial. Toast wording corrected — it claimed "your work still
+   saved normally", untrue now that state is READ from Supabase first.
+   **The root cause of the W00000038 loss itself was never established** — the evidence was gone.
+3. **Price catalogue could load short** (`ca24179`) — `_supaFetchAllRows` assumed the page size it
+   asked for was the page size it got. PostgREST caps at `pgrst.db_max_rows` = **10000 on this
+   project, exactly equal to PAGE**, so it works by coincidence. Simulated at a 1000-row cap, the
+   old code returned **1,000 of 153,552 rows, silently**. It now takes the real page size from the
+   first response and compares against an exact count; short means it says so and falls back to
+   Sheets. Also: **BOM and Outsource hand-rolled "first exact match wins"** where cutting-list used
+   `lookupInSource`'s best-of-duplicates — the same SKU could fill differently per mode. Latent
+   (measured: zero names currently have a worse first row), now unified.
+4. **Quotation name came from Google, not Settings** (`4058dcc`) — `prepared_by` was `gUser.name`
+   off the Google profile. Several staff share a mailbox (`designer-ce1/2/3`, `ppic2`), so the name
+   was the mailbox's. Now taken from the Roles sheet row already matched at login; the Google name
+   is the fallback for blank cells and the old 4-column format. Editing your own name in
+   Settings → Users updates the live session too.
+5. **Contingency & charges card** (`083f5d3`, `df223e8`, `62f0e23`) — fabrication-only quotations
+   had no way to touch the contingency at all (fab buffer is `ni`-gated; the CF override card is
+   hidden for that service type). New per-quotation card: **rate (%)** plus **Charge under**
+   (separate line / included in fabrication). **Not approval-gated** (Rommel's call) — so each
+   committed change logs old to new, and a coral "Reduced to N%" pill shows on the card.
+   `_fabContLast` means typing 1, 12, 12.5 logs once.
+   **Two follow-ups the same session:** it never appeared on a *new* quotation (`initQuotation`
+   sets the Assembly and override cards' visibility explicitly and I had not added this one), and
+   it was then moved up under **Scope of work** because it changes the fabrication price.
+6. **Site visit read P0.00 while charged** (`23daf7a`) — `sv-cost-disp` was refreshed only when one
+   of its three FIELDS was edited; ticking Active touches no field and `recalc` never refreshed it.
+   Display only — verified the money was right in all four configurations (+P1,680 = P1,500 x
+   1.12). `recalcFQ` had always refreshed its copy; Stage 1 never did.
+7. **Charges could bill off service quantities** (`4ff9e8e`) — cutting-list and design charges are
+   per CARCASS, but took their count from `getInstallCarcassUnits()`, which falls back to
+   `getTotU()` when the Carcass / Unit Count card is blank — and in cutting-list mode `getTotU()`
+   sums **service line quantities**. A real job (240 lm + 310 lm + 96 holes) reads as **646
+   units**: cutting list **P323,100 instead of P6,100**, folded silently into fabrication where
+   nobody would see it. No live quotation had hit it (measured). `_chargeCarcassUnits()` never
+   takes that fallback; a blank count floors at 1 unit **plus an amber warning**, and both cards
+   now show their arithmetic. **`getInstallCarcassUnits()` deliberately untouched — Installation,
+   Assembly and PPIC still take that fallback (see OPEN).**
+8. **Design charge is per carcass unit only** (`68b3ab7`) — the per-area rate existed only because
+   cutting-list mode had no carcass number; that gap is filled, so it had become a second near-flat
+   fee (187 of 194 quotations have exactly one area). Field removed from Settings;
+   `CF.designChargePerArea` kept for old saved settings, nothing reads it.
+9. **Locked quotations were not frozen** (`d46a25e`) — a locked quotation recomputed from TODAY's
+   Settings, and `doApprove` / `confirmSend` / `skipSend` / every `doShare*` /
+   `confirmClientApprove` / `confirmCancelQuotation` write that back over the stored total — all of
+   which happen AFTER locking. Demonstrated: one issued at P90,720 reprinted and would re-save at
+   P100,800. **Rommel: freeze at lock, release only on unlock.** `_capturePricingRates()` copies
+   `CF`, `CARCASS_PRICES`, `MOB_LOCATIONS`, `INST_COST` whole (~4.4 KB in state);
+   `_withFrozenRates()` swaps the globals, runs, restores in a `finally`; `recalc`, `recalcFQ` and
+   `_buildPrintBody` all go through it so the printout holds too. Pill **"Rates as at lock"**;
+   releasing measures and announces the delta. **Existing locked quotations are NOT backfilled** —
+   the rates they were issued at are not knowable, and inventing them would cement a wrong number.
+10. **Design charge display option** (`b7667c2`) — separate line, or folded into fabrication and
+    not shown. Independent of the contingency fold; all four combinations verified identical at
+    P109,760.
+11. **VAT default by account type** (`e74db30`) — a Subsidiary (WCLI/CWLI) transfers cost into its
+    own system which adds VAT there, so quoting VAT-inclusive charges 12% twice. **Direct stays
+    VAT-inclusive; Subsidiary defaults to VAT-exclusive**, and for a Subsidiary non-VAT needs no
+    approval (the Request button is hidden). **Choosing Vatable is never gated, either direction** —
+    it cannot under-charge. Direct dropping VAT still opens the PIN modal. Announced with
+    before/after, since it moves the total 12%.
+12. **Printout says VAT EXCLUSIVE** (`92a09d0`) — omitting the VAT row made its absence ambiguous;
+    silence reads as "VAT included". Marked in three places: a `VAT | VAT EXCLUSIVE` row,
+    `GRAND TOTAL (VAT ex.)`, `TOTAL COST (VAT ex.):`. Keyed on the treatment, not the account type.
+13. **Team performance** (`d5d9a26`, `0272d59`, `e196559`) — it was live but counted
+    `status==='closed'`, a status that stopped existing when the ladder was redefined: **zero of
+    223 quotations match**, so Closed/Rate/Revenue read 0 for everyone. It timed created to lock,
+    and ranked anyone who ever prepared a quotation.
+    Now: **per-user "Include in Team performance"** switch (Settings → Users, Admin-only, OFF by
+    default, User Roles col Z, ranges A:Y → A:Z, new `users.include_in_kpi` column); the clock is
+    **order received → quotation sent in WORKING hours**, reusing `calcWorkingMinutes` so it can
+    never disagree with the order card's SLA timer; Won/Rate/Revenue key off **Client Approved**;
+    **company filter** All / WCL / MSSI / CWL / Unassigned. Unticked preparers are **named in a
+    footer** (Admin and Director exempt — that was pure noise).
+    **Company filter rebuilt** (`e196559`): it inferred company from the serial prefix, which only
+    exists post-2026-07-04, so **137 of 223 quotations were silently dropped** by any company
+    choice. Rommel: *"if they quoted for WCLI, CWLI or MSSI, it's always there"* — it is, on the
+    form, just never stored. **Quotations sheet gains column U = Company** (ranges A:T → A:U);
+    `_quotCompanyKey()` prefers it and falls back to the prefix. Rows hidden for having no company
+    are counted and stated under the table.
+    **"Orders answered"** = completed received→sent cycles, i.e. the sample size behind the
+    average response time.
+14. **Deleting a quotation logged nothing** (`e196559`) — permanent destruction with no trace,
+    against the "everything recorded, nothing erased" rule, and the reason the Sheet-vs-Supabase
+    row gap could not be explained. Now logs serial, client and value.
+
+### Corrections to earlier claims in this file
+- **`index.html`'s working copy is LF**, not CRLF (git converts on checkout). Edits matched fine.
+- **OPEN item 6 was stale** — hole counts ARE collected and parsed.
+- **Supabase counts are inflated versus the app.** `supaDeleteQuotation` did not exist until
+  `0075b40` (2026-08-02), so every quotation ever deleted from the Sheet is still in Supabase.
+  The dashboard (reading the Sheet) is right; SQL counts in this file that predate that commit —
+  including the "24 Subsidiary quotations carrying VAT" list — may include deleted rows.
+
+### Findings reported, NOT acted on
+- **Subsidiary quotations carrying VAT** — 24 found (P2.45M, P262,898 of VAT). **But only 2 are
+  genuinely inter-company**; 16 have external client names (Bella Ferma, STUDIO TILLE, VALERA
+  MARKETING, Peter Bena Construction...). For those the wrong field is the **account type**, not
+  the VAT — removing VAT would under-bill by P237,149. Rommel: users adjust these themselves.
+- **The Wi-Fi stall.** Reproduced: after ~2 min idle the first packet is dropped, giving 7.1 s /
+  15.2 s stalls (Windows SYN retransmit 1+2+4 / +8). **The ping to the router itself was LOST**, so
+  the loss is on the Wi-Fi link, before the router — not the ISP, not Cloudflare, not Supabase, not
+  Tailscale (its interface carries only private ranges; one default route, via Wi-Fi). Windows
+  wireless power saving is **Medium on battery**, Maximum Performance on AC — but a drop happened
+  while plugged in, so the remaining laptop-side suspect is **MIMO Power Save = Auto SMPS**; beyond
+  that it is the access point. **Cost three failed `git push` attempts this session.** System
+  settings, Rommel's to change.
+
+---
+
+# OPEN — updated 2026-08-04 (supersedes the 2026-08-03 list for these items)
+
+### AGREED FOR NEXT SESSION — two pieces of the performance picture, neither built
+
+**1. Walk-in clients.** Rommel, 2026-08-04: a quotation started directly, with no Wufoo or website
+order behind it, is a **walk-in client**, and walk-ins must be included in the performance
+measurement. Nothing has been built. Open questions: what starts the clock when there is no
+`receivedAt` (the quotation's own `created` timestamp is the obvious candidate — is that fair?);
+whether walk-ins share the Avg. response column or get their own; and how a walk-in is identified
+(absence of `sourceOrder` is the natural test, and it is already stored).
+
+**2. Overall team card.** Rommel, 2026-08-04: a separate card, at the bottom or alongside Team
+performance, showing the whole picture rather than per-person rows — **including the orders that
+never became quotations**:
+   - how many orders are still **Pending**
+   - how many have reached **quotation**
+   - how many have **lapsed the defined SLA**
+   Everything needed exists: `pendingOrders` carries `receivedAt` / `sentAt` / `status` /
+   `quotSerial`, `calcWorkingMinutes()` gives working-hours elapsed, and `ordersSlaSettings`
+   holds the per-company SLA hours and calendar. Note **Site Visit orders are SLA-exempt** and must
+   be excluded from the lapsed count. Current shape of the data: **59 orders, 47 still in New, 3
+   ever carried through to a sent quotation** — so the card will mostly show a large pending
+   backlog, which is the point.
+
+### Still Rommel's
+- **Cleanup SQL** — 98 rows, still not run. SQL in the 2026-08-03 OPEN item A. The Supabase count
+  is inflated by never-propagated deletions, so re-check the expected row count first.
+- **Google Sites embed width** — needed before the quotation-page layout rework (mockup approved in
+  principle: sticky running total, collapsed client card, 1754px → 838px scroll).
+- **Checked by / Noted by signatures** — stamp automatically on PIN approval, or a separate "sign"
+  action? `qSignatures.checked` / `.noted` exist and the printout already reads them.
+- **Signatures missing**: Andrei Salvador (`designer-ce2`) is the only *preparer* without one. The
+  approvers — Kathleen Joyce Tiu, Allan Lagsao, Michael Delos Reyes, Stiffany Gabut — have none,
+  and are needed once the flow above is settled.
+- **Wi-Fi power settings** (see above).
+- **Tick who is measured** in Settings → Users, or Team performance stays empty by design.
+
+### Still to build / decide
+- **`getInstallCarcassUnits()`** — Installation, Assembly and PPIC still take the blank-count
+  fallback that was fixed for the two charges. Same 646-vs-12 failure mode. Separate pricing
+  decision. One locked quotation is in that set (`QT-260603-8162`, Peace Maker, P541,474) but it
+  has no service lines, so nothing was inflated there.
+- **Order queue coverage** — only **3 of 59** orders have both a received and a sent time; 47 are
+  still in *New*. Team performance measures almost nothing until the queue is worked through the
+  app. A process gap, not a code one.
+- **MABA CONSTRAK `QT-260619-3668`** — stored P0.00, should be ~P32,981.26. Still parked, and the
+  9 quotations missing `fqLocked` are parked behind it.
+- **PMES sign-in** — 22 tables still anon-readable; do not drop the policies before it has auth.
+- **Wufoo API key** — still needs rotating; it is in public git history.
+- **Price DB blank-unit rows** — ~39,420; fill the units, delete nothing (~10,000 have no
+  populated twin).
