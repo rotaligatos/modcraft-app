@@ -17298,22 +17298,51 @@ function gSignInBtnHtml(){
 var _supaErrorCount=0;
 var _supaLastErrorAt=0;
 var _supaErrorToastCooldownUntil=0;
+// The counter above lives only in memory, so a refresh erased the evidence. QT-W00000038 was
+// renumbered, logged as saved, and never reached Supabase — and by the time it was noticed there
+// was nothing left to read. Failures are now written to localStorage WITH the message, so the
+// next person to look can see what actually failed rather than that something once did.
+var SUPA_ERRLOG_KEY='mc_supa_errs';
+var _supaErrLog=[];
+function _supaLoadErrLog(){
+  try{ _supaErrLog=JSON.parse(localStorage.getItem(SUPA_ERRLOG_KEY)||'[]')||[]; }catch(e){ _supaErrLog=[]; }
+  if(_supaErrLog.length){ _supaErrorCount=_supaErrLog.length; _supaLastErrorAt=_supaErrLog[_supaErrLog.length-1].at||0; }
+}
+function _supaClearErrLog(){
+  _supaErrLog=[]; _supaErrorCount=0; _supaLastErrorAt=0;
+  try{ localStorage.removeItem(SUPA_ERRLOG_KEY); }catch(e){}
+}
+function _supaNoteError(msg){
+  _supaErrorCount++;
+  _supaLastErrorAt=Date.now();
+  _supaErrLog.push({at:_supaLastErrorAt,msg:String(msg||'').slice(0,300)});
+  if(_supaErrLog.length>50) _supaErrLog=_supaErrLog.slice(-50);
+  try{ localStorage.setItem(SUPA_ERRLOG_KEY,JSON.stringify(_supaErrLog)); }catch(e){}
+  if(Date.now()>_supaErrorToastCooldownUntil){
+    // Wording matters: this used to say "your work still saved normally". That was true when
+    // Sheets was the read path. Quotation state is now READ from Supabase first, so a failed
+    // state write means the NEXT open quietly serves the older copy — not a harmless lag.
+    if(typeof showToast==='function') showToast('⚠ A save to the fast database failed. Sheets still has it, but this quotation may open showing older data until it syncs — Settings → Company & DB.');
+    _supaErrorToastCooldownUntil=Date.now()+5*60*1000;
+  }
+  if(typeof renderSupaStatus==='function') renderSupaStatus();
+}
 (function(){
   var origWarn=console.warn.bind(console);
   console.warn=function(){
     if(typeof arguments[0]==='string'&&arguments[0].indexOf('[supa]')===0){
-      _supaErrorCount++;
-      _supaLastErrorAt=Date.now();
-      if(Date.now()>_supaErrorToastCooldownUntil){
-        if(typeof showToast==='function') showToast('⚠ A background sync to the fast database failed — your work still saved normally. See Settings → Company & DB.');
-        _supaErrorToastCooldownUntil=Date.now()+5*60*1000;
+      var txt=[];
+      for(var i=0;i<arguments.length;i++){
+        var a=arguments[i];
+        try{ txt.push(typeof a==='string'?a:(a&&a.message)?a.message:JSON.stringify(a)); }catch(e){ txt.push(String(a)); }
       }
-      if(typeof renderSupaStatus==='function') renderSupaStatus();
+      _supaNoteError(txt.join(' '));
     }
     return origWarn.apply(console,arguments);
   };
 })();
 function initSupabase(){
+  try{ _supaLoadErrLog(); }catch(e){}
   if(supa) return;
   if(typeof window.supabase==='undefined'||!window.supabase.createClient){ return; }
   if(!SUPA_URL||!SUPA_ANON_KEY){ return; }
@@ -17535,10 +17564,20 @@ function renderSupaStatus(){
   var errNote='';
   if(_supaErrorCount>0){
     var mins=Math.round((Date.now()-_supaLastErrorAt)/60000);
-    var whenTxt=mins<1?'just now':(mins+' min ago');
+    var whenTxt=mins<1?'just now':(mins<60?(mins+' min ago'):(Math.round(mins/60)+'h ago'));
+    // The actual messages, not just a count — a count tells you something broke, the message
+    // tells you WHICH quotation and why, which is the only part anyone can act on.
+    var recent=_supaErrLog.slice(-5).reverse().map(function(e){
+      var d=new Date(e.at);
+      var hh=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);
+      return '<div style="font-family:monospace;font-size:10px;margin-top:3px;word-break:break-word">'
+        +hh+' — '+escHtml(e.msg)+'</div>';
+    }).join('');
     errNote='<div style="margin-top:8px;padding:6px 10px;background:#fff8ec;border:1px solid var(--amber);border-radius:6px;font-size:11px;color:#8a5a00">'
-      +'<i class="ti ti-alert-triangle"></i> '+_supaErrorCount+' background sync '+(_supaErrorCount===1?'issue':'issues')+' since this page loaded (last one '+whenTxt+'). '
-      +'<a href="#" onclick="_supaErrorCount=0;renderSupaStatus();return false" style="color:#8a5a00;text-decoration:underline">Dismiss</a>'
+      +'<i class="ti ti-alert-triangle"></i> <b>'+_supaErrorCount+' failed background '+(_supaErrorCount===1?'save':'saves')+'</b> (last one '+whenTxt+'). '
+      +'Sheets still holds the work, but a quotation whose state failed to sync will open showing the older copy. '
+      +'<a href="#" onclick="_supaClearErrLog();renderSupaStatus();return false" style="color:#8a5a00;text-decoration:underline">Dismiss</a>'
+      +recent
       +'</div>';
   }
   // Three states, not two: session-truthy-and-verified-working, session-truthy-but-a-real-check-
@@ -17692,23 +17731,29 @@ function supaUpsertQuotation(entry){
   // Postgres timestamptz rejects '' — coerce empties to null
   ['created_at','initial_locked_at','initial_approved_at','final_locked_at'].forEach(function(k){ if(!row[k]) row[k]=null; });
   try{
+    // The .catch is not optional. A network-level rejection never sets r.error and the
+    // surrounding try/catch cannot see an async rejection — so the whole class of failure
+    // was completely silent: no warn, no toast, no row. Nothing said the save had not landed.
     return supa.from('quotations').upsert(row,{onConflict:'serial'}).then(function(r){
-      if(r.error) console.warn('[supa] quotation upsert error:',r.error.message||r.error);
+      if(r.error) console.warn('[supa] quotation upsert error ('+row.serial+'):',r.error.message||r.error);
       else console.log('[supa] quotation upserted:',row.serial);
-    });
-  }catch(e){ console.warn('[supa] quotation upsert threw',e); return Promise.resolve(); }
+    }).catch(function(e){ console.warn('[supa] quotation upsert threw ('+row.serial+')',e); });
+  }catch(e){ console.warn('[supa] quotation upsert threw ('+row.serial+')',e); return Promise.resolve(); }
 }
 // — quotation state upsert (dual-write). Ensures parent quotation row exists
 //   first (FK), without clobbering its columns (DO NOTHING stub). —
 function supaUpsertState(serial,state){
   if(!SUPA_DUAL_WRITE||!supaReady()||!serial) return Promise.resolve();
   try{
-    return supa.from('quotations').upsert({serial:serial},{onConflict:'serial',ignoreDuplicates:true}).then(function(){
+    // The stub's own error used to be discarded, so if the parent insert was refused the code
+    // carried on and reported only the child's failure — naming the symptom, never the cause.
+    return supa.from('quotations').upsert({serial:serial},{onConflict:'serial',ignoreDuplicates:true}).then(function(r0){
+      if(r0&&r0.error) console.warn('[supa] state upsert — parent row refused ('+serial+'):',r0.error.message||r0.error);
       return supa.from('quotation_states').upsert({serial:serial,state:state,cost_report:(state&&state.costReport)||null},{onConflict:'serial'});
     }).then(function(r){
-      if(r&&r.error) console.warn('[supa] state upsert error:',r.error.message||r.error);
+      if(r&&r.error) console.warn('[supa] state upsert error ('+serial+'):',r.error.message||r.error);
       else console.log('[supa] state upserted:',serial);
-    }).catch(function(e){ console.warn('[supa] state upsert threw',e); });
+    }).catch(function(e){ console.warn('[supa] state upsert threw ('+serial+')',e); });
   }catch(e){ console.warn('[supa] state upsert threw',e); return Promise.resolve(); }
 }
 // — quotation state read (used only when USE_SUPABASE is true; off for now) —
