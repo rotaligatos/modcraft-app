@@ -342,7 +342,15 @@ tr.cl-row:hover td{background:#f4f7fb}
   </div>
   <div class="card" id="dash-team-card">
     <div class="card-head"><h3><i class="ti ti-users"></i>Team performance</h3>
-      <button class="btn" onclick="navigate('reports')" style="font-size:12px;padding:4px 10px"><i class="ti ti-external-link"></i>Full report</button>
+      <div style="display:flex;align-items:center;gap:8px;margin-left:auto">
+        <select id="dash-team-co" onchange="_dashUpdateKPIs()" style="height:28px;font-size:12px;padding:0 6px">
+          <option value="">All companies</option>
+          <option value="W">World Class Laminate</option>
+          <option value="M">Module Systems &amp; Services</option>
+          <option value="C">Cebu World Laminate</option>
+        </select>
+        <button class="btn" onclick="navigate('reports')" style="font-size:12px;padding:4px 10px"><i class="ti ti-external-link"></i>Full report</button>
+      </div>
     </div>
     <div class="card-body" style="padding:0"><table class="data" id="dash-team"></table></div>
   </div>
@@ -8683,34 +8691,79 @@ function _dashUpdateKPIs(){
   });
   html('dash-pipeline', pHtml||'<p style="font-size:12px;color:var(--text2)">No data yet.</p>');
 
-  // Team performance — group by user
+  // Team performance — the KPI matrix.
+  //
+  // Three things were wrong with the old version. It counted status==='closed', which stopped
+  // existing when the status ladder was redefined — across 223 live quotations, zero matched, so
+  // Closed / Rate / Revenue read 0 for everyone. It timed created -> initial lock rather than the
+  // thing being managed. And it ranked anyone who had ever prepared a quotation, test accounts
+  // included.
+  //
+  // Now: only people ticked "Include in Team performance" (Settings -> Users), measured on the
+  // real cycle — order received -> quotation sent — in WORKING hours, using the same calendar as
+  // the SLA timer on the order card so the two can never disagree. Company comes from the serial
+  // prefix (W/M/C), which already encodes it, so no new column is needed.
+  var teamCo=(el('dash-team-co')||{}).value||'';
+  var kpiPeople=(sheetUsers||[]).filter(function(u){return u.includeKpi&&u.active;});
   var byUser={};
+  kpiPeople.forEach(function(u){
+    byUser[u.name.trim().toLowerCase()]={name:u.name,quotes:0,won:0,revenue:0,respMins:[],answered:0};
+  });
+  var quotBySerial={};
+  all.forEach(function(e){ if(e.id) quotBySerial[String(e.id)]=e; });
+  var unmatched={};
   all.forEach(function(e){
-    var u=e.user||'(unknown)';
-    if(!byUser[u]) byUser[u]={name:u,quotes:0,closed:0,revenue:0,respTimes:[]};
-    byUser[u].quotes++;
-    var st=(e.status||'').toLowerCase();
-    if(st==='closed'){byUser[u].closed++;byUser[u].revenue+=(e.value||0);}
-    if(e.initLockedAt&&e.created){
-      var d1=new Date(e.created),d2=new Date(e.initLockedAt);
-      if(!isNaN(d1)&&!isNaN(d2)&&d2>d1) byUser[u].respTimes.push((d2-d1)/3600000);
-    }
+    var pre=_companyPrefixOf(e.id);
+    if(teamCo && pre!==teamCo) return;
+    var key=String(e.user||'').trim().toLowerCase();
+    if(!key) return;
+    if(!byUser[key]){ if(e.user) unmatched[e.user]=(unmatched[e.user]||0)+1; return; }
+    var u=byUser[key];
+    u.quotes++;
+    if((e.status||'')==='Client Approved'){ u.won++; u.revenue+=(e.value||0); }
+  });
+  // The response clock lives on the ORDER, not the quotation: received -> sent.
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
+    if(!o||!o.receivedAt||!o.sentAt||!o.quotSerial) return;
+    var q=quotBySerial[o.quotSerial]||quotBySerial[_serialRoot(o.quotSerial)];
+    if(!q) return;
+    var pre=_companyPrefixOf(q.id);
+    if(teamCo && pre!==teamCo) return;
+    var key=String(q.user||'').trim().toLowerCase();
+    if(!byUser[key]) return;
+    var mins=(typeof calcWorkingMinutes==='function')
+      ? calcWorkingMinutes(o.receivedAt,o.sentAt,o.sourceCompany||'')
+      : (new Date(o.sentAt)-new Date(o.receivedAt))/60000;
+    if(mins>=0){ byUser[key].respMins.push(mins); byUser[key].answered++; }
   });
   var users=Object.values(byUser).sort(function(a,b){return b.quotes-a.quotes;});
-  var teamHtml='<thead><tr><th>User</th><th>Quotes</th><th>Closed</th><th>Rate</th><th>Resp. time</th><th>Revenue</th></tr></thead><tbody>';
-  if(!users.length) teamHtml+='<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:16px">No data yet.</td></tr>';
+  var teamHtml='<thead><tr><th>User</th><th>Quotes</th><th>Won</th><th>Rate</th><th>Orders answered</th><th>Avg. response</th><th>Revenue</th></tr></thead><tbody>';
+  if(!users.length){
+    teamHtml+='<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:16px">'
+      +'Nobody is included yet — tick <b>Include in Team performance</b> on each person in Settings &rarr; Users.</td></tr>';
+  }
   users.forEach(function(u){
-    var rate=u.quotes?Math.round(u.closed/u.quotes*100):0;
-    var avgH=u.respTimes.length?u.respTimes.reduce(function(s,v){return s+v;},0)/u.respTimes.length:null;
+    var rate=u.quotes?Math.round(u.won/u.quotes*100):0;
+    var avg=u.respMins.length?u.respMins.reduce(function(s,v){return s+v;},0)/u.respMins.length:null;
     var rateColor=rate>=75?'var(--teal)':rate>=50?'var(--amber)':'var(--coral)';
     var init=u.name.split(/\s+/).map(function(n){return n[0]||'';}).join('').substring(0,2).toUpperCase();
-    teamHtml+='<tr><td><div style="display:flex;align-items:center;gap:8px"><div style="width:26px;height:26px;border-radius:50%;background:#e6edf5;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:var(--navy)">'+init+'</div>'+u.name+'</div></td>'
-      +'<td style="text-align:center">'+u.quotes+'</td><td style="text-align:center">'+u.closed+'</td>'
+    teamHtml+='<tr><td><div style="display:flex;align-items:center;gap:8px"><div style="width:26px;height:26px;border-radius:50%;background:#e6edf5;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:var(--navy)">'+init+'</div>'+escHtml(u.name)+'</div></td>'
+      +'<td style="text-align:center">'+u.quotes+'</td><td style="text-align:center">'+u.won+'</td>'
       +'<td><div style="display:flex;align-items:center;gap:6px"><div class="range-bar" style="flex:1"><div class="range-fill" style="background:'+rateColor+';width:'+rate+'%"></div></div><span style="font-size:12px;font-weight:500;min-width:28px">'+rate+'%</span></div></td>'
-      +'<td style="text-align:center;font-weight:500">'+(avgH!=null?(avgH<24?avgH.toFixed(1)+'h':Math.round(avgH/24)+'d'):'—')+'</td>'
+      +'<td style="text-align:center">'+(u.answered||'—')+'</td>'
+      +'<td style="text-align:center;font-weight:500">'+(avg!=null?(typeof fmtWorkMins==='function'?fmtWorkMins(Math.round(avg)):Math.round(avg)+'m'):'—')+'</td>'
       +'<td style="font-weight:500">'+fmtK(u.revenue)+'</td></tr>';
   });
   teamHtml+='</tbody>';
+  // Anyone preparing quotations who is NOT in the matrix is named, not silently dropped — that is
+  // how you notice a new hire nobody ticked, or a name that no longer matches the Roles sheet.
+  var un=Object.keys(unmatched);
+  if(un.length){
+    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:#8a5a00;background:#fff8ec;padding:7px 10px">'
+      +'<i class="ti ti-alert-triangle"></i> Not measured: '
+      +un.map(function(n){return escHtml(n)+' ('+unmatched[n]+')';}).join(' · ')
+      +' — tick them in Settings &rarr; Users, or check the name matches the Roles sheet.</td></tr></tfoot>';
+  }
   html('dash-team',teamHtml);
 
   // Revenue chart — monthly totals for current year
@@ -9970,7 +10023,7 @@ function exportReportToPPT() {
 // Load sheetUsers silently on app start so routing works without visiting Users page
 function loadSheetUsersBackground(){
   if(!gToken) return;
-  sheetsGet('User Roles!A:Y')
+  sheetsGet('User Roles!A:Z')
     .then(function(data){
       var rows=data.values||[];
       sheetUsers=parseUserRows(rows);
@@ -14561,7 +14614,10 @@ function parseUserRows(rows){
     }
     if(!email) continue;
     var pinHash=r[22]||''; var pinSalt=r[23]||'';
-    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:pinHash,pinSalt:pinSalt,rowIdx:i+1});
+    // Col Z — whether this person appears in the Team performance matrix. Absent (an existing
+    // row, or a sheet not yet widened) reads as NOT measured: nobody is ranked until ticked.
+    var includeKpi=String(r[25]||'').toUpperCase()==='TRUE';
+    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:pinHash,pinSalt:pinSalt,includeKpi:includeKpi,rowIdx:i+1});
   }
   return out;
 }
@@ -14570,7 +14626,7 @@ function loadUsersFromSheet(){
   var wrap=el('users-wrap');
   if(!gToken){if(wrap)wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Please sign in to manage users.</div>';return;}
   if(wrap)wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text2);font-size:13px"><i class="ti ti-loader" style="font-size:18px"></i> Loading users…</div>';
-  sheetsGet('User Roles!A:Y')
+  sheetsGet('User Roles!A:Z')
     .then(function(data){
       sheetUsers=parseUserRows(data.values||[]);
       renderUsers();
@@ -14646,6 +14702,13 @@ function renderUsers(){
         +'<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px">'+acBoxes+'</div>';
     }
 
+    // Who appears in the Team performance matrix. Off by default — nobody is ranked until an
+    // Admin says so, rather than everyone who ever prepared a quotation being ranked by accident.
+    var kpiHtml='<div class="dvdr" style="margin:10px 0 8px"><span>Performance matrix</span></div>'
+      +'<label style="display:flex;align-items:center;gap:7px;font-size:12px;'+(isAdmin?'cursor:pointer':'cursor:default;opacity:.55')+'">'
+      +'<input type="checkbox" id="u'+i+'kpi" '+(u.includeKpi?'checked':'')+(isAdmin?'':' disabled')+'>'
+      +'Include in Team performance</label>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Measured on orders answered: received &rarr; quotation sent, in working hours.</div>';
     h+='<div style="background:#fff;border:.5px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:12px;opacity:'+(u.active?1:.6)+'">'
       +'<div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">'
       +'<div style="width:42px;height:42px;border-radius:50%;background:'+(u.active?'#e6edf5':'#eee')+';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:'+(u.active?'var(--navy)':'var(--muted)')+'">'+ini+'</div>'
@@ -14669,7 +14732,8 @@ function renderUsers(){
       +'<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">'+accHtml+'</div>'
       +delHtml
       +accessCoHtml
-      +(isAdmin?'<button class="btn btn-primary" onclick="saveUserRow('+i+')" style="font-size:12px;padding:5px 12px"><i class="ti ti-device-floppy"></i> Save changes</button>':'')
+      +kpiHtml
+      +(isAdmin?'<div style="margin-top:12px"><button class="btn btn-primary" onclick="saveUserRow('+i+')" style="font-size:12px;padding:5px 12px"><i class="ti ti-device-floppy"></i> Save changes</button></div>':'')
       +'</div>'
       +'<div style="display:flex;flex-direction:column;gap:8px;flex-shrink:0">'
       +(isAdmin?'<button class="btn btn-'+(u.active?'danger':'success')+'" onclick="toggleUserActive('+i+')" style="font-size:12px;padding:6px 12px;white-space:nowrap"><i class="ti ti-'+(u.active?'user-x':'user-check')+'"></i>'+(u.active?'Deactivate':'Activate')+'</button>':'')
@@ -14709,6 +14773,9 @@ function saveUserRow(i){
   var receiveAll=canDelegate?(el('u'+i+'ra')?el('u'+i+'ra').checked:u.receiveAll):u.receiveAll;
   // Additional company access — checkboxes only rendered for non-Admin/Director rows;
   // preserve the existing value for Admin/Director (always redundant for them anyway).
+  // Whether this person appears in the Team performance matrix. Admin-set, like the rest of
+  // this card; the switch is only rendered for an Admin, so preserve the stored value otherwise.
+  var includeKpi=el('u'+i+'kpi')?el('u'+i+'kpi').checked:!!u.includeKpi;
   var accessCompanies=u.accessCompanies||[];
   if(pos!=='Admin'&&pos!=='Director'){
     accessCompanies=Object.keys(COMPANY_KEY_NAMES).filter(function(k){
@@ -14723,10 +14790,11 @@ function saveUserRow(i){
     acc['Projects']?'TRUE':'FALSE',acc['Clients']?'TRUE':'FALSE',                                   // R-S
     acc['Designers Support']?'TRUE':'FALSE',acc['Settings']?'TRUE':'FALSE',acc['Users']?'TRUE':'FALSE', // T-V
     u.pinHash||'', u.pinSalt||'',                                                                    // W-X
-    accessCompanies.join(',')];                                                                      // Y
-  sheetsUpdate('User Roles!A'+u.rowIdx+':Y'+u.rowIdx,[row])
+    accessCompanies.join(','),                                                                        // Y
+    includeKpi?'TRUE':'FALSE'];                                                                     // Z                                                                      // Y
+  sheetsUpdate('User Roles!A'+u.rowIdx+':Z'+u.rowIdx,[row])
     .then(function(){
-      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',rowIdx:u.rowIdx};
+      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',includeKpi:includeKpi,rowIdx:u.rowIdx};
       supaUpsertUser(sheetUsers[i]);
       // Correcting your OWN name here should show on the next quotation you save, not after a
       // re-login — otherwise the fix looks like it did nothing.
@@ -14751,7 +14819,7 @@ function toggleUserActive(i){
 function removeUserRow(i){
   var u=sheetUsers[i];
   _confirm('Remove '+u.name+' ('+u.email+')? They will no longer be able to sign in.',function(){
-    sheetsClear('User Roles!A'+u.rowIdx+':Y'+u.rowIdx)
+    sheetsClear('User Roles!A'+u.rowIdx+':Z'+u.rowIdx)
       .then(function(){supaDeleteUser(u.email); sheetUsers.splice(i,1); renderUsers(); showToast('User removed.');})
       .catch(function(){showToast('Failed to remove. Check sheet permissions.');});
   });
@@ -14810,9 +14878,10 @@ function submitAddUser(){
   for(var k=8;k<ACC_KEYS.length;k++){var cb=el('na'+k);row.push(cb&&cb.checked?'TRUE':'FALSE');}  // R-V (new 5 keys)
   row.push('','');  // W-X: no PIN set on add
   row.push('');  // Y: no additional company access on add — grant explicitly afterward if needed
+  row.push(el('n-kpi')&&el('n-kpi').checked?'TRUE':'FALSE');  // Z: include in the performance matrix
   var acc={};
   for(var k=0;k<ACC_KEYS.length;k++){var cb=el('na'+k);acc[ACC_KEYS[k]]=cb?cb.checked:false;}
-  sheetsAppend('User Roles!A:Y',[row])
+  sheetsAppend('User Roles!A:Z',[row])
     .then(function(){
       supaUpsertUser({name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:true,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:'',accessCompanies:[],pinHash:'',pinSalt:''});
       var w=el('add-user-form-wrap');if(w)w.innerHTML=''; loadUsersFromSheet(); showToast('User added.');
@@ -18766,13 +18835,14 @@ function supaUpsertUser(u){
     receive_all:!!u.receiveAll,
     access_companies:u.accessCompanies||[],
     pin_hash:u.pinHash||null,
-    pin_salt:u.pinSalt||null
+    pin_salt:u.pinSalt||null,
+    include_in_kpi:!!u.includeKpi
   };
   try{
     return supa.from('users').upsert(row,{onConflict:'email'}).then(function(r){
-      if(r.error) console.warn('[supa] user upsert error:',r.error.message||r.error);
+      if(r.error) console.warn('[supa] user upsert error ('+row.email+'):',r.error.message||r.error);
       else console.log('[supa] user upserted:',row.email);
-    });
+    }).catch(function(e){ console.warn('[supa] user upsert threw ('+row.email+')',e); });
   }catch(e){ console.warn('[supa] user upsert threw',e); return Promise.resolve(); }
 }
 function supaDeleteUser(email){
@@ -18795,7 +18865,7 @@ function supaMigrateUsers(){
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
   _usersMigrationInFlight=true;
   console.log('[migrate] backfilling Users into Supabase from User Roles sheet…');
-  return sheetsGet('User Roles!A:Y').then(function(d){
+  return sheetsGet('User Roles!A:Z').then(function(d){
     var rows=(d&&!d.error&&d.values)||[];
     var users=parseUserRows(rows);
     console.log('[migrate] found',users.length,'user row(s) in Sheets — migrating...');
@@ -22613,6 +22683,12 @@ function _saveConflictReload(){
 // (/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/), so the suffix is stripped wherever the base
 // is needed — directory grouping, Drive folders, dedup. _claimPeekedSerial's
 // $-anchored regex only ever sees a freshly minted serial, before any suffix exists.
+// W / M / C from the serial — the quotation's own company, already encoded at creation.
+// Old-format serials (QT-YYMMDD-RRRR) predate the prefix and return '' (unassigned).
+function _companyPrefixOf(serial){
+  var m=String(serial||'').match(/^QT-([WCM])\d{8}/);
+  return m?m[1]:'';
+}
 function _serialStem(serial){ return String(serial||'').replace(/\.R\d+$/,''); }
 // The quotation's identity with BOTH suffixes off — option (-2) and revision (.R1).
 // Use this to ask "is this the same quotation?", never a raw === on the serial.
