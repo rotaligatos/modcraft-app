@@ -1833,7 +1833,7 @@ tr.cl-row:hover td{background:#f4f7fb}
 <!-- Approver: full CF override modal with profit summary -->
 <div class="overlay" id="ov-custom-cf">
   <div class="modal wide">
-    <div class="modal-head"><h3><i class="ti ti-adjustments-alt"></i>Cost factor override — this quotation only</h3><button class="modal-close" onclick="closeModal('ov-custom-cf')">×</button></div>
+    <div class="modal-head"><h3><i class="ti ti-adjustments-alt"></i>Cost factor override — this quotation only</h3><button class="modal-close" onclick="closeCustomCF()">×</button></div>
     <div class="modal-body">
       <!-- Requester note (shown when opened from a request) -->
       <div id="ccf-req-note" style="display:none;background:#f0f4ff;border:.5px solid #b0c0e8;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--text1)">
@@ -1930,7 +1930,7 @@ tr.cl-row:hover td{background:#f4f7fb}
         <input type="password" id="ccf-pin" placeholder="••••" style="letter-spacing:8px;text-align:center;font-size:18px">
         <p id="ccf-err" style="color:var(--coral);font-size:12px;display:none;margin-top:4px">Incorrect PIN.</p>
         <div style="display:flex;gap:8px;margin-top:14px">
-          <button class="btn" onclick="closeModal('ov-custom-cf')">Cancel</button>
+          <button class="btn" onclick="closeCustomCF()">Cancel</button>
           <button class="btn btn-amber" onclick="confirmCustomCF()"><i class="ti ti-check"></i>Approve &amp; apply</button>
         </div>
       </div>
@@ -8037,9 +8037,21 @@ function _setCCFFields(src) {
   el("ccf-def-instMk").textContent="(global: "+(CF.instMarkup||0)+"%)";
   el("ccf-def-discBuf").textContent="(global: "+(CF.discountBuffer||0)+"%)";
 }
+// Everything that says "this modal is actioning a ROUTED request" — the request being
+// actioned and the quotation it belongs to. Both are sticky globals, and neither was
+// cleared when the modal was cancelled or reopened a different way, so they survived
+// into the NEXT override:
+//   * a leftover _ccfTargetSerial made _onOpen false, so confirming an override on the
+//     quotation actually on screen silently did nothing to it — which is why it took
+//     several attempts before anything appeared to change, and
+//   * a leftover _pendingOverrideNotifIdx marked somebody else's request approved, with
+//     these rates, and wrote them into that request's quotation.
+function _ccfClearRouting(){ _pendingOverrideNotifIdx=-1; _ccfTargetSerial=''; }
+// Cancel / × must clear too, otherwise backing out of a routed request poisons the next one.
+function closeCustomCF(){ _ccfClearRouting(); closeModal('ov-custom-cf'); }
 function openCustomCF() {
   modalCtx='s1';
-  _ccfTargetSerial='';   // no routed request — the target is the open quotation
+  _ccfClearRouting();   // no routed request — the target is the open quotation
   if(isApprover()){
     var src=(qCustomCFApproved&&qCustomCF)?qCustomCF:CF;
     _setCCFFields(src);
@@ -8174,6 +8186,7 @@ function _ccfRenderRoute(){
 }
 function fqOpenCustomCF() {
   modalCtx='fq';
+  _ccfClearRouting();   // Stage 2 override on the OPEN quotation — cleared neither before
   if(isApprover()){
     var src=(fqCustomCFApproved&&fqCustomCF)?fqCustomCF:CF;
     _setCCFFields(src);
@@ -10955,8 +10968,11 @@ function toggleNotifPanel(e){
   if(p.style.display==='block'){
     closeNotifPanel();
   } else {
-    renderNotifPanel();
+    renderNotifPanel();          // show what we have straight away…
     p.style.display='block';
+    // …then check for anything newer. Opening the bell is a deliberate "has it come
+    // through yet?", so it should not show a list up to a minute stale.
+    if(typeof _pollApprovalsNow==='function') _pollApprovalsNow(true);
     setTimeout(function(){
       document.addEventListener('click',_notifPanelOutsideClick);
     },0);
@@ -19765,9 +19781,14 @@ function gShowApp(){
   }); // load persisted requests, update badge
   // Auto-refresh every 60 s: ring bell for approvers when new requests arrive;
   // notify requesters when their own requests are approved or rejected.
-  if(window._apprPollTimer) clearInterval(window._apprPollTimer);
-  window._apprPollTimer=setInterval(function(){
-    if(!gToken||gSessionExpired||document.hidden) return;   // skip polling when tab not visible
+  // (the timer is cleared just below, where it is re-created)
+  // Extracted from the 60 s interval so the SAME check can be run on demand. A requester
+  // waited a full poll to see their approval land — longer if their tab was in the background,
+  // because the poll deliberately skips while hidden. Now it also runs the moment they come
+  // back to the tab, and when they open the notification panel.
+  window._pollApprovalsNow=function(force){
+    if(!gToken||gSessionExpired) return;
+    if(document.hidden&&!force) return;   // skip background polling, but never an on-demand call
     var me=(gUser&&gUser.email||'').toLowerCase();
     // Snapshot current statuses of own requests before reloading
     var ownBefore={};
@@ -19834,7 +19855,16 @@ function gShowApp(){
       var ap=el('page-approvals');
       if(ap&&ap.classList.contains('active')) renderApprovals();
     });
-  }, 60000); // every 60 seconds
+  };
+  if(window._apprPollTimer) clearInterval(window._apprPollTimer);
+  window._apprPollTimer=setInterval(function(){ _pollApprovalsNow(false); }, 60000); // every 60 seconds
+  // Coming back to the tab is exactly when a requester expects to see the answer.
+  if(!window._apprVisHooked){
+    window._apprVisHooked=true;
+    document.addEventListener("visibilitychange",function(){
+      if(!document.hidden&&typeof _pollApprovalsNow==="function") _pollApprovalsNow(true);
+    });
+  }
 
   // ── Messages: baseline existing, then poll for new ones ──
   gEnsureMessagesTab(function(){
