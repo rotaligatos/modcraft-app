@@ -2677,6 +2677,26 @@ var qFabCont = {pct:null,mode:'line'};
 // Whole objects are copied rather than a list of named fields, so a rate added later is frozen
 // too without anyone remembering to add it here.
 var qLockedRates = null;   // {at, by, cf, carcassPrices, mobLocations, instCost}
+// The grand total each stage was LOCKED at. Freezing the rates stops the price moving
+// when Settings change, but it cannot stop a recompute drifting for any other reason —
+// a figure the client has already been given must not be rewritten by an action taken
+// afterwards (approve, share, close all re-save). Null until that stage is locked.
+// Keyed off qLocked / fqLocked, so unlocking releases the guard without clearing these.
+var qLockedTotal = null;   // Stage 1 (Initial Quotation)
+var fqLockedTotal = null;  // Stage 2 (Final Quotation)
+// Records the stage's total at the moment it is locked. Called at every lock site,
+// BEFORE gSaveQuotation, and unconditionally — a re-lock after an unlock must capture
+// the new figure, unlike _freezeRates() which deliberately refuses to re-freeze.
+function _captureLockedTotal(){
+  var g=(_pCalc&&_pCalc.grand)||0;
+  if(!(g>0)) return;                       // nothing computed yet — don't pin a zero
+  if((_pCalc.stage||qStage)===2) fqLockedTotal=g; else qLockedTotal=g;
+}
+// The figure the CURRENT stage is pinned to, or null when it is free to move.
+function _lockedTotalForStage(){
+  if(qStage===2) return fqLocked?fqLockedTotal:null;
+  return qLocked?qLockedTotal:null;
+}
 function _capturePricingRates(){
   var cp=function(o){ try{ return JSON.parse(JSON.stringify(o)); }catch(e){ return null; } };
   return {at:new Date().toISOString(), by:(gUser&&(gUser.name||gUser.email))||'',
@@ -4561,6 +4581,7 @@ function initQuotation() {
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}],outsourceMaterials:[],outsourceHardware:[]}];
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus=''; qLockedRates=null;
+  qLockedTotal=null; fqLockedTotal=null;
   qInitLockedAt=''; qInitApprovedAt=''; fqLockedAt=''; qClosedAt='';
   qCancelled=false; qCancelledAt=''; qCancelReason='';
   qLog=[]; qPieces=[]; _pCalc={};
@@ -15747,7 +15768,7 @@ function doLockOnly(){
   if(qRevisionPending) _applyRevisionBump();   // stamp the revision as it is issued
   _stampPreparedBySignature();
   qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
-  _freezeRates('Stage 1 lock');
+  _freezeRates('Stage 1 lock'); _captureLockedTotal();
   // Also mark the current option object as locked
   if(qActiveOptionId>0){var _lo=qOptionsList.find(function(o){return o.id===qActiveOptionId;});if(_lo){_lo.locked=true;_lo.saved=true;}}
   logActivity('Quotation locked.');
@@ -16009,7 +16030,7 @@ function confirmSend(via) {
   _stampPreparedBySignature();
   if(modalCtx==='fq'){
     fqLocked=true; fqSentStatus=sentTxt; fqLockedAt=new Date().toISOString();
-    _freezeRates('Final Quotation lock');
+    _freezeRates('Final Quotation lock'); _captureLockedTotal();
     logActivity(stage+" locked. "+sentTxt+".");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -16019,7 +16040,7 @@ function confirmSend(via) {
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus=sentTxt; qInitLockedAt=qInitLockedAt||new Date().toISOString();
-    _freezeRates('Stage 1 lock & send');
+    _freezeRates('Stage 1 lock & send'); _captureLockedTotal();
     logActivity(stage+" locked. "+sentTxt+".");
     gSaveQuotation(); updateLockUI(); updateSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -16058,7 +16079,7 @@ function skipSend() {
   closeModal("ov-lock");
   if(modalCtx==='fq'){
     fqLocked=true; fqSentStatus="Not sent"; fqLockedAt=new Date().toISOString();
-    _freezeRates('Final Quotation lock');
+    _freezeRates('Final Quotation lock'); _captureLockedTotal();
     logActivity("Final quotation locked. Not sent to client.");
     updateFQLockUI(); updateFQSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -16068,7 +16089,7 @@ function skipSend() {
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus="Not sent"; qInitLockedAt=qInitLockedAt||new Date().toISOString();
-    _freezeRates('Stage 1 lock');
+    _freezeRates('Stage 1 lock'); _captureLockedTotal();
     logActivity("Quotation locked. Not sent to client.");
     gSaveQuotation(); updateLockUI(); updateSentStatus();
     saveQuotationToDrive('final','Final Quotation');
@@ -23182,6 +23203,21 @@ function _proceedSaveQuotation(){
   // Fix ₱0.00: try _pCalc first, then fall back to summary element
   var grand=(_pCalc&&_pCalc.grand&&_pCalc.grand>0)?_pCalc.grand:0;
   if(!grand){var te=el('sum-total');if(te) grand=parseFloat(te.textContent.replace(/[^\d.]/g,''))||0;}
+  // A locked stage keeps the figure it was locked at. Approve, share, close and cancel all
+  // re-save AFTER the client has the quotation, so without this a recompute that drifted for
+  // any reason would quietly rewrite an issued price. Rommel, 2026-08-05: "do not change the
+  // locked and sent quotation unless the user interven or unlocked the quotation."
+  // Unlocking clears qLocked/fqLocked, which releases the guard on its own.
+  var _pinned=_lockedTotalForStage();
+  if(_pinned!=null && _pinned>0 && Math.abs(_pinned-grand)>0.005){
+    // Never silent. A drift here means something changed underneath an issued quotation,
+    // and that is worth a permanent record even though the stored figure is protected.
+    logActivity('Locked total kept at '+fmtMoney(_pinned)+' — a recompute produced '
+      +fmtMoney(grand)+' ('+(grand>_pinned?'+':'−')+fmtMoney(Math.abs(grand-_pinned))
+      +'). Unlock the quotation to change the price.');
+    console.warn('[locked-total] kept '+_pinned+', recompute said '+grand);
+    grand=_pinned;
+  }
   var total=grand.toFixed(2);
   var now=new Date().toISOString();
   var serial=qBaseSerial||qSerial;
@@ -23336,6 +23372,7 @@ function getFullQuotationState(){
     // cost was silently lost on reopen — and, worse, the globals leaked between
     // quotations (see fqInitialized in restoreFullQuotationState).
     fqFabBasis:fqFabBasis, fqFabCostOverride:fqFabCostOverride,
+    lockedTotal:qLockedTotal, fqLockedTotal:fqLockedTotal,
     fqClientApproved:fqClientApproved, fqClientApprovedAt:fqClientApprovedAt,
     fqVatApproved:fqVatApproved, fqDiscPct:fqDiscPct, fqDiscApproved:fqDiscApproved, fqPremApproved:fqPremApproved,
     fqCustomCF:fqCustomCF?JSON.parse(JSON.stringify(fqCustomCF)):null, fqCustomCFApproved:fqCustomCFApproved,
@@ -23467,6 +23504,15 @@ function restoreFullQuotationState(state){
   // or fqClientApproved (restored here), and approvals are already guarded by
   // fqApprovalsFromSave.
   fqInitialized=false;
+  // The figure each stage was locked at. Quotations locked before this existed never saved
+  // one, so fall back to the pCalc they were last saved with — that IS the number that was
+  // written to the Quotations sheet at the time, which is the figure to protect. Only
+  // adopted when that stage is actually locked and the saved pCalc belongs to that stage.
+  var _sp=state.pCalc||null, _spStage=_sp?(_sp.stage||1):0, _spGrand=_sp?(_sp.grand||0):0;
+  qLockedTotal = (state.lockedTotal!=null) ? state.lockedTotal
+    : ((state.locked && _spStage===1 && _spGrand>0) ? _spGrand : null);
+  fqLockedTotal = (state.fqLockedTotal!=null) ? state.fqLockedTotal
+    : ((state.fqLocked && _spStage===2 && _spGrand>0) ? _spGrand : null);
   // The basis this quotation actually saved wins over initFinalQuotation()'s
   // reset to 'initial' — same pattern as fqApprovalsFromSave above.
   if(state.fqFabBasis!==undefined){
