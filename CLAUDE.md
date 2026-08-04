@@ -3428,9 +3428,287 @@ rule applied was: **loud, never short.**
   that it is the access point. **Cost three failed `git push` attempts this session.** System
   settings, Rommel's to change.
 
+## What was changed on 2026-08-05 (session — 12 fixes: Stage 2 leak, locked prices, audit log, hardware catalogue, additional orders)
+
+Twelve commits, `bad19ac`..`9a624ca`, all deployed and verified live. Every one was found by
+RUNNING the code or by Rommel using the page; none by reading alone.
+
+### The two agreed at the end of 2026-08-04, both built
+1. **Order queue card** (`bad19ac`) — Dashboard, under Team performance, same company filter and
+   the same widget gate (a sixth widget key would need adding to every saved DASHPREF / DASHALLOW
+   row before anyone could see it). Four tiles — still new · in progress · reached quotation ·
+   past SLA — then average age of the open queue, the oldest order waiting, and how many answered
+   arrivals were late. Reuses `calcWorkingMinutes` and `ordersSlaSettings.defaultHours`
+   deliberately, so it can never disagree with the order card's timer. Company matched by
+   **keyword** (`_orderCompanyKey`) — "Module System" singular is the real value on 7 users.
+   Everything it cannot count is STATED: site visits (SLA-exempt), orders with no received time,
+   rows hidden by the filter, cancelled/archived, and the Sheets-only partial queue.
+   **Surfaced a real gap:** only `exportOrderToQuotation` sets *In Progress*, but the quotation
+   backlink appears only once that quotation is SAVED — so "In progress: 9 / Reached quotation: 0"
+   are both true. The tile now names it ("9 with no saved quotation yet") = an export abandoned or
+   still open in someone's tab.
+2. **Walk-in / Email arrival + response clock** (`dc63eda`) — Team performance could time only
+   **6 of 225** quotations, because an order carries a received time and a directly-started
+   quotation carries nothing. Rommel's design: the encoder says how the job arrived, that starts
+   the clock, Initial Quotation lock stops it. **Two sources, not one tick** — CWLI does not use
+   Wufoo, their orders come by email, so calling every non-order job a walk-in would mislabel a
+   whole company's work. An email order is real client WAIT, so its received time is **backdatable**
+   (defaults to now; a future time is refused with a toast). Reminder fires on the client name and
+   never nags again once picked. An order-backed quotation locks both radios and says where its
+   clock comes from. Self-reported by the person measured — deliberate trade, so every start,
+   source change and backdate goes to the activity log. Locked quotations with no source picked are
+   counted and NAMED under the table. One shared column, not two: once the start is deliberate the
+   quantity is the same either way. **Storage:** Quotations V=Job Source, W=Job Started;
+   `job_source`/`job_started_at` on Supabase. Forward-only — the 101 already-locked walk-ins never
+   get a start time. Not in the option snapshot on purpose (the job arrived once).
+
+### Bugs Rommel reported, all root-caused by reproduction
+3. **QT-M00000070 read ₱0.00 at Final, ₱3,043.04 at Initial** (`df8459b`) — the pricing was never
+   wrong; **Stage 2 was reading another quotation's numbers.** `fqInitialized` was only ever reset
+   by `initQuotation()`, which opening a saved quotation never calls — so after viewing Stage 2 on
+   quotation A, opening B and clicking Final Quotation **skipped `initFinalQuotation()` entirely**
+   (`goStage` guards on that flag) and B kept A's `fqFabBasis`, `fqFabCostOverride`, `fqInstRegion`,
+   `fqInstWorkers`, `fqInstDays`, `fqInstPlanner` and `fqBondIns`. Reproduced on 70's real state:
+   fresh load 2,766.40/2,766.40 · after another quotation (blank) 2,766.40/**0** · after another
+   quotation with a real number 2,766.40/**111,998.88**. The zero is the mild case; the third row
+   is the dangerous one, and bond insurance leaked the same way, switching itself on and adding
+   real money. `restoreFullQuotationState` now clears `fqInitialized`. Safe to re-run:
+   `initFinalQuotation()` never touches `fqLocked`/`fqSentStatus`/`fqClientApproved` and approvals
+   are guarded by `fqApprovalsFromSave` — all three verified intact. **Also fixed the quieter
+   half:** `fqFabBasis`/`fqFabCostOverride` were never persisted, so a typed cutting-list cost was
+   lost on reopen; both now save, with a new `fqBasisFromSave` flag stopping `initFinalQuotation`
+   resetting them.
+   > ⚠ **One casualty predates the fix: `QT-M00000087` (GYMFIX), final-locked and Client Approved
+   > at ₱0.00 on 2026-08-04.** Its line items are worth ₱500; its sibling `QT-M00000088` with the
+   > identical ₱500 line totals **₱616.00** (500 × 1.10 × 1.12). Correcting it needs an unlock of a
+   > client-approved quotation — Rommel's call, NOT done.
+4. **"The line item format doesn't appear anymore"** (`d42bef4`) — not lost; the
+   *Services, Materials & Hardware* print mode was gated to **"Fabrication only"**, so it never
+   appeared on a Fabrication-with-Installation quotation. The gate was too strict: itemised rows
+   replace only the per-area scope table and everything below (Fabrication subtotal, Mobilization &
+   Installation, design charge, site visit, discount, bond, VAT, grand total) is the same shared
+   totals section either way. Gate is now the fab-mode check alone; BOM and carcass still hide it.
+   Verified the risk directly — **totals identical both ways**: Fabrication only 3,326.40/3,326.40,
+   with Installation 618,247.41/618,247.41, both equal to `_pCalc.grand`.
+5. **"What is the 850 in the summary?"** (`14ef50a`) — ₱850 is the assembly cost per carcass, but
+   the line beside it was wrong: `instUnitPrice` is derived as `instLaborCost / instUnits`
+   (carcasses) yet was printed against `totU`, which in cutting-list mode sums **service**
+   quantities — linear metres and holes. The line read *"2342.56 units × ₱3,563.25"*, implying
+   **₱8,347,126.92** against a line actually charging **₱83,438.54** — ~100× overstated. **Display
+   only**; `instBase` comes from `instLaborCost` and never touched `totU`, and the client printout
+   does not carry the note. Carcass mode was never affected (there `getTotU()` already IS the
+   carcass count). Stage 2 does not share the bug — checked, not assumed.
+6. **Override needed several attempts, then landed late** (`2ebb90b`) — two faults.
+   (a) `_ccfTargetSerial` and `_pendingOverrideNotifIdx` are sticky globals that were never cleared
+   on cancel, and `fqOpenCustomCF()` cleared neither on the way in. A leftover target serial makes
+   `_onOpen` false, so confirming an override on the quotation **on screen silently did nothing** —
+   hence "twice or several times". Worse the other way: a leftover index marked **somebody else's
+   request** approved with these rates and wrote them into that request's quotation. Same class as
+   the 2026-07-29 fix one level up — that fixed *where the rates go*, this fixes *which request is
+   being answered*. All cleared by one `_ccfClearRouting()`, called from `openCustomCF`,
+   `fqOpenCustomCF` and a new `closeCustomCF()` wired to Cancel and the ×.
+   (b) The requester waited for the 60 s poll, which **skips while the tab is hidden**. The poll
+   body is extracted to `_pollApprovalsNow(force)` and now also runs on `visibilitychange` and when
+   the notification bell opens. Background polling still skips while hidden — the force flag is
+   what distinguishes an on-demand call.
+7. **Save/Discard asked on every open** (`c4c906a`) — `confirmUnsavedThen()` treated a quotation as
+   having unsaved work whenever `items[]` or `bomItems[]` was non-empty, but `initQuotation()`
+   **seeds both with a default Kitchen Base Cabinet** — so a blank form always matched. It was
+   testing whether the default scaffolding existed, not whether anyone had done anything. Now
+   compares against `_pristineQuotSig`, a signature of meaningful content only (field values, area
+   names, cabinet types/quantities, row counts) so lazily-created arrays cannot register as an
+   edit. The risk is the opposite failure, so that was tested hardest: **all 13 kinds of edit still
+   prompt**; untouched forms do not, including right after `renderItems()` and `recalc()`.
+
+### Rommel's rule: a locked quotation must not change
+8. **Locked quotations keep the price they were locked at** (`f3aeda0`) — *"do not change the
+   locked and sent quotation unless the user interven or unlocked the quotation."* Freezing the
+   rates (2026-08-04) stopped Settings moving a locked price but could not stop a recompute
+   drifting for any other reason, and approve/share/close/cancel all re-save AFTER the client has
+   the quotation. Each stage now records its total at lock (`qLockedTotal`/`fqLockedTotal`,
+   `_captureLockedTotal()` at all five lock sites) and a save while that stage is locked writes the
+   recorded figure. Stage 1 and Stage 2 pinned independently. **Unlocking clears `qLocked`/
+   `fqLocked`, which releases the guard on its own** — no separate clearing path to fall out of
+   step. Re-locking pins the new figure. Never silent: when the guard bites, the attempted figure
+   and the difference go to the activity log. Quotations locked before this adopt the `pCalc` they
+   were last saved with — precisely the number in the Quotations sheet.
+   Verified with sheet writes captured: at lock 1,680 · drifted to 6,720 while locked → **writes
+   1,680** + logs · after unlock → 6,720 · re-locked then drifted → 6,720 · old locked quotation
+   adopts 1,680 and refuses 6,720 · Stage 2 locked writes 3,360 and refuses 16,783 · plain draft
+   writes freely.
+
+### Designers Support
+9. **Reflect into the quotation you are working on** (`277e893`) — reflecting ALWAYS called
+   `initQuotation()`, so it started a brand new quotation every time; that is the only reason it
+   touched the serial, and why it cleared the client and reset Account Category to Direct. Rommel:
+   *"it should just reflect it... However, I agree that it should be gated and asked."* It now asks.
+   Choosing the open quotation leaves serial, client, project and Account Category alone — a CWLI
+   job stays CWLI on its C serial — and the analysis lands as a **new area named after the file**,
+   so nothing entered is removed (the first area is reused only while empty). The question is
+   skipped when there is nothing to add to. **Also fixed the silent discard:** every other path
+   that starts a fresh quotation goes through `confirmUnsavedThen`; reflect was the only one that
+   did not, and wiped a quotation holding 6 wardrobes with no prompt.
+
+### Price catalogue
+10. **Hardware editable in Settings** (`9853db9`) — Settings → Price Database now carries an
+    editable hardware catalogue (search, edit name/UOM/price, add, remove, then Save settings),
+    the same shape as Services. **Deliberately NOT in the quotation** — Rommel: *"if you put it in
+    the quotation, they will just keep adding unnecessary things."* Hardware only: Materials is
+    153,552 rows and cannot be listed inline. Guarded — writes nothing unless edited, refuses an
+    empty list rather than wiping 143 items, drops unnamed rows, and a background Price DB reload
+    cannot clobber unsaved edits.
+    **Two real bugs fixed alongside.** *"Import Hardware Excel"* was neither an append nor a clean
+    replace: a PUT to `<tab>!A:C` only overwrites the cells the new values cover, so importing 6
+    rows over 143 left rows 7–143 as the OLD data — two catalogues silently mixed — while Supabase
+    (delete-all + insert) ended with 6, and since the app reads Supabase first every connected
+    user's catalogue would have collapsed to 6 items while the Sheet still looked right. It now
+    clears before writing, both buttons read **"Replace … from Excel"**, and both confirm.
+    And `saveOutsourceToDB` appended to the **Sheet only**, so an item saved from an Outsource row
+    looked saved, reloaded and came back missing — now writes both via a shared `_priceDbAddRow`.
+    Checked first: 143 hardware rows, all with units and prices, Sheet and Supabase in agreement.
+
+### Audit trail
+11. **The change log was recording the previous quotation's contents** (`9c58f13`) —
+    `_auditBaseline()` was **defined and never called**, so `_auditPrev` was set once per session
+    and carried across quotations. Work on A, save; open B, save untouched, and the log recorded
+    *"removed <all of A's lines> · added <all of B's lines>"* against B. The activity log is
+    permanent and cannot be erased, so this was the worst possible place for it. Now baselined in
+    both `initQuotation()` and `restoreFullQuotationState()`.
+    **Two categories were never captured at all:** outsourced rows (`outsourceMaterials`/
+    `outsourceHardware`), and **BOM cabinet contents** — only cabinet type and quantity were
+    recorded, so changing materials/hardware/services INSIDE a cabinet, which is most of the work
+    in BOM mode, was invisible. Now logged as *"Kitchen Base Cabinet › MDF 18mm qty 4 → 7"*.
+
+### New feature
+12. **Additional orders** (`9a624ca`) — Rommel: extra work asked for after everything is final is
+    not covered, and adjusting a finalised Final Quotation *"will definitely create distortion,
+    problem with the transparency and tracking."* The Project List now carries an **"Additional"**
+    button on every issued quotation (not Draft — nothing to add to; not Cancelled — not live). It
+    creates a SEPARATE quotation with its own serial, carries the client across, and records the
+    link — on the quotation, on the printout as *"Additional order from: QT-XXXXXXXX"*, in the
+    Project List and in the database. **The scope starts EMPTY on purpose:** this quotation is the
+    additional work only, and copying the original's items would have production build everything
+    twice. **Not a revision, deliberately:** a revision SUPERSEDES (same job, new version, `.R1`),
+    an additional order ACCUMULATES (extra work, own serial, both stay live). The link reads both
+    ways — opening the original shows *"N additional orders: QT-…"*.
+    **Storage:** Quotations column X (A:W → A:X, all three headers and every range moved together),
+    state JSON, `additional_from` on Supabase with a partial index.
+
+### Sheet columns after this session
+`Quotations!A:X` — 24 columns. New this session: **V = Job Source · W = Job Started ·
+X = Additional From**. All three headers (save row, tab creation, `_syncQuotHeader`) are identical
+and 24 wide; verified by test, along with the written row and all three directory readers.
+> Fixed on the way: `_syncQuotHeader` built a **21**-entry header but read and wrote `A1:T1` — 20
+> columns — so `Company` was never written and `cur.length < HDR.length` stayed permanently true,
+> rewriting the header every session and never converging. The tab-creation header was also still
+> 13 columns against 23-value rows.
+
+### Method notes worth keeping
+- **Reproduce before fixing, always.** Every one of these was demonstrated failing first — the
+  ₱0 Stage 2, the 100× service-charge label, the cross-quotation audit entries, the Save/Discard
+  prompt, the override that silently did nothing.
+- **Test the fix's opposite risk hardest.** For the Save/Discard fix that meant proving all 13
+  kinds of edit still prompt; for the locked-total guard, that a draft still saves freely; for the
+  hardware catalogue, that it refuses to wipe 143 items.
+- **Store `.slice()`, not the array**, when collecting results in a browser test — twice a result
+  looked wrong because the harness held a live reference and showed the final contents.
+- A stale page in the preview tab carries state between test blocks; `initQuotation()` first, or a
+  reload, before asserting on "untouched form" behaviour.
+
 ---
 
-# OPEN — updated 2026-08-04 (supersedes the 2026-08-03 list for these items)
+# OPEN — updated 2026-08-05 (THIS IS THE AUTHORITATIVE LIST — supersedes 2026-08-04)
+
+## AGREED, DESIGNED, NOT BUILT — one job, four parts. Start here.
+Full brief in memory: `project_stage2_own_scope.md`. Rommel wants these together; they are all
+about Stage 1 being settled once the client approves.
+
+**1. Stage 2 gets its OWN scope (`fqAreas`).** Estimators cannot change the scope of work in
+Stage 2, so they go back to Stage 1 and request an unlock instead — which invalidates the Initial
+Quotation the client already has, bumps the serial to `.R1`, and releases the frozen rates.
+Rommel's rule, verbatim: *"any changes on stage 2 should only be on stage only and should not
+affect stage 1."* And: *"stage 1 and stage 2 initially [the same] unless another change requested
+by client, then stage 2 will be different from stage 1 due to changes by the client."*
+- **Design settled and measured.** `qAreas` is referenced 172 times: **161 plain JS reads, 10
+  inline handlers.** Wrap `recalcFQ`, the Stage 2 printout and BOM report in a new
+  `_withFQAreas(fn)` that swaps `qAreas`→`fqAreas` and restores in `finally` — same mechanism as
+  the proven `_withFrozenRates`, so **all 161 reads need zero edits** and `recalc()` outside the
+  swap always sees Stage 1's real areas, correct by construction.
+- **Editor handlers run AFTER render** so a swap cannot cover them: the Stage 2 editor must EMIT
+  the target array name into its handlers. **Do NOT use a stage-keyed accessor** (`_AR()` on
+  `qStage`) — `recalc()` can run while `qStage===2` and would compute Stage 1 from Stage 2's areas.
+- **No re-sync mechanism needed.** `goStage()` has `if(n===2&&!qApproved) return;` so Stage 2 is
+  unreachable until approval; Stage 1 is settled by then. Fork once on entering Stage 2.
+- Work: ~20 mutation functions · 10 handlers · `renderItems(targetId,arrName)` · Stage 2 editor
+  container · save/restore/option-snapshots for a second areas array.
+- **Falls out free:** because Stage 2 starts as an exact copy, ANY divergence is client-requested —
+  so the app can show *"Changes from the Initial Quotation"* without anyone tracking it by hand.
+
+**2. Change log must cover Stage 2.** `_auditDiffAndLog()` runs from `gSaveQuotation`, OUTSIDE the
+swap, so it snapshots `qAreas` even when saving from Stage 2. Rommel: *"same goes with stage 1 if
+unlocked and they made changes... then it should be logged. same to final quotation or stage 2."*
+(The cross-quotation contamination, outsource rows and BOM-cabinet contents were fixed 2026-08-05.)
+
+**3. Record client approval at Stage 1 — Rommel calls this critical.** *"it must be recorded the
+client approval. that critical and should be part of the team performance flow and other kpis and
+reporting."* Stage 2 has `fqClientApproved` + timestamp; **Stage 1 has nothing** — its gate is the
+internal Approve button, so the app never records whether that click meant the client approved.
+Plan: add `qClientApproved`/`qClientApprovedAt` captured at that existing Approve step (per
+Rommel's workflow it only fires on client approval), **KEEP the status ladder as-is** (inserting it
+would read backwards), and make Won/Rate/Revenue key off the **flag at either stage**, not the
+label.
+> ⚠ **Measured impact (post-2026-07-12 rows).** "In Final Quotation" = 4 quotations, **₱659,867.52,
+> all client-approved and none counted as Won**; "Client Approved" = 3, ₱43,947.75. So won revenue
+> reports **₱43,948 against ₱703,815 actually won — ~94% invisible.** Expect the dashboard to jump
+> ~16×. That is a correction, not inflation — but warn anyone who reports on these numbers weekly.
+
+**4. Decide how additional orders count in the KPIs.** Built 2026-08-05; right now an additional
+order counts as its own win with its own revenue. Probably right for revenue, but it should be a
+deliberate decision — roll up under the original job, or stand alone?
+
+## Rommel's to do
+- **QT-M00000087 (GYMFIX)** — final-locked and Client Approved at **₱0.00**; should be **₱616.00**
+  (₱500 line × 1.10 contingency × 1.12 VAT; its sibling QT-M00000088 with the identical line is
+  ₱616.00). Correcting it means unlocking a client-approved quotation — his call, not done.
+- **Tick who is measured** in Settings → Users, or Team performance stays empty by design.
+- **Cleanup SQL** — 98 rows, still not run. SQL in the 2026-08-03 OPEN item A. Supabase over-counts
+  (deletions did not propagate before 2026-08-02), so re-check the expected count first.
+- **Google Sites embed width** — needed before the quotation-page layout rework.
+- **Checked by / Noted by signatures** — stamp on PIN approval, or a separate "sign" action?
+  `qSignatures.checked`/`.noted` exist and the printout reads them. Andrei Salvador's signature and
+  the approvers' are still missing.
+- **Rotate the Wufoo API key** — public in git history; the only item with a security clock.
+- **Wi-Fi power settings** (MIMO Power Save = Auto SMPS) — causes intermittent push/fetch stalls.
+- **Price DB blank-unit rows** — ~39,420; fill the units, **delete nothing** (~10,000 have no
+  populated twin).
+
+## Still to build / decide
+- **Materials editing in the app** — parked 2026-08-05. Hardware is done; Materials is 153,552 rows
+  so it cannot be an inline list. Needs a **search-first** tab: type to find, edit price/unit, add
+  new, and save **only what changed** (targeted row updates, never a whole-table rewrite).
+- **`getInstallCarcassUnits()`** — Installation, Assembly and PPIC still take the blank-carcass-count
+  fallback that was fixed for the two charges on 2026-08-04. Same 646-vs-12 failure mode. Separate
+  pricing decision.
+- **Carcass/BOM final-locked quotations** — only checked for internal consistency (stored total
+  matches its own saved calc), NOT recomputed from line items. A leak there would look consistent.
+  Offer to recompute properly if certainty is wanted.
+- **`QT-M00000070` is filed under `QT-W00000037`** — its state says `serial: QT-M00000070` but
+  `baseSerial: QT-W00000037`, and the DB row key is the latter; it was renumbered twice (provisional
+  M00000056 → W00000037 on 31 Jul → M00000070 on 3 Aug). Worth a look: a renumber leaving a stale
+  `baseSerial` could affect option and revision grouping.
+- **67, 68, 69, 70 and 76 are missing from Supabase entirely** while the app has them — the silent
+  dual-write failure class. Related to the above or not, unknown.
+- **MABA CONSTRAK `QT-260619-3668`** — stored ₱0.00, should be ~₱32,981.26. Separate, older cause;
+  still parked.
+- **PMES sign-in** — 22 tables still anon-readable; do not drop the policies before it has auth.
+- **Website order pipeline** — live SKUs into the webpage cutting list; hole count + grooving
+  variants in the form. See `MSSI Webpage/HANDOFF.md`, which is authoritative for that side.
+- **MSSI footer** still says "Concept — not the live site"; the site is not deployed anywhere.
+
+
+---
+
+# OPEN — 2026-08-04 (SUPERSEDED by the 2026-08-05 list above — kept for the detail only)
 
 ### AGREED FOR NEXT SESSION — two pieces of the performance picture, neither built
 
