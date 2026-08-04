@@ -355,6 +355,19 @@ tr.cl-row:hover td{background:#f4f7fb}
     </div>
     <div class="card-body" style="padding:0"><table class="data" id="dash-team"></table></div>
   </div>
+  <!-- The other half of the performance picture. Team performance ranks people on
+       what they produced; this counts what is still waiting — including the orders
+       that never became quotations at all. Same company filter as the table above,
+       same working-hours calendar as the timer on the order card. -->
+  <div class="card" id="dash-orders-card" style="margin-top:14px">
+    <div class="card-head"><h3><i class="ti ti-inbox"></i>Order queue</h3>
+      <div style="display:flex;align-items:center;gap:8px;margin-left:auto">
+        <span id="dash-oq-scope" style="font-size:11px;color:var(--text2)"></span>
+        <button class="btn" onclick="navigate('orders')" style="font-size:12px;padding:4px 10px"><i class="ti ti-external-link"></i>Open queue</button>
+      </div>
+    </div>
+    <div class="card-body" id="dash-orders-body"></div>
+  </div>
   <div class="card" id="dash-followed" style="margin-top:14px">
     <div class="card-head"><h3><i class="ti ti-star" style="color:var(--amber)"></i>Followed quotations</h3>
       <button class="btn" onclick="navigate('directory')" style="font-size:12px;padding:4px 10px"><i class="ti ti-folders"></i>Directory</button>
@@ -8799,6 +8812,169 @@ function _dashUpdateKPIs(){
     }
   });
   drawChart('dash-chart',monthly.map(function(v){return Math.round(v/1000);}),null);
+
+  _renderOrderQueueCard(teamCo, all);
+}
+
+// An order's company, by KEYWORD not exact match — this data has real spelling
+// drift ("Module System" vs "Module Systems") and an exact compare has locked
+// people out before. Same three keys the quotation side uses.
+function _orderCompanyKey(o){
+  var co=String((o&&o.sourceCompany)||'').toLowerCase();
+  if(co.indexOf('cebu')>=0) return 'C';
+  if(co.indexOf('module')>=0) return 'M';
+  if(co.indexOf('world class')>=0) return 'W';
+  return '';
+}
+
+// Order queue overview — the half of the picture Team performance cannot show.
+//
+// That table ranks people on what they PRODUCED. This counts what is still
+// WAITING, including the orders that never became a quotation at all. It reuses
+// calcWorkingMinutes and ordersSlaSettings.defaultHours deliberately, so it can
+// never disagree with the timer on the order card about whether something is
+// overdue.
+//
+// Every order that cannot be counted is STATED, never quietly dropped. A site
+// visit is SLA-exempt by design; an order with no received time cannot be timed
+// at all; a company filter hides rows. A smaller number with no explanation is
+// indistinguishable from a healthy queue — which is the whole failure mode this
+// card exists to expose.
+function _renderOrderQueueCard(teamCo, allQuots){
+  var body=el('dash-orders-body'); if(!body) return;
+  var scopeEl=el('dash-oq-scope'); if(scopeEl) scopeEl.textContent='';
+  if(typeof ordersLoaded!=='undefined' && !ordersLoaded){
+    body.innerHTML='<p style="font-size:12px;color:var(--text2);margin:0">Loading orders…</p>';
+    return;
+  }
+  var orders=(typeof pendingOrders!=='undefined'&&pendingOrders)?pendingOrders:[];
+
+  // Which orders already have a quotation? The serial is written back to the order
+  // only when the quotation is SHARED, so an order exported and being worked right
+  // now still has none. The quotation's own sourceOrder is the earlier and truer
+  // signal, so both are used and either counts.
+  var quotedIds={};
+  (allQuots||[]).forEach(function(e){ if(e&&e.sourceOrder) quotedIds[String(e.sourceOrder)]=true; });
+
+  var pending=0,inprog=0,done=0,quoted=0,overdue=0,lateAnswered=0,answered=0,inprogNoQuot=0;
+  var coHidden=0,noTime=0,exempt=0,closed=0;
+  var openAges=[], oldest=null;
+  var slaHours=(typeof ordersSlaSettings!=='undefined'&&ordersSlaSettings.defaultHours)?ordersSlaSettings.defaultHours:8;
+  var slaMins=slaHours*60;
+  var nowIso=new Date().toISOString();
+
+  orders.forEach(function(o){
+    if(!o) return;
+    var ck=_orderCompanyKey(o);
+    if(teamCo==='none'){ if(ck!=='') return; }
+    else if(teamCo){ if(ck!==teamCo){ coHidden++; return; } }
+
+    var st=o.status||'Pending';
+    // Cancelled and Archived are settled, not waiting — they would only inflate the
+    // backlog. Counted so their absence is visible rather than assumed.
+    if(st==='Cancelled'||st==='Archived'){ closed++; return; }
+
+    if(st==='Pending') pending++;
+    else if(st==='In Progress') inprog++;
+    else if(st==='Done') done++;
+    var hasQuot=!!(quotedIds[String(o.id)]||o.quotSerial||st==='Done');
+    if(hasQuot) quoted++;
+    // Only exportOrderToQuotation sets In Progress, so the status means "somebody
+    // pressed Export". The backlink only appears once that quotation is SAVED.
+    // An order sitting In Progress with no saved quotation behind it is an export
+    // that was abandoned or is still open in somebody's tab — worth naming, because
+    // the two counts otherwise look like they contradict each other.
+    if(st==='In Progress'&&!hasQuot) inprogNoQuot++;
+
+    // A site visit is a request to ATTEND, not a quotation turnaround. It is still
+    // part of the queue above; it is simply never measured against the SLA.
+    if(!(ORDER_KINDS[orderKind(o)]||{}).sla){ exempt++; return; }
+    if(!o.receivedAt){ noTime++; return; }
+
+    if(st==='Done'){
+      if(!o.sentAt){ noTime++; return; }
+      var m=calcWorkingMinutes(o.receivedAt,o.sentAt,o.sourceCompany||'');
+      if(m===null){ noTime++; return; }
+      answered++;
+      if(m>=slaMins) lateAnswered++;
+      return;
+    }
+    var age=calcWorkingMinutes(o.receivedAt,nowIso,o.sourceCompany||'');
+    if(age===null){ noTime++; return; }
+    openAges.push(age);
+    if(age>=slaMins) overdue++;
+    if(!oldest||age>oldest.age) oldest={age:age,id:o.id,client:o.clientName||''};
+  });
+
+  var live=pending+inprog+done;
+  if(scopeEl) scopeEl.textContent=live?(live+' live order'+(live===1?'':'s')+' · SLA '+slaHours+'h'):'';
+
+  if(!live){
+    body.innerHTML='<p style="font-size:12px;color:var(--text2);margin:0">'
+      +(orders.length?'No live orders for this company filter.':'No orders in the queue yet.')+'</p>'
+      +_oqFootnote(coHidden,noTime,exempt,closed,0);
+    return;
+  }
+
+  function tile(lbl,val,colour,sub){
+    return '<div class="kpi"><div class="lbl">'+lbl+'</div>'
+      +'<div class="val" style="color:'+colour+'">'+val+'</div>'
+      +'<div class="sub">'+(sub||'')+'</div></div>';
+  }
+  var pctQuoted=live?Math.round(quoted/live*100):0;
+  var h='<div class="kpi-grid" style="margin-bottom:0">'
+    + tile('Still new', pending, 'var(--amber)', pending?'Nobody has opened these':'Queue is being worked')
+    + tile('In progress', inprog, 'var(--navy)',
+        inprogNoQuot?(inprogNoQuot+' with no saved quotation yet'):'Exported to a quotation')
+    + tile('Reached quotation', quoted, 'var(--teal)', pctQuoted+'% of '+live+' live order'+(live===1?'':'s'))
+    + tile('Past SLA', overdue, overdue?'var(--coral)':'var(--teal)',
+        overdue?('Still open, over '+slaHours+'h working time'):'Nothing open is overdue')
+    + '</div>';
+
+  // The averages sit under the tiles rather than in them: they qualify the numbers
+  // above, and the sample size behind each is small enough that it must be shown.
+  var bits=[];
+  if(openAges.length){
+    var avgAge=Math.round(openAges.reduce(function(s,v){return s+v;},0)/openAges.length);
+    bits.push('Open queue averages <b>'+fmtWorkMins(avgAge)+'</b> of working time across '+openAges.length+' order'+(openAges.length===1?'':'s'));
+  }
+  if(oldest){
+    bits.push('Oldest waiting: <b>#'+escHtml(String(oldest.id))+'</b>'
+      +(oldest.client?' — '+escHtml(oldest.client):'')+' at '+fmtWorkMins(oldest.age));
+  }
+  if(answered){
+    bits.push(answered+' answered'+(lateAnswered?(', <b style="color:var(--coral)">'+lateAnswered+' of them past SLA</b>'):', all within SLA'));
+  }
+  if(bits.length){
+    h+='<div style="margin-top:12px;font-size:12px;color:var(--text2);line-height:1.7">'
+      +bits.map(function(b){return '<div>'+b+'</div>';}).join('')+'</div>';
+  }
+  h+=_oqFootnote(coHidden,noTime,exempt,closed,live);
+  body.innerHTML=h;
+}
+
+// Everything the tiles above could NOT count, said out loud. Silence here would
+// read as "nothing was excluded", which is exactly the mistake this guards.
+function _oqFootnote(coHidden,noTime,exempt,closed,live){
+  var notes=[];
+  if(coHidden) notes.push(coHidden+' order'+(coHidden===1?'':'s')+' hidden by the company filter');
+  if(exempt)   notes.push(exempt+' site visit'+(exempt===1?'':'s')+' counted above but SLA-exempt');
+  if(noTime)   notes.push(noTime+' order'+(noTime===1?'':'s')+' could not be timed (no received or sent time)');
+  if(closed)   notes.push(closed+' cancelled or archived, not counted as waiting');
+  var h='';
+  if(notes.length){
+    h+='<div style="margin-top:10px;font-size:11px;color:var(--text2);background:#f7f7f5;border-radius:6px;padding:7px 10px">'
+      +'<i class="ti ti-info-circle"></i> '+notes.join(' · ')+'</div>';
+  }
+  // The Sheets-only fallback shows a SHORT queue — website orders live only in the
+  // fast database. Without this the backlog looks smaller than it is.
+  if(typeof ordersFromSheetsOnly!=='undefined' && ordersFromSheetsOnly){
+    h+='<div style="margin-top:8px;font-size:11px;color:#8a5a00;background:#fff8ec;border-radius:6px;padding:7px 10px">'
+      +'<i class="ti ti-alert-triangle"></i> <b>This is a partial queue.</b> Orders filed through the MSSI website '
+      +'are not in the Google Sheet, so they are missing from these counts. '
+      +'<a href="#" onclick="navigate(\'settings\');setTimeout(function(){setStTab(\'company\');},150);return false" style="color:var(--navy);font-weight:600">Connect in Settings → Company &amp; DB</a>.</div>';
+  }
+  return h;
 }
 
 function renderDashboard() {
@@ -8833,7 +9009,12 @@ function renderDashboard() {
     chartsGrid.style.display=(showChart||showPipe)?"grid":"none";
     chartsGrid.style.gridTemplateColumns=(showChart&&showPipe)?"3fr 2fr":"1fr";
   }
-  var teamCard=el("dash-team-card"); if(teamCard) teamCard.style.display=(isDashWidgetAllowed('team')&&dashPref.team)?"block":"none";
+  var showTeam=isDashWidgetAllowed('team')&&dashPref.team;
+  var teamCard=el("dash-team-card"); if(teamCard) teamCard.style.display=showTeam?"block":"none";
+  // Rides the same gate as Team performance rather than adding a sixth widget key:
+  // it is the other half of one picture, and a new key would need adding to every
+  // saved DASHPREF / DASHALLOW row before anyone could see it.
+  var oqCard=el("dash-orders-card"); if(oqCard) oqCard.style.display=showTeam?"block":"none";
   var followedCard=el("dash-followed"); if(followedCard) followedCard.style.display=(isDashWidgetAllowed('followed')&&dashPref.followed)?"block":"none";
   renderDashFollowed();
   // Claude API status card — Admin / Director / Manager only
