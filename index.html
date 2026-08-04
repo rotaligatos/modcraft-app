@@ -1357,13 +1357,18 @@ tr.cl-row:hover td{background:#f4f7fb}
             <div style="border:.5px solid var(--border);border-radius:8px;padding:12px">
               <div style="font-size:12px;font-weight:600;margin-bottom:4px"><i class="ti ti-tool" style="color:var(--navy)"></i> Hardware</div>
               <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Expected columns: <b>Name · Supplier · Price · UOM</b> (3 header rows)</div>
-              <button class="btn btn-primary" onclick="importHardwareExcel()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Import Hardware Excel</button>
+              <div style="font-size:11px;color:#8a5a00;background:#fff8ec;border:.5px solid #f5d9a0;border-radius:6px;padding:6px 8px;margin-bottom:8px"><i class="ti ti-alert-triangle"></i> <b>Replaces the whole list.</b> The file must be the COMPLETE catalogue — anything not in it is removed. To add one item, use the 💾 on a hardware row in a quotation.</div>
+              <button class="btn btn-primary" onclick="_confirm('Replace the ENTIRE Hardware catalogue with this file?
+
+Everything not in the file is removed. To add a few items instead, use the save icon on a hardware row in a quotation.', importHardwareExcel)" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Replace Hardware from Excel</button>
             </div>
             <div style="border:.5px solid var(--border);border-radius:8px;padding:12px">
               <div style="font-size:12px;font-weight:600;margin-bottom:4px"><i class="ti ti-box" style="color:var(--navy)"></i> Materials</div>
               <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Expected columns: <b>Name · Supplier · Price · UOM</b> (3 header rows)</div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
-                <button class="btn btn-primary" onclick="importMaterialsExcel()" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Import Materials Excel</button>
+                <button class="btn btn-primary" onclick="_confirm('Replace the ENTIRE Materials catalogue with this file?
+
+Everything not in the file is removed.', importMaterialsExcel)" style="font-size:12px;padding:5px 12px"><i class="ti ti-upload"></i>Replace Materials from Excel</button>
                 <button class="btn" onclick="dedupeMaterialsSheet()" style="font-size:12px;padding:5px 12px;color:var(--amber)" title="Removes exact name+unit+price duplicate rows (large catalog — may take ~20s)"><i class="ti ti-filter"></i>Clean duplicates</button>
                 <button class="btn" onclick="_confirm('Remove all zero-priced Solid Surface slab items (Aspen Glacier, Aspen Lily, Beige, Athena, All Color Match, Vanity Sink Solid Colors, etc.)? Priced solid-surface items are left untouched. This cannot be undone.', removeZeroPricedSlabMaterials)" style="font-size:12px;padding:5px 12px;color:var(--coral)" title="One-time cleanup: removes zero-priced Solid Surface slab catalog entries only"><i class="ti ti-trash"></i>Remove zero-priced slabs</button>
                 <button class="btn" onclick="_confirm('Remove 9 non-material rows (Advertising, Barcode Charges, Bundle Annex Clearance Board Sale, Consignee Discount, Consignee Sales, Dealers Sales Incentive, Expense, Gate Fee, Sales Discount) that look like leftover rows from a rebate/commission sheet, not real materials? This cannot be undone.', removeFinancialLineItemMaterials)" style="font-size:12px;padding:5px 12px;color:var(--coral)" title="One-time cleanup: removes 9 specific non-material rows (no unit, ₱0 price)"><i class="ti ti-trash"></i>Remove financial/fee rows</button>
@@ -1382,6 +1387,10 @@ tr.cl-row:hover td{background:#f4f7fb}
             </div>
           </div>
         </div>
+        <!-- Editable hardware catalogue — add and reprice in the app, the same way Services
+             works. Deliberately NOT offered for Materials: that table is 153,552 rows and
+             cannot be rendered or rewritten as an inline list. -->
+        <div id="hw-catalog-wrap" style="border:.5px solid var(--border);border-radius:10px;padding:14px;margin-top:14px"></div>
         <div id="db-preview" style="margin-top:14px"></div>
         <div id="mto-tag-wrap" style="margin-top:14px"></div>
       </div>
@@ -6284,6 +6293,146 @@ function onOutsourceItemSearch(inp,a,ci,cat,ri){
     row.name=name; row.saved=false;
   }
 }
+// ── Add one row to the price catalogue ────────────────────────────────────
+// Appends to the Google Sheet AND inserts into Supabase. Both are required:
+// loadPriceDatabase() reads Supabase FIRST (since 2026-07-05), so a row written
+// only to the Sheet would never appear for a connected user — which is what the
+// Outsource save button had been doing.
+function _priceDbAddRow(sheetName,row,cb){
+  var vals=[[row.name,row.unit||'pc',row.price||0]];
+  priceDbAppend(sheetName+'!A:C',vals).then(function(){
+    var tbl=sheetName==='Hardware'?'price_hardware':sheetName==='Materials'?'price_materials':null;
+    if(tbl&&typeof SUPA_DUAL_WRITE!=='undefined'&&SUPA_DUAL_WRITE&&typeof supaReady==='function'&&supaReady()){
+      return supa.from(tbl).insert([{name:row.name,unit:row.unit||'pc',price:row.price||0}])
+        .then(function(r){ if(r&&r.error) console.warn('[supa] '+tbl+' insert error:',r.error.message||r.error); })
+        .catch(function(e){ console.warn('[supa] '+tbl+' insert threw',e); });
+    }
+  }).then(function(){
+    if(typeof logActivity==='function') logActivity('Added to '+sheetName+' catalogue: '+row.name+' ('+(row.unit||'pc')+', '+fmtMoney(row.price||0)+')');
+    loadPriceDatabase(false);
+    if(cb) cb(true);
+  }).catch(function(e){
+    showToast('Could not save to the database: '+(e&&e.message?e.message:e));
+    if(cb) cb(false);
+  });
+}
+// Is this name already in the catalogue? Drives whether the save button is offered
+// at all — an icon on every row would be noise.
+function _inPriceCatalog(list,name){
+  var n=String(name||'').trim().toLowerCase();
+  if(!n) return true;                       // nothing typed — nothing to offer
+  for(var i=0;i<list.length;i++){ if(String(list[i].name||'').trim().toLowerCase()===n) return true; }
+  return false;
+}
+// ── Hardware catalogue, edited in Settings ────────────────────────────────
+// Rommel, 2026-08-05: "adopt same system same as the services wherein I can just
+// simply add via the app and do repricing" — and explicitly NOT from inside a
+// quotation: "if you put it in the quotation, they will just keep adding
+// unnecessary things." So this lives in Settings → Price Database only.
+//
+// Eventually the source of truth for hardware pricing should be the Procurement
+// app, which does not exist yet; until it does this is where it is maintained.
+var HARDWARE_CAT=[];      // working copy — written back on Save settings
+var _hwCatDirty=false;    // only rewrite the sheet when something actually changed
+var _hwCatFilter='';
+// Refresh the working copy from the loaded Price DB. Never clobbers unsaved edits.
+function _syncHardwareFromDb(){
+  if(_hwCatDirty) return;
+  HARDWARE_CAT=(dbHardware||[]).map(function(x){return {name:x.name,unit:x.unit||'pc',price:x.price||0};});
+  if(stTab==='database') renderHardwareCatalog();
+}
+function _hwCatSet(i,field,val){
+  var it=HARDWARE_CAT[i]; if(!it) return;
+  it[field]=(field==='price')?(parseFloat(val)||0):String(val);
+  _hwCatDirty=true;
+  var d=el('hw-cat-dirty'); if(d) d.style.display='inline';
+}
+function addHardwareItem(){
+  HARDWARE_CAT.unshift({name:'',unit:'pc',price:0});
+  _hwCatDirty=true; _hwCatFilter='';
+  renderHardwareCatalog();
+  setTimeout(function(){var f=el('hw-cat-name-0'); if(f) f.focus();},30);
+}
+function removeHardwareItem(i){
+  var it=HARDWARE_CAT[i]; if(!it) return;
+  _confirm('Remove "'+(it.name||'(unnamed)')+'" from the Hardware catalogue?\n\nQuotations already using it keep their own saved price.',function(){
+    HARDWARE_CAT.splice(i,1); _hwCatDirty=true; renderHardwareCatalog();
+  });
+}
+function _hwCatSetFilter(v){ _hwCatFilter=String(v||'').trim().toLowerCase(); renderHardwareCatalog(true); }
+function renderHardwareCatalog(keepFocus){
+  var w=el('hw-catalog-wrap'); if(!w) return;
+  var dupes={},seen={};
+  HARDWARE_CAT.forEach(function(it){
+    var k=String(it.name||'').trim().toLowerCase(); if(!k) return;
+    if(seen[k]) dupes[k]=true; else seen[k]=true;
+  });
+  var nDupe=Object.keys(dupes).length;
+  var idx=HARDWARE_CAT.map(function(it,i){return i;}).filter(function(i){
+    return !_hwCatFilter||String(HARDWARE_CAT[i].name||'').toLowerCase().indexOf(_hwCatFilter)>=0;
+  });
+  var COLS='2fr 90px 110px 34px';
+  var h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">'
+    +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;display:flex;align-items:center;gap:5px">'
+    +'<i class="ti ti-tool"></i>Hardware catalogue'
+    +'<span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text2)">— '+HARDWARE_CAT.length+' items</span>'
+    +'<span id="hw-cat-dirty" style="display:'+(_hwCatDirty?'inline':'none')+';font-weight:600;color:var(--amber);text-transform:none;letter-spacing:0">· unsaved</span>'
+    +(nDupe?'<span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--amber)"><i class="ti ti-alert-triangle"></i> '+nDupe+' duplicate name'+(nDupe>1?'s':'')+'</span>':'')
+    +'</div>'
+    +'<div style="display:flex;gap:8px;align-items:center">'
+    +'<input id="hw-cat-search" value="'+escHtml(_hwCatFilter)+'" placeholder="Search hardware…" oninput="_hwCatSetFilter(this.value)" style="height:30px;font-size:12px;width:190px">'
+    +'<button class="btn btn-primary" onclick="addHardwareItem()" style="font-size:12px;padding:5px 10px"><i class="ti ti-plus"></i>Add hardware</button>'
+    +'</div></div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:10px">Edit names, units and prices here, then click <b>Save settings</b>. Materials are not editable this way — that catalogue is far too large to list.</div>';
+  if(!HARDWARE_CAT.length){
+    h+='<div style="font-size:12px;color:var(--text2);padding:6px 0">Nothing loaded yet — click <b>Reload from Sheets</b> above.</div>';
+    w.innerHTML=h; return;
+  }
+  h+='<div style="display:grid;grid-template-columns:'+COLS+';gap:6px;margin-bottom:4px;padding:0 2px">'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Hardware name</span>'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">UOM</span>'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;text-align:right">Price</span>'
+    +'<span></span></div>';
+  h+='<div style="max-height:420px;overflow-y:auto;padding-right:4px">';
+  if(!idx.length) h+='<div style="font-size:12px;color:var(--text2);padding:6px 2px">No hardware matches "'+escHtml(_hwCatFilter)+'".</div>';
+  idx.forEach(function(i){
+    var it=HARDWARE_CAT[i];
+    var dup=dupes[String(it.name||'').trim().toLowerCase()];
+    h+='<div style="display:grid;grid-template-columns:'+COLS+';gap:6px;margin-bottom:5px;align-items:center'+(dup?';background:#fff8ec;border-radius:6px':'')+'">'
+      +'<input id="hw-cat-name-'+i+'" value="'+escHtml(it.name||'')+'" placeholder="Hardware name" oninput="_hwCatSet('+i+',\'name\',this.value)" style="height:30px;font-size:12px">'
+      +'<input value="'+escHtml(it.unit||'pc')+'" placeholder="pc" oninput="_hwCatSet('+i+',\'unit\',this.value)" style="height:30px;font-size:12px;text-align:center">'
+      +'<input type="number" min="0" step="0.01" value="'+(it.price||0)+'" oninput="_hwCatSet('+i+',\'price\',this.value)" style="height:30px;font-size:12px;text-align:right;padding-right:6px">'
+      +'<button class="btn" onclick="removeHardwareItem('+i+')" title="Remove" style="height:30px;width:30px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+      +'</div>';
+  });
+  h+='</div>';
+  w.innerHTML=h;
+  if(keepFocus){ var f=el('hw-cat-search'); if(f){ f.focus(); f.setSelectionRange(f.value.length,f.value.length); } }
+}
+// Write-back, mirroring _saveServicesToPriceDb. Guarded twice: nothing happens unless the
+// user actually edited something AND there is a non-empty list — a clear-then-write against
+// an empty working copy would erase the whole catalogue.
+function _saveHardwareToPriceDb(){
+  if(!gToken||!_hwCatDirty) return Promise.resolve();
+  var clean=HARDWARE_CAT.filter(function(it){return String(it.name||'').trim();})
+    .map(function(it){return {name:String(it.name).trim(),unit:String(it.unit||'pc').trim()||'pc',price:it.price||0};});
+  if(!clean.length){ showToast('Hardware not saved — the list is empty.'); return Promise.resolve(); }
+  var rows=[['Name','Unit','Price']].concat(clean.map(function(it){return [it.name,it.unit,it.price];}));
+  return priceDbClear('Hardware!A:Z')
+    .then(function(){ return priceDbUpdate('Hardware!A1',rows); })
+    .then(function(){
+      dbHardware=clean.slice();
+      HARDWARE_CAT=clean.slice();
+      _hwCatDirty=false;
+      supaReplaceTable('price_hardware',clean);
+      if(typeof logActivity==='function') logActivity('Hardware catalogue updated — '+clean.length+' items.');
+      if(stTab==='database') renderHardwareCatalog();
+    })
+    .catch(function(e){
+      showSheetsToast(false,'Hardware not saved — '+(e&&e.message?e.message:'check connection'));
+      throw e;
+    });
+}
 function saveOutsourceToDB(a,ci,cat,ri) {
   var row=_outRowsArr(a,ci,cat)[ri];
   if(!row){showToast('Item not found.');return;}
@@ -6291,16 +6440,15 @@ function saveOutsourceToDB(a,ci,cat,ri) {
   if(!gToken){showToast('Please sign in to save to the database.');return;}
   var sheetName=(cat==='outsourceMaterials')?'Materials':'Hardware';
   var existingDb=(cat==='outsourceMaterials')?dbMaterials:dbHardware;
-  var dupFound=false;
-  for(var i=0;i<existingDb.length;i++){
-    if(existingDb[i].name.toLowerCase()===row.name.toLowerCase()){dupFound=true;break;}
-  }
+  // Was appending to the Google Sheet ONLY. loadPriceDatabase() reads Supabase first
+  // (since 2026-07-05), so an item saved this way never appeared for a connected user —
+  // it looked saved, reloaded, and came back missing. _priceDbAddRow writes both.
   function _doAppend(){
-    priceDbAppend(sheetName+'!A:C',[[row.name,row.unit||'pc',row.price||0]])
-      .then(function(){row.saved=true;renderItems();loadPriceDatabase(false);})
-      .catch(function(e){showToast('Error saving to database: '+(e&&e.message?e.message:e));});
+    _priceDbAddRow(sheetName,{name:row.name,unit:row.unit||'pc',price:row.price||0},function(ok){
+      if(ok){ row.saved=true; renderItems(); }
+    });
   }
-  if(dupFound){_confirm('"'+row.name+'" already exists in the '+sheetName+' database. Add a duplicate entry?',_doAppend);}
+  if(_inPriceCatalog(existingDb,row.name)){_confirm('"'+row.name+'" already exists in the '+sheetName+' database. Add a duplicate entry?',_doAppend);}
   else{_doAppend();}
 }
 function loadCabinetTemplate(a,ci,silent) {
@@ -12717,7 +12865,7 @@ function setStTab(t) {
   if(t==="carcass") renderCarcassSettings();
   if(t==="costbreakdown") renderCostBreakdownSettings();
   if(t==="network") renderNetworkTab();
-  if(t==="database") renderPriceDbSettings();
+  if(t==="database"){ renderPriceDbSettings(); _syncHardwareFromDb(); renderHardwareCatalog(); }
   if(t==="security") renderSecuritySettings();
   if(t==="production") renderProductionSettings();
   if(t==="ppic") setPpicSubTab(_ppicSubTab);
@@ -20318,6 +20466,7 @@ function _applySvcCapFromDrive(driveData) {
     if (driveData.serviceCapacity.hasOwnProperty(k)) SERVICE_CAPACITY[k] = driveData.serviceCapacity[k];
   }
   if (dbServices.length) _syncServicesFromDb();
+  _syncHardwareFromDb();
   if (stTab === 'ppic' && _ppicSubTab === 'services') renderServicesSettings();
 }
 function _restoreSvcCapFromDrive() {
@@ -22248,6 +22397,7 @@ function loadPriceDatabase(showFeedback) {
       dbTemplates=data.templates.map(function(r){return {cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0};});
       _applyMtoTags();
       _syncServicesFromDb();
+      _syncHardwareFromDb();
       dbLoaded=true;
       renderPriceDbSettings();
       if(qFabMode==='bom') renderItems();
@@ -22278,6 +22428,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
       dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
       _applyMtoTags();
       _syncServicesFromDb();
+      _syncHardwareFromDb();
       dbLoaded=true;
       renderPriceDbSettings(); // always refresh settings panel counts
       if(qFabMode==='bom') renderItems(); // refresh BOM dropdowns
@@ -22334,8 +22485,18 @@ function importPriceDbExcel(targetSheet, skipRows, colMap) {
               .then(function(res){ if(res.error) throw new Error(res.error.message||'Could not create sheet'); });
           })
           .then(function(){
-            // Step 2: overwrite the sheet with header + data rows
-            if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Uploading <b>'+rows.length+'</b> items to <b>'+targetSheet+'</b>…</div>';
+            // Step 2: CLEAR, then write header + data rows.
+            //
+            // The clear is not optional. A PUT to <tab>!A:C only overwrites the cells the new
+            // values cover — it does not truncate — so importing 6 rows over a 143-row sheet
+            // left rows 7-143 as the OLD data, silently mixing two catalogues. Supabase, by
+            // contrast, is delete-all + insert (supaReplaceTable below), so the two stores ended
+            // up disagreeing completely: the Sheet kept 143 rows, Supabase had 6, and since the
+            // app reads Supabase first every connected user's catalogue collapsed to 6 items.
+            if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Replacing <b>'+targetSheet+'</b> with <b>'+rows.length+'</b> items…</div>';
+            return priceDbClear(targetSheet+'!A:C');
+          })
+          .then(function(){
             var values=[['Name','Unit','Price']].concat(rows);
             return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID+'/values/'+encodeURIComponent(targetSheet+'!A:C')+'?valueInputOption=USER_ENTERED',{
               method:'PUT',
@@ -22766,6 +22927,8 @@ function gSaveAppSettings(){
   }).then(function(){
     showSheetsToast(true,'Settings saved to database');
     return _saveServicesToPriceDb();
+  }).then(function(){
+    return _saveHardwareToPriceDb();
   }).then(function(){
     _saveSvcCapToDrive(); // non-blocking Drive backup for SERVICE_CAPACITY
   }).catch(function(e){
