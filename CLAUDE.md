@@ -3855,20 +3855,53 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
 - **QT-M00000087 (GYMFIX)** — final-locked and Client Approved at **₱0.00**; should be **₱616.00**
   (₱500 line × 1.10 contingency × 1.12 VAT; its sibling QT-M00000088 with the identical line is
   ₱616.00). Correcting it means unlocking a client-approved quotation — his call, not done.
+  **Investigated 2026-08-06 — see the zero-total findings below.** Clean to repair: its service
+  carries an explicit ₱500, so the figure is not in doubt. Unlock → recalculate → re-lock.
 - ~~Tick who is measured~~ **DONE 2026-08-05** — 5 ticked: Jhover Galupo, Joanna Marie Buenconsejo,
   Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros. **Two Staff who do prepare
   quotations are NOT ticked — Andrei Salvador and Rafael Colot.** Managers/Directors/Admins are
   unticked by design and exempt from the missing-preparer footer.
-- **Cleanup SQL** — 98 rows, still not run. SQL in the 2026-08-03 OPEN item A. Supabase over-counts
-  (deletions did not propagate before 2026-08-02), so re-check the expected count first.
+- **Cleanup SQL** — ⚠ **the 98 figure is STALE. Re-measured 2026-08-06: 56 rows, ₱6,179,562 of
+  draft value** (oldest 2026-05-26, newest 2026-07-08). All unlocked drafts never issued. Most is
+  obvious test data (*Tsttesttest*, *Sana*, *jojojojojojojojoj*, *Testes*, *Yesyesyes*,
+  *George Clooney*, *ano na*, *sasve ulit*) — but **not all of it**: World Class Laminate, Inc.
+  (6, ₱1.93M), Peace Maker (4, ₱563K), RTMO Digital Solutions (2, ₱542K), Yummy Bakeshop (2,
+  ₱291K), STUDIO TILLE (1, by Jhover) and **23 blank-client drafts by Jhover, Joanna and Rommel**.
+  Nothing contractual is lost — none were ever locked or sent — but the ones prepared by Jhover
+  and Joanna may be abandoned real work rather than junk. **Ask before deleting those.** Always
+  re-count before running: this figure has already moved once.
 - **Google Sites embed width** — needed before the quotation-page layout rework.
 - **Checked by / Noted by signatures** — stamp on PIN approval, or a separate "sign" action?
   `qSignatures.checked`/`.noted` exist and the printout reads them. Andrei Salvador's signature and
   the approvers' are still missing.
 - **Rotate the Wufoo API key** — public in git history; the only item with a security clock.
 - ~~Wi-Fi power settings~~ **DONE 2026-08-05.**
-- **Price DB blank-unit rows** — ~39,420; fill the units, **delete nothing** (~10,000 have no
-  populated twin).
+- **Price DB blank-unit rows** — re-measured exactly 2026-08-06: **153,552 rows / 124,132 distinct
+  names; 39,420 blank-unit rows, of which 29,420 have a populated twin and 10,000 have NO
+  alternative.** Fill the units, **delete nothing** — deleting would destroy those 10,000 SKUs
+  outright. Purely cosmetic now: `lookupInSource` already prefers the populated row, and the unit
+  string affects no computation (see the CLOSED Normalize-units entry above).
+
+### Zero-total quotations — investigated 2026-08-06
+Three quotations store ₱0.00 against real line items. One is not a bug:
+
+- **`QT-W00000060` (KEYSTONE) — NOT A BUG, resolved.** Subsidiary/WCLI, materials only, no
+  services. Cutting-list mode does not bill materials to WCLI, so ₱0.00 is correct by design.
+- **`QT-M00000087` (GYMFIX)** and **`QT-260619-3668` (MABA)** share one signature: cutting-list
+  mode · **"Fabrication only"** · saved from **Stage 2** · **no `fqFabBasis` recorded**. Two
+  quotations seven weeks apart with the same fingerprint is not coincidence.
+- **The failure mode is CLOSED** — verified on current code: reopening now clears `fqInitialized`,
+  `initFinalQuotation()` runs, `fqFabBasis` comes back as `'own'`, and Stage 2 prices correctly.
+- **The historical cause was NOT proven.** The Stage 2 leak fixed 2026-08-05 (`df8459b`) is
+  consistent with the evidence but did not reproduce — current code returned the correct total in
+  that exact scenario. Recorded as a hypothesis, not a finding.
+- ⚠ **MABA cannot be repaired by recomputing.** Its two service lines carry **no stored price** and
+  resolve positionally into `SERVICES`, and that catalogue has been reordered, renamed and
+  re-imported repeatedly since June — indexes 4 and 5 no longer mean what they meant. Materials are
+  solid at ₱26,150; the services are not recoverable from the record. And because the printout
+  rebuilds from a live recalc at print time rather than from the stored total, **what MABA CONSTRAK
+  actually received is unknown to us.** Ask Joanna for the sent PDF or email; recomputing today
+  would invent a number the client never saw.
 
 ## NEW 2026-08-05 — raised by Rommel, not started
 
