@@ -241,6 +241,7 @@ tr.cl-row:hover td{background:#f4f7fb}
     <button class="nav-btn" data-pg="clients"><i class="ti ti-address-book"></i>Clients</button>
     <button class="nav-btn" data-pg="schedule"><i class="ti ti-calendar-event"></i>Schedule</button>
     <button class="nav-btn" data-pg="production"><i class="ti ti-cpu"></i>Designers Support</button>
+    <button class="nav-btn" data-pg="approvals"><i class="ti ti-checkbox"></i>Approvals<span id="nav-appr-cnt" style="display:none;margin-left:5px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--coral);color:#fff;font-size:9px;font-weight:700;align-items:center;justify-content:center">0</span></button>
     <button class="nav-btn" data-pg="reports"><i class="ti ti-chart-bar"></i>Reports</button>
     <button class="nav-btn" data-pg="settings"><i class="ti ti-settings"></i>Settings</button>
     <button class="nav-btn" data-pg="help" style="color:var(--teal)"><i class="ti ti-help-circle"></i>Help</button>
@@ -5378,7 +5379,7 @@ function submitClientCorrection(){
   if(!changes.length)return;
   var notif={id:NOTIFS.length+1,type:'client_update',from:(gUser&&gUser.name)||'Staff',client:(c.bizname||c.name),serial:qSerial,msg:'Client record update: '+changes.join('; '),date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),status:'pending',company:currentUserCompany,clientId:_linkedClientId,proposed:proposed};
   NOTIFS.unshift(notif);
-  var cnt=el('notif-cnt');if(cnt){cnt.textContent=NOTIFS.filter(function(n){return n.status==='pending';}).length;cnt.style.display='flex';}
+  _updateNotifBadge();
   for(var j=0;j<flds.length;j++) _originalValues[flds[j]]=el('cl-'+flds[j])?el('cl-'+flds[j]).value:'';
   var cw=el('cl-correction-wrap');if(cw)cw.style.display='none';
   var toast=el('cl-correction-toast');if(toast){toast.style.display='block';setTimeout(function(){toast.style.display='none';},3500);}
@@ -11039,9 +11040,7 @@ function submitApprovalRequest(){
     date:req.date,status:'pending',company:currentUserCompany,
     approverEmail:appr.email,cfValues:null,ctx:req.ctx,by:''});
 
-  // Update badge
-  var cnt=el('notif-cnt');
-  if(cnt){cnt.textContent=NOTIFS.filter(function(n){return n.status==='pending';}).length;cnt.style.display='flex';}
+  _updateNotifBadge();
 
   // Show pending badge on the quotation form (pass reqId for cancel button)
   _setReqPendingBadge(type, req.ctx, reqId);
@@ -11364,10 +11363,7 @@ function cancelApprovalRequest(reqId, type){
   for(var i=0;i<NOTIFS.length;i++){
     if(NOTIFS[i].reqId===reqId){NOTIFS[i].status='cancelled';break;}
   }
-  // Update notification badge
-  var cnt=el('notif-cnt');
-  var pending=NOTIFS.filter(function(n){return n.status==='pending';}).length;
-  if(cnt){cnt.textContent=pending;cnt.style.display=pending?'flex':'none';}
+  _updateNotifBadge();
   // Persist cancellation to Sheets
   var key='APPREQ_'+reqId;
   sheetsGet('Settings!A:A').then(function(d){
@@ -11571,11 +11567,29 @@ function renderNotifPanel(){
   // Update badge: pending count
   _updateNotifBadge();
 }
+// What is genuinely waiting on ME.
+//
+// The badge used to count 'pending' alone, which quietly excluded the one case where the
+// requester is the person who has to act: a counter-offer. Once an approver counters, the
+// request leaves 'pending' — so the requester's badge dropped to zero at the exact moment
+// the ball moved to them. Confirmed on QT-M00000102: a 3% counter was made, read, and then
+// sat unaccepted with nothing on screen indicating anything was owed.
+function _apprNeedsMyAction(n){
+  if(!n) return false;
+  if(n.status==='pending') return true;   // unchanged — every previous badge counted these
+  if(n.status==='countered'){             // added — this is the case that was invisible
+    var me=(gUser&&gUser.email||'').toLowerCase();
+    return !!(n.fromEmail&&n.fromEmail.toLowerCase()===me);
+  }
+  return false;
+}
 function _updateNotifBadge(){
   var visible=filterApprovalsByRouting(NOTIFS);
-  var pending=visible.filter(function(n){return n.status==='pending';}).length;
+  var mine=visible.filter(_apprNeedsMyAction).length;
   var cnt=el('notif-cnt');
-  if(cnt){cnt.textContent=pending;cnt.style.display=pending?'flex':'none';}
+  if(cnt){cnt.textContent=mine;cnt.style.display=mine?'flex':'none';}
+  var nav=el('nav-appr-cnt');
+  if(nav){nav.textContent=mine;nav.style.display=mine?'inline-flex':'none';}
 }
 
 function filterApprovalsByRouting(notifs){
@@ -11649,8 +11663,7 @@ function renderApprovals() {
     if(a.status!=='pending'&&b.status==='pending') return 1;
     return new Date(b.date)-new Date(a.date)||0;
   });
-  var pending=0; for(var i=0;i<visible.length;i++){if(visible[i].status==="pending")pending++;}
-  el("notif-cnt").textContent=pending; el("notif-cnt").style.display=pending?"flex":"none";
+  _updateNotifBadge();
 
   // Delegation context banner
   var banner='';
@@ -11690,7 +11703,14 @@ function renderApprovals() {
       +'<div style="font-weight:500;font-size:14px;margin-bottom:2px">'+escHtml(n.client)+' · '+escHtml(n.serial)+'</div>'
       +'<div style="font-size:12px;color:var(--text2);margin-bottom:4px">By: '+escHtml(n.from)+' · '+escHtml(n.date||'')+'</div>'
       +'<div style="font-size:13px">'+escHtml(n.msg)+'</div>'
-      +(n.status==='countered'&&n.counterDisc?'<div style="font-size:12px;color:var(--amber);margin-top:4px"><i class="ti ti-arrows-exchange"></i> Counter-offer: <b>'+n.counterDisc+'%</b> discount</div>':'')
+      // Say who is being waited on. Without this the approver sees "Counter-offer: 3%" and
+      // reasonably reads it as settled, when the discount is not applied and will not be until
+      // the requester accepts — which is exactly how QT-M00000102 stalled unnoticed.
+      +(n.status==='countered'&&n.counterDisc?'<div style="font-size:12px;color:var(--amber);margin-top:4px"><i class="ti ti-arrows-exchange"></i> Counter-offer: <b>'+n.counterDisc+'%</b> discount'
+          +'<span style="display:block;font-size:11px;margin-top:2px">'
+          +(isOwn?'Not applied yet — press <b>Accept '+n.counterDisc+'% counter</b> below to apply it to the quotation.'
+                 :'Not applied yet — waiting for '+escHtml(n.from||'the requester')+' to accept or decline.')
+          +'</span></div>':'')
       +(n.by?'<div style="font-size:12px;color:'+(n.status==="approved"||n.status==="accepted"?"var(--teal)":"var(--coral)")+';margin-top:4px">Actioned by: '+escHtml(n.by)+'</div>':'')
       +'</div>'
       +(n.status==="pending"?(
@@ -11809,10 +11829,16 @@ function doApprovalAction(idx, action) {
   if(n.fromEmail&&n.fromEmail.toLowerCase()!==((gUser&&gUser.email)||'').toLowerCase()){
     var _outLabels={approved:'approved',rejected:'rejected',countered:'answered with a counter-offer'};
     var _tl={nonvat:'Non-VAT',discount:'Discount',override:'Cost factor',premium:'Holiday premium',unlock:'Unlock'};
+    // A counter-offer is not applied when it is made — the requester still has to accept it.
+    // The old message stated the outcome and stopped there, so it read as "done" when in fact
+    // nothing had changed on the quotation and the requester was the one being waited on.
+    // Say what is needed and where, or it does not get done (QT-M00000102 sat unaccepted).
     gSendMessage(n.fromEmail,n.from,
       'Your '+(_tl[n.type]||n.type)+' request for '+n.serial+' was '+(_outLabels[action]||action)+' by '+byName
-        +(action==='countered'&&counterDisc?(' — '+counterDisc+'%'):'')+'.',
-      action==='approved'?'normal':'normal','approval_result:'+n.type+':'+n.serial,function(){});
+        +(action==='countered'&&counterDisc?(' — '+counterDisc+'%'):'')+'.'
+        +(action==='countered'?' This is NOT applied yet — open the Approvals tab and press "Accept '
+            +(counterDisc?counterDisc+'% ':'')+'counter" to apply it to the quotation, or Decline.':''),
+      action==='countered'?'urgent':'normal','approval_result:'+n.type+':'+n.serial,function(){});
   }
   // If approved → apply the change to the quotation form (if open)
   if(action==='approved'){
@@ -20601,8 +20627,7 @@ function gShowApp(){
     gLoadApprovalRequests(function(){
       // ── Approver side: ring bell when new requests arrive ──────────────
       var newPending=NOTIFS.filter(function(n){return n.status==='pending';}).length;
-      var cnt=el('notif-cnt');
-      if(cnt){cnt.textContent=newPending;cnt.style.display=newPending?'flex':'none';}
+      _updateNotifBadge();
       if(newPending>prevPending){
         var bell=el('notif-btn');
         if(bell){bell.classList.remove('bell-pulse');void bell.offsetWidth;bell.classList.add('bell-pulse');}
@@ -20639,15 +20664,26 @@ function gShowApp(){
         if(!prevStatus||prevStatus===n.status) continue; // no change
         var typeLabels={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',unlock:'Unlock'};
         var tl=typeLabels[n.type]||n.type;
+        // Lami already announces a NEW request to the approver; the requester got only a toast,
+        // which is gone in seconds and easily missed while working in another tab. She says the
+        // outcome too now — and for a counter she says the part that actually matters, that
+        // nothing is applied until they accept.
+        var _say=function(t){
+          if(typeof _chipSpeak==='function'&&typeof chipVoiceOn!=='undefined'&&chipVoiceOn) _chipSpeak(t);
+        };
         if(n.status==='approved'){
           showToast('✅ Your '+tl+' request for '+n.serial+' was approved by '+n.by+'!');
+          _say('Good news. Your '+tl+' request for '+n.serial+' was approved by '+(n.by||'the approver')+'.');
           _applyApprovedRequest(n);          // apply to quotation form if open
           _showApprovedBadge(n.type, n);     // update the pending badge → Approved
         } else if(n.status==='rejected'){
           showToast('❌ Your '+tl+' request for '+n.serial+' was rejected by '+n.by+'.');
+          _say('Your '+tl+' request for '+n.serial+' was rejected by '+(n.by||'the approver')+'.');
           _clearPendingBadge(n.type);        // remove the pending badge
         } else if(n.status==='countered'){
-          showToast('⚠️ Your '+tl+' request for '+n.serial+' received a counter-offer'+(n.counterDisc?' of '+n.counterDisc+'%':'')+' from '+(n.by||'approver')+'. Check the Approvals page.');
+          showToast('⚠️ Your '+tl+' request for '+n.serial+' received a counter-offer'+(n.counterDisc?' of '+n.counterDisc+'%':'')+' from '+(n.by||'approver')+'. Open the Approvals tab and press Accept to apply it.');
+          _say((n.by||'The approver')+' answered your '+tl+' request for '+n.serial+' with a counter-offer'
+              +(n.counterDisc?' of '+n.counterDisc+' percent':'')+'. It is not applied yet. Open the Approvals tab and press Accept to apply it, or Decline.');
           _clearPendingBadge(n.type);
           _showCounterBadge(n.type, n);
         }
@@ -20715,7 +20751,7 @@ function canNavigate(pg){
   if(pg==='users') return currentRole==='Admin'||currentRole==='Director';
 
   if(pg==='quotation'||pg==='directory') return !!(currentUserAcc['Quotations']||currentUserAcc['Projects']);
-  var m={dashboard:'Dashboard',clients:'Clients',schedule:'Schedule',production:'Designers Support',reports:'Reports',settings:'Settings'};
+  var m={dashboard:'Dashboard',clients:'Clients',schedule:'Schedule',production:'Designers Support',reports:'Reports',settings:'Settings',approvals:'Approvals'};
   return m[pg]?!!currentUserAcc[m[pg]]:true;
 }
 // Show/hide nav tabs and New-quotation buttons based on currentUserAcc
@@ -20723,7 +20759,7 @@ function applyNavAccess(){
   var isAdmin=(currentRole==='Admin');
   var hasQ=!!currentUserAcc['Quotations'];
   var hasP=!!currentUserAcc['Projects'];
-  var navMap={dashboard:'Dashboard',clients:'Clients',schedule:'Schedule',production:'Designers Support',reports:'Reports',settings:'Settings'};
+  var navMap={dashboard:'Dashboard',clients:'Clients',schedule:'Schedule',production:'Designers Support',reports:'Reports',settings:'Settings',approvals:'Approvals'};
   document.querySelectorAll('.nav-btn[data-pg]').forEach(function(btn){
     var pg=btn.getAttribute('data-pg');
     if(pg==='help'){btn.style.display='';return;}
