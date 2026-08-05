@@ -803,6 +803,17 @@ tr.cl-row:hover td{background:#f4f7fb}
                 <button id="disc-req-btn" class="btn btn-amber" onclick="onDiscRequest()" style="white-space:nowrap"><i class="ti ti-send"></i>Request</button>
               </div>
               <div id="disc-ok-msg" style="display:none;font-size:12px;color:var(--teal);margin-top:5px;align-items:center;gap:4px"><i class="ti ti-circle-check"></i><span id="disc-ok-txt"></span></div>
+              <div id="disc-scope-wrap" style="margin-top:7px">
+                <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px">Apply the discount to</div>
+                <div style="display:flex;flex-wrap:wrap;gap:4px 12px">
+                  <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer"><input type="checkbox" id="disc-sc-materials" onchange="onDiscScopeChange('materials',this.checked)">Materials</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer"><input type="checkbox" id="disc-sc-edgeband" onchange="onDiscScopeChange('edgeband',this.checked)">Edgeband</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer"><input type="checkbox" id="disc-sc-hardware" onchange="onDiscScopeChange('hardware',this.checked)">Hardware</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer"><input type="checkbox" id="disc-sc-services" onchange="onDiscScopeChange('services',this.checked)">Services</label>
+                  <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer"><input type="checkbox" id="disc-sc-installation" onchange="onDiscScopeChange('installation',this.checked)">Installation</label>
+                </div>
+                <div id="disc-scope-note" style="font-size:10px;color:var(--muted);margin-top:3px">Leave all unticked to discount the whole quotation.</div>
+              </div>
             </div>
           </div>
         </div>
@@ -4744,6 +4755,7 @@ function initQuotation() {
   qCancelled=false; qCancelledAt=''; qCancelReason='';
   qLog=[]; qPieces=[]; _pCalc={};
   qVatApproved=true; qDiscApproved=false; qDiscPct=0; qPremApproved=false;
+  qDiscScope={materials:false,edgeband:false,hardware:false,services:false,installation:false};
   qCustomCF=null; qCustomCFApproved=false;
   qOutMarkup=null; qOutContingency=null; qOutBuffer=null;
   qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
@@ -5721,6 +5733,92 @@ function removeSvcItem(a,i) {
 function isDirectClient(){
   return (el('cl-type')?el('cl-type').value:'Direct')==='Direct';
 }
+// ── Discount scope ────────────────────────────────────────────────────────
+// A discount can be limited to parts of the job instead of the whole quotation.
+//
+// DEFAULT IS NOTHING TICKED, and that means "discount everything" — the exact behaviour and
+// the exact arithmetic that existed before this feature. Every quotation already saved, and
+// every one where nobody touches these boxes, is untouched. Scoping only engages once a box
+// is ticked, so this can never quietly change a price behind someone's back.
+//
+// Edgeband is the EDGE TAPE MATERIAL (Rommel's call), not the edgebanding labour. It is
+// carved OUT of Materials so ticking both cannot discount the tape twice.
+//
+// Not offered in carcass mode: there one price covers a whole cabinet and the materials,
+// hardware and labour inside it are not separable, so any split would be invented. The card
+// hides itself there and the discount stays whole-quotation.
+var qDiscScope={materials:false,edgeband:false,hardware:false,services:false,installation:false};
+var DISC_SCOPE_KEYS=['materials','edgeband','hardware','services','installation'];
+function _discScopeOn(){
+  if(qFabMode==='carcass') return false;
+  for(var i=0;i<DISC_SCOPE_KEYS.length;i++) if(qDiscScope[DISC_SCOPE_KEYS[i]]) return true;
+  return false;
+}
+// Edge tape is a material like any other, so it is recognised by name. Matches the catalogue's
+// own wording ("… 2mmx22mm Matte PVC Premium Edgeband", "Edge Tape 0.4mm"). A tape whose name
+// says none of this simply stays under Materials rather than being guessed into its own bucket.
+function _isEdgeTapeName(nm){ return /edge\s*-?\s*(band|tape)|edgeband/i.test(String(nm||'')); }
+// Human wording for what the discount covers — used on the form, the printout and the request
+// sent to the approver. A discount on part of a job must never be presented as a discount on
+// the job: the client is reading a number and needs to know what it came off.
+var DISC_SCOPE_LABELS={materials:'materials',edgeband:'edgeband',hardware:'hardware',services:'services',installation:'installation'};
+function _discScopeLabel(){
+  if(!_discScopeOn()) return '';
+  var p=[];
+  for(var i=0;i<DISC_SCOPE_KEYS.length;i++) if(qDiscScope[DISC_SCOPE_KEYS[i]]) p.push(DISC_SCOPE_LABELS[DISC_SCOPE_KEYS[i]]);
+  if(p.length<2) return p[0]||'';
+  return p.slice(0,-1).join(', ')+' and '+p[p.length-1];
+}
+function onDiscScopeChange(k,on){
+  qDiscScope[k]=!!on;
+  // Changing WHAT is discounted changes the money just as much as changing the percentage, so it
+  // has to invalidate an approval already given — otherwise a 5% approved on services alone could
+  // be silently widened to the whole job after the fact.
+  if(typeof onDiscInput==='function') onDiscInput();
+  renderDiscScope();
+  if(typeof recalc==='function') recalc();
+}
+function renderDiscScope(){
+  var w=el('disc-scope-wrap'); if(!w) return;
+  // Carcass mode prices a whole cabinet as one figure, so there is nothing to split.
+  if(qFabMode==='carcass'){ w.style.display='none'; return; }
+  w.style.display='';
+  for(var i=0;i<DISC_SCOPE_KEYS.length;i++){
+    var c=el('disc-sc-'+DISC_SCOPE_KEYS[i]);
+    if(c) c.checked=!!qDiscScope[DISC_SCOPE_KEYS[i]];
+  }
+  var n=el('disc-scope-note'); if(!n) return;
+  if(_discScopeOn()) n.innerHTML='<span style="color:var(--amber);font-weight:600">Discount applies to '+escHtml(_discScopeLabel())+' only</span> — everything else stays full price.';
+  else n.textContent='Leave all unticked to discount the whole quotation.';
+}
+// Raw, pre-markup bases per bucket, read from whichever scope is current (Stage 1 or Stage 2 —
+// this reads the global areas array, so the Stage 2 swap covers it like everything else).
+function _discRawBases(){
+  var b={materials:0,edgeband:0,hardware:0,services:0};
+  var mult=clientMatMult(), isDir=isDirectClient();
+  function addMat(nm,amt){ if(_isEdgeTapeName(nm)) b.edgeband+=amt; else b.materials+=amt; }
+  for(var a=0;a<qAreas.length;a++){
+    var ar=qAreas[a]; if(!ar) continue;
+    if(qFabMode==='bom'){
+      var bis=ar.bomItems||[];
+      for(var i=0;i<bis.length;i++){
+        var bi=bis[i], q=(parseFloat(bi.qty)||1), r;
+        (bi.services||[]).forEach(function(r){ b.services+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*mult*q; });
+        (bi.hardware||[]).forEach(function(r){ b.hardware+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*q; });
+        (bi.materials||[]).forEach(function(r){ addMat(r.name,(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*q); });
+      }
+    } else {
+      (ar.svcItems||[]).forEach(function(si){ b.services+=_svcLineTotal(si); });
+      // Materials and hardware are only billed to Direct clients in this mode, so they are only
+      // discountable when they are actually being charged (see getAreaSubtotal).
+      if(isDir){
+        (ar.matItems||[]).forEach(function(m){ addMat(m.name,(m.qty||0)*(m.price||0)); });
+        (ar.hwItems||[]).forEach(function(h){ b.hardware+=(h.qty||0)*(h.price||0); });
+      }
+    }
+  }
+  return b;
+}
 function getAreaMatSubtotal(a){
   var sub=0; var mis=qAreas[a].matItems||[];
   for(var i=0;i<mis.length;i++) sub+=(mis[i].qty||0)*(mis[i].price||0);
@@ -6648,6 +6746,7 @@ function onFabModeChange(mode) {
   var card=el('outsource-rates-card');
   if(card) card.style.display=(mode==='bom'?'block':'none');
   _updateCarcassCountCardVisibility();
+  if(typeof renderDiscScope==='function') renderDiscScope();
   renderItems();
   recalc();
 }
@@ -6938,6 +7037,7 @@ function renderItems(){
   // container. Nothing is skipped: the correct render happens in the same synchronous turn.
   if(_scopeCtx==='fq') return;
   renderClientMatSection();
+  if(typeof renderDiscScope==='function') renderDiscScope();
   return _renderScope('items-wrap','qAreas','');
 }
 function renderFQItems(){
@@ -7322,7 +7422,22 @@ function _recalcCore(fast) {
   var designerCommAmt=(ni&&CF.designersCommissionEnabled)?subtotal*(CF.designersCommPct||0)/100:0;
   var preDisc=subtotal+mssiCommAmt+designerCommAmt;
   var bufAmt=discBufAmt; var mkAmt=mssiCommAmt+designerCommAmt; // kept for _pCalc compat
-  var dA=(qDiscApproved&&qDiscPct)?preDisc*qDiscPct/100:0;
+  // Discount base. Nothing ticked -> the whole quotation, exactly as before. Ticked -> only the
+  // chosen buckets, carried up the SAME markup chain the rest of the price went up, so the
+  // discount comes off the selling price of those parts and not off their raw cost.
+  var _dScope=_discScopeOn(), _dBase=preDisc, _dParts=null;
+  if(_dScope){
+    var _rb=_discRawBases();
+    var _fabF=(1+cf/100)*(ni?(1+fabBuf/100):1);            // same factor that produced regularFabC
+    var _upF=(1+discBuf/100)*(1+((mssiCommApplies&&CF.mssiCommissionEnabled?(CF.mssiCommPct||0):0)
+                                +((ni&&CF.designersCommissionEnabled)?(CF.designersCommPct||0):0))/100);
+    _dParts={materials:_rb.materials*_fabF,edgeband:_rb.edgeband*_fabF,
+             hardware:_rb.hardware*_fabF,services:_rb.services*_fabF,installation:instC};
+    var _sum=0;
+    for(var _k=0;_k<DISC_SCOPE_KEYS.length;_k++) if(qDiscScope[DISC_SCOPE_KEYS[_k]]) _sum+=_dParts[DISC_SCOPE_KEYS[_k]];
+    _dBase=_sum*_upF;
+  }
+  var dA=(qDiscApproved&&qDiscPct)?_dBase*qDiscPct/100:0;
   var afterD=preDisc-dA;
   // Step 1: Compute temp VAT (on base only) as basis for bond computation
   var tempVat=qVatApproved?afterD*vat/100:0;
@@ -7337,7 +7452,7 @@ function _recalcCore(fast) {
   var premAmt=qPremApproved?afterDWithBonds*premRate/100:0;
   var grand=afterDWithBonds+vatAmt+premAmt;
   // Cache for openPrint()
-  _pCalc={stage:1,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBaseRaw,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,biCosts:biCosts,bondState:qBondIns,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:!!qVatApproved,discOn:!!(qDiscApproved&&dA),discPct:qDiscPct||0,premOn:!!qPremApproved,ni:ni,na:na,
+  _pCalc={stage:1,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBaseRaw,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,biCosts:biCosts,bondState:qBondIns,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:!!qVatApproved,discOn:!!(qDiscApproved&&dA),discPct:qDiscPct||0,discScoped:_dScope,discScopeLabel:_discScopeLabel(),premOn:!!qPremApproved,ni:ni,na:na,
     regularBase:regularBase,clCost:clCost,bufAmt:discBufAmt,mkAmt:mkAmt,
     discBufAmt:discBufAmt,mssiCommAmt:mssiCommAmt,designerCommAmt:designerCommAmt,
     fabContAmt:regularBase*cf/100,mobContAmt:mobBase*cm/100,instContAmt:(instBase+assmBase)*ci/100,
@@ -7587,7 +7702,7 @@ function _recalcCore(fast) {
   // is shown once above in the itemized "lines" block; no need to repeat it here.)
   var tot = '';
   tot += '<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--text2)"><span>Subtotal</span><span>'+fmtMoney(preDisc)+'</span></div>';
-  if(qDiscApproved&&dA) tot += '<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--teal)"><span>Discount ('+qDiscPct+'%)</span><span>−'+fmtMoney(dA)+'</span></div>';
+  if(qDiscApproved&&dA) tot += '<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--teal)"><span>Discount ('+qDiscPct+'%'+(_discScopeOn()?' on '+_discScopeLabel():'')+')</span><span>−'+fmtMoney(dA)+'</span></div>';
   if(qBondIns.enabled&&biCosts.total>0) tot += '<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:#1a3c5e"><span><i class="ti ti-shield-check" style="font-size:11px"></i> Bond &amp; Insurance</span><span>+'+fmtMoney(biCosts.total)+'</span></div>';
   if(qVatApproved) tot += '<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--text2)"><span>VAT (12%)</span><span>'+fmtMoney(vatAmt)+'</span></div>';
   else tot += '<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0"><span style="color:var(--text2)">VAT</span><span class="pill pill-muted">Non-vatable</span></div>';
@@ -8207,7 +8322,7 @@ function _buildPrintBodyCore() {
     + ((dcCost>0&&!foldDC)?'<tr style="background:#e0f2fe"><td colspan="4" style="'+tdS+';color:#0369a1;font-weight:600"><i class="ti ti-pencil-bolt"></i> Design charge</td><td style="'+tdS+';text-align:right;color:#0369a1;font-weight:600">'+fmtMoney(dcCost)+'</td></tr>':'')
     + (pSvCost>0?'<tr><td colspan="4" style="'+tdS+'">Site visit</td><td style="'+tdS+';text-align:right">'+fmtMoney(pSvCost)+'</td></tr>':'')
     + ((pC.otherCostStandaloneItems||[]).map(function(oc){return '<tr><td colspan="4" style="'+tdS+'">'+escHtml(oc.label||'Other cost')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(oc.amount)+'</td></tr>';}).join(''))
-    + (pC.discOn&&pC.discAmt>0?'<tr style="color:#0f6e56"><td colspan="4" style="'+tdS+'">Discount ('+pC.discPct+'%)</td><td style="'+tdS+';text-align:right">−'+fmtMoney(pC.discAmt)+'</td></tr>':'')
+    + (pC.discOn&&pC.discAmt>0?'<tr style="color:#0f6e56"><td colspan="4" style="'+tdS+'">Discount ('+pC.discPct+'%'+(pC.discScopeLabel?' on '+pC.discScopeLabel+' only':'')+')</td><td style="'+tdS+';text-align:right">−'+fmtMoney(pC.discAmt)+'</td></tr>':'')
     + (pC.biTotal>0?'<tr><td colspan="4" style="'+tdS+'">Bond &amp; Insurance</td><td style="'+tdS+';text-align:right">'+fmtMoney(pC.biTotal)+'</td></tr>':'')
     + (pC.vatOn
         ?'<tr><td colspan="4" style="'+tdS+'">VAT (12%)</td><td style="'+tdS+';text-align:right">'+fmtMoney(pC.vatAmt||0)+'</td></tr>'
@@ -11018,7 +11133,7 @@ function submitApprovalRequest(){
   var overrideReason=type==='override'?(data.reason||note||''):null;
   var msgMap={
     nonvat:'Non-VAT treatment requested'+(note?' — '+note:'')+'.',
-    discount:'Discount of '+(data.discPct||0)+'% requested'+(note?' — '+note:'')+'.',
+    discount:'Discount of '+(data.discPct||0)+'%'+(_discScopeOn()?' on '+_discScopeLabel()+' only':' on the whole quotation')+' requested'+(note?' — '+note:'')+'.',
     override:'Cost factor adjustment requested'+(overrideReason?' — '+overrideReason:'')+'.',
     premium:'Holiday/weekend premium approval requested'+(note?' — '+note:'')+'.',
     unlock:'Unlock requested for '+(data.ctx==='fq'?'Final Quotation':'Initial Quotation')+(note?' — '+note:'')+'.'
@@ -16145,7 +16260,7 @@ function captureQuotationSnapshot(){
     customCF:qCustomCF?JSON.parse(JSON.stringify(qCustomCF)):null,
     customCFApproved:qCustomCFApproved,
     outMarkup:qOutMarkup,outContingency:qOutContingency,outBuffer:qOutBuffer,
-    vatApproved:qVatApproved,discApproved:qDiscApproved,discPct:qDiscPct,premApproved:qPremApproved,
+    vatApproved:qVatApproved,discApproved:qDiscApproved,discPct:qDiscPct,discScope:JSON.parse(JSON.stringify(qDiscScope)),premApproved:qPremApproved,
     locked:qLocked,saved:qSaved,sentStatus:qSentStatus,
     projectSize:qProjectSize,
     instWorkers:qInstWorkers,instDays:qInstDays,
@@ -16182,6 +16297,7 @@ function restoreQuotationSnapshot(snap){
   qCustomCFApproved=snap.customCFApproved;
   qOutMarkup=snap.outMarkup;qOutContingency=snap.outContingency;qOutBuffer=snap.outBuffer;
   qVatApproved=snap.vatApproved;qDiscApproved=snap.discApproved;qDiscPct=snap.discPct;qPremApproved=snap.premApproved;
+  qDiscScope=snap.discScope?JSON.parse(JSON.stringify(snap.discScope)):{materials:false,edgeband:false,hardware:false,services:false,installation:false};
   if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';}
   if(snap.initLockedAt!==undefined){qInitLockedAt=snap.initLockedAt||'';qInitApprovedAt=snap.initApprovedAt||'';fqLockedAt=snap.finalLockedAt||'';qClosedAt=snap.closedAt||'';}
   qProjectSize=snap.projectSize||0;
@@ -16211,6 +16327,7 @@ function syncOptionUI(){
   for(var i=0;i<fabRads.length;i++) fabRads[i].checked=(fabRads[i].value===qFabMode);
   renderOtherCosts();
   renderClientMatSection();
+  if(typeof renderDiscScope==='function') renderDiscScope();
   if(el('assm-toggle')) el('assm-toggle').checked=qAssembly.enabled;
   if(el('assm-body')) el('assm-body').style.display=qAssembly.enabled?'block':'none';
   if(el('carcass-unit-count')) el('carcass-unit-count').value=qCarcassUnitCount||'';
@@ -18783,7 +18900,23 @@ function _recalcFQCore() {
   var designerCommAmt=(ni&&CF.designersCommissionEnabled)?subtotal*(CF.designersCommPct||0)/100:0;
   var preDisc=subtotal+mssiCommAmt+designerCommAmt;
   var bufAmt=discBufAmt; var mkAmt=mssiCommAmt+designerCommAmt;
-  var dA=(fqDiscApproved&&fqDiscPct)?preDisc*fqDiscPct/100:0;
+  // Same scoping rule as Stage 1 — the two are hand-duplicated and drift, so this must land in
+  // both or a discount scoped at Stage 1 would silently widen to the whole job at Stage 2.
+  // _discRawBases reads the global areas array, so inside recalcFQ it already sees Stage 2's own
+  // scope of work, not Stage 1's.
+  var _dScope=_discScopeOn(), _dBase=preDisc;
+  if(_dScope){
+    var _rb=_discRawBases();
+    var _fabF=(1+cf/100)*(ni?(1+fabBuf/100):1);
+    var _upF=(1+discBuf/100)*(1+((mssiCommApplies&&CF.mssiCommissionEnabled?(CF.mssiCommPct||0):0)
+                                +((ni&&CF.designersCommissionEnabled)?(CF.designersCommPct||0):0))/100);
+    var _dParts={materials:_rb.materials*_fabF,edgeband:_rb.edgeband*_fabF,
+                 hardware:_rb.hardware*_fabF,services:_rb.services*_fabF,installation:instC};
+    var _sum=0;
+    for(var _k=0;_k<DISC_SCOPE_KEYS.length;_k++) if(qDiscScope[DISC_SCOPE_KEYS[_k]]) _sum+=_dParts[DISC_SCOPE_KEYS[_k]];
+    _dBase=_sum*_upF;
+  }
+  var dA=(fqDiscApproved&&fqDiscPct)?_dBase*fqDiscPct/100:0;
   var afterD=preDisc-dA;
   var fqVatRadio=document.querySelector("[name='fq-vat']:checked");
   var vatOn=fqVatRadio?fqVatRadio.value==='y':fqVatApproved;
@@ -18796,7 +18929,7 @@ function _recalcFQCore() {
   var premAmt=fqPremApproved?afterDWithBonds*premRate/100:0;
   var grand=afterDWithBonds+vatAmt+premAmt;
   // Cache for openPrint()
-  _pCalc={stage:2,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBase,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:vatOn,discOn:!!(fqDiscApproved&&dA),discPct:fqDiscPct||0,premOn:!!fqPremApproved,ni:ni,na:na,
+  _pCalc={stage:2,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBase,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:vatOn,discOn:!!(fqDiscApproved&&dA),discPct:fqDiscPct||0,discScoped:_dScope,discScopeLabel:_discScopeLabel(),premOn:!!fqPremApproved,ni:ni,na:na,
     regularBase:regularBase,clCost:clCost,bufAmt:discBufAmt,mkAmt:mkAmt,
     discBufAmt:discBufAmt,mssiCommAmt:mssiCommAmt,designerCommAmt:designerCommAmt,
     fabContAmt:regularFabC-regularBase,mobContAmt:mobBase*cm/100,instContAmt:(instBase+assmBase)*ci/100,
@@ -18947,7 +19080,7 @@ function _recalcFQCore() {
   // is shown once above in the itemized "lines" block; no need to repeat it here.)
   var tot='';
   tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--text2)"><span>Subtotal</span><span>'+fmtMoney(preDisc)+'</span></div>';
-  if(fqDiscApproved&&dA) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--teal)"><span>Discount ('+fqDiscPct+'%)</span><span>−'+fmtMoney(dA)+'</span></div>';
+  if(fqDiscApproved&&dA) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--teal)"><span>Discount ('+fqDiscPct+'%'+(_discScopeOn()?' on '+_discScopeLabel():'')+')</span><span>−'+fmtMoney(dA)+'</span></div>';
   if(fqBondIns.enabled&&biCosts.total>0) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:#1a3c5e"><span><i class="ti ti-shield-check" style="font-size:11px"></i> Bond &amp; Insurance</span><span>+'+fmtMoney(biCosts.total)+'</span></div>';
   if(vatOn) tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0;color:var(--text2)"><span>VAT (12%)</span><span>'+fmtMoney(vatAmt)+'</span></div>';
   else tot+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:3px 0"><span style="color:var(--text2)">VAT</span><span class="pill pill-muted">Non-vatable</span></div>';
@@ -24257,7 +24390,7 @@ function getFullQuotationState(){
     locked:qLocked, approved:qApproved, saved:qSaved, sentStatus:qSentStatus,
     stage:qStage, fabMode:qFabMode,
     areas:JSON.parse(JSON.stringify(qAreas)),
-    vatApproved:qVatApproved, discApproved:qDiscApproved, discPct:qDiscPct, premApproved:qPremApproved,
+    vatApproved:qVatApproved, discApproved:qDiscApproved, discPct:qDiscPct, discScope:JSON.parse(JSON.stringify(qDiscScope)), premApproved:qPremApproved,
     bondIns:JSON.parse(JSON.stringify(qBondIns)),
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     fabCont:JSON.parse(JSON.stringify(qFabCont||{pct:null,mode:'line'})),
@@ -24492,6 +24625,7 @@ function restoreFullQuotationState(state){
   qAreas=JSON.parse(JSON.stringify(state.areas||[]));
   qVatApproved=state.vatApproved!==undefined?state.vatApproved:true;
   qDiscApproved=!!state.discApproved; qDiscPct=state.discPct||0; qPremApproved=!!state.premApproved;
+  qDiscScope=state.discScope?JSON.parse(JSON.stringify(state.discScope)):{materials:false,edgeband:false,hardware:false,services:false,installation:false};
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
   qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
   qFabCont=state.fabCont?JSON.parse(JSON.stringify(state.fabCont)):{pct:null,mode:'line'};
