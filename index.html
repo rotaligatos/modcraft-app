@@ -2682,6 +2682,11 @@ var dirSelected = {};   // { serial: true } — checked quotation rows
 var clientSelected = {}; // { id: true } — checked client rows
 var qStage = 1;
 var qApproved = false;
+// Client sign-off on the INITIAL quotation — see _recordStage1ClientApproval. Distinct from
+// qApproved, which is the internal gate that opens Stage 2; these happen together today, but
+// the KPI question is "did the client approve", and that deserves its own recorded fact.
+var qClientApproved = false;
+var qClientApprovedAt = '';
 var qSaved = false;       // true once Stage 1 Save Draft is clicked (gates Lock & Send)
 var qSerialCommitted = false; // true once this serial has survived a first-save collision check (see gSaveQuotation)
 var qLoadedSavedAt = null;    // savedAt of the state as last loaded/saved by THIS session — used to detect another user's save in between (see gSaveQuotation opts.checkConflict)
@@ -4696,6 +4701,7 @@ function initQuotation() {
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}],outsourceMaterials:[],outsourceHardware:[]}];
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus=''; qLockedRates=null;
+  qClientApproved=false; qClientApprovedAt='';
   qLockedTotal=null; fqLockedTotal=null;
   qInitLockedAt=''; qInitApprovedAt=''; fqLockedAt=''; qClosedAt='';
   qCancelled=false; qCancelledAt=''; qCancelReason='';
@@ -7600,6 +7606,35 @@ function doCloseProject(){
   dirData=[];
   });
 }
+// Stage 2 has recorded client sign-off since it existed (fqClientApproved + timestamp). Stage 1
+// never did — its gate is the internal Approve button, which in Rommel's workflow is only ever
+// clicked once the client has approved, so the fact was real but nowhere in the data. Won/rate/
+// revenue keyed off the "Client Approved" status label, which only Stage 2 can reach, so every
+// job that stopped at an approved Initial Quotation counted as not won.
+// Rommel: "it must be recorded the client approval. that critical and should be part of the team
+// performance flow and other kpis and reporting."
+// The status ladder is deliberately unchanged — inserting a rung here would read backwards.
+function _recordStage1ClientApproval(){
+  if(qClientApproved) return;                       // first approval stands; a re-approve is not a new one
+  qClientApproved=true;
+  qClientApprovedAt=new Date().toISOString();
+  logActivity('Client approved the Initial Quotation.');
+}
+// Won either way. A job the client approved at Stage 1 and never took to a Final Quotation is
+// just as won as one that did.
+//
+// Column Y only exists from now on, so every quotation already in the sheet would read as unwon
+// until someone happened to reopen and re-save it. The status is the honest fallback: reaching
+// "In Final Quotation" requires the Approve button, which is only clicked once the client has
+// approved, so anything at that rank or beyond was client-approved at Stage 1. Cancelled is the
+// one higher rank that is not a win, and is excluded by name rather than by arithmetic.
+function _isClientApprovedEntry(e){
+  if(!e) return false;
+  var st=_normalizeStatusLabel(e.status||'');
+  if(st==='Cancelled') return false;
+  if(e.clientApproved||e.fqClientApproved) return true;
+  return _statusRank(st)>=_statusRank('In Final Quotation');
+}
 function doApprove() {
   if(qCancelled){ showToast('This quotation was cancelled — the client declined to proceed.'); return; }
   if(!qLocked){
@@ -7617,6 +7652,7 @@ function doApprove() {
     openOptionApproveModal(); return;
   }
   qApproved=true; qInitApprovedAt=qInitApprovedAt||new Date().toISOString();
+  _recordStage1ClientApproval();
   el("q-status").textContent="Approved"; el("q-status").className="pill pill-teal";
   el("s2btn").style.opacity="1"; el("s2btn").style.cursor="pointer";
   el("revise-btn").style.display="inline-flex";
@@ -7633,6 +7669,9 @@ function confirmRevise() {
   var old=qSerial;
   saveQuotationToDrive('final','Revision v'+old);
   qSerial=makeSerial(); qSerialCommitted=false; qApproved=false; qRevisedFrom=old;
+  // A revision supersedes the version the client approved, so its sign-off does not carry over —
+  // same rule the Stage 2 unlock path already applies to fqClientApproved.
+  qClientApproved=false; qClientApprovedAt='';
   qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
   var qdl=el('q-drive-links'); if(qdl) qdl.innerHTML='';
   var fqdl=el('fq-drive-links'); if(fqdl) fqdl.innerHTML='';
@@ -8992,7 +9031,7 @@ function gLoadDirData(cb){
   if(dirLoading){setTimeout(function(){gLoadDirData(cb);},300); return;}
   if(!gToken){if(cb) cb(); return;}
   dirLoading=true;
-  sheetsGet('Quotations!A:X').then(function(d){
+  sheetsGet('Quotations!A:Y').then(function(d){
     if(!d.error){
       var rows=d.values||[],seen={};
       dirData=[];
@@ -9013,7 +9052,7 @@ function gLoadDirData(cb){
         var entry={id:ser,baseSerial:baseS,created:r[1]||'',client:r[2]||'',contact:r[4]||'',type:r[12]||'',
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,user:r[7]||'',segment:r[8]||'',
           status:r[5]||'Draft',locked:r[9]==='Yes',stage:r[10]||'Initial',options:parseInt(r[11])||1,
-          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||''};
+          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim())};
         dirData.push(entry); seen[baseS]=entry;
       }
     }
@@ -9031,6 +9070,43 @@ function _dashAllEntries(){
   return Object.values(merged);
 }
 
+// ── Additional orders roll up under the job they came from ─────────────────────────────────
+// An additional order is extra work on a job already won, not a new opportunity — counting it as
+// its own win flatters the win rate, and counting it as its own quotation inflates the pipeline.
+// Rommel, 2026-08-05: roll it up. Revenue is real money and still counts in full; it attaches to
+// the ORIGINAL job's row, which does mean it no longer shows who prepared the additional quote —
+// accepted when the choice was made.
+//
+// Returns one record per real job: the original entry, plus every additional order that traces
+// back to it, with revenue summed. Chains (an additional order of an additional order) resolve to
+// the root; a cycle stops rather than looping.
+function _rollupJobs(entries){
+  var byId={};
+  (entries||[]).forEach(function(e){ if(e&&e.id) byId[String(e.id)]=e; });
+  function rootOf(e){
+    var seen={}, cur=e, hops=0;
+    while(cur&&cur.additionalFrom&&hops++<20){
+      var k=String(cur.additionalFrom);
+      if(seen[k]) break;                       // cycle — stop where we are rather than spin
+      seen[k]=1;
+      var parent=byId[k]||byId[_serialRoot(k)];
+      if(!parent) break;                       // parent not loaded/visible — treat this as the root
+      cur=parent;
+    }
+    return cur;
+  }
+  var jobs={}, order=[];
+  (entries||[]).forEach(function(e){
+    if(!e||!e.id) return;
+    var r=rootOf(e), rid=String(r.id);
+    if(!jobs[rid]){ jobs[rid]={root:r, members:[], revenue:0, extras:0}; order.push(rid); }
+    var j=jobs[rid];
+    j.members.push(e);
+    j.revenue+=(e.value||0);
+    if(e!==r) j.extras++;
+  });
+  return order.map(function(k){ return jobs[k]; });
+}
 // Compute and render real KPIs + pipeline + chart from live data
 function _dashUpdateKPIs(){
   var all=_dashAllEntries();
@@ -9066,10 +9142,14 @@ function _dashUpdateKPIs(){
     return true;
   });
 
-  var total=filtered.length;
-  var rev=filtered.reduce(function(s,e){return s+(e.value||0);},0);
+  // One job = one number. An additional order adds its revenue to the job it came from rather
+  // than standing as another quotation in the count and another chance in the conversion rate.
+  var jobs=_rollupJobs(filtered);
+  var extrasRolled=jobs.reduce(function(s,j){return s+j.extras;},0);
+  var total=jobs.length;
+  var rev=jobs.reduce(function(s,j){return s+j.revenue;},0);
   // Conversion = quotation reached Final Quotation locked (Stage 2 locked)
-  var closedN=filtered.filter(function(e){ return !!e.finalLockedAt; }).length;
+  var closedN=jobs.filter(function(j){ return !!j.root.finalLockedAt; }).length;
   var convRate=total?Math.round(closedN/total*100):0;
 
   // Avg response time
@@ -9122,7 +9202,10 @@ function _dashUpdateKPIs(){
 
   // Render KPIs
   setText('kpi-total', total);
-  setText('kpi-total-sub', total===all.length?total+' total':total+' of '+all.length+' total');
+  // Rolled-up additional orders are stated, never silently absorbed — otherwise the count simply
+  // reads lower than the number of quotations in the list with nothing to explain the gap.
+  setText('kpi-total-sub', (total===all.length?total+' total':total+' of '+all.length+' total')
+    +(extrasRolled?' · '+extrasRolled+' additional order'+(extrasRolled!==1?'s':'')+' rolled up':''));
   setText('kpi-conv', total?convRate+'%':'—');
   setText('kpi-conv-sub', total?closedN+' closed of '+total:'No data');
   setText('kpi-rev', rev?fmtK(rev):'₱0');
@@ -9173,7 +9256,13 @@ function _dashUpdateKPIs(){
   var quotBySerial={};
   all.forEach(function(e){ if(e.id) quotBySerial[String(e.id)]=e; });
   var unmatched={};
-  all.forEach(function(e){
+  // One row per JOB, not per quotation — an additional order counts toward the job it came from
+  // (see _rollupJobs), so it neither adds a second win nor a second chance to the rate.
+  var teamJobs=_rollupJobs(all);
+  var teamExtras=0;
+  teamJobs.forEach(function(j){
+    var e=j.root;
+    teamExtras+=j.extras;
     var pre=_quotCompanyKey(e);
     // 137 of the quotations on this system predate the W/M/C serial prefix, so a company filter
     // would drop more than half the data with nothing said. Reachable via 'Unassigned', and
@@ -9198,7 +9287,11 @@ function _dashUpdateKPIs(){
     }
     var u=byUser[key];
     u.quotes++;
-    if((e.status||'')==='Client Approved'){ u.won++; u.revenue+=(e.value||0); }
+    // Won is now the recorded client-approval fact at EITHER stage, not the "Client Approved"
+    // status label — that label is only reachable from Stage 2, so a job the client approved at
+    // Stage 1 and never took further counted as unwon. Revenue is the whole job, additional
+    // orders included.
+    if(_isClientApprovedEntry(e)){ u.won++; u.revenue+=j.revenue; }
   });
   // The response clock lives on the ORDER, not the quotation: received -> sent.
   (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
@@ -9252,6 +9345,15 @@ function _dashUpdateKPIs(){
       +'<td style="font-weight:500">'+fmtK(u.revenue)+'</td></tr>';
   });
   teamHtml+='</tbody>';
+  // The roll-up is stated. Otherwise a preparer's Quotes count silently reads lower than the
+  // number of quotations with their name on it, and the person who prepared an additional order
+  // sees no credit for it anywhere with nothing to explain why.
+  if(teamExtras){
+    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--text2);background:#f7f7f5;padding:7px 10px">'
+      +'<i class="ti ti-git-merge"></i> '+teamExtras+' additional order'+(teamExtras===1?'':'s')
+      +' counted under the job '+(teamExtras===1?'it':'they')+' came from — revenue included, not counted as '+(teamExtras===1?'a separate win':'separate wins')+'.'
+      +'</td></tr></tfoot>';
+  }
   // Anyone preparing quotations who is NOT in the matrix is named, not silently dropped — that is
   // how you notice a new hire nobody ticked, or a name that no longer matches the Roles sheet.
   if(noPrefixHidden){
@@ -10982,6 +11084,7 @@ function _applyApprovedRequest(notif){
     } else {
       qLocked=false; qSentStatus='';
       _thawRatesVisible('unlock approved');
+      qClientApproved=false; qClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
       logActivity('Quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+').');
       if(typeof updateLockUI==='function') updateLockUI();
       if(typeof updateSentStatus==='function') updateSentStatus();
@@ -16135,6 +16238,7 @@ function confirmOptionApprove(optId){
   }
   // Proceed with normal approval
   qApproved=true; qInitApprovedAt=qInitApprovedAt||new Date().toISOString();
+  _recordStage1ClientApproval();
   el("q-status").textContent="Approved"; el("q-status").className="pill pill-teal";
   el("s2btn").style.opacity="1"; el("s2btn").style.cursor="pointer";
   el("revise-btn").style.display="inline-flex";
@@ -16663,6 +16767,7 @@ function confirmUnlock() {
   } else {
     qLocked=false; qSentStatus="";
     _thawRatesVisible('quotation unlocked');
+    qClientApproved=false; qClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
     logActivity("Quotation unlocked by Manager/Supervisor ("+qSerial+"). Reason: "+reason);
     updateLockUI(); updateSentStatus();
   }
@@ -16997,7 +17102,7 @@ function renderDirectory(){
     dirLoading=true;
     var wrap=el('dir-table');
     if(wrap) wrap.innerHTML='<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite;font-size:20px"></i> Loading...</td></tr>';
-    sheetsGet('Quotations!A:X').then(function(d){
+    sheetsGet('Quotations!A:Y').then(function(d){
       if(d.error){ // Quotations tab not created yet — no quotations saved so far. Show empty, not demo.
         dirData=[]; dirLoading=false; renderDirectoryTable(); return;
       }
@@ -17027,7 +17132,7 @@ function renderDirectory(){
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,
           user:r[7]||'',segment:r[8]||'',status:r[5]||'Draft',locked:r[9]==='Yes',
           stage:r[10]||'Initial',options:parseInt(r[11])||1,
-          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||''};
+          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim())};
         dirData.push(entry);
         seen[baseS]=entry;
       }
@@ -19152,10 +19257,11 @@ function supaUpsertQuotation(entry){
     project_name:entry.project||null,
     job_source:entry.jobSource||null,
     job_started_at:entry.jobStartedAt||null,
-    additional_from:entry.additionalFrom||null
+    additional_from:entry.additionalFrom||null,
+    client_approved_at:entry.clientApprovedAt||null
   };
   // Postgres timestamptz rejects '' — coerce empties to null
-  ['created_at','initial_locked_at','initial_approved_at','final_locked_at','job_started_at'].forEach(function(k){ if(!row[k]) row[k]=null; });
+  ['created_at','initial_locked_at','initial_approved_at','final_locked_at','job_started_at','client_approved_at'].forEach(function(k){ if(!row[k]) row[k]=null; });
   try{
     // The .catch is not optional. A network-level rejection never sets r.error and the
     // surrounding try/catch cannot see an async rejection — so the whole class of failure
@@ -19509,7 +19615,7 @@ function supaMigrateAll(){
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(); }
   console.log('[migrate] starting — this can take a few minutes for a large dataset. Do not close this tab.');
   var stats={quotHeaders:0,quotHeaderErrors:0,states:0,stateErrors:0};
-  return sheetsGet('Quotations!A:X').then(function(d){
+  return sheetsGet('Quotations!A:Y').then(function(d){
     var rows=(d&&!d.error&&d.values)||[];
     var headerRows=[];
     for(var i=1;i<rows.length;i++){
@@ -19522,7 +19628,7 @@ function supaMigrateAll(){
         value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,
         user:r[7]||'',stage:r[10]||'',type:r[12]||'',
         baseSerial:baseS,initLockedAt:r[13]||'',initApprovedAt:r[14]||'',
-        finalLockedAt:r[15]||'',sourceOrder:r[17]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||''
+        finalLockedAt:r[15]||'',sourceOrder:r[17]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim())
       });
     }
     console.log('[migrate] found',headerRows.length,'quotation header rows in Sheets — migrating...');
@@ -21092,12 +21198,12 @@ function setupMissingSheetTabs(){
   // A freshly created tab got a 13-column header while every writer sends 23.
   // _syncQuotHeader would eventually widen it, but there is no reason to create it
   // wrong in the first place.
-  var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From']];
+  var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Client Approved']];
   var CLI_HDR=[['ID','Contact Name','Business Name','Contact No','Email','Address','City','Account Type','Segment','Segment Group','Segment Custom','Notes']];
   var STATE_HDR=[['Serial','State JSON (chunked across columns B–K — do not edit manually)']];
   Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1'),sheetsGet('Quotation State!A1')]).then(function(res){
     var tasks=[];
-    if(res[0].error) tasks.push(sheetsCreateTab('Quotations').then(function(){return sheetsAppend('Quotations!A:X',QUOT_HDR);}));
+    if(res[0].error) tasks.push(sheetsCreateTab('Quotations').then(function(){return sheetsAppend('Quotations!A:Y',QUOT_HDR);}));
     if(res[1].error) tasks.push(sheetsCreateTab('Clients').then(function(){return sheetsAppend('Clients!A:L',CLI_HDR);}));
     if(res[2].error) tasks.push(sheetsCreateTab('Quotation State').then(function(){return sheetsAppend('Quotation State!A1:K1',STATE_HDR);}));
     if(!tasks.length){if(status) status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div>All tabs already exist — nothing to create.</div></div>';return Promise.resolve();}
@@ -23518,8 +23624,8 @@ function _syncQuotHeader(){
   // The range must be as wide as HDR. It was A1:T1 against a 21-entry HDR, so
   // 'Company' was never actually written and cur.length<HDR.length stayed true
   // forever — the header was rewritten every session and never converged.
-  var HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From'];
-  var RANGE='Quotations!A1:X1';   // A..W = 23 columns = HDR.length
+  var HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Client Approved'];
+  var RANGE='Quotations!A1:Y1';   // must stay as wide as HDR — see the A1:T1 bug below
   sheetsGet(RANGE).then(function(d){
     var cur=(d.values&&d.values[0])||[];
     if(d.error||!cur.length) return; // tab missing/empty — append path writes the header
@@ -23895,30 +24001,30 @@ function _proceedSaveQuotation(){
   // editable copies of the same fact would eventually disagree.
   var _jobSrc=qSourceOrderId?'':(qJobSource||'');
   var _jobStart=qSourceOrderId?'':(qJobStartedAt||'');
-  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||''];
+  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',qClientApprovedAt||''];
   // Store in session memory immediately so directory shows it without waiting for Sheets
-  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From'];
+  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Client Approved'];
   var _bsM=serial.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
-  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||''};
+  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:qClientApprovedAt||'',clientApproved:!!qClientApproved};
   try{ supaUpsertQuotation(sessionQuotations[serial]); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
   sheetsGet('Quotations!A:A').then(function(d){
     if(d.error){
       return sheetsCreateTab('Quotations').then(function(){
-        return sheetsAppend('Quotations!A:X',[QUOT_HDR]).then(function(){
-          return sheetsAppend('Quotations!A:X',[row]);
+        return sheetsAppend('Quotations!A:Y',[QUOT_HDR]).then(function(){
+          return sheetsAppend('Quotations!A:Y',[row]);
         });
       });
     }
     var vals=d.values||[];
     if(!vals.length){
-      return sheetsAppend('Quotations!A:X',[QUOT_HDR]).then(function(){
-        return sheetsAppend('Quotations!A:X',[row]);
+      return sheetsAppend('Quotations!A:Y',[QUOT_HDR]).then(function(){
+        return sheetsAppend('Quotations!A:Y',[row]);
       });
     }
     var rowIdx=-1;
     for(var i=1;i<vals.length;i++){if(vals[i][0]===serial){rowIdx=i+1;break;}}
     if(rowIdx>0){return sheetsUpdate('Quotations!A'+rowIdx+':X'+rowIdx,[row]);}
-    else{return sheetsAppend('Quotations!A:X',[row]);}
+    else{return sheetsAppend('Quotations!A:Y',[row]);}
   }).then(function(){
     showSheetsToast(true,'Quotation '+serial+' saved to database');
   }).catch(function(e){
@@ -24032,6 +24138,7 @@ function getFullQuotationState(){
     // losing it would silently reprice the job back to the Initial Quotation's scope.
     fqAreas:fqAreas?JSON.parse(JSON.stringify(fqAreas)):null, fqScopeForked:fqScopeForked,
     lockedTotal:qLockedTotal, fqLockedTotal:fqLockedTotal,
+    clientApproved:qClientApproved, clientApprovedAt:qClientApprovedAt,
     fqClientApproved:fqClientApproved, fqClientApprovedAt:fqClientApprovedAt,
     fqVatApproved:fqVatApproved, fqDiscPct:fqDiscPct, fqDiscApproved:fqDiscApproved, fqPremApproved:fqPremApproved,
     fqCustomCF:fqCustomCF?JSON.parse(JSON.stringify(fqCustomCF)):null, fqCustomCFApproved:fqCustomCFApproved,
@@ -24185,6 +24292,13 @@ function restoreFullQuotationState(state){
   // the next time Stage 2 is opened, which reproduces exactly what it priced at before.
   fqAreas = state.fqAreas ? JSON.parse(JSON.stringify(state.fqAreas)) : null;
   fqScopeForked = !!(state.fqScopeForked && fqAreas);
+  qClientApproved=!!state.clientApproved; qClientApprovedAt=state.clientApprovedAt||'';
+  // A quotation approved before this was recorded has no flag of its own. Its internal approval
+  // timestamp IS that moment — per Rommel's workflow the Approve button is only clicked once the
+  // client has approved — so back-fill from it rather than reporting historic wins as unwon.
+  if(!qClientApproved && state.approved && state.initApprovedAt){
+    qClientApproved=true; qClientApprovedAt=state.initApprovedAt;
+  }
   fqClientApproved=!!state.fqClientApproved; fqClientApprovedAt=state.fqClientApprovedAt||'';
   // Stage 2's OWN approval state (VAT/discount/premium/CF override), if this quotation has ever
   // saved one — see fqApprovalsFromSave above. state.fqVatApproved!==undefined distinguishes "this
