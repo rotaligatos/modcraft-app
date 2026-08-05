@@ -4008,14 +4008,23 @@ than a cabinet. That may be exactly what he wants changed.
 - **Carcass/BOM final-locked quotations** — only checked for internal consistency (stored total
   matches its own saved calc), NOT recomputed from line items. A leak there would look consistent.
   Offer to recompute properly if certainty is wanted.
-- **`QT-M00000070` is filed under `QT-W00000037`** — its state says `serial: QT-M00000070` but
-  `baseSerial: QT-W00000037`, and the DB row key is the latter; it was renumbered twice (provisional
-  M00000056 → W00000037 on 31 Jul → M00000070 on 3 Aug). Worth a look: a renumber leaving a stale
-  `baseSerial` could affect option and revision grouping.
-- **67, 68, 69, 70 and 76 are missing from Supabase entirely** while the app has them — the silent
-  dual-write failure class. Related to the above or not, unknown.
-- **MABA CONSTRAK `QT-260619-3668`** — stored ₱0.00, should be ~₱32,981.26. Separate, older cause;
-  still parked.
+- ~~`QT-M00000070` is filed under `QT-W00000037`~~ **DIAGNOSED + FIXED 2026-08-06.** Not a one-off:
+  **nine** quotations were filed under the number they were first PREVIEWED as while displaying and
+  printing under the number they were saved with. Cause was the preview path, not the renumber path
+  — `qBaseSerial` was set only `if(qBaseSerial==='')`, so it froze on the first preview and never
+  followed later ones (the counters load late after sign-in, and switching company moves the
+  quotation to another series). Fixed by `_syncBaseSerialToPreview()` (`7f2b41a`), and
+  `reconcileRenumbered()` (`dc13d9b`) repairs the eight safe rows — **still to be RUN by Rommel**;
+  Bella Ferma is excluded pending Stephanie.
+- ~~67, 68, 69, 70 and 76 missing from Supabase~~ **EXPLAINED 2026-08-06.** Not a dual-write
+  failure. **70 and 76 are filed under `QT-W00000037` and `QT-W00000043`** (same cause as above).
+  **67, 68 and 69 never existed** — the serial counter advances on every renumber, so gaps are
+  normal.
+- **MABA CONSTRAK `QT-260619-3668`** — stored ₱0.00. ⚠ **Cannot be repaired by recomputing** — its
+  service lines carry no stored price and resolve positionally into a catalogue reordered many
+  times since June. Materials are solid at ₱26,150; the services are gone from the record, and what
+  the client received is unknown (the printout rebuilds live, not from the stored total). Needs
+  Joanna's sent PDF. See the zero-total findings above.
 - **PMES sign-in** — 22 tables still anon-readable; do not drop the policies before it has auth.
 - **Website order pipeline** — live SKUs into the webpage cutting list; hole count + grooving
   variants in the form. See `MSSI Webpage/HANDOFF.md`, which is authoritative for that side.
