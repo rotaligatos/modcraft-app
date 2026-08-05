@@ -3842,18 +3842,23 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
 - **Roll-up trade-off**: the rolled-up job shows the ORIGINAL preparer, so whoever prepared the
   additional order gets no credit. Confirm that is wanted.
 ## Rommel's to do
-- **QT-M00000102 (One Oak Craft)** — a 3% counter-offer is sitting unaccepted. Joanna
-  (designer-ce1) now has an **Approvals** nav tab showing a red 1; she presses **Accept 3%
-  counter** and both the discount and the printout come right. No code needed.
-- **Run the Normalize units button** — Settings → Price Database. Approved 2026-08-05, built, not
-  yet run. 31 services change spelling only (`/lm`→`lm`, `/pc`→`piece`, `/sq. m`→`sqm`); it writes
-  the Sheet and Supabase together so no follow-up migration is needed.
-- **`min. charge` on 2 services** — not a unit, a pricing rule in the unit column. Decide what it
-  should be and it can be handled separately.
+- ~~QT-M00000102 (One Oak Craft)~~ **DONE 2026-08-05** — Joanna accepted the 3% counter at 08:09.
+  Verified: subtotal 33,506.86 less 3% = 32,501.65, x1.12 VAT = 36,401.85, matching the stored
+  total exactly. The total rose from 35,318.93 only because the SCOPE grew ~1,972 after the request
+  was sent. Worth knowing: an approved discount percentage stays attached and follows the scope, so
+  work added after approval is discounted too and nobody re-approves the larger amount.
+- ~~Run the Normalize units button~~ **CLOSED 2026-08-05** — Rommel: units are fine, he edits them manually. Kept in the app for whenever it is wanted. NOTE FOR ANY FUTURE UOM QUESTION: **the unit string does not affect any computation.** A service line costs qty x price; the unit is never read by the arithmetic. Exactly one place in the app branches on a unit string (`hw.unit==='lm'` marks a hardware row as edge tape) and the hardware catalogue has no `lm` rows. So spelling variants are cosmetic. What the unit DOES decide is what a person types in the quantity box, and what the client sees on the printout — a 2.4m x 0.6m panel is 1.44 sqm or 2.4 lm, and only a human can tell which is meant. Board Assembly went from `/sq. m` to `lm` during this session (either deliberately or via the pre-fix dropdown); Rommel reviewed and is content. Service UOM is edited in **Settings -> Services / Price Database** — NOT PPIC, whose UOM is per cabinet type for installation capacity.
+  (The button remains in Settings → Price Database: 31 services would change spelling only —
+  `/lm`→`lm`, `/pc`→`piece`, `/sq. m`→`sqm` — previewed and confirmed before writing, Sheet and
+  Supabase together. `min. charge` on 2 services is deliberately left alone: it is a pricing rule
+  in the unit column, not a unit. Closed as cosmetic, not needed.)
 - **QT-M00000087 (GYMFIX)** — final-locked and Client Approved at **₱0.00**; should be **₱616.00**
   (₱500 line × 1.10 contingency × 1.12 VAT; its sibling QT-M00000088 with the identical line is
   ₱616.00). Correcting it means unlocking a client-approved quotation — his call, not done.
-- **Tick who is measured** in Settings → Users, or Team performance stays empty by design.
+- ~~Tick who is measured~~ **DONE 2026-08-05** — 5 ticked: Jhover Galupo, Joanna Marie Buenconsejo,
+  Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros. **Two Staff who do prepare
+  quotations are NOT ticked — Andrei Salvador and Rafael Colot.** Managers/Directors/Admins are
+  unticked by design and exempt from the missing-preparer footer.
 - **Cleanup SQL** — 98 rows, still not run. SQL in the 2026-08-03 OPEN item A. Supabase over-counts
   (deletions did not propagate before 2026-08-02), so re-check the expected count first.
 - **Google Sites embed width** — needed before the quotation-page layout rework.
@@ -3861,10 +3866,56 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
   `qSignatures.checked`/`.noted` exist and the printout reads them. Andrei Salvador's signature and
   the approvers' are still missing.
 - **Rotate the Wufoo API key** — public in git history; the only item with a security clock.
-- **Wi-Fi power settings** (MIMO Power Save = Auto SMPS) — causes intermittent push/fetch stalls.
+- ~~Wi-Fi power settings~~ **DONE 2026-08-05.**
 - **Price DB blank-unit rows** — ~39,420; fill the units, **delete nothing** (~10,000 have no
   populated twin).
 
+## NEW 2026-08-05 — raised by Rommel, not started
+
+### 1. Mobile approvals app — the priority
+Rommel: *"Im having challenges to keep on catching up the request. What I want to do here is a
+mobile app just for those so I can immediately approve, review or disapprove the request even when
+im away with my laptop."*
+
+**Scope is approvals ONLY** — not the quotation app on a phone. Approve · review · counter ·
+disapprove, for unlock / override / discount / non-VAT / premium, wherever he is.
+
+Why this is now the bottleneck, in his own data: QT-M00000102 took **46 minutes** from request to
+counter, then sat another **~50 minutes** unaccepted. Approvals gate locking, revision, discounts
+and CF overrides — every one stops an estimator until he answers.
+
+**Everything it needs already exists server-side.** `approval_requests` is a real Supabase table
+with RLS, dual-written on every action; `messages` already fans out to email and Google Chat;
+`APPR_ROUTING` decides who each request goes to; PIN verification is SHA-256 + salt in
+`users.pin_hash` / `pin_salt`. A phone client would talk to the same table the desktop app does —
+no new backend, no second source of truth.
+
+**Open questions to settle BEFORE building** (each changes the work materially):
+- **Installable app, or a phone-friendly web page?** A separate mobile-optimised page served from
+  the same GitHub Pages repo needs no store, no build chain, and works the day it ships. A real
+  installable app (PWA or native) buys **push notifications** and a home-screen icon. Push is the
+  thing that actually solves "catching up" — email and Chat already arrive and are still missed.
+- **How does he authenticate on a phone?** Google sign-in already works; the PIN is the approval
+  gate. Typing a PIN on a phone is fine — but is a PIN sufficient authority on a device that might
+  sit unlocked in a bag?
+- **Does it show the money?** Approving a discount sensibly needs the total and the margin. That is
+  `canViewCostReport()` data — fine for him, but the same screen would serve Managers.
+- **Counter-offer on mobile** needs number entry, and per this session the requester must still
+  accept afterwards.
+
+**Standing constraint worth remembering:** Google Chat webhooks post to a SPACE, not a DM, so the
+current notification path already exposes client name, serial and reason to everyone in that space
+(restricted to Managers+ per 2026-07-29). Real per-person push would avoid that.
+
+### 2. Wall Cladding — change of treatment
+Rommel wants the treatment of **Wall Cladding** changed. **Nothing specified yet — ask what the new
+treatment should be before touching anything.**
+
+Context for when he explains: Wall Cladding is one of the 13 `CARCASS_NAMES`, with its own carcass
+price and a `cabinet_templates` row. It carries most of the orphan template lines (materials and
+hardware names with no catalogue match — see the 2026-07-30 session). Its components-per-unit is
+**1**, the lowest of the 13, which suggests it is already treated as an area/sheet product rather
+than a cabinet. That may be exactly what he wants changed.
 ## Still to build / decide
 - **Materials editing in the app** — parked 2026-08-05. Hardware is done; Materials is 153,552 rows
   so it cannot be an inline list. Needs a **search-first** tab: type to find, edit price/unit, add
@@ -3926,7 +3977,10 @@ never became quotations**:
   approvers — Kathleen Joyce Tiu, Allan Lagsao, Michael Delos Reyes, Stiffany Gabut — have none,
   and are needed once the flow above is settled.
 - **Wi-Fi power settings** (see above).
-- **Tick who is measured** in Settings → Users, or Team performance stays empty by design.
+- ~~Tick who is measured~~ **DONE 2026-08-05** — 5 ticked: Jhover Galupo, Joanna Marie Buenconsejo,
+  Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros. **Two Staff who do prepare
+  quotations are NOT ticked — Andrei Salvador and Rafael Colot.** Managers/Directors/Admins are
+  unticked by design and exempt from the missing-preparer footer.
 
 ### Still to build / decide
 - **`getInstallCarcassUnits()`** — Installation, Assembly and PPIC still take the blank-count
