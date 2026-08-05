@@ -3617,56 +3617,239 @@ and 24 wide; verified by test, along with the written row and all three director
 
 ---
 
+## What was changed on 2026-08-05 (session 2 — UOM display bug, price discrepancy, approvals visibility, scoped discount)
+
+Six commits, `0752904`..`724c0c9`, all deployed and confirmed serving. Every fix below was found
+by RUNNING the code or by Rommel using the page — none by reading it. **Two of the three things
+reported as bugs were not bugs; the machinery was sound and the app was failing to say so.**
+
+### ⚠ The service UOM dropdown was showing "lm" for 33 of 61 services (`0752904`)
+Reported as "why is the UOM different from PPIC" — Board Assembly read **₱150 /sq. m** in Cost
+Breakdown and **lm** in the Services tab, for the same service. The database says `/sq. m`; the
+Cost Breakdown was right.
+
+**A `<select>` whose value matches no `<option>` does not render blank — the browser silently
+falls back to the FIRST option.** `UNIT_OPTS` holds `lm` first and does not contain `/lm`, `/pc`,
+`/sq. m` or `min. charge`, which is what **33 of the 61 live services** are priced in. Every one
+displayed `lm`.
+
+Not merely a wrong label — the dropdown was **armed**. `onchange` writes straight back to the
+service, so anyone touching it, even to set what they believed it already was, converted `/sq. m`
+to `lm`. ₱150 per square metre and ₱150 per linear metre are not the same price.
+
+`_unitOptsHtml(sel)` now always includes the unit the service actually has, marked
+`(as catalogued)`. Same trap fixed in the Designers Support reflect-summary dropdown.
+
+> **Standing lesson — this is a whole bug CLASS, not one bug.** Any `<select>` built from a fixed
+> option list but fed a value from data will silently show the wrong thing. It bit the client
+> material Type field the same day (below). When replacing a fixed list under a select, either
+> include the stored value as an option or use a free-text input.
+
+**PPIC vs services, for the record:** they are different measures and cannot share a UOM. PPIC
+capacity is `teamsPerDay × cabPerTeamDay` = **carcasses/day**, feeding installation only. A
+service card's is `teams × shifts × output/shift` in **the service's own selling unit**. They
+share only `workdaysPerMonth`. PPIC *does* have a UOM, but per **cabinet type**
+(`ppicSettings.installation.typeUom`), not per service.
+
+### Normalize units button (`c371538`) — BUILT, NOT YET RUN
+Settings → Price Database, beside "Clean duplicates". Maps spelling variants to the canonical
+form already in `UNIT_OPTS` and already in real use: `/lm`→`lm`, `/pc`→`piece`, `/sq. m`→`sqm`.
+Previews every change and asks before writing; writes **both** the Sheet and Supabase in one
+action, so it cannot leave the mirror stale. Logs what it changed.
+
+`min. charge` (2 services) is **deliberately excluded** — it is not a spelling of a unit, it is a
+pricing rule sitting in the unit column, and choosing a unit for it is a pricing decision.
+
+**Rommel approved this but it has not been run.** Catalogue spread: `/lm` 24 · `lm` 14 · `hole` 7
+· `piece` 5 · `/pc` 5 · `/sq. m` 2 · `min. charge` 2 · `carcass` 1 · `sqm` 1.
+
+### Client-supplied material types expanded, and now free text (`a5d81e5`)
+Was 4 types. Now 13, grouped raw board → melamine-laminated board → surfacing → edging: Raw Board
+Plywood · Raw Board Marine Plywood · Raw Board MDF · Raw Board MDF-MR · Melamine Laminate MDF ·
+Melamine Laminate MDF-MR · Melamine Laminate PB · Melamine Laminate PB-MR · PVC Board · HPL ·
+HPL Postforming · Compact Laminate · Edgebanding.
+
+**Made free text with those as suggestions, not a `<select>`** — Rommel asked for manual entry,
+and it also sidesteps the fallback trap above: swapping the list under a select would have made
+every quotation still holding `Raw Plywood` or `Melamine Laminated MDF/PB/Plywood` display a
+DIFFERENT material and save it on the next touch.
+
+Old values are deliberately **not remapped** — they sit on quotations already sent to clients. A
+new row starts **blank** rather than defaulting to the first type; an empty field is visible, a
+plausible-but-wrong default is not, and it prints onto the client's copy.
+
+### ⚠ Service lines ignored the client-supplied uplift, so the price "changed" on preview (`09776ba`)
+Reported as a price jump between the quotation page and the printout. **The printout was right.**
+Every line differed by exactly ×1.20 — the client-supplied materials multiplier.
+
+The panel was contradicting **itself**: rows read 1,954.10 + 2,093.55 = 4,047.65 while the
+subtotal directly beneath them said 4,857.17. `getAreaSubtotal` and the printout applied the
+uplift; only the form's own rows did not.
+
+**A second, worse bug in the same place, probably never yet hit in production:** the live patch
+that runs while typing read `SERVICES[svcIdx].price`, not `_svcEffectivePrice(si)` — so it ignored
+a typed unit price as well as the uplift. Override a rate to 99 on qty 118.43 and the row showed
+**1,954.10 for a line billing 14,069.48**.
+
+Four places computed the same figure and three disagreed. Now one definition —
+**`_svcUnitPrice(si)` / `_svcLineTotal(si)`** — used by the form row, the live patch and the
+printout. Unit price still shows the BASE rate (it is what the user edits); the Services header
+states the uplift instead.
+
+### Approvals: no way in, and a badge that went dark exactly when it mattered (`f46dd82`)
+Reported as "the counter-offer did not reflect on the quotation" **and** "the discount is not
+shown in the printout". Both were the same cause, and nothing was broken: **a counter-offer is an
+OFFER — the discount only exists once the requester accepts it.**
+
+Full trail on QT-M00000102: 5% requested 06:33 → countered at 3% 07:19 → requester messaged →
+**message READ 07:24** → nothing. Four reasons, all fixed:
+
+1. **THERE WAS NO APPROVALS NAV TAB.** The only ways in were the bell dropdown and a pop-up that
+   is gone once dismissed. Now a nav tab, gated on the existing `Approvals` access key.
+2. **THE BADGE COUNTED `pending` ONLY.** The moment an approver counters, the request leaves
+   pending — so **the requester's badge dropped to ZERO at the exact moment the ball moved to
+   them.** `_apprNeedsMyAction(n)` now counts pending (unchanged) **plus a counter on your own
+   request**. Five hand-rolled copies of that badge existed, each with its own rule and the
+   counter case missing from all five; now one definition, `_updateNotifBadge()`.
+3. **The message stated the outcome and stopped** — now says it is NOT applied, names the button
+   and the tab, and is sent **urgent**.
+4. **The approver could not see it was with them** — the card now reads "waiting for `<name>` to
+   accept or decline" to the approver, "press Accept 3% counter below" to the requester.
+
+**Lami announces it too** (Rommel's idea) — she already announced new requests to approvers, but
+the requester got only a toast. She now speaks the outcome, and for a counter says the part that
+matters: nothing is applied until they accept.
+
+### Discount can be limited to parts of the job (`9f743ae`)
+Five tickboxes: **Materials · Edgeband · Hardware · Services · Installation**.
+
+**Nothing ticked = the whole quotation, running the exact previous arithmetic.** Scoping engages
+only once a box is ticked, so no saved quotation moves.
+
+**Edgeband is the edge TAPE MATERIAL** (Rommel's decision), not the edgebanding labour, which
+stays under Services. Carved OUT of Materials so ticking both cannot discount it twice —
+`_isEdgeTapeName()` matches the catalogue's own wording.
+
+**Not offered in carcass mode** (Rommel's decision) — one price covers a whole cabinet there and
+any split would be invented. The card hides itself and ticks made in another mode are ignored.
+
+The discount comes off the chosen buckets **after** they have been carried up the same markup
+chain as the rest of the price. **Changing the scope invalidates an approval already given**,
+exactly as changing the percentage does. Stated in all three places: the approver's request
+("Discount of 10% on materials and services only requested"), the printout ("Discount (10% on
+materials and services only)"), and the form. Landed in **both** stages.
+
+Verified the parts reconcile: the four fabrication buckets discounted separately add to exactly
+the whole-quotation discount (340.00 = 100+50+40+150). Mobilization, design charge and site visit
+are outside the five buckets by design — Rommel declined adding them.
+
+### Choose which services the client-supplied uplift applies to (`724c0c9`)
+The ×1.20 hit every service. Now a tickbox per service, in the Client-supplied materials card
+next to the multiplier, listing only the services actually in that quotation, with All/None.
+
+**EXCLUSIONS are stored, not inclusions** (`qClientMatSvcExcl`, keyed by lowercased service
+name). An empty list = every service uplifted = the previous behaviour, and a service added later
+is uplifted **automatically** rather than quietly escaping because nobody ticked it —
+under-charging in silence is the failure that matters. Name-keyed, so it holds across areas and
+in BOM mode, whose service rows carry a name rather than a catalogue index.
+
+Five call sites moved off the blanket multiplier to `clientMatMultFor()`: shared per-line price,
+BOM item cost, area subtotal, discount buckets, fabrication margin recognition. The four
+now-dead blanket-multiplier variables were removed so nobody reuses one by accident.
+
+Three places stopped overclaiming: the card ("all services are multiplied"), the badge ("uplift
+applied" regardless — now "on 1 of 2 services", or says plainly that none carry it), and the
+Settings help text.
+
+### New globals (2026-08-05 session 2)
+```javascript
+qDiscScope          // {materials,edgeband,hardware,services,installation} — all false = whole quotation
+DISC_SCOPE_KEYS     // iteration order for the five buckets
+qClientMatSvcExcl   // {serviceNameLower:true} — services the client-supplied uplift does NOT apply to
+```
+
+### New functions (2026-08-05 session 2)
+```javascript
+_unitOptsHtml(sel)              // unit dropdown that shows a non-standard stored value instead of falling back to "lm"
+normalizeServiceUnits()         // Price DB: /lm→lm, /pc→piece, /sq. m→sqm; previews, confirms, writes Sheet+Supabase
+_canonServiceUnit(u)            // the spelling map (min. charge deliberately absent)
+_svcUnitPrice(si)/_svcLineTotal(si) // the ONE definition of what a service line bills
+_apprNeedsMyAction(n)           // pending, plus a counter-offer on your own request
+_discScopeOn()/_discScopeLabel()/_discRawBases()/_isEdgeTapeName(nm)
+onDiscScopeChange(k,on)/renderDiscScope()
+clientMatMultFor(nameOrItem)    // per-service client-supplied uplift
+_svcNameOf(si)/_svcKey(nm)/_quotedServiceNames()
+onClientMatSvcToggle(nm,on)/_clientMatSvcAll(on)/_clientMatSvcPickerHtml()
+```
+
+### Method notes worth keeping
+- **Two of three reported "bugs" were not bugs.** The counter-offer and the missing printout
+  discount were one working feature that could not be seen. Diagnose before fixing: the whole
+  approval trail was reconstructible from the database in three queries.
+- **A `<select>` fed a value outside its option list is a silent-loss generator.** Two separate
+  instances in one day.
+- **When a figure looks wrong, check whether the panel contradicts itself first.** The service
+  lines not summing to their own subtotal pointed straight at the cause.
+- `innerText` returns **nothing** for a hidden page — a badge check "failed" purely because the
+  quotation page was not the active one. Assert on `innerHTML` when the page may be hidden.
+- Node heredocs choke on `'`-quoted JS containing `\'` — use the Edit tool for those, not a patch
+  script.
+
+---
+
 # OPEN — updated 2026-08-05 (THIS IS THE AUTHORITATIVE LIST — supersedes 2026-08-04)
 
-## AGREED, DESIGNED, NOT BUILT — one job, four parts. Start here.
-Full brief in memory: `project_stage2_own_scope.md`. Rommel wants these together; they are all
-about Stage 1 being settled once the client approves.
+## ✅ AUDITED 2026-08-05 — the "four parts" job is BUILT. Do not rebuild it.
 
-**1. Stage 2 gets its OWN scope (`fqAreas`).** Estimators cannot change the scope of work in
-Stage 2, so they go back to Stage 1 and request an unlock instead — which invalidates the Initial
-Quotation the client already has, bumps the serial to `.R1`, and releases the frozen rates.
-Rommel's rule, verbatim: *"any changes on stage 2 should only be on stage only and should not
-affect stage 1."* And: *"stage 1 and stage 2 initially [the same] unless another change requested
-by client, then stage 2 will be different from stage 1 due to changes by the client."*
-- **Design settled and measured.** `qAreas` is referenced 172 times: **161 plain JS reads, 10
-  inline handlers.** Wrap `recalcFQ`, the Stage 2 printout and BOM report in a new
-  `_withFQAreas(fn)` that swaps `qAreas`→`fqAreas` and restores in `finally` — same mechanism as
-  the proven `_withFrozenRates`, so **all 161 reads need zero edits** and `recalc()` outside the
-  swap always sees Stage 1's real areas, correct by construction.
-- **Editor handlers run AFTER render** so a swap cannot cover them: the Stage 2 editor must EMIT
-  the target array name into its handlers. **Do NOT use a stage-keyed accessor** (`_AR()` on
-  `qStage`) — `recalc()` can run while `qStage===2` and would compute Stage 1 from Stage 2's areas.
-- **No re-sync mechanism needed.** `goStage()` has `if(n===2&&!qApproved) return;` so Stage 2 is
-  unreachable until approval; Stage 1 is settled by then. Fork once on entering Stage 2.
-- Work: ~20 mutation functions · 10 handlers · `renderItems(targetId,arrName)` · Stage 2 editor
-  container · save/restore/option-snapshots for a second areas array.
-- **Falls out free:** because Stage 2 starts as an exact copy, ANY divergence is client-requested —
-  so the app can show *"Changes from the Initial Quotation"* without anyone tracking it by hand.
+The previous handoff listed this as "AGREED, DESIGNED, NOT BUILT — start here". **That was
+already false when it was written.** Three commits landed the work right after that handoff
+commit (`92ce0c0`), and the OPEN list was never updated:
 
-**2. Change log must cover Stage 2.** `_auditDiffAndLog()` runs from `gSaveQuotation`, OUTSIDE the
-swap, so it snapshots `qAreas` even when saving from Stage 2. Rommel: *"same goes with stage 1 if
-unlocked and they made changes... then it should be logged. same to final quotation or stage 2."*
-(The cross-quotation contamination, outsource rows and BOM-cabinet contents were fixed 2026-08-05.)
+| Commit | Part |
+|---|---|
+| `17ba238` | 1 — Stage 2 gets its own scope of work |
+| `79dafb5` | 2 — the change log now covers Stage 2 |
+| `4822e7e` | 3 + 4 — client approval at Stage 1, additional orders roll up |
 
-**3. Record client approval at Stage 1 — Rommel calls this critical.** *"it must be recorded the
-client approval. that critical and should be part of the team performance flow and other kpis and
-reporting."* Stage 2 has `fqClientApproved` + timestamp; **Stage 1 has nothing** — its gate is the
-internal Approve button, so the app never records whether that click meant the client approved.
-Plan: add `qClientApproved`/`qClientApprovedAt` captured at that existing Approve step (per
-Rommel's workflow it only fires on client approval), **KEEP the status ladder as-is** (inserting it
-would read backwards), and make Won/Rate/Revenue key off the **flag at either stage**, not the
-label.
-> ⚠ **Measured impact (post-2026-07-12 rows).** "In Final Quotation" = 4 quotations, **₱659,867.52,
-> all client-approved and none counted as Won**; "Client Approved" = 3, ₱43,947.75. So won revenue
-> reports **₱43,948 against ₱703,815 actually won — ~94% invisible.** Expect the dashboard to jump
-> ~16×. That is a correction, not inflation — but warn anyone who reports on these numbers weekly.
+A full audit was run 2026-08-05 by **driving the code, not reading it**. All four pass:
 
-**4. Decide how additional orders count in the KPIs.** Built 2026-08-05; right now an additional
-order counts as its own win with its own revenue. Probably right for revenue, but it should be a
-deliberate decision — roll up under the original job, or stand alone?
+1. **Stage 2 owns its scope** ✅ — forked a quotation, added work to Stage 2 only: Stage 1 held
+   at ₱1,120.00 while Stage 2 rose to ₱5,600.00, separate arrays (1 line vs 2). The specific trap
+   the design warned about holds: `recalc()` with `qStage===2` still prices Stage 1 from its own
+   areas. Survives save/reload and option snapshots.
+   Implementation note: it does NOT use a `qStage`-keyed accessor. `_scopeCtx` marks the duration
+   of a Stage 2 *edit*, and `recalc()` stands down while set — correct by construction.
+   `_buildPrintBody` and `_collectBomData` DO key on `qStage`, which is right: you print the stage
+   you are viewing.
+2. **Change log covers Stage 2** ✅ — a Stage 2 edit logs
+   *"Changed: Now on Final Quotation · Final Quotation: Cutting qty 10 → 40"*, naming the stage so
+   the two cannot be confused in the permanent record.
+3. **Client approval at Stage 1** ✅ — `_isClientApprovedEntry()` returns true on
+   `e.clientApproved || e.fqClientApproved`, i.e. the flag at either stage, with a status-rank
+   fallback for older rows.
+4. **Additional orders** ✅ — `_rollupJobs()` **rolls them up under the original job**. Verified on
+   a chain (job → additional → additional-of-additional): one job, revenue summed, extras counted,
+   cycles cannot hang it.
 
+### Two things Rommel still needs to decide (both were decided without him)
+- **The ~16× KPI jump already went live.** He asked to be told BEFORE it did. Measured on real
+  data 2026-08-05 it is **36.5×**, not 16× — another large quotation reached Final since the
+  estimate: won revenue **₱43,947.75 → ₱1,602,277.41**.
+- **Five older quotations (₱1,558,329.66) count as won by inference**, not by a recorded approval —
+  the rank fallback treats "In Final Quotation" as won on the reasoning that Stage 2 is unreachable
+  without client approval. True of the app, but inferred rather than recorded for pre-flag rows.
+  Accept, or count only recorded approvals?
+- **Roll-up trade-off**: the rolled-up job shows the ORIGINAL preparer, so whoever prepared the
+  additional order gets no credit. Confirm that is wanted.
 ## Rommel's to do
+- **QT-M00000102 (One Oak Craft)** — a 3% counter-offer is sitting unaccepted. Joanna
+  (designer-ce1) now has an **Approvals** nav tab showing a red 1; she presses **Accept 3%
+  counter** and both the discount and the printout come right. No code needed.
+- **Run the Normalize units button** — Settings → Price Database. Approved 2026-08-05, built, not
+  yet run. 31 services change spelling only (`/lm`→`lm`, `/pc`→`piece`, `/sq. m`→`sqm`); it writes
+  the Sheet and Supabase together so no follow-up migration is needed.
+- **`min. charge` on 2 services** — not a unit, a pricing rule in the unit column. Decide what it
+  should be and it can be handled separately.
 - **QT-M00000087 (GYMFIX)** — final-locked and Client Approved at **₱0.00**; should be **₱616.00**
   (₱500 line × 1.10 contingency × 1.12 VAT; its sibling QT-M00000088 with the identical line is
   ₱616.00). Correcting it means unlocking a client-approved quotation — his call, not done.
