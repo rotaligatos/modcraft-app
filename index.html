@@ -5923,6 +5923,22 @@ function _svcEffectivePrice(si){
   if(si&&si.price!=null) return si.price;
   var svc=SERVICES[si&&si.svcIdx]; return svc?(svc.price||0):0;
 }
+// What a service line is actually billed at, and what it adds to the area.
+//
+// These two existed in four places computing the same thing differently, and three of them
+// were wrong. getAreaSubtotal and the printout applied the client-supplied-materials uplift;
+// the quotation form's own rows did not. So the rows read 1,954.10 + 2,093.55 while the
+// subtotal directly beneath them said 4,857.17 — the panel contradicted itself — and the
+// price appeared to jump on Preview when in fact the printout had been right all along.
+//
+// Worse, the live patch in recalc did not even honour a typed unit price: it read
+// SERVICES[svcIdx].price, so overriding a rate to 99 left the row showing the catalogue
+// 16.50 with no uplift — 1,954.10 on screen for a line billing 14,069.48.
+//
+// One definition now, used by the form, the live patch and the printout, so a future change
+// to the pricing rule cannot land in one and miss the others.
+function _svcUnitPrice(si){ return _svcEffectivePrice(si)*clientMatMult(); }
+function _svcLineTotal(si){ return _svcUnitPrice(si)*(si&&si.qty||0); }
 // ── Mat/Hw source helpers — DB when loaded, local catalog as fallback ─────
 function getMatSource(){
   if(!dbMaterials.length) return MAT_CATALOG;
@@ -6955,7 +6971,7 @@ function _refreshScopeSums(idp){
       for(var _i=0;_i<_his.length;_i++){var _ae=el(idp+'hw-amt-'+_a+'-'+_i);if(_ae)_ae.textContent=fmtMoney((_his[_i].qty||0)*(_his[_i].price||0));}
       var _hse=el(idp+'hw-sub-'+_a);if(_hse)_hse.innerHTML='Hardware: <b>'+fmtMoney(getAreaHwSubtotal(_a))+'</b>';
       var _svs=qAreas[_a].svcItems||[];
-      for(var _i=0;_i<_svs.length;_i++){var _ae=el(idp+'svc-sub-'+_a+'-'+_i);var _s=SERVICES[_svs[_i].svcIdx]||{price:0};if(_ae)_ae.textContent=fmtMoney(_s.price*(_svs[_i].qty||1));}
+      for(var _i=0;_i<_svs.length;_i++){var _ae=el(idp+'svc-sub-'+_a+'-'+_i);if(_ae)_ae.textContent=fmtMoney(_svcLineTotal(_svs[_i]));}
       var _ase=el(idp+'area-sub-svc-'+_a);if(_ase)_ase.textContent=qAreas[_a].name+' subtotal: '+fmtMoney(getAreaSubtotal(_a));
     }
   }
@@ -7132,7 +7148,13 @@ function _renderScopeCore(wrap) {
       // own price (svcItems[i].price, copied from the catalog when picked) instead of always
       // reading SERVICES[si.svcIdx].price live, so a one-off override never touches the shared
       // catalog and only ever affects this quotation (see _svcEffectivePrice).
-      h+='<div class="dvdr" style="margin:6px 0 8px"><span style="display:flex;align-items:center;gap:4px"><i class="ti ti-tool" style="font-size:10px"></i>Services</span></div>';
+      // Unit price stays the BASE rate, because that input is what the user edits — showing the
+      // uplifted figure there would mean typing it back in as the base. So the uplift has to be
+      // stated, or the row reads 16.50 x 118.43 and then a subtotal that is not their product.
+      var _cmm=clientMatMult();
+      h+='<div class="dvdr" style="margin:6px 0 8px"><span style="display:flex;align-items:center;gap:4px"><i class="ti ti-tool" style="font-size:10px"></i>Services</span>'
+        +(_cmm!==1?'<span style="font-size:10px;color:var(--amber);font-weight:600;margin-left:8px" title="Client-supplied materials is on, so every service is billed at its unit price x '+_cmm.toFixed(2)+'. Unit price below is the base rate; Subtotal is what is charged.">&times;'+_cmm.toFixed(2)+' client-supplied uplift applied</span>':'')
+        +'</div>';
       if(area.svcItems.length){
         h+='<div style="display:grid;grid-template-columns:2fr 78px 60px 88px 88px 36px;gap:6px;margin-bottom:4px">'
           +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Service</span>'
@@ -7153,7 +7175,7 @@ function _renderScopeCore(wrap) {
           +'<input type="number" min="0.1" step="0.1" value="'+si.qty+'" oninput="'+_rndArr+'['+a+'].svcItems['+i+'].qty=parseFloat(this.value)||1;'+_hSoon()+'" style="height:34px;text-align:center">'
           +'<span style="height:34px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text2)">'+escHtml(svc.unit||'—')+'</span>'
           +'<input type="number" min="0" step="0.01" value="'+svcPrice+'" oninput="'+_rndArr+'['+a+'].svcItems['+i+'].price=parseFloat(this.value)||0;'+_hSoon()+'" style="height:34px;text-align:right;font-size:12px;padding-right:6px">'
-          +'<span id="'+_rndIdp+'svc-sub-'+a+'-'+i+'" style="font-size:13px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney(svcPrice*si.qty)+'</span>'
+          +'<span id="'+_rndIdp+'svc-sub-'+a+'-'+i+'" style="font-size:13px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney(_svcLineTotal(si))+'</span>'
           +'<button class="btn" onclick="'+_hEdit('removeSvcItem('+a+','+i+')')+'" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
           +'</div>'
           // Additional information about THIS service. One box per performed service, directly
@@ -8014,7 +8036,7 @@ function buildItemizedPrintRows(hideMatPricing){
       for(var i=0;i<svcItems.length;i++){
         var si=svcItems[i];
         var sv=SERVICES[si.svcIdx]||{name:'Service',price:0,unit:''};
-        var up=_svcEffectivePrice(si)*mult;
+        var up=_svcUnitPrice(si);
         rows+='<tr><td style="'+tdS+'">'+escHtml(sv.name)+'</td><td style="'+tdS+';text-align:center">'+(si.qty||0)+'</td><td style="'+tdS+';text-align:center">'+escHtml(sv.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up*(si.qty||0))+'</td></tr>';
       }
     }
