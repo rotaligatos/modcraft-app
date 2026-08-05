@@ -23562,9 +23562,22 @@ function _syncQuotHeader(){
 // logging every keystroke buries the entries that matter.
 var _auditPrev=null;
 function _auditSnapshot(){
+  return { total:(_pCalc&&_pCalc.grand)||0, stage:(_pCalc&&_pCalc.stage)||qStage||1,
+           discPct:+qDiscPct||0, vatOn:!!qVatApproved,
+           projectSize:(typeof projectSizeValue==='function'?projectSizeValue():0),
+           cfOverride:!!qCustomCFApproved,
+           lines:_auditLines(qAreas),
+           // Stage 2 owns its own scope, and _auditDiffAndLog runs from gSaveQuotation — outside
+           // the areas swap — so without this every Stage 2 scope change went unrecorded.
+           // Rommel: "same goes with stage 1 if unlocked and they made changes... then it should
+           // be logged. same to final quotation or stage 2."
+           fqLines:fqAreas?_auditLines(fqAreas):null };
+}
+function _auditLines(areas){
   var lines={};
-  for(var a=0;a<qAreas.length;a++){
-    var ar=qAreas[a]||{}, i;
+  areas=areas||[];
+  for(var a=0;a<areas.length;a++){
+    var ar=areas[a]||{}, i;
     var push=function(kind,label,qty,price){
       if(!label) return;
       lines['A'+a+'|'+kind+'|'+label]={label:label,qty:+qty||0,price:(price==null?null:+price||0)};
@@ -23593,41 +23606,51 @@ function _auditSnapshot(){
       for(j=0;j<(bi.outsourceHardware||[]).length;j++)  push('bom-ohw|'+i, cab+' › '+(bi.outsourceHardware[j].name||''), bi.outsourceHardware[j].qty, bi.outsourceHardware[j].price);
     }
   }
-  return { total:(_pCalc&&_pCalc.grand)||0, discPct:+qDiscPct||0, vatOn:!!qVatApproved,
-           projectSize:(typeof projectSizeValue==='function'?projectSizeValue():0),
-           cfOverride:!!qCustomCFApproved, lines:lines };
+  return lines;
 }
 function _auditBaseline(){ try{ _auditPrev=_auditSnapshot(); }catch(e){ _auditPrev=null; } }
 function _auditDiffAndLog(){
   var now; try{ now=_auditSnapshot(); }catch(e){ return; }
   if(!_auditPrev){ _auditPrev=now; return; }   // nothing to compare against yet
   var p=_auditPrev, parts=[], money=function(v){ return (typeof fmtMoney==='function')?fmtMoney(v):v; };
-  if(Math.round(now.total*100)!==Math.round(p.total*100)){
+  // _pCalc holds whichever stage last recalculated, so comparing totals across a stage change
+  // would report a difference between two different quotations' figures. Say which stage it is
+  // instead of publishing a meaningless delta.
+  if(now.stage!==p.stage) parts.push('Now on '+(now.stage===2?'Final Quotation':'Initial Quotation'));
+  else if(Math.round(now.total*100)!==Math.round(p.total*100)){
     var d=now.total-p.total;
-    parts.push('Total '+money(p.total)+' → '+money(now.total)+' ('+(d>=0?'+':'−')+money(Math.abs(d))+')');
+    parts.push((now.stage===2?'Final Quotation total ':'Total ')+money(p.total)+' → '+money(now.total)+' ('+(d>=0?'+':'−')+money(Math.abs(d))+')');
   }
   if(now.discPct!==p.discPct)         parts.push('Discount '+p.discPct+'% → '+now.discPct+'%');
   if(now.vatOn!==p.vatOn)             parts.push('VAT '+(p.vatOn?'on':'off')+' → '+(now.vatOn?'on':'off'));
   if(now.projectSize!==p.projectSize) parts.push('Project size '+p.projectSize+' → '+now.projectSize);
   if(now.cfOverride!==p.cfOverride)   parts.push('Cost factor override '+(now.cfOverride?'applied':'removed'));
-  var keys={},k;
-  for(k in p.lines) keys[k]=1;
-  for(k in now.lines) keys[k]=1;
-  var lp=[];
-  for(k in keys){
-    var a=p.lines[k], b=now.lines[k];
-    if(a&&!b){ lp.push('removed '+a.label+(a.qty?' ×'+a.qty:'')); continue; }
-    if(!a&&b){ lp.push('added '+b.label+(b.qty?' ×'+b.qty:'')); continue; }
-    if(a.qty!==b.qty) lp.push(b.label+' qty '+a.qty+' → '+b.qty);
-    if(a.price!=null&&b.price!=null&&Math.round(a.price*100)!==Math.round(b.price*100))
-      lp.push(b.label+' price '+money(a.price)+' → '+money(b.price));
-  }
+  // Both scopes are diffed. A Stage 2 change is tagged, because "Wardrobe qty 4 → 9" means a
+  // very different thing depending on which quotation it happened to.
+  var lp=_auditLineDiff(p.lines,now.lines,money,'');
+  // fqLines null on either side = that save had no Stage 2 scope yet. The fork itself is not a
+  // change (it is an exact copy), so nothing is reported for it — the first real edit is.
+  if(p.fqLines&&now.fqLines) lp=lp.concat(_auditLineDiff(p.fqLines,now.fqLines,money,'Final Quotation: '));
   // Capped so one bulk edit cannot write a wall of text — but the count is stated,
   // never silently truncated.
   if(lp.length>6){ var extra=lp.length-6; lp=lp.slice(0,6); lp.push('and '+extra+' more change'+(extra===1?'':'s')); }
   parts=parts.concat(lp);
   _auditPrev=now;
   if(parts.length) logActivity('Changed: '+parts.join(' · '));
+}
+function _auditLineDiff(pl,nl,money,tag){
+  var keys={},k,lp=[];
+  for(k in pl) keys[k]=1;
+  for(k in nl) keys[k]=1;
+  for(k in keys){
+    var a=pl[k], b=nl[k];
+    if(a&&!b){ lp.push(tag+'removed '+a.label+(a.qty?' ×'+a.qty:'')); continue; }
+    if(!a&&b){ lp.push(tag+'added '+b.label+(b.qty?' ×'+b.qty:'')); continue; }
+    if(a.qty!==b.qty) lp.push(tag+b.label+' qty '+a.qty+' → '+b.qty);
+    if(a.price!=null&&b.price!=null&&Math.round(a.price*100)!==Math.round(b.price*100))
+      lp.push(tag+b.label+' price '+money(a.price)+' → '+money(b.price));
+  }
+  return lp;
 }
 function gSaveQuotation(opts){
   if(!gToken||!gUser) return;
