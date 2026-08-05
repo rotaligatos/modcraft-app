@@ -3868,10 +3868,12 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
   ₱616.00). Correcting it means unlocking a client-approved quotation — his call, not done.
   **Investigated 2026-08-06 — see the zero-total findings below.** Clean to repair: its service
   carries an explicit ₱500, so the figure is not in doubt. Unlock → recalculate → re-lock.
-- ~~Tick who is measured~~ **DONE 2026-08-05** — 5 ticked: Jhover Galupo, Joanna Marie Buenconsejo,
-  Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros. **Two Staff who do prepare
-  quotations are NOT ticked — Andrei Salvador and Rafael Colot.** Managers/Directors/Admins are
-  unticked by design and exempt from the missing-preparer footer.
+- ~~Tick who is measured~~ **DONE + CLOSED 2026-08-06** — 5 measured: Jhover Galupo, Joanna Marie
+  Buenconsejo, Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros.
+  **Andrei Salvador and Rafael Colot are deliberately NOT included** (Rommel, 2026-08-06) — they
+  prepare quotations but are not measured. **Do not re-raise this.** The Team performance footer
+  that names unticked preparers will list them; that is expected, not a gap.
+  Managers/Directors/Admins are unticked by design and exempt from that footer.
 - **Test-data cleanup** — ⚠ **DO NOT RUN THE SQL. It is struck (decision 2026-08-06).** The
   statement recorded in the 2026-08-03 OPEN item A deletes from **Supabase only**, and the Google
   Sheet is still the Project List's read path for anyone not connected. It would leave every row
@@ -4069,10 +4071,12 @@ never became quotations**:
   approvers — Kathleen Joyce Tiu, Allan Lagsao, Michael Delos Reyes, Stiffany Gabut — have none,
   and are needed once the flow above is settled.
 - **Wi-Fi power settings** (see above).
-- ~~Tick who is measured~~ **DONE 2026-08-05** — 5 ticked: Jhover Galupo, Joanna Marie Buenconsejo,
-  Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros. **Two Staff who do prepare
-  quotations are NOT ticked — Andrei Salvador and Rafael Colot.** Managers/Directors/Admins are
-  unticked by design and exempt from the missing-preparer footer.
+- ~~Tick who is measured~~ **DONE + CLOSED 2026-08-06** — 5 measured: Jhover Galupo, Joanna Marie
+  Buenconsejo, Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros.
+  **Andrei Salvador and Rafael Colot are deliberately NOT included** (Rommel, 2026-08-06) — they
+  prepare quotations but are not measured. **Do not re-raise this.** The Team performance footer
+  that names unticked preparers will list them; that is expected, not a gap.
+  Managers/Directors/Admins are unticked by design and exempt from that footer.
 
 ### Still to build / decide
 - **`getInstallCarcassUnits()`** — Installation, Assembly and PPIC still take the blank-count
