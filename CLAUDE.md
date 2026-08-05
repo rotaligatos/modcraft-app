@@ -2925,6 +2925,17 @@ where created_at::date <= '2026-07-12'
   and initial_locked_at is null and final_locked_at is null
   and (source_order is null or btrim(source_order) = '');
 ```
+> ## ⚠⚠ STRUCK 2026-08-06 — DO NOT RUN THIS STATEMENT ⚠⚠
+> **"Supabase only — the Sheet is unaffected" is exactly why it must not be run.** The Google
+> Sheet remains the Project List's read path for anyone not connected to Supabase, so this would
+> delete from one store and leave all 56 rows in the other. They would reappear, and the two
+> stores would disagree — worse than doing nothing. The 98 figure is also stale; it is 56.
+>
+> **Replaced by: Project List → filter to Draft → tick the rows → "Delete selected"**, the
+> existing Admin bulk delete, which removes from memory, the Sheet and Supabase together and logs
+> each deletion. See the "Test-data cleanup" entry in the current OPEN list for the full scope and
+> the two sets worth checking before deleting.
+
 Expect **98 rows**; 209 → 111. Children cascade. Supabase only — the Sheet is unaffected.
 
 > ⚠ The `never locked` conditions are deliberate and were argued for. Dropping them takes
@@ -3861,15 +3872,25 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
   Kaye Ibardaloza, Rhodalyn Dela Pena (CWLI), Stephanie Rose Oliveros. **Two Staff who do prepare
   quotations are NOT ticked — Andrei Salvador and Rafael Colot.** Managers/Directors/Admins are
   unticked by design and exempt from the missing-preparer footer.
-- **Cleanup SQL** — ⚠ **the 98 figure is STALE. Re-measured 2026-08-06: 56 rows, ₱6,179,562 of
-  draft value** (oldest 2026-05-26, newest 2026-07-08). All unlocked drafts never issued. Most is
+- **Test-data cleanup** — ⚠ **DO NOT RUN THE SQL. It is struck (decision 2026-08-06).** The
+  statement recorded in the 2026-08-03 OPEN item A deletes from **Supabase only**, and the Google
+  Sheet is still the Project List's read path for anyone not connected. It would leave every row
+  in the Sheet, so they would reappear and the two stores would diverge — worse than doing nothing.
+
+  **Use the app instead: Project List → filter to Draft → tick the rows → "Delete selected".**
+  That is the existing Admin bulk delete: it removes from memory, the Sheet AND Supabase together,
+  and since 2026-08-03 it logs each deletion. Doing it by hand is also safer than any script,
+  because the client name is visible on every row as you go.
+
+  Scope, re-measured 2026-08-06 (**the old "98 rows" figure was stale — it is 56**, ₱6,179,562 of
+  draft value, oldest 2026-05-26, newest 2026-07-08; all unlocked, none ever issued). Most is
   obvious test data (*Tsttesttest*, *Sana*, *jojojojojojojojoj*, *Testes*, *Yesyesyes*,
-  *George Clooney*, *ano na*, *sasve ulit*) — but **not all of it**: World Class Laminate, Inc.
-  (6, ₱1.93M), Peace Maker (4, ₱563K), RTMO Digital Solutions (2, ₱542K), Yummy Bakeshop (2,
-  ₱291K), STUDIO TILLE (1, by Jhover) and **23 blank-client drafts by Jhover, Joanna and Rommel**.
-  Nothing contractual is lost — none were ever locked or sent — but the ones prepared by Jhover
-  and Joanna may be abandoned real work rather than junk. **Ask before deleting those.** Always
-  re-count before running: this figure has already moved once.
+  *George Clooney*, *ano na*, *sasve ulit*). **The rest is not**, and carries real line items:
+  World Class Laminate, Inc. (6, ₱1.93M), Peace Maker (4, ₱563K), RTMO Digital Solutions (2,
+  ₱542K), Yummy Bakeshop (2, ₱291K), plus 13 by Jhover and Joanna — of which
+  **QT-M00000018→M00000025 are eight near-identical repeat-saves** (₱4,165.89, 7 line items each,
+  same day, one named STUDIO TILLE) and **QT-M00000027 (Joanna, ₱90,813.44, 9 line items)** is the
+  one worth checking before it goes. Re-count before starting: this figure has already moved once.
 - **Google Sites embed width** — needed before the quotation-page layout rework.
 - **Checked by / Noted by signatures** — stamp on PIN approval, or a separate "sign" action?
   `qSignatures.checked`/`.noted` exist and the printout reads them. Andrei Salvador's signature and
@@ -4028,8 +4049,9 @@ never became quotations**:
    backlog, which is the point.
 
 ### Still Rommel's
-- **Cleanup SQL** — 98 rows, still not run. SQL in the 2026-08-03 OPEN item A. The Supabase count
-  is inflated by never-propagated deletions, so re-check the expected row count first.
+- ~~Cleanup SQL~~ **STRUCK 2026-08-06 — do not run it.** Supabase-only, so it would leave all the
+  rows in the Sheet and split the two stores. Use Project List → Draft → Delete selected instead.
+  See the current OPEN list.
 - **Google Sites embed width** — needed before the quotation-page layout rework (mockup approved in
   principle: sticky running total, collapsed client card, 1754px → 838px scroll).
 - **Checked by / Noted by signatures** — stamp automatically on PIN approval, or a separate "sign"
