@@ -926,6 +926,17 @@ tr.cl-row:hover td{background:#f4f7fb}
       </div>
       <!-- Fabrication Cost Basis card — populated by renderFQFabBasisCard() -->
       <div id="fq-fab-basis-wrap" style="margin-bottom:6px"></div>
+      <!-- Stage 2's own scope of work. Starts as an exact copy of Stage 1 and is edited here for
+           client-requested changes; Stage 1 is never touched. Rendered by renderFQItems(). -->
+      <div id="fq-scope-card" class="card" style="margin-bottom:6px">
+        <div class="card-head"><h3><i class="ti ti-list-details"></i>Scope of work — Final Quotation</h3>
+          <button class="btn" onclick="_fqEdit(function(){addArea()})" style="font-size:12px;padding:4px 10px"><i class="ti ti-plus"></i>Add area</button>
+        </div>
+        <div class="card-body">
+          <p style="font-size:12px;color:var(--text2);margin:0 0 10px"><i class="ti ti-info-circle" style="font-size:11px"></i> Copied from the Initial Quotation. Edit for changes the client asked for — the Initial Quotation the client already has is not affected.</p>
+          <div id="fq-items-wrap"></div>
+        </div>
+      </div>
       <div style="display:flex;gap:10px;margin-top:10px">
         <button class="btn" onclick="goStage(1)"><i class="ti ti-arrow-left"></i>Back</button>
         <button class="btn btn-primary" style="flex:1;justify-content:center" onclick="openPrint()"><i class="ti ti-file-export"></i>Generate final quotation</button>
@@ -2145,6 +2156,16 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
   </div>
 </div>
 
+<div class="overlay" id="ov-info">
+  <div class="modal" style="max-width:620px">
+    <div class="modal-head"><h3 id="ov-info-title"><i class="ti ti-info-circle"></i> Info</h3></div>
+    <div class="modal-body" id="ov-info-body" style="font-size:13px;color:var(--text)"></div>
+    <div class="modal-foot" style="display:flex;gap:10px;justify-content:flex-end;padding:14px 18px">
+      <button class="btn btn-primary" onclick="closeModal('ov-info')">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="ov-option-approve">
   <div class="modal" style="max-width:400px">
     <div class="modal-head"><h3><i class="ti ti-versions"></i>Which option was approved?</h3><button class="modal-close" onclick="closeModal('ov-option-approve')">×</button></div>
@@ -2772,6 +2793,47 @@ function _withFrozenRates(fn){
     if(sIC!==null) INST_COST=sIC;
   }
 }
+// ── Stage 2's own scope ────────────────────────────────────────────────────────────────
+// Stage 2 mirrors Stage 1 the moment the client approves and the quotation moves on, and is
+// editable from then on WITHOUT touching Stage 1 (Rommel, 2026-08-05: "any changes on stage 2
+// should only be on stage only and should not affect stage 1"). Before this, the only way to
+// change the scope was to unlock Stage 1 — which invalidates the Initial Quotation the client
+// already holds, bumps the serial to .R1 and releases the frozen rates.
+//
+// Every reader of the scope (getAreaSubtotal, getTotU, the printout, the BOM report — 161 of
+// them) goes on reading the global `qAreas`. Instead of editing all of them, the Stage 2 entry
+// points run inside _withAreas, which points `qAreas` at Stage 2's copy for the duration and
+// always puts it back. Same mechanism as _withFrozenRates above, and try/finally for the same
+// reason: a throw must never leave the app computing Stage 1 from Stage 2's scope.
+//
+// Deliberately NOT keyed on qStage — recalc() (Stage 1) can and does run while qStage===2, and
+// a stage-keyed accessor would then price Stage 1 off Stage 2's areas. The swap is scoped to a
+// call, not to a mode.
+function _withAreas(arr, fn){
+  if(!arr || arr===qAreas) return fn();
+  var save=qAreas;
+  try{ qAreas=arr; return fn(); } finally { qAreas=save; }
+}
+function _withFQAreas(fn){ return _withAreas(fqAreas, fn); }
+
+// Set ONLY for the duration of one Stage 2 scope edit. The ~35 mutators (addMatItem, removeArea,
+// onBOMRowChange, …) are shared with Stage 1 and end by calling renderItems()/recalc(); while
+// this is set those two stand down so they cannot draw Stage 2's data into Stage 1's container
+// or price Stage 1 off Stage 2's areas. Nothing is lost by standing down — _fqEdit runs the
+// correct Stage 2 render and recalc immediately afterwards, in the same synchronous turn.
+var _scopeCtx=null;
+function _fqEdit(fn){
+  if(!fqAreas){ showToast('Final Quotation scope is not ready yet — reopen Stage 2.'); return; }
+  var prev=_scopeCtx; _scopeCtx='fq';
+  try{ return _withFQAreas(fn); }
+  finally {
+    _scopeCtx=prev;
+    // The basis card above shows Stage 2's fabrication total and the count of changes from the
+    // Initial Quotation, so it has to be redrawn too — otherwise it keeps reading "same as
+    // Initial" after a real edit, and the change list stays invisible.
+    if(!prev){ try{ renderFQItems(); recalcFQ(); renderFQFabBasisCard(); }catch(e){ console.error('[fqEdit] refresh failed',e); } }
+  }
+}
 function _freezeRates(why){
   if(qLockedRates) return;                    // already frozen — a re-lock must not re-price
   qLockedRates=_capturePricingRates();
@@ -3257,7 +3319,13 @@ var fqInitialized = false;
 var fqClientApproved = false;   // true once the client has confirmed sign-off on the locked Final Quotation
 var fqClientApprovedAt = '';    // timestamp of that confirmation
 var fqPreviewed = false;          // true once user clicks Preview & Print or Save Draft
-var fqFabBasis = 'initial';       // 'initial' = use Stage 1 totals, 'cutting' = manual override
+// Stage 2's own editable copy of the scope of work. null until the quotation first reaches
+// Stage 2; forked there as an exact copy of qAreas, and independent from that moment on.
+// Stage 1 is locked and client-approved before Stage 2 is reachable (goStage refuses n===2
+// while !qApproved), so it is settled by the time the fork happens and never needs re-syncing.
+var fqAreas = null;
+var fqScopeForked = false;        // true once fqAreas exists — persisted, so reopening never re-forks over the client's changes
+var fqFabBasis = 'own';           // 'own' = Stage 2's own scope (fqAreas), 'cutting' = single manual figure
 var fqFabCostOverride = 0;        // fabrication cost when fqFabBasis === 'cutting'
 // True once this quotation's own saved fabrication basis has been loaded — stops
 // initFinalQuotation() resetting it back to 'initial' (see fqApprovalsFromSave).
@@ -4752,8 +4820,10 @@ function initQuotation() {
   // Reset Final Quotation state for fresh start
   fqLocked=false; fqSentStatus=''; fqInitialized=false; fqApprovalsFromSave=false;
   fqClientApproved=false; fqClientApprovedAt='';
-  fqPreviewed=false; fqFabBasis='initial'; fqFabCostOverride=0; fqBasisFromSave=false;
+  fqPreviewed=false; fqFabBasis='own'; fqFabCostOverride=0; fqBasisFromSave=false;
+  fqAreas=null; fqScopeForked=false;   // a new quotation has no Stage 2 scope until it reaches Stage 2
   var fqw=el('fq-cards-wrap'); if(fqw) fqw.innerHTML='';
+  var fqiw=el('fq-items-wrap'); if(fqiw) fqiw.innerHTML='';
   renderClientCompanyField();
   populateMobSelect();
   renderItems();
@@ -5883,9 +5953,9 @@ function _matMtoBadgeHtml(mi,toggleOnExpr,toggleOffExpr,leadChangeExpr,rememberE
 }
 function _qMatMtoRowHtml(a,i,mi){
   return _matMtoBadgeHtml(mi,
-    '_qMatSetMto('+a+','+i+',true)','_qMatSetMto('+a+','+i+',false)',
-    'qAreas['+a+'].matItems['+i+'].mtoLeadDays=Math.max(0,parseFloat(this.value)||0);recalcSoon()',
-    '_qMatRememberMtoCatalog('+a+','+i+')');
+    _hEdit('_qMatSetMto('+a+','+i+',true)'),_hEdit('_qMatSetMto('+a+','+i+',false)'),
+    _rndArr+'['+a+'].matItems['+i+'].mtoLeadDays=Math.max(0,parseFloat(this.value)||0);'+_hSoon(),
+    _hEdit('_qMatRememberMtoCatalog('+a+','+i+')'));
 }
 function _qMatSetMto(a,i,on){
   var mi=qAreas[a].matItems[i]; if(!mi) return;
@@ -5903,9 +5973,9 @@ function _qMatRememberMtoCatalog(a,i){
 }
 function _bomMatMtoRowHtml(a,ci,r,row){
   return _matMtoBadgeHtml(row,
-    '_bomMatSetMto('+a+','+ci+','+r+',true)','_bomMatSetMto('+a+','+ci+','+r+',false)',
-    'qAreas['+a+'].bomItems['+ci+'].materials['+r+'].mtoLeadDays=Math.max(0,parseFloat(this.value)||0);recalcSoon()',
-    '_bomMatRememberMtoCatalog('+a+','+ci+','+r+')');
+    _hEdit('_bomMatSetMto('+a+','+ci+','+r+',true)'),_hEdit('_bomMatSetMto('+a+','+ci+','+r+',false)'),
+    _rndArr+'['+a+'].bomItems['+ci+'].materials['+r+'].mtoLeadDays=Math.max(0,parseFloat(this.value)||0);'+_hSoon(),
+    _hEdit('_bomMatRememberMtoCatalog('+a+','+ci+','+r+')'));
 }
 function _bomMatSetMto(a,ci,r,on){
   var row=qAreas[a].bomItems[ci].materials[r]; if(!row) return;
@@ -6621,15 +6691,21 @@ function _updateCarcassCountCardVisibility(){
   renderProjectSizeNote();   // the detected count depends on the mode
 }
 
+// These two patch a specific row/area in place and are called straight from the BOM mutators —
+// after a render, when the render context is gone. During a Stage 2 scope edit qAreas points at
+// fqAreas, so without the prefix they would write Stage 2's figures into Stage 1's still-present
+// (merely hidden) DOM nodes: Stage 1 would show numbers that are not its own, and Stage 2's own
+// row would never update. _scopeCtx is set for exactly the duration of that edit.
+function _sumIdp(){ return _scopeCtx==='fq' ? 'fq-' : ''; }
 function updateBOMCostHeader(a,ci) {
   var bItem=qAreas[a].bomItems[ci];
-  var el2=el('bom-cost-'+a+'-'+ci); if(!el2) return;
+  var el2=el(_sumIdp()+'bom-cost-'+a+'-'+ci); if(!el2) return;
   var hasRows=(bItem.materials.length||bItem.hardware.length||bItem.services.length||(bItem.outsourceMaterials&&bItem.outsourceMaterials.length)||(bItem.outsourceHardware&&bItem.outsourceHardware.length));
   var costNote=hasRows?'':'<span style="font-size:10px;color:var(--text2);margin-left:6px">(base cost)</span>';
   el2.innerHTML=fmtMoney(getBOMItemUnitCost(bItem)*(bItem.qty||1))+costNote;
 }
 function updateBOMAreaSubtotal(a) {
-  var el2=el('bom-sub-'+a); if(!el2) return;
+  var el2=el(_sumIdp()+'bom-sub-'+a); if(!el2) return;
   el2.textContent=qAreas[a].name+' subtotal: '+fmtMoney(getAreaSubtotal(a));
 }
 function renderBOMSection(a,ci,cat,catLabel,rows) {
@@ -6655,7 +6731,7 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
     for(var r=0;r<rows.length;r++){
       var row=rows[r];
       var amount=fmtMoney((row.qty||0)*(row.price||0));
-      var removeBtn='<button class="btn" onclick="removeBOMRow('+a+','+ci+',\''+cat+'\','+r+')" style="height:28px;width:28px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash" style="font-size:11px"></i></button>';
+      var removeBtn='<button class="btn" onclick="'+_hEdit('removeBOMRow('+a+','+ci+',\''+cat+'\','+r+')')+'" style="height:28px;width:28px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash" style="font-size:11px"></i></button>';
       if(hasDb){
         // Search mode: type-to-filter text input backed by a native <datalist>
         // (same lightweight pattern as the cutting-list/services-mode material
@@ -6665,36 +6741,36 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
         // Same matcher the handler uses, so the amber "not in the catalogue" flag can never
         // disagree with what actually happens when the row is picked.
         var matched=!!lookupInSource(db,row.name||'');
-        var dlId='bom-dl-'+a+'-'+ci+'-'+cat+'-'+r;
+        var dlId=_rndIdp+'bom-dl-'+a+'-'+ci+'-'+cat+'-'+r;
         var dlOpts=_dlOptions(db,row.name);
         var inpStyle='height:28px;font-size:11px'+(matched?'':';color:#e07000;border-color:#f59e0b');
         h+='<div style="display:grid;grid-template-columns:2fr 78px 65px 90px 80px 28px;gap:4px;margin-bottom:4px;align-items:center">'
           +'<span><input list="'+dlId+'" value="'+escHtml(row.name||'')+'" placeholder="Type to search…" '
-            +'oninput="onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')" onchange="onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')" '
+            +'oninput="'+_hEdit('onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" onchange="'+_hEdit('onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" '
             +'style="'+inpStyle+';width:100%"><datalist id="'+dlId+'">'+dlOpts+'</datalist></span>'
-          +'<span id="bom-unit-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:11px;color:var(--text2);padding-left:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+row.unit+'">'+row.unit+'</span>'
-          +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)" style="height:28px;font-size:12px;text-align:center">'
-          +'<input id="bom-price-'+a+'-'+ci+'-'+cat+'-'+r+'" type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)" style="height:28px;font-size:12px;text-align:right">'
-          +'<span id="bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
+          +'<span id="'+_rndIdp+'bom-unit-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:11px;color:var(--text2);padding-left:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+row.unit+'">'+row.unit+'</span>'
+          +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
+          +'<input id="'+_rndIdp+'bom-price-'+a+'-'+ci+'-'+cat+'-'+r+'" type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)')+'" style="height:28px;font-size:12px;text-align:right">'
+          +'<span id="'+_rndIdp+'bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
           +removeBtn+'</div>'
           +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       } else {
         // Free-text mode: name input + unit select
         var uopts='<option value="pc">pc</option><option value="lm">lm</option><option value="sqm">sqm</option><option value="sheet">sheet</option><option value="hole">hole</option><option value="set">set</option><option value="lot">lot</option><option value="hr">hr</option>';
-        var selU='<select onchange="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'unit\',this.value)" style="height:28px;font-size:11px;padding:0 2px">'+uopts.replace('value="'+(row.unit||'pc')+'"','value="'+(row.unit||'pc')+'" selected')+'</select>';
+        var selU='<select onchange="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'unit\',this.value)')+'" style="height:28px;font-size:11px;padding:0 2px">'+uopts.replace('value="'+(row.unit||'pc')+'"','value="'+(row.unit||'pc')+'" selected')+'</select>';
         h+='<div style="display:grid;grid-template-columns:2fr 78px 65px 90px 80px 28px;gap:4px;margin-bottom:4px;align-items:center">'
-          +'<input value="'+(row.name||'')+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'name\',this.value)" style="height:28px;font-size:12px" placeholder="Item name">'
+          +'<input value="'+(row.name||'')+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'name\',this.value)')+'" style="height:28px;font-size:12px" placeholder="Item name">'
           +selU
-          +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)" style="height:28px;font-size:12px;text-align:center">'
-          +'<input type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)" style="height:28px;font-size:12px;text-align:right">'
-          +'<span id="bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
+          +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
+          +'<input type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)')+'" style="height:28px;font-size:12px;text-align:right">'
+          +'<span id="'+_rndIdp+'bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
           +removeBtn+'</div>'
           +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       }
     }
   }
   var addLabel=hasDb?('Add '+catLabel.toLowerCase().replace(/s$/,'')):'Add '+catLabel.toLowerCase()+' row';
-  h+='<button class="btn" onclick="addBOMRow('+a+','+ci+',\''+cat+'\')" style="font-size:10px;padding:3px 8px;margin-top:2px"><i class="ti ti-plus"></i>'+addLabel+'</button>'
+  h+='<button class="btn" onclick="'+_hEdit('addBOMRow('+a+','+ci+',\''+cat+'\')')+'" style="font-size:10px;padding:3px 8px;margin-top:2px"><i class="ti ti-plus"></i>'+addLabel+'</button>'
     +'</div>';
   return h;
 }
@@ -6719,23 +6795,23 @@ function renderOutsourceSection(a,ci) {
     for(var r=0;r<rows.length;r++){
       var row=rows[r];
       var amount=fmtMoney((row.qty||0)*(row.price||0));
-      var selU='<select id="out-unit-'+a+'-'+ci+'-'+cat+'-'+r+'" onchange="onOutsourceRowChange('+a+','+ci+',\''+cat+'\','+r+',\'unit\',this.value)" style="height:28px;font-size:11px;padding:0 2px">'+uopts.replace('value="'+(row.unit||'pc')+'"','value="'+(row.unit||'pc')+'" selected')+'</select>';
+      var selU='<select id="'+_rndIdp+'out-unit-'+a+'-'+ci+'-'+cat+'-'+r+'" onchange="'+_hEdit('onOutsourceRowChange('+a+','+ci+',\''+cat+'\','+r+',\'unit\',this.value)')+'" style="height:28px;font-size:11px;padding:0 2px">'+uopts.replace('value="'+(row.unit||'pc')+'"','value="'+(row.unit||'pc')+'" selected')+'</select>';
       var saveBtn=row.saved
         ?'<button class="btn" disabled title="Already saved to DB" style="height:28px;width:30px;padding:0;justify-content:center;color:#16a34a;cursor:default"><i class="ti ti-check" style="font-size:11px"></i></button>'
-        :'<button class="btn" onclick="saveOutsourceToDB('+a+','+ci+',\''+cat+'\','+r+')" title="Save to Price Database" style="height:28px;width:30px;padding:0;justify-content:center;color:#b45309"><i class="ti ti-device-floppy" style="font-size:11px"></i></button>';
-      var dlId='out-dl-'+a+'-'+ci+'-'+cat+'-'+r;
+        :'<button class="btn" onclick="'+_hEdit('saveOutsourceToDB('+a+','+ci+',\''+cat+'\','+r+')')+'" title="Save to Price Database" style="height:28px;width:30px;padding:0;justify-content:center;color:#b45309"><i class="ti ti-device-floppy" style="font-size:11px"></i></button>';
+      var dlId=_rndIdp+'out-dl-'+a+'-'+ci+'-'+cat+'-'+r;
       var dlOpts=_dlOptions(db,row.name);
       s+='<div style="display:grid;grid-template-columns:2fr 78px 65px 90px 80px 30px 28px;gap:4px;margin-bottom:4px;align-items:center">'
         +'<span><input list="'+dlId+'" value="'+escHtml(row.name||'')+'" '
-          +'oninput="onOutsourceItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')" onchange="onOutsourceItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')" '
+          +'oninput="'+_hEdit('onOutsourceItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" onchange="'+_hEdit('onOutsourceItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" '
           +'style="height:28px;font-size:12px;width:100%" placeholder="Type to search, or enter a new item">'
           +'<datalist id="'+dlId+'">'+dlOpts+'</datalist></span>'
         +selU
-        +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="onOutsourceRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)" style="height:28px;font-size:12px;text-align:center">'
-        +'<input id="out-price-'+a+'-'+ci+'-'+cat+'-'+r+'" type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="onOutsourceRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)" style="height:28px;font-size:12px;text-align:right">'
-        +'<span id="out-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
+        +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="'+_hEdit('onOutsourceRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
+        +'<input id="'+_rndIdp+'out-price-'+a+'-'+ci+'-'+cat+'-'+r+'" type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="'+_hEdit('onOutsourceRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)')+'" style="height:28px;font-size:12px;text-align:right">'
+        +'<span id="'+_rndIdp+'out-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
         +saveBtn
-        +'<button class="btn" onclick="removeOutsourceRow('+a+','+ci+',\''+cat+'\','+r+')" style="height:28px;width:28px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash" style="font-size:11px"></i></button>'
+        +'<button class="btn" onclick="'+_hEdit('removeOutsourceRow('+a+','+ci+',\''+cat+'\','+r+')')+'" style="height:28px;width:28px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash" style="font-size:11px"></i></button>'
         +'</div>';
     }
     return s;
@@ -6758,14 +6834,91 @@ function renderOutsourceSection(a,ci) {
     +'</div>'
     +inner
     +'<div style="display:flex;gap:6px;margin-top:'+(hasRows?'4':'0')+'px">'
-    +'<button class="btn" onclick="addOutsourceRow('+a+','+ci+',\'outsourceMaterials\')" style="font-size:10px;padding:3px 8px;color:#b45309;border-color:#fcd34d"><i class="ti ti-plus"></i>Outsource material</button>'
-    +'<button class="btn" onclick="addOutsourceRow('+a+','+ci+',\'outsourceHardware\')" style="font-size:10px;padding:3px 8px;color:#b45309;border-color:#fcd34d"><i class="ti ti-plus"></i>Outsource hardware</button>'
+    +'<button class="btn" onclick="'+_hEdit('addOutsourceRow('+a+','+ci+',\'outsourceMaterials\')')+'" style="font-size:10px;padding:3px 8px;color:#b45309;border-color:#fcd34d"><i class="ti ti-plus"></i>Outsource material</button>'
+    +'<button class="btn" onclick="'+_hEdit('addOutsourceRow('+a+','+ci+',\'outsourceHardware\')')+'" style="font-size:10px;padding:3px 8px;color:#b45309;border-color:#fcd34d"><i class="ti ti-plus"></i>Outsource hardware</button>'
     +'</div>'
     +'</div>';
 }
-function renderItems() {
+// ── One scope renderer, two stages ─────────────────────────────────────────────────────
+// Stage 1 draws qAreas into #items-wrap; Stage 2 draws its own fqAreas into #fq-items-wrap.
+// The reads below all go through the global qAreas, so Stage 2 simply renders inside
+// _withFQAreas and needs no read-site edits at all. What CANNOT be swapped is the emitted
+// HTML: an inline handler runs long after the render returns, when the swap is gone. So the
+// handlers carry their target with them — _rndArr names the array a direct write lands in,
+// and _hEdit wraps a shared mutator so it runs against fqAreas and refreshes Stage 2.
+//
+// _rndIdp prefixes every element id. Both containers are in the DOM at the same time (s1-wrap
+// is only display:none), so without it getElementById would find Stage 1's node and Stage 2's
+// live subtotals would silently update the wrong stage's screen — the numbers would look right
+// on one stage and be frozen on the other, with nothing to indicate why.
+//
+// These are read during a render pass only. Rendering is synchronous end to end, so no two
+// passes can interleave; they exist so the three renderers (scope / BOM section / outsource
+// section) agree on the target without threading three params through every one.
+var _rndArr='qAreas', _rndIdp='', _rndFq=false;
+function _hEdit(call){
+  // .bind(this) matters: several handlers pass `this` (the input element) into the mutator,
+  // and without it the wrapper function would shadow it with undefined.
+  return _rndFq ? '_fqEdit(function(){'+call+'}.bind(this))' : call;
+}
+function _hSoon(){ return _rndFq ? 'recalcFQSoon()' : 'recalcSoon()'; }
+
+function renderItems(){
+  // Standing down inside a Stage 2 scope edit — _fqEdit re-renders Stage 2 the moment the
+  // mutator returns. Without this the shared mutators would paint Stage 2's data into Stage 1's
+  // container. Nothing is skipped: the correct render happens in the same synchronous turn.
+  if(_scopeCtx==='fq') return;
   renderClientMatSection();
-  var wrap=el("items-wrap"); if(!wrap) return;
+  return _renderScope('items-wrap','qAreas','');
+}
+function renderFQItems(){
+  if(!fqAreas) return;
+  return _withFQAreas(function(){ return _renderScope('fq-items-wrap','fqAreas','fq-'); });
+}
+// Live per-row amounts and area subtotals, patched in place rather than re-rendered so a focused
+// input keeps focus while you type. Reads the current qAreas, so Stage 2 gets the identical
+// treatment simply by calling it inside _withFQAreas with its own id prefix — one implementation,
+// no chance of the two stages drifting the way recalc/recalcFQ have.
+function _refreshScopeSums(idp){
+  idp=idp||'';
+  if(qFabMode==='carcass'){
+    for(var _ca=0;_ca<qAreas.length;_ca++){
+      var _caSub=0;
+      for(var _ci=0;_ci<qAreas[_ca].items.length;_ci++){
+        var _cAmt=(CARCASS_PRICES[qAreas[_ca].items[_ci].type]||0)*qAreas[_ca].items[_ci].qty;
+        _caSub+=_cAmt;
+        var _cs=el(idp+'carc-amt-'+_ca+'-'+_ci);
+        if(_cs) _cs.textContent=fmtMoney(_cAmt);
+      }
+      var _css=el(idp+'area-sub-carc-'+_ca);
+      if(_css) _css.textContent=qAreas[_ca].name+' subtotal: '+fmtMoney(_caSub);
+    }
+  }
+  if(qFabMode==='services'){
+    for(var _a=0;_a<qAreas.length;_a++){
+      var _mis=qAreas[_a].matItems||[];
+      for(var _i=0;_i<_mis.length;_i++){var _ae=el(idp+'mat-amt-'+_a+'-'+_i);if(_ae)_ae.textContent=fmtMoney((_mis[_i].qty||0)*(_mis[_i].price||0));}
+      var _mse=el(idp+'mat-sub-'+_a);if(_mse)_mse.innerHTML='Materials: <b>'+fmtMoney(getAreaMatSubtotal(_a))+'</b>';
+      var _his=qAreas[_a].hwItems||[];
+      for(var _i=0;_i<_his.length;_i++){var _ae=el(idp+'hw-amt-'+_a+'-'+_i);if(_ae)_ae.textContent=fmtMoney((_his[_i].qty||0)*(_his[_i].price||0));}
+      var _hse=el(idp+'hw-sub-'+_a);if(_hse)_hse.innerHTML='Hardware: <b>'+fmtMoney(getAreaHwSubtotal(_a))+'</b>';
+      var _svs=qAreas[_a].svcItems||[];
+      for(var _i=0;_i<_svs.length;_i++){var _ae=el(idp+'svc-sub-'+_a+'-'+_i);var _s=SERVICES[_svs[_i].svcIdx]||{price:0};if(_ae)_ae.textContent=fmtMoney(_s.price*(_svs[_i].qty||1));}
+      var _ase=el(idp+'area-sub-svc-'+_a);if(_ase)_ase.textContent=qAreas[_a].name+' subtotal: '+fmtMoney(getAreaSubtotal(_a));
+    }
+  }
+  // BOM mode deliberately absent: its rows are patched by updateBOMCostHeader /
+  // updateBOMAreaSubtotal, called straight from the BOM mutators. Duplicating them here would
+  // drop the "(base cost)" note they carry, so Stage 1 would lose it on every recalc.
+}
+function _renderScope(wrapId, arrName, idp) {
+  var wrap=el(wrapId); if(!wrap) return;
+  var _sArr=_rndArr, _sIdp=_rndIdp, _sFq=_rndFq;
+  _rndArr=arrName; _rndIdp=idp; _rndFq=(arrName==='fqAreas');
+  try{ return _renderScopeCore(wrap); }
+  finally { _rndArr=_sArr; _rndIdp=_sIdp; _rndFq=_sFq; }
+}
+function _renderScopeCore(wrap) {
   var isCarcass=(qFabMode==="carcass");
   var isBOM=(qFabMode==="bom");
   var h="";
@@ -6776,8 +6929,8 @@ function renderItems() {
     h+='<div style="border:.5px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:12px">'
       +'<div style="background:#f4f4f2;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:.5px solid var(--border)">'
       +'<i class="ti ti-layout-2" style="color:var(--navy);font-size:13px;flex-shrink:0"></i>'
-      +'<input value="'+area.name+'" oninput="qAreas['+a+'].name=this.value" style="height:28px;font-size:13px;font-weight:500;flex:1;border-color:transparent;background:transparent" onfocus="this.style.borderColor=\'#ccc\'" onblur="this.style.borderColor=\'transparent\'">'
-      +(qAreas.length>1?'<button class="btn btn-danger" onclick="removeArea('+a+')" style="font-size:11px;padding:3px 8px;flex-shrink:0"><i class="ti ti-trash"></i>Remove</button>':'')
+      +'<input value="'+area.name+'" oninput="'+_rndArr+'['+a+'].name=this.value" style="height:28px;font-size:13px;font-weight:500;flex:1;border-color:transparent;background:transparent" onfocus="this.style.borderColor=\'#ccc\'" onblur="this.style.borderColor=\'transparent\'">'
+      +(qAreas.length>1?'<button class="btn btn-danger" onclick="'+_hEdit('removeArea('+a+')')+'" style="font-size:11px;padding:3px 8px;flex-shrink:0"><i class="ti ti-trash"></i>Remove</button>':'')
       +'</div><div style="padding:10px 12px">';
 
     if(isCarcass){
@@ -6795,15 +6948,15 @@ function renderItems() {
           opts+='<option'+(n===it.type?" selected":"")+'>'+n+'</option>';
         }
         h+='<div style="display:grid;grid-template-columns:2fr 78px 110px 36px;gap:6px;margin-bottom:8px;align-items:center">'
-          +'<select onchange="qAreas['+a+'].items['+i+'].type=this.value;recalcSoon()" style="height:34px">'+opts+'</select>'
-          +'<input type="number" min="1" value="'+it.qty+'" oninput="qAreas['+a+'].items['+i+'].qty=parseInt(this.value)||1;recalcSoon()" style="height:34px;text-align:center">'
-          +'<span id="carc-amt-'+a+'-'+i+'" style="font-size:13px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney((CARCASS_PRICES[it.type]||0)*it.qty)+'</span>'
-          +'<button class="btn" onclick="removeItemFromArea('+a+','+i+')" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+          +'<select onchange="'+_rndArr+'['+a+'].items['+i+'].type=this.value;'+_hSoon()+'" style="height:34px">'+opts+'</select>'
+          +'<input type="number" min="1" value="'+it.qty+'" oninput="'+_rndArr+'['+a+'].items['+i+'].qty=parseInt(this.value)||1;'+_hSoon()+'" style="height:34px;text-align:center">'
+          +'<span id="'+_rndIdp+'carc-amt-'+a+'-'+i+'" style="font-size:13px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney((CARCASS_PRICES[it.type]||0)*it.qty)+'</span>'
+          +'<button class="btn" onclick="'+_hEdit('removeItemFromArea('+a+','+i+')')+'" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
           +'</div>';
       }
       h+='<div style="display:flex;justify-content:space-between;align-items:center;padding-top:6px;border-top:.5px solid var(--border)">'
-        +'<button class="btn" onclick="addItemToArea('+a+')" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add item</button>'
-        +'<span id="area-sub-carc-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>'
+        +'<button class="btn" onclick="'+_hEdit('addItemToArea('+a+')')+'" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add item</button>'
+        +'<span id="'+_rndIdp+'area-sub-carc-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>'
         +renderOutsourceSection(a,-1); // area-level — for a material/hardware not covered by the flat carcass price
 
     } else if(isBOM){
@@ -6817,11 +6970,11 @@ function renderItems() {
         var costNote=hasRows?'':'<span style="font-size:10px;color:var(--text2);margin-left:6px">(base cost)</span>';
         h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:#fafafa">'
           +'<div style="display:grid;grid-template-columns:2fr 70px 1fr auto 36px;gap:8px;align-items:center;margin-bottom:6px">'
-          +'<select onchange="onBOMTypeChange('+a+','+ci+',this.value)" style="height:34px;font-size:13px">'+bOpts+'</select>'
-          +'<input type="number" min="1" value="'+(bItem.qty||1)+'" onchange="onBOMQtyChange('+a+','+ci+',this.value)" style="height:34px;text-align:center" title="Quantity">'
-          +'<div id="bom-cost-'+a+'-'+ci+'" style="font-size:12px;font-weight:500;color:var(--navy);text-align:right">'+fmtMoney(unitCost*(bItem.qty||1))+costNote+'</div>'
-          +'<button class="btn" onclick="loadCabinetTemplate('+a+','+ci+')" style="height:34px;font-size:11px;padding:0 8px;white-space:nowrap;color:var(--navy)" title="Load default template rows"><i class="ti ti-template"></i> Template</button>'
-          +'<button class="btn" onclick="removeBOMItem('+a+','+ci+')" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+          +'<select onchange="'+_hEdit('onBOMTypeChange('+a+','+ci+',this.value)')+'" style="height:34px;font-size:13px">'+bOpts+'</select>'
+          +'<input type="number" min="1" value="'+(bItem.qty||1)+'" onchange="'+_hEdit('onBOMQtyChange('+a+','+ci+',this.value)')+'" style="height:34px;text-align:center" title="Quantity">'
+          +'<div id="'+_rndIdp+'bom-cost-'+a+'-'+ci+'" style="font-size:12px;font-weight:500;color:var(--navy);text-align:right">'+fmtMoney(unitCost*(bItem.qty||1))+costNote+'</div>'
+          +'<button class="btn" onclick="'+_hEdit('loadCabinetTemplate('+a+','+ci+')')+'" style="height:34px;font-size:11px;padding:0 8px;white-space:nowrap;color:var(--navy)" title="Load default template rows"><i class="ti ti-template"></i> Template</button>'
+          +'<button class="btn" onclick="'+_hEdit('removeBOMItem('+a+','+ci+')')+'" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
           +'</div>'
           +renderBOMSection(a,ci,'materials','Materials',bItem.materials||[])
           +renderBOMSection(a,ci,'hardware','Hardware',bItem.hardware||[])
@@ -6830,8 +6983,8 @@ function renderItems() {
           +'</div>';
       }
       h+='<div style="display:flex;justify-content:space-between;align-items:center;padding-top:6px;border-top:.5px solid var(--border)">'
-        +'<button class="btn" onclick="addBOMItem('+a+')" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add cabinet</button>'
-        +'<span id="bom-sub-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>';
+        +'<button class="btn" onclick="'+_hEdit('addBOMItem('+a+')')+'" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add cabinet</button>'
+        +'<span id="'+_rndIdp+'bom-sub-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>';
 
     } else {
       if(!area.matItems) area.matItems=[];
@@ -6861,26 +7014,26 @@ function renderItems() {
         for(var i=0;i<matItems.length;i++){
           var mi=matItems[i];
           var matDlOpts=_dlOptions(matSrc,mi.name);
-          h+='<datalist id="mat-dl-'+a+'-'+i+'">'+matDlOpts+'</datalist>';
+          h+='<datalist id="'+_rndIdp+'mat-dl-'+a+'-'+i+'">'+matDlOpts+'</datalist>';
           h+='<div style="display:grid;grid-template-columns:2fr 78px 60px 88px 88px 30px;gap:5px;margin-bottom:6px;align-items:center">'
-            +'<input type="text" list="mat-dl-'+a+'-'+i+'" value="'+escHtml(mi.name||'')+'" placeholder="Type to search…" oninput="onMatSearch(this,'+a+','+i+')" onchange="onMatPick(this,'+a+','+i+')" style="height:30px;font-size:12px">'
-            +'<input type="number" min="0" step="0.01" value="'+(mi.qty||1)+'" oninput="qAreas['+a+'].matItems['+i+'].qty=parseFloat(this.value)||0;recalcSoon()" style="height:30px;text-align:center;font-size:12px">'
+            +'<input type="text" list="'+_rndIdp+'mat-dl-'+a+'-'+i+'" value="'+escHtml(mi.name||'')+'" placeholder="Type to search…" oninput="'+_hEdit('onMatSearch(this,'+a+','+i+')')+'" onchange="'+_hEdit('onMatPick(this,'+a+','+i+')')+'" style="height:30px;font-size:12px">'
+            +'<input type="number" min="0" step="0.01" value="'+(mi.qty||1)+'" oninput="'+_rndArr+'['+a+'].matItems['+i+'].qty=parseFloat(this.value)||0;'+_hSoon()+'" style="height:30px;text-align:center;font-size:12px">'
             +'<span style="height:30px;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text2);background:var(--bg2);border:.5px solid var(--border);border-radius:5px;padding:0 6px">'+(mi.unit||'—')+'</span>'
-            +'<input type="number" min="0" step="0.01" value="'+(mi.price||0)+'" oninput="qAreas['+a+'].matItems['+i+'].price=parseFloat(this.value)||0;recalcSoon()" style="height:30px;text-align:right;font-size:12px;padding-right:6px" placeholder="0.00">'
+            +'<input type="number" min="0" step="0.01" value="'+(mi.price||0)+'" oninput="'+_rndArr+'['+a+'].matItems['+i+'].price=parseFloat(this.value)||0;'+_hSoon()+'" style="height:30px;text-align:right;font-size:12px;padding-right:6px" placeholder="0.00">'
             +(isDirect
-              ? '<span id="mat-amt-'+a+'-'+i+'" style="font-size:12px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney((mi.qty||0)*(mi.price||0))+'</span>'
+              ? '<span id="'+_rndIdp+'mat-amt-'+a+'-'+i+'" style="font-size:12px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney((mi.qty||0)*(mi.price||0))+'</span>'
               : '<span style="font-size:11px;color:var(--muted);text-align:center">—</span>')
-            +'<button class="btn" onclick="removeMatItem('+a+','+i+')" style="height:30px;width:30px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+            +'<button class="btn" onclick="'+_hEdit('removeMatItem('+a+','+i+')')+'" style="height:30px;width:30px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
             +'</div>'
             +_qMatMtoRowHtml(a,i,mi)
             ;
         }
       }
       h+='<div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px">'
-        +'<div style="display:flex;align-items:center;gap:6px"><button class="btn" onclick="addMatItem('+a+')" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add material</button>'
+        +'<div style="display:flex;align-items:center;gap:6px"><button class="btn" onclick="'+_hEdit('addMatItem('+a+')')+'" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add material</button>'
         +(dbMaterials.length?'<span style="font-size:10px;color:var(--teal);display:flex;align-items:center;gap:3px"><i class="ti ti-database" style="font-size:10px"></i>DB prices active</span>':'<span style="font-size:10px;color:var(--text2)">No DB — enter prices manually</span>')
         +'</div>'
-        +(isDirect&&matItems.length?'<span id="mat-sub-'+a+'" style="font-size:11px;color:var(--text2)">Materials: <b>'+fmtMoney(matSub)+'</b></span>':'')
+        +(isDirect&&matItems.length?'<span id="'+_rndIdp+'mat-sub-'+a+'" style="font-size:11px;color:var(--text2)">Materials: <b>'+fmtMoney(matSub)+'</b></span>':'')
         +'</div></div>';
 
       // ── Hardware section ───────────────────────────────────
@@ -6901,25 +7054,25 @@ function renderItems() {
         for(var i=0;i<hwItems.length;i++){
           var hi=hwItems[i];
           var hwDlOpts=_dlOptions(hwSrc,hi.name);
-          h+='<datalist id="hw-dl-'+a+'-'+i+'">'+hwDlOpts+'</datalist>';
+          h+='<datalist id="'+_rndIdp+'hw-dl-'+a+'-'+i+'">'+hwDlOpts+'</datalist>';
           h+='<div style="display:grid;grid-template-columns:2fr 78px 60px 88px 88px 30px;gap:5px;margin-bottom:6px;align-items:center">'
-            +'<input type="text" list="hw-dl-'+a+'-'+i+'" value="'+escHtml(hi.name||'')+'" placeholder="Type to search…" oninput="onHwSearch(this,'+a+','+i+')" onchange="onHwPick(this,'+a+','+i+')" style="height:30px;font-size:12px">'
-            +'<input type="number" min="0" step="0.01" value="'+(hi.qty||1)+'" oninput="qAreas['+a+'].hwItems['+i+'].qty=parseFloat(this.value)||0;recalcSoon()" style="height:30px;text-align:center;font-size:12px">'
+            +'<input type="text" list="'+_rndIdp+'hw-dl-'+a+'-'+i+'" value="'+escHtml(hi.name||'')+'" placeholder="Type to search…" oninput="'+_hEdit('onHwSearch(this,'+a+','+i+')')+'" onchange="'+_hEdit('onHwPick(this,'+a+','+i+')')+'" style="height:30px;font-size:12px">'
+            +'<input type="number" min="0" step="0.01" value="'+(hi.qty||1)+'" oninput="'+_rndArr+'['+a+'].hwItems['+i+'].qty=parseFloat(this.value)||0;'+_hSoon()+'" style="height:30px;text-align:center;font-size:12px">'
             +'<span style="height:30px;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text2);background:var(--bg2);border:.5px solid var(--border);border-radius:5px;padding:0 6px">'+(hi.unit||'—')+'</span>'
-            +'<input type="number" min="0" step="0.01" value="'+(hi.price||0)+'" oninput="qAreas['+a+'].hwItems['+i+'].price=parseFloat(this.value)||0;recalcSoon()" style="height:30px;text-align:right;font-size:12px;padding-right:6px" placeholder="0.00">'
+            +'<input type="number" min="0" step="0.01" value="'+(hi.price||0)+'" oninput="'+_rndArr+'['+a+'].hwItems['+i+'].price=parseFloat(this.value)||0;'+_hSoon()+'" style="height:30px;text-align:right;font-size:12px;padding-right:6px" placeholder="0.00">'
             +(isDirect
-              ? '<span id="hw-amt-'+a+'-'+i+'" style="font-size:12px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney((hi.qty||0)*(hi.price||0))+'</span>'
+              ? '<span id="'+_rndIdp+'hw-amt-'+a+'-'+i+'" style="font-size:12px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney((hi.qty||0)*(hi.price||0))+'</span>'
               : '<span style="font-size:11px;color:var(--muted);text-align:center">—</span>')
-            +'<button class="btn" onclick="removeHwItem('+a+','+i+')" style="height:30px;width:30px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+            +'<button class="btn" onclick="'+_hEdit('removeHwItem('+a+','+i+')')+'" style="height:30px;width:30px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
             +'</div>'
             ;
         }
       }
       h+='<div style="display:flex;justify-content:space-between;align-items:center;padding-top:4px">'
-        +'<div style="display:flex;align-items:center;gap:6px"><button class="btn" onclick="addHwItem('+a+')" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add hardware</button>'
+        +'<div style="display:flex;align-items:center;gap:6px"><button class="btn" onclick="'+_hEdit('addHwItem('+a+')')+'" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add hardware</button>'
         +(dbHardware.length?'<span style="font-size:10px;color:var(--teal);display:flex;align-items:center;gap:3px"><i class="ti ti-database" style="font-size:10px"></i>DB prices active</span>':'<span style="font-size:10px;color:var(--text2)">No DB — enter prices manually</span>')
         +'</div>'
-        +(isDirect&&hwItems.length?'<span id="hw-sub-'+a+'" style="font-size:11px;color:var(--text2)">Hardware: <b>'+fmtMoney(hwSub)+'</b></span>':'')
+        +(isDirect&&hwItems.length?'<span id="'+_rndIdp+'hw-sub-'+a+'" style="font-size:11px;color:var(--text2)">Hardware: <b>'+fmtMoney(hwSub)+'</b></span>':'')
         +'</div></div>';
 
       // ── Services section ───────────────────────────────────
@@ -6942,47 +7095,64 @@ function renderItems() {
         var si=area.svcItems[i];
         var svc=SERVICES[si.svcIdx]||{price:0,unit:''};
         var svcPrice=_svcEffectivePrice(si);
-        h+='<datalist id="svc-dl-'+a+'-'+i+'">'+svcDlOpts+'</datalist>';
+        h+='<datalist id="'+_rndIdp+'svc-dl-'+a+'-'+i+'">'+svcDlOpts+'</datalist>';
         h+='<div style="display:grid;grid-template-columns:2fr 78px 60px 88px 88px 36px;gap:6px;margin-bottom:8px;align-items:center">'
-          +'<input type="text" list="svc-dl-'+a+'-'+i+'" value="'+escHtml(svc.name||'')+'" placeholder="Type to search…" oninput="onSvcSearch(this,'+a+','+i+')" onchange="onSvcPick(this,'+a+','+i+')" style="height:34px;font-size:12px">'
-          +'<input type="number" min="0.1" step="0.1" value="'+si.qty+'" oninput="qAreas['+a+'].svcItems['+i+'].qty=parseFloat(this.value)||1;recalcSoon()" style="height:34px;text-align:center">'
+          +'<input type="text" list="'+_rndIdp+'svc-dl-'+a+'-'+i+'" value="'+escHtml(svc.name||'')+'" placeholder="Type to search…" oninput="'+_hEdit('onSvcSearch(this,'+a+','+i+')')+'" onchange="'+_hEdit('onSvcPick(this,'+a+','+i+')')+'" style="height:34px;font-size:12px">'
+          +'<input type="number" min="0.1" step="0.1" value="'+si.qty+'" oninput="'+_rndArr+'['+a+'].svcItems['+i+'].qty=parseFloat(this.value)||1;'+_hSoon()+'" style="height:34px;text-align:center">'
           +'<span style="height:34px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text2)">'+escHtml(svc.unit||'—')+'</span>'
-          +'<input type="number" min="0" step="0.01" value="'+svcPrice+'" oninput="qAreas['+a+'].svcItems['+i+'].price=parseFloat(this.value)||0;recalcSoon()" style="height:34px;text-align:right;font-size:12px;padding-right:6px">'
-          +'<span id="svc-sub-'+a+'-'+i+'" style="font-size:13px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney(svcPrice*si.qty)+'</span>'
-          +'<button class="btn" onclick="removeSvcItem('+a+','+i+')" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
+          +'<input type="number" min="0" step="0.01" value="'+svcPrice+'" oninput="'+_rndArr+'['+a+'].svcItems['+i+'].price=parseFloat(this.value)||0;'+_hSoon()+'" style="height:34px;text-align:right;font-size:12px;padding-right:6px">'
+          +'<span id="'+_rndIdp+'svc-sub-'+a+'-'+i+'" style="font-size:13px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney(svcPrice*si.qty)+'</span>'
+          +'<button class="btn" onclick="'+_hEdit('removeSvcItem('+a+','+i+')')+'" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
           +'</div>'
           // Additional information about THIS service. One box per performed service, directly
           // beneath it — add another service and it gets its own. oninput writes straight to the
           // model and triggers no re-render, so typing cannot be interrupted.
           +(svc.name
             ? '<div style="margin:-2px 0 10px;padding-left:2px">'
-              +'<textarea id="svc-note-'+a+'-'+i+'" rows="1" placeholder="Additional note for '+escHtml(svc.name)+' — exclusions, site conditions, lead time…" '
-              +'oninput="qAreas['+a+'].svcItems['+i+'].note=this.value" '
+              +'<textarea id="'+_rndIdp+'svc-note-'+a+'-'+i+'" rows="1" placeholder="Additional note for '+escHtml(svc.name)+' — exclusions, site conditions, lead time…" '
+              +'oninput="'+_rndArr+'['+a+'].svcItems['+i+'].note=this.value" '
               +'style="width:100%;font-size:11px;resize:vertical;padding:5px 7px;border:.5px solid var(--border);border-radius:5px;font-family:inherit;color:var(--text1)">'
               +escHtml(si.note||'')+'</textarea></div>'
             : '');
       }
       h+='<div style="display:flex;justify-content:space-between;align-items:center;padding-top:6px;border-top:.5px solid var(--border)">'
-        +'<button class="btn" onclick="addSvcItem('+a+')" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add service</button>'
-        +'<span id="area-sub-svc-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>'
+        +'<button class="btn" onclick="'+_hEdit('addSvcItem('+a+')')+'" style="font-size:11px;padding:4px 10px"><i class="ti ti-plus"></i>Add service</button>'
+        +'<span id="'+_rndIdp+'area-sub-svc-'+a+'" style="font-size:12px;font-weight:500;color:var(--navy)">'+area.name+' subtotal: '+fmtMoney(sub)+'</span></div>'
         +renderOutsourceSection(a,-1); // area-level — for a material/hardware not in the current catalog, without switching to BOM mode
     }
     h+='</div></div>';
   }
   wrap.innerHTML=h;
-  recalc();
-  if(typeof renderProjectSizeNote==='function') renderProjectSizeNote();
+  if(_rndFq){ recalcFQ(); }
+  else {
+    recalc();
+    if(typeof renderProjectSizeNote==='function') renderProjectSizeNote();
+  }
 }
 
 // Debounced recalc — fast path skips sum-lines rebuild; full path deferred 120ms
 var _recalcTimer=null;
 function recalcSoon(){
+  if(_scopeCtx==='fq') return;   // see renderItems — _fqEdit recalcs Stage 2 straight after
   clearTimeout(_recalcTimer);
   recalc(true);                        // immediate: update totals only (fast)
   _recalcTimer=setTimeout(recalc,120); // deferred: rebuild line items too
 }
+// Stage 2 equivalent — a Stage 2 scope field must never call recalcSoon(), which prices Stage 1.
+var _recalcFQTimer=null;
+function recalcFQSoon(){
+  clearTimeout(_recalcFQTimer);
+  recalcFQ();
+  _recalcFQTimer=setTimeout(recalcFQ,120);
+}
 
-function recalc(fast){ return _withFrozenRates(function(){ return _recalcCore(fast); }); }
+function recalc(fast){
+  // See renderItems — while a Stage 2 scope edit is running, qAreas points at fqAreas, so
+  // pricing Stage 1 here would price it off Stage 2's scope. _fqEdit runs recalcFQ() the
+  // moment the mutator returns, so nothing goes uncomputed.
+  if(_scopeCtx==='fq') return _pCalc;
+  return _withFrozenRates(function(){ return _recalcCore(fast); });
+}
 function _recalcCore(fast) {
   clearTimeout(_recalcTimer); _recalcTimer=null; // cancel any pending debounce
   var aCF=(qCustomCFApproved&&qCustomCF)?qCustomCF:CF;
@@ -7106,37 +7276,10 @@ function _recalcCore(fast) {
   // the fee was correctly in the total all along. recalcFQ has always refreshed its own copy;
   // this is Stage 1 catching up.
   var _svd=el('sv-cost-disp'); if(_svd) _svd.textContent=fmtMoney(getSiteVisitCost());
-  // Live-update carcass item prices and area subtotals
-  if(qFabMode==='carcass'){
-    for(var _ca=0;_ca<qAreas.length;_ca++){
-      var _caSub=0;
-      for(var _ci=0;_ci<qAreas[_ca].items.length;_ci++){
-        var _cAmt=(CARCASS_PRICES[qAreas[_ca].items[_ci].type]||0)*qAreas[_ca].items[_ci].qty;
-        _caSub+=_cAmt;
-        var _cs=el('carc-amt-'+_ca+'-'+_ci);
-        if(_cs) _cs.textContent=fmtMoney(_cAmt);
-      }
-      var _css=el('area-sub-carc-'+_ca);
-      if(_css) _css.textContent=qAreas[_ca].name+' subtotal: '+fmtMoney(_caSub);
-    }
-  }
+  _refreshScopeSums('');   // live carcass / mat / hw / svc amounts in the Stage 1 editor
 
   if(el("mob-disp")) el("mob-disp").textContent=fmtMoney(mobRegionCost);
   if(el("mob-total-q-disp")) el("mob-total-q-disp").textContent=fmtMoney(mobBaseRaw*(1+cm/100)*(1+mobBuf/100)*(1+mobMk/100));
-  // Live-update mat/hw/svc amounts in form (avoids re-render so focused inputs keep focus)
-  if(qFabMode==='services'){
-    for(var _a=0;_a<qAreas.length;_a++){
-      var _mis=qAreas[_a].matItems||[];
-      for(var _i=0;_i<_mis.length;_i++){var _ae=el('mat-amt-'+_a+'-'+_i);if(_ae)_ae.textContent=fmtMoney((_mis[_i].qty||0)*(_mis[_i].price||0));}
-      var _mse=el('mat-sub-'+_a);if(_mse)_mse.innerHTML='Materials: <b>'+fmtMoney(getAreaMatSubtotal(_a))+'</b>';
-      var _his=qAreas[_a].hwItems||[];
-      for(var _i=0;_i<_his.length;_i++){var _ae=el('hw-amt-'+_a+'-'+_i);if(_ae)_ae.textContent=fmtMoney((_his[_i].qty||0)*(_his[_i].price||0));}
-      var _hse=el('hw-sub-'+_a);if(_hse)_hse.innerHTML='Hardware: <b>'+fmtMoney(getAreaHwSubtotal(_a))+'</b>';
-      var _svs=qAreas[_a].svcItems||[];
-      for(var _i=0;_i<_svs.length;_i++){var _ae=el('svc-sub-'+_a+'-'+_i);var _s=SERVICES[_svs[_i].svcIdx]||{price:0};if(_ae)_ae.textContent=fmtMoney(_s.price*(_svs[_i].qty||1));}
-      var _ase=el('area-sub-svc-'+_a);if(_ase)_ase.textContent=qAreas[_a].name+' subtotal: '+fmtMoney(getAreaSubtotal(_a));
-    }
-  }
   // Update assembly card cost display
   var acd=el("assm-cost-disp");
   if(acd){
@@ -7424,7 +7567,9 @@ function goStage(n) {
   el("s2btn").classList.toggle("active",n===2);
   if(n===2) {
     if(!fqInitialized){ initFinalQuotation(); fqInitialized=true; }
-    else { renderFQFabBasisCard(); updateFQUploadCardVisibility(); updateFQLockUI(); updateFQSentStatus(); }
+    else { _forkFQScope(); renderFQFabBasisCard(); updateFQUploadCardVisibility(); updateFQLockUI(); updateFQSentStatus(); }
+    renderFQItems();
+    recalcFQ();
   } else {
     if(typeof onServiceChange==='function') onServiceChange();
   }
@@ -7814,7 +7959,12 @@ function buildItemizedPrintRows(hideMatPricing){
   return rows;
 }
 
-function _buildPrintBody(){ return _withFrozenRates(function(){ return _buildPrintBodyCore(); }); }
+// The Stage 2 printout must itemise Stage 2's scope, not Stage 1's — otherwise a client-requested
+// change would price correctly in the total while the line items still listed the original scope.
+function _buildPrintBody(){
+  var fn=function(){ return _withFrozenRates(function(){ return _buildPrintBodyCore(); }); };
+  return (qStage===2) ? _withFQAreas(fn) : fn();
+}
 function _buildPrintBodyCore() {
   // Returns the inner HTML for the quotation printout (no side effects).
   // Use openPrint() to display it; use buildFullQuotationHtml() to save to Drive.
@@ -15717,6 +15867,10 @@ function getDisplaySerial(){
 function captureQuotationSnapshot(){
   return {
     areas:JSON.parse(JSON.stringify(qAreas)),
+    // Each option is a whole priced variant, so Stage 2's own scope belongs to the option too —
+    // without this, switching options would leave the previous option's Final Quotation scope in
+    // place and price the new one off it.
+    fqAreas:fqAreas?JSON.parse(JSON.stringify(fqAreas)):null, fqScopeForked:fqScopeForked,
     fabMode:qFabMode,
     assembly:JSON.parse(JSON.stringify(qAssembly)),
     carcassUnitCount:qCarcassUnitCount,
@@ -15785,6 +15939,9 @@ function restoreQuotationSnapshot(snap){
   qClientSupplyMatList=snap.clientSupplyMatList?JSON.parse(JSON.stringify(snap.clientSupplyMatList)):[];
   qClientMatMultOverride=snap.clientMatMultOverride||0;
   qOtherCosts=Array.isArray(snap.otherCosts)?JSON.parse(JSON.stringify(snap.otherCosts)):[];
+  fqAreas=snap.fqAreas?JSON.parse(JSON.stringify(snap.fqAreas)):null;
+  fqScopeForked=!!(snap.fqScopeForked&&fqAreas);
+  fqInitialized=false;   // this option's Stage 2 must re-initialise from its own snapshot, not the previous option's
   populateInstRegionSelect();
 }
 function syncOptionUI(){
@@ -17315,6 +17472,13 @@ function _additionalOrdersFor(serial){
 }
 // ── Custom confirm modal (replaces native confirm() blocked by Google Sites sandbox) ──
 var _confirmQueue=null;
+// Read-only overlay for content that is a table or list rather than a sentence — _confirm()
+// takes textContent only, so anything structured would arrive as escaped markup.
+function _infoModal(title,html){
+  var t=el('ov-info-title'); if(t) t.innerHTML='<i class="ti ti-info-circle"></i> '+escHtml(title);
+  var b=el('ov-info-body'); if(b) b.innerHTML=html;
+  openModal('ov-info');
+}
 function _confirm(msg,onOk,onCancel){
   var msgEl=el('ov-confirm-msg');
   if(msgEl) msgEl.textContent=msg;
@@ -17633,6 +17797,56 @@ function renderBondIns(){
 }
 
 // ── Final Quotation (Stage 2) functions ──────────────────────────────────
+// Stage 2 mirrors Stage 1 the first time the quotation reaches Stage 2, and owns its scope from
+// then on. Runs ONCE per quotation: fqScopeForked is saved with the quotation, so reopening can
+// never re-copy Stage 1 over changes the client asked for. Stage 1 is locked and approved before
+// Stage 2 is reachable at all (goStage refuses n===2 while !qApproved), so there is nothing to
+// re-sync afterwards — Stage 1 is settled by definition.
+function _forkFQScope(){
+  if(fqScopeForked && fqAreas) return;
+  try{
+    fqAreas=JSON.parse(JSON.stringify(qAreas||[]));
+    fqScopeForked=true;
+  }catch(e){
+    // A structured-clone failure would leave Stage 2 with no scope and price it at zero. Refuse
+    // loudly rather than quietly producing a cheaper Final Quotation than Stage 1.
+    fqAreas=null; fqScopeForked=false;
+    console.error('[fq] scope fork failed',e);
+    showToast('Could not copy the scope into the Final Quotation — reopen Stage 2 before pricing.');
+  }
+}
+// Stage 2's scope differs from Stage 1's only where the client asked for a change — it starts as
+// an exact copy. So the divergence IS the client's change list, with nobody tracking it by hand.
+function _fqScopeChanges(){
+  if(!fqAreas) return null;
+  var A=qAreas||[], B=fqAreas, out=[];
+  function lines(area){
+    var m={};
+    (area.items||[]).forEach(function(it){ m['Cabinet · '+it.type]=(m['Cabinet · '+it.type]||0)+(+it.qty||0); });
+    (area.bomItems||[]).forEach(function(b){ m['Cabinet · '+b.type]=(m['Cabinet · '+b.type]||0)+(+b.qty||0); });
+    (area.matItems||[]).forEach(function(x){ if(x.name) m['Material · '+x.name]=(m['Material · '+x.name]||0)+(+x.qty||0); });
+    (area.hwItems||[]).forEach(function(x){ if(x.name) m['Hardware · '+x.name]=(m['Hardware · '+x.name]||0)+(+x.qty||0); });
+    (area.svcItems||[]).forEach(function(x){ var s=SERVICES[x.svcIdx]; if(s&&s.name) m['Service · '+s.name]=(m['Service · '+s.name]||0)+(+x.qty||0); });
+    ['outsourceMaterials','outsourceHardware'].forEach(function(k){
+      (area[k]||[]).forEach(function(x){ if(x.name) m['Outsource · '+x.name]=(m['Outsource · '+x.name]||0)+(+x.qty||0); });
+    });
+    return m;
+  }
+  function collect(arr){
+    var m={}; (arr||[]).forEach(function(area){
+      var nm=area.name||'Area', L=lines(area);
+      for(var k in L) m[nm+' › '+k]=(m[nm+' › '+k]||0)+L[k];
+    }); return m;
+  }
+  var a=collect(A), b=collect(B), keys={};
+  for(var k in a) keys[k]=1; for(var k2 in b) keys[k2]=1;
+  Object.keys(keys).sort().forEach(function(k){
+    var x=a[k]||0, y=b[k]||0;
+    if(Math.abs(x-y)<1e-9) return;
+    out.push({what:k, from:x, to:y, kind:!x?'added':(!y?'removed':'changed')});
+  });
+  return out;
+}
 function initFinalQuotation() {
   // Deep-copy Stage 1 state into FQ state so values pre-populate, but ONLY as a starting point
   // the first time this quotation ever reaches Stage 2. If it already has its OWN saved Stage 2
@@ -17661,9 +17875,10 @@ function initFinalQuotation() {
   // otherwise reopening a Final Quotation that was priced from a cutting list
   // would silently revert it to the Stage 1 total.
   if(!fqBasisFromSave){
-    fqFabBasis = 'initial';
+    fqFabBasis = 'own';
     fqFabCostOverride = 0;
   }
+  _forkFQScope();
   renderFQFabBasisCard();
   updateFQUploadCardVisibility();
   renderFQCards();
@@ -18009,18 +18224,28 @@ function fqResetCustomCF() {
 function renderFQFabBasisCard() {
   var wrap=el('fq-fab-basis-wrap'); if(!wrap) return;
   var s1FabTotal=0; for(var _a=0;_a<qAreas.length;_a++) s1FabTotal+=getAreaSubtotal(_a);
+  var fqFabTotal=s1FabTotal;
+  if(fqAreas) fqFabTotal=_withFQAreas(function(){ var t=0; for(var i=0;i<qAreas.length;i++) t+=getAreaSubtotal(i); return t; });
+  var chg=_fqScopeChanges()||[];
   var fabCutVal=fqFabCostOverride||0;
   var h='<div class="card">'
     +'<div class="card-head"><h3><i class="ti ti-calculator"></i>Fabrication Cost Basis</h3></div>'
     +'<div class="card-body">'
     +'<p style="font-size:12px;color:var(--text2);margin:0 0 10px">Choose which fabrication cost to use as the base for this final quotation.</p>'
     +'<div style="display:flex;flex-direction:column;gap:10px">'
-    +'<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border-radius:8px;border:1.5px solid '+(fqFabBasis==='initial'?'var(--teal)':'var(--border)')+';background:'+(fqFabBasis==='initial'?'#e8f8f2':'#fafaf8')+'">'
-    +'<input type="radio" name="fq-fab-basis" value="initial" '+(fqFabBasis==='initial'?'checked':'')+' onchange="setFQFabBasis(\'initial\')" style="margin-top:2px">'
-    +'<div>'
-    +'<div style="font-weight:600;font-size:13px">Use Initial Quotation Total</div>'
-    +'<div style="font-size:12px;color:var(--text2);margin-top:2px">Scope of work fabrication total from Stage 1</div>'
-    +'<div style="font-size:13px;font-weight:700;color:var(--navy);margin-top:4px">'+fmtMoney(s1FabTotal)+'</div>'
+    +'<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border-radius:8px;border:1.5px solid '+(fqFabBasis==='own'?'var(--teal)':'var(--border)')+';background:'+(fqFabBasis==='own'?'#e8f8f2':'#fafaf8')+'">'
+    +'<input type="radio" name="fq-fab-basis" value="own" '+(fqFabBasis==='own'?'checked':'')+' onchange="setFQFabBasis(\'own\')" style="margin-top:2px">'
+    +'<div style="flex:1">'
+    +'<div style="font-weight:600;font-size:13px">Use this Final Quotation\'s scope of work</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-top:2px">Starts as an exact copy of the Initial Quotation. Edit it below for changes the client asked for — Stage 1 is not affected.</div>'
+    +'<div style="font-size:13px;font-weight:700;color:var(--navy);margin-top:4px">'+fmtMoney(fqFabTotal)
+    +(Math.abs(fqFabTotal-s1FabTotal)>0.005
+      ? '<span style="font-weight:500;font-size:11px;color:var(--text2);margin-left:6px">Initial was '+fmtMoney(s1FabTotal)+'</span>'
+      : '<span style="font-weight:500;font-size:11px;color:var(--text2);margin-left:6px">same as Initial</span>')
+    +'</div>'
+    +(chg.length
+      ? '<div style="margin-top:6px"><button class="btn" onclick="openFQScopeChanges()" style="font-size:11px;padding:3px 8px;color:var(--amber);border-color:#f5d78e"><i class="ti ti-git-compare"></i>'+chg.length+' change'+(chg.length!==1?'s':'')+' from the Initial Quotation</button></div>'
+      : '')
     +'</div></label>'
     +'<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;border-radius:8px;border:1.5px solid '+(fqFabBasis==='cutting'?'var(--teal)':'var(--border)')+';background:'+(fqFabBasis==='cutting'?'#e8f8f2':'#fafaf8')+'">'
     +'<input type="radio" name="fq-fab-basis" value="cutting" '+(fqFabBasis==='cutting'?'checked':'')+' onchange="setFQFabBasis(\'cutting\')" style="margin-top:2px">'
@@ -18040,12 +18265,41 @@ function updateFQUploadCardVisibility() {
   var show=(fqFabBasis==='cutting');
   var uc=el('fq-upload-card'); if(uc) uc.style.display=show?'block':'none';
   var sc=el('fq-spec-card');   if(sc) sc.style.display=show?'block':'none';
+  // The scope editor is only meaningful when the Final Quotation prices from its own scope.
+  var sw=el('fq-scope-card');  if(sw) sw.style.display=show?'none':'block';
 }
 function setFQFabBasis(basis) {
-  fqFabBasis=basis;
+  fqFabBasis=_fqNormBasis(basis);
   renderFQFabBasisCard();
   updateFQUploadCardVisibility();
+  renderFQItems();
   recalcFQ();
+}
+// Quotations saved before Stage 2 had its own scope carry basis 'initial'. fqAreas is forked as
+// an exact copy of Stage 1, so 'own' prices those identically — the value is renamed, not
+// reinterpreted. Anything unrecognised also lands on 'own' rather than silently zeroing the
+// fabrication base, which is what an unknown basis would otherwise do.
+function _fqNormBasis(b){ return b==='cutting' ? 'cutting' : 'own'; }
+function openFQScopeChanges(){
+  var chg=_fqScopeChanges()||[];
+  var h='<div style="max-height:52vh;overflow:auto">';
+  if(!chg.length){
+    h+='<p style="font-size:13px;color:var(--text2);margin:0">This Final Quotation\'s scope is identical to the Initial Quotation.</p>';
+  } else {
+    h+='<p style="font-size:12px;color:var(--text2);margin:0 0 10px">The Final Quotation starts as an exact copy of the Initial Quotation, so everything below was changed here — at the client\'s request. The Initial Quotation is unchanged.</p>'
+      +'<table style="width:100%;border-collapse:collapse;font-size:12px">'
+      +'<tr style="background:#f4f4f2"><th style="text-align:left;padding:5px 7px">Item</th><th style="text-align:right;padding:5px 7px">Initial</th><th style="text-align:right;padding:5px 7px">Final</th></tr>';
+    chg.forEach(function(c){
+      var col=c.kind==='added'?'var(--teal)':(c.kind==='removed'?'var(--coral)':'var(--amber)');
+      h+='<tr style="border-top:.5px solid var(--border)">'
+        +'<td style="padding:5px 7px"><span style="color:'+col+';font-weight:600">'+(c.kind==='added'?'+':(c.kind==='removed'?'−':'±'))+'</span> '+escHtml(c.what)+'</td>'
+        +'<td style="text-align:right;padding:5px 7px;color:var(--text2)">'+(c.from||'—')+'</td>'
+        +'<td style="text-align:right;padding:5px 7px;font-weight:600">'+(c.to||'—')+'</td></tr>';
+    });
+    h+='</table>';
+  }
+  h+='</div>';
+  _infoModal('Changes from the Initial Quotation',h);
 }
 function fqSaveDraft() {
   fqPreviewed=true;
@@ -18168,7 +18422,15 @@ function checkFQSchedule() {
   var po=el('fq-prem-ok');  if(po) po.style.display=fqPremApproved?'block':'none';
 }
 
-function recalcFQ(){ return _withFrozenRates(function(){ return _recalcFQCore(); }); }
+// Prices the Final Quotation off Stage 2's OWN scope. Everything _recalcFQCore reaches —
+// getAreaSubtotal, getTotU, getInstallCarcassUnits, the cutting-list and design charges — reads
+// the global qAreas, so the swap is all it takes: the whole Stage 2 chain follows Stage 2's
+// scope, and Stage 1 keeps its own.
+function recalcFQ(){
+  return _withFQAreas(function(){
+    return _withFrozenRates(function(){ return _recalcFQCore(); });
+  });
+}
 function _recalcFQCore() {
   var aCF=(fqCustomCFApproved&&fqCustomCF)?fqCustomCF:CF;
   var cf=aCF.fabContingency||0, fabBuf=aCF.fabBuffer||0;
@@ -18182,6 +18444,7 @@ function _recalcFQCore() {
   if(!ni&&qFabCont&&qFabCont.pct!=null) cf=qFabCont.pct;   // see recalc() — same rule, both stages
   var na=ni||(svc==='Fabrication only'&&qAssembly&&qAssembly.enabled);
 
+  // qAreas is Stage 2's own fqAreas here — see recalcFQ.
   var fabBase=0;
   if(fqFabBasis==='cutting'){
     fabBase=fqFabCostOverride||0;
@@ -18190,6 +18453,7 @@ function _recalcFQCore() {
   }
   var outsourceBase=0;
   if(fqFabBasis!=='cutting') for(var _oa=0;_oa<qAreas.length;_oa++) outsourceBase+=getAreaOutsourceSubtotal(_oa);
+  _refreshScopeSums('fq-');   // live per-row amounts in the Stage 2 scope editor
   var outRates=getOutRates();
   var outsourceFinal=outsourceBase*(1+outRates.contingency/100)*(1+outRates.buffer/100)*(1+outRates.markup/100);
   var totU=getTotU();
@@ -21869,7 +22133,17 @@ function _computeShipmentWeight(){
 }
 
 // ── BOM Report ────────────────────────────────────────────────────────────
+// A BOM report generated from Stage 2 must list what will actually be built — Stage 2's scope.
+// Keyed on the stage being viewed, the same rule _buildPrintBody uses, so the banner and the
+// materials can never disagree. (_bomIsFinal, below, was keyed on fqInitialized, which stays true
+// for the rest of the session once Stage 2 has been opened — harmless while the two scopes were
+// always identical, but it would now label a Stage 1 report as Final and list Stage 2's scope.)
 function _collectBomData(){
+  var fn=_collectBomDataCore;
+  return _bomIsFinal() ? _withFQAreas(fn) : fn();
+}
+function _bomIsFinal(){ return qStage===2 && !!(fqLocked||fqInitialized); }
+function _collectBomDataCore(){
   var mode=qFabMode,matMap={},hwMap={},areas=[];
   var tplSrc=dbTemplates.length?dbTemplates:INIT_TEMPLATES.map(function(t){return {cabinet:t[0],category:t[1],name:t[2],unit:t[3],qty:parseFloat(t[4])||0,price:parseFloat(t[5])||0};});
   function _aM(map,arr,name,qty,unit,price){
@@ -21922,7 +22196,7 @@ function _collectBomData(){
 }
 function _buildBomHtml(d, optLabel){
   var cn=(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'';
-  var isFinal=!!(fqLocked||fqInitialized);
+  var isFinal=_bomIsFinal();   // must match the scope _collectBomData actually read
   var stage=isFinal?'Stage 2 — Final Quotation':'Stage 1 — Initial Quotation';
   var mLabel={carcass:'By Furniture Type (Carcass)',services:'By Cutting List (Services)',bom:'By BOM'}[d.mode]||d.mode;
   var co=getCompanyName()||'World Class Laminate, Inc.';
@@ -23731,6 +24005,9 @@ function getFullQuotationState(){
     // cost was silently lost on reopen — and, worse, the globals leaked between
     // quotations (see fqInitialized in restoreFullQuotationState).
     fqFabBasis:fqFabBasis, fqFabCostOverride:fqFabCostOverride,
+    // Stage 2's own scope. Saved in full — it is what the Final Quotation is priced from, so
+    // losing it would silently reprice the job back to the Initial Quotation's scope.
+    fqAreas:fqAreas?JSON.parse(JSON.stringify(fqAreas)):null, fqScopeForked:fqScopeForked,
     lockedTotal:qLockedTotal, fqLockedTotal:fqLockedTotal,
     fqClientApproved:fqClientApproved, fqClientApprovedAt:fqClientApprovedAt,
     fqVatApproved:fqVatApproved, fqDiscPct:fqDiscPct, fqDiscApproved:fqDiscApproved, fqPremApproved:fqPremApproved,
@@ -23875,12 +24152,16 @@ function restoreFullQuotationState(state){
   // The basis this quotation actually saved wins over initFinalQuotation()'s
   // reset to 'initial' — same pattern as fqApprovalsFromSave above.
   if(state.fqFabBasis!==undefined){
-    fqFabBasis=state.fqFabBasis||'initial';
+    fqFabBasis=_fqNormBasis(state.fqFabBasis);   // 'initial' from older saves means 'own' — see _fqNormBasis
     fqFabCostOverride=state.fqFabCostOverride||0;
     fqBasisFromSave=true;
   } else {
-    fqFabBasis='initial'; fqFabCostOverride=0; fqBasisFromSave=false;
+    fqFabBasis='own'; fqFabCostOverride=0; fqBasisFromSave=false;
   }
+  // Stage 2's own scope. A quotation saved before this existed has none — it forks from Stage 1
+  // the next time Stage 2 is opened, which reproduces exactly what it priced at before.
+  fqAreas = state.fqAreas ? JSON.parse(JSON.stringify(state.fqAreas)) : null;
+  fqScopeForked = !!(state.fqScopeForked && fqAreas);
   fqClientApproved=!!state.fqClientApproved; fqClientApprovedAt=state.fqClientApprovedAt||'';
   // Stage 2's OWN approval state (VAT/discount/premium/CF override), if this quotation has ever
   // saved one — see fqApprovalsFromSave above. state.fqVatApproved!==undefined distinguishes "this
