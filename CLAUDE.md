@@ -3850,8 +3850,17 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
   the rank fallback treats "In Final Quotation" as won on the reasoning that Stage 2 is unreachable
   without client approval. True of the app, but inferred rather than recorded for pre-flag rows.
   Accept, or count only recorded approvals?
-- **Roll-up trade-off**: the rolled-up job shows the ORIGINAL preparer, so whoever prepared the
-  additional order gets no credit. Confirm that is wanted.
+- ~~Roll-up trade-off~~ **DECIDED 2026-08-06 — keep it.** The original preparer keeps the credit;
+  whoever prepares an additional order gets no separate win. Accepted knowingly. No work required,
+  do not re-raise.
+- ⚠ **The 36.5× KPI figure is misleading — re-measured 2026-08-06.** NOT a broad reclassification:
+  **97% of it is Bella Ferma counted twice** (₱898,462 + ₱640,323 — the suspected duplicate). The
+  rest is ₱8,775 + ₱7,726 + ₱3,043. If Stephanie confirms one job, real won revenue is ~₱940K and
+  the jump is ~21×, not 36.5×. **Both KPI decisions are parked behind Bella Ferma** — there is
+  nothing useful to decide while the largest number in the set is unresolved.
+  Also found: **not one quotation has a recorded approval timestamp** — every "won" figure today
+  is inferred or comes from a status label with no date. And **GYMFIX counts as won at ₱0.00**,
+  dragging average deal size down until it is corrected.
 ## Rommel's to do
 - ~~QT-M00000102 (One Oak Craft)~~ **DONE 2026-08-05** — Joanna accepted the 3% counter at 08:09.
   Verified: subtotal 33,506.86 less 3% = 32,501.65, x1.12 VAT = 36,401.85, matching the stored
@@ -3894,9 +3903,9 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
   same day, one named STUDIO TILLE) and **QT-M00000027 (Joanna, ₱90,813.44, 9 line items)** is the
   one worth checking before it goes. Re-count before starting: this figure has already moved once.
 - **Google Sites embed width** — needed before the quotation-page layout rework.
-- **Checked by / Noted by signatures** — stamp on PIN approval, or a separate "sign" action?
-  `qSignatures.checked`/`.noted` exist and the printout reads them. Andrei Salvador's signature and
-  the approvers' are still missing.
+- ~~Checked by / Noted by signatures — how?~~ **DESIGN SETTLED 2026-08-06**, see the signature-flow
+  spec below. Still Rommel's to supply: **the per-company threshold amounts**, and the missing
+  signature images (Andrei Salvador's, and all four approvers').
 - **Rotate the Wufoo API key** — public in git history; the only item with a security clock.
 - ~~Wi-Fi power settings~~ **DONE 2026-08-05.**
 - **Price DB blank-unit rows** — re-measured exactly 2026-08-06: **153,552 rows / 124,132 distinct
@@ -4000,6 +4009,49 @@ price and a `cabinet_templates` row. It carries most of the orphan template line
 hardware names with no catalogue match — see the 2026-07-30 session). Its components-per-unit is
 **1**, the lowest of the 13, which suggests it is already treated as an area/sheet product rather
 than a cabinet. That may be exactly what he wants changed.
+### 3. Checked by / Noted by signature flow — SPECIFIED 2026-08-06, not built
+Rommel's design, settled in full. Mirrors the existing VAT/discount approval machinery rather
+than inventing a second mechanism.
+
+**Setup**
+- **Checked by** and **Noted by** signatories are assigned in **Settings → Approval Routing**,
+  alongside `nonvat`/`discount`/`override`/`premium` — so per company, changeable without code.
+- **Noted-by threshold**, set by Admin or Director, **defined PER COMPANY** ("ruling may be
+  different from each"). Above it, Noted by is required; below it, Checked by alone.
+- **Threshold basis: total project cost BEFORE VAT** (fixed — not the grand total). Rommel:
+  *"the basis would be the total project cost before vat."* VAT is not project cost.
+- The ₱20,000 figure is an EXAMPLE. Build the setting now; the real numbers come later
+  ("this is something i need to discuss but i want to include this to the set up now").
+
+**Flow**
+1. User locks the quotation → a **Request signature** button appears.
+2. User presses it → request routes to **Checked by** first.
+3. Checked by enters their **PIN** → on approval it **automatically forwards to Noted by**
+   (only when the ex-VAT total is above that company's threshold).
+4. Same rules as VAT/discount: PIN-gated, **does not proceed if not approved**, requester
+   **notified either way**.
+5. A correction means the user must **trigger the request again** — corrections never inherit
+   the previous signatures.
+
+**Decided alongside it**
+- **Unlocking CLEARS both signatures automatically.** Enforced, not left to the user to
+  remember — a changed document must never carry a signature approving the older version. Same
+  principle as changing a discount's scope cancelling its approval.
+- **Sending is NOT blocked** — warn but allow. The user is told the quotation is unsigned and it
+  is recorded in the activity log, so a slow approver never stops a job going out.
+
+**What already exists to build on:** `qSignatures.checked` / `.noted` and the printout that reads
+them; `APPR_ROUTING` and `findApproverForAction()`; PIN verification (`_verifyApproverPin`);
+`submitApprovalRequest` + the poll + Lami announcements; `_freezeRates`/unlock hooks for the
+clearing rule.
+
+**Still open:** the actual threshold amounts per company, and whether any role may sign for
+another (delegation already exists for approvals — does it extend to signing?).
+
+### 4. Additional-order credit — DECIDED 2026-08-06, no change needed
+Rommel chose **original preparer keeps the credit** — i.e. the behaviour already shipped. The
+whole job counts once, under whoever prepared the original; whoever prepares an additional order
+gets no separate win. Accepted knowingly. **No work required; do not re-raise.**
 ## Still to build / decide
 - **Materials editing in the app** — parked 2026-08-05. Hardware is done; Materials is 153,552 rows
   so it cannot be an inline list. Needs a **search-first** tab: type to find, edit price/unit, add
