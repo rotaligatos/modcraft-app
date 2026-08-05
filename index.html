@@ -1362,6 +1362,7 @@ tr.cl-row:hover td{background:#f4f7fb}
           <button class="btn btn-primary" onclick="loadPriceDatabase(true)"><i class="ti ti-refresh"></i>Reload from Sheets</button>
           <button class="btn" onclick="initPriceDB()"><i class="ti ti-database-import"></i>Initialize DB (first-time setup)</button>
           <button class="btn" onclick="dedupeServicesSheet()" style="color:var(--amber)"><i class="ti ti-filter"></i>Clean duplicates</button>
+          <button class="btn" onclick="normalizeServiceUnits()" style="color:var(--amber)" title="Rewrites /lm, /pc and /sq. m to the standard spelling. Price and basis unchanged."><i class="ti ti-ruler-measure"></i>Normalize units</button>
         </div>
         <div style="border:.5px solid var(--border);border-radius:10px;padding:14px;margin-bottom:14px">
           <div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;display:flex;align-items:center;gap:5px"><i class="ti ti-file-import"></i>Import from Excel</div>
@@ -13827,6 +13828,71 @@ function removeCarcassType(name){
     var idx=CARCASS_NAMES.indexOf(name);
     if(idx>-1) CARCASS_NAMES.splice(idx,1);
     renderCarcassSettings();
+  });
+}
+// The same unit written three ways — '/lm' (24) and 'lm' (14), '/pc' (5) and 'piece' (5),
+// '/sq. m' (2) and 'sqm' (1). Harmless to pricing, but it is why the UOM dropdown could not
+// show a service's real unit until _unitOptsHtml, and why the Cost Breakdown card and the
+// Services tab appeared to disagree about Board Assembly.
+//
+// Spelling only. The canonical form on the right is already in UNIT_OPTS and already in real
+// use in the catalogue, so nothing is invented and no price basis changes — '/sq. m' and 'sqm'
+// are the same square metre. 'min. charge' is deliberately NOT in this table: it is not a
+// spelling of a unit, it is a pricing rule sitting in the unit column, and picking a unit for
+// it would be a pricing decision, not a rename.
+var SVC_UNIT_CANON = {'/lm':'lm', '/pc':'piece', '/sq. m':'sqm', '/sqm':'sqm', '/hole':'hole', '/carcass':'carcass', '/set':'set', '/piece':'piece'};
+function _canonServiceUnit(u){
+  var t=String(u==null?'':u).trim();
+  if(SVC_UNIT_CANON[t]) return SVC_UNIT_CANON[t];
+  var low=t.toLowerCase();
+  if(SVC_UNIT_CANON[low]) return SVC_UNIT_CANON[low];
+  return t;
+}
+function normalizeServiceUnits(){
+  if(!gToken){showToast('Sign in first.');return;}
+  var s=el('db-status-row');
+  if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Reading Services sheet…</div>';
+  priceDbGet('Services!A:C').then(function(data){
+    if(data.error) throw new Error(data.error.message);
+    var rows=(data.values||[]);
+    if(rows.length<2){ if(s)s.innerHTML='<div class="alert alert-warn">Services sheet is empty.</div>'; return; }
+    var out=[rows[0]], changes=[], untouched={};
+    for(var i=1;i<rows.length;i++){
+      var r=rows[i].slice(), was=(r[1]||'').trim(), now=_canonServiceUnit(was);
+      if(was!==now){ changes.push((r[0]||'(unnamed)')+': '+was+' → '+now); r[1]=now; }
+      else if(was && UNIT_OPTS.map(function(o){return o.v;}).indexOf(was)<0) untouched[was]=(untouched[was]||0)+1;
+      out.push(r);
+    }
+    var leftovers=Object.keys(untouched);
+    if(!changes.length){
+      if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Units are already consistent'
+        +(leftovers.length?'. Left as-is (not a spelling variant): <b>'+leftovers.map(function(k){return escHtml(k)+' ×'+untouched[k];}).join(', ')+'</b>':'')+'</div>';
+      return;
+    }
+    // Editing the shared catalogue — say exactly what will change before doing it.
+    var preview=changes.slice(0,10).join('\n')+(changes.length>10?'\nand '+(changes.length-10)+' more':'');
+    _confirm('Normalize '+changes.length+' service unit'+(changes.length>1?'s':'')+'?\n\n'+preview
+      +'\n\nSpelling only — the price and the basis are unchanged. Written to both the Price DB sheet and Supabase.',
+    function(){
+      if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Writing…</div>';
+      priceDbClear('Services!A:Z').then(function(){
+        return priceDbUpdate('Services!A1',out);
+      }).then(function(){
+        // Both stores in one action — a Sheet-only edit goes stale in Supabase with no warning,
+        // and connected users read Supabase first.
+        return supaReplaceTable('price_services',out.slice(1).map(function(r){return {name:r[0],unit:r[1],price:r[2]};}));
+      }).then(function(){
+        if(s)s.innerHTML='<div class="alert alert-success"><i class="ti ti-check"></i> Normalized '+changes.length+' unit'+(changes.length>1?'s':'')+'.'
+          +(leftovers.length?' Left as-is (not a spelling variant): <b>'+leftovers.map(function(k){return escHtml(k)+' ×'+untouched[k];}).join(', ')+'</b>.':'')
+          +' Reload to refresh dropdowns.</div>';
+        logActivity('Price DB: normalized '+changes.length+' service unit'+(changes.length>1?'s':'')+' ('+changes.slice(0,6).join('; ')+(changes.length>6?'; …':'')+').');
+        loadPriceDatabase(false);
+      }).catch(function(e){
+        if(s)s.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i> Error: '+escHtml(e.message||e)+'</div>';
+      });
+    });
+  }).catch(function(e){
+    if(s)s.innerHTML='<div class="alert alert-error"><i class="ti ti-alert-circle"></i> Error: '+escHtml(e.message||e)+'</div>';
   });
 }
 function dedupeServicesSheet(){
