@@ -3890,18 +3890,36 @@ with RLS, dual-written on every action; `messages` already fans out to email and
 `users.pin_hash` / `pin_salt`. A phone client would talk to the same table the desktop app does —
 no new backend, no second source of truth.
 
-**Open questions to settle BEFORE building** (each changes the work materially):
-- **Installable app, or a phone-friendly web page?** A separate mobile-optimised page served from
-  the same GitHub Pages repo needs no store, no build chain, and works the day it ships. A real
-  installable app (PWA or native) buys **push notifications** and a home-screen icon. Push is the
-  thing that actually solves "catching up" — email and Chat already arrive and are still missed.
-- **How does he authenticate on a phone?** Google sign-in already works; the PIN is the approval
-  gate. Typing a PIN on a phone is fine — but is a PIN sufficient authority on a device that might
-  sit unlocked in a bag?
-- **Does it show the money?** Approving a discount sensibly needs the total and the margin. That is
-  `canViewCostReport()` data — fine for him, but the same screen would serve Managers.
-- **Counter-offer on mobile** needs number entry, and per this session the requester must still
-  accept afterwards.
+**DECIDED 2026-08-05 (Rommel):**
+- **Installable, with push notifications.** Push is the point — email and Chat already arrive and
+  are still missed.
+- **Show the money: total, discount amount AND margin.**
+- **THE KEY REQUIREMENT, in his words:** *"I want to work like the override that shows the figures
+  when I make the adjustments. This way, Im not blinded by just approving or rejecting countering
+  the request."* So the figures must be **LIVE as he types a counter percentage**, exactly as
+  `_ccfUpdateProfit()` does on the CF override modal — type 3%, see the resulting total and margin;
+  type 5%, see them move. Not a static summary of the request.
+
+**The one hard architectural question — where the live figures come from.**
+`_ccfUpdateProfit()` gets its numbers by running the quotation's own `recalc()` and reading
+`_pCalc`. A phone has no quotation loaded, and a second implementation of the pricing maths on
+mobile WOULD drift — the same failure as `recalc`/`recalcFQ`, and as the four disagreeing copies of
+the service line total fixed this session. Three options, in order of preference:
+1. **Fetch the quotation's state and compute from it** — `quotation_states` already holds the whole
+   state as one JSON row and RLS already allows the approver to read it. Most faithful, but needs
+   the pricing engine available to the phone, i.e. extracting it from `index.html` into a shared
+   file both load. That extraction is the real cost of this feature and is also the right long-term
+   move.
+2. **Store the few numbers a live preview needs on the request itself** (discountable base, direct
+   cost, VAT flag) and do linear arithmetic on the phone. Cheap and no engine needed — but ⚠ it
+   goes stale: QT-M00000102's scope grew ~₱1,972 AFTER the request was sent, so a request-time
+   snapshot would have shown the wrong figures.
+3. Read-only mobile that opens the laptop for anything needing judgement — rejected by the
+   requirement above.
+
+**Still to settle:** authentication on a phone (Google sign-in works; is a PIN enough authority on
+a device that may sit unlocked in a bag?), and that a counter still requires the requester to
+accept afterwards.
 
 **Standing constraint worth remembering:** Google Chat webhooks post to a SPACE, not a DM, so the
 current notification path already exposes client name, serial and reason to everyone in that space
