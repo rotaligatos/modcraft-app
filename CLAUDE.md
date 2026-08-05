@@ -3872,7 +3872,17 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
 
 ## NEW 2026-08-05 — raised by Rommel, not started
 
-### 1. Mobile approvals app — the priority
+### 1. Mobile approvals app — ROADMAP, not scheduled (Rommel, 2026-08-05: "not yet")
+
+**The goal, in his words: *"to make all users especially the approver to be always on top of
+things."*** That is the objective to design against — the mobile app is the currently-favoured
+means, not the end. Anything that closes the gap between a request being raised and the right
+person knowing about it serves the same goal, and cheaper wins may exist (the Approvals nav tab
+and the badge that no longer goes dark on a counter, both shipped 2026-08-05, were exactly that).
+
+Decisions below are settled for whenever it IS picked up. **Do not start without asking** — it
+begins with extracting the pricing engine out of `index.html`, which touches the live app.
+
 Rommel: *"Im having challenges to keep on catching up the request. What I want to do here is a
 mobile app just for those so I can immediately approve, review or disapprove the request even when
 im away with my laptop."*
