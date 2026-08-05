@@ -19993,6 +19993,166 @@ function _sheetsGetWithRetry(range,maxRetries){
 // Quotation State, minus 1 for the header row each) to confirm completeness.
 // Idempotent — safe to re-run; every write is an upsert, so it never
 // duplicates or loses data, it just re-syncs anything that changed.
+// ── One-time reconciliation: quotations filed under a stale preview serial ───────────────
+// Nine quotations were recorded under the number they were FIRST previewed as, while they
+// display and print under the number they were actually saved with (see
+// _syncBaseSerialToPreview for the cause, fixed 2026-08-06 — this repairs the rows that
+// pre-date the fix).
+//
+// Rommel's rule: keep the LATEST number. The old number is retained in prevSerials so a
+// client or an email still quoting it can be traced — some of them were printed under one
+// number and recorded under the other, so which one a client holds is not knowable.
+//
+// Runs in the app, not against the database directly, because the Google Sheet is still the
+// read path for anyone not connected to Supabase — repairing one store and not the other
+// would widen the split rather than close it.
+//
+// DRY RUN BY DEFAULT. reconcileRenumbered() reports; reconcileRenumbered(true) writes.
+var RENUMBER_PLAN=[
+  {from:'QT-W00000027', to:'QT-M00000043'},
+  {from:'QT-W00000028', to:'QT-M00000101'},
+  {from:'QT-W00000030', to:'QT-M00000082'},
+  {from:'QT-W00000037', to:'QT-M00000070'},
+  {from:'QT-W00000043', to:'QT-M00000076'},
+  {from:'QT-W00000048', to:'QT-M00000086'},
+  {from:'QT-M00000036', to:'QT-W00000029'},
+  // Duplicate: one job recorded twice. Keep the later row, retire the earlier. Both Cancelled,
+  // so no live figure moves.
+  {from:'QT-M00000040', to:'QT-M00000054', duplicate:true}
+  // QT-W00000036 -> QT-W00000039 (Bella Ferma) deliberately ABSENT — parked pending Stephanie,
+  // because removing the older row would drop P640,323 of live pipeline.
+];
+function reconcileRenumbered(execute){
+  if(!gToken){ console.log('Sign in first.'); return; }
+  var mode=execute?'EXECUTE':'DRY RUN';
+  console.log('=== Renumber reconciliation ('+mode+') ===');
+  return Promise.all([
+    sheetsGet('Quotations!A:X'),
+    sheetsGet('Quotation State!A:K')
+  ]).then(function(res){
+    var qRows=(res[0].values||[]), sRows=(res[1].values||[]);
+    var qIdx={}, sIdx={};
+    for(var i=1;i<qRows.length;i++) if(qRows[i][0]) qIdx[String(qRows[i][0]).trim()]=i;
+    for(var j=1;j<sRows.length;j++) if(sRows[j][0]) sIdx[String(sRows[j][0]).trim()]=j;
+
+    var ops=[], skipped=[];
+    RENUMBER_PLAN.forEach(function(p){
+      var qi=qIdx[p.from], si=sIdx[p.from];
+      if(qi==null&&si==null){ skipped.push(p.from+' — not found in either sheet (already done?)'); return; }
+      // Safety: the state must actually claim the destination serial. If it does not, this row is
+      // not the case we diagnosed and must be left alone.
+      var stateJson='', claims='';
+      if(si!=null){
+        stateJson=(sRows[si].slice(1)||[]).join('');
+        try{ claims=JSON.parse(stateJson).serial||''; }catch(e){ claims='(unparseable)'; }
+        if(claims!==p.to){
+          skipped.push(p.from+' — its state claims '+JSON.stringify(claims)+', not '+p.to+'. LEFT ALONE.');
+          return;
+        }
+      }
+      if(!p.duplicate && qIdx[p.to]!=null){
+        skipped.push(p.from+' — '+p.to+' already exists in Quotations. LEFT ALONE.');
+        return;
+      }
+      ops.push({p:p, qi:qi, si:si, json:stateJson, client:(qi!=null?qRows[qi][2]:''), total:(qi!=null?qRows[qi][5]:'')});
+    });
+
+    console.log('');
+    ops.forEach(function(o){
+      console.log((o.p.duplicate?'REMOVE DUPLICATE  ':'RENAME            ')
+        +o.p.from+'  ->  '+o.p.to+'   '+(o.client||'')+'  '+(o.total||''));
+    });
+    skipped.forEach(function(s){ console.log('SKIPPED           '+s); });
+    console.log('');
+    console.log(ops.length+' to change, '+skipped.length+' skipped.');
+    if(!execute){ console.log('Dry run only. Run reconcileRenumbered(true) to apply.'); return {ops:ops.length,skipped:skipped}; }
+
+    // ── apply, one at a time so a failure cannot half-finish the set ──
+    var done=0, failed=[];
+    return ops.reduce(function(chain,o){
+      return chain.then(function(){
+        var p=o.p;
+        var writes=[];
+        if(p.duplicate){
+          // Retire the earlier row: blank its serial cell is NOT enough (the row would still be
+          // read), so remove the row outright from both sheets and from Supabase.
+          writes.push(sheetsDeleteRowByKeyP('Quotations',p.from));
+          if(o.si!=null) writes.push(sheetsDeleteRowByKeyP('Quotation State',p.from));
+        } else {
+          // Quotations: move the row's key to the new serial.
+          if(o.qi!=null) writes.push(sheetsUpdate('Quotations!A'+(o.qi+1),[[p.to]]));
+          // Quotation State: re-key the row AND correct the JSON inside it, so a later save does
+          // not simply re-file it under the old number again.
+          if(o.si!=null){
+            var st={};
+            try{ st=JSON.parse(o.json); }catch(e){ st=null; }
+            if(st){
+              st.baseSerial=p.to;
+              st.prevSerials=(st.prevSerials||[]);
+              if(st.prevSerials.indexOf(p.from)<0) st.prevSerials.push(p.from);
+              var row=_qstateRow(p.to,JSON.stringify(st));
+              writes.push(sheetsUpdate('Quotation State!A'+(o.si+1)+':K'+(o.si+1),[row]));
+            } else {
+              writes.push(sheetsUpdate('Quotation State!A'+(o.si+1),[[p.to]]));
+            }
+          }
+        }
+        return Promise.all(writes).then(function(){
+          return _supaReconcileOne(p);
+        }).then(function(){
+          done++;
+          logActivity('Renumber reconciled: '+p.from+(p.duplicate?' removed (duplicate of '+p.to+')':' → '+p.to));
+          console.log('  done  '+p.from+' → '+p.to);
+        }).catch(function(e){
+          failed.push(p.from+': '+(e&&e.message||e));
+          console.warn('  FAILED '+p.from, e);
+        });
+      });
+    }, Promise.resolve()).then(function(){
+      console.log('');
+      console.log('=== DONE — '+done+' applied, '+failed.length+' failed ===');
+      if(failed.length) console.log(failed);
+      console.log('Reload the app to see the corrected numbers.');
+      return {done:done,failed:failed};
+    });
+  });
+}
+// Sheets row delete as a promise (sheetsDeleteRowByKey is callback-based)
+function sheetsDeleteRowByKeyP(sheet,key){
+  return new Promise(function(res){ sheetsDeleteRowByKey(sheet,key,function(){ res(); }); });
+}
+// Supabase side. quotation_states / board_layouts / drawing_analyses cascade on DELETE but are
+// NO ACTION on UPDATE, so the parent cannot simply be renamed: insert the new parent, repoint the
+// children, then delete the old parent. approval_requests has no FK and would otherwise be left
+// pointing at a serial that no longer exists.
+function _supaReconcileOne(p){
+  if(!supaReady()) return Promise.resolve();
+  return supa.from('quotations').select('*').eq('serial',p.from).maybeSingle().then(function(r){
+    var oldRow=r&&r.data;
+    if(p.duplicate){
+      return supa.from('approval_requests').update({serial:p.to}).eq('serial',p.from)
+        .then(function(){ return supa.from('quotations').delete().eq('serial',p.from); });
+    }
+    if(!oldRow) return null;
+    var nw=Object.assign({},oldRow,{serial:p.to,base_serial:p.to});
+    return supa.from('quotations').upsert(nw,{onConflict:'serial'}).then(function(){
+      return supa.from('quotation_states').select('state').eq('serial',p.from).maybeSingle();
+    }).then(function(sr){
+      var st=sr&&sr.data&&sr.data.state;
+      if(!st) return null;
+      st.baseSerial=p.to;
+      st.prevSerials=(st.prevSerials||[]);
+      if(st.prevSerials.indexOf(p.from)<0) st.prevSerials.push(p.from);
+      return supa.from('quotation_states').upsert({serial:p.to,state:st},{onConflict:'serial'});
+    }).then(function(){
+      return supa.from('approval_requests').update({serial:p.to}).eq('serial',p.from);
+    }).then(function(){
+      // children now point at the new parent, so this cascade removes only the stale rows
+      return supa.from('quotations').delete().eq('serial',p.from);
+    });
+  });
+}
+
 function supaMigrateAll(){
   if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(); }
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(); }
