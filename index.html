@@ -4756,6 +4756,7 @@ function initQuotation() {
   qLog=[]; qPieces=[]; _pCalc={};
   qVatApproved=true; qDiscApproved=false; qDiscPct=0; qPremApproved=false;
   qDiscScope={materials:false,edgeband:false,hardware:false,services:false,installation:false};
+  qClientMatSvcExcl={};
   qCustomCF=null; qCustomCFApproved=false;
   qOutMarkup=null; qOutContingency=null; qOutBuffer=null;
   qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
@@ -5661,11 +5662,83 @@ function clientMatMult(){
   var m=(qClientMatMultOverride>0)?qClientMatMultOverride:(CF.clientMatServiceMult||1);
   return (m>0)?m:1;
 }
+// The uplift used to hit EVERY service in the quotation. Some genuinely carry the extra risk of
+// working someone else's board and some do not, so it can now be turned off per service.
+//
+// EXCLUSIONS are stored, not inclusions. That way the default — an empty list — means every
+// service is uplifted, which is exactly the behaviour that existed before, and a service added
+// later is uplifted automatically rather than silently escaping the uplift because nobody
+// remembered to tick it. Under-charging quietly is the failure that matters here.
+//
+// Keyed by service NAME, so the decision holds wherever that service appears — every area, and
+// BOM rows too, which carry a name rather than a catalogue index.
+var qClientMatSvcExcl={};
+function _svcNameOf(si){
+  if(!si) return '';
+  if(si.name) return si.name;
+  var s=SERVICES[si.svcIdx];
+  return s?(s.name||''):'';
+}
+function _svcKey(nm){ return String(nm||'').trim().toLowerCase(); }
+// Distinct services actually in this quotation, in both modes — the picker lists what is really
+// being quoted rather than the whole catalogue, so it stays short and relevant.
+function _quotedServiceNames(){
+  var seen={}, out=[];
+  function add(nm){ var k=_svcKey(nm); if(!k||seen[k]) return; seen[k]=1; out.push(nm); }
+  for(var a=0;a<qAreas.length;a++){
+    var ar=qAreas[a]; if(!ar) continue;
+    (ar.svcItems||[]).forEach(function(si){ add(_svcNameOf(si)); });
+    (ar.bomItems||[]).forEach(function(bi){ (bi.services||[]).forEach(function(r){ add(r.name); }); });
+  }
+  return out;
+}
+function onClientMatSvcToggle(nm,on){
+  var k=_svcKey(nm);
+  if(on) delete qClientMatSvcExcl[k]; else qClientMatSvcExcl[k]=true;
+  renderClientMatSection();
+  if(typeof renderItems==='function') renderItems();   // the per-line figures change
+  if(typeof recalc==='function') recalc();
+}
+function _clientMatSvcAll(on){
+  var names=_quotedServiceNames();
+  for(var i=0;i<names.length;i++){
+    var k=_svcKey(names[i]);
+    if(on) delete qClientMatSvcExcl[k]; else qClientMatSvcExcl[k]=true;
+  }
+  renderClientMatSection();
+  if(typeof renderItems==='function') renderItems();
+  if(typeof recalc==='function') recalc();
+}
+function _clientMatSvcPickerHtml(){
+  var names=_quotedServiceNames(), mult=_cmMult();
+  if(!names.length) return '<div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Add a service to the scope of work to choose which ones the &times;'+mult.toFixed(2)+' applies to.</div>';
+  var on=0; for(var i=0;i<names.length;i++) if(!qClientMatSvcExcl[_svcKey(names[i])]) on++;
+  var h='<div style="margin-top:10px;padding-top:9px;border-top:.5px solid var(--border)">'
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px">'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Apply the &times;'+mult.toFixed(2)+' to</span>'
+    +'<span style="font-size:11px;color:'+(on===names.length?'var(--text2)':'var(--amber)')+';font-weight:600">'+on+' of '+names.length+' services</span>'
+    +'<button class="btn" onclick="_clientMatSvcAll(true)" style="font-size:10px;padding:2px 7px">All</button>'
+    +'<button class="btn" onclick="_clientMatSvcAll(false)" style="font-size:10px;padding:2px 7px">None</button>'
+    +'</div><div style="display:flex;flex-direction:column;gap:2px;max-height:170px;overflow-y:auto">';
+  for(var j=0;j<names.length;j++){
+    var checked=!qClientMatSvcExcl[_svcKey(names[j])];
+    h+='<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer'+(checked?'':';color:var(--muted)')+'">'
+      +'<input type="checkbox"'+(checked?' checked':'')+' onchange="onClientMatSvcToggle(\''+String(names[j]).replace(/'/g,"\\'")+'\',this.checked)">'
+      +escHtml(names[j])+(checked?'':' <span style="font-size:10px">— no uplift</span>')+'</label>';
+  }
+  return h+'</div></div>';
+}
+function clientMatMultFor(nameOrItem){
+  if(!qClientSupplyMat) return 1;
+  var nm=(typeof nameOrItem==='string')?nameOrItem:_svcNameOf(nameOrItem);
+  if(nm&&qClientMatSvcExcl[_svcKey(nm)]) return 1;   // this service opted out
+  return clientMatMult();
+}
 function getBOMItemUnitCost(bItem) {
-  var c=0, mult=clientMatMult(), i;
+  var c=0, i;
   // services get the client-supplied uplift
   var svc=bItem.services||[];
-  for(i=0;i<svc.length;i++) c+=(parseFloat(svc[i].qty)||0)*(parseFloat(svc[i].price)||0)*mult;
+  for(i=0;i<svc.length;i++) c+=(parseFloat(svc[i].qty)||0)*(parseFloat(svc[i].price)||0)*clientMatMultFor(svc[i].name);
   // hardware + outsource always counted (not excluded by client-supplied)
   var hw=(bItem.hardware||[]).concat(bItem.outsourceMaterials||[]).concat(bItem.outsourceHardware||[]);
   for(i=0;i<hw.length;i++) c+=(parseFloat(hw[i].qty)||0)*(parseFloat(hw[i].price)||0);
@@ -5687,10 +5760,9 @@ function getAreaSubtotal(a) {
     var bi=qAreas[a].bomItems||[];
     for(var i=0;i<bi.length;i++) sub+=getBOMItemUnitCost(bi[i])*(bi[i].qty||1);
   } else {
-    var mult=clientMatMult();
     for(var i=0;i<qAreas[a].svcItems.length;i++){
       var si=qAreas[a].svcItems[i];
-      sub+=_svcEffectivePrice(si)*si.qty*mult;   // services uplifted when client supplies materials
+      sub+=_svcLineTotal(si);   // per-service uplift lives in _svcUnitPrice
     }
     // Material & hardware costs: only charged to Direct clients, not Subsidiary.
     // Materials always counted (client rarely supplies 100%; leave a row at 0 for
@@ -5795,7 +5867,7 @@ function renderDiscScope(){
 // this reads the global areas array, so the Stage 2 swap covers it like everything else).
 function _discRawBases(){
   var b={materials:0,edgeband:0,hardware:0,services:0};
-  var mult=clientMatMult(), isDir=isDirectClient();
+  var isDir=isDirectClient();
   function addMat(nm,amt){ if(_isEdgeTapeName(nm)) b.edgeband+=amt; else b.materials+=amt; }
   for(var a=0;a<qAreas.length;a++){
     var ar=qAreas[a]; if(!ar) continue;
@@ -5803,7 +5875,7 @@ function _discRawBases(){
       var bis=ar.bomItems||[];
       for(var i=0;i<bis.length;i++){
         var bi=bis[i], q=(parseFloat(bi.qty)||1), r;
-        (bi.services||[]).forEach(function(r){ b.services+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*mult*q; });
+        (bi.services||[]).forEach(function(r){ b.services+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*clientMatMultFor(r.name)*q; });
         (bi.hardware||[]).forEach(function(r){ b.hardware+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*q; });
         (bi.materials||[]).forEach(function(r){ addMat(r.name,(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*q); });
       }
@@ -5848,10 +5920,11 @@ function renderClientMatSection(){
   if(!qClientSupplyMat){ b.innerHTML=''; return; }
   var mult=_cmMult();
   // No apostrophes in this string — it lives inside a single-quoted JS literal.
-  var h='<div style="font-size:11px;color:var(--text2);margin:2px 0 8px"><i class="ti ti-info-circle"></i> Listed for the client as excluded from the quoted material cost, so nobody assumes what they bring is already paid for. Materials you enter in the Materials section are still charged; all services are multiplied by &times;'+mult.toFixed(2)+'. List the materials the client will supply:</div>';
+  var h='<div style="font-size:11px;color:var(--text2);margin:2px 0 8px"><i class="ti ti-info-circle"></i> Listed for the client as excluded from the quoted material cost, so nobody assumes what they bring is already paid for. Materials you enter in the Materials section are still charged; services are multiplied by &times;'+mult.toFixed(2)+' &mdash; choose which ones below. List the materials the client will supply:</div>';
   h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"><label style="font-size:12px;color:var(--text2)">Service multiplier override (&times;):</label>'
     +'<input type="number" step="0.01" min="1" value="'+(qClientMatMultOverride||'')+'" placeholder="'+(CF.clientMatServiceMult||1.2)+'" oninput="qClientMatMultOverride=parseFloat(this.value)||0;renderClientMatSection();if(typeof recalc===\'function\')recalc()" style="height:30px;width:90px">'
     +'<span style="font-size:10px;color:var(--muted)">blank = global default ('+(CF.clientMatServiceMult||1.2)+')</span></div>';
+  h+=_clientMatSvcPickerHtml();
   // One shared suggestion list, emitted OUTSIDE the grid. Inside it, it would be a grid child and
   // shift every column along by one — relying on the UA stylesheet hiding <datalist> is not worth
   // a broken row.
@@ -6036,7 +6109,7 @@ function _svcEffectivePrice(si){
 //
 // One definition now, used by the form, the live patch and the printout, so a future change
 // to the pricing rule cannot land in one and miss the others.
-function _svcUnitPrice(si){ return _svcEffectivePrice(si)*clientMatMult(); }
+function _svcUnitPrice(si){ return _svcEffectivePrice(si)*clientMatMultFor(si); }
 function _svcLineTotal(si){ return _svcUnitPrice(si)*(si&&si.qty||0); }
 // ── Mat/Hw source helpers — DB when loaded, local catalog as fallback ─────
 function getMatSource(){
@@ -7254,7 +7327,16 @@ function _renderScopeCore(wrap) {
       // stated, or the row reads 16.50 x 118.43 and then a subtotal that is not their product.
       var _cmm=clientMatMult();
       h+='<div class="dvdr" style="margin:6px 0 8px"><span style="display:flex;align-items:center;gap:4px"><i class="ti ti-tool" style="font-size:10px"></i>Services</span>'
-        +(_cmm!==1?'<span style="font-size:10px;color:var(--amber);font-weight:600;margin-left:8px" title="Client-supplied materials is on, so every service is billed at its unit price x '+_cmm.toFixed(2)+'. Unit price below is the base rate; Subtotal is what is charged.">&times;'+_cmm.toFixed(2)+' client-supplied uplift applied</span>':'')
+        // Count how many of THIS area's lines actually carry the uplift — saying "applied" when
+        // half the lines opted out would be the same kind of quiet inaccuracy as the old
+        // per-line figures that ignored it altogether.
+        +(function(){
+            if(_cmm===1) return '';
+            var tot=area.svcItems.length, up=0;
+            for(var _u=0;_u<tot;_u++) if(clientMatMultFor(area.svcItems[_u])!==1) up++;
+            if(!up) return '<span style="font-size:10px;color:var(--muted);margin-left:8px">no client-supplied uplift on these services</span>';
+            return '<span style="font-size:10px;color:var(--amber);font-weight:600;margin-left:8px" title="Client-supplied materials is on. Unit price below is the base rate; Subtotal is what is charged. Choose which services the uplift applies to in the Client-supplied materials card above.">&times;'+_cmm.toFixed(2)+' client-supplied uplift'+(up<tot?' on '+up+' of '+tot+' services':' applied')+'</span>';
+          })()
         +'</div>';
       if(area.svcItems.length){
         h+='<div style="display:grid;grid-template-columns:2fr 78px 60px 88px 88px 36px;gap:6px;margin-bottom:4px">'
@@ -8139,7 +8221,6 @@ function buildPrintRows(mode){
 function buildItemizedPrintRows(hideMatPricing){
   var tdS='padding:6px 9px;border:1px solid #ddd;font-size:11px;vertical-align:top';
   var rows='';
-  var mult=clientMatMult();
   for(var a=0;a<qAreas.length;a++){
     var area=qAreas[a];
     var areaSub=getAreaSubtotal(a);
@@ -8962,7 +9043,7 @@ function renderCostFactors() {
     +'</div>'
     +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Client-supplied materials</div>'
     +'<div class="g3" style="margin-bottom:10px">'
-    +'<div><label class="fld">Service multiplier (&times;)</label><input type="number" step="0.01" min="1" value="'+(CF.clientMatServiceMult||1.2)+'" oninput="CF.clientMatServiceMult=parseFloat(this.value)||1" style="height:32px"><div style="font-size:10px;color:var(--muted);margin-top:2px">When the client supplies materials: all services are multiplied by this. Materials still count normally toward cost — zero out or delete rows for whatever the client provides themselves. Overridable per quotation.</div></div>'
+    +'<div><label class="fld">Service multiplier (&times;)</label><input type="number" step="0.01" min="1" value="'+(CF.clientMatServiceMult||1.2)+'" oninput="CF.clientMatServiceMult=parseFloat(this.value)||1" style="height:32px"><div style="font-size:10px;color:var(--muted);margin-top:2px">When the client supplies materials, services are multiplied by this — which services it applies to is chosen per quotation. Materials still count normally toward cost — zero out or delete rows for whatever the client provides themselves. Overridable per quotation.</div></div>'
     +'</div>'
     +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">VAT &amp; Premiums</div>'
     +'<div class="g3" style="margin-bottom:10px">'
@@ -14458,9 +14539,10 @@ function computeServiceCosts(s) {
 // — without capacity, opCost is unknowable, so we leave that line's full price
 // treated as cost (unchanged, conservative default) rather than guess.
 function _fabServiceMarginTotal(){
-  var margin=0, mult=clientMatMult();
+  var margin=0;
   function addLine(svc,qty){
     if(!svc) return;
+    var mult=clientMatMultFor(svc.name);
     var cc=computeServiceCosts(svc);
     // opCost>0 as well as capacity: a service with capacity set but no cost breakdown entered
     // computes opCost 0, and crediting its whole price as margin would overstate profit.
@@ -16274,7 +16356,7 @@ function captureQuotationSnapshot(){
     instTouristPrem:qInstTouristPrem,
     clientSupplyMat:qClientSupplyMat,
     clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])),
-    clientMatMultOverride:qClientMatMultOverride,
+    clientMatMultOverride:qClientMatMultOverride,clientMatSvcExcl:JSON.parse(JSON.stringify(qClientMatSvcExcl||{})),
     otherCosts:JSON.parse(JSON.stringify(qOtherCosts||[])),
     mobQaqcPersons:mobilityState.qaqcPersons||1
   };
@@ -16315,6 +16397,7 @@ function restoreQuotationSnapshot(snap){
   qClientSupplyMat=!!snap.clientSupplyMat;
   qClientSupplyMatList=snap.clientSupplyMatList?JSON.parse(JSON.stringify(snap.clientSupplyMatList)):[];
   qClientMatMultOverride=snap.clientMatMultOverride||0;
+  qClientMatSvcExcl=snap.clientMatSvcExcl?JSON.parse(JSON.stringify(snap.clientMatSvcExcl)):{};
   qOtherCosts=Array.isArray(snap.otherCosts)?JSON.parse(JSON.stringify(snap.otherCosts)):[];
   fqAreas=snap.fqAreas?JSON.parse(JSON.stringify(snap.fqAreas)):null;
   fqScopeForked=!!(snap.fqScopeForked&&fqAreas);
@@ -24407,7 +24490,7 @@ function getFullQuotationState(){
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
     drawingAnalysis:_daLightweightSummary(),
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null, instTouristPrem:qInstTouristPrem,
-    clientSupplyMat:qClientSupplyMat, clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])), clientMatMultOverride:qClientMatMultOverride,
+    clientSupplyMat:qClientSupplyMat, clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])), clientMatMultOverride:qClientMatMultOverride, clientMatSvcExcl:JSON.parse(JSON.stringify(qClientMatSvcExcl||{})),
     otherCosts:JSON.parse(JSON.stringify(qOtherCosts||[])),
     accomException:mobilityState.accomException||null,
     mobPlannerZone:mobilityState.zone||'',
@@ -24653,7 +24736,7 @@ function restoreFullQuotationState(state){
   qBoardLayout=state.boardLayout||null;
   qDrawingAnalysis=state.drawingAnalysis||null;
   qInstPlanner=state.instPlanner||null; qInstTouristPrem=!!state.instTouristPrem;
-  qClientSupplyMat=!!state.clientSupplyMat; qClientSupplyMatList=Array.isArray(state.clientSupplyMatList)?state.clientSupplyMatList:[]; qClientMatMultOverride=state.clientMatMultOverride||0;
+  qClientSupplyMat=!!state.clientSupplyMat; qClientSupplyMatList=Array.isArray(state.clientSupplyMatList)?state.clientSupplyMatList:[]; qClientMatMultOverride=state.clientMatMultOverride||0; qClientMatSvcExcl=state.clientMatSvcExcl?JSON.parse(JSON.stringify(state.clientMatSvcExcl)):{};
   qOtherCosts=Array.isArray(state.otherCosts)?state.otherCosts:[];
   renderOtherCosts();
   mobilityState.accomException=state.accomException||null;
