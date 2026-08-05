@@ -405,6 +405,9 @@ tr.cl-row:hover td{background:#f4f7fb}
   <div style="max-width:800px;margin:16px auto">
     <!-- Stage 1 -->
     <div id="s1-wrap">
+      <!-- Signature state + the Request-signature button. Hidden until the quotation is locked,
+           because signatures apply to the issued document, not to a draft. -->
+      <div id="sig-bar" style="display:none"></div>
       <div id="reactivation-banner" style="display:none;background:#fff8e1;border:1.5px solid var(--amber);border-radius:10px;padding:16px 20px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px">
         <div><span style="font-weight:600;color:#92400e"><i class="ti ti-archive"></i> This quotation is archived</span><span id="reactivation-date" style="font-size:12px;color:var(--text2);margin-left:10px"></span><br><span style="font-size:12px;color:var(--text2)">Reactivating will set it back to Draft so work can resume.</span></div>
         <div id="reactivation-actions"></div>
@@ -2242,6 +2245,22 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
   </div>
 </div>
 
+<div class="overlay" id="ov-sign-pin">
+  <div class="modal">
+    <div class="modal-head"><h3><i class="ti ti-signature"></i>Sign this quotation</h3><button class="modal-close" onclick="closeModal('ov-sign-pin')">×</button></div>
+    <div class="modal-body">
+      <div id="sign-pin-summary" style="font-size:12px;color:var(--text2);margin-bottom:10px"></div>
+      <div class="alert"><i class="ti ti-info-circle"></i>Entering your PIN places <b>your</b> signature on this quotation. It will appear on the printed document.</div>
+      <label class="fld pin-approver-lbl" style="margin-top:10px">Your PIN</label>
+      <input type="password" id="sign-pin" placeholder="••••" style="letter-spacing:8px;text-align:center;font-size:18px">
+      <p id="sign-pin-err" style="color:var(--coral);font-size:12px;display:none;margin-top:4px">Incorrect PIN.</p>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn" onclick="closeModal('ov-sign-pin')">Cancel</button>
+        <button class="btn btn-success" onclick="confirmSignature()" style="flex:1"><i class="ti ti-signature"></i>Sign</button>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="overlay" id="ov-unlock">
   <div class="modal">
     <div class="modal-head"><h3><i class="ti ti-lock-open"></i>Request unlock</h3><button class="modal-close" onclick="closeModal('ov-unlock')">×</button></div>
@@ -6926,6 +6945,7 @@ function _applyGateToBtn(btn,ok){
   btn.title=ok?'':PROJECT_SIZE_GATE_MSG;
 }
 function _updateLockGate(){
+  if(typeof renderSignatureBar==='function') renderSignatureBar();
   var lb=el('lock-btn'); if(!lb) return;
   if(qLocked||qCancelled) return;   // updateLockUI owns the button in those states
   _applyGateToBtn(lb,_projectSizeGateOk());
@@ -11198,7 +11218,7 @@ function submitApprovalRequest(){
   }
   var serial=qBaseSerial||qSerial||'—';
   var client=(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'—';
-  var typeLabels={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',unlock:'Unlock'};
+  var typeLabels={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',unlock:'Unlock',signature:'Signature'};
 
   // Prevent duplicate pending request for same type+serial
   for(var i=0;i<NOTIFS.length;i++){
@@ -11414,6 +11434,8 @@ function _persistApprovedFieldToQuotation(notif,callback){
     ?function(s){ s.fqCustomCF=notif.cfValues; s.fqCustomCFApproved=true; }
     :function(s){ s.customCF=notif.cfValues; s.customCFApproved=true; };
   else if(type==='premium') mutate=ctx==='fq'?function(s){ s.fqPremApproved=true; }:function(s){ s.premApproved=true; };
+  // A signature is not stage-specific — it signs the issued document, not a stage.
+  else if(type==='signature'&&notif.sigSlot&&notif.sigValue) mutate=function(s){ s.signatures=s.signatures||{}; s.signatures[notif.sigSlot]=notif.sigValue; };
   else if(type==='unlock') mutate=ctx==='fq'
     ?function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; }
     :function(s){ s.locked=false; s.sentStatus=''; };
@@ -11918,7 +11940,17 @@ function renderApprovals() {
           +'</span></div>':'')
       +(n.by?'<div style="font-size:12px;color:'+(n.status==="approved"||n.status==="accepted"?"var(--teal)":"var(--coral)")+';margin-top:4px">Actioned by: '+escHtml(n.by)+'</div>':'')
       +'</div>'
-      +(n.status==="pending"?(
+      // A signature request is actioned by the ASSIGNED signatory only — not by any approver.
+      // They are signing as themselves, so it is their name that goes on the document.
+      +(n.status==="pending"&&n.type==='signature'?(
+          isOwn
+          ? '<button class="btn btn-danger" onclick="cancelApprovalRequest(\''+escHtml(n.reqId||'')+'\',\''+n.type+'\')" style="align-self:flex-start;font-size:12px"><i class="ti ti-x"></i> Withdraw</button>'
+          : ((n.approverEmail||'').toLowerCase()===((gUser&&gUser.email)||'').toLowerCase()
+              ? '<div style="display:flex;flex-direction:column;gap:6px;align-self:flex-start">'
+                +'<button class="btn btn-success" onclick="openSignatureAction('+origIdx+')" style="font-size:12px;white-space:nowrap"><i class="ti ti-signature"></i>Sign</button>'
+                +'<button class="btn btn-danger" onclick="declineSignature('+origIdx+')" style="font-size:12px"><i class="ti ti-x"></i>Decline</button></div>'
+              : '<span style="font-size:11px;color:var(--text2);align-self:flex-start">Awaiting '+escHtml(n.approverEmail||'signatory')+'</span>')
+        ):n.status==="pending"?(
           isOwn
           ? '<button class="btn btn-danger" onclick="cancelApprovalRequest(\''+escHtml(n.reqId||'')+'\',\''+n.type+'\')" style="align-self:flex-start;font-size:12px"><i class="ti ti-x"></i> Withdraw</button>'
           : (isApprover()?'<button class="btn btn-amber" onclick="openApprovalAction('+origIdx+')" style="align-self:flex-start"><i class="ti ti-check"></i>Action</button>':'')
@@ -12033,7 +12065,7 @@ function doApprovalAction(idx, action) {
   // fan-out as the request itself.
   if(n.fromEmail&&n.fromEmail.toLowerCase()!==((gUser&&gUser.email)||'').toLowerCase()){
     var _outLabels={approved:'approved',rejected:'rejected',countered:'answered with a counter-offer'};
-    var _tl={nonvat:'Non-VAT',discount:'Discount',override:'Cost factor',premium:'Holiday premium',unlock:'Unlock'};
+    var _tl={nonvat:'Non-VAT',discount:'Discount',override:'Cost factor',premium:'Holiday premium',unlock:'Unlock',signature:'Signature'};
     // A counter-offer is not applied when it is made — the requester still has to accept it.
     // The old message stated the outcome and stopped there, so it read as "done" when in fact
     // nothing had changed on the quotation and the requester was the one being waited on.
@@ -13579,6 +13611,247 @@ function adminUploadUserSignature(i){
 // Stamps the locker onto the quotation. Called at lock; does nothing if there is
 // already a prepared-by signature, so re-locking a revision keeps the original
 // preparer rather than reassigning it to whoever unlocked it.
+// ══ Checked by / Noted by signature flow ═════════════════════════════════════════════════
+// Rommel's design (2026-08-06). Deliberately built on the existing approval machinery rather
+// than a second mechanism: same routing table, same PIN gate, same request/notify/poll path.
+//
+//   lock → "Request signatures" → Checked by → PIN → (if above the company's threshold)
+//   → Noted by → PIN → done.
+//
+// Three rules settled with it:
+//   · Unlocking CLEARS both signatures. Enforced, not left to the user to remember — a changed
+//     document must never carry a signature approving the version before it.
+//   · The Noted-by threshold is measured on the total BEFORE VAT ("VAT is not project cost"),
+//     and is set PER COMPANY because the ruling differs between them.
+//   · Sending is warned, never blocked — a slow approver must not stop a job going out.
+var NOTED_THRESHOLD={};   // { company: amount } — ex-VAT total above which Noted by is required
+var SIG_SLOTS=[{key:'checked',label:'Checked by'},{key:'noted',label:'Noted by'}];
+
+function _notedThresholdFor(co){
+  var v=parseFloat(NOTED_THRESHOLD[co||getCompanyName()]);
+  return (isFinite(v)&&v>0)?v:0;         // 0 or unset = always require Noted by
+}
+// Total project cost BEFORE VAT. _pCalc.preDisc is the subtotal the discount comes off; the
+// grand total carries VAT, bond and premiums, none of which are project cost.
+function _quotExVatTotal(){
+  var pc=_pCalc||{};
+  var pre=parseFloat(pc.preDisc)||0, disc=parseFloat(pc.discAmt)||0;
+  if(pre>0) return Math.max(0,pre-disc);
+  // Nothing calculated yet (e.g. reopened and not recalculated) — fall back to the locked figure
+  // less VAT rather than reporting zero, which would wrongly skip the Noted-by requirement.
+  var g=parseFloat(qLockedTotal||pc.grand)||0;
+  var vat=parseFloat((CF&&CF.vat)!=null?CF.vat:12)||0;
+  return pc.vatOn===false?g:(vat>0?g/(1+vat/100):g);
+}
+function _notedRequired(){
+  var t=_notedThresholdFor(getCompanyName());
+  if(!t) return true;                    // no threshold configured — always require it
+  return _quotExVatTotal()>t;
+}
+function _sigOf(slot){ return (qSignatures||{})[slot]||null; }
+function _sigPendingFor(slot){
+  var serial=qBaseSerial||qSerial;
+  for(var i=0;i<NOTIFS.length;i++){
+    var n=NOTIFS[i];
+    if(n.type==='signature'&&n.sigSlot===slot&&n.serial===serial&&n.status==='pending') return n;
+  }
+  return null;
+}
+// One place that decides where the quotation stands, so the button, the badge and the send
+// warning can never describe it differently.
+function _sigState(){
+  var needNoted=_notedRequired();
+  var c=_sigOf('checked'), n=needNoted?_sigOf('noted'):true;
+  var pend=_sigPendingFor('checked')||(needNoted?_sigPendingFor('noted'):null);
+  return {needNoted:needNoted, checked:!!c, noted:!!n, complete:!!(c&&n), pending:pend,
+          exVat:_quotExVatTotal(), threshold:_notedThresholdFor(getCompanyName())};
+}
+// ── The request ──────────────────────────────────────────────────────────────────────────
+function requestSignatures(){
+  if(!qLocked&&!fqLocked){ showToast('Lock the quotation first — signatures apply to the issued document.'); return; }
+  var st=_sigState();
+  if(st.complete){ showToast('This quotation is already fully signed.'); return; }
+  var slot=st.checked?'noted':'checked';     // Checked by always goes first
+  if(slot==='noted'&&!st.needNoted){ showToast('Noted by is not required for this amount.'); return; }
+  if(_sigPendingFor(slot)){ showToast(_sigLabel(slot)+' has already been requested and is pending.'); return; }
+  _sendSignatureRequest(slot,false);
+}
+function _sigLabel(slot){ return slot==='noted'?'Noted by':'Checked by'; }
+// The signatory is looked up against the QUOTATION's company first, because that is the company
+// whose threshold decided whether the signature was needed and whose name is on the document.
+// findApproverForAction keys on currentUserCompany — right for the other approval types, but it
+// would let a Subsidiary quotation take its threshold from one company and its signatory from
+// another. Falls back to the generic routing so nothing is left unroutable.
+function _findSignatory(slot){
+  var co=getCompanyName()||currentUserCompany||'';
+  var email=APPR_ROUTING[co]&&APPR_ROUTING[co][slot];
+  if(email){
+    var u=sheetUsers.find(function(x){return x.email&&x.email.toLowerCase()===email.toLowerCase()&&x.active;});
+    if(u) return u;
+  }
+  return findApproverForAction(slot);
+}
+// auto = raised by the system after Checked by approved, not by the user pressing the button
+function _sendSignatureRequest(slot,auto,serialOverride,clientOverride){
+  var serial=serialOverride||qBaseSerial||qSerial||'—';
+  var client=clientOverride||(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'—';
+  var apprObj=_findSignatory(slot);
+  if(!apprObj||!apprObj.email){
+    var admin=sheetUsers.find(function(u){return u.pos==='Admin'&&u.active;});
+    if(admin) gSendMessage(admin.email,admin.name,'No '+_sigLabel(slot)+' signatory is assigned for '+(getCompanyName()||currentUserCompany)+'. A signature request on '+serial+' cannot be routed. Please set one in Settings → Approval Routing.','urgent','no_signatory:'+slot,function(){});
+    showToast('No '+_sigLabel(slot)+' signatory assigned — Admin has been notified.');
+    return null;
+  }
+  var id='req_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
+  var who=(gUser&&gUser.name)||currentRole;
+  var req={id:id,type:'signature',sigSlot:slot,serial:serial,client:client,
+    company:getCompanyName()||currentUserCompany,
+    from:who,fromEmail:(gUser&&gUser.email)||'',
+    approverEmail:apprObj.email,approver:apprObj.email,
+    msg:_sigLabel(slot)+' signature requested on '+serial+' for '+client+'.',
+    note:'',date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
+    status:'pending',amount:(_pCalc&&_pCalc.grand)||0,ctx:(qStage===2?'fq':'s1')};
+  NOTIFS.unshift(Object.assign({id:NOTIFS.length+1,reqId:id},req));
+  if(typeof gSaveApprovalRequest==='function') gSaveApprovalRequest(req);
+  gSendMessage(apprObj.email,apprObj.name,
+    who+' is requesting your signature — '+_sigLabel(slot)+' on '+serial+' for '+client
+      +'. Open the Approvals tab and enter your PIN to sign.','normal',
+    'signature_request:'+slot+':'+serial,function(){});
+  logActivity('Signature requested — '+_sigLabel(slot)+' → '+apprObj.name+(auto?' (automatic after Checked by)':''));
+  if(!auto) showToast('✓ '+_sigLabel(slot)+' request sent to '+apprObj.name);
+  _updateNotifBadge();
+  renderSignatureBar();
+  return req;
+}
+// ── Signing ──────────────────────────────────────────────────────────────────────────────
+// The signatory signs as THEMSELVES, so the PIN is verified against the logged-in user rather
+// than against a routed third party.
+var _sigActionNotifIdx=-1;
+function openSignatureAction(idx){
+  var n=NOTIFS[idx]; if(!n||n.type!=='signature') return;
+  _sigActionNotifIdx=idx;
+  var me=(gUser&&gUser.email||'').toLowerCase();
+  if((n.approverEmail||'').toLowerCase()!==me){
+    showToast('This signature request is assigned to someone else.'); return;
+  }
+  if(!mySignature()){
+    showToast('No signature on file for you — upload one from the avatar menu first.');
+    return;
+  }
+  _pinModalApprover=findApproverForSelf();
+  _openPinModal('ov-sign-pin','sign-pin','sign-pin-err');
+}
+function confirmSignature(){
+  var idx=_sigActionNotifIdx; var n=NOTIFS[idx];
+  if(!n){ closeModal('ov-sign-pin'); return; }
+  // Re-check here as well as in openSignatureAction. That one sets the index BEFORE it validates,
+  // so anything reaching this function directly would otherwise sign a request assigned to someone
+  // else. This puts a named person's signature on a client-facing document — worth checking twice.
+  var _me=((gUser&&gUser.email)||'').toLowerCase();
+  if(n.type!=='signature'||(n.approverEmail||'').toLowerCase()!==_me){
+    closeModal('ov-sign-pin');
+    showToast('This signature request is not assigned to you.');
+    return;
+  }
+  if(n.status!=='pending'){ closeModal('ov-sign-pin'); showToast('That request has already been actioned.'); return; }
+  var pin=(el('sign-pin')||{}).value||'';
+  _verifyApproverPin(pin).then(function(ok){
+    if(!ok){ var e=el('sign-pin-err'); if(e){e.textContent='Incorrect PIN.';e.style.display='block';} return; }
+    closeModal('ov-sign-pin');
+    var sig={name:(gUser.name||gUser.email||''),email:(gUser.email||''),role:currentRole||'',
+             img:mySignature(),at:new Date().toISOString()};
+    NOTIFS[idx].status='approved'; NOTIFS[idx].by=sig.name;
+    _localActions[n.reqId]={time:Date.now()};
+    if(typeof gSaveApprovalRequest==='function')
+      gSaveApprovalRequest({id:n.reqId,type:'signature',sigSlot:n.sigSlot,status:'approved',serial:n.serial,
+        client:n.client,from:n.from,fromEmail:n.fromEmail||'',company:n.company,msg:n.msg,
+        date:n.date,by:sig.name,actionDate:new Date().toISOString()});
+    // Apply to the open quotation when it is the right one, and always to the stored record.
+    if((qBaseSerial||qSerial)===n.serial){
+      qSignatures=qSignatures||{}; qSignatures[n.sigSlot]=sig;
+      renderSignatureBar();
+    }
+    _persistSignatureToQuotation(n.serial,n.sigSlot,sig,function(ok2){
+      if(!ok2) showToast('⚠ Signed, but could not confirm it saved into '+n.serial+' — open it and check.');
+    });
+    logActivity(_sigLabel(n.sigSlot)+' signed by '+sig.name+' on '+n.serial+'.');
+    gSendMessage(n.fromEmail,n.from,_sigLabel(n.sigSlot)+' on '+n.serial+' has been signed by '+sig.name+'.',
+      'normal','signature_signed:'+n.sigSlot+':'+n.serial,function(){});
+    showToast('✓ Signed as '+_sigLabel(n.sigSlot));
+    // Checked by done → hand straight on to Noted by when the amount requires it.
+    if(n.sigSlot==='checked'){
+      var needs=((qBaseSerial||qSerial)===n.serial) ? _notedRequired() : (n.notedRequired!==false);
+      if(needs) _sendSignatureRequest('noted',true,n.serial,n.client);
+      else logActivity('Noted by not required on '+n.serial+' (below the company threshold).');
+    }
+    _updateNotifBadge();
+    if(el('page-approvals')&&el('page-approvals').classList.contains('active')) renderApprovals();
+  });
+}
+function declineSignature(idx){
+  var n=NOTIFS[idx]; if(!n) return;
+  _confirm('Decline the '+_sigLabel(n.sigSlot)+' signature request on '+n.serial+'?\n\nThe requester will be told it was not signed.',function(){
+    NOTIFS[idx].status='rejected'; NOTIFS[idx].by=(gUser&&gUser.name)||currentRole;
+    _localActions[n.reqId]={time:Date.now()};
+    if(typeof gSaveApprovalRequest==='function')
+      gSaveApprovalRequest({id:n.reqId,type:'signature',sigSlot:n.sigSlot,status:'rejected',serial:n.serial,
+        client:n.client,from:n.from,fromEmail:n.fromEmail||'',company:n.company,msg:n.msg,date:n.date,
+        by:NOTIFS[idx].by,actionDate:new Date().toISOString()});
+    gSendMessage(n.fromEmail,n.from,_sigLabel(n.sigSlot)+' on '+n.serial+' was NOT signed by '+NOTIFS[idx].by
+      +'. Correct the quotation and request the signature again.','urgent',
+      'signature_declined:'+n.sigSlot+':'+n.serial,function(){});
+    logActivity(_sigLabel(n.sigSlot)+' DECLINED by '+NOTIFS[idx].by+' on '+n.serial+'.');
+    _updateNotifBadge(); renderApprovals();
+  });
+}
+// Writes into the stored record so a signature lands even when the signatory does not have that
+// quotation open — the same mechanism the other approvals use.
+function _persistSignatureToQuotation(serial,slot,sig,cb){
+  _persistApprovedFieldToQuotation({serial:serial,type:'signature',sigSlot:slot,sigValue:sig},cb);
+}
+// ── Clearing ─────────────────────────────────────────────────────────────────────────────
+// A quotation that is unlocked and edited must not keep a signature that approved the version
+// before the edit. Cleared outright rather than warned about.
+function clearSignaturesOnUnlock(why){
+  var had=[];
+  if(qSignatures){
+    if(qSignatures.checked) had.push('Checked by ('+(qSignatures.checked.name||'')+')');
+    if(qSignatures.noted)   had.push('Noted by ('+(qSignatures.noted.name||'')+')');
+    delete qSignatures.checked; delete qSignatures.noted;
+  }
+  if(had.length){
+    logActivity('Signatures cleared on unlock'+(why?' ('+why+')':'')+' — '+had.join(', ')+'. A new signature request is required.');
+    showToast('Signatures cleared — request them again once the changes are final.');
+  }
+  renderSignatureBar();
+}
+// ── UI ───────────────────────────────────────────────────────────────────────────────────
+function renderSignatureBar(){
+  var w=el('sig-bar'); if(!w) return;
+  var locked=(qStage===2?fqLocked:qLocked);
+  if(!locked){ w.style.display='none'; return; }
+  w.style.display='';
+  var st=_sigState();
+  function pill(slot,on,req){
+    var pend=_sigPendingFor(slot);
+    var sg=_sigOf(slot);
+    var col=on?'var(--teal)':(pend?'var(--amber)':'var(--muted)');
+    var txt=on?('✓ '+_sigLabel(slot)+(sg&&sg.name?' — '+sg.name:'')):(pend?('🕐 '+_sigLabel(slot)+' — awaiting '+(pend.approverEmail||'')):(_sigLabel(slot)+(req?' — not requested':' — not required')));
+    return '<span style="font-size:11px;color:'+col+';font-weight:600">'+escHtml(txt)+'</span>';
+  }
+  var h='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 11px;background:#f7f9fc;border:.5px solid var(--border);border-radius:7px;margin-bottom:9px">'
+    +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Signatures</span>'
+    +pill('checked',st.checked,true)
+    +pill('noted',st.noted&&st.needNoted,st.needNoted);
+  if(!st.needNoted&&st.threshold)
+    h+='<span style="font-size:10px;color:var(--muted)">Noted by not required — '+fmtMoney(st.exVat)+' ex-VAT is below the '+fmtMoney(st.threshold)+' threshold</span>';
+  if(!st.complete)
+    h+='<button class="btn btn-amber" onclick="requestSignatures()" style="font-size:11px;padding:3px 10px;margin-left:auto"><i class="ti ti-signature"></i>Request signature'+(st.checked?' (Noted by)':'')+'</button>';
+  else
+    h+='<span style="font-size:11px;color:var(--teal);margin-left:auto;font-weight:600">✓ Fully signed</span>';
+  w.innerHTML=h+'</div>';
+}
+
 function _stampPreparedBySignature(){
   if(!gUser) return;
   if(qSignatures && qSignatures.prepared && qSignatures.prepared.img) return;
@@ -16728,7 +17001,22 @@ function doShare(){
   var total=(_pCalc&&_pCalc.grand)?fmtMoney(_pCalc.grand):'';
   // Show share info summary in modal
   var info=el('ov-share-info');
-  if(info) info.innerHTML='<b>'+escHtml(serial)+'</b> — '+escHtml(cn)+(total?' · <b>'+escHtml(total)+'</b>':'');
+  if(info){
+    // Warned, never blocked (Rommel, 2026-08-06): a slow approver must not stop a job going out.
+    // But an unsigned quotation leaving must be visible and on the record, not silent.
+    var _ss=(typeof _sigState==='function')?_sigState():null;
+    var _warn='';
+    if(_ss&&!_ss.complete){
+      var _missing=[]; if(!_ss.checked) _missing.push('Checked by');
+      if(_ss.needNoted&&!_sigOf('noted')) _missing.push('Noted by');
+      if(_missing.length){
+        _warn='<div class="alert alert-warn" style="margin-top:8px;font-size:12px"><i class="ti ti-alert-triangle"></i>'
+          +'This quotation is <b>not fully signed</b> — '+_missing.join(' and ')+' still outstanding. You can send it, but the signature block will print blank.</div>';
+        logActivity('Share opened on '+serial+' while unsigned ('+_missing.join(', ')+' outstanding).');
+      }
+    }
+    info.innerHTML='<b>'+escHtml(serial)+'</b> — '+escHtml(cn)+(total?' · <b>'+escHtml(total)+'</b>':'')+_warn;
+  }
   // Hide native share button if not supported
   var nb=el('share-native-btn');
   if(nb) nb.style.display=navigator.share?'inline-flex':'none';
@@ -17129,12 +17417,14 @@ function confirmUnlock() {
     fqLocked=false; fqSentStatus="";
     _thawRatesVisible('Final Quotation unlocked');
     fqClientApproved=false; fqClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
+    clearSignaturesOnUnlock("Final Quotation unlocked");
     logActivity("Final quotation unlocked ("+qSerial+"). Reason: "+reason);
     updateFQLockUI(); updateFQSentStatus(); _updateQStatusBadge();
   } else {
     qLocked=false; qSentStatus="";
     _thawRatesVisible('quotation unlocked');
     qClientApproved=false; qClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
+    clearSignaturesOnUnlock("quotation unlocked");
     logActivity("Quotation unlocked by Manager/Supervisor ("+qSerial+"). Reason: "+reason);
     updateLockUI(); updateSentStatus();
   }
@@ -21018,7 +21308,7 @@ function gShowApp(){
         if(bell){bell.classList.remove('bell-pulse');void bell.offsetWidth;bell.classList.add('bell-pulse');}
         setTimeout(function(){var b=el('notif-btn');if(b)b.classList.remove('bell-pulse');},2500);
         // Show toast for each truly-new request (not previously seen)
-        var _tl2={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',client_update:'Client Update',revision:'Revision'};
+        var _tl2={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',client_update:'Client Update',revision:'Revision',signature:'Signature'};
         var shown2=0;
         NOTIFS.forEach(function(n){
           if(n.status==='pending'&&n.reqId&&!_lastSeenReqIds[n.reqId]){
@@ -21047,7 +21337,7 @@ function gShowApp(){
         if(!n.fromEmail||n.fromEmail.toLowerCase()!==me||!n.reqId) continue;
         var prevStatus=ownBefore[n.reqId];
         if(!prevStatus||prevStatus===n.status) continue; // no change
-        var typeLabels={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',unlock:'Unlock'};
+        var typeLabels={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',unlock:'Unlock',signature:'Signature'};
         var tl=typeLabels[n.type]||n.type;
         // Lami already announces a NEW request to the approver; the requester got only a toast,
         // which is gone in seconds and easily missed while working in another tab. She says the
@@ -23797,6 +24087,7 @@ function _collectAppSettings(){
     chatWebhookUrl:(el('s-chat-webhook')?el('s-chat-webhook').value.trim():CHAT_WEBHOOK_URL)||CHAT_WEBHOOK_URL||'',
     serialClaimUrl:(el('s-serial-claim')?el('s-serial-claim').value.trim():SERIAL_CLAIM_URL)||SERIAL_CLAIM_URL||'',
     approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING)),
+    notedThreshold: JSON.parse(JSON.stringify(NOTED_THRESHOLD)),
     mtoMaterials: mtoMaterialNames.slice()
   };
 }
@@ -23899,6 +24190,11 @@ function _applyAppSettings(s){
       for(var _zk in _qdDef){ if(INST_COST.zoneAddons[_zk]&&INST_COST.zoneAddons[_zk].qaqcDays==null) INST_COST.zoneAddons[_zk].qaqcDays=_qdDef[_zk]; }
     }
     if(typeof ic.zonePersons==='number') INST_COST.zonePersons=ic.zonePersons;
+  }
+  if(s.notedThreshold&&typeof s.notedThreshold==='object'){
+    for(var _ntc in s.notedThreshold){
+      if(s.notedThreshold.hasOwnProperty(_ntc)) NOTED_THRESHOLD[_ntc]=s.notedThreshold[_ntc];
+    }
   }
   if(s.approvalRouting&&typeof s.approvalRouting==='object'){
     for(var _arc in s.approvalRouting){
@@ -29976,7 +30272,9 @@ function renderApprovalRoutingSettings(){
     {key:'override',     label:'CF Override'},
     {key:'premium',      label:'Holiday/Weekend Premium'},
     {key:'unlock',       label:'Unlock Quotation'},
-    {key:'accommodation',label:'Accommodation Exception'}
+    {key:'accommodation',label:'Accommodation Exception'},
+    {key:'checked',      label:'Signature — Checked by'},
+    {key:'noted',        label:'Signature — Noted by'}
   ];
   // Collect active approvers (Manager/Director/Admin)
   var approvers=sheetUsers.filter(function(u){return u.active&&(u.pos==='Manager'||u.pos==='Director'||u.pos==='Admin');});
@@ -29987,6 +30285,19 @@ function renderApprovalRoutingSettings(){
     +'<input type="number" min="0" max="100" value="'+(CF.discountEscalationThreshold||10)+'" oninput="CF.discountEscalationThreshold=parseFloat(this.value)||0" style="height:32px;width:100px"></div>'
     +'<div style="font-size:11px;color:var(--text2);padding-bottom:6px;flex:1">A Manager can normally approve a discount themselves via PIN. Above this %, the request always goes to a Director (or Admin, if no Director is active) instead — regardless of who\'s assigned in the table below. Directors/Admin are never affected by this limit.</div>'
     +'</div>'
+    // Per company, because the ruling differs between them (Rommel, 2026-08-06). Measured on the
+    // total BEFORE VAT — VAT is not project cost. Blank or 0 means Noted by is ALWAYS required,
+    // which is the safe default: a missing threshold must not quietly skip a sign-off.
+    +'<div style="padding:12px;background:#eef4fb;border:.5px solid #bcd4ec;border-radius:8px;margin-bottom:16px">'
+    +'<div style="font-weight:600;font-size:13px;margin-bottom:3px"><i class="ti ti-signature"></i> Noted-by threshold</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:9px">A quotation whose <b>project cost before VAT</b> exceeds this needs a <b>Noted by</b> signature as well as <b>Checked by</b>. Below it, Checked by alone is enough. Leave blank or 0 to always require both.</div>'
+    +'<div style="display:flex;gap:14px;flex-wrap:wrap">'
+    +COMPANIES.map(function(co){
+        return '<div><label class="fld" style="margin-top:0;font-size:11px">'+escHtml(co)+'</label>'
+          +'<input type="number" min="0" step="1000" value="'+(NOTED_THRESHOLD[co]||'')+'" placeholder="always required" '
+          +'oninput="NOTED_THRESHOLD[\''+co.replace(/'/g,"\\'")+'\']=parseFloat(this.value)||0" style="height:32px;width:170px"></div>';
+      }).join('')
+    +'</div></div>'
     +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">'
     +'<thead><tr><th style="text-align:left;padding:8px 10px;background:#f5f5f3;border:.5px solid var(--border)">Action</th>';
   for(var ci=0;ci<COMPANIES.length;ci++){
