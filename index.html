@@ -2907,11 +2907,10 @@ function _fqEdit(fn){
     // Initial Quotation, so it has to be redrawn too — otherwise it keeps reading "same as
     // Initial" after a real edit, and the change list stays invisible.
     if(!prev){
-      // Rommel, 2026-08-06: signatures survive client approval and carry into Stage 2 — but "a
-      // change in the final quotation" means they must be requested again. A Stage 2 scope edit
-      // needs no unlock, so without this the document could change while keeping the signatures
-      // that approved the version before it.
-      if(typeof clearSignaturesOnUnlock==='function') clearSignaturesOnUnlock('Final Quotation scope changed');
+      // Signatures are NOT cleared here. Rommel's rule is a change "that will change the cost",
+      // so an edit that leaves the total alone (renaming an area, reordering) must not force a
+      // re-signing. recalcFQ below runs _sigCheckCostChanged, which clears them only if the
+      // figure actually moved.
       try{ renderFQItems(); recalcFQ(); renderFQFabBasisCard(); }catch(e){ console.error('[fqEdit] refresh failed',e); }
     }
   }
@@ -4796,7 +4795,7 @@ function initQuotation() {
   // Neither was cleared before, so a new quotation started right after revising one
   // inherited the old "Revised from:" line on its printout, and an owed revision
   // would have stamped .R1 onto a brand-new serial.
-  qRevisedFrom=''; qRevisionPending=false; qSignatures={}; qAdditionalFrom='';
+  qRevisedFrom=''; qRevisionPending=false; qSignatures={}; qSigBaseTotal=null; qAdditionalFrom='';
   var _bR=el('banner-revised'); if(_bR){ _bR.style.display='none'; _bR.textContent=''; }
   // Baseline the change log against the empty quotation, so building it up is
   // recorded as additions rather than compared against the previous quotation.
@@ -13640,6 +13639,29 @@ function adminUploadUserSignature(i){
 //   · Sending is warned, never blocked — a slow approver must not stop a job going out.
 var NOTED_THRESHOLD={};   // { company: amount } — ex-VAT total above which Noted by is required
 var SIG_SLOTS=[{key:'checked',label:'Checked by'},{key:'noted',label:'Noted by'}];
+// The total the signatures were given against. Stage 2 mirrors Stage 1 on client approval, so at
+// that moment both stages carry the same figure — this is that figure. Any Stage 2 edit that moves
+// the cost (scope, mobilization, installation, discount, cost-factor override, bond, site visit)
+// makes the signed document out of date, and the signatures must be requested again.
+// Watching the TOTAL rather than any one card is what makes that complete: a new card added later
+// is covered automatically, because it can only matter by changing this number.
+var qSigBaseTotal=null;
+function _sigCaptureBaseTotal(){
+  var g=(_pCalc&&parseFloat(_pCalc.grand))||0;
+  if(g>0) qSigBaseTotal=g;
+}
+// Called from recalcFQ. Only ever clears — never re-signs — and is idempotent, so running on every
+// recalculation is safe.
+function _sigCheckCostChanged(){
+  if(!qSignatures||(!qSignatures.checked&&!qSignatures.noted)) return;
+  if(qSigBaseTotal==null) return;                 // no baseline recorded (older saved quotation)
+  var g=(_pCalc&&parseFloat(_pCalc.grand))||0;
+  if(!g) return;
+  if(Math.abs(g-qSigBaseTotal)<0.01) return;      // unchanged — tolerance covers rounding only
+  var was=fmtMoney(qSigBaseTotal), now=fmtMoney(g);
+  qSigBaseTotal=null;                             // clear first so the clear cannot re-enter
+  clearSignaturesOnUnlock('Final Quotation cost changed '+was+' → '+now);
+}
 
 function _notedThresholdFor(co){
   var v=parseFloat(NOTED_THRESHOLD[co||getCompanyName()]);
@@ -13731,6 +13753,7 @@ function _sendSignatureRequest(slot,auto,serialOverride,clientOverride){
     who+' is requesting your signature — '+_sigLabel(slot)+' on '+serial+' for '+client
       +'. Open the Approvals tab and enter your PIN to sign.','normal',
     'signature_request:'+slot+':'+serial,function(){});
+  _sigCaptureBaseTotal();
   logActivity('Signature requested — '+_sigLabel(slot)+' → '+apprObj.name+(auto?' (automatic after Checked by)':''));
   if(!auto) showToast('✓ '+_sigLabel(slot)+' request sent to '+apprObj.name);
   _updateNotifBadge();
@@ -13783,6 +13806,7 @@ function confirmSignature(){
     // Apply to the open quotation when it is the right one, and always to the stored record.
     if((qBaseSerial||qSerial)===n.serial){
       qSignatures=qSignatures||{}; qSignatures[n.sigSlot]=sig;
+      if(qSigBaseTotal==null) _sigCaptureBaseTotal();
       renderSignatureBar();
     }
     _persistSignatureToQuotation(n.serial,n.sigSlot,sig,function(ok2){
@@ -13834,7 +13858,9 @@ function clearSignaturesOnUnlock(why){
     delete qSignatures.checked; delete qSignatures.noted;
   }
   if(had.length){
-    logActivity('Signatures cleared on unlock'+(why?' ('+why+')':'')+' — '+had.join(', ')+'. A new signature request is required.');
+    // The reason carries itself — this fires on a cost change as well as an unlock, and the
+    // activity log is permanent, so it must not claim an unlock that never happened.
+    logActivity('Signatures cleared'+(why?' — '+why:'')+'. Removed: '+had.join(', ')+'. A new signature request is required.');
     showToast('Signatures cleared — request them again once the changes are final.');
   }
   renderSignatureBar();
@@ -19235,9 +19261,14 @@ function checkFQSchedule() {
 // the global qAreas, so the swap is all it takes: the whole Stage 2 chain follows Stage 2's
 // scope, and Stage 1 keeps its own.
 function recalcFQ(){
-  return _withFQAreas(function(){
+  var _r=_withFQAreas(function(){
     return _withFrozenRates(function(){ return _recalcFQCore(); });
   });
+  // After the total is known: any Stage 2 change that moved the cost invalidates the signatures.
+  // Runs here rather than on individual cards so nothing can be missed — every card that matters
+  // matters by changing this figure.
+  try{ _sigCheckCostChanged(); }catch(e){ console.warn('[sig] cost check failed',e); }
+  return _r;
 }
 function _recalcFQCore() {
   var aCF=(fqCustomCFApproved&&fqCustomCF)?fqCustomCF:CF;
@@ -25013,7 +25044,7 @@ function getFullQuotationState(){
     // reopened; revisionPending is the unlock-owes-a-revision flag, which has to
     // survive a save or a draft reopened tomorrow would lock without its revision.
     revisedFrom:qRevisedFrom, revisionPending:qRevisionPending, additionalFrom:qAdditionalFrom,
-    signatures:JSON.parse(JSON.stringify(qSignatures||{})),
+    signatures:JSON.parse(JSON.stringify(qSignatures||{})), sigBaseTotal:qSigBaseTotal,
     instWorkers:qInstWorkers, instDays:qInstDays,
     instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom, mobCalc:qMobCalc,
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
@@ -25249,6 +25280,7 @@ function restoreFullQuotationState(state){
   qAdditionalFrom=state.additionalFrom||'';
   qRevisionPending=!!state.revisionPending;
   qSignatures=state.signatures?JSON.parse(JSON.stringify(state.signatures)):{};
+  qSigBaseTotal=(state.sigBaseTotal!=null)?state.sigBaseTotal:null;
   // Baseline AFTER the restore and its recalc have run, or the first save would
   // report every line in the quotation as newly added.
   setTimeout(_auditBaseline,0);
