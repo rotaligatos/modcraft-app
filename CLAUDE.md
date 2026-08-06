@@ -4176,10 +4176,19 @@ detector (would need to compare against the Sheet, which only the app can read) 
 quotation-page rework (collapse the 701px Client card, two columns, wider).
 
 ## Next up — agreed order, not started
+0. **Collision checker + pre-commit hook (~15 min)** — agreed 2026-08-07, do this FIRST. A script
+   over `index.html` reporting: duplicate top-level `function` names, duplicate top-level `var`
+   names, duplicate element `id="..."`, and that every `<script>` block parses. Wired as a git
+   pre-commit hook so it runs whether or not anyone remembers.
+   **Why:** a later definition silently wins in JS, and `getElementById` silently finds the first
+   duplicate id. Both have already bitten this app — `dashToggleWidget` nearly shipped shadowed on
+   2026-08-06, and a duplicate `id="users-wrap"` made the Users page render blank into a hidden div.
+   Neither throws an error, so only a check finds them. Must exist before the cutting-list port.
 1. **Remote approval, the cheap route (~1 session)** — collapse the 1473px topbar on a phone, size
    buttons to 44px, put the figures into the Chat/email notification. This was Rommel's actual point.
 2. **Website cutting list into Modcraft (~1–1.5 sessions)** — Designers Support tab feeding the
-   existing bridge. **Namespace `recalc` and `SERVICES` or it breaks pricing.**
+   existing bridge. **Wrap the ported file in an IIFE** so `recalc` and `SERVICES` never reach global
+   scope — prevention by construction, not by vigilance. Modcraft's `recalc()` is the pricing engine.
 3. Then reconsider whether the full mobile app with push is still wanted.
 
 ## Roadmap — do not start without asking
