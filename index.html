@@ -6272,6 +6272,26 @@ function _minChargeTokens(name){
     .replace(/[^a-z0-9]+/g,' ').trim().split(/\s+/).filter(Boolean);
 }
 function _isMinChargeName(name){ return /minimum charge|min\.? charge/i.test(String(name||'')); }
+// Some services read like a family but are a different job. "Cutting List Preparation" is a
+// per-carcass preparation fee, not cutting — Rommel, 2026-08-06: "literally a different work and
+// should not be included". Left in, one of those would satisfy the ₱500 cutting floor on its own
+// and real cutting work would get no top-up at all.
+//
+// A general exclusion rather than a special case for that one name: any service can be taken out
+// of its family by clicking it in the minimum-charge card. Values are stored EXPLICITLY (true or
+// false) so re-including something sticks — an absent key means "never decided", which is what
+// lets the sensible default below apply without freezing it.
+var MIN_CHARGE_EXCL={'cutting list preparation':true};
+function _minChargeExcluded(name){
+  var k=String(name||'').trim().toLowerCase();
+  return MIN_CHARGE_EXCL[k]===true;
+}
+function toggleMinChargeExcl(name,excluded){
+  MIN_CHARGE_EXCL[String(name||'').trim().toLowerCase()]=!!excluded;
+  logActivity('Minimum charge: "'+name+'" '+(excluded?'excluded from':'included in')+' its service family.');
+  if(typeof renderCostBreakdownSettings==='function') renderCostBreakdownSettings();
+  if(typeof recalc==='function') recalc();
+}
 function _minChargeFamilies(){
   var out=[];
   for(var i=0;i<SERVICES.length;i++){
@@ -6286,6 +6306,7 @@ function _minChargeFamilies(){
 // work — picking one by hand must not satisfy its own floor.
 function _minChargeFamilyFor(name,fams){
   if(!name||_isMinChargeName(name)) return null;
+  if(_minChargeExcluded(name)) return null;   // a different kind of work — see MIN_CHARGE_EXCL
   var st=_minChargeTokens(name), best=null, bestN=0;
   for(var i=0;i<fams.length;i++){
     var f=fams[i];
@@ -16149,20 +16170,39 @@ function renderCostBreakdownSettings() {
       // members makes a wrong grouping obvious here instead of six months into a quotation.
       var _mf=null, _fams=_minChargeFamilies();
       for(var _fi=0;_fi<_fams.length;_fi++) if(_fams[_fi].name===s.name) _mf=_fams[_fi];
-      var _members=[];
+      // Members, and separately the ones taken out — an exclusion must be visible and reversible,
+      // not a silent absence that looks like the matching failed.
+      var _members=[], _excluded=[];
       if(_mf) for(var _si=0;_si<SERVICES.length;_si++){
-        var _ms=SERVICES[_si];
-        if(_ms&&_minChargeFamilyFor(_ms.name,_fams)===_mf) _members.push(_ms.name);
+        var _ms=SERVICES[_si]; if(!_ms||!_ms.name) continue;
+        if(_minChargeFamilyFor(_ms.name,_fams)===_mf){ _members.push(_ms.name); continue; }
+        // would it belong if it were not excluded?
+        if(_minChargeExcluded(_ms.name)){
+          var _st=_minChargeTokens(_ms.name);
+          if(_mf.tokens.every(function(t){ return _st.indexOf(t)>=0; })) _excluded.push(_ms.name);
+        }
       }
       h += '<div style="padding:10px 16px;font-size:12px;color:var(--text2)">'
         + '<i class="ti ti-info-circle"></i> Minimum charge — no cost breakdown applicable. '
         + 'If these services add up to less than <b>'+fmtMoney(parseFloat(s.price)||0)+'</b> on a quotation, the difference is added.'
         + (_members.length
             ? '<div style="margin-top:7px;display:flex;flex-wrap:wrap;gap:5px">'
-              + _members.map(function(n){ return '<span class="pill" style="font-size:10px;background:#eef4fb;border:1px solid #cddff0;color:#2c5282">'+escHtml(n)+'</span>'; }).join('')
+              + _members.map(function(n){
+                  return '<span class="pill" style="font-size:10px;background:#eef4fb;border:1px solid #cddff0;color:#2c5282">'+escHtml(n)
+                    +'<button onclick="toggleMinChargeExcl(\''+n.replace(/'/g,"\\'")+'\',true)" title="Not this kind of work — exclude it from this minimum" style="background:none;border:none;cursor:pointer;color:#2c5282;font-size:12px;padding:0 0 0 5px;line-height:1">&times;</button></span>';
+                }).join('')
               + '</div>'
-              + '<div style="margin-top:6px;font-size:11px;color:var(--muted)">Membership follows the name. Anything containing <b>'+escHtml(_mf.tokens.join(' + '))+'</b> is counted — check nothing above is a different kind of work.</div>'
+              + '<div style="margin-top:6px;font-size:11px;color:var(--muted)">Membership follows the name — anything containing <b>'+escHtml(_mf.tokens.join(' + '))+'</b>. Press &times; on anything that is a different kind of work.</div>'
             : '<div style="margin-top:7px;color:var(--amber)">No service currently matches this minimum, so it will never apply.</div>')
+        + (_excluded.length
+            ? '<div style="margin-top:8px;padding-top:7px;border-top:.5px dashed var(--border)">'
+              + '<span style="font-size:11px;color:var(--text2)">Excluded — counted as different work:</span> '
+              + _excluded.map(function(n){
+                  return '<span class="pill" style="font-size:10px;background:#f5f5f3;border:1px solid var(--border);color:var(--muted);text-decoration:line-through">'+escHtml(n)
+                    +'<button onclick="toggleMinChargeExcl(\''+n.replace(/'/g,"\\'")+'\',false)" title="Put it back into this minimum" style="background:none;border:none;cursor:pointer;color:var(--teal);font-size:12px;padding:0 0 0 5px;line-height:1;text-decoration:none">&#8634;</button></span>';
+                }).join(' ')
+              + '</div>'
+            : '')
         + '</div>';
       h += '</div>'; continue;
     }
@@ -24436,6 +24476,7 @@ function _collectAppSettings(){
     serialClaimUrl:(el('s-serial-claim')?el('s-serial-claim').value.trim():SERIAL_CLAIM_URL)||SERIAL_CLAIM_URL||'',
     approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING)),
     notedThreshold: JSON.parse(JSON.stringify(NOTED_THRESHOLD)),
+    minChargeExcl: JSON.parse(JSON.stringify(MIN_CHARGE_EXCL)),
     mtoMaterials: mtoMaterialNames.slice()
   };
 }
@@ -24538,6 +24579,11 @@ function _applyAppSettings(s){
       for(var _zk in _qdDef){ if(INST_COST.zoneAddons[_zk]&&INST_COST.zoneAddons[_zk].qaqcDays==null) INST_COST.zoneAddons[_zk].qaqcDays=_qdDef[_zk]; }
     }
     if(typeof ic.zonePersons==='number') INST_COST.zonePersons=ic.zonePersons;
+  }
+  if(s.minChargeExcl&&typeof s.minChargeExcl==='object'){
+    for(var _mce in s.minChargeExcl){
+      if(s.minChargeExcl.hasOwnProperty(_mce)) MIN_CHARGE_EXCL[_mce]=s.minChargeExcl[_mce];
+    }
   }
   if(s.notedThreshold&&typeof s.notedThreshold==='object'){
     for(var _ntc in s.notedThreshold){
