@@ -565,6 +565,9 @@ tr.cl-row:hover td{background:#f4f7fb}
           <button class="btn btn-primary" onclick="addArea()" style="font-size:12px;padding:4px 10px"><i class="ti ti-layout-grid-add"></i>Add area</button>
         </div>
         <div class="card-body">
+          <!-- Whether materials & hardware are billed at all. Defaults by account category and
+               subsidiary company; the toggle exists because the arrangement varies job to job. -->
+          <div id="charge-mh-row" style="display:none;margin-bottom:12px"></div>
           <div id="client-mat-row" style="display:block;margin-bottom:12px">
             <div class="alert" style="flex-direction:column;gap:8px;align-items:stretch;background:#eef6ff;border:.5px solid #b6d4f5">
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:500;flex-wrap:wrap">
@@ -4824,7 +4827,7 @@ function initQuotation() {
   if(el('inst-date'))el('inst-date').value='';
   qProjectSize=0; var _ps=el('project-size'); if(_ps) _ps.value='';
   qInstWorkers=0; qInstDays=0;
-  qClientSupplyMat=false; qClientSupplyMatList=[]; qClientMatMultOverride=0;
+  qClientSupplyMat=false; qChargeMatHw=null; qClientSupplyMatList=[]; qClientMatMultOverride=0;
   qInstRegion='metro'; qInstRegionManual=false;
   qMobTransport=null; qMobAccom=null; qMobCalc=null; qBoardLayout=null; qDrawingAnalysis=null; qInstPlanner=null; qInstTouristPrem=false;
   mobilityState.accomException=null; mobilityState.zone='';
@@ -5014,11 +5017,11 @@ function renderClientCompanyField() {
       }
     }
     row.innerHTML = '<label class="fld">Subsidiary company</label>'
-      + '<select id="cl-company-sel" onchange="updateBanner();_onQuotationCompanyMightChange()">'+opts+'</select>';
+      + '<select id="cl-company-sel" onchange="updateBanner();_onQuotationCompanyMightChange();renderChargeMatHwRow();renderItems();recalc()">'+opts+'</select>';
   }
   updateBanner();
 }
-function onClientTypeChange() { renderClientCompanyField(); renderItems(); _applyVatDefaultForType(); _onQuotationCompanyMightChange(); }
+function onClientTypeChange() { renderClientCompanyField(); renderChargeMatHwRow(); renderItems(); _applyVatDefaultForType(); _onQuotationCompanyMightChange(); if(typeof recalc==='function') recalc(); }
 // VAT default follows who is being billed (Rommel, 2026-08-04). A Direct client is billed VAT
 // here. A Subsidiary — WCLI, CWLI — transfers the cost into its own system, which computes VAT
 // itself; quoting them VAT-inclusive means the same 12% is charged twice.
@@ -5783,12 +5786,18 @@ function getBOMItemUnitCost(bItem) {
   var svc=bItem.services||[];
   for(i=0;i<svc.length;i++) c+=(parseFloat(svc[i].qty)||0)*(parseFloat(svc[i].price)||0)*clientMatMultFor(svc[i].name);
   // hardware + outsource always counted (not excluded by client-supplied)
-  var hw=(bItem.hardware||[]).concat(bItem.outsourceMaterials||[]).concat(bItem.outsourceHardware||[]);
-  for(i=0;i<hw.length;i++) c+=(parseFloat(hw[i].qty)||0)*(parseFloat(hw[i].price)||0);
+  // Outsource is always charged — an externally-bought item is a real cost to us either way.
+  var outs=(bItem.outsourceMaterials||[]).concat(bItem.outsourceHardware||[]);
+  for(i=0;i<outs.length;i++) c+=(parseFloat(outs[i].qty)||0)*(parseFloat(outs[i].price)||0);
+  var chargeMH=_chargeMatHw();
+  if(chargeMH){
+    var hw=bItem.hardware||[];
+    for(i=0;i<hw.length;i++) c+=(parseFloat(hw[i].qty)||0)*(parseFloat(hw[i].price)||0);
+  }
   // materials always counted too — client rarely supplies 100% of them, so whatever
   // qty/price is entered here (for what the company itself still supplies) still bills;
   // leave rows at 0/blank for anything the client is providing themselves
-  var mat=bItem.materials||[]; for(i=0;i<mat.length;i++) c+=(parseFloat(mat[i].qty)||0)*(parseFloat(mat[i].price)||0);
+  if(chargeMH){ var mat=bItem.materials||[]; for(i=0;i<mat.length;i++) c+=(parseFloat(mat[i].qty)||0)*(parseFloat(mat[i].price)||0); }
   var hasRow=((bItem.materials||[]).length||(bItem.hardware||[]).length||(bItem.services||[]).length||(bItem.outsourceMaterials||[]).length||(bItem.outsourceHardware||[]).length);
   if(c===0 && !hasRow) c=CABINET_BASE_COSTS[bItem.type]||0;
   return c;
@@ -5796,7 +5805,7 @@ function getBOMItemUnitCost(bItem) {
 function getAreaSubtotal(a) {
   var sub=0;
   if(qFabMode==="carcass"){
-    for(var i=0;i<qAreas[a].items.length;i++) sub+=(CARCASS_PRICES[qAreas[a].items[i].type]||0)*qAreas[a].items[i].qty;
+    for(var i=0;i<qAreas[a].items.length;i++) sub+=_carcassUnitPrice(qAreas[a].items[i].type)*qAreas[a].items[i].qty;
     // Outsource: unconditional, same as BOM/services (see below).
     sub+=getAreaLevelOutsourceCost(a);
   } else if(qFabMode==="bom"){
@@ -5810,7 +5819,7 @@ function getAreaSubtotal(a) {
     // Material & hardware costs: only charged to Direct clients, not Subsidiary.
     // Materials always counted (client rarely supplies 100%; leave a row at 0 for
     // whatever they do provide) — only services get the client-supplied uplift above.
-    if(isDirectClient()){ sub+=getAreaMatSubtotal(a); sub+=getAreaHwSubtotal(a); }
+    if(_chargeMatHw()){ sub+=getAreaMatSubtotal(a); sub+=getAreaHwSubtotal(a); }
     // Outsource: unconditional (matches BOM mode's existing behavior — an
     // externally-purchased item's cost isn't waived for Subsidiary clients).
     sub+=getAreaLevelOutsourceCost(a);
@@ -5847,6 +5856,86 @@ function removeSvcItem(a,i) {
 }
 function isDirectClient(){
   return (el('cl-type')?el('cl-type').value:'Direct')==='Direct';
+}
+// ── Do we charge materials & hardware on this quotation? ──────────────────
+// Rommel, 2026-08-06:
+//   · Direct (whoever is quoting) — everything is charged.
+//   · Subsidiary WCLI — materials AND hardware are NOT charged. WCLI costs its own; we bill the
+//     work. The quotation still lists them, by SKU and quantity, so the record is complete.
+//   · Subsidiary CWLI — everything IS charged. A genuine inter-company sale, not a transfer.
+// Those are DEFAULTS, not rules: a per-quotation toggle can override either way, because the
+// arrangement varies job to job. Stored as an explicit value once touched, so a saved quotation
+// never silently re-decides itself if the defaults are changed later.
+var qChargeMatHw=null;           // null = follow the default for the current account/company
+function _chargeMatHwDefault(){
+  if(isDirectClient()) return true;
+  var sub=el('cl-company-sel')?el('cl-company-sel').value:'';
+  // Keyword match, not exact string — the company names carry real spelling drift.
+  if(/world\s*class/i.test(sub)) return false;   // WCLI: transferred, not sold
+  return true;                                   // CWLI and anything else: charged
+}
+function _chargeMatHw(){
+  return (qChargeMatHw===null||qChargeMatHw===undefined)?_chargeMatHwDefault():!!qChargeMatHw;
+}
+// The carcass price is the cabinet template's own build-up — verified equal for 12 of the 13
+// types — so when materials and hardware are not charged their real template value can be
+// subtracted rather than estimated as a share. A type with no template contributes nothing to
+// subtract, and says so rather than silently leaving the full price in.
+function _carcassMatHwValue(type){
+  var src=(typeof dbTemplates!=='undefined'&&dbTemplates&&dbTemplates.length)?dbTemplates:(typeof INIT_TEMPLATES!=='undefined'?INIT_TEMPLATES:[]);
+  var v=0, found=false;
+  for(var i=0;i<src.length;i++){
+    var t=src[i];
+    // Two shapes in play: the Price DB gives objects, INIT_TEMPLATES is raw arrays
+    // [cabinet, category, name, unit, qty, price]. Read both rather than assuming, or the
+    // fallback silently finds nothing and the whole price stays in.
+    var cab,cat,qty,price;
+    if(Array.isArray(t)){ cab=t[0]; cat=t[1]; qty=t[4]; price=t[5]; }
+    else { cab=t.cabinet; cat=t.category; qty=t.qty; price=t.price; }
+    if(cab!==type) continue;
+    if(cat==='materials'||cat==='hardware'){
+      v+=(parseFloat(qty)||0)*(parseFloat(price)||0); found=true;
+    }
+  }
+  return found?v:null;
+}
+function onChargeMatHwToggle(on){
+  qChargeMatHw=!!on;                       // explicit from here on — no longer following the default
+  renderChargeMatHwRow();
+  if(typeof renderItems==='function') renderItems();
+  if(typeof recalc==='function') recalc();
+  logActivity('Materials & hardware '+(on?'INCLUDED in':'EXCLUDED from')+' the quotation cost'
+    +(isDirectClient()?'':' (Subsidiary — '+((el('cl-company-sel')||{}).value||'?')+')')+'.');
+}
+function renderChargeMatHwRow(){
+  var w=el('charge-mh-row'); if(!w) return;
+  var on=_chargeMatHw(), def=_chargeMatHwDefault(), direct=isDirectClient();
+  var sub=(el('cl-company-sel')||{}).value||'';
+  // Nothing to say on a Direct quotation — everything is charged and there is no arrangement to
+  // vary. Showing a toggle there would invite someone to switch off billing by accident.
+  if(direct){ w.style.display='none'; return; }
+  w.style.display='block';
+  var overridden=(qChargeMatHw!==null&&qChargeMatHw!==undefined&&!!qChargeMatHw!==def);
+  w.innerHTML='<div class="alert" style="flex-direction:column;gap:6px;align-items:stretch;background:'+(on?'#eef6ff':'#fdf2e0')+';border:.5px solid '+(on?'#b6d4f5':'#f5d78e')+'">'
+    +'<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:500;flex-wrap:wrap">'
+    +'<input type="checkbox" id="charge-mh-toggle" '+(on?'checked':'')+' onchange="onChargeMatHwToggle(this.checked)">'
+    +'Charge materials &amp; hardware'
+    +(overridden?'<span class="pill pill-amber" style="font-size:10px">changed from the default</span>':'')
+    +'</label>'
+    +'<div style="font-size:11px;color:var(--text2)">'
+    +(on
+      ? 'Materials and hardware are billed on this quotation.'
+        +(def?'':' <b>Default for '+escHtml(sub||'this subsidiary')+' is NOT to charge</b> — you have switched it on.')
+      : '<b>Materials and hardware are NOT billed</b> — '+escHtml(sub||'this subsidiary')+' costs them on their own side. They still appear on the quotation by SKU and quantity so the record is complete. Services are charged as normal.'
+        +(def?'':' Default for this subsidiary is to charge — you have switched it off.'))
+    +'</div></div>';
+}
+function _carcassUnitPrice(type){
+  var full=CARCASS_PRICES[type]||0;
+  if(_chargeMatHw()) return full;
+  var mh=_carcassMatHwValue(type);
+  if(mh===null) return full;                  // no template — nothing reliable to remove
+  return Math.max(0, full-mh);
 }
 // ── Discount scope ────────────────────────────────────────────────────────
 // A discount can be limited to parts of the job instead of the whole quotation.
@@ -5919,7 +6008,7 @@ function renderDiscScope(){
 // this reads the global areas array, so the Stage 2 swap covers it like everything else).
 function _discRawBases(){
   var b={materials:0,edgeband:0,hardware:0,services:0};
-  var isDir=isDirectClient();
+  var isDir=_chargeMatHw();   // billed at all? same rule the cost uses
   function addMat(nm,amt){ if(_isEdgeTapeName(nm)) b.edgeband+=amt; else b.materials+=amt; }
   for(var a=0;a<qAreas.length;a++){
     var ar=qAreas[a]; if(!ar) continue;
@@ -7163,6 +7252,7 @@ function renderItems(){
   // container. Nothing is skipped: the correct render happens in the same synchronous turn.
   if(_scopeCtx==='fq') return;
   renderClientMatSection();
+  if(typeof renderChargeMatHwRow==='function') renderChargeMatHwRow();
   if(typeof renderDiscScope==='function') renderDiscScope();
   return _renderScope('items-wrap','qAreas','');
 }
@@ -16734,7 +16824,7 @@ function captureQuotationSnapshot(){
     instTouristPrem:qInstTouristPrem,
     clientSupplyMat:qClientSupplyMat,
     clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])),
-    clientMatMultOverride:qClientMatMultOverride,clientMatSvcExcl:JSON.parse(JSON.stringify(qClientMatSvcExcl||{})),
+    clientMatMultOverride:qClientMatMultOverride,chargeMatHw:qChargeMatHw,clientMatSvcExcl:JSON.parse(JSON.stringify(qClientMatSvcExcl||{})),
     otherCosts:JSON.parse(JSON.stringify(qOtherCosts||[])),
     mobQaqcPersons:mobilityState.qaqcPersons||1
   };
@@ -16775,6 +16865,7 @@ function restoreQuotationSnapshot(snap){
   qClientSupplyMat=!!snap.clientSupplyMat;
   qClientSupplyMatList=snap.clientSupplyMatList?JSON.parse(JSON.stringify(snap.clientSupplyMatList)):[];
   qClientMatMultOverride=snap.clientMatMultOverride||0;
+  qChargeMatHw=(snap.chargeMatHw===undefined)?null:snap.chargeMatHw;
   qClientMatSvcExcl=snap.clientMatSvcExcl?JSON.parse(JSON.stringify(snap.clientMatSvcExcl)):{};
   qOtherCosts=Array.isArray(snap.otherCosts)?JSON.parse(JSON.stringify(snap.otherCosts)):[];
   fqAreas=snap.fqAreas?JSON.parse(JSON.stringify(snap.fqAreas)):null;
@@ -16788,6 +16879,7 @@ function syncOptionUI(){
   for(var i=0;i<fabRads.length;i++) fabRads[i].checked=(fabRads[i].value===qFabMode);
   renderOtherCosts();
   renderClientMatSection();
+  if(typeof renderChargeMatHwRow==='function') renderChargeMatHwRow();
   if(typeof renderDiscScope==='function') renderDiscScope();
   if(el('assm-toggle')) el('assm-toggle').checked=qAssembly.enabled;
   if(el('assm-body')) el('assm-body').style.display=qAssembly.enabled?'block':'none';
@@ -25117,7 +25209,7 @@ function getFullQuotationState(){
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
     drawingAnalysis:_daLightweightSummary(),
     instPlanner:qInstPlanner?JSON.parse(JSON.stringify(qInstPlanner)):null, instTouristPrem:qInstTouristPrem,
-    clientSupplyMat:qClientSupplyMat, clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])), clientMatMultOverride:qClientMatMultOverride, clientMatSvcExcl:JSON.parse(JSON.stringify(qClientMatSvcExcl||{})),
+    clientSupplyMat:qClientSupplyMat, clientSupplyMatList:JSON.parse(JSON.stringify(qClientSupplyMatList||[])), clientMatMultOverride:qClientMatMultOverride, chargeMatHw:qChargeMatHw, clientMatSvcExcl:JSON.parse(JSON.stringify(qClientMatSvcExcl||{})),
     otherCosts:JSON.parse(JSON.stringify(qOtherCosts||[])),
     accomException:mobilityState.accomException||null,
     mobPlannerZone:mobilityState.zone||'',
@@ -25364,7 +25456,7 @@ function restoreFullQuotationState(state){
   qBoardLayout=state.boardLayout||null;
   qDrawingAnalysis=state.drawingAnalysis||null;
   qInstPlanner=state.instPlanner||null; qInstTouristPrem=!!state.instTouristPrem;
-  qClientSupplyMat=!!state.clientSupplyMat; qClientSupplyMatList=Array.isArray(state.clientSupplyMatList)?state.clientSupplyMatList:[]; qClientMatMultOverride=state.clientMatMultOverride||0; qClientMatSvcExcl=state.clientMatSvcExcl?JSON.parse(JSON.stringify(state.clientMatSvcExcl)):{};
+  qClientSupplyMat=!!state.clientSupplyMat; qClientSupplyMatList=Array.isArray(state.clientSupplyMatList)?state.clientSupplyMatList:[]; qClientMatMultOverride=state.clientMatMultOverride||0; qChargeMatHw=(state.chargeMatHw===undefined)?null:state.chargeMatHw; qClientMatSvcExcl=state.clientMatSvcExcl?JSON.parse(JSON.stringify(state.clientMatSvcExcl)):{};
   qOtherCosts=Array.isArray(state.otherCosts)?state.otherCosts:[];
   renderOtherCosts();
   mobilityState.accomException=state.accomException||null;
