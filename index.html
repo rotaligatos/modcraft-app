@@ -6251,6 +6251,82 @@ function _svcEffectivePrice(si){
 // One definition now, used by the form, the live patch and the printout, so a future change
 // to the pricing rule cannot land in one and miss the others.
 function _svcUnitPrice(si){ return _svcEffectivePrice(si)*clientMatMultFor(si); }
+// ── Minimum charge per service family ────────────────────────────────────────────────────
+// Rommel, 2026-08-06: "Apply the minimum charge if the service cost will not reach the minimum
+// amount specified... when sum up. For example, sum of cutting of mdf and cutting of versaboard is
+// less than 500 pesos, the charge is 500. Then similar to edgebanding... the total of two services
+// will become 1000."
+//
+// So the floor is per FAMILY, summed across the whole quotation, and each family stands alone.
+// A family is defined by a catalogue row whose name contains "(minimum charge)" — its price is the
+// floor, and the words left after removing that phrase are what a service must contain to belong.
+// Most specific wins, so "Edgebanding EVA Transparent" answers to its own ₱510 rather than the
+// plain EVA ₱500. Nothing is hardcoded: add a "(minimum charge)" row for any service and it works.
+//
+// The grouping is SHOWN in Settings → Cost Breakdown rather than left implicit — a service quietly
+// attached to the wrong floor, or to none, is exactly the kind of thing that is invisible until it
+// has been charged wrongly for months.
+function _minChargeTokens(name){
+  return String(name||'').toLowerCase()
+    .replace(/\(minimum charge\)/g,' ').replace(/\bmin\.? charge\b/g,' ')
+    .replace(/[^a-z0-9]+/g,' ').trim().split(/\s+/).filter(Boolean);
+}
+function _isMinChargeName(name){ return /minimum charge|min\.? charge/i.test(String(name||'')); }
+function _minChargeFamilies(){
+  var out=[];
+  for(var i=0;i<SERVICES.length;i++){
+    var s=SERVICES[i]; if(!s||!_isMinChargeName(s.name)) continue;
+    var t=_minChargeTokens(s.name);
+    if(!t.length) continue;                       // a bare "(minimum charge)" row matches everything — skip it
+    out.push({name:s.name, floor:parseFloat(s.price)||0, tokens:t});
+  }
+  return out;
+}
+// Which family a quoted service belongs to, or null. The minimum rows themselves never count as
+// work — picking one by hand must not satisfy its own floor.
+function _minChargeFamilyFor(name,fams){
+  if(!name||_isMinChargeName(name)) return null;
+  var st=_minChargeTokens(name), best=null, bestN=0;
+  for(var i=0;i<fams.length;i++){
+    var f=fams[i];
+    var all=f.tokens.every(function(t){ return st.indexOf(t)>=0; });
+    if(all&&f.tokens.length>bestN){ best=f; bestN=f.tokens.length; }
+  }
+  return best;
+}
+// Walks the whole quotation (both fabrication modes) and returns what must be added so each
+// family reaches its floor. A family with no work at all is untouched — a minimum is a floor on
+// work done, not a standing fee.
+function _minChargeTopUps(){
+  var fams=_minChargeFamilies();
+  if(!fams.length) return {total:0,rows:[]};
+  var actual={};
+  fams.forEach(function(f){ actual[f.name]=0; });
+  function add(name,amt){
+    var f=_minChargeFamilyFor(name,fams);
+    if(f) actual[f.name]+=amt;
+  }
+  for(var a=0;a<qAreas.length;a++){
+    var ar=qAreas[a]; if(!ar) continue;
+    (ar.svcItems||[]).forEach(function(si){ add(_svcNameOf(si), _svcLineTotal(si)); });
+    (ar.bomItems||[]).forEach(function(bi){
+      var q=parseFloat(bi.qty)||1;
+      (bi.services||[]).forEach(function(r){
+        add(r.name,(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*clientMatMultFor(r.name)*q);
+      });
+    });
+  }
+  var rows=[], total=0;
+  fams.forEach(function(f){
+    var got=actual[f.name]||0;
+    if(got<=0) return;                            // nothing of this kind quoted
+    if(got>=f.floor) return;                      // already clears the floor
+    var up=f.floor-got;
+    rows.push({name:f.name, floor:f.floor, actual:got, topUp:up});
+    total+=up;
+  });
+  return {total:total, rows:rows};
+}
 function _svcLineTotal(si){ return _svcUnitPrice(si)*(si&&si.qty||0); }
 // ── Mat/Hw source helpers — DB when loaded, local catalog as fallback ─────
 function getMatSource(){
@@ -7579,6 +7655,8 @@ function _recalcCore(fast) {
     fabBase+=sub;
     outsourceBase+=outSub;
   }
+  // Minimum charge per service family, measured across the whole quotation.
+  var _minCh=_minChargeTopUps(); fabBase+=_minCh.total;
   var clCost=qCuttingList.enabled?calcCuttingListCost():0;
   var dcCost=qDesignCharge.enabled?calcDesignChargeCost():0;
   var ocTotals=getOtherCostTotals();
@@ -7677,7 +7755,7 @@ function _recalcCore(fast) {
   var premAmt=qPremApproved?afterDWithBonds*premRate/100:0;
   var grand=afterDWithBonds+vatAmt+premAmt;
   // Cache for openPrint()
-  _pCalc={stage:1,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBaseRaw,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,biCosts:biCosts,bondState:qBondIns,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:!!qVatApproved,discOn:!!(qDiscApproved&&dA),discPct:qDiscPct||0,discScoped:_dScope,discScopeLabel:_discScopeLabel(),premOn:!!qPremApproved,ni:ni,na:na,
+  _pCalc={stage:1,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBaseRaw,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,biCosts:biCosts,bondState:qBondIns,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:!!qVatApproved,discOn:!!(qDiscApproved&&dA),discPct:qDiscPct||0,discScoped:_dScope,discScopeLabel:_discScopeLabel(),minCharge:_minCh,premOn:!!qPremApproved,ni:ni,na:na,
     regularBase:regularBase,clCost:clCost,bufAmt:discBufAmt,mkAmt:mkAmt,
     discBufAmt:discBufAmt,mssiCommAmt:mssiCommAmt,designerCommAmt:designerCommAmt,
     fabContAmt:regularBase*cf/100,mobContAmt:mobBase*cm/100,instContAmt:(instBase+assmBase)*ci/100,
@@ -7789,6 +7867,17 @@ function _recalcCore(fast) {
     +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:500">'
     +'<span><i class="ti ti-armchair" style="font-size:11px;color:var(--text2)"></i> Fabrication</span>'
     +'<span>'+fmtMoney(fabBase-outsourceBase)+'</span></div>';
+  // Minimum charges, named individually. A silent top-up folded into Fabrication would leave the
+  // estimator unable to explain the figure to a client who adds up the line items themselves.
+  if(_minCh&&_minCh.rows&&_minCh.rows.length){
+    _minCh.rows.forEach(function(r){
+      lines+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0 3px 22px;color:var(--amber)">'
+        +'<span title="'+escHtml(r.name)+' — '+fmtMoney(r.actual)+' quoted, topped up to the '+fmtMoney(r.floor)+' minimum">'
+        +'<i class="ti ti-arrow-bar-up" style="font-size:11px"></i> Minimum charge — '+escHtml(r.name.replace(/\s*\(minimum charge\)\s*/i,' ').trim())
+        +' <span style="color:var(--text2)">('+fmtMoney(r.actual)+' &rarr; '+fmtMoney(r.floor)+')</span></span>'
+        +'<span>+'+fmtMoney(r.topUp)+'</span></div>';
+    });
+  }
   // Outsource — single line (was previously invisible in this summary; only its
   // contingency/buffer/markup deltas showed up in the admin-only box, never the
   // base cost or the final marked-up total)
@@ -19407,11 +19496,14 @@ function _recalcFQCore() {
   var na=ni||(svc==='Fabrication only'&&qAssembly&&qAssembly.enabled);
 
   // qAreas is Stage 2's own fqAreas here — see recalcFQ.
-  var fabBase=0;
+  var fabBase=0, _minCh={total:0,rows:[]};
   if(fqFabBasis==='cutting'){
-    fabBase=fqFabCostOverride||0;
+    fabBase=fqFabCostOverride||0;   // a single typed figure — a per-service floor cannot apply to it
   } else {
     for(var a=0;a<qAreas.length;a++) fabBase+=getAreaSubtotal(a);
+    // Same rule as Stage 1. qAreas is Stage 2's own scope here, so the floor is measured against
+    // what Stage 2 actually quotes rather than what Stage 1 did.
+    _minCh=_minChargeTopUps(); fabBase+=_minCh.total;
   }
   var outsourceBase=0;
   if(fqFabBasis!=='cutting') for(var _oa=0;_oa<qAreas.length;_oa++) outsourceBase+=getAreaOutsourceSubtotal(_oa);
@@ -19511,7 +19603,7 @@ function _recalcFQCore() {
   var premAmt=fqPremApproved?afterDWithBonds*premRate/100:0;
   var grand=afterDWithBonds+vatAmt+premAmt;
   // Cache for openPrint()
-  _pCalc={stage:2,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBase,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:vatOn,discOn:!!(fqDiscApproved&&dA),discPct:fqDiscPct||0,discScoped:_dScope,discScopeLabel:_discScopeLabel(),premOn:!!fqPremApproved,ni:ni,na:na,
+  _pCalc={stage:2,fabBaseRaw:fabBase-outsourceBase,outsourceBase:outsourceBase,outsourceFinal:outsourceFinal,mobBase:mobBase,instBase:instBase,assmBase:assmBase,dcCost:dcCost,svCost:svSep?svCost:0,preDisc:preDisc,discAmt:dA,biTotal:biCosts.total,vatAmt:vatAmt,premAmt:premAmt,grand:grand,totU:totU,vatOn:vatOn,discOn:!!(fqDiscApproved&&dA),discPct:fqDiscPct||0,discScoped:_dScope,discScopeLabel:_discScopeLabel(),minCharge:_minCh,premOn:!!fqPremApproved,ni:ni,na:na,
     regularBase:regularBase,clCost:clCost,bufAmt:discBufAmt,mkAmt:mkAmt,
     discBufAmt:discBufAmt,mssiCommAmt:mssiCommAmt,designerCommAmt:designerCommAmt,
     fabContAmt:regularFabC-regularBase,mobContAmt:mobBase*cm/100,instContAmt:(instBase+assmBase)*ci/100,
