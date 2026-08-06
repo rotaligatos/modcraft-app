@@ -4009,7 +4009,34 @@ price and a `cabinet_templates` row. It carries most of the orphan template line
 hardware names with no catalogue match — see the 2026-07-30 session). Its components-per-unit is
 **1**, the lowest of the 13, which suggests it is already treated as an area/sheet product rather
 than a cabinet. That may be exactly what he wants changed.
-### 3. Checked by / Noted by signature flow — SPECIFIED 2026-08-06, not built
+### 3. Order intent — New / Revision / Additional — QUEUED 2026-08-06, not started
+Rommel: *"Orders can be defined if new or revision or additional. Just queue this to activities."*
+
+**Half of it already exists.** `pending_orders.request_type` carries **New** (69 orders) and
+**Revision** (3) today, straight from the Wufoo form, and the order card already shows it as a
+badge. What is missing is **Additional**, and — more importantly — the field currently means
+nothing to the app: `exportOrderToQuotation` behaves identically whichever value it holds. It is a
+label, not an instruction.
+
+The work is therefore less about adding a third value than about making the field DO something,
+now that all three destinations exist in the app:
+
+| Intent | What export should do |
+|---|---|
+| **New** | today's behaviour — a fresh quotation, client fields pre-filled |
+| **Revision** | revise the quotation this order refers to (`openRevise` — new version, `.R1` on the serial, the old one superseded) rather than starting a blank one |
+| **Additional** | create an ADDITIONAL order quotation linked to the original (the "Additional" button built 2026-08-05: own serial, empty scope, `additionalFrom` set), so production never builds anything twice |
+
+**The piece that does not exist yet:** Revision and Additional both need to know WHICH quotation
+they attach to, and nothing on the order captures that. Options — ask the client for the serial on
+the form (most reliable, needs a Wufoo/website field), match on client + project name (no extra
+field, but ambiguous for repeat clients), or have the estimator pick it at export time (always
+works, one extra step). Worth settling before building; the rest is straightforward.
+
+Also note `ORDER_KINDS` (Wufoo / Cutting List / Service Request / Site Visit) is a DIFFERENT axis —
+it is the FORM the order arrived on, not what the client wants done. Intent and channel are
+independent: a cutting-list order can perfectly well be a revision. Do not collapse the two.
+### 4. Checked by / Noted by signature flow — SPECIFIED 2026-08-06, not built
 Rommel's design, settled in full. Mirrors the existing VAT/discount approval machinery rather
 than inventing a second mechanism.
 
@@ -4048,7 +4075,7 @@ clearing rule.
 **Still open:** the actual threshold amounts per company, and whether any role may sign for
 another (delegation already exists for approvals — does it extend to signing?).
 
-### 4. Additional-order credit — DECIDED 2026-08-06, no change needed
+### 5. Additional-order credit — DECIDED 2026-08-06, no change needed
 Rommel chose **original preparer keeps the credit** — i.e. the behaviour already shipped. The
 whole job counts once, under whoever prepared the original; whoever prepares an additional order
 gets no separate win. Accepted knowingly. **No work required; do not re-raise.**
