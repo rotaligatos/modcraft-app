@@ -394,6 +394,9 @@ tr.cl-row:hover td{background:#f4f7fb}
         <span id="q-prev-serial-note" style="display:none;font-size:10px;color:var(--text2);cursor:help"></span>
         <span id="q-order-badge" style="display:none;background:#e8f4fd;color:#1a73e8;border:1px solid #acd;border-radius:4px;font-size:11px;padding:2px 7px;font-weight:500"></span>
         <span class="pill pill-amber" id="q-status">Draft</span>
+        <!-- Signature state lives with the other status pills, not buried above the form —
+             it is status, and this row is where people look for it. -->
+        <span id="sig-top" style="display:none;align-items:center;gap:6px"></span>
         <button class="btn btn-danger" id="revise-btn" style="display:none;font-size:12px;padding:4px 10px" onclick="openRevise()"><i class="ti ti-edit"></i>Revise</button>
         <button class="btn btn-primary" onclick="newQuotation()" style="font-size:12px;padding:4px 12px"><i class="ti ti-plus"></i>New quotation</button>
       </div>
@@ -2903,7 +2906,14 @@ function _fqEdit(fn){
     // The basis card above shows Stage 2's fabrication total and the count of changes from the
     // Initial Quotation, so it has to be redrawn too — otherwise it keeps reading "same as
     // Initial" after a real edit, and the change list stays invisible.
-    if(!prev){ try{ renderFQItems(); recalcFQ(); renderFQFabBasisCard(); }catch(e){ console.error('[fqEdit] refresh failed',e); } }
+    if(!prev){
+      // Rommel, 2026-08-06: signatures survive client approval and carry into Stage 2 — but "a
+      // change in the final quotation" means they must be requested again. A Stage 2 scope edit
+      // needs no unlock, so without this the document could change while keeping the signatures
+      // that approved the version before it.
+      if(typeof clearSignaturesOnUnlock==='function') clearSignaturesOnUnlock('Final Quotation scope changed');
+      try{ renderFQItems(); recalcFQ(); renderFQFabBasisCard(); }catch(e){ console.error('[fqEdit] refresh failed',e); }
+    }
   }
 }
 function _freezeRates(why){
@@ -4768,6 +4778,10 @@ function initQuotation() {
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:1}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}],outsourceMaterials:[],outsourceHardware:[]}];
   qFabMode="carcass"; qHasCuttingList=false;
   qLocked=false; qApproved=false; qSaved=false; qSentStatus=''; qLockedRates=null;
+  // The pill is only redrawn by _freezeRates/_thawRates/restoreFullQuotationState, so clearing the
+  // variable here left the previous quotation's "Rates as at lock" badge on screen — a brand-new
+  // draft claiming a lock it never had. Redraw it from the (now empty) state.
+  if(typeof _renderFrozenRatePill==='function') _renderFrozenRatePill();
   qClientApproved=false; qClientApprovedAt='';
   qLockedTotal=null; fqLockedTotal=null;
   qInitLockedAt=''; qInitApprovedAt=''; fqLockedAt=''; qClosedAt='';
@@ -13826,11 +13840,33 @@ function clearSignaturesOnUnlock(why){
   renderSignatureBar();
 }
 // ── UI ───────────────────────────────────────────────────────────────────────────────────
+// The compact indicator in the quotation's own header row, beside the serial and status pills —
+// where people look for the state of a quotation. Nothing at all on a draft, because signatures
+// only apply to an issued document and an extra pill on every draft would just be noise.
+function _renderSigTopPill(){
+  var t=el('sig-top'); if(!t) return;
+  var locked=(qStage===2?fqLocked:qLocked);
+  if(!locked){ t.style.display='none'; t.innerHTML=''; return; }
+  t.style.display='inline-flex';
+  var st=_sigState();
+  var need=st.needNoted?2:1, have=(st.checked?1:0)+(st.needNoted?(_sigOf('noted')?1:0):0);
+  if(st.complete){
+    t.innerHTML='<span class="pill" style="background:#e6f6f1;color:#0f6e56;border:1px solid #9ed9c6"><i class="ti ti-signature"></i> Signed '+have+'/'+need+'</span>';
+    return;
+  }
+  var pend=st.pending;
+  t.innerHTML='<span class="pill pill-amber" title="'+(pend?'Awaiting '+escHtml(pend.approverEmail||'signatory'):'No signature requested yet')+'">'
+      +'<i class="ti ti-signature"></i> '+(pend?'Awaiting signature':'Unsigned')+' '+have+'/'+need+'</span>'
+    +(pend?'':'<button class="btn btn-amber" data-lock-exempt="1" onclick="requestSignatures()" style="font-size:11px;padding:3px 9px"><i class="ti ti-send"></i>Request signature</button>');
+}
 function renderSignatureBar(){
+  _renderSigTopPill();
   var w=el('sig-bar'); if(!w) return;
   var locked=(qStage===2?fqLocked:qLocked);
-  if(!locked){ w.style.display='none'; return; }
   w.style.display='';
+  // Nothing on a draft. Discoverability is handled by the pill in the header row, which appears
+  // the moment the quotation is locked — in the row people already read for the serial and status.
+  if(!locked){ w.style.display='none'; w.innerHTML=''; return; }
   var st=_sigState();
   function pill(slot,on,req){
     var pend=_sigPendingFor(slot);
@@ -16721,6 +16757,10 @@ function syncOptionUI(){
   if(typeof renderBondIns==='function'&&qBondIns.enabled) renderBondIns();
   if(typeof onServiceChange==='function') onServiceChange();
   if(typeof _updateLockGate==='function') _updateLockGate();   // must have the last word
+  // The signatures bar depends on lock state, so it has to redraw whenever the lock UI does.
+  // _updateLockGate is NOT called from updateLockUI (only from the project-size gate and here),
+  // so hooking it there alone left the bar showing "available once locked" on a locked quotation.
+  if(typeof renderSignatureBar==='function') renderSignatureBar();
 }
 function createNewOption(){
   // Require lock before creating next option
@@ -17319,6 +17359,9 @@ function updateLockUI() {
     b.disabled=locked;
   });
   _updateReactivationBanner();
+  // Last, and after the disable sweep above: the signature indicator depends on lock state, and
+  // rebuilding it here means its Request button is created fresh rather than caught by that sweep.
+  if(typeof renderSignatureBar==='function') renderSignatureBar();
 }
 // ── Reactivation (Archived → Draft) ───────────────────────────────────────
 function _qIsArchived(){
