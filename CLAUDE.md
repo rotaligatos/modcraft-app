@@ -3808,7 +3808,168 @@ onClientMatSvcToggle(nm,on)/_clientMatSvcAll(on)/_clientMatSvcPickerHtml()
 
 ---
 
-# OPEN — updated 2026-08-05 (THIS IS THE AUTHORITATIVE LIST — supersedes 2026-08-04)
+## What was changed on 2026-08-06 (session 3 — signatures, subsidiary billing, minimum charges)
+
+Fourteen commits, `9c5c5bf`..`ed75a93`. Every fix below was found by RUNNING the code or by Rommel
+using the page. **Three separate features were built to a rule Rommel stated and then corrected
+mid-build — the corrections are recorded because in each case the first reading was wrong.**
+
+### Checked by / Noted by signature flow (`15d9c5e`, `9c5c5bf`, `adf9eb5`, `dc6b8d4`, `c928e07`, `94d8812`)
+Built on the existing approval machinery — same routing table, same PIN gate, same request/notify
+path. Lock → **Request signature** → Checked by → PIN → (above the company threshold) → Noted by.
+
+- **Signatories are assigned in Settings → Approval Routing**, and are open to **any active user**,
+  not just Manager/Director/Admin. Rommel: *"since we did not define any seniority, keep the list
+  open to other users."* The other approval rows stay restricted — those are authority decisions;
+  signing is an attestation.
+- **Noted-by threshold is PER COMPANY and measured BEFORE VAT** (*"the basis would be the total
+  project cost before vat"*). Blank means always required — a missing threshold must never quietly
+  skip a sign-off.
+- **Unlocking clears both signatures**, and so does **any Stage 2 change that moves the cost**.
+  `qSigBaseTotal` records the figure the signatures were given against and `recalcFQ` clears them
+  when it moves. Watching the TOTAL rather than individual cards is what makes it complete — a card
+  added later is covered automatically, because it can only matter by changing that number. An edit
+  that leaves the cost alone (renaming an area) does NOT force a re-signing.
+- **Sending is warned, never blocked.**
+- The signature indicator lives in the quotation header beside the serial and status pills, not
+  buried above the form — Rommel had to ask twice where it was.
+
+**Four bugs found while building it, all fixed:**
+1. The Request button was **dead exactly when it was needed** — it only appears once locked, and
+   `updateLockUI` disables every button inside `#s1-wrap` on lock unless it carries
+   `data-lock-exempt`. It also worked on the pass that created it and died on the next refresh,
+   which is how a fault gets reported as "sometimes it is not there".
+2. `renderSignatureBar` was hooked into `_updateLockGate`, which **`updateLockUI` does not call** —
+   so the bar never refreshed on lock. Now called at the end of `updateLockUI` itself.
+3. `_findSignatory` looks up the **quotation's** company, not the user's. `findApproverForAction`
+   keys on `currentUserCompany` — right for other approvals, but it would let a Subsidiary
+   quotation take its threshold from one company and its signatory from another.
+4. `confirmSignature` now **re-checks the signer and that the request is still pending**.
+   `openSignatureAction` sets the target index BEFORE validating, so anything reaching confirm
+   directly would have signed a request belonging to someone else.
+
+**PINs, as a consequence of opening the signatory list:**
+- **"Require own PIN"** per user (Settings → Users, col **AA**, `users.require_pin`). Ticking it
+  refuses the shared `1234` for that person.
+- **Mandatory for Manager/Director/Admin** — Rommel: *"why is the tick expanded for those manager,
+  admin and director position? They have a pin capability already."* Their card now states it
+  rather than offering a switch. **Five of the six had no PIN**; Rommel confirmed knowing that,
+  since the app link had not gone out.
+- **A deadlock fixed:** "Set / Change PIN" was gated on `isApprover()`, so a Staff signatory could
+  never set the PIN their own signature required. Available to everyone now.
+- **Reset PIN and the PIN badge** were Manager/Director/Admin only — a Staff signatory was
+  unresettable and their PIN state invisible. Shown for every user.
+- **A prompt at every login** until a required PIN is set. Deliberately not dismissible-once:
+  someone in that state cannot approve or sign at all.
+
+### Materials & hardware billing by account (`e36cc31`)
+Rommel's rule, stated then corrected twice:
+| | Materials | Hardware | Services |
+|---|---|---|---|
+| **Direct** (any quoting company) | in | in | in |
+| **Subsidiary WCLI** | **out** | **out** | in |
+| **Subsidiary CWLI** | in | in | in |
+
+Defaults, not rules — a **"Charge materials & hardware"** toggle overrides either way, shown only
+on Subsidiary quotations. `qChargeMatHw` is `null` while untouched (meaning "follow the default",
+so changing a default later still reaches old quotations) and stores an explicit true/false once
+toggled.
+
+**Applied to all three fabrication modes**, which was most of the work — only cutting-list had any
+rule, and it was wrong both ways: gated on `isDirectClient()` so **CWLI was wrongly excluded**, and
+it **dropped hardware**, which stays in.
+
+**Carcass became possible because the data made it so:** the carcass price IS the cabinet
+template's own build-up — verified equal for **12 of the 13 types** — so the real material and
+hardware values are subtracted rather than a share estimated. A type with no template keeps its
+full price rather than guessing.
+
+⚠ **Large effect on carcass.** Kitchen Base is materials ₱4,147 + hardware ₱956 of a ₱6,237 price,
+so **~82% comes out** for a WCLI carcass quotation. **11 existing Subsidiary quotations** (4 BOM,
+7 carcass) were charging materials they should not have been.
+
+**Pre-existing bug fixed on the way:** `INIT_TEMPLATES` rows are raw arrays
+`[cabinet, category, name, unit, qty, price]` while the Price DB gives objects — any lookup written
+for one silently finds nothing in the other.
+
+### Minimum charge per service family (`a4ac3fb`, `f5fc164`, `ed75a93`)
+Rommel: *"Apply the minimum charge if the service cost will not reach the minimum amount
+specified... when sum up... the total of two services will become 1000."*
+
+The `(minimum charge)` rows existed but **nothing enforced them** — a ₱165 cutting line went out at
+₱165. The floor is now **per family, summed across the whole quotation, each family independent**.
+
+A family is defined by the catalogue row itself: its price is the floor, and the words left after
+removing "(minimum charge)" are what a service must contain to belong. **Nothing hardcoded** — add
+such a row for any service and it works. **Most specific wins**, so Edgebanding EVA Transparent
+answers to its own floor rather than the plain EVA one. A minimum row never counts toward its own
+floor; a family with no work is untouched (a floor applies to work done, it is not a standing fee).
+
+Applied at quotation level (not inside `getAreaSubtotal`, which runs per area), in **both stages**,
+and skipped when Stage 2 is priced off a single typed cutting-list figure.
+
+**Each top-up is its own visible amber line** naming the family, what was quoted and the floor it
+was raised to. Verified against Rommel's own example: cutting 165 + 100 = 265 → 500; adding
+edgebanding 102 makes the two families **exactly 1,000**.
+
+**A real false positive found by checking the live catalogue:** **"Cutting List Preparation"**
+(₱500/carcass) contains the word Cutting, so it joined the cutting family — and at ₱500 satisfied
+the floor **entirely on its own**, meaning genuine cutting work got no top-up. The rule silently not
+firing. Rommel: *"literally a different work and should not be included."*
+
+Fixed generally rather than as a special case: the minimum-charge card in Cost Breakdown now
+**lists every service under each floor**, states the words that decide membership, and each member
+has an **×** to exclude it (restorable). Excluded services are listed struck through under "counted
+as different work" rather than vanishing — an exclusion that looks like a failed match is its own
+trap. `MIN_CHARGE_EXCL` ships with Cutting List Preparation excluded and is saved with settings.
+
+**Still open on this:** "Handgrab Groove" and "Flush Handle Groove" fall under NO minimum — they
+say *groove*, not *grooving*. If they should count toward the ₱400, renaming them is cleaner than
+loosening the matching.
+
+### A renumber left its old Project List row behind (`e3eeb88`)
+Different bug from the morning's, same family. That one stopped quotations being FILED under the
+number they were first previewed as. This is the leftover **list row**: changing the client's
+company claims a new serial, but the row under the old number was never removed — so one job showed
+as two lines, the live one and an abandoned shell frozen at its pre-change value.
+
+Confirmed on FOR SIMULATION: `QT-W00000061` (Draft, ₱1,297.30 as Subsidiary) beside `QT-M00000105`
+(Initial Quotation, ₱3,758.83 as Direct), **one minute apart**, the second recording the first in
+`prevSerials`. Two quotations affected.
+
+`_cleanupPrevSerialRows` runs **after the new row saves, never at the moment of renumber** —
+deleting first and then failing to save would leave the quotation with no row at all, invisible in
+the Project List. `qPrevSerials` is deliberately NOT cleared; it is what the "(was …)" note reads.
+
+### Lami taught this session's work (`483ed3c`)
+Her manual mentioned none of it. Added the Approvals tab and **the counter-offer rule that
+generates support questions** (nothing changes until the REQUESTER accepts), the signature flow,
+PIN rules, discount scope, per-service uplift, project size and additional orders.
+
+**She was actively teaching something wrong:** the guide said client-supplied materials *"excludes
+materials from cost"* — untrue since 2026-07-16. Corrected. Her manual is hand-maintained and goes
+stale silently; check it whenever a feature ships.
+
+### Why the drafts pile up (investigated, no code)
+58 drafts, and it is **not** the Share button. **Draft simply means never locked** — sharing does
+not change it. **35 of the 58 are the pre-12-July test pile**; clearing those leaves 23 real
+work-in-progress. Also worth knowing: **42 rows labelled "Locked" and 13 "Approved" are legacy
+status names** that display as Initial/Final Quotation, so the live pipeline is healthier than the
+raw count suggests.
+
+### Method notes worth keeping
+- **Rommel corrected the rule mid-build three times** (hardware in/out for WCLI, CWLI charged or
+  not, which services a minimum covers). Playing the rule back as a table before building caught
+  each one; building straight from the first statement would have shipped three wrong features.
+- **Check a naming-based rule against the real catalogue before shipping it.** The Cutting List
+  Preparation false positive was invisible in principle and obvious in one query.
+- **A rule that silently does not fire is worse than one that fires wrongly** — both minimum-charge
+  problems were of that shape.
+- Inline handlers live inside single-quoted JS string literals: **any `'` in them truncates the
+  handler**. Hit again this session with `typeof x==='function'` inside an `onchange`.
+
+---
+# OPEN — updated 2026-08-06 (THIS IS THE AUTHORITATIVE LIST)
 
 ## ✅ AUDITED 2026-08-05 — the "four parts" job is BUILT. Do not rebuild it.
 
@@ -3862,6 +4023,30 @@ A full audit was run 2026-08-05 by **driving the code, not reading it**. All fou
   is inferred or comes from a status label with no date. And **GYMFIX counts as won at ₱0.00**,
   dragging average deal size down until it is corrected.
 ## Rommel's to do
+
+### ⚠ NEEDED BEFORE THE SIGNATURE FLOW CAN BE USED (built 2026-08-06, unusable until these are done)
+1. **Assign Checked by and Noted by** per company — Settings → Approval Routing. Any active user
+   can be picked, not just managers.
+2. **Set the Noted-by threshold** per company, same page. Measured on the total BEFORE VAT. Blank
+   means Noted by is ALWAYS required. The ₱20,000 discussed was an example, not a decision.
+3. **Signature images.** Signing is refused without one rather than printing a blank name. Four
+   approvers have none: Kathleen Joyce Tiu, Allan Lagsao, Michael Delos Reyes, Stiffany Gabut.
+   Uploaded from the avatar menu, or by an Admin from Settings → Users.
+4. **Tick "Require own PIN"** for anyone named as a signatory who is not already an approver.
+   Manager/Director/Admin are mandatory automatically.
+
+### ⚠ VERIFY BEFORE QUOTING — the subsidiary billing change is large
+**A WCLI carcass quotation now drops ~82%** (Kitchen Base: materials ₱4,147 + hardware ₱956 of a
+₱6,237 price). Correct by the stated rule — you bill the work, not the boards — but check it
+against one real job before it goes to a client. **11 existing Subsidiary quotations** (4 BOM,
+7 carcass) were charging materials they should not have been.
+
+### Other
+- **Deactivate Andrei Salvador's account** — `designer-ce2@…` is still Active with access to all
+  three companies. Keeping the seat as a spare is fine; leaving it able to sign in is not.
+- **"Handgrab Groove" and "Flush Handle Groove" fall under NO minimum charge** — they say *groove*,
+  not *grooving*. If they should count toward the ₱400, rename them; loosening the matching would
+  catch things it should not.
 - ~~QT-M00000102 (One Oak Craft)~~ **DONE 2026-08-05** — Joanna accepted the 3% counter at 08:09.
   Verified: subtotal 33,506.86 less 3% = 32,501.65, x1.12 VAT = 36,401.85, matching the stored
   total exactly. The total rose from 35,318.93 only because the SCOPE grew ~1,972 after the request
@@ -4036,7 +4221,7 @@ works, one extra step). Worth settling before building; the rest is straightforw
 Also note `ORDER_KINDS` (Wufoo / Cutting List / Service Request / Site Visit) is a DIFFERENT axis —
 it is the FORM the order arrived on, not what the client wants done. Intent and channel are
 independent: a cutting-list order can perfectly well be a revision. Do not collapse the two.
-### 4. Checked by / Noted by signature flow — SPECIFIED 2026-08-06, not built
+### 4. Checked by / Noted by signature flow — ✅ BUILT 2026-08-06 (see the session record above)
 Rommel's design, settled in full. Mirrors the existing VAT/discount approval machinery rather
 than inventing a second mechanism.
 
