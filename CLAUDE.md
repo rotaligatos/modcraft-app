@@ -3969,7 +3969,228 @@ raw count suggests.
   handler**. Hit again this session with `typeof x==='function'` inside an `onchange`.
 
 ---
-# OPEN — updated 2026-08-06 (THIS IS THE AUTHORITATIVE LIST)
+
+## What was changed on 2026-08-06/07 (session — one definition of a win, status rename, dashboard grid, orders search, running total)
+
+Eleven commits, `3795278`..`db2d9d7`. Everything below was found by RUNNING the code or by Rommel
+using the page — none of it by reading.
+
+### THE definition of a win — client approval of the FINAL QUOTATION (commit `1d518af`)
+Rommel: *"Win is the final approval of client in the final quotation. no argument to that. there's
+no win before that. and this should reflect in the dashboard or any report."*
+
+**Three different definitions were live at once**, on the same page:
+| Where | Counted as won |
+|---|---|
+| Dashboard "Conversion rate" | `finalLockedAt` — US locking Stage 2. A quotation sent and never answered counted. |
+| Team performance Won/Rate | a recorded approval at either stage, **OR** anything that had merely reached "In Final Quotation" |
+| Reports win rate | the status LABEL, counting `Closed` too |
+
+All three now call **`_isClientApprovedEntry`**, which requires a recorded client sign-off on the
+Final Quotation. Stage 1 approval and the status-rank inference no longer count. The
+`'Client Approved'` label IS accepted, because `_computeQuotationStatus` produces it from
+`fqClientApproved` alone — that is the recorded fact, not a guess about it.
+
+**Root cause fixed alongside — the approval never reached the data.** `confirmClientApprove()`
+sets `fqClientApproved`/`fqClientApprovedAt`, but the row written to the Quotations sheet wrote the
+**Stage 1** variable (`qClientApprovedAt`), so column Y stayed empty: **0 of 160 rows carried a date
+while 3 states carried `fqClientApproved:true`**. The row and `sessionQuotations` now write the
+Stage 2 values; column Y is relabelled **Final Client Approved** in all three header definitions.
+
+**Effect on live data:** wins 21 → 3, rate 13.1% → 1.9%, revenue ₱3,730,777.78 → ₱35,369.59. Not a
+regression — the old figure was inference standing in for a fact nobody recorded. **The team has
+clicked Client Approved on a Final Quotation three times.** The number stays near zero until that
+becomes habit; the fix makes it capturable, not retroactive.
+
+### Status rung renamed → "Approved Initial Quotation" (commits `b7ff116`, `31f711f`)
+Rommel spotted `Final | Approved` and asked why something says *approved final* while the stage says
+initial. It never did — the bare legacy word `Approved` only ever meant the INITIAL quotation was
+approved; it just did not say *what* was approved. Ladder now reads:
+
+`Draft → Initial Quotation → Approved Initial Quotation → Awaiting Client Approval → Client Approved → Closed`
+
+Both legacy spellings (`Approved`, `In Final Quotation`) map to it, so the 14 stored rows carrying an
+old string display and filter correctly with no re-save. Kept as keys in the pill-colour, rank and
+ageing maps too.
+
+**Stage vs Status, settled:** Status is what happened to the job (derived, rewritten every save);
+**Stage is just which tab was open when it was last saved** (`qStage===2?'Final':'Initial'`). Stage
+is not a business fact and can lag. Verified: 14 rows sit at `Initial | Approved Initial Quotation`
+and are *correct*; 4 rows at `Final | Approved` are wrong — and there **the STATUS is the stale
+one**, not the Stage (those are 4 of the 9 legacy quotations missing `fqLocked`).
+
+Project List: Status column default width **90px → 180px** (the widest label measures 153px + 24px
+padding and cells are nowrap+ellipsis, so it clipped); the resize handle existed on every column but
+was 6px and invisible until hover — now 9px with a visible divider.
+
+**Also fixed:** the Lami KPI briefing read `kpi.byStatus.Locked` and `.Approved`, neither of which is
+a key in `byStatus`, so managers were told **"Locked=undefined, Approved=undefined"**.
+
+### Dashboard — customisable widget grid + 11 new KPIs (commits `2a7d6aa`, `c6ecbc8`, `ab9dd18`)
+Prototype first (`dashboard_redesign.html`, `DASHBOARD_REDESIGN.md`, commit `3795278`) — standalone,
+`index.html` untouched. **React-Grid-Layout / Recharts / Framer Motion were rejected**: this is one
+32,000-line file with no build step, so they would mean a bundler and a rewrite. Everything asked for
+is ~380 lines of plain JS.
+
+Then into the app. **Not a rewrite:** every pre-existing card lives in a hidden `#dash-stock` and is
+**MOVED** into the grid, never rebuilt — so each id keeps its identity and `_dashUpdateKPIs`,
+`renderDashFollowed`, `_renderClaudeApiCard`, the `dash-chart` canvas and the team `<select>` all
+needed no change. A removed widget parks back in stock; verified the revenue chart's canvas survives
+a remove/add cycle.
+
+- 12-column dense grid, unit = 3 cols × 108px; drag by the handle, corner-drag to resize (snaps
+  3/6/9/12 × 1–4), **Tidy up** re-packs largest-first, **Add widget** from a catalogue of 24.
+- New widgets from `_dashMetrics()` — computed once per render off dirData + sessionQuotations +
+  pendingOrders, **no per-quotation state fetches**: open pipeline, won revenue, average deal size,
+  value by company, top clients, quotation funnel, quotation ageing, revisions & additions, awaiting
+  client approval, orders past SLA, data to fix.
+- **Per-card visualisation switcher** (`c6ecbc8`): gear → bar / donut / ranked list / funnel, saved
+  with the layout. Five widgets carry a series and support it; single-figure cards get no gear.
+- Access unchanged in spirit, stricter in reach: an Admin/Manager DASHALLOW restriction can now
+  target **any** widget individually, and old rows keyed on a legacy group name still apply.
+
+**Three bugs prevented, not shipped:**
+1. the pref loader coerced every key with `!!`, which would have turned the saved layout array into
+   `true` and silently reset everyone's dashboard on each login (`_applyDashPref` skips it now);
+2. the old `dashToggleWidget` was defined **after** the new one and would have silently overridden
+   it (removed; the "My widgets" tab is now the library);
+3. the resize maths assumed 12 columns, but the grid drops to 6 below 900px — the Google Sites embed
+   — where it went negative; it now reads the grid's real geometry and declines with a message.
+
+`'Conversion rate'` relabelled **'Win rate'**. `'Unsigned quotations'` was **dropped rather than
+faked** — signatures live only in each quotation's state JSON.
+
+**Customize regression, caught by Rommel and fixed (`ab9dd18`):** the new edit mode buried the widget
+list and the per-user restrictions behind a second click on "Add widget". Nothing was lost — but he
+could not find restrictions he already had. Customize opens the panel immediately again.
+
+### Orders — search the queue (commit `089f4a0`)
+One box over: entry number, client, company, contact, both emails, agent, project, address, notes,
+service, substrate, request type, channel, linked quotation serial, segment, lead source, source
+company. **Codes count as much as names** (`8724`, `M00000090`), words match in any order.
+**Tab counts follow the search**, so searching from the wrong tab shows where the order actually is
+instead of an unexplained empty list.
+
+### Quotation — running total pinned (commit `db2d9d7`)
+Stage 1 measures **2,903px** tall (it has grown ~850px since it was last measured), so the grand total
+sat ~2,900px down. Offered three sizes; **Rommel chose the smallest deliberately — bar only, nothing
+moved, no width change.**
+
+The bar's buttons are **MIRRORS**: each clones the real toolbar button's label, icon and disabled
+state and clicks the original, so the project-size gate, locked state, view-only mode and pending
+badge all still come from one place. It also states VAT treatment, discount and scope, minimum
+charge, and frozen-rates — previously only findable by scrolling to the summary.
+
+Two bugs fixed in testing: the refresh was hooked **before** the `_pCalc` assignment so the bar showed
+the PREVIOUS recalculation; and a fixed 74px reserve against a 100px bar hid the last card (now set
+from the bar's real height).
+
+### Rommel's test file, and a general gap
+`QT-W00000026` (Zhiel Ashton Taligatos, ₱23,866.15) was his test file counting as a win. He removed it
+— **from the Google Sheet only**, leaving a Supabase row untouched since 2 August. Deleted directly
+(state row cascaded). **`gLoadDirData` reads `Quotations!A:Y` from the SHEET**, never Supabase, so the
+Project List and every dashboard KPI are Sheet-backed — meaning the orphan was never affecting his
+figures, only my SQL. **General gap: any quotation deleted from the Sheet while not Supabase-connected
+leaves an unreachable stale row.**
+
+### Estimates measured, not guessed (for the roadmap)
+- **Mobile approvals app** — the blocker is extracting the pricing engine. Measured: `_recalcCore`
+  399 lines + `_recalcFQCore` 284 + ~550 of helpers, but only **~47 DOM reads total**, and the worst
+  helpers are tiny (`isDirectClient` 2 lines, `getCompanyName` 10). The maths already runs off globals,
+  which is what a saved state restores. **≈4–5 sessions** for the full PWA with push (push on iPhone
+  requires the app be installed — Safari 16.4+).
+- **BUT remote approval already works** — the app is a URL. Measured at 375px: the Approvals page
+  **does not overflow**; the topbar is **1473px wide** and scrolls sideways; buttons are 28–35px,
+  under the 44px tap minimum. **≈1 session** to collapse the nav, size the buttons, and put the
+  figures into the Chat/email notification. Rommel's actual point was remote approval, so this is the
+  route to take first.
+- **Website cutting list into Modcraft** (Rommel's request) — goes in as a Designers Support tab and
+  feeds the existing `_cutListToAnalysis` → `prodLoadStructuredList` bridge, so no new plumbing; it
+  also fixes the stand-in-SKU item for free because the real catalogue is already in memory.
+  **≈1–1.5 sessions.**
+  > ⚠ **`cutlist-template.html` defines `function recalc()` — Modcraft's `recalc()` IS the quotation
+  > pricing engine.** A naive paste would silently override it and break pricing app-wide (same class
+  > as the `dashToggleWidget` bug above). `var SERVICES` collides too — that is the live service
+  > catalogue. **The port must be namespaced.**
+
+### Method notes worth keeping
+- **Two of three "bugs" Rommel reported were not bugs** — the counter-offer flow and the missing
+  Customize panel were both working and merely unreachable. Diagnose before fixing.
+- **A name defined later wins.** Twice this session a new function would have been silently
+  overridden (or would have overridden) an existing one. Check for collisions before porting anything.
+- **Measure the mechanism before estimating.** The mobile-app estimate fell from 4–5 sessions to 1
+  once the actual DOM coupling and the actual phone rendering were measured.
+- **I re-raised a parked item after being asked to drop it**, and Rommel said it distorted his
+  understanding. When something is parked, leave it parked.
+
+---
+# OPEN — updated 2026-08-07 (THIS IS THE AUTHORITATIVE LIST)
+
+## Cleared on 2026-08-06/07
+Test file `QT-W00000026` (deleted, both stores) · per-card chart-type switcher · Orders search ·
+Customize/restrictions panel reachable again · running total bar · one definition of a win · status
+rung renamed · Status column width + resize handle · Lami's undefined KPI counts.
+
+## ⏳ Deploy pending at session end
+`db2d9d7` (running total bar) was still queued at GitHub — status `waiting`, not started, ~25 min.
+Not a code problem; the two commits before it deployed fine. **Check it is serving before assuming
+it shipped:** `curl -s https://rotaligatos.github.io/modcraft-app/ | grep -c q-total-bar`. If still
+stuck, retrigger with an empty commit. Do NOT touch the Pages configuration — doing that during the
+July incident turned a short outage into a day-long one.
+
+## Blocking — the signature flow is unusable until these are done (all re-verified 2026-08-07)
+| | State |
+|---|---|
+| **Checked by** unassigned | Empty for all three companies. It goes first, so nothing can start. |
+| **Noted-by threshold** | `{}` → Noted by always required. Valid, but a decision. |
+| **Signature images** | 7 on file. Kathleen, Michael, Stiffany still missing. Signing is refused without one. |
+| **PINs** | **5 approvers still have none.** Kathleen approves non-VAT for all three companies and cannot. |
+
+## Verify before anyone quotes
+- **Subsidiary billing** — a WCLI carcass quotation drops ~82%. Correct by the rule, but check one
+  real job. 11 existing subsidiary quotations were charging materials they should not have been.
+- **Win rate reads ~2%** until estimators click Client Approved on the Final Quotation. Worth telling
+  them that is now what makes a job count.
+
+## Rommel's to do
+- **Rotate the Wufoo API key** — the only item with a security clock.
+- **GYMFIX `QT-M00000087`** — still ₱0.00, should be ₱616. Unlock, recalculate, re-lock.
+- **MABA CONSTRAK `QT-260619-3668`** — needs Joanna's sent PDF; cannot be recomputed (its service
+  lines carry no stored price and resolve positionally into a catalogue since reordered).
+- **Bella Ferma** (W00000036 / W00000039) — one job or two? Blocks both KPI decisions.
+- **Run `reconcileRenumbered()`** — repairs 8 stale-serial records (dry run first).
+- **Clear ~56 old drafts** — Project List → filter Draft → Delete selected. **Not the struck SQL.**
+- **Deactivate Andrei Salvador** — `designer-ce2@` still active across all three companies.
+- **"Handgrab Groove" / "Flush Handle Groove"** — under no minimum charge (they say *groove*, not
+  *grooving*); rename if they should count toward the ₱400.
+- **Google Sites embed width** — only still needed for the larger quotation-page rework.
+
+## Parked
+9 legacy quotations missing `fqLocked` (4 show a wrong status) · subsidiary material billing differs
+between BOM and cutting-list mode · Price DB ~39,420 blank-unit rows (fill units, **delete nothing**
+— ~10,000 SKUs exist only as one) · hardware still on the assumed 30% pending procurement data ·
+Materials editing needs a search-first design · `getInstallCarcassUnits()` blank-count fallback ·
+website order pipeline (live SKUs, hole count, grooving variants) · PMES sign-in (do not drop the
+anon policies first) · Cabinet POC unverified types + oven tower · FORGE detection · Supabase orphan
+detector (would need to compare against the Sheet, which only the app can read) · the larger
+quotation-page rework (collapse the 701px Client card, two columns, wider).
+
+## Next up — agreed order, not started
+1. **Remote approval, the cheap route (~1 session)** — collapse the 1473px topbar on a phone, size
+   buttons to 44px, put the figures into the Chat/email notification. This was Rommel's actual point.
+2. **Website cutting list into Modcraft (~1–1.5 sessions)** — Designers Support tab feeding the
+   existing bridge. **Namespace `recalc` and `SERVICES` or it breaks pricing.**
+3. Then reconsider whether the full mobile app with push is still wanted.
+
+## Roadmap — do not start without asking
+Mobile approvals app (PWA + push) · Wall Cladding treatment (still unspecified) · Order intent
+New/Revision/Additional (half exists; the missing piece is which quotation a revision attaches to).
+
+---
+# OPEN — 2026-08-06 (SUPERSEDED by the 2026-08-07 list above — kept for the detail only)
+
+Everything still live from here has been carried up into the 2026-08-07 list. Read this only for the
+background detail on an item, never as the current state.
 
 ## ✅ AUDITED 2026-08-05 — the "four parts" job is BUILT. Do not rebuild it.
 
