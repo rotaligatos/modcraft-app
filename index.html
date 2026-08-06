@@ -3723,7 +3723,13 @@ function _pinGenSalt() {
 async function _verifyApproverPin(pin) {
   if(!_pinModalApprover) return pin === '1234'; // no approver context — legacy fallback
   var u = _pinModalApprover;
-  if(!u.pinHash || !u.pinSalt) return pin === '1234'; // user has no PIN set yet
+  if(!u.pinHash || !u.pinSalt){
+    // "Require own PIN" (Settings → Users) is what closes the shared-1234 fallback for a given
+    // person. Ticked and no PIN set means nothing is accepted — they are sent to set one instead
+    // of being quietly waved through on a code everyone knows. Unticked keeps today's behaviour.
+    if(u.requirePin) return false;
+    return pin === '1234';                     // user has no PIN set yet
+  }
   return await _pinVerify(pin, u.pinHash, u.pinSalt);
 }
 // Find current user's sheetUsers entry (for self-approval)
@@ -11111,7 +11117,7 @@ function exportReportToPPT() {
 // Load sheetUsers silently on app start so routing works without visiting Users page
 function loadSheetUsersBackground(){
   if(!gToken) return;
-  sheetsGet('User Roles!A:Z')
+  sheetsGet('User Roles!A:AA')
     .then(function(data){
       var rows=data.values||[];
       sheetUsers=parseUserRows(rows);
@@ -16193,7 +16199,10 @@ function parseUserRows(rows){
     // Col Z — whether this person appears in the Team performance matrix. Absent (an existing
     // row, or a sheet not yet widened) reads as NOT measured: nobody is ranked until ticked.
     var includeKpi=String(r[25]||'').toUpperCase()==='TRUE';
-    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:pinHash,pinSalt:pinSalt,includeKpi:includeKpi,rowIdx:i+1});
+    // Col AA — must this person hold their own PIN. Signatories can be ANY active user now, so
+    // who needs a PIN is a choice rather than a consequence of rank. Absent reads as FALSE.
+    var requirePin=String(r[26]||'').toUpperCase()==='TRUE';
+    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:pinHash,pinSalt:pinSalt,includeKpi:includeKpi,requirePin:requirePin,rowIdx:i+1});
   }
   return out;
 }
@@ -16202,7 +16211,7 @@ function loadUsersFromSheet(){
   var wrap=el('users-wrap');
   if(!gToken){if(wrap)wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Please sign in to manage users.</div>';return;}
   if(wrap)wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text2);font-size:13px"><i class="ti ti-loader" style="font-size:18px"></i> Loading users…</div>';
-  sheetsGet('User Roles!A:Z')
+  sheetsGet('User Roles!A:AA')
     .then(function(data){
       sheetUsers=parseUserRows(data.values||[]);
       renderUsers();
@@ -16284,7 +16293,12 @@ function renderUsers(){
       +'<label style="display:flex;align-items:center;gap:7px;font-size:12px;'+(isAdmin?'cursor:pointer':'cursor:default;opacity:.55')+'">'
       +'<input type="checkbox" id="u'+i+'kpi" '+(u.includeKpi?'checked':'')+(isAdmin?'':' disabled')+'>'
       +'Include in Team performance</label>'
-      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Measured on orders answered: received &rarr; quotation sent, in working hours.</div>';
+      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Measured on orders answered: received &rarr; quotation sent, in working hours.</div>'
+      +'<div class="dvdr" style="margin:10px 0 8px"><span>Security</span></div>'
+      +'<label style="display:flex;align-items:center;gap:7px;font-size:12px;'+(isAdmin?'cursor:pointer':'cursor:default;opacity:.55')+'">'
+      +'<input type="checkbox" id="u'+i+'reqpin" '+(u.requirePin?'checked':'')+(isAdmin?'':' disabled')+'>'
+      +'Require own PIN</label>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">'+(u.pinHash?'<span style="color:var(--teal)">PIN is set.</span> ':'<span style="color:var(--amber)">No PIN yet.</span> ')+'Tick this for anyone who signs or approves — they will be asked to set one before their first PIN action, and the shared fallback stops working for them.</div>';
     h+='<div style="background:#fff;border:.5px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:12px;opacity:'+(u.active?1:.6)+'">'
       +'<div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">'
       +'<div style="width:42px;height:42px;border-radius:50%;background:'+(u.active?'#e6edf5':'#eee')+';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:'+(u.active?'var(--navy)':'var(--muted)')+'">'+ini+'</div>'
@@ -16352,6 +16366,7 @@ function saveUserRow(i){
   // Whether this person appears in the Team performance matrix. Admin-set, like the rest of
   // this card; the switch is only rendered for an Admin, so preserve the stored value otherwise.
   var includeKpi=el('u'+i+'kpi')?el('u'+i+'kpi').checked:!!u.includeKpi;
+  var requirePin=el('u'+i+'reqpin')?el('u'+i+'reqpin').checked:!!u.requirePin;
   var accessCompanies=u.accessCompanies||[];
   if(pos!=='Admin'&&pos!=='Director'){
     accessCompanies=Object.keys(COMPANY_KEY_NAMES).filter(function(k){
@@ -16367,10 +16382,11 @@ function saveUserRow(i){
     acc['Designers Support']?'TRUE':'FALSE',acc['Settings']?'TRUE':'FALSE',acc['Users']?'TRUE':'FALSE', // T-V
     u.pinHash||'', u.pinSalt||'',                                                                    // W-X
     accessCompanies.join(','),                                                                        // Y
-    includeKpi?'TRUE':'FALSE'];                                                                     // Z                                                                      // Y
-  sheetsUpdate('User Roles!A'+u.rowIdx+':Z'+u.rowIdx,[row])
+    includeKpi?'TRUE':'FALSE',
+    requirePin?'TRUE':'FALSE'];                                                                   // AA                                                                     // Z                                                                      // Y
+  sheetsUpdate('User Roles!A'+u.rowIdx+':AA'+u.rowIdx,[row])
     .then(function(){
-      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',includeKpi:includeKpi,rowIdx:u.rowIdx};
+      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',includeKpi:includeKpi,requirePin:requirePin,rowIdx:u.rowIdx};
       supaUpsertUser(sheetUsers[i]);
       // Correcting your OWN name here should show on the next quotation you save, not after a
       // re-login — otherwise the fix looks like it did nothing.
@@ -16457,7 +16473,7 @@ function submitAddUser(){
   row.push(el('n-kpi')&&el('n-kpi').checked?'TRUE':'FALSE');  // Z: include in the performance matrix
   var acc={};
   for(var k=0;k<ACC_KEYS.length;k++){var cb=el('na'+k);acc[ACC_KEYS[k]]=cb?cb.checked:false;}
-  sheetsAppend('User Roles!A:Z',[row])
+  sheetsAppend('User Roles!A:AA',[row])
     .then(function(){
       supaUpsertUser({name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:true,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:'',accessCompanies:[],pinHash:'',pinSalt:''});
       var w=el('add-user-form-wrap');if(w)w.innerHTML=''; loadUsersFromSheet(); showToast('User added.');
@@ -20827,7 +20843,8 @@ function supaUpsertUser(u){
     access_companies:u.accessCompanies||[],
     pin_hash:u.pinHash||null,
     pin_salt:u.pinSalt||null,
-    include_in_kpi:!!u.includeKpi
+    include_in_kpi:!!u.includeKpi,
+    require_pin:!!u.requirePin
   };
   try{
     return supa.from('users').upsert(row,{onConflict:'email'}).then(function(r){
@@ -20856,7 +20873,7 @@ function supaMigrateUsers(){
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
   _usersMigrationInFlight=true;
   console.log('[migrate] backfilling Users into Supabase from User Roles sheet…');
-  return sheetsGet('User Roles!A:Z').then(function(d){
+  return sheetsGet('User Roles!A:AA').then(function(d){
     var rows=(d&&!d.error&&d.values)||[];
     var users=parseUserRows(rows);
     console.log('[migrate] found',users.length,'user row(s) in Sheets — migrating...');
@@ -21190,7 +21207,7 @@ function gCheckRole(){
   // fell into the data.error branch below and showed the misleading "ask your
   // Admin to share the spreadsheet" message — telling the user they lack access
   // when really the server was just briefly busy.
-  _sheetsGetWithRetry('User Roles!A:Y',4)
+  _sheetsGetWithRetry('User Roles!A:AA',4)
     .then(function(data){
       if(data.error){
         if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
