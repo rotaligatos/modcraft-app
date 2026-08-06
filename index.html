@@ -8140,19 +8140,37 @@ function _recordStage1ClientApproval(){
   logActivity('Client approved the Initial Quotation.');
 }
 // Won either way. A job the client approved at Stage 1 and never took to a Final Quotation is
-// just as won as one that did.
+// SUPERSEDED 2026-08-06. The paragraph above described the earlier rule, where a Stage 1
+// client approval counted as a win and a status rank stood in for it on older rows. Rommel
+// has since set one rule: a win is the client approving the FINAL QUOTATION, and nothing
+// before it. _recordStage1ClientApproval still runs — a Stage 1 sign-off is a real event
+// worth logging and showing — but it no longer makes the job won, and no longer writes
+// column Y. See _isClientApprovedEntry below for the single test everything now uses.
+// THE definition of a win, used by every KPI and report. Rommel, 2026-08-06:
+// "Win is the final approval of client in the final quotation. no argument to that.
+//  there's no win before that."
 //
-// Column Y only exists from now on, so every quotation already in the sheet would read as unwon
-// until someone happened to reopen and re-save it. The status is the honest fallback: reaching
-// "In Final Quotation" requires the Approve button, which is only clicked once the client has
-// approved, so anything at that rank or beyond was client-approved at Stage 1. Cancelled is the
-// one higher rank that is not a win, and is excluded by name rather than by arithmetic.
+// So: a recorded client sign-off on the LOCKED FINAL QUOTATION, and nothing else.
+// Two things were counted as wins before and are deliberately not any more:
+//   · Stage 1 client approval. Still recorded, still shown, still a real fact —
+//     but an approved Initial Quotation is not a won job.
+//   · The status-rank fallback (anything that had reached "In Final Quotation").
+//     That was an INFERENCE standing in for a fact nobody was recording, and it
+//     was carrying essentially the whole win rate — reaching Stage 2 is not the
+//     client saying yes.
+// Removing the fallback makes the figure smaller and true. If a won job reads as
+// unwon, the fix is to record the approval on the quotation, not to loosen this.
 function _isClientApprovedEntry(e){
   if(!e) return false;
   var st=_normalizeStatusLabel(e.status||'');
   if(st==='Cancelled') return false;
-  if(e.clientApproved||e.fqClientApproved) return true;
-  return _statusRank(st)>=_statusRank('In Final Quotation');
+  if(e.clientApprovedAt||e.clientApproved) return true;   // column Y = final client approval
+  // The "Client Approved" label is produced by exactly one thing — fqClientApproved in
+  // _computeQuotationStatus — so it IS the recorded final approval, not a guess about it.
+  // It is accepted because until 2026-08-06 the Stage 2 approval never reached column Y
+  // (the row wrote the Stage 1 variable), leaving real wins with the label but no date.
+  // This is not the old rank fallback: "In Final Quotation" and below still do not count.
+  return st==='Client Approved';
 }
 function doApprove() {
   if(qCancelled){ showToast('This quotation was cancelled — the client declined to proceed.'); return; }
@@ -9667,7 +9685,8 @@ function _dashUpdateKPIs(){
   var total=jobs.length;
   var rev=jobs.reduce(function(s,j){return s+j.revenue;},0);
   // Conversion = quotation reached Final Quotation locked (Stage 2 locked)
-  var closedN=jobs.filter(function(j){ return !!j.root.finalLockedAt; }).length;
+  // Same test as Team performance and every report — one definition of a win.
+  var closedN=jobs.filter(function(j){ return _isClientApprovedEntry(j.root); }).length;
   var convRate=total?Math.round(closedN/total*100):0;
 
   // Avg response time
@@ -22429,7 +22448,7 @@ function setupMissingSheetTabs(){
   // A freshly created tab got a 13-column header while every writer sends 23.
   // _syncQuotHeader would eventually widen it, but there is no reason to create it
   // wrong in the first place.
-  var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Client Approved']];
+  var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved']];
   var CLI_HDR=[['ID','Contact Name','Business Name','Contact No','Email','Address','City','Account Type','Segment','Segment Group','Segment Custom','Notes']];
   var STATE_HDR=[['Serial','State JSON (chunked across columns B–K — do not edit manually)']];
   Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1'),sheetsGet('Quotation State!A1')]).then(function(res){
@@ -24867,7 +24886,7 @@ function _syncQuotHeader(){
   // The range must be as wide as HDR. It was A1:T1 against a 21-entry HDR, so
   // 'Company' was never actually written and cur.length<HDR.length stayed true
   // forever — the header was rewritten every session and never converged.
-  var HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Client Approved'];
+  var HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved'];
   var RANGE='Quotations!A1:Y1';   // must stay as wide as HDR — see the A1:T1 bug below
   sheetsGet(RANGE).then(function(d){
     var cur=(d.values&&d.values[0])||[];
@@ -25294,11 +25313,11 @@ function _proceedSaveQuotation(){
   // editable copies of the same fact would eventually disagree.
   var _jobSrc=qSourceOrderId?'':(qJobSource||'');
   var _jobStart=qSourceOrderId?'':(qJobStartedAt||'');
-  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',qClientApprovedAt||''];
+  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',fqClientApprovedAt||''];
   // Store in session memory immediately so directory shows it without waiting for Sheets
-  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Client Approved'];
+  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved'];
   var _bsM=serial.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
-  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:qClientApprovedAt||'',clientApproved:!!qClientApproved};
+  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:fqClientApprovedAt||'',clientApproved:!!fqClientApproved};
   try{ supaUpsertQuotation(sessionQuotations[serial]); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
   sheetsGet('Quotations!A:A').then(function(d){
     if(d.error){
@@ -31520,7 +31539,7 @@ function _chipKpiContext(){
     // Revenue is recognized once the client has actually approved (or the project is closed) —
     // not at the earlier internal Stage-1-approval point this used to key off. Note this counts
     // as "signed, not yet collected" — there's no payment/invoice tracking yet to distinguish that.
-    if(st==='Closed'||st==='Client Approved') closedRevenue+=v;
+    if(_isClientApprovedEntry(q)) closedRevenue+=v;
     // Monthly bucketing by created date
     var d=q.created||(q.date||'');
     var m=d?d.substring(0,7):'';
@@ -31550,9 +31569,12 @@ function _chipKpiContext(){
   var pipeline=all.filter(function(q){var st=_normalizeStatusLabel(q.status);return st!=='Closed'&&st!=='Cancelled';})
     .reduce(function(s,q){return s+(parseFloat(q.value)||0);},0);
 
-  // Win rate / conversion: client-approved (or closed) / total — keyed to actual client sign-off,
-  // not the earlier internal Stage-1-approval point this used to use.
-  var conversion=total>0?(((byStatus.Closed+byStatus['Client Approved'])/total)*100).toFixed(1)+'%':'N/A';
+  // Win rate: the same single test as the dashboard and Team performance —
+  // a recorded client approval on the Final Quotation. Was the status LABEL
+  // ('Client Approved' or 'Closed'), which let a project closed without a
+  // recorded sign-off count as won and could disagree with the dashboard.
+  var wonN=all.filter(_isClientApprovedEntry).length;
+  var conversion=total>0?((wonN/total)*100).toFixed(1)+'%':'N/A';
 
   return {total:total, byStatus:byStatus, totalRevenue:totalRevenue,
     closedRevenue:closedRevenue, pipeline:pipeline, conversion:conversion,
