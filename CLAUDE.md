@@ -4124,19 +4124,103 @@ leaves an unreachable stale row.**
   understanding. When something is parked, leave it parked.
 
 ---
+
+## What was changed on 2026-08-07 (session 2 — site-visit-only, quotation layout)
+
+Two commits after the handoff above: `900cf0f`, `8aadebd`. Both found by Rommel or his users
+on the real app.
+
+### A site-visit-only request is charged at cost (`900cf0f`)
+A user reported a **₱1,500 site visit producing a ₱2,788.50 subtotal**, with nothing on screen
+to explain the gap.
+
+**Cause.** The Site visit card's *Charge under: Mobilization* folds the fee into `mobBase`, where
+it picks up mobilization contingency × buffer × markup — **×1.86** at these rates. The summary
+printed the raw ₱1,500, and the admin row that would have explained it (*"Site visit in mob"*) is
+gated on `(ni||na)`, both false on a visit-only job. So the uplift was invisible — and the client's
+printout showed **neither** a site-visit nor a mobilization line, because `_pCalc.svCost` is 0 when
+charged under mob and there is no mobilization line without installation.
+
+Rommel: *"if site visit only is the requirement no other cost should be added such as mobilization
+additional markup etc... only vat in accordance to our established company rule."*
+
+**Fix.** A tick — **"Site visit only request"** — rather than inferring it from an empty scope,
+because a design charge may legitimately ride along. When ticked the visit is treated as its own
+line, so it never enters `mobBase`; *Charge under* greys out with the reason stated, so nobody can
+set Mobilization out of habit and re-inflate it; and the empty *Fabrication ₱0.00* row is dropped.
+Applied to **both** stages.
+
+**Deliberately narrow.** Fabrication-only and fab+installation are untouched. An earlier draft
+extended the rule to fabrication-only, which Rommel had not asked for and which would have changed
+live pricing — he pulled it back, correctly.
+
+VAT needed no work: `_vatDefaultForType` already gives Direct 12% inclusive, Subsidiary exclusive.
+
+Verified: tick off → ₱2,789.33 / ₱3,124.04 unchanged; tick on → **₱1,500 + ₱180 = ₱1,680** Direct,
+**₱1,500** flat Subsidiary; the tick beats *Charge under* both ways; a design charge rides along at
+cost (₱1,800 exactly); Stage 1 and Stage 2 agree; the tick persists; a normal fab+installation
+quotation still prices differently under Mobilization vs Separate line.
+
+### Quotation page — two steps, two columns (`8aadebd`)
+Measured first: Stage 1 was **2,903px** in a fixed **800px** column on 1440px screens. Client
+information alone was **701px** filled once and never read again; five cards were a 40px toggle
+each taking a full-width row.
+
+- **Step 1 = client. Step 2 = the quotation**, in two columns above 1180px. Work on the left
+  (scope, mobilization, installation, pricing, summary); set-once and reference cards on the right
+  (contingency, project size, the charge toggles, bond, other cost, scheduling, activity log).
+- Below 1180px the rail falls underneath in the same order — **no separate phone design needed**,
+  which is what made this cheap. Rommel's own scoping: *"the approval is what I think is needed
+  when it comes to phone"*, so the quotation page only has to not break at narrow widths.
+- The step bar carries the client forward, so step 2 never leaves you wondering who you are pricing.
+- Cards are **MOVED**, never rebuilt — same approach as the dashboard grid, so every id and handler
+  survives. Anything not named stays in the main column, so a card added later lands sensibly.
+
+**Result: step 1 = 772px, step 2 = 1,213px** (main 1,142 / rail 1,084), against 2,903px. Nothing
+inside the quotation page overflows at any width.
+
+> ⚠ **Two ids landed on the WRONG cards** while doing this — `activity-card` went onto the
+> Scheduling card, and `sched-card` onto **Stage 2's** JS-built scheduling card, which would have
+> let Stage 2's card be dragged into Stage 1's rail. Caught only by checking each id against its
+> own card title. Stage 2's is now `fq-sched-card`. **This is precisely what the queued collision
+> checker is for** — a mislabelled id throws nothing and surfaces only when something quietly
+> appears in the wrong place.
+
+### Method notes
+- **Rommel corrected an over-reach.** Told "site visit only", I generalised to fabrication-only as
+  well. He pulled it back: *"I didn't say that it should be removed to other cost we already
+  establish."* Implement the rule given, not the rule inferred.
+- **My own test rigs were wrong three times this session** — measuring mid-CSS-transition, measuring
+  a container that stretches to fit the thing it should constrain, and setting a container width
+  expecting a viewport media query to fire. Each produced a confident, wrong number. When a
+  measurement surprises you, suspect the rig before the code.
+- **Mockups earn their keep.** The A+B mockup proved option B (merging the five toggles) made the
+  page *longer*, not shorter — the opposite of what I had told him.
+
+---
 # OPEN — updated 2026-08-07 (THIS IS THE AUTHORITATIVE LIST)
 
 ## Cleared on 2026-08-06/07
 Test file `QT-W00000026` (deleted, both stores) · per-card chart-type switcher · Orders search ·
 Customize/restrictions panel reachable again · running total bar · one definition of a win · status
-rung renamed · Status column width + resize handle · Lami's undefined KPI counts.
+rung renamed · Status column width + resize handle · Lami's undefined KPI counts ·
+**site-visit-only charged at cost** · **quotation page two-step + two-column layout**.
 
-## ⏳ Deploy pending at session end
-`db2d9d7` (running total bar) was still queued at GitHub — status `waiting`, not started, ~25 min.
-Not a code problem; the two commits before it deployed fine. **Check it is serving before assuming
-it shipped:** `curl -s https://rotaligatos.github.io/modcraft-app/ | grep -c q-total-bar`. If still
-stuck, retrigger with an empty commit. Do NOT touch the Pages configuration — doing that during the
-July incident turned a short outage into a day-long one.
+## ⏳ DEPLOY BACKLOG — check this FIRST next session
+GitHub Pages stopped starting runs mid-session (they declared a Partial System Outage, then
+"operational" while runs still queued). One run was **cancelled** outright; the retrigger sat
+`pending` for over an hour. **Everything from `db2d9d7` onward is committed and pushed but was NOT
+being served**, including the running total bar, the site-visit fix and the new layout.
+
+```bash
+curl -s https://rotaligatos.github.io/modcraft-app/ | grep -c q-total-bar   # 0 = still stuck
+curl -s https://rotaligatos.github.io/modcraft-app/ | grep -c sv-only       # site-visit fix
+curl -s https://rotaligatos.github.io/modcraft-app/ | grep -c s1-step2      # new layout
+```
+
+If still 0, push an empty commit to retrigger. **Do NOT touch the Pages configuration** — doing
+that during the July incident turned a short outage into a day-long one. The app itself served
+HTTP 200 throughout; users were on the older build, not broken.
 
 ## Blocking — the signature flow is unusable until these are done (all re-verified 2026-08-07)
 | | State |
@@ -4173,7 +4257,18 @@ Materials editing needs a search-first design · `getInstallCarcassUnits()` blan
 website order pipeline (live SKUs, hole count, grooving variants) · PMES sign-in (do not drop the
 anon policies first) · Cabinet POC unverified types + oven tower · FORGE detection · Supabase orphan
 detector (would need to compare against the Sheet, which only the app can read) · the larger
-quotation-page rework (collapse the 701px Client card, two columns, wider).
+quotation-page rework — **DONE 2026-08-07**, see the session record above.
+
+## Mockups kept for reference (standalone, not deployed)
+- `dashboard_redesign.html` — the widget grid prototype the real dashboard was built from
+- `quotation_layout_mockup.html` — A (collapse client) + B (merge toggles). **B was proved wrong
+  here**: merging the five 40px toggle cards made the page LONGER, not shorter
+- `quotation_responsive_mockup.html` — fixed 800px vs adaptive, measured at six widths in a real
+  iframe (45% shorter at ≥1280px, slightly longer on a phone, which is the right trade)
+- `quotation_steps_mockup.html` — the two-step + light/dark demo. Its **"Show hardcoded colours"**
+  switch demonstrates the dark-mode problem: 2,057 token references would flip, **1,588 hardcoded
+  hex colours would not**. Twelve values cover ~500 of them (`#fff` alone is 191), so dark mode is
+  ~1 mechanical session — plus print styles must stay light or PDFs come out dark.
 
 ## Next up — agreed order, not started
 0. **Collision checker + pre-commit hook (~15 min)** — agreed 2026-08-07, do this FIRST. A script
@@ -4184,8 +4279,13 @@ quotation-page rework (collapse the 701px Client card, two columns, wider).
    duplicate id. Both have already bitten this app — `dashToggleWidget` nearly shipped shadowed on
    2026-08-06, and a duplicate `id="users-wrap"` made the Users page render blank into a hidden div.
    Neither throws an error, so only a check finds them. Must exist before the cutting-list port.
-1. **Remote approval, the cheap route (~1 session)** — collapse the 1473px topbar on a phone, size
-   buttons to 44px, put the figures into the Chat/email notification. This was Rommel's actual point.
+1. **Remote approval, the cheap route (~1 session)** — collapse the topbar on a phone, size buttons
+   to 44px, put the figures into the Chat/email notification. This was Rommel's actual point:
+   *"the approval is what I think is needed when it comes to phone."* Measured: the Approvals page
+   itself does NOT overflow at 375px; the **topbar is ~1,447px** and is the only thing that does —
+   it is also the single remaining overflow on the quotation page, so fixing it clears both.
+   Buttons are 28–35px against a 44px tap minimum. The full PWA-with-push is ~4–5 sessions and is
+   NOT what he asked for; do this first and reconsider after.
 2. **Website cutting list into Modcraft (~1–1.5 sessions)** — Designers Support tab feeding the
    existing bridge. **Wrap the ported file in an IIFE** so `recalc` and `SERVICES` never reach global
    scope — prevention by construction, not by vigilance. Modcraft's `recalc()` is the pricing engine.
