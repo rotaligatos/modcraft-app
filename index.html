@@ -1801,6 +1801,7 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
   <div style="display:flex;gap:4px;border-bottom:.5px solid var(--border);margin-bottom:18px">
     <button id="prod-tab-drawing" onclick="setProdTab('drawing')" class="tab active" style="border-radius:8px 8px 0 0;border-bottom:none"><i class="ti ti-file-analytics"></i>Shop Drawing Analysis</button>
     <button id="prod-tab-mobility" onclick="setProdTab('mobility')" class="tab" style="border-radius:8px 8px 0 0;border-bottom:none"><i class="ti ti-map-route"></i>Mobility &amp; Accommodation</button>
+    <button id="prod-tab-cutlist" onclick="setProdTab('cutlist')" class="tab" style="border-radius:8px 8px 0 0;border-bottom:none"><i class="ti ti-table"></i>Cutting List</button>
     <button id="prod-tab-saved" onclick="setProdTab('saved')" class="tab" style="border-radius:8px 8px 0 0;border-bottom:none"><i class="ti ti-history"></i>Saved Analyses</button>
   </div>
   <div id="prod-wrap"></div>
@@ -13915,11 +13916,24 @@ function _cutListToAnalysis(cl,order){
   if(t.pieces!==undefined && +t.pieces !== gotPieces) mismatch.push('the client sent '+t.pieces+' pieces, this parsed '+gotPieces);
   if(panels.length !== gotRows)                       mismatch.push(panels.length+' panels in the payload, '+gotRows+' components built');
 
-  var head='Cutting list filed by the client on the MSSI website'
-    +(order&&order.id?' (order '+order.id+')':'')+'. '
-    +(t.rows||panels.length)+' rows · '+(t.pieces||0)+' pieces'
-    +(t.area?' · '+Number(t.area).toFixed(3)+' m²':'')
-    +'. These values were typed by the client, not extracted — check them, do not re-derive them.';
+  // Where the list came from changes what the reader should do with it, so say
+  // which. A list typed into this app is not "filed by the client", and its
+  // totals were computed in this same browser from these same rows — so the two
+  // count comparisons above are circular and are skipped by leaving cl.totals
+  // unset. The panels-vs-components check still runs, and that is the one that
+  // catches the converter dropping a row.
+  var head;
+  if(cl&&cl.origin==='typed'){
+    head='Cutting list entered in Modcraft'+(cl.enteredBy?' by '+cl.enteredBy:'')+'. '
+      +panels.length+' rows · '+gotPieces+' pieces'
+      +'. Keyed in by hand from the client’s own list — check it against that document.';
+  } else {
+    head='Cutting list filed by the client on the MSSI website'
+      +(order&&order.id?' (order '+order.id+')':'')+'. '
+      +(t.rows||panels.length)+' rows · '+(t.pieces||0)+' pieces'
+      +(t.area?' · '+Number(t.area).toFixed(3)+' m²':'')
+      +'. These values were typed by the client, not extracted — check them, do not re-derive them.';
+  }
   if(hplRows.length) head+=' '+hplRows.length+' HPL build'+(hplRows.length===1?' is':'s are')
     +' applied through the panels that use them, so they are not listed again as their own components.';
   if(warn.length) head+=' \u26a0 '+warn.join('. ')+'.';
@@ -27182,10 +27196,12 @@ function renderProductionPage() {
   // Route to correct tab
   if(prodTab==='mobility'){w.innerHTML=_buildMobilityCard();return;}
   if(prodTab==='saved'){w.innerHTML=_buildSavedAnalysesTab();return;}
+  if(prodTab==='cutlist'){w.innerHTML=MCL.build();MCL.afterRender();return;}
   // Sync tab button state (in case page was navigated to directly)
   var dt=el('prod-tab-drawing'); if(dt) dt.classList.toggle('active',prodTab==='drawing');
   var mt=el('prod-tab-mobility'); if(mt) mt.classList.toggle('active',prodTab==='mobility');
   var st=el('prod-tab-saved'); if(st) st.classList.toggle('active',prodTab==='saved');
+  var ct=el('prod-tab-cutlist'); if(ct) ct.classList.toggle('active',prodTab==='cutlist');
   // Auto-fill the shared carcass/unit count from production (shop-drawing) analysis
   if(prodState.result&&prodState.result.carcassCount){
     var pc=prodState.result.carcassCount;
@@ -27270,12 +27286,393 @@ function setProdTab(tab){
     if(_projLoc) mobilityState.destination=_projLoc;
   }
   if(tab==='saved') _prodLoadSavedAnalysesList();
-  ['drawing','mobility','saved'].forEach(function(t){
+  ['drawing','mobility','saved','cutlist'].forEach(function(t){
     var btn=el('prod-tab-'+t);
     if(btn){btn.classList.toggle('active',t===tab);}
   });
   renderProductionPage();
 }
+// ── Cutting List tab ──────────────────────────────────────────────────────
+// The MSSI website already collects a structured cutting list, and a website
+// order carrying one drops straight into Designers Support via
+// _cutListToAnalysis -> prodLoadStructuredList. A client who emails or walks in
+// with the same list had no way in: the only other entry points call Claude,
+// and paying an extraction pass to read a list that is already exact can only
+// add error.
+//
+// So this is the website's form, brought here, producing the SAME cl object
+// _cutListToAnalysis already consumes. One conversion, not two — that converter
+// is tested against real website orders, and a second copy of the EBT and HPL
+// rules would drift the way Stage 1 and Stage 2 do.
+//
+// Two things are better here than on the website: the real catalogue is already
+// in memory, so materials are picked from live SKUs instead of the site's
+// stand-ins and land resolved rather than in the fuzzy matcher; and the same
+// bounded search the quotation uses is reused, so a 153k-row catalogue stays
+// searchable.
+//
+// IIFE-wrapped on purpose. The source file declares `function recalc()` and
+// `var SERVICES` at top level — in this app those ARE the pricing engine and the
+// live service catalogue, and a later definition silently wins. Nothing here
+// reaches global scope except the MCL namespace the inline handlers need.
+var MCL=(function(){
+  var S={grain:'length',groupBy:'cabinet',panels:[],hpl:[],hardware:[]};
+
+  var PARTS=['Side panel','Top panel','Bottom panel','Top rail','Back panel','Fixed shelf',
+             'Adjustable shelf','Partition','Door','Drawer front','Drawer side','Drawer back',
+             'Drawer bottom','Filler','Toe kick','Worktop','Other'];
+  // Long/short, not width/height: the code follows the piece, so a part entered
+  // taller than it is wide cannot flip its meaning. _webEbtToModcraft converts
+  // through the real dimensions.
+  var EBT=['','1L','2L','1S','2S','1L 1S','2L 1S','1L 2S','4S'];
+  var SVC=['Grooving','Boring','Routing','Manual Edgebanding'];
+
+  function esc(s){ return escHtml(String(s==null?'':s)); }
+  function num(v){ var n=parseFloat(v); return isFinite(n)?n:0; }
+
+  function blankPanel(){
+    return {group:S.groupBy==='area'?'Area 1':'Cabinet 1',part:'Side panel',mat:'',th:18,
+            L:0,W:0,qty:1,ebt:'',grain:'',svcs:[]};
+  }
+
+  // ── The composite label an HPL build offers ────────────────────────────
+  // _cutListToAnalysis resolves a panel's material back to substrate + finish +
+  // face count by rebuilding exactly this string, so it is built here the same
+  // way rather than parsed back out of a display name.
+  function hplLabel(h){
+    if(!h.sub||!h.fin) return '';
+    return String(h.fin).split(' — ')[0].trim()+' on '+String(h.sub).split(' — ')[0].trim()
+           +' · '+(h.faces||'1F');
+  }
+  function hplLabels(){
+    var out=[]; for(var i=0;i<S.hpl.length;i++){ var l=hplLabel(S.hpl[i]); if(l) out.push(l); }
+    return out;
+  }
+
+  function opts(list,sel){
+    return list.map(function(v){
+      return '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(v||'—')+'</option>';
+    }).join('');
+  }
+
+  // ── Panels ──────────────────────────────────────────────────────────────
+  function panelRow(p,i){
+    var inp='style="width:100%;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
+    var sel='style="width:100%;padding:4px 4px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
+    var h='<tr data-i="'+i+'">';
+    h+='<td><input '+inp+' value="'+esc(p.group)+'" oninput="MCL.set('+i+',\'group\',this.value)"></td>';
+    h+='<td><select '+sel+' onchange="MCL.set('+i+',\'part\',this.value)">'+opts(PARTS,p.part)+'</select></td>';
+    h+='<td><input '+inp+' list="mcl-mat-dl-'+i+'" value="'+esc(p.mat)+'" placeholder="type to search the catalogue"'
+      +' oninput="MCL.matSearch(this,'+i+')" onchange="MCL.matSearch(this,'+i+')">'
+      +'<datalist id="mcl-mat-dl-'+i+'"></datalist></td>';
+    h+='<td><input '+inp+' type="number" min="0" step="0.1" value="'+(p.th||'')+'" oninput="MCL.set('+i+',\'th\',this.value)"></td>';
+    h+='<td><input '+inp+' type="number" min="0" value="'+(p.L||'')+'" oninput="MCL.set('+i+',\'L\',this.value)"></td>';
+    h+='<td><input '+inp+' type="number" min="0" value="'+(p.W||'')+'" oninput="MCL.set('+i+',\'W\',this.value)"></td>';
+    h+='<td><input '+inp+' type="number" min="1" value="'+(p.qty||1)+'" oninput="MCL.set('+i+',\'qty\',this.value)"></td>';
+    h+='<td><select '+sel+' onchange="MCL.set('+i+',\'ebt\',this.value)">'+opts(EBT,p.ebt)+'</select></td>';
+    h+='<td><select '+sel+' onchange="MCL.set('+i+',\'grain\',this.value)">'
+      +opts(['','L','W'],p.grain)+'</select></td>';
+    h+='<td>'+svcCell(p,i)+'</td>';
+    h+='<td style="text-align:center"><button class="btn" style="padding:2px 7px" title="Remove row"'
+      +' onclick="MCL.removePanel('+i+')"><i class="ti ti-trash"></i></button></td>';
+    return h+'</tr>';
+  }
+
+  // The website offers five generic service names because it has no catalogue.
+  // Here the real one is loaded, so offer that instead: it names the three
+  // grooving prices separately and the boring bits by diameter, which is exactly
+  // the ambiguity the converter would otherwise have to flag for someone to
+  // resolve by hand.
+  function svcOptions(){
+    var names=[];
+    for(var i=0;i<SERVICES.length;i++){
+      var n=SERVICES[i]&&SERVICES[i].name;
+      if(n&&names.indexOf(n)<0) names.push(n);
+    }
+    return names.length?names:SVC;
+  }
+  var HOLES_RE=/\s*[x×]\s*\d+\s*holes?\s*$/i;
+  function svcBase(s){ return String(s).replace(HOLES_RE,'').trim(); }
+  function svcHoles(s){ var m=String(s).match(/[x×]\s*(\d+)\s*holes?\s*$/i); return m?m[1]:''; }
+
+  function svcCell(p,i){
+    var h='<div style="display:flex;flex-wrap:wrap;gap:3px;align-items:center">';
+    for(var s=0;s<p.svcs.length;s++){
+      var sv=p.svcs[s];
+      var chip='background:#eef2f7;border:.5px solid var(--border);border-radius:10px;'
+              +'padding:1px 6px;font-size:11px;white-space:nowrap';
+      if(/bor/i.test(sv)){
+        // Boring is priced per hole, and prodComputeServices drops a service at
+        // qty 0 — so a boring line with no count does not arrive vague, it
+        // disappears. Ask for the number here rather than let it flag later.
+        h+='<span style="'+chip+'">'+esc(svcBase(sv))
+          +' <input type="number" min="0" value="'+esc(svcHoles(sv))+'" placeholder="?"'
+          +' title="holes — priced per hole" style="width:44px;font-size:11px;padding:0 3px;'
+          +'border:.5px solid var(--border);border-radius:4px;font-family:inherit"'
+          +' oninput="MCL.setHoles('+i+','+s+',this.value)"> holes'
+          +' <a href="#" style="color:var(--coral);text-decoration:none" title="Remove"'
+          +' onclick="MCL.removeSvc('+i+','+s+');return false">×</a></span>';
+      } else {
+        h+='<span style="'+chip+'">'+esc(sv)
+          +' <a href="#" style="color:var(--coral);text-decoration:none" title="Remove"'
+          +' onclick="MCL.removeSvc('+i+','+s+');return false">×</a></span>';
+      }
+    }
+    h+='<select style="border:.5px dashed var(--border);border-radius:10px;font-size:11px;padding:1px 3px;'
+      +'background:transparent;font-family:inherit;max-width:140px" onchange="MCL.addSvc('+i+',this.value);this.value=\'\'">'
+      +'<option value="">+ service</option>'+opts(svcOptions(),'')+'</select>';
+    return h+'</div>';
+  }
+
+  // ── Build the tab ───────────────────────────────────────────────────────
+  function build(){
+    var th='style="text-align:left;font-size:11px;color:var(--text2);font-weight:600;padding:4px 5px;white-space:nowrap"';
+    var h='<div class="card" style="padding:16px;margin-bottom:14px">'
+      +'<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">'
+      +'<div><div style="font-weight:600;font-size:14px">Cutting list</div>'
+      +'<div style="font-size:11px;color:var(--text2);max-width:560px">For a list a client sent by email or brought in. '
+      +'It goes through the same conversion a website order does — no AI, so nothing is re-read or re-guessed.</div></div>'
+      +'<div style="flex:1"></div>'
+      +'<label style="font-size:11px;color:var(--text2)">Job grain'
+      +'<select onchange="MCL.setGrain(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
+      +'<option value="length"'+(S.grain==='length'?' selected':'')+'>Along length</option>'
+      +'<option value="width"'+(S.grain==='width'?' selected':'')+'>Along width</option></select></label>'
+      +'<label style="font-size:11px;color:var(--text2)">Group by'
+      +'<select onchange="MCL.setGroupBy(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
+      +'<option value="cabinet"'+(S.groupBy==='cabinet'?' selected':'')+'>Cabinet</option>'
+      +'<option value="area"'+(S.groupBy==='area'?' selected':'')+'>Area</option></select></label>'
+      +'</div></div>';
+
+    // HPL builds — declared first, because a panel's material can be one of them.
+    h+='<div class="card" style="padding:14px;margin-bottom:14px">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+      +'<span style="font-weight:600;font-size:13px">HPL builds</span>'
+      +'<span style="font-size:11px;color:var(--text2);flex:1">HPL is a finish laminated onto a substrate, never a board on its own. '
+      +'Declare the build here and it becomes selectable as a panel material; the sheet and the substrate-correct lamination service are derived from the panels that use it.</span>'
+      +'<button class="btn" style="font-size:11px;padding:4px 9px" onclick="MCL.addHpl()"><i class="ti ti-plus"></i>Add build</button></div>';
+    if(!S.hpl.length){
+      h+='<div style="font-size:11px;color:var(--text2);font-style:italic">None — add one only if the job has HPL.</div>';
+    } else {
+      h+='<table style="width:100%;border-collapse:collapse"><tr>'
+        +'<th '+th+'>Substrate</th><th '+th+'>HPL finish</th><th '+th+'>Faces</th><th '+th+'>Selectable as</th><th></th></tr>';
+      for(var i=0;i<S.hpl.length;i++){
+        var hp=S.hpl[i];
+        var ii='style="width:100%;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
+        h+='<tr><td><input '+ii+' list="mcl-hsub-'+i+'" value="'+esc(hp.sub)+'" placeholder="substrate SKU"'
+          +' oninput="MCL.hplSearch(this,'+i+',\'sub\')" onchange="MCL.hplSearch(this,'+i+',\'sub\')">'
+          +'<datalist id="mcl-hsub-'+i+'"></datalist></td>'
+          +'<td><input '+ii+' list="mcl-hfin-'+i+'" value="'+esc(hp.fin)+'" placeholder="HPL SKU"'
+          +' oninput="MCL.hplSearch(this,'+i+',\'fin\')" onchange="MCL.hplSearch(this,'+i+',\'fin\')">'
+          +'<datalist id="mcl-hfin-'+i+'"></datalist></td>'
+          +'<td><select style="padding:4px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"'
+          +' onchange="MCL.setHpl('+i+',\'faces\',this.value)">'+opts(['1F','2F'],hp.faces)+'</select></td>'
+          +'<td style="font-size:11px;color:var(--text2)">'+esc(hplLabel(hp)||'— fill both SKUs —')+'</td>'
+          +'<td style="text-align:center"><button class="btn" style="padding:2px 7px" onclick="MCL.removeHpl('+i+')"><i class="ti ti-trash"></i></button></td></tr>';
+      }
+      h+='</table>';
+    }
+    h+='</div>';
+
+    // Panels
+    h+='<div class="card" style="padding:14px;margin-bottom:14px">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+      +'<span style="font-weight:600;font-size:13px">Panels</span>'
+      +'<span style="font-size:11px;color:var(--text2);flex:1">Edge codes follow the piece — L is a long edge, S a short one — so a part entered taller than it is wide still bands correctly.</span>'
+      +'<button class="btn" style="font-size:11px;padding:4px 9px" onclick="MCL.addPanel(1)"><i class="ti ti-plus"></i>Row</button>'
+      +'<button class="btn" style="font-size:11px;padding:4px 9px" onclick="MCL.addPanel(5)">+5</button></div>'
+      +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:900px"><tr>'
+      +'<th '+th+'>'+(S.groupBy==='area'?'Area':'Cabinet')+'</th><th '+th+'>Part</th><th '+th+' style="min-width:220px">Material</th>'
+      +'<th '+th+'>Th</th><th '+th+'>Long (mm)</th><th '+th+'>Short (mm)</th><th '+th+'>Qty</th>'
+      +'<th '+th+'>Edges</th><th '+th+'>Grain</th><th '+th+' style="min-width:170px">Services</th><th></th></tr>';
+    if(!S.panels.length){
+      h+='<tr><td colspan="11" style="font-size:12px;color:var(--text2);font-style:italic;padding:10px 4px">No rows yet — add one to start.</td></tr>';
+    } else {
+      for(var p=0;p<S.panels.length;p++) h+=panelRow(S.panels[p],p);
+    }
+    h+='</table></div></div>';
+
+    // Hardware
+    h+='<div class="card" style="padding:14px;margin-bottom:14px">'
+      +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+      +'<span style="font-weight:600;font-size:13px">Hardware</span><span style="flex:1"></span>'
+      +'<button class="btn" style="font-size:11px;padding:4px 9px" onclick="MCL.addHw()"><i class="ti ti-plus"></i>Row</button></div>';
+    if(!S.hardware.length){
+      h+='<div style="font-size:11px;color:var(--text2);font-style:italic">None.</div>';
+    } else {
+      h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+' style="min-width:240px">Item</th>'
+        +'<th '+th+'>Qty</th><th '+th+'>Unit</th><th '+th+'>Note</th><th></th></tr>';
+      for(var w2=0;w2<S.hardware.length;w2++){
+        var hw=S.hardware[w2];
+        var hi='style="width:100%;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
+        h+='<tr><td><input '+hi+' list="mcl-hw-dl-'+w2+'" value="'+esc(hw.name)+'" placeholder="type to search"'
+          +' oninput="MCL.hwSearch(this,'+w2+')" onchange="MCL.hwSearch(this,'+w2+')">'
+          +'<datalist id="mcl-hw-dl-'+w2+'"></datalist></td>'
+          +'<td><input '+hi+' type="number" min="0" value="'+(hw.qty||'')+'" oninput="MCL.setHw('+w2+',\'qty\',this.value)"></td>'
+          +'<td><input '+hi+' value="'+esc(hw.unit)+'" oninput="MCL.setHw('+w2+',\'unit\',this.value)"></td>'
+          +'<td><input '+hi+' value="'+esc(hw.note)+'" oninput="MCL.setHw('+w2+',\'note\',this.value)"></td>'
+          +'<td style="text-align:center"><button class="btn" style="padding:2px 7px" onclick="MCL.removeHw('+w2+')"><i class="ti ti-trash"></i></button></td></tr>';
+      }
+      h+='</table>';
+    }
+    h+='</div>';
+
+    // Footer
+    h+='<div class="card" style="padding:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
+      +'<div style="font-size:12px;color:var(--text2)">'+footerText()+'</div><div style="flex:1"></div>'
+      +'<button class="btn" style="font-size:12px;padding:6px 12px" onclick="MCL.clear()">Clear</button>'
+      +'<button class="btn btn-navy" style="font-size:12px;padding:6px 14px" onclick="MCL.load()">'
+      +'<i class="ti ti-arrow-right"></i>Load into analysis</button></div>';
+    return h;
+  }
+
+  function totals(){
+    var rows=0,pieces=0,area=0;
+    for(var i=0;i<S.panels.length;i++){
+      var p=S.panels[i];
+      if(!p.L&&!p.W&&!p.mat) continue;          // an untouched blank row is not a row
+      rows++;
+      var q=num(p.qty)||1; pieces+=q;
+      area+=(num(p.L)/1000)*(num(p.W)/1000)*q;
+    }
+    return {rows:rows,pieces:pieces,area:area};
+  }
+
+  // ── Catalogue pickers ───────────────────────────────────────────────────
+  // Same bounded search the quotation uses. An unbounded datalist over 124k
+  // distinct names is not a search box — which SKUs appeared came down to the
+  // browser, and that is why one person could find a board and another could not.
+  function fillMatList(id,q){
+    var extra=hplLabels();
+    var dl=el(id); if(!dl) return;
+    if(extra.length){
+      // HPL builds first: they are the thing a person just declared, and there
+      // are only ever a handful.
+      var ql=String(q||'').toLowerCase();
+      var hit=extra.filter(function(l){ return !ql||l.toLowerCase().indexOf(ql)>=0; });
+      _refillDatalist(id,getMatSource(),q);
+      dl.innerHTML=hit.map(function(l){ return '<option value="'+esc(l)+'">'; }).join('')+dl.innerHTML;
+    } else {
+      _refillDatalist(id,getMatSource(),q);
+    }
+  }
+
+  function afterRender(){
+    for(var i=0;i<S.panels.length;i++) fillMatList('mcl-mat-dl-'+i,S.panels[i].mat);
+    for(var h=0;h<S.hpl.length;h++){
+      _refillDatalist('mcl-hsub-'+h,getMatSource(),S.hpl[h].sub);
+      _refillDatalist('mcl-hfin-'+h,getMatSource(),S.hpl[h].fin);
+    }
+    for(var w2=0;w2<S.hardware.length;w2++) _refillDatalist('mcl-hw-dl-'+w2,getHwSource(),S.hardware[w2].name);
+  }
+
+  // ── Handlers ────────────────────────────────────────────────────────────
+  function rerender(){ renderProductionPage(); }
+  function set(i,f,v){
+    var p=S.panels[i]; if(!p) return;
+    p[f]=(f==='L'||f==='W'||f==='qty'||f==='th')?num(v):v;
+    _mclFooter();                                 // no full re-render while typing
+  }
+  // One definition, used by the full render and by the in-place patch. Two copies
+  // of the same string is how the two stages of the quotation keep disagreeing.
+  // It counts what will actually EXPORT — a half-filled HPL build or a nameless
+  // hardware row is dropped on the way out, so counting it here would promise
+  // something the analysis then does not contain.
+  function footerText(){
+    var t=totals();
+    var hplN=S.hpl.filter(function(x){return x.sub&&x.fin;}).length;
+    var hwN=S.hardware.filter(function(x){return String(x.name||'').trim();}).length;
+    return '<b style="color:var(--text)">'+t.rows+'</b> row'+(t.rows===1?'':'s')
+      +' · <b style="color:var(--text)">'+t.pieces+'</b> piece'+(t.pieces===1?'':'s')
+      +' · <b style="color:var(--text)">'+t.area.toFixed(3)+'</b> m²'
+      +(hplN?(' · '+hplN+' HPL build'+(hplN===1?'':'s')):'')
+      +(hwN?(' · '+hwN+' hardware line'+(hwN===1?'':'s')):'');
+  }
+  function _mclFooter(){
+    // Patch just the counts, so a keystroke never rebuilds the table under the
+    // cursor — the same reason the quotation debounces its own line items.
+    var w=el('prod-wrap'); if(!w) return;
+    var cards=w.querySelectorAll('.card');
+    var last=cards[cards.length-1]; if(!last) return;
+    var d=last.querySelector('div'); if(!d) return;
+    d.innerHTML=footerText();
+  }
+
+  return {
+    build:build, afterRender:afterRender,
+    setGrain:function(v){ S.grain=v; },
+    setGroupBy:function(v){ S.groupBy=v; rerender(); },
+    addPanel:function(n){ for(var i=0;i<(n||1);i++) S.panels.push(blankPanel()); rerender(); },
+    removePanel:function(i){ S.panels.splice(i,1); rerender(); },
+    set:set,
+    matSearch:function(inp,i){ S.panels[i].mat=inp.value; fillMatList('mcl-mat-dl-'+i,inp.value); },
+    addSvc:function(i,v){ if(!v) return; if(S.panels[i].svcs.indexOf(v)<0) S.panels[i].svcs.push(v); rerender(); },
+    removeSvc:function(i,s){ S.panels[i].svcs.splice(s,1); rerender(); },
+    // Rewrites the chip in place; no re-render, so the number keeps focus while
+    // it is being typed.
+    setHoles:function(i,s,v){
+      var base=svcBase(S.panels[i].svcs[s]);
+      var n=parseInt(v,10);
+      S.panels[i].svcs[s]=(n>0)?(base+' × '+n+' holes'):base;
+    },
+    addHpl:function(){ S.hpl.push({sub:'',fin:'',faces:'2F'}); rerender(); },
+    removeHpl:function(i){ S.hpl.splice(i,1); rerender(); },
+    setHpl:function(i,f,v){ S.hpl[i][f]=v; rerender(); },
+    hplSearch:function(inp,i,f){ S.hpl[i][f]=inp.value; _refillDatalist((f==='sub'?'mcl-hsub-':'mcl-hfin-')+i,getMatSource(),inp.value); },
+    addHw:function(){ S.hardware.push({name:'',qty:1,unit:'pcs',note:''}); rerender(); },
+    removeHw:function(i){ S.hardware.splice(i,1); rerender(); },
+    setHw:function(i,f,v){ S.hardware[i][f]=(f==='qty')?num(v):v; _mclFooter(); },
+    hwSearch:function(inp,i){ S.hardware[i].name=inp.value; _refillDatalist('mcl-hw-dl-'+i,getHwSource(),inp.value); },
+    clear:function(){
+      if(!S.panels.length&&!S.hpl.length&&!S.hardware.length) return;
+      if(!confirm('Clear this cutting list?')) return;
+      S.panels=[]; S.hpl=[]; S.hardware=[]; rerender();
+    },
+    state:function(){ return S; },
+    // Exposed so the conversion can be exercised without the DOM.
+    toCl:function(){
+      var t=totals();
+      var panels=[];
+      for(var i=0;i<S.panels.length;i++){
+        var p=S.panels[i];
+        if(!p.L&&!p.W&&!p.mat) continue;
+        panels.push({group:p.group,part:p.part,mat:p.mat,th:p.th,
+                     L:p.L,W:p.W,qty:num(p.qty)||1,ebt:p.ebt,grain:p.grain,svcs:p.svcs.slice()});
+      }
+      // No totals block on purpose: they would be computed here from these same
+      // rows, so comparing them against themselves proves nothing. The
+      // panels-vs-components check inside _cutListToAnalysis still runs, and that
+      // is the one that catches a row being dropped in conversion.
+      // {item, qty, unit, notes} — the shape _cutListToAnalysis reads. It skips a
+      // row whose `item` is empty, so emitting `name` here dropped every line
+      // without a word: caught only by counting the hardware that came out.
+      var hw=[];
+      for(var q=0;q<S.hardware.length;q++){
+        var x=S.hardware[q];
+        if(!String(x.name||'').trim()) continue;
+        hw.push({item:x.name,qty:num(x.qty),unit:x.unit||'pc',notes:x.note||''});
+      }
+      return {origin:'typed',enteredBy:(gUser&&gUser.name)||'',
+              grain:S.grain==='width'?'W':'L',panels:panels,
+              hpl:S.hpl.filter(function(h){return h.sub&&h.fin;}),
+              hardware:hw,
+              _counts:t};
+    },
+    load:function(){
+      var cl=MCL.toCl();
+      if(!cl.panels.length){ showToast('Add at least one panel row first.'); return; }
+      var payload=_cutListToAnalysis(cl,null);
+      prodLoadStructuredList(payload,'Cutting list — entered in Modcraft');
+      var flagged=0;
+      for(var c=0;c<payload.components.length;c++) if(payload.components[c].needsReview) flagged++;
+      try{ logActivity('Cutting list entered in Modcraft loaded into Designers Support — '
+        +payload.components.length+' components'); }catch(e){}
+      setProdTab('drawing');
+      showToast('✓ '+payload.components.length+' components'
+        +(flagged?' — '+flagged+' need review':' — nothing flagged'));
+    }
+  };
+})();
+
 // ── Saved Analyses tab ────────────────────────────────────────────────────
 // Global list, filterable by serial/client/file name — every Designers Support analysis that was
 // reflected into a quotation and survived to a lock/approve event (see _saveDrawingAnalysisToDrive).
