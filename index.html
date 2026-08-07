@@ -834,11 +834,29 @@ tr.cl-row:hover td{background:#f4f7fb}
             <div><label class="fld">Areas per location</label><input type="number" id="sv-areas" min="1" value="1" oninput="onSiteVisitChange()" style="height:32px"></div>
             <div><label class="fld">Fee per area (₱)</label><input type="number" id="sv-fee" min="0" oninput="onSiteVisitChange()" style="height:32px" placeholder="Default"></div>
           </div>
-          <div style="margin-top:10px">
+          <!-- A job that is nothing but a site visit. Rommel: "if site visit only is
+               the requirement no other cost should be added such as mobilization
+               additional markup etc... only vat in accordance to our established
+               company rule." A tick rather than something inferred from the scope,
+               because a design charge may legitimately ride along with it. -->
+          <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;margin-top:10px;
+                        padding:9px 11px;background:#f0f7ff;border:1px solid #c0d8f0;border-radius:8px">
+            <input type="checkbox" id="sv-only" onchange="onSiteVisitOnlyChange()" style="width:16px;height:16px;cursor:pointer;margin-top:1px">
+            <span>
+              <span style="font-size:13px;font-weight:500;color:#1a3c5e">Site visit only request</span>
+              <span style="display:block;font-size:11px;color:var(--text2);margin-top:2px">
+                The client asked for a visit and nothing else. Charged at cost — no mobilization
+                contingency, buffer or markup. VAT still follows the account type.</span>
+            </span>
+          </label>
+          <div style="margin-top:10px" id="sv-charge-wrap">
             <label class="fld">Charge under</label>
             <div style="display:flex;gap:20px;margin-top:6px;align-items:center;flex-wrap:wrap">
               <label style="cursor:pointer;display:flex;align-items:center;gap:5px;font-size:13px"><input type="radio" name="sv-charge" value="mob" checked onchange="onSiteVisitChange()"> Mobilization</label>
               <label style="cursor:pointer;display:flex;align-items:center;gap:5px;font-size:13px"><input type="radio" name="sv-charge" value="separate" onchange="onSiteVisitChange()"> Separate line item</label>
+            </div>
+            <div id="sv-charge-note" style="display:none;font-size:11px;color:var(--text2);margin-top:6px">
+              <i class="ti ti-info-circle"></i> Not applied — a site-visit-only request is always charged at cost.
             </div>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:8px 0 0;margin-top:6px;border-top:.5px solid var(--border);color:var(--text2)">
@@ -2891,7 +2909,7 @@ var qCustomCFApproved = false;
 var qOutMarkup = null;
 var qOutContingency = null;
 var qOutBuffer = null;
-var qSiteVisit = {enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
+var qSiteVisit = {enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob',onlyRequest:false};
 // Fabrication-only contingency control. pct null = use CF.fabContingency (the global default);
 // mode 'line' prints its own "Contingency & charges" row, 'folded' rolls it into the fabrication
 // subtotal with no separate row. Only consulted when the service is Fabrication only — on
@@ -5544,7 +5562,7 @@ function initQuotation() {
   qOutMarkup=null; qOutContingency=null; qOutBuffer=null;
   initOutRatesCard();
   // Reset site visit
-  qSiteVisit={enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
+  qSiteVisit={enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob',onlyRequest:false};
   qFabCont={pct:null,mode:'line'}; _fabContLast=null; syncFabContUI();
   initSiteVisitCard();
   // Reset assembly
@@ -7436,6 +7454,25 @@ function onSiteVisitChange() {
   var disp=el('sv-cost-disp'); if(disp) disp.textContent=fmtMoney(getSiteVisitCost());
   recalc();
 }
+// Site-visit-only request. The tick wins over "Charge under": otherwise someone
+// picks Mobilization out of habit and the visit is marked up again, which is
+// exactly what was reported — a ₱1,500 visit arriving as ₱2,788.50.
+function onSiteVisitOnlyChange(){
+  var c=el('sv-only'); qSiteVisit.onlyRequest=!!(c&&c.checked);
+  _syncSiteVisitOnlyUI();
+  recalc();
+}
+function _syncSiteVisitOnlyUI(){
+  var on=!!qSiteVisit.onlyRequest;
+  var c=el('sv-only'); if(c) c.checked=on;
+  // Grey the selector rather than hide it — it must be visible WHY it stopped applying.
+  var wrap=el('sv-charge-wrap');
+  if(wrap){
+    wrap.style.opacity=on?'.45':'';
+    wrap.style.pointerEvents=on?'none':'';
+  }
+  var note=el('sv-charge-note'); if(note) note.style.display=on?'block':'none';
+}
 function initSiteVisitCard() {
   var toggle=el('sv-toggle'); if(toggle) toggle.checked=qSiteVisit.enabled;
   var body=el('sv-body'); if(body) body.style.display=qSiteVisit.enabled?'block':'none';
@@ -7446,6 +7483,7 @@ function initSiteVisitCard() {
   var radios=document.querySelectorAll('input[name="sv-charge"]');
   for(var i=0;i<radios.length;i++) radios[i].checked=(radios[i].value===qSiteVisit.chargeMode);
   var disp=el('sv-cost-disp'); if(disp) disp.textContent=fmtMoney(getSiteVisitCost());
+  _syncSiteVisitOnlyUI();
 }
 // ── Outsource BOM helpers ─────────────────────────────────────────────────
 // Outsource rows live in two different places depending on fabrication mode:
@@ -8360,7 +8398,9 @@ function _recalcCore(fast) {
   var mobBaseRaw=mobRegionCost+mobPlanner;
   // Site visit: add to mob or treat as separate
   var svCost=getSiteVisitCost();
-  var svSep=qSiteVisit.enabled&&qSiteVisit.chargeMode==='separate';
+  // A site-visit-only request is charged at cost: treated as its own line so it
+  // never enters mobBase and never picks up contingency/buffer/markup.
+  var svSep=qSiteVisit.enabled&&(qSiteVisit.chargeMode==='separate'||qSiteVisit.onlyRequest);
   var mobBase=mobBaseRaw+(qSiteVisit.enabled&&!svSep?svCost:0);
   var mobC=mobBase*(1+cm/100)*(1+mobBuf/100)*(1+mobMk/100);
   var assmRate=aCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850;
@@ -8543,10 +8583,13 @@ function _recalcCore(fast) {
   // Fabrication total (single consolidated line — was previously repeated in a
   // separate totals-chips grid further down; Fab. contingency stays admin-only,
   // shown in the "Admin view" box that renders right after this block)
+  // A site-visit-only request has nothing fabricated, so a "Fabrication ₱0.00"
+  // row is noise — on the estimator's screen and on the client's copy alike.
+  var _svOnlyNoFab=(qSiteVisit.enabled&&qSiteVisit.onlyRequest&&(fabBase-outsourceBase)<=0);
   lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px">'
-    +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:500">'
+    +(_svOnlyNoFab?'':'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:500">'
     +'<span><i class="ti ti-armchair" style="font-size:11px;color:var(--text2)"></i> Fabrication</span>'
-    +'<span>'+fmtMoney(fabBase-outsourceBase)+'</span></div>';
+    +'<span>'+fmtMoney(fabBase-outsourceBase)+'</span></div>');
   // Minimum charges, named individually. A silent top-up folded into Fabrication would leave the
   // estimator unable to explain the figure to a client who adds up the line items themselves.
   if(_minCh&&_minCh.rows&&_minCh.rows.length){
@@ -20343,7 +20386,9 @@ function _recalcFQCore() {
   var _fqdcd=el('fq-dc-charge-disp'); if(_fqdcd) _fqdcd.textContent=fmtMoney(dcCost);
   var _fqdcl=el('fq-dc-charge-lbl'); if(_fqdcl) _fqdcl.textContent=qDesignCharge.enabled?'Design charge included':'Include design charge';
   var svCost=getSiteVisitCost();
-  var svSep=qSiteVisit.enabled&&qSiteVisit.chargeMode==='separate';
+  // A site-visit-only request is charged at cost: treated as its own line so it
+  // never enters mobBase and never picks up contingency/buffer/markup.
+  var svSep=qSiteVisit.enabled&&(qSiteVisit.chargeMode==='separate'||qSiteVisit.onlyRequest);
   var _fqsvd=el('fq-sv-cost-disp'); if(_fqsvd) _fqsvd.textContent=fmtMoney(svCost);
   var ocTotals=getOtherCostTotals();
   var regularBase=fabBase-outsourceBase+clCost;
@@ -20479,10 +20524,13 @@ function _recalcFQCore() {
   }
   // Fabrication total (single consolidated line — Fab. contingency stays admin-only,
   // shown in the "Admin view" box that renders right after this block)
+  // A site-visit-only request has nothing fabricated, so a "Fabrication ₱0.00"
+  // row is noise — on the estimator's screen and on the client's copy alike.
+  var _svOnlyNoFab=(qSiteVisit.enabled&&qSiteVisit.onlyRequest&&(fabBase-outsourceBase)<=0);
   lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px">'
-    +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:500">'
+    +(_svOnlyNoFab?'':'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:500">'
     +'<span><i class="ti ti-armchair" style="font-size:11px;color:var(--text2)"></i> Fabrication</span>'
-    +'<span>'+fmtMoney(fabBase-outsourceBase)+'</span></div>';
+    +'<span>'+fmtMoney(fabBase-outsourceBase)+'</span></div>');
   // Outsource — single line (own contingency/buffer/markup rates, admin-only breakdown below)
   if(outsourceBase>0){
     lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-top:.5px solid var(--border)">'
@@ -26406,7 +26454,8 @@ function restoreFullQuotationState(state){
   qDiscApproved=!!state.discApproved; qDiscPct=state.discPct||0; qPremApproved=!!state.premApproved;
   qDiscScope=state.discScope?JSON.parse(JSON.stringify(state.discScope)):{materials:false,edgeband:false,hardware:false,services:false,installation:false};
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
-  qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob'};
+  qSiteVisit=state.siteVisit?JSON.parse(JSON.stringify(state.siteVisit)):{enabled:false,locations:1,areasPerLocation:1,fee:null,chargeMode:'mob',onlyRequest:false};
+  if(qSiteVisit.onlyRequest===undefined) qSiteVisit.onlyRequest=false;   // quotations saved before the tick existed
   qFabCont=state.fabCont?JSON.parse(JSON.stringify(state.fabCont)):{pct:null,mode:'line'};
   qLockedRates=state.lockedRates?JSON.parse(JSON.stringify(state.lockedRates)):null;
   _renderFrozenRatePill();
