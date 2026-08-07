@@ -254,6 +254,43 @@ tr.cl-row:hover td{background:#f4f7fb}
 .map-sr-item{padding:10px 14px;font-size:13px;cursor:pointer;border-bottom:.5px solid #f0f0f0;display:flex;align-items:flex-start;gap:10px;color:var(--text)}
 .map-sr-item:hover{background:#f0f4fa}
 .map-sr-item i{color:var(--navy);margin-top:2px;flex-shrink:0}
+
+/* ── Narrow screens ───────────────────────────────────────────────────────
+   The topbar needs about 1466px to lay out: a nav group (brand + 12 tabs, all
+   nowrap) with a min-content width of 1206px, a 220px control cluster and 40px
+   of padding. Below that the whole document is dragged wider than the viewport
+   and every page pans sideways — measured at 1472px on a 1280 laptop as well as
+   on a phone, so this is not only a phone problem.
+
+   Letting the nav group scroll on its own axis contains it. All 12 tabs stay
+   reachable, nothing is hidden, and on a screen wide enough to fit there is no
+   scrolling and so no visible change at all. */
+@media (max-width:1500px){
+  .topbar>div:first-child{flex:1 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none;-ms-overflow-style:none}
+  .topbar>div:first-child::-webkit-scrollbar{display:none}
+  .topbar>div:last-child{flex:0 0 auto}
+}
+
+/* ── Phone ────────────────────────────────────────────────────────────────
+   Approving from a phone is the point here, not running the whole app on one.
+   Measured at 375px the Approvals page itself does not overflow; only the
+   topbar did, and the rule above now contains it. What is left is room and
+   reach: the brand costs ~187px, and tap targets on the approval path were
+   28-35px against the 44px minimum. */
+@media (max-width:900px){
+  .topbar{padding:0 8px;gap:6px}
+  #app-logo-svg,#app-logo-img{display:none!important}
+  /* Every pixel here is a pixel the tabs do not get. The role pill is telling
+     you something you already know, and fullscreen does nothing useful on a
+     phone — dropping both roughly doubles the visible nav. Messages,
+     notifications and the avatar stay: all three are how you act on a request. */
+  #topbar-role-pill,.topbar button[title="Toggle fullscreen"]{display:none!important}
+  .nav-btn{padding:0 12px}
+  /* Scoped to the remote-approval path, so densities elsewhere are unchanged. */
+  #page-approvals .btn,#notif-panel .btn,#msg-panel .btn,.topbar .btn,
+  #ov-appr-action .btn,#ov-send-request .btn{min-height:44px}
+  #page-approvals .btn{padding-left:14px;padding-right:14px}
+}
 </style></head>
 <body>
 
@@ -4357,6 +4394,25 @@ function _showPage(pg){
   document.querySelectorAll('.nav-btn').forEach(function(b){b.classList.remove('active');});
   var e=el('page-'+pg); if(e) e.classList.add('active');
   document.querySelectorAll("[data-pg='"+pg+"']").forEach(function(b){b.classList.add('active');});
+  _navScrollActiveIntoView();
+}
+// On a phone the nav is a scrolling strip (see the max-width:900px block), so the
+// tab you are on can sit off to one side with nothing to say so. Bring it into
+// view. On a wide screen the strip does not scroll and this does nothing.
+function _navScrollActiveIntoView(){
+  try{
+    var strip=document.querySelector('.topbar>div:first-child');
+    if(!strip||strip.scrollWidth<=strip.clientWidth) return;
+    var act=strip.querySelector('.nav-btn.active');
+    if(!act) return;
+    // behavior:'auto', not 'smooth'. Smooth is suppressed in several ordinary
+    // situations — reduced-motion being the common one — and when it is, the
+    // scroll simply does not happen and nothing is raised. Measured here: smooth
+    // left scrollLeft at 0, auto moved it to the intended 666. The tab should
+    // also already be in place when the page appears, not slide in after it.
+    var target=act.offsetLeft-(strip.clientWidth-act.offsetWidth)/2;
+    strip.scrollTo({left:Math.max(0,target),behavior:'auto'});
+  }catch(e){}
 }
 function newQuotation(){
   confirmUnsavedThen(function(){
@@ -4374,6 +4430,7 @@ function navigate(pg) {
   var pg_el = el("page-"+pg);
   if(pg_el) pg_el.classList.add("active");
   document.querySelectorAll("[data-pg='"+pg+"']").forEach(function(b){b.classList.add("active");});
+  _navScrollActiveIntoView();
   // The running total is pinned to the viewport, so it has to be told when the
   // quotation page is no longer the one being looked at.
   try{ _qTotalBar(); }catch(e){}
@@ -9827,6 +9884,60 @@ function _ccfUpdateProfitNow() {
 // Ex-VAT is the grand total less VAT, so it is the quotation's own subtotal line rather than a
 // separately-derived number that can disagree with it. The premium stays inside it: it is a
 // surcharge the client pays, not tax.
+// Figures for the approval notification, so a request can be judged from the
+// email or the Chat message without opening the app.
+//
+// The resulting total is not re-derived here. It is produced by applying the
+// requested value, running the quotation's OWN recalc, reading _pCalc and
+// restoring — the same apply/read/restore _ccfUpdateProfitNow uses. A second
+// implementation of the pricing tail would drift, which is exactly how Stage 1
+// and Stage 2 keep disagreeing.
+//
+// One deliberate limit: gSendMessage puts this single string into the Sheets
+// row, the Supabase row, the email AND the Chat post, and gLoadMessages returns
+// rows where you are the SENDER as well as the recipient. So margin is included
+// only when the requester could already see it (canViewCostReport) — otherwise
+// composing the message would hand an Encoder the profit figure the app denies
+// them. Totals are always included; the requester is looking at them anyway.
+function _apprFigures(type,data){
+  data=data||{};
+  if(!_pCalc||!_pCalc.grand) return '';
+  var isFq=(data.ctx==='fq');
+  var before=_pCalc.grand||0;
+  var out=' Quotation total '+fmtMoney(before)+'.';
+
+  if(type==='discount'&&data.discPct){
+    var snap=null;
+    if(isFq){
+      var _pP=fqDiscPct, _pA=fqDiscApproved;
+      fqDiscPct=data.discPct; fqDiscApproved=true;
+      try{ recalcFQ(); snap=_ccfReadPCalc(); }
+      catch(e){ console.warn('[appr] preview recalc failed',e); }
+      finally{ fqDiscPct=_pP; fqDiscApproved=_pA; try{ recalcFQ(); }catch(e2){} }
+    }else{
+      var _pP2=qDiscPct, _pA2=qDiscApproved;
+      qDiscPct=data.discPct; qDiscApproved=true;
+      try{ recalc(); snap=_ccfReadPCalc(); }
+      catch(e){ console.warn('[appr] preview recalc failed',e); }
+      finally{ qDiscPct=_pP2; qDiscApproved=_pA2; try{ recalc(); }catch(e2){} }
+    }
+    if(snap&&snap.grand){
+      out+=' If approved it becomes '+fmtMoney(snap.grand)
+          +' — a reduction of '+fmtMoney(before-snap.grand)+'.';
+      out+=' Applies to '+(_discScopeOn()?_discScopeLabel()+' only':'the whole quotation')+'.';
+      if(canViewCostReport()){
+        var profit=snap.exVat-snap.rawCost;
+        var pct=snap.exVat>0?(profit/snap.exVat*100):0;
+        out+=' Margin after the discount '+fmtMoney(profit)+' ('+pct.toFixed(1)+'%).';
+      }
+    }
+  }else if(canViewCostReport()){
+    var now=_ccfReadPCalc(), p2=now.exVat-now.rawCost;
+    out+=' Current margin '+fmtMoney(p2)
+        +' ('+(now.exVat>0?(p2/now.exVat*100).toFixed(1):'0.0')+'%).';
+  }
+  return out;
+}
 function _ccfReadPCalc(){
   var p=_pCalc||{};
   return {
@@ -12191,7 +12302,7 @@ function submitApprovalRequest(){
   var _reason=(data.reason||note||'');
   gSendMessage(appr.email,appr.name,
     _who+' is requesting your approval — '+(_reqLabels[type]||type)+_detail+' on '+serial
-      +' for '+client+(_reason?('. Reason: '+_reason):'')+'.',
+      +' for '+client+(_reason?('. Reason: '+_reason):'')+'.'+_apprFigures(type,data),
     'normal','approval_request:'+type+':'+serial,function(){});
   var overrideReason=type==='override'?(data.reason||note||''):null;
   var msgMap={
