@@ -4923,23 +4923,35 @@ was the fix; documenting it was not. Restore path if ever needed: `rollback_pin_
 `git revert 6259b26` + `supaMigrateUsers()` (values come back from the Sheet, so no secret is
 stored — this repo is public).
 
-## ⚠ OPEN CONCERN — carcass margin is measured against a price that is not charged
-`_fabCarcassMargin` (~`index.html:30002`) computes margin as
-`(CARCASS_PRICES[type] - unitCost) * qty` — the **list** price. Since 2026-08-06 a Subsidiary
-quotation can exclude materials and hardware (`_carcassUnitPrice` subtracts their template value),
-so on those the revenue actually billed is far lower — Kitchen Base bills ₱1,134.35 of a ₱6,237
-list. The margin therefore counts revenue that was never charged and **overstates profit**.
+## ✅ WITHDRAWN 2026-08-08 — the carcass margin concern was wrong (I raised it, then disproved it)
+I flagged `_fabCarcassMargin` as overstating profit on a Subsidiary quotation because it has
+`CARCASS_PRICES[type]` — the **list** price — in its formula, while WCLI is billed far less.
+**That was wrong. The term cancels.** For WCLI, `_materialMarginCounts()` is false, so the
+template's materials and hardware are costed at their FULL price:
 
-**Cost Report only** — it does not touch what the client pays. Raised by Rommel 2026-08-08 and
-deliberately not fixed the same night: the revenue side is a one-line change, but the **cost** side
-needs a decision first. `unitCost` is built from the full cabinet template, so simply swapping in
-`_carcassUnitPrice` would leave materials and hardware in the cost while removing them from the
-revenue, and understate margin instead. Both sides have to move together, and which cost is the
-right one to keep is a business question: are transferred materials a cost to this company at all,
-or do they belong wholly to the receiving subsidiary?
+```
+reported margin = listPrice − servicesCost − materials − hardware
+revenue billed  = listPrice − materials − hardware        (_carcassUnitPrice)
+∴ reported margin = revenue billed − servicesCost
+```
 
-Related, same area and also unresolved: **item 1+2** below (subsidiary material billing differing
-between BOM and cutting-list mode).
+Verified numerically: revenue ₱5,587.85 − services cost ₱1,040 = ₱4,547.85, exactly what it
+reports. The identity holds whether or not the template total equals the list price, because both
+sides take materials and hardware from the same template rows.
+
+**So it already measures "what you billed minus what the services cost you", which is correct.**
+The one assumption baked in is that transferred materials cost this company nothing — which IS the
+stated rule ("WCLI costs them on their own side"). It only becomes wrong if that policy changes.
+
+**The lesson, not the fact:** I saw a list price in a margin formula and concluded it was being
+used as revenue, without doing the algebra. Raising a false concern cost a round trip and would
+have put a wrong item on this list permanently. Do the arithmetic before flagging a number as
+wrong — the same discipline as reproducing before fixing.
+
+Two genuinely open, same area: **item 1+2** below (subsidiary material billing differing between
+BOM and cutting-list mode), and the narrower point that carcass services with no Cost Breakdown
+entry are counted at full price, so their margin shows as zero rather than unknown — conservative,
+but it means carcass margin understates until Cost Breakdown is filled in.
 
 ## NEXT SESSION
 Nothing queued for building. See the two habits above first, then Rommel's list.
