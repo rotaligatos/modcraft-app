@@ -4442,8 +4442,8 @@ from the older list; it IS assigned now. The PIN and signature gaps are real and
 |---|---|
 | **Checked by** | assigned now (`designer-ce1@`) for all three companies — verify it is the person intended |
 | **Noted-by threshold** | `{}` → Noted by always required. Valid, but a decision. |
-| **Signature images** | Kathleen, Michael, Stiffany still have none. Signing is refused without one. |
-| **PINs** | **5 of 6 have none** — verified 2026-08-08 against `users`: IT Admin, Kathleen Joyce Tiu (Director), Allan Lagsao, Michael Delos Reyes, Stiffany Gabut. Only Rommel has one. Kathleen approves non-VAT for all three companies and cannot. |
+| **Signature images** | Same caveat — Joanna's shows Signature ✓ in the app. Re-check the others in Settings → Users rather than trusting the earlier list. |
+| **PINs** | ⚠ **UNVERIFIED — see the correction below.** A Supabase read said 5 of 6 had none, but Joanna's app record shows a PIN set, so that column is stale. Check Settings → Users per person, not SQL. |
 
 ## Rommel's to do
 - **Deploy the Wufoo webhook.** Script is confirmed correct in the editor (`testFileFields` on entry
@@ -4462,6 +4462,72 @@ from the older list; it IS assigned now. The PIN and signature gaps are real and
 - **Deactivate Andrei Salvador** — `designer-ce2@` still active across all three companies.
 - **"Handgrab Groove" / "Flush Handle Groove"** — under no minimum charge (they say *groove*, not
   *grooving*); rename if they should count toward the ₱400.
+
+## ⚠ CORRECTION — do NOT trust `users.pin_hash` in Supabase
+Rommel checked Settings → Users on 2026-08-08: **Joanna has a PIN and a signature on file**, while
+the Supabase `users` row said `pin_hash` was empty. I asserted "5 of 6 approvers have no PIN" several
+times today from that column. **The User Roles SHEET is authoritative** (cols W/X); the Supabase
+mirror only refreshes on an Admin-driven save, so anyone who set their own PIN via the avatar menu
+can look empty there indefinitely. Re-check PIN and signature state in the app, not in SQL — and
+treat the earlier "5 of 6" figure as unverified.
+
+## Signature flow — where it actually stands (2026-08-08)
+- **Fixed and live:** a named signatory can always reach Approvals (`_isSignatory()` exempts them in
+  both `canNavigate` and `applyNavAccess`). Joanna is Staff and was being refused at the door by the
+  Approvals access key while assigned as Checked-by for all three companies.
+- **`QT-W00000087` is stuck**: `from_email` and `to_email` are both `designer-ce1@` — she prepared it,
+  requested the signature, and the routing sent it back to herself. The app withholds the sign action
+  from the requester so nobody signs their own work, so Withdraw is the only button left. Correct
+  behaviour on a request that should never have been routed to her.
+- **`QT-W00000088`** (Jhover → Joanna, pending 11:58) is correctly routed. Reported as "not working";
+  it was waiting on her, and she could not reach the page until the fix above.
+- **"It keeps repeating"** — verified there are **no duplicate signature rows** in
+  `approval_requests`, so it is the on-screen notification repeating, not the request. Points at the
+  60s approval poll re-announcing the same pending item. Not yet traced.
+
+## NEXT SESSION — start here, in this order
+1. **Fallback Checked-by** (agreed with Rommel 2026-08-08, spec settled, NOT built).
+   `APPR_ROUTING[co].checkedAlt` — one extra field per company on Settings → Approval Routing.
+   At request time in `_findSignatory('checked')`: if the preparer IS the assigned Checked-by, route
+   to the fallback; if no fallback is set, **refuse with the reason** rather than routing to self and
+   dead-ending. Rommel will put the Noted-by person in it for now — he knows that means one person
+   signs both boxes above the threshold, and accepts it because the hierarchy is currently too small.
+   It is a field, not a rule, so the day a third person exists he changes one name and the
+   double-signing stops. **Why a fallback and not "skip Checked-by and let Noted-by cover both":**
+   Noted-by is threshold-gated, so below the threshold that rule would leave a quotation with NO
+   signature at all — working today only because the threshold is blank.
+2. **The repeating notification** (above).
+3. **Serial preview can show `1`** — `serialCounters` defaults to `{W:1,C:1,M:1}`; a draft created
+   before the Settings read lands shows a confident wrong number. Counter is intact (M at 106) and
+   the committed serial is claimed atomically, so display only.
+
+## Status ladder — investigated 2026-08-08, unresolved
+Rommel: the team cannot see quotations moving. Measured against saved state (`state->>'locked'`, NOT
+`qLocked` — the state keys are `locked`/`approved`/`sentStatus`/`fqLocked`):
+
+| Status shown | Rows | Locked in saved state |
+|---|---|---|
+| Draft | 60 | **0** |
+| Initial Quotation | 40 | 38 |
+| Locked *(legacy word)* | 30 | 30 |
+| Approved *(legacy)* | 13 | 13 |
+| Client Approved | 2 | 2 |
+
+Everything except Draft is consistent. **Not one quotation created since the ladder was redefined has
+ever had Initial Approve clicked**, and only 2 have reached Client Approved — so after "Initial
+Quotation" every remaining rung needs an in-app action nobody performs. The one thing the team DOES
+do next — send it — **is not a rung at all**; there is no `sent_at` on `quotations` (only on orders).
+60 rows still carry the legacy status words.
+
+Rommel then said most of those Drafts ARE locked, which the data contradicts. **Do not guess: get one
+serial he believes is locked but shows Draft** and trace row + state + timestamps + activity log. Two
+candidates — the lock being refused by the project-size gate (it now refuses outright with a reason,
+and someone may be moving on), or the save after locking failing silently.
+
+Before redesigning the ladder, the open question for Rommel is what actually happens after a
+quotation is sent — does the client reply by email/Viber, is it chased, when is it dead? The likely
+missing rungs are "sent, awaiting client" and an explicit Won/Lost, so a job that dies silently stops
+looking identical to one still in play.
 
 ## Next up — agreed order, not started
 1. **Serial preview can show `1`** (~20 min). `serialCounters` defaults to `{W:1,C:1,M:1}`, so a
