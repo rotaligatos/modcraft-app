@@ -24158,17 +24158,25 @@ function _findStaleStatuses(cb){
     if(!d||d.error){ cb(null); return; }
     var rows=(d.values)||[];
     _allQuotationStates(function(states,src){
-      var findings=[], noState=0, checked=0;
+      var findings=[], noState=0, checked=0, lockFromState=[];
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var serial=r[0], stored=(r[5]||'').trim(), st=states[serial];
         if(!st){ noState++; continue; }
         checked++;
+        // Column N holds the Initial Locked date the Project List shows. Where the quotation's own
+        // state HAS that date and the column does not, there is nothing to work out — the true
+        // value is right there. This is a different fault from a date that was destroyed
+        // (see _findLostLockTimes) and needs no activity log and no guessing.
+        var sheetN=(r[13]||'').trim(), stateN=(st.initLockedAt||'').trim();
+        if(!sheetN&&stateN) lockFromState.push({row:i+1, serial:serial, client:r[2]||'', lockedAt:stateN});
+
         var should=_statusFromState(st,serial);
         if(_normalizeStatusLabel(stored)===should) continue;
         findings.push({row:i+1, serial:serial, client:r[2]||'', stored:stored||'(blank)',
                        should:should, shown:_normalizeStatusLabel(stored)});
       }
+      _lockFromStateFindings=lockFromState;
       cb(findings, checked, noState, src);
     });
   }).catch(function(){ cb(null); });
@@ -24254,13 +24262,55 @@ function checkProjectListData(){
   });
 }
 var _lostLockFindings=[];
+// Dates the quotation still HAS in its state but that never reached the Sheet column the Project
+// List reads. Filled by _findStaleStatuses, which already reads both sides.
+var _lockFromStateFindings=[];
+function fixLockDatesFromState(){
+  var list=_lockFromStateFindings.slice(); if(!list.length) return;
+  _confirm('Fill in the Initial Locked date on '+list.length+' quotation'+(list.length===1?'':'s')+'?\n\n'
+    +'Each date is copied from the quotation\'s own saved record — nothing is worked out or guessed. Only that column changes.',
+  function(){
+    var host=el('dbcheck-locks');
+    if(host) host.innerHTML='<div style="padding:12px 16px">Filling in '+list.length+'…</div>';
+    var done=0, failed=0;
+    (function next(i){
+      if(i>=list.length){
+        logActivity('Initial Locked dates copied from each quotation\'s saved record — '+done+' filled in'+(failed?', '+failed+' failed':'')+'.');
+        if(host) host.innerHTML='<div style="padding:12px 16px;color:var(--teal)"><i class="ti ti-circle-check"></i> Filled in <b>'+done+'</b>'
+          +(failed?', <b>'+failed+'</b> could not be written':'')+'. Reopen the Project List to see them.</div>';
+        _lockFromStateFindings=[]; dirData=[];
+        var lb=el('dir-lock-banner'); if(lb) lb.innerHTML='';
+        if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
+        return;
+      }
+      var f=list[i];
+      sheetsUpdate('Quotations!N'+f.row,[[f.lockedAt]]).then(function(){
+        done++;
+        try{ if(SUPA_DUAL_WRITE&&supaReady())
+          supa.from('quotations').update({initial_locked_at:f.lockedAt}).eq('serial',f.serial).then(function(){}); }catch(e){}
+      }).catch(function(){ failed++; })
+        .then(function(){ setTimeout(function(){ next(i+1); },120); });
+    })(0);
+  });
+}
 function _reportLostLockTimes(){
   var host=el('dbcheck-locks'); if(!host) return;
+  // Offered FIRST, because it is the certain one: the date already exists on the quotation and
+  // only has to be copied across. The activity-log recovery below is for dates that are genuinely
+  // gone.
+  if(_lockFromStateFindings.length){
+    host.innerHTML='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-navy)">'
+      +'<div style="font-size:13px;margin-bottom:8px"><b>'+_lockFromStateFindings.length+'</b> quotation'
+      +(_lockFromStateFindings.length===1?' has':'s have')+' an <b>Initial Locked</b> date on the quotation itself '
+      +'that never reached the Project List column. Nothing has to be worked out — it can be copied straight across.</div>'
+      +'<button class="btn btn-primary" onclick="fixLockDatesFromState()" style="font-size:12px">'
+      +'<i class="ti ti-copy"></i> Fill in '+_lockFromStateFindings.length+' date'+(_lockFromStateFindings.length===1?'':'s')+'</button></div>';
+  }
   _findLostLockTimes(function(list,totalMissing){
     // Say why, rather than showing nothing. A blank space is indistinguishable from "all fine",
     // and that is how this went unnoticed once already.
     if(!list){
-      host.innerHTML='<div style="padding:12px 16px;border-top:1px solid var(--border);font-size:13px;color:var(--text2)">'
+      host.innerHTML+='<div style="padding:12px 16px;border-top:1px solid var(--border);font-size:13px;color:var(--text2)">'
         +'<i class="ti ti-info-circle"></i> Could not check Initial Locked dates — this needs the fast database. '
         +'Connect it in this card and run the check again.</div>';
       return;
@@ -24268,7 +24318,7 @@ function _reportLostLockTimes(){
     if(!list.length) return;                 // genuinely nothing recoverable
     _lostLockFindings=list;
     var unrecoverable=(totalMissing||list.length)-list.length;
-    host.innerHTML='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
+    host.innerHTML+='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
       +'<div style="font-size:13px;margin-bottom:8px"><b>'+list.length+'</b> locked quotation'+(list.length===1?' has':'s have')
       +' no <b>Initial Locked</b> date. The true time is in the activity log and can be put back.'
       +(unrecoverable>0?' <span style="color:var(--text2)">'+unrecoverable+' predate the log and cannot be recovered — those keep a dash.</span>':'')
