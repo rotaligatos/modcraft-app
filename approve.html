@@ -102,6 +102,44 @@ function canSeeMoney(){ return MYROLE==='Admin'||MYROLE==='Director'||MYROLE==='
 var TYPE_LABEL={nonvat:'Non-VAT treatment',discount:'Discount',override:'Cost factor adjustment',
                 premium:'Holiday/weekend premium',unlock:'Unlock',signature:'Signature'};
 
+/* The nine rates an override sets. Same keys and the same order as the laptop modal, so the two
+   read alike; labels shortened for a narrow screen. */
+var RATE_FIELDS=[
+  {k:'fabContingency', l:'Fabrication contingency'},
+  {k:'fabBuffer',      l:'Fabrication buffer'},
+  {k:'mobContingency', l:'Mobilization contingency'},
+  {k:'mobBuffer',      l:'Mobilization buffer'},
+  {k:'mobMarkup',      l:'Mobilization markup'},
+  {k:'instContingency',l:'Installation contingency'},
+  {k:'instBuffer',     l:'Installation buffer'},
+  {k:'instMarkup',     l:'Installation markup'},
+  {k:'discountBuffer', l:'Discount buffer'}
+];
+/* The closed form the engine PROVED at request time -- see _apprOverrideModel in index.html.
+   Kept deliberately identical to _ccfEval there; if one is ever changed the other must be, and
+   the proof at request time is what catches it. */
+function ovrEval(m,r){
+  var pc=function(v){ return 1+(Number(v)||0)/100; };
+  var fabC=m.regularBase*pc(r.fabContingency)*(m.ni?pc(r.fabBuffer):1);
+  var mobC=m.mobBase*pc(r.mobContingency)*pc(r.mobBuffer)*pc(r.mobMarkup);
+  var instC=m.instBase*pc(r.instContingency)*pc(r.instBuffer)*pc(r.instMarkup);
+  // gated on installation, exactly as the engine does -- see _ccfEval in index.html
+  var subtotal=(fabC+mobC+instC+m.otherFixed)*(m.ni?pc(r.discountBuffer):1);
+  var preDisc=subtotal*(1+m.mssiRate+m.desRate);
+  var afterDisc=preDisc*(1-(m.discPct||0)/100);
+  var prem=afterDisc*m.premRate, vat=(afterDisc+prem)*m.vatRate;
+  var grand=afterDisc+prem+vat, exVat=grand-vat;
+  return {grand:grand, exVat:exVat, profit:exVat-m.cost,
+          marginPct:(exVat>0?+((exVat-m.cost)/exVat*100).toFixed(2):0)};
+}
+function ovrRead(){
+  var r={};
+  RATE_FIELDS.forEach(function(f){
+    var e=el('ov_'+f.k); r[f.k]=e?(parseFloat(e.value)||0):0;
+  });
+  return r;
+}
+
 /* ── THE AUTHORISATION SEAM ──────────────────────────────────────────────────────
    Phase 1 ships with this open: being signed in to Google on your own phone is the
    authority, and the action is still recorded against that identity so the audit
@@ -214,15 +252,28 @@ function render(){
     +'<div class="sk"></div><div class="sk"></div></div>';
 
   /* A cost-factor override is approved by ENTERING nine rates -- the requester sends only a
-     reason, by design. There is nothing here to accept, so this page offers Reject and says
-     where to go. Better than an Approve button that records a decision the laptop can never
-     carry onto the quotation. */
-  var overrideNeedsLaptop=(t==='override');
+     reason, by design. So this page gives the rate editor, with the total and margin moving as
+     they change, evaluated from a model the engine PROVED at request time. Where that proof
+     failed there is no model, and the honest answer is a laptop. */
+  var OVR=(DEC&&DEC.override)||null;
+  var overrideNeedsLaptop=(t==='override'&&!OVR);
 
   if(pending&&mine&&overrideNeedsLaptop){
     h+='<div class="card"><div class="lbl">Your decision</div>'
-      +'<p class="muted">A cost factor adjustment is approved by setting the rates, so it has to be '
-      +'done on a laptop — there is nothing to simply accept here. You can still decline it now.</p>'
+      +'<p class="muted">The figures for this one could not be worked out reliably away from the '
+      +'app, so setting the rates has to be done on a laptop. You can still decline it now.</p>'
+      +'<button class="btn btn-no" id="no">Reject</button>'
+      +'<div class="muted" style="margin-top:10px">Recorded against '+esc(ME)+'.</div></div>';
+  } else if(pending&&mine&&t==='override'){
+    h+='<div class="card"><div class="lbl">Set the cost factors</div>'
+      +'<div id="ovrimp" class="row" style="border:0;padding:2px 0 8px"></div>';
+    RATE_FIELDS.forEach(function(f){
+      h+='<div class="row"><span class="k">'+esc(f.l)+'</span>'
+        +'<span class="v"><input class="num" type="number" inputmode="decimal" step="0.5" '
+        +'id="ov_'+f.k+'" value="'+(OVR.current[f.k]||0)+'"> %</span></div>';
+    });
+    h+='<button class="btn" id="ovreset" style="min-height:44px;font-size:14px">Reset to current rates</button>'
+      +'<button class="btn btn-ok" id="ok">Approve these rates</button>'
       +'<button class="btn btn-no" id="no">Reject</button>'
       +'<div class="muted" style="margin-top:10px">Recorded against '+esc(ME)+'.</div></div>';
   } else if(pending&&mine){
@@ -251,6 +302,14 @@ function render(){
 
   var cs=el('cs');
   if(cs){ cs.oninput=onCounter; onCounter(); }
+  if(OVR&&el('ov_fabContingency')){
+    RATE_FIELDS.forEach(function(f){ var e=el('ov_'+f.k); if(e) e.oninput=onOverride; });
+    el('ovreset').onclick=function(){
+      RATE_FIELDS.forEach(function(f){ var e=el('ov_'+f.k); if(e) e.value=OVR.current[f.k]||0; });
+      onOverride();
+    };
+    onOverride();
+  }
   if(el('ok'))  el('ok').onclick =function(){ act('approved'); };
   if(el('no'))  el('no').onclick =function(){ act('rejected'); };
   if(el('ctr')) el('ctr').onclick=function(){ act('countered'); };
@@ -268,6 +327,27 @@ function onCounter(){
   el('cimp').textContent=s;
 }
 
+/* Live as the rates are typed. Shows the movement against the current total, because "what does
+   this change" is the actual question -- not the absolute number. */
+function onOverride(){
+  var box=el('ovrimp'); if(!box||!OVR) return;
+  var r=ovrEval(OVR,ovrRead());
+  var delta=r.grand-DEC.before;
+  var sign=delta>=0?'+':'−';
+  var col=delta>=0?'var(--teal)':'var(--coral)';
+  var s='<span class="k">New total</span><span class="v">'+peso(r.grand)
+       +' <span style="color:'+col+'">('+sign+peso(Math.abs(delta)).slice(1)+')</span></span>';
+  box.innerHTML=s;
+  var mg=el('ovrmargin');
+  if(!mg){
+    mg=document.createElement('div'); mg.className='row'; mg.id='ovrmargin';
+    mg.style.cssText='border:0;padding:0 0 8px';
+    box.parentNode.insertBefore(mg,box.nextSibling);
+  }
+  mg.innerHTML=canSeeMoney()
+    ? '<span class="k">Profit</span><span class="v">'+peso(r.profit)+' <span class="muted">('+r.marginPct+'%)</span></span>'
+    : '';
+}
 function loadHistory(){
   var name=(REQ.client_name||'').trim();
   var box=el('hist'); if(!box) return;
@@ -310,6 +390,14 @@ function act(status){
     if(!okToProceed){ BUSY=false; render(); return; }
     var patch={status:status,actioned_by:ME,updated_at:new Date().toISOString()};
     if(counter!=null) patch.counter_disc=counter;
+    /* An override IS its rates -- approving without them would mark the request done while the
+       quotation kept the old ones, which is the failure this whole phase exists to prevent.
+       They ride in the payload, where _persistApprovedFieldToQuotation reads cfValues from. */
+    if(status==='approved'&&REQ.req_type==='override'&&OVR){
+      var pay=Object.assign({},REQ.payload||{});
+      pay.cfValues=ovrRead();
+      patch.payload=pay;
+    }
     return supa.from('approval_requests').update(patch).eq('id',REQ.id).then(function(r){
       BUSY=false;
       if(r.error){

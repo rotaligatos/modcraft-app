@@ -10265,7 +10265,127 @@ function _apprDecisionContext(type,data){
     d.requested=data.discPct||0;
     d.counter=_apprCounterTable(ctx);
   }
+  if(type==='override'){
+    // null when the closed form could not be proved against the engine — the phone then sends
+    // the approver to a laptop rather than showing figures it cannot stand behind.
+    d.override=_apprOverrideModel(ctx);
+  }
   return d;
+}
+// ── Cost-factor override on a phone ────────────────────────────────────────────────────────
+// A discount is one number, so its outcomes can simply be tabulated. An override is NINE rates,
+// which cannot be -- the combinations are unbounded. But the chain is analytically separable:
+// each rate multiplies a base the engine has already worked out, so the tail can be evaluated in
+// closed form from a handful of stored numbers.
+//
+// That is still a second expression of the pricing tail, and second expressions drift. So it is
+// NOT TRUSTED ON FAITH: at request time the closed form is checked against the real engine at
+// several rate sets, including deliberately lopsided ones. It is only offered to the phone if it
+// reproduces the engine to the centavo. If it does not -- because the tail changed and this was
+// not updated -- the phone says to use a laptop instead of showing a number that is quietly wrong.
+var CCF_RATE_KEYS=['fabContingency','fabBuffer','mobContingency','mobBuffer','mobMarkup',
+                   'instContingency','instBuffer','instMarkup','discountBuffer'];
+// _pCalc.rates records what the engine ACTUALLY applied, but under short names. Reading it with
+// the CF names silently found nothing and fell back to the global rates -- so the model described
+// a different quotation than the engine had priced. The proof step caught it; this is the map it
+// was missing. It also matters that these are the applied rates: an approved custom override means
+// the quotation is not on the global CF at all.
+var CCF_RATE_FROM_PCALC={fabContingency:'fabCont',fabBuffer:'fabBuf',mobContingency:'mobCont',
+  mobBuffer:'mobBuf',mobMarkup:'mobMk',instContingency:'instCont',instBuffer:'instBuf',
+  instMarkup:'instMk',discountBuffer:'discBuf'};
+function _ccfEval(m,r){
+  var pc=function(v){ return 1+(Number(v)||0)/100; };
+  var fabC = m.regularBase*pc(r.fabContingency)*(m.ni?pc(r.fabBuffer):1);
+  var mobC = m.mobBase *pc(r.mobContingency)*pc(r.mobBuffer)*pc(r.mobMarkup);
+  var instC= m.instBase*pc(r.instContingency)*pc(r.instBuffer)*pc(r.instMarkup);
+  var combined = fabC+mobC+instC+m.otherFixed;
+  // Both buffers are gated on installation being present -- recalc() forces the discount buffer
+  // to zero on a fabrication-only quotation, the same way the fabrication buffer is. Applying it
+  // regardless overstated a fab-only total by thousands.
+  var subtotal = combined*(m.ni?pc(r.discountBuffer):1);
+  var preDisc  = subtotal*(1+m.mssiRate+m.desRate);
+  var afterDisc= preDisc*(1-(m.discPct||0)/100);
+  var prem     = afterDisc*m.premRate;
+  var vat      = (afterDisc+prem)*m.vatRate;
+  var grand    = afterDisc+prem+vat;
+  return {grand:grand, exVat:grand-vat, cost:m.cost,
+          profit:(grand-vat)-m.cost,
+          marginPct:((grand-vat)>0?+(((grand-vat)-m.cost)/(grand-vat)*100).toFixed(2):0)};
+}
+function _apprOverrideModel(ctx){
+  var isFq=(ctx==='fq'), p=_pCalc||{};
+  if(!p.grand) return null;
+  var cur={}; CCF_RATE_KEYS.forEach(function(k){
+    var s=CCF_RATE_FROM_PCALC[k];
+    cur[k]=(p.rates&&p.rates[s]!=null)?p.rates[s]:(CF[k]||0);
+  });
+  var pcv=function(v){ return 1+(Number(v)||0)/100; };
+  // Assembly rides on the INSTALLATION rate fields -- instContingency/instBuffer/instMarkup are
+  // applied to instBase + assmBase together (a naming artifact from when Assembly was added after
+  // Installation). Folding it in here keeps _ccfEval a plain three-leg model. Confirmed against
+  // the engine: at 10% contingency it charged (375,341 + 89,250) x 10%, not instBase alone.
+  var regularBase=p.regularBase||0, mobBase=p.mobBase||0,
+      instBase=(p.instBase||0)+(p.assmBase||0);
+  var ni=!!p.ni;
+  var fabC=regularBase*pcv(cur.fabContingency)*(ni?pcv(cur.fabBuffer):1);
+  var mobC=mobBase*pcv(cur.mobContingency)*pcv(cur.mobBuffer)*pcv(cur.mobMarkup);
+  var instC=instBase*pcv(cur.instContingency)*pcv(cur.instBuffer)*pcv(cur.instMarkup);
+  var preDisc=p.preDisc||0, mssi=p.mssiCommAmt||0, des=p.designerCommAmt||0;
+  var subtotal=preDisc-mssi-des;
+  var combined=subtotal/(ni?pcv(cur.discountBuffer):1);
+  // Everything not driven by the nine rates -- design charge, separately-billed site visit,
+  // outsource, standalone other costs -- taken as the RESIDUAL rather than enumerated, so a
+  // component added to the engine later is absorbed instead of silently dropped.
+  var otherFixed=combined-(fabC+mobC+instC);
+  var afterDisc=preDisc-(p.discAmt||0);
+  var m={
+    regularBase:regularBase, mobBase:mobBase, instBase:instBase, otherFixed:otherFixed, ni:ni,
+    mssiRate:(subtotal>0?mssi/subtotal:0), desRate:(subtotal>0?des/subtotal:0),
+    discPct:(preDisc>0?(p.discAmt||0)/preDisc*100:0),
+    premRate:(afterDisc>0?(p.premAmt||0)/afterDisc:0),
+    vatRate:((afterDisc+(p.premAmt||0))>0?(p.vatAmt||0)/(afterDisc+(p.premAmt||0)):0),
+    cost:_directCostFromPCalc(p),
+    current:cur
+  };
+  // ── prove it against the engine ──────────────────────────────────────────────────────────
+  // Every rate must MOVE, and to a distinct value. The first version nudged by a fixed pattern
+  // and happened to leave discountBuffer at zero in every probe -- so it certified a model that
+  // applied that rate when the engine does not, and a fabrication-only total was out by
+  // thousands. A prober that does not vary an input has not tested it.
+  var probes=[cur,{},{},{}];
+  CCF_RATE_KEYS.forEach(function(k,i){
+    probes[1][k]=(cur[k]||0)+2+i;                          // all move, all differently
+    probes[2][k]=(i%2)?(cur[k]||0)+11:Math.max(0,(cur[k]||0)-1);  // lopsided but never static
+    probes[3][k]=(i===8)?((cur[k]||0)+6.5):((cur[k]||0)+0.25);    // fractional + a big discBuf move
+  });
+  var ok=true, worst=0, baseline=p.grand;
+  var pPrev=isFq?fqCustomCF:qCustomCF, aPrev=isFq?fqCustomCFApproved:qCustomCFApproved;
+  try{
+    probes.forEach(function(r){
+      var full={}; CCF_RATE_KEYS.forEach(function(k){ full[k]=(r[k]!=null?r[k]:cur[k]); });
+      if(isFq){ fqCustomCF=full; fqCustomCFApproved=true; recalcFQ(); }
+      else    { qCustomCF=full;  qCustomCFApproved=true;  recalc(); }
+      var truth=(_pCalc&&_pCalc.grand)||0, mine=_ccfEval(m,full).grand;
+      worst=Math.max(worst,Math.abs(truth-mine));
+      if(Math.abs(truth-mine)>0.01) ok=false;
+    });
+  }catch(e){ ok=false; console.warn('[appr] override model probe failed',e); }
+  finally{
+    if(isFq){ fqCustomCF=pPrev; fqCustomCFApproved=aPrev; try{recalcFQ();}catch(e){} }
+    else    { qCustomCF=pPrev;  qCustomCFApproved=aPrev;  try{recalc();}catch(e){} }
+    if(Math.abs(((_pCalc&&_pCalc.grand)||0)-baseline)>0.01){
+      ok=false;
+      console.error('[appr] override probing did not restore the quotation total');
+      showToast('The quotation total did not settle after previewing cost factors — reload before saving.');
+    }
+  }
+  if(!ok){
+    console.warn('[appr] override closed form disagreed with the engine by up to '+worst.toFixed(4)
+                 +' — mobile override disabled for this request.');
+    return null;
+  }
+  m.verified=true;
+  return m;
 }
 function _submitCFRequest() {
   var reason=((el('ccf-reason')||{}).value||'').trim();
