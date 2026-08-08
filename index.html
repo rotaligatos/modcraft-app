@@ -14978,20 +14978,61 @@ function _sigLabel(slot){ return slot==='noted'?'Noted by':'Checked by'; }
 // findApproverForAction keys on currentUserCompany — right for the other approval types, but it
 // would let a Subsidiary quotation take its threshold from one company and its signatory from
 // another. Falls back to the generic routing so nothing is left unroutable.
-function _findSignatory(slot){
+//
+// Nobody checks their own work. Where the preparer IS the assigned Checked-by, the request goes
+// to that company's FALLBACK instead (APPR_ROUTING[co].checkedAlt), and where no usable fallback
+// is set it is REFUSED with the reason rather than routed to self — a self-routed request cannot
+// be signed at all, because the Approvals page shows the requester Withdraw and nothing else.
+// That is how QT-W00000087 stalled.
+//
+// A fallback rather than "skip Checked-by and let Noted-by cover both": Noted-by is
+// threshold-gated, so that rule would leave a quotation below the threshold with NO signature at
+// all. It only looks safe today because the threshold is blank.
+//
+// The generic routing is guarded the same way — it can land on the preparer just as easily as the
+// assigned name can.
+function _findSignatory(slot,preparerEmail){
   var co=getCompanyName()||currentUserCompany||'';
-  var email=APPR_ROUTING[co]&&APPR_ROUTING[co][slot];
-  if(email){
-    var u=sheetUsers.find(function(x){return x.email&&x.email.toLowerCase()===email.toLowerCase()&&x.active;});
-    if(u) return u;
+  var r=APPR_ROUTING[co]||{};
+  var prep=String(preparerEmail||'').trim().toLowerCase();
+  function isPreparer(e){ return !!(prep&&e&&String(e).trim().toLowerCase()===prep); }
+  function pick(e){
+    if(!e) return null;
+    return sheetUsers.find(function(x){
+      return x.email&&x.email.trim().toLowerCase()===String(e).trim().toLowerCase()&&x.active;
+    })||null;
   }
-  return findApproverForAction(slot);
+  function fallback(assigned){
+    var alt=pick(r.checkedAlt);
+    if(alt&&!isPreparer(alt.email)) return alt;
+    return {_conflict:true,assigned:assigned};
+  }
+  var u=pick(r[slot]);
+  if(u) return (slot==='checked'&&isPreparer(u.email)) ? fallback(u) : u;
+  var g=findApproverForAction(slot);
+  if(slot==='checked'&&g&&isPreparer(g.email)) return fallback(g);
+  return g;
+}
+// Who prepared the document. qSignatures.prepared is stamped at lock and is the name that appears
+// on the printout, so it is the right answer even when somebody else raises the request.
+function _preparerEmail(){
+  var p=(qSignatures||{}).prepared;
+  return (p&&p.email)||((gUser&&gUser.email)||'');
 }
 // auto = raised by the system after Checked by approved, not by the user pressing the button
 function _sendSignatureRequest(slot,auto,serialOverride,clientOverride){
   var serial=serialOverride||qBaseSerial||qSerial||'—';
   var client=clientOverride||(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'—';
-  var apprObj=_findSignatory(slot);
+  var apprObj=_findSignatory(slot,_preparerEmail());
+  if(apprObj&&apprObj._conflict){
+    var _co=getCompanyName()||currentUserCompany||'—';
+    var _nm=(apprObj.assigned&&apprObj.assigned.name)||'the assigned Checked by';
+    var _adm=sheetUsers.find(function(u){return u.pos==='Admin'&&u.active;});
+    if(_adm) gSendMessage(_adm.email,_adm.name,'A Checked-by signature on '+serial+' cannot be routed: the preparer ('+_nm+') is also the assigned Checked by for '+_co+', and no fallback is set. Please set a fallback Checked-by in Settings → Approval Routing.','urgent','no_signatory_fallback:'+serial,function(){});
+    showToast('Cannot route — '+_nm+' prepared this and is also the Checked by for '+_co+'. A fallback Checked-by is needed (Settings → Approval Routing). Admin has been notified.');
+    logActivity('Signature request refused — the preparer is the assigned Checked by for '+_co+' and no fallback is set.');
+    return null;
+  }
   if(!apprObj||!apprObj.email){
     var admin=sheetUsers.find(function(u){return u.pos==='Admin'&&u.active;});
     if(admin) gSendMessage(admin.email,admin.name,'No '+_sigLabel(slot)+' signatory is assigned for '+(getCompanyName()||currentUserCompany)+'. A signature request on '+serial+' cannot be routed. Please set one in Settings → Approval Routing.','urgent','no_signatory:'+slot,function(){});
@@ -23049,6 +23090,7 @@ function _isSignatory(){
   for(var co in APPR_ROUTING){
     var r=APPR_ROUTING[co]||{};
     if(String(r.checked||'').trim().toLowerCase()===me) return true;
+    if(String(r.checkedAlt||'').trim().toLowerCase()===me) return true;
     if(String(r.noted||'').trim().toLowerCase()===me) return true;
   }
   return false;
@@ -32380,6 +32422,12 @@ function renderApprovalRoutingSettings(){
     {key:'unlock',       label:'Unlock Quotation'},
     {key:'accommodation',label:'Accommodation Exception'},
     {key:'checked',      label:'Signature — Checked by'},
+    // Used only when the preparer IS the Checked by. Without it that request is refused, because
+    // routing it to the preparer dead-ends: the Approvals page offers the requester Withdraw and
+    // nothing else. Deliberately a FIELD, not a rule — change one name the day a third person
+    // exists and the double-signing stops.
+    {key:'checkedAlt',   label:'Signature — Checked by (fallback)',
+     hint:'Used only when the preparer is the assigned Checked by'},
     {key:'noted',        label:'Signature — Noted by'}
   ];
   // Collect active approvers (Manager/Director/Admin)
@@ -32419,7 +32467,8 @@ function renderApprovalRoutingSettings(){
   h+='</tr></thead><tbody>';
   for(var ai=0;ai<ACTION_TYPES.length;ai++){
     var at=ACTION_TYPES[ai];
-    h+='<tr><td style="padding:8px 10px;border:.5px solid var(--border);font-weight:500">'+at.label+'</td>';
+    h+='<tr><td style="padding:8px 10px;border:.5px solid var(--border);font-weight:500">'+at.label
+      +(at.hint?'<div style="font-weight:400;font-size:11px;color:var(--text2);margin-top:2px">'+at.hint+'</div>':'')+'</td>';
     for(var ci=0;ci<COMPANIES.length;ci++){
       var co=COMPANIES[ci];
       var coEsc=co.replace(/'/g,"\\'"); // co is interpolated into a single-quoted JS string literal below — not JSON.stringify(), which produces double quotes that collide with the onchange="..." attribute's own double-quote delimiters and silently truncate the handler
@@ -32430,7 +32479,7 @@ function renderApprovalRoutingSettings(){
       // Approval actions stay restricted to Manager/Director/Admin — those are authority
       // decisions. The two SIGNATURE rows are open to any active user: seniority for Checked by
       // and Noted by has not been defined, so the app must not decide it (Rommel, 2026-08-06).
-      var _list=(at.key==='checked'||at.key==='noted') ? signatoryPool : approvers;
+      var _list=(at.key==='checked'||at.key==='checkedAlt'||at.key==='noted') ? signatoryPool : approvers;
       for(var ui=0;ui<_list.length;ui++){
         var au=_list[ui];
         h+='<option value="'+escHtml(au.email)+'"'+(cur===au.email?' selected':'')+'>'+escHtml(au.name)+' ('+au.pos+')</option>';
