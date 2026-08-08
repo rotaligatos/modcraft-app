@@ -12468,7 +12468,7 @@ function submitApprovalRequest(){
   }
   var serial=qBaseSerial||qSerial||'—';
   var client=(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'—';
-  var typeLabels={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',unlock:'Unlock',signature:'Signature'};
+  var typeLabels=APPR_TYPE_LABELS;
 
   // Prevent duplicate pending request for same type+serial
   for(var i=0;i<NOTIFS.length;i++){
@@ -13097,6 +13097,20 @@ function _apprNeedsMyAction(n){
   }
   return false;
 }
+// ONE type-label map. There were four hand-written copies — the card header's was a ternary chain
+// whose final fallback was "Revision", and it was the only one missing 'signature', so every
+// signature request was badged Revision. A map returns the type itself for anything unlisted,
+// which is wrong-looking rather than confidently wrong.
+var APPR_TYPE_LABELS={nonvat:'Non-VAT',discount:'Discount',holiday:'Holiday Premium',
+  premium:'Holiday Premium',client_update:'Client Update',unlock:'Unlock',override:'CF Override',
+  reactivate:'Reactivation',revision:'Revision',signature:'Signature',
+  accommodation:'Accommodation'};
+var APPR_TYPE_COLORS={nonvat:'coral',revision:'navy',client_update:'teal',signature:'navy'};
+function _apprTypeLabel(t){
+  var s=String(t||'');
+  return APPR_TYPE_LABELS[s]||(s.charAt(0).toUpperCase()+s.slice(1))||'Request';
+}
+function _apprTypeColor(t){ return APPR_TYPE_COLORS[String(t||'')]||'amber'; }
 function _updateNotifBadge(){
   var visible=filterApprovalsByRouting(NOTIFS);
   var mine=visible.filter(_apprNeedsMyAction).length;
@@ -13200,8 +13214,10 @@ function renderApprovals() {
     var unread=_isNotifUnread(n);
     // Find original index in NOTIFS for action callbacks
     var origIdx=NOTIFS.indexOf(n);
-    var tc=n.type==="nonvat"?"coral":n.type==="revision"?"navy":n.type==="client_update"?"teal":"amber";
-    var tl=n.type==="nonvat"?"Non-VAT":n.type==="discount"?"Discount":n.type==="holiday"?"Holiday Premium":n.type==="client_update"?"Client Update":n.type==="unlock"?"Unlock":n.type==="override"?"CF Override":n.type==="premium"?"Holiday Premium":n.type==="reactivate"?"Reactivation":"Revision";
+    var tc=_apprTypeColor(n.type);
+    // A signature card says WHICH signature, not just "Signature" — Checked by and Noted by are
+    // different asks and a signatory may hold both on the same quotation.
+    var tl=_apprTypeLabel(n.type)+(n.type==='signature'&&n.sigSlot?' — '+_sigLabel(n.sigSlot):'');
     var sc=n.status==="pending"?"amber":n.status==="approved"||n.status==="accepted"?"teal":n.status==="countered"?"amber":"coral";
     var slMap={pending:'Pending',approved:'Approved',rejected:'Rejected',countered:'Counter-offer',accepted:'Accepted',cancelled:'Cancelled'};
     var sl=slMap[n.status]||(n.status.charAt(0).toUpperCase()+n.status.slice(1));
@@ -13229,9 +13245,18 @@ function renderApprovals() {
       +'</div>'
       // A signature request is actioned by the ASSIGNED signatory only — not by any approver.
       // They are signing as themselves, so it is their name that goes on the document.
+      // A request routed to its own requester can never be signed — the requester only ever gets
+      // Withdraw. Say so plainly and offer the repair, rather than showing "Awaiting <themselves>"
+      // and leaving them to work it out.
+      +(n.status==='pending'&&n.type==='signature'&&isOwn&&(n.approverEmail||'').toLowerCase()===(n.fromEmail||'').toLowerCase()
+        ?'<div style="font-size:12px;color:var(--coral);margin-top:6px"><i class="ti ti-alert-triangle"></i> This went to you, and nobody can sign their own work — so it cannot be signed as it stands. Set a fallback '+escHtml(_sigLabel(n.sigSlot))+' in Settings → Approval Routing, then press Re-route.</div>'
+        :'')
       +(n.status==="pending"&&n.type==='signature'?(
           isOwn
-          ? '<button class="btn btn-danger" onclick="cancelApprovalRequest(\''+escHtml(n.reqId||'')+'\',\''+n.type+'\')" style="align-self:flex-start;font-size:12px"><i class="ti ti-x"></i> Withdraw</button>'
+          ? '<div style="display:flex;flex-direction:column;gap:6px;align-self:flex-start">'
+            +((n.approverEmail||'').toLowerCase()===(n.fromEmail||'').toLowerCase()
+              ?'<button class="btn btn-amber" onclick="rerouteSignature('+origIdx+')" style="font-size:12px;white-space:nowrap"><i class="ti ti-route"></i> Re-route</button>':'')
+            +'<button class="btn btn-danger" onclick="cancelApprovalRequest(\''+escHtml(n.reqId||'')+'\',\''+n.type+'\')" style="font-size:12px"><i class="ti ti-x"></i> Withdraw</button></div>'
           : ((n.approverEmail||'').toLowerCase()===((gUser&&gUser.email)||'').toLowerCase()
               ? '<div style="display:flex;flex-direction:column;gap:6px;align-self:flex-start">'
                 +'<button class="btn btn-success" onclick="openSignatureAction('+origIdx+')" style="font-size:12px;white-space:nowrap"><i class="ti ti-signature"></i>Sign</button>'
@@ -13352,7 +13377,7 @@ function doApprovalAction(idx, action) {
   // fan-out as the request itself.
   if(n.fromEmail&&n.fromEmail.toLowerCase()!==((gUser&&gUser.email)||'').toLowerCase()){
     var _outLabels={approved:'approved',rejected:'rejected',countered:'answered with a counter-offer'};
-    var _tl={nonvat:'Non-VAT',discount:'Discount',override:'Cost factor',premium:'Holiday premium',unlock:'Unlock',signature:'Signature'};
+    var _tl=APPR_TYPE_LABELS;
     // A counter-offer is not applied when it is made — the requester still has to accept it.
     // The old message stated the outcome and stopped there, so it read as "done" when in fact
     // nothing had changed on the quotation and the requester was the one being waited on.
@@ -15045,23 +15070,30 @@ function _sigLabel(slot){ return slot==='noted'?'Noted by':'Checked by'; }
 // would let a Subsidiary quotation take its threshold from one company and its signatory from
 // another. Falls back to the generic routing so nothing is left unroutable.
 //
-// Nobody checks their own work. Where the preparer IS the assigned Checked-by, the request goes
-// to that company's FALLBACK instead (APPR_ROUTING[co].checkedAlt), and where no usable fallback
-// is set it is REFUSED with the reason rather than routed to self — a self-routed request cannot
-// be signed at all, because the Approvals page shows the requester Withdraw and nothing else.
-// That is how QT-W00000087 stalled.
+// Nobody signs off their own work, in EITHER slot. Where the assigned signatory is somebody who
+// cannot sign this document, the request goes to that company's FALLBACK instead
+// (checkedAlt / notedAlt), and where no usable fallback is set it is REFUSED with the reason
+// rather than routed to a person who cannot act — a self-routed request cannot be signed at all,
+// because the Approvals page shows the requester Withdraw and nothing else. That is how
+// QT-W00000087 stalled.
+//
+// Who cannot sign:
+//   Checked by — the PREPARER.
+//   Noted by   — the preparer, AND whoever already signed Checked by. Noting is a second pair of
+//                eyes; one person holding both boxes is one pair.
 //
 // A fallback rather than "skip Checked-by and let Noted-by cover both": Noted-by is
 // threshold-gated, so that rule would leave a quotation below the threshold with NO signature at
 // all. It only looks safe today because the threshold is blank.
 //
-// The generic routing is guarded the same way — it can land on the preparer just as easily as the
-// assigned name can.
-function _findSignatory(slot,preparerEmail){
-  var co=getCompanyName()||currentUserCompany||'';
+// The generic routing is guarded the same way — it can land on an excluded person just as easily
+// as the assigned name can.
+function _findSignatory(slot,excludes,coOverride){
+  var co=coOverride||getCompanyName()||currentUserCompany||'';
   var r=APPR_ROUTING[co]||{};
-  var prep=String(preparerEmail||'').trim().toLowerCase();
-  function isPreparer(e){ return !!(prep&&e&&String(e).trim().toLowerCase()===prep); }
+  var bad={};
+  (excludes||[]).forEach(function(e){ if(e) bad[String(e).trim().toLowerCase()]=true; });
+  function excluded(e){ return !!(e&&bad[String(e).trim().toLowerCase()]); }
   function pick(e){
     if(!e) return null;
     return sheetUsers.find(function(x){
@@ -15069,15 +15101,23 @@ function _findSignatory(slot,preparerEmail){
     })||null;
   }
   function fallback(assigned){
-    var alt=pick(r.checkedAlt);
-    if(alt&&!isPreparer(alt.email)) return alt;
-    return {_conflict:true,assigned:assigned};
+    var alt=pick(r[slot+'Alt']);          // checkedAlt / notedAlt
+    if(alt&&!excluded(alt.email)) return alt;
+    return {_conflict:true,slot:slot,assigned:assigned};
   }
   var u=pick(r[slot]);
-  if(u) return (slot==='checked'&&isPreparer(u.email)) ? fallback(u) : u;
+  if(u) return excluded(u.email) ? fallback(u) : u;
   var g=findApproverForAction(slot);
-  if(slot==='checked'&&g&&isPreparer(g.email)) return fallback(g);
+  if(g&&excluded(g.email)) return fallback(g);
   return g;
+}
+// Who may not sign a given slot on the quotation currently open.
+function _sigExcludes(slot,checkedSignerEmail){
+  var ex=[_preparerEmail()];
+  if(slot==='noted'){
+    ex.push(checkedSignerEmail||((_sigOf('checked')||{}).email));
+  }
+  return ex.filter(Boolean);
 }
 // Who prepared the document. qSignatures.prepared is stamped at lock and is the name that appears
 // on the printout, so it is the right answer even when somebody else raises the request.
@@ -15086,17 +15126,21 @@ function _preparerEmail(){
   return (p&&p.email)||((gUser&&gUser.email)||'');
 }
 // auto = raised by the system after Checked by approved, not by the user pressing the button
-function _sendSignatureRequest(slot,auto,serialOverride,clientOverride){
+function _sendSignatureRequest(slot,auto,serialOverride,clientOverride,checkedSignerEmail){
   var serial=serialOverride||qBaseSerial||qSerial||'—';
   var client=clientOverride||(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'—';
-  var apprObj=_findSignatory(slot,_preparerEmail());
+  var apprObj=_findSignatory(slot,_sigExcludes(slot,checkedSignerEmail));
   if(apprObj&&apprObj._conflict){
     var _co=getCompanyName()||currentUserCompany||'—';
-    var _nm=(apprObj.assigned&&apprObj.assigned.name)||'the assigned Checked by';
+    var _lbl=_sigLabel(slot);
+    var _nm=(apprObj.assigned&&apprObj.assigned.name)||('the assigned '+_lbl);
+    var _why=slot==='noted'
+      ? _nm+' cannot note this — they either prepared it or already signed Checked by'
+      : _nm+' prepared this quotation and is also the assigned Checked by';
     var _adm=sheetUsers.find(function(u){return u.pos==='Admin'&&u.active;});
-    if(_adm) gSendMessage(_adm.email,_adm.name,'A Checked-by signature on '+serial+' cannot be routed: the preparer ('+_nm+') is also the assigned Checked by for '+_co+', and no fallback is set. Please set a fallback Checked-by in Settings → Approval Routing.','urgent','no_signatory_fallback:'+serial,function(){});
-    showToast('Cannot route — '+_nm+' prepared this and is also the Checked by for '+_co+'. A fallback Checked-by is needed (Settings → Approval Routing). Admin has been notified.');
-    logActivity('Signature request refused — the preparer is the assigned Checked by for '+_co+' and no fallback is set.');
+    if(_adm) gSendMessage(_adm.email,_adm.name,'A '+_lbl+' signature on '+serial+' cannot be routed: '+_why+' for '+_co+', and no fallback is set. Please set a fallback '+_lbl+' in Settings → Approval Routing.','urgent','no_signatory_fallback:'+slot+':'+serial,function(){});
+    showToast('Cannot route — '+_why+' for '+_co+'. A fallback '+_lbl+' is needed (Settings → Approval Routing). Admin has been notified.');
+    logActivity(_lbl+' signature request refused on '+serial+' — '+_why+' for '+_co+' and no fallback is set.');
     return null;
   }
   if(!apprObj||!apprObj.email){
@@ -15130,6 +15174,38 @@ function _sendSignatureRequest(slot,auto,serialOverride,clientOverride){
   _updateNotifBadge();
   renderSignatureBar();
   return req;
+}
+// Repairs a request that was routed somewhere it can never be signed — in practice, to its own
+// requester. Re-resolves the signatory against the CURRENT routing (so setting a fallback fixes
+// requests already raised) and moves the same request rather than cancelling and re-raising it,
+// which would leave two rows and lose the original date.
+function rerouteSignature(idx){
+  var n=NOTIFS[idx];
+  if(!n||n.type!=='signature'||n.status!=='pending'){ showToast('That request is no longer pending.'); return; }
+  var slot=n.sigSlot||'checked';
+  var co=n.company||currentUserCompany||'';
+  var found=_findSignatory(slot,[n.fromEmail],co);
+  if(found&&found._conflict){
+    showToast('Still nowhere to send it — set a fallback '+_sigLabel(slot)+' for '+co+' in Settings → Approval Routing first.');
+    return;
+  }
+  if(!found||!found.email){ showToast('No '+_sigLabel(slot)+' signatory is assigned for '+co+'.'); return; }
+  if(found.email.toLowerCase()===(n.approverEmail||'').toLowerCase()){
+    showToast('The routing still resolves to the same person — change it in Settings → Approval Routing first.');
+    return;
+  }
+  var was=n.approverEmail||'(nobody)';
+  NOTIFS[idx].approverEmail=found.email;
+  NOTIFS[idx].approver=found.email;
+  if(typeof gSaveApprovalRequest==='function') gSaveApprovalRequest({id:n.reqId,approverEmail:found.email,approver:found.email});
+  gSendMessage(found.email,found.name,
+    (n.from||'A colleague')+' is requesting your signature — '+_sigLabel(slot)+' on '+n.serial+' for '+n.client
+      +'. Open the Approvals tab and enter your PIN to sign.','normal',
+    'signature_request:'+slot+':'+n.serial,function(){});
+  logActivity(_sigLabel(slot)+' signature on '+n.serial+' re-routed from '+was+' to '+found.name+'.');
+  showToast('✓ Re-routed to '+found.name);
+  _updateNotifBadge();
+  renderApprovals();
 }
 // ── Signing ──────────────────────────────────────────────────────────────────────────────
 // The signatory signs as THEMSELVES, so the PIN is verified against the logged-in user rather
@@ -15190,7 +15266,10 @@ function confirmSignature(){
     // Checked by done → hand straight on to Noted by when the amount requires it.
     if(n.sigSlot==='checked'){
       var needs=((qBaseSerial||qSerial)===n.serial) ? _notedRequired() : (n.notedRequired!==false);
-      if(needs) _sendSignatureRequest('noted',true,n.serial,n.client);
+      // Pass who just signed Checked by: they must not also be handed Noted by, and the
+      // quotation is usually not open here (the signatory acts from Approvals), so
+      // qSignatures.checked cannot be relied on to say.
+      if(needs) _sendSignatureRequest('noted',true,n.serial,n.client,sig.email);
       else logActivity('Noted by not required on '+n.serial+' (below the company threshold).');
     }
     _updateNotifBadge();
@@ -23038,7 +23117,7 @@ function gShowApp(){
         if(bell){bell.classList.remove('bell-pulse');void bell.offsetWidth;bell.classList.add('bell-pulse');}
         setTimeout(function(){var b=el('notif-btn');if(b)b.classList.remove('bell-pulse');},2500);
         // Show toast for each truly-new request (not previously seen)
-        var _tl2={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',client_update:'Client Update',revision:'Revision',signature:'Signature'};
+        var _tl2=APPR_TYPE_LABELS;
         var shown2=0;
         NOTIFS.forEach(function(n){
           if(n.status==='pending'&&n.reqId&&!_lastSeenReqIds[n.reqId]){
@@ -23067,7 +23146,7 @@ function gShowApp(){
         if(!n.fromEmail||n.fromEmail.toLowerCase()!==me||!n.reqId) continue;
         var prevStatus=ownBefore[n.reqId];
         if(!prevStatus||prevStatus===n.status) continue; // no change
-        var typeLabels={nonvat:'Non-VAT',discount:'Discount',override:'CF Override',premium:'Holiday Premium',unlock:'Unlock',signature:'Signature'};
+        var typeLabels=APPR_TYPE_LABELS;
         var tl=typeLabels[n.type]||n.type;
         // Lami already announces a NEW request to the approver; the requester got only a toast,
         // which is gone in seconds and easily missed while working in another tab. She says the
@@ -23165,9 +23244,12 @@ function _isSignatory(){
   if(!me) return false;
   for(var co in APPR_ROUTING){
     var r=APPR_ROUTING[co]||{};
-    if(String(r.checked||'').trim().toLowerCase()===me) return true;
-    if(String(r.checkedAlt||'').trim().toLowerCase()===me) return true;
-    if(String(r.noted||'').trim().toLowerCase()===me) return true;
+    // Every slot that can be ROUTED to must also be able to reach the page, fallbacks included —
+    // otherwise the person gets the notification and is turned away at the door.
+    var slots=['checked','checkedAlt','noted','notedAlt'];
+    for(var s=0;s<slots.length;s++){
+      if(String(r[slots[s]]||'').trim().toLowerCase()===me) return true;
+    }
   }
   return false;
 }
@@ -32504,7 +32586,11 @@ function renderApprovalRoutingSettings(){
     // exists and the double-signing stops.
     {key:'checkedAlt',   label:'Signature — Checked by (fallback)',
      hint:'Used only when the preparer is the assigned Checked by'},
-    {key:'noted',        label:'Signature — Noted by'}
+    {key:'noted',        label:'Signature — Noted by'},
+    // Noting is a SECOND pair of eyes, so the fallback covers two cases: the assigned Noted-by
+    // prepared the quotation, or they already signed Checked by.
+    {key:'notedAlt',     label:'Signature — Noted by (fallback)',
+     hint:'Used when the assigned Noted by prepared it, or already signed Checked by'}
   ];
   // Collect active approvers (Manager/Director/Admin)
   var approvers=sheetUsers.filter(function(u){return u.active&&(u.pos==='Manager'||u.pos==='Director'||u.pos==='Admin');});
@@ -32555,7 +32641,7 @@ function renderApprovalRoutingSettings(){
       // Approval actions stay restricted to Manager/Director/Admin — those are authority
       // decisions. The two SIGNATURE rows are open to any active user: seniority for Checked by
       // and Noted by has not been defined, so the app must not decide it (Rommel, 2026-08-06).
-      var _list=(at.key==='checked'||at.key==='checkedAlt'||at.key==='noted') ? signatoryPool : approvers;
+      var _list=/^(checked|checkedAlt|noted|notedAlt)$/.test(at.key) ? signatoryPool : approvers;
       for(var ui=0;ui<_list.length;ui++){
         var au=_list[ui];
         h+='<option value="'+escHtml(au.email)+'"'+(cur===au.email?' selected':'')+'>'+escHtml(au.name)+' ('+au.pos+')</option>';
