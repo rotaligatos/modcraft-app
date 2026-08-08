@@ -27513,8 +27513,18 @@ function _gSaveQuotationCore(){
   if(!qSerialCommitted){
     var claimSerial=qBaseSerial||qSerial;
     if(SERIAL_CLAIM_URL){
+      // A number claimed by an earlier attempt that never got a row is reused rather than
+      // burned. Without this, every failed save costs a serial and can leave a duplicate row.
+      var pocketed=_pendingSerialGet(_serialPrefix());
+      if(pocketed){
+        _acceptClaimedSerial(claimSerial,pocketed,false);
+        qSerialCommitted=true;
+        _proceedSaveQuotation();
+        return;
+      }
       _claimSerialAtomic(_serialPrefix(),function(newSerial){
         if(newSerial){
+          _pendingSerialSet(_serialPrefix(),newSerial);   // held until a row exists
           _acceptClaimedSerial(claimSerial,newSerial,false);
           qSerialCommitted=true;
           _proceedSaveQuotation();
@@ -27670,6 +27680,33 @@ function _syncBaseSerialToPreview(){
 }
 // Updates qSerial/qBaseSerial + the on-screen number when the claimed serial
 // differs from what was provisionally displayed since "New Quotation".
+// ── A claimed serial that never got used must be kept, not abandoned ───────────────────────────
+// A serial is claimed BEFORE the row is written. If the write then fails -- Sheets quota, a
+// dropped packet, anything -- that number has been consumed and the quotation has no row. Press
+// Save again and, if the in-memory "committed" flag has been lost in between (a reload, a fresh
+// tab), a SECOND number is claimed and a second row appears. That is how QT-M00000108 / 109 / 110
+// came from one quotation on 2026-08-08.
+//
+// So an unused claim is pocketed and reused on the next attempt. Survives a reload, because that
+// is the case the in-memory flag cannot cover. Cleared only once a row has actually been written.
+// Bounded to a day: the claim service is monotonic so a pocketed number can never be handed to
+// anyone else, but a week-old pocket resurfacing on an unrelated quotation would be its own
+// surprise.
+var PENDING_SERIAL_KEY='mc_pending_serial';
+var PENDING_SERIAL_MAX_AGE=24*60*60*1000;
+function _pendingSerialGet(prefix){
+  try{
+    var raw=localStorage.getItem(PENDING_SERIAL_KEY); if(!raw) return '';
+    var o=JSON.parse(raw);
+    if(!o||o.prefix!==prefix||!o.serial) return '';
+    if(Date.now()-(o.at||0)>PENDING_SERIAL_MAX_AGE){ _pendingSerialClear(); return ''; }
+    return o.serial;
+  }catch(e){ return ''; }
+}
+function _pendingSerialSet(prefix,serial){
+  try{ localStorage.setItem(PENDING_SERIAL_KEY,JSON.stringify({prefix:prefix,serial:serial,at:Date.now()})); }catch(e){}
+}
+function _pendingSerialClear(){ try{ localStorage.removeItem(PENDING_SERIAL_KEY); }catch(e){} }
 function _acceptClaimedSerial(oldSerial,newSerial,wasCollision){
   if(newSerial===oldSerial) return; // common case — no contention, nothing to change
   qSerial=newSerial; if(qBaseSerial===oldSerial) qBaseSerial=newSerial;
@@ -27779,6 +27816,9 @@ function _proceedSaveQuotation(){
     else{return sheetsAppend('Quotations!A:AA',[row]);}
   }).then(function(){
     showSheetsToast(true,'Quotation '+serial+' saved to database');
+    // The number is now spent on a real row, so release the pocket. Deliberately here and not in
+    // the claim: a claim only reserves a number, a written row is what consumes it.
+    _pendingSerialClear();
     // Only now that the NEW row exists is it safe to remove the row this quotation used to have.
     _cleanupPrevSerialRows(serial);
   }).catch(function(e){
