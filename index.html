@@ -1185,6 +1185,9 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         <button class="btn" id="lock-btn" onclick="doLockOnly()" style="background:var(--navy);color:var(--on-accent);border-color:var(--navy)"><i class="ti ti-lock"></i>Lock</button>
         <button class="btn" id="send-btn" onclick="doShare()" style="display:none;background:var(--teal);color:var(--on-accent);border-color:var(--teal)"><i class="ti ti-share"></i>Share</button>
         <button class="btn" id="cancel-s1-btn" onclick="requestCancelQuotation('s1')" style="display:none;background:var(--coral);color:var(--on-accent);border-color:var(--coral)" data-lock-exempt="1"><i class="ti ti-circle-x"></i>Client Declined</button>
+        <!-- Only ever visible on a draft — see discardQuotation. Once a quotation has been issued
+             it is a record, and the way out is Client Declined, not deletion. -->
+        <button class="btn" id="discard-btn" onclick="discardQuotation()" style="display:none;color:var(--coral);border-color:var(--coral)"><i class="ti ti-trash"></i>Discard draft</button>
         <!-- Close Project removed 2026-08-08: the quotation ends when the client says yes or no.
              Delivery is Admin's (payment) and then Production's, which extend the chain rather than
              sit inside it. The order archiving it was quietly responsible for moved to
@@ -18365,6 +18368,7 @@ function syncOptionUI(){
   if(typeof renderBondIns==='function'&&qBondIns.enabled) renderBondIns();
   if(typeof onServiceChange==='function') onServiceChange();
   if(typeof _updateLockGate==='function') _updateLockGate();   // must have the last word
+  try{ _updateDiscardBtn(); }catch(e){}
   try{ _qTotalBar(); }catch(e){}
   // The signatures bar depends on lock state, so it has to redraw whenever the lock UI does.
   // _updateLockGate is NOT called from updateLockUI (only from the project-size gate and here),
@@ -18967,6 +18971,9 @@ function updateLockUI() {
     b.disabled=locked;
   });
   _updateReactivationBanner();
+  // Shown only while this is still a draft, so it disappears the moment the quotation is locked
+  // rather than relying on the sweep above to disable it.
+  try{ _updateDiscardBtn(); }catch(e){}
   // Last, and after the disable sweep above: the signature indicator depends on lock state, and
   // rebuilding it here means its Request button is created fresh rather than caught by that sweep.
   if(typeof renderSignatureBar==='function') renderSignatureBar();
@@ -20025,6 +20032,74 @@ function sheetsDeleteRowByKey(sheetName, keyVal, callback){
     });
   }).then(function(){if(callback)callback(true);})
     .catch(function(e){console.warn('sheetsDeleteRowByKey failed:',e);if(callback)callback(false,e&&e.message);});
+}
+// ── Discarding a draft ───────────────────────────────────────────────────────────────────
+// Abandoned quotations were being saved and left to rot in the Project List, because the only
+// way to remove one was an Admin deleting it from that list.
+//
+// The line this must not cross: a DRAFT is unfinished work and nobody has seen it, so discarding
+// it destroys nothing. An ISSUED quotation is a record — the client is holding a document with
+// that number on it, and deleting it would erase the trail we spent this whole day rebuilding.
+// The way out of an issued quotation is Client Declined, which keeps it and records why.
+function _canDiscardDraft(){
+  if(qLocked||fqLocked||qInitLockedAt||fqLockedAt) return {ok:false,why:'issued'};
+  if(qApproved||qClientApproved||fqClientApproved) return {ok:false,why:'issued'};
+  if(qCancelled) return {ok:false,why:'issued'};
+  // Someone else's unfinished work is not yours to throw away. Admin can, because somebody has
+  // to be able to clear up after a person who has left.
+  var mine=!qSerialCommitted
+    || !!(gUser&&sessionQuotations[qBaseSerial||qSerial]
+          && String(sessionQuotations[qBaseSerial||qSerial].user||'')===String(gUser.name||gUser.email||''))
+    || !_quotationOwner();
+  if(currentRole!=='Admin'&&!mine) return {ok:false,why:'notyours'};
+  return {ok:true};
+}
+function _quotationOwner(){
+  var serial=qBaseSerial||qSerial;
+  var e=sessionQuotations[serial]||(dirData||[]).filter(function(x){return x.id===serial;})[0];
+  return e?String(e.user||''):'';
+}
+function _updateDiscardBtn(){
+  var b=el('discard-btn'); if(!b) return;
+  b.style.display=_canDiscardDraft().ok?'inline-flex':'none';
+}
+function discardQuotation(){
+  var g=_canDiscardDraft();
+  if(!g.ok){
+    showToast(g.why==='notyours'
+      ? 'This draft belongs to '+_quotationOwner()+' — only they or an Admin can discard it.'
+      : 'This quotation has been issued, so it cannot be deleted. Use Client Declined instead — that keeps the record and asks for the reason.');
+    return;
+  }
+  var serial=qBaseSerial||qSerial;
+  var client=(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'';
+  var everSaved=!!(qSerialCommitted||sessionQuotations[serial]);
+  _confirm('Discard this draft'+(client?' for '+client:'')+'?\n\n'
+    +(everSaved
+      ? serial+' will be removed from the Project List and cannot be recovered.\n\nThe deletion itself is recorded in the activity log.'
+      :'Nothing has been saved yet, so this just clears the form.'),
+  function(){
+    if(!everSaved){
+      logActivity('Draft discarded before it was ever saved'+(client?' — '+client:'')+'.');
+      initQuotation();
+      showToast('Draft discarded');
+      return;
+    }
+    var val=(sessionQuotations[serial]&&sessionQuotations[serial].value)||(_pCalc&&_pCalc.grand)||0;
+    dirData=(dirData||[]).filter(function(e){return e.id!==serial;});
+    delete sessionQuotations[serial];
+    sheetsDeleteRowByKey('Quotations',serial,function(){});
+    sheetsDeleteRowByKey('Quotation State',serial,function(){});
+    try{ supaDeleteQuotation(serial); }catch(e){}
+    _qStateRowCache={};                 // row indices shift after a delete
+    if(_stageFlags) delete _stageFlags[serial];
+    // The quotation goes; the fact that it existed and who removed it does not. The activity log
+    // is append-only, so this survives even though the quotation itself does not.
+    logActivity('Draft DISCARDED: '+serial+(client?' — '+client:'')+(val?' ('+fmtMoney(val)+')':'')+'.');
+    initQuotation();
+    showToast(serial+' discarded');
+    if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
+  });
 }
 function deleteQuotation(serial){
   if(currentRole!=='Admin') return;
