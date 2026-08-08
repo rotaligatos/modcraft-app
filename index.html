@@ -1381,6 +1381,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
 
 <!-- DIRECTORY -->
 <div class="page" id="page-directory">
+  <div id="dir-stale-banner"></div>
   <div id="dir-sticky-header" style="position:sticky;top:52px;z-index:10;background:var(--bg);padding-bottom:4px;margin-bottom:14px">
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;flex-wrap:wrap;gap:10px;padding-top:4px">
       <div><h2 style="font-size:20px;font-weight:500">Project List</h2><p style="color:var(--text2);font-size:13px;margin-top:2px">All projects — sortable, filterable, followable</p></div>
@@ -19331,14 +19332,62 @@ function _pendingRevisionCtx(serial){
   }
   return null;
 }
-// What to SHOW for a stored row. The stored value is the quotation's own state; a pending revision
-// request lives in the approval list, not on the quotation, so it is layered on at display time.
-// Settled quotations are never overlaid — a stale request must not make a won or declined job look
-// reopened.
+// ── Deriving the stage, rather than trusting the stored copy ─────────────────────────────
+// The Status column is a COPY, written when a quotation is saved. Any path that changes a
+// quotation without saving leaves that copy behind, and no amount of care stops the next one
+// being written — it only takes one new action that forgets. Correcting the column afterwards is
+// cleanup, not a fix.
+//
+// So the Project List no longer trusts it. quotation_stage_flags is a view holding just the dozen
+// flags the ladder reads — 156 quotations come to 11 kB, one query — and each row's stage is
+// computed from the quotation's own state through the same _statusFromState the app uses. The
+// stored column stays as the fallback for anyone not connected, and the checker still heals it so
+// reports and the Sheet agree, but what you SEE is derived and cannot drift.
+var _stageFlags=null, _stageFlagsLoading=false;
+function supaGetStageFlags(){
+  if(!(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady()))
+    return Promise.resolve(null);
+  try{
+    return supa.from('quotation_stage_flags').select('*').then(function(r){
+      if(r.error||!r.data){ console.warn('[stage] flags unavailable, using the stored Status',r.error&&r.error.message); return null; }
+      var m={};
+      r.data.forEach(function(x){
+        m[x.serial]={qCancelled:x.q_cancelled, fqClientApproved:x.fq_client_approved,
+          clientApproved:x.client_approved, approved:x.approved, locked:x.locked,
+          fqLocked:x.fq_locked, fqStarted:x.fq_started, sentStatus:x.sent_status,
+          fqSentStatus:x.fq_sent_status, initLockedAt:x.init_locked_at, finalLockedAt:x.final_locked_at};
+      });
+      return m;
+    });
+  }catch(e){ return Promise.resolve(null); }
+}
+function _ensureStageFlags(){
+  if(_stageFlags||_stageFlagsLoading) return;
+  _stageFlagsLoading=true;
+  supaGetStageFlags().then(function(m){
+    _stageFlagsLoading=false;
+    if(!m) return;
+    _stageFlags=m;
+    if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
+  });
+}
+// Keeps the derived view honest the moment something changes in this session, without refetching.
+function _stageFlagsNoteLocalSave(serial){
+  if(!_stageFlags||!serial) return;
+  _stageFlags[serial]={qCancelled:qCancelled, fqClientApproved:fqClientApproved,
+    clientApproved:qClientApproved, approved:qApproved, locked:qLocked, fqLocked:fqLocked,
+    fqStarted:fqStarted, sentStatus:qSentStatus, fqSentStatus:fqSentStatus,
+    initLockedAt:qInitLockedAt, finalLockedAt:fqLockedAt};
+}
+// What to SHOW for a row. A pending revision request lives in the approval list, not on the
+// quotation, so it is layered on at display time. Settled quotations are never overlaid — a stale
+// request must not make a won or declined job look reopened.
 function _displayStatus(e){
-  var st=_normalizeStatusLabel(e&&e.status);
+  var serial=e&&(e.id||e.serial);
+  var f=_stageFlags&&serial?_stageFlags[serial]:null;
+  var st=f?_statusFromState(f,serial):_normalizeStatusLabel(e&&e.status);
   if(st==='Declined'||st==='FQ Approved') return st;
-  var ctx=_pendingRevisionCtx(e&&(e.id||e.serial));
+  var ctx=_pendingRevisionCtx(serial);
   if(ctx) return ctx==='fq'?'FQ Revision Requested':'IQ Revision Requested';
   return st;
 }
@@ -19653,6 +19702,8 @@ function toggleFollow(id) {
 }
 function renderDirectory(){
   _fillStatusFilter();
+  try{ _ensureStageFlags(); }catch(e){}
+  try{ _dbCheckAuto(); }catch(e){}
   // Load from Sheets if signed in, else use demo
   if(gToken&&!dirLoading&&(!dirData||dirData.length===0)){
     dirLoading=true;
@@ -23953,12 +24004,12 @@ function _allQuotationStates(cb){
   }
   _statesFromSheet(function(o){ cb(o,'Google Sheets'); });
 }
-function checkProjectListData(){
-  var box=el('dbcheck-result'); if(!box) return;
-  if(!gToken){ box.innerHTML='<div class="alert" style="margin-top:10px">Sign in first.</div>'; return; }
-  box.innerHTML='<div class="alert alert-info" style="margin-top:10px"><i class="ti ti-loader"></i> Reading the Quotations sheet and every saved quotation…</div>';
+// The comparison itself, separated so the manual check and the automatic one can never disagree.
+// cb(findings, checkedCount, skippedCount, source) — or cb(null) if the sheet could not be read.
+function _findStaleStatuses(cb){
+  if(!gToken){ cb(null); return; }
   sheetsGet('Quotations!A:AA').then(function(d){
-    if(!d||d.error){ box.innerHTML='<div class="alert alert-error" style="margin-top:10px">Could not read the Quotations sheet.</div>'; return; }
+    if(!d||d.error){ cb(null); return; }
     var rows=(d.values)||[];
     _allQuotationStates(function(states,src){
       var findings=[], noState=0, checked=0;
@@ -23972,6 +24023,39 @@ function checkProjectListData(){
         findings.push({row:i+1, serial:serial, client:r[2]||'', stored:stored||'(blank)',
                        should:should, shown:_normalizeStatusLabel(stored)});
       }
+      cb(findings, checked, noState, src);
+    });
+  }).catch(function(){ cb(null); });
+}
+// Runs once per session when the Project List is opened. Sustainability cannot depend on somebody
+// remembering to press a button in Settings — if a future action ever changes a quotation without
+// saving it, this is what says so, instead of the list quietly being wrong for weeks. It only ever
+// REPORTS; correcting stays a deliberate act.
+var _dbCheckAutoDone=false;
+function _dbCheckAuto(){
+  if(_dbCheckAutoDone||!gToken) return;
+  _dbCheckAutoDone=true;
+  _findStaleStatuses(function(findings){
+    var host=el('dir-stale-banner');
+    if(!host||!findings||!findings.length) return;
+    host.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 14px;'
+      +'background:var(--wash-amber);border:1px solid #f5d78e;border-left:3px solid var(--amber);'
+      +'border-radius:0 8px 8px 0;margin-bottom:10px;font-size:13px">'
+      +'<i class="ti ti-alert-triangle" style="color:var(--amber)"></i>'
+      +'<span><b>'+findings.length+'</b> quotation'+(findings.length===1?' is':'s are')
+      +' showing the wrong stage here.</span>'
+      +'<button class="btn" style="font-size:12px;height:28px;padding:0 10px" '
+      +'onclick="navigate(\'settings\');setTimeout(function(){setStTab(\'company\');setTimeout(checkProjectListData,150);},150)">'
+      +'Review and correct</button></div>';
+  });
+}
+function checkProjectListData(){
+  var box=el('dbcheck-result'); if(!box) return;
+  if(!gToken){ box.innerHTML='<div class="alert" style="margin-top:10px">Sign in first.</div>'; return; }
+  box.innerHTML='<div class="alert alert-info" style="margin-top:10px"><i class="ti ti-loader"></i> Reading the Quotations sheet and every saved quotation…</div>';
+  _findStaleStatuses(function(findings,checked,noState,src){
+    if(!findings){ box.innerHTML='<div class="alert alert-error" style="margin-top:10px">Could not read the Quotations sheet.</div>'; return; }
+    {
       _dbCheckFindings=findings;
       var h='<div style="margin-top:12px;border:1px solid var(--border);border-radius:10px;overflow:hidden">'
         +'<div style="padding:12px 16px;background:var(--card2);font-size:13px">'
@@ -24004,9 +24088,7 @@ function checkProjectListData(){
         +'<span style="font-size:12px;color:var(--text2)">Rewrites only the Status column. Nothing else on the quotation is touched.</span>'
         +'</div></div>';
       box.innerHTML=h;
-    });
-  }).catch(function(){
-    box.innerHTML='<div class="alert alert-error" style="margin-top:10px">Could not read the Quotations sheet.</div>';
+    }
   });
 }
 function fixProjectListStatuses(){
@@ -27074,6 +27156,7 @@ function _proceedSaveQuotation(){
   // editable copies of the same fact would eventually disagree.
   var _jobSrc=qSourceOrderId?'':(qJobSource||'');
   var _jobStart=qSourceOrderId?'':(qJobStartedAt||'');
+  try{ _stageFlagsNoteLocalSave(serial); }catch(e){}
   var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',fqClientApprovedAt||'',now,(fqSentAt||qSentAt||'')];
   // Store in session memory immediately so directory shows it without waiting for Sheets
   var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated','Sent At'];
