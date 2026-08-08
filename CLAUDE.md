@@ -2913,7 +2913,7 @@ should become a slim bar pinned to the bottom instead of a 224px side column.
 
 ---
 
-# ⚠ OPEN — read before continuing (updated 2026-08-03)
+# OPEN — 2026-08-03 (SUPERSEDED by the 2026-08-08 list — kept for the detail only)
 
 ### A. Supabase cleanup — SQL agreed, NOT RUN YET
 Rommel approved deleting the testing-period quotations. As of session end: **209
@@ -4197,8 +4197,304 @@ inside the quotation page overflows at any width.
 - **Mockups earn their keep.** The A+B mockup proved option B (merging the five toggles) made the
   page *longer*, not shorter — the opposite of what I had told him.
 
+## What was changed on 2026-08-08 (session — deploy unblocked, collision checker, remote approval, cutting-list tab, theme, Wufoo attachments)
+
+Eight commits, `d049bb6`..`c065ebd`. Everything below was found by RUNNING the code, by querying
+live data, or by Rommel using the page.
+
+### The deploy was not the GitHub outage
+Six consecutive runs looked cancelled. The real cause: **one run stuck in `waiting` since the day
+before**, holding the `pages` concurrency slot. `concurrency: group: pages, cancel-in-progress:
+false` lets one run hold and one queue — so every new push queued behind the stuck one and was
+cancelled by the next. **Each "retrigger" made it worse**, taking the previous queue slot. Cancelling
+the stuck run released everything in under a minute.
+
+> If a deploy stalls again, look for a non-completed OLDER run before pushing anything:
+> `curl -s "https://api.github.com/repos/rotaligatos/modcraft-app/actions/runs?per_page=8"` and check
+> for `status: waiting`. An empty commit is the wrong move.
+
+### Collision checker + pre-commit hook (`d049bb6`, `4e0d0b0`)
+`tools/check-collisions.mjs` reports duplicate top-level function names, duplicate top-level vars,
+duplicate element ids, and any `<script>` that does not parse — all silent in the browser, all of
+which have already bitten this app. Wired as `.githooks/pre-commit` via `core.hooksPath`, checking
+the STAGED content. `.gitattributes` pins the hook to LF or a fresh clone gets `bad interpreter:
+/bin/sh^M` and the check silently disables itself.
+
+Ids are read from the static markup AND from JS string literals, because the 2026-08-07 wrong-card
+bug was a JS-built card carrying an id the markup already had — a markup-only scan misses it. An id
+emitted from two places in JS is reported but does not fail (a create-if-missing guard is a real
+reason for it; the two in the file today are both that).
+
+Declarations are matched at column 0, which is this file's real style: all 1339 top-level functions
+sit there and every indented one is a nested local. Comments and string/template literals are masked
+first.
+
+> **The masker was silently dropping half the declarations.** `Array.from()` splits by code POINT but
+> `src[i]` indexes by UTF-16 UNIT, and index.html holds 98 emoji — so the mask drifted 98 characters
+> and hid ~660 declarations. Caught only by cross-checking the count against `grep`. Use `split('')`.
+
+`tools/check-collisions.test.mjs` covers both directions — 7 faults it must catch (including the
+`dashToggleWidget` and `users-wrap` bugs) and 7 it must NOT flag. Proven to block a real commit by
+shadowing `recalc` in index.html.
+
+### Remote approval — the cheap route (`e41a5d4`)
+Measured at 375px first: **the Approvals page does not overflow; the topbar does.** Its nav group
+(brand + 12 tabs, all nowrap) has a min-content width of 1206px, needing ~1466px to lay out, so the
+document was dragged to 1472px and every page panned sideways.
+
+The nav group now scrolls on its own axis. **That rule starts at 1500px, not at phone widths, because
+a 1280 laptop overflowed too** — same defect, same fix, and it costs nothing visually (on a wide
+screen the strip does not scroll at all). Below 900px the brand, role pill and fullscreen button go
+as well, roughly doubling the visible nav; messages, notifications and the avatar stay. Tap targets
+on the approval path were 28-35px against the 44px minimum.
+
+`navigate()` now brings the active tab into view. It scrolls with **`behavior:'auto'`, not
+`'smooth'`** — smooth is suppressed in ordinary situations (reduced-motion among them) and when it is,
+the scroll simply does not happen and nothing is raised. Measured: smooth left scrollLeft at 0, auto
+moved it to the intended 666.
+
+The approval notification now carries the figures — total, what it becomes if approved, the
+reduction, and the discount scope. **The resulting total is not re-derived**: it comes from applying
+the requested value, running the quotation's own recalc, reading `_pCalc` and restoring, the same
+apply/read/restore `_ccfUpdateProfitNow` uses.
+
+> **Margin is included only when the requester could already see it.** `gSendMessage` puts one string
+> into the Sheets row, the Supabase row, the email AND the Chat post, and `gLoadMessages` returns rows
+> where you are the SENDER as well as the recipient — so composing it would otherwise hand an Encoder
+> the profit figure `canViewCostReport()` denies them.
+
+### Cutting List tab in Designers Support (`1f2bb29`)
+A website order carrying a cutting list already dropped into Designers Support; a client who emails
+or walks in with one had no way in, because every other entry point calls Claude and paying an
+extraction pass to read an exact list can only add error.
+
+This is the website's form brought here, producing the SAME `cl` object `_cutListToAnalysis` already
+consumes — one conversion, not two. **IIFE-wrapped deliberately**: the source file declares
+`function recalc()` and `var SERVICES` at top level, which in this app are the pricing engine and the
+live service catalogue. Only the `MCL` namespace reaches global scope; both were verified intact.
+
+Two things are better here than on the website, because the catalogue is in memory: materials come
+from live SKUs through the same bounded search the quotation uses (so they arrive resolved rather
+than in the fuzzy matcher), and services are offered by their real catalogue names — which name the
+three grooving prices separately and carry the boring diameter and type. **The same list that flags
+twice from the website now flags nothing.** Boring also gets a hole count on the chip, since
+`prodComputeServices` drops a service at qty 0 — a count-less boring line does not arrive vague, it
+disappears.
+
+The summary states where the list came from, and `cl.totals` is deliberately unset for a typed list:
+those totals would be computed in the same browser from the same rows, so comparing them is circular.
+The panels-vs-components check still runs, and that is the one that catches a row lost in conversion.
+
+> Found on the way: **hardware was being dropped in full, silently.** The converter reads
+> `{item, qty, unit, notes}` and this was emitting `{name, note}`, so every line was skipped without a
+> word — caught only by counting what came out the far end.
+
+### A new quotation starts at nothing (`b6e0749`)
+`initQuotation` seeded a Kitchen Base Cabinet at qty 1, so an untouched quotation was already worth
+₱7,275.35. Always true; the total just sat ~2,900px down where nobody saw it, and pinning the running
+total made it visible. Seeded at qty 0 now, and the same for `addArea`, which was quietly adding
+another ₱7,275 to a quotation already being worked on. The row added by an explicit "+ Add item"
+click keeps qty 1 — that one was asked for.
+
+Also: the running total said "minimum charge applied" on every quotation including an empty one.
+`minCharge` is always an object (`{total, rows}`), so testing it for truth was always true.
+
+### Minimum charge on the printout (`d9a9745`)
+Reported as "it raises the total but doesn't indicate the minimum charge". It was worse than that —
+**the printout contradicted itself**: item rows and VAT read ₱264.00 and ₱108.00 while the GRAND
+TOTAL said ₱1,008.00, with ₱636.00 unaccounted for. The top-up is added to `fabBase` inside recalc,
+but the printed fabrication subtotal is summed from the line items.
+
+Now one row per family, above the subtotal and included in it, so ₱264 + ₱335 + ₱301 = ₱900 and
+₱900 × 1.12 = ₱1,008. The floor is stated rather than the shortfall, because a minimum is a term of
+the quotation and how far under the work fell is ours. Both stages, since `_buildPrintBody` reads
+`_pCalc` and both carry `minCharge`.
+
+### Unit counts printed floating-point noise (`6f57a98`)
+A client's quotation showed `1732.2000000000003`. Unit counts are built by addition and binary
+floating point cannot hold most decimal fractions; money never showed it because `fmtMoney` pins two
+decimals, and the unit cells were concatenated raw. New `fmtUnits` rounds to two decimals then
+formats. **Applied to all five unit cells, not just the two in the report** — the lump-sum row, the
+by-type row, the per-area row and both totals — because fixing only what was photographed leaves the
+same fault on the other layouts. Reproduced with quantities summing to exactly the reported value;
+the case also lands on ₱34,836.93, the figure on Kaye's quotation.
+
+### Project List: pinned actions column + sticky scrollbar (`4911f6a`, `3ecdaf9`)
+The "Additional" button had not disappeared — it was off the right edge. That column is last, so with
+enough columns on, the table is wider than the screen and the whole column sits past the edge with
+nothing to suggest it is there. 246px hidden with the reported columns; 1176px with all of them.
+Pinned to the right edge, header and cells, inheriting the row's background (selection is set inline
+on the row in three places — inherit rather than restate a fourth).
+
+Then the scroll itself: the table's own scrollbar sits at the bottom of the scroll container, which
+has no height cap, so with 68 quotations it is ~3,400px down. That left a 12px strip above the
+headers as the only reachable one, and it scrolled away. Now sticky, its offset measured from the
+filter bar (which wraps on a narrower window) and re-measured on resize.
+
+> **Sticky alone did nothing, and that is the part worth remembering.** `.card` is `overflow:hidden`,
+> and a sticky child of a clipping ancestor sticks to that ancestor rather than the page — so it
+> computed as `position:sticky` with the right offset and still scrolled away, with nothing raised.
+> `.dir-table-card` opts that one card out. A class, not `:has()`, which would quietly do nothing on
+> an older browser.
+
+### Theme: light, dark, or follow the device (`a618b08`, `492d331`)
+Three choices in the avatar menu; "Device" is the default and follows the OS, including a flip at
+sunset with the tab open. Stored per device — following the system only means anything on the machine
+in your hand. Applied in `<head>` ahead of any markup so the resolved theme is on the root element
+before first paint. `data-theme` always carries the RESOLVED theme and never the word "system", so
+there is one dark block rather than a second copy inside a media query that could drift.
+
+**THE PRINTOUT IS NEVER AFFECTED, by construction rather than by care.** The six builders whose output
+can become a standalone document are verified to hold **no `var()` at all** — in a fresh document the
+custom properties do not exist, a `var()` resolves to nothing and the rule is dropped, silently
+removing a background from the client's copy. On top of that `#ov-print` and `#print-body` restate the
+light palette. Re-verified after every pass. The client's copy also keeps the TRUE company brand
+colour, not the lifted one.
+
+The work was ~570 hardcoded colours → tokens, in passes: surfaces/lines/greys, then the pale washes
+used as banner backgrounds and the dark inks sitting on them (**those two must move together** — a
+lifted ink on a pale wash is worse than neither), then the long tail: **69 distinct near-identical
+pale backgrounds**, someone having typed a slightly different pale blue each time. Mapped by hue onto
+seven wash tokens rather than one screen at a time. Also defined `--text1`, `--bg1`, `--bg2`,
+`--danger`, `--error`, referenced through `var()` in 52 places and never defined anywhere.
+
+Three mistakes worth recording:
+- **`#fff` does not always mean a surface.** 81 were text on a filled accent; converting those to
+  `--card` made them dark-on-dark. They use `--on-accent`, white in both themes.
+- **The conversion script's guard skipped only the first 14 lines**, so it rewrote the theme block
+  just written into `--card2:var(--card2)` — circular, invalid, and why the print pin silently did
+  nothing at first.
+- The company brand colours are held as **JS values, not CSS declarations**, which is why every
+  colour pass walked past them.
+
+Two faults surfaced that were wrong in LIGHT as well and had gone unnoticed: the Gantt bars set a
+fill but never a text colour (dark ink on navy and teal), and the running total kept the previous
+palette for one toggle (`position:fixed`; elements created after the switch always resolve correctly,
+so `_qTotalBar()` is rebuilt on theme change).
+
+**Measured across 11 pages: zero low-contrast text in dark and zero in light.**
+
+### Client step offers only "Continue to quotation" (`c065ebd`)
+The running total sits on both steps and on step 1 was still showing step 2's actions — Preview, Save
+draft, Approve & proceed to Stage 2, Lock. Beside a client form those ask someone to act several steps
+ahead. One button now; the rest return on step 2. `qGoStep` refreshes the bar, since stepping back
+does not recalc. Stage 2 untouched (guarded on Stage 1; Stage 2 has no step of its own).
+
+### ⚠ Wufoo was reading 2 of 11 attachment fields (`860bf80`, `ea56f38`)
+Reported as orders "lacking attachment". The form has **eleven** file fields — `Field128, 129, 132,
+133, 134, 135, 136, 137, 138, 139, 140`, all present on every submission — and the webhook read the
+first two. The other nine were discarded on arrival with nothing logged and nothing shown.
+
+**51 files across 15 orders**, on top of the 88 reachable. The worst had eleven and showed two.
+
+Nothing was permanently lost: the webhook stores the raw POST, so the links were recorded all along
+and simply never read. **All 67 orders backfilled** — 139 files now reachable — and
+`insert_pending_order` now carries an `attachments` list (it only had `attachment_1/2`), guarded so a
+later empty write cannot blank a list already there. The app needed no change; it has rendered the
+full list since 1 August and was only ever handed two.
+
+`_gas_wufoo_webhook_updated.gs` is the full updated script (pasted whole into the Apps Script project,
+not a patch). `FILE_FIELDS` is explicit rather than a scan for `-url` keys, so a twelfth field is a
+deliberate edit rather than another silent loss. `testFileFields(entryId)` checks a real submission
+from the Wufoo Debug tab and NAMES any field the script does not know, writing nothing.
+
+Verified live by Rommel: `Entry 8864: 3 file(s) captured — Field129, Field128, Field140`. **Field140
+is one of the nine the old script threw away**, and no `!!` line means nothing unknown. The code is
+right and in the editor; the deploy (**new VERSION of the existing deployment**, not a new deployment)
+and a live order remain.
+
+### Serial preview can show `1` — investigated, NOT a reset
+Rommel saw a Draft reading `QT-M00000001`. **The counter is intact**: M is at 106, W at 85, C at 2,
+and saves go through the atomic claim service (`serialClaimUrl` is configured) — his Project List
+being a continuous series is the real evidence.
+
+`serialCounters` **defaults** to `{W:1, C:1, M:1}` and is overwritten when the Settings sheet loads,
+so `serialCounters[prefix] || 1` returns a confident `1` before the read lands. `gShowApp` re-peeks
+once after loading, but if "+ New quotation" is clicked before that or the read fails, the draft keeps
+showing `1`. Harmless today — the committed number is claimed atomically — but it shows an estimator a
+number that is not theirs. Fix deferred deliberately rather than rushed at the end of a session.
+
+### Method notes worth keeping
+- **My test harness misled me three times** — a resize applied before navigation, a smooth scroll
+  measured before it ran, and repeated theme toggling producing stale computed values in an iframe
+  (a freshly-created element in the SAME parent resolved correctly while the existing one did not).
+  When a measurement is impossible rather than merely surprising, suspect the rig. A fresh load in a
+  real tab is the reliable measurement.
+- **Two of the reports were not what they looked like.** "Additional disappeared" was a scroll
+  position; "the serial reset" was a preview race. Diagnose before fixing.
+- **Fix the class, not the instance.** Five unit cells not two, all eleven Wufoo fields not the one
+  reported, 69 washes by hue not one screen at a time.
+
 ---
-# OPEN — updated 2026-08-07 (THIS IS THE AUTHORITATIVE LIST)
+# OPEN — updated 2026-08-08 (THIS IS THE AUTHORITATIVE LIST)
+
+## Cleared 2026-08-08
+Deploy backlog (was a stuck run, not the outage) · collision checker + pre-commit hook · remote
+approval on a phone · cutting-list tab in Designers Support · new quotation starts at nothing ·
+minimum charge shown on the printout and the column reconciles · unit-count float noise ·
+pinned actions column · sticky horizontal scrollbar · light/dark/device with **zero** low-contrast
+text in either theme · 51 lost Wufoo attachments recovered.
+
+## Blocking — the signature flow is unusable until these are done
+Re-checked against live data 2026-08-08 — I had been repeating "Checked by unassigned" all session
+from the older list; it IS assigned now. The PIN and signature gaps are real and verified.
+| | State |
+|---|---|
+| **Checked by** | assigned now (`designer-ce1@`) for all three companies — verify it is the person intended |
+| **Noted-by threshold** | `{}` → Noted by always required. Valid, but a decision. |
+| **Signature images** | Kathleen, Michael, Stiffany still have none. Signing is refused without one. |
+| **PINs** | **5 of 6 have none** — verified 2026-08-08 against `users`: IT Admin, Kathleen Joyce Tiu (Director), Allan Lagsao, Michael Delos Reyes, Stiffany Gabut. Only Rommel has one. Kathleen approves non-VAT for all three companies and cannot. |
+
+## Rommel's to do
+- **Deploy the Wufoo webhook.** Script is confirmed correct in the editor (`testFileFields` on entry
+  8864 found Field140 — one of the nine the old code discarded — and flagged nothing unknown). Needs
+  **Deploy → Manage deployments → edit the existing one → New VERSION**. A new *deployment* mints a
+  different URL and leaves the old code serving. Then a live order with 3+ files, and I check the
+  attachments land on `drive.google.com` rather than `wufoo.com`.
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **GYMFIX `QT-M00000087`** — final-locked and Client Approved at ₱0.00, should be ₱616. Unlock,
+  recalculate, re-lock.
+- **MABA CONSTRAK `QT-260619-3668`** — needs Joanna's sent PDF; cannot be recomputed (its service
+  lines carry no stored price and resolve positionally into a catalogue since reordered).
+- **Bella Ferma** (W00000036 / W00000039) — one job or two? Blocks both KPI decisions.
+- **Run `reconcileRenumbered()`** — repairs 8 stale-serial records (dry run first).
+- **Clear ~56 old drafts** — Project List → filter Draft → Delete selected. **Not** the struck SQL.
+- **Deactivate Andrei Salvador** — `designer-ce2@` still active across all three companies.
+- **"Handgrab Groove" / "Flush Handle Groove"** — under no minimum charge (they say *groove*, not
+  *grooving*); rename if they should count toward the ₱400.
+
+## Next up — agreed order, not started
+1. **Serial preview can show `1`** (~20 min). `serialCounters` defaults to `{W:1,C:1,M:1}`, so a
+   draft created before the Settings read lands shows a confident wrong number. The counter is fine
+   (M at 106) and the committed serial is claimed atomically, so this is display only — but it shows
+   an estimator a number that is not theirs. Fix: do not show a number until the counter is known,
+   and refresh when it arrives. Deliberately deferred rather than rushed at the end of a session.
+2. **Wufoo verification** once an order lands (above).
+3. Then reconsider whether the full mobile app with push is still wanted — the cheap route shipped
+   2026-08-08 and may be enough.
+
+## Parked
+9 legacy quotations missing `fqLocked` (4 show a wrong status) · subsidiary material billing differs
+between BOM and cutting-list mode · Price DB ~39,420 blank-unit rows (fill units, **delete nothing** —
+~10,000 SKUs exist only as one) · hardware still on the assumed 30% pending procurement data ·
+Materials editing needs a search-first design · `getInstallCarcassUnits()` blank-count fallback ·
+website order pipeline (live SKUs, hole count, grooving variants) · PMES sign-in (do not drop the anon
+policies first) · Cabinet POC unverified types + oven tower · FORGE detection · Supabase orphan
+detector · **`pending_orders` allows anon insert with `check(true)`** — anyone with the publishable
+key can file unlimited orders; fine for launch-day, not for long.
+
+## Standing rules confirmed this session
+- **Never let a colour token into the six standalone print builders.** In a fresh document the
+  variables do not exist, the rule is dropped, and a background silently disappears from the client's
+  copy. Re-check after any colour work: they must contain zero `var(--`.
+- **A stuck deploy is usually an older run holding the concurrency slot.** Look for
+  `status: waiting` before pushing; an empty commit joins the same queue and cancels the one ahead.
+- **Run `tools/check-collisions.mjs` after any bulk edit** — the pre-commit hook does it, but scripted
+  passes over index.html have twice rewritten code they should not have touched.
+- **Direct Price DB Sheet edit → always follow with `supaMigratePriceDb()`.**
+
+---
+# OPEN — 2026-08-07 (SUPERSEDED by the 2026-08-08 list above — kept for the detail only)
 
 ## Cleared on 2026-08-06/07
 Test file `QT-W00000026` (deleted, both stores) · per-card chart-type switcher · Orders search ·
@@ -4206,7 +4502,7 @@ Customize/restrictions panel reachable again · running total bar · one definit
 rung renamed · Status column width + resize handle · Lami's undefined KPI counts ·
 **site-visit-only charged at cost** · **quotation page two-step + two-column layout**.
 
-## ⏳ DEPLOY BACKLOG — check this FIRST next session
+## DEPLOY BACKLOG — RESOLVED 2026-08-08 (a stuck run held the concurrency slot, not the outage)
 GitHub Pages stopped starting runs mid-session (they declared a Partial System Outage, then
 "operational" while runs still queued). One run was **cancelled** outright; the retrigger sat
 `pending` for over an hour. **Everything from `db2d9d7` onward is committed and pushed but was NOT
