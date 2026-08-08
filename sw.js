@@ -1,16 +1,20 @@
 /* Modcraft Approvals — service worker.
  *
- * ⚠ THIS WORKER DELIBERATELY HAS NO `fetch` HANDLER, AND MUST NOT GAIN ONE.
+ * ⚠ THIS WORKER MUST NEVER CACHE ANYTHING. Read the fetch handler before touching it.
  *
- * A service worker that caches responses would serve a stale index.html, and this app has
- * already been bitten twice by cached JS where a plain hard-refresh was not enough to clear it
- * (2026-07-02, and again 2026-08-08). A caching worker turns that from an occasional nuisance
- * into a permanent one: the fix ships, the browser keeps the old copy, and the user has no
- * obvious way out. GitHub Pages already serves these files with sensible caching.
+ * A worker that caches responses would serve a stale approve.html, and this app has twice been
+ * bitten by cached JS that a plain hard-refresh could not clear (2026-07-02, 2026-08-08). Caching
+ * turns that from an occasional nuisance into a permanent trap: the fix ships, the browser keeps
+ * the old copy, and the user has no obvious way out. GitHub Pages already handles caching.
  *
- * Its only jobs are to receive a push and to open the right request when the notification is
- * tapped. Registration is scoped to approve.html specifically, so even if this rule were ever
- * broken the main app would stay out of its reach.
+ * There IS a fetch handler, and it exists only because Chrome will not offer to install the app
+ * without one — verified: with no handler, beforeinstallprompt never fired. It always goes to the
+ * network and stores nothing; its sole extra behaviour is a plain "you are offline" page when a
+ * NAVIGATION genuinely fails. No cache is opened anywhere in this file, and none should be.
+ *
+ * Its real jobs are to receive a push and to open the right request when the notification is
+ * tapped. Registration is scoped to approve.html specifically, so the main app is out of reach
+ * regardless.
  */
 'use strict';
 
@@ -18,6 +22,31 @@
 // tab to close. Safe precisely because nothing is cached — there is no stale content to hand out.
 self.addEventListener('install', function(e){ self.skipWaiting(); });
 self.addEventListener('activate', function(e){ e.waitUntil(self.clients.claim()); });
+
+// Network-only, with a plain notice if a page navigation fails outright.
+// NOTHING IS CACHED — caches.open() appears nowhere in this file and must not be added. Assets
+// are passed straight through untouched, so a deployed fix is picked up on the next load exactly
+// as it would be without a worker.
+var OFFLINE_HTML =
+  '<!doctype html><meta charset="utf-8">'+
+  '<meta name="viewport" content="width=device-width,initial-scale=1">'+
+  '<title>Offline</title>'+
+  '<body style="margin:0;display:grid;place-items:center;height:100vh;background:#0b1220;'+
+  'color:#e5e9f0;font:15px/1.5 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">'+
+  '<div style="text-align:center;padding:24px">'+
+  '<div style="font-size:18px;font-weight:600;margin-bottom:6px">No connection</div>'+
+  '<div style="color:#9aa5b5">Approvals need to be online — the figures are read live so you are '+
+  'never deciding on a stale number.</div></div>';
+
+self.addEventListener('fetch', function(event){
+  // Only navigations. Assets are left entirely alone.
+  if (event.request.mode !== 'navigate') return;
+  event.respondWith(
+    fetch(event.request).catch(function(){
+      return new Response(OFFLINE_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    })
+  );
+});
 
 self.addEventListener('push', function(event){
   var d = {};
