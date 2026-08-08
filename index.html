@@ -13039,12 +13039,25 @@ function _apprSigObjectFor(email){
   if(!img) return null;                       // never sign with a blank -- refuse instead
   return {name:(u&&u.name)||email,email:email,role:(u&&u.pos)||'',img:img,at:new Date().toISOString()};
 }
+// At most this many per poll. Each apply is a Sheets read plus a write, and Sheets has a hard
+// per-minute quota shared with everything else the app does -- saturating it makes the USER's own
+// save fail, which is exactly what happened when this first shipped.
+var APPR_APPLY_PER_POLL=2;
 function _apprApplyRemoteDecisions(){
   if(!gToken) return;
+  var budget=APPR_APPLY_PER_POLL;
   NOTIFS.forEach(function(n){
+    if(budget<=0) return;
     if(!n.reqId||n.applied) return;
     if(n.status!=='approved'&&n.status!=='accepted') return;
     if(!n.serial) return;
+    // ⚠ ONLY decisions that could have come from a phone. Everything raised before the decision
+    // context existed was already applied at the time by the laptop that actioned it, and has no
+    // 'applied' flag simply because the field is new -- so without this gate the very first poll
+    // tries to re-apply EVERY historical approval. That is what happened: 43 of them, including
+    // 17 unlocks, retried every 60s, exhausting the Sheets quota so the user's own saves failed.
+    // Re-applying an unlock would also have silently unlocked issued quotations.
+    if(!n.decision) return;
     // An override carries no numbers until an approver supplies them, and the phone has no editor
     // for the nine cost-factor fields. Skip rather than retry every 60s forever; approve.html
     // tells the approver to use a laptop for this one type.
@@ -13060,6 +13073,7 @@ function _apprApplyRemoteDecisions(){
       // reqId carried so the central mark-applied in _persistApprovedFieldToQuotation fires.
       payload={reqId:n.reqId,serial:n.serial,type:'signature',sigSlot:n.sigSlot,sigValue:sig,ctx:n.ctx};
     }
+    budget--;
     n.applied=true;   // optimistic: one missed apply we can see in the log beats a retry loop
     _persistApprovedFieldToQuotation(payload,function(ok){
       if(ok){
