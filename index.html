@@ -12857,6 +12857,15 @@ function _persistApprovedFieldToQuotation(notif,callback){
     }
     p.then(function(){
       try{ supaUpsertState(serial,state); }catch(e){}
+      // Record that this decision has landed, wherever it was applied from. Marked centrally so
+      // every path is covered, and PERSISTED because in-memory alone would let the next session's
+      // poll apply it a second time. Most mutations set a value and would survive that, but
+      // 'unlock' would not: unlock -> re-lock -> stale re-apply would silently unlock an issued
+      // quotation again.
+      if(notif&&notif.reqId){
+        notif.applied=true;
+        try{ gSaveApprovalRequest({id:notif.reqId,applied:true},function(){}); }catch(e2){}
+      }
       if(callback) callback(true);
     }).catch(function(e){
       console.warn('[approval] failed to persist approved field for '+serial,e);
@@ -12865,6 +12874,62 @@ function _persistApprovedFieldToQuotation(notif,callback){
   });
 }
 
+// ── Applying decisions taken away from a laptop ────────────────────────────────────────────
+// A decision made on the phone (approve.html) can only write the REQUEST -- it has no pricing
+// engine and no Sheets access, and giving it either would mean a second implementation that
+// drifts, which is the standing fault between recalc() and recalcFQ().
+//
+// So the phone records the decision and the laptop carries it onto the quotation. Without this,
+// approving from a phone would mark a request approved while the quotation silently kept its old
+// price -- exactly the CF-override failure of 2026-06-16, where the requester was told it had been
+// applied and it had not.
+//
+// Runs on whichever connected session polls next; _persistApprovedFieldToQuotation writes the
+// STORED state, so the quotation does not need to be open, and it need not be the approver's
+// machine. Marked applied afterwards so it cannot be done twice. Two sessions polling at the same
+// instant could both apply -- harmless, because every mutation sets a value rather than adjusting
+// one, so applying it twice lands on the same result.
+function _apprSigObjectFor(email){
+  var e=String(email||'').trim().toLowerCase();
+  var u=(sheetUsers||[]).find(function(x){return String(x.email||'').trim().toLowerCase()===e;});
+  var img=(typeof userSignatures!=='undefined')?userSignatures[e]:'';
+  if(!img) return null;                       // never sign with a blank -- refuse instead
+  return {name:(u&&u.name)||email,email:email,role:(u&&u.pos)||'',img:img,at:new Date().toISOString()};
+}
+function _apprApplyRemoteDecisions(){
+  if(!gToken) return;
+  NOTIFS.forEach(function(n){
+    if(!n.reqId||n.applied) return;
+    if(n.status!=='approved'&&n.status!=='accepted') return;
+    if(!n.serial) return;
+    // An override carries no numbers until an approver supplies them, and the phone has no editor
+    // for the nine cost-factor fields. Skip rather than retry every 60s forever; approve.html
+    // tells the approver to use a laptop for this one type.
+    if(n.type==='override'&&!n.cfValues) return;
+    var payload=n;
+    if(n.type==='signature'){
+      var sig=_apprSigObjectFor(n.approverEmail);
+      if(!sig){
+        console.warn('[approval] '+n.approverEmail+' approved a signature on '+n.serial
+                     +' but has no signature image on file — not applied.');
+        return;
+      }
+      // reqId carried so the central mark-applied in _persistApprovedFieldToQuotation fires.
+      payload={reqId:n.reqId,serial:n.serial,type:'signature',sigSlot:n.sigSlot,sigValue:sig,ctx:n.ctx};
+    }
+    n.applied=true;   // optimistic: one missed apply we can see in the log beats a retry loop
+    _persistApprovedFieldToQuotation(payload,function(ok){
+      if(ok){
+        n.applied=true;   // payload may be the fabricated signature object, not this notif
+        logActivity('Applied a decision taken on a phone — '+(APPR_TYPE_LABELS[n.type]||n.type)
+                    +' on '+n.serial+', actioned by '+(n.by||n.approverEmail||'?')+'.');
+      } else {
+        n.applied=false;   // genuinely failed — let the next poll try again
+        console.warn('[approval] could not apply the phone decision for '+n.serial);
+      }
+    });
+  });
+}
 // Update the pending badge to show "Counter-offer received" state
 function _showCounterBadge(type, notif){
   var disc=notif&&notif.counterDisc?notif.counterDisc:notif&&notif.reqDisc?notif.reqDisc:0;
@@ -13023,7 +13088,7 @@ function _apprMergeWithKnown(req){
     // approver acts. That is how sigSlot was lost, and how to_email came back null.
     var base=NOTIFS[i], out={}, keys=['type','sigSlot','notedRequired','serial','client','company',
       'from','fromEmail','approverEmail','approver','msg','note','date','status','amount',
-      'reqDisc','counterDisc','cfValues','ctx','by','decision'];
+      'reqDisc','counterDisc','cfValues','ctx','by','decision','applied'];
     for(var k=0;k<keys.length;k++){
       var v=base[keys[k]];
       if(v!==undefined&&v!==null&&v!=='') out[keys[k]]=v;
@@ -13086,6 +13151,9 @@ function _mergeApprovalReqsIntoNotifs(reqs){
           // Only ever fill in — never overwrite with nothing. The decision context is built once,
           // at request time, by the engine; a later partial save has no newer version of it.
           if(!NOTIFS[j].decision&&req.decision) NOTIFS[j].decision=req.decision;
+          // Sticky once true: another session may already have carried this decision onto the
+          // quotation, and re-applying on every poll would be pointless work.
+          if(req.applied) NOTIFS[j].applied=true;
         }
         found=true; break;
       }
@@ -13101,7 +13169,7 @@ function _mergeApprovalReqsIntoNotifs(reqs){
         // Carried, not dropped: this push is a fixed field list, and anything missing from it is
         // lost on every reload. sigSlot decides which signature the request is for.
         sigSlot:_apprSigSlot(req),notedRequired:req.notedRequired,
-        decision:req.decision||null,
+        decision:req.decision||null,applied:!!req.applied,
         ctx:req.ctx||'s1',by:req.by||''});
     }
   }
@@ -13118,7 +13186,7 @@ function gLoadApprovalRequests(cb){
           note:row.note,counterDisc:row.counter_disc,status:row.status,by:row.actioned_by,
           from:p.from,msg:p.msg,amount:p.amount||0,reqDisc:p.reqDisc||0,cfValues:p.cfValues||null,
           ctx:p.ctx||'s1',date:p.date,sigSlot:p.sigSlot||null,notedRequired:p.notedRequired,
-          decision:p.decision||null};
+          decision:p.decision||null,applied:!!p.applied};
       });
       _mergeApprovalReqsIntoNotifs(reqs);
       if(cb)cb();
@@ -23028,7 +23096,7 @@ function supaUpsertApprovalRequest(req){
     // completed. Only ever overwrite it with something real: partial saves (doApprovalAction,
     // _markOverrideApproved) send just the changed fields, and both stores replace the payload
     // wholesale, so an unguarded write would blank it on the first approval action.
-    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null),decision:(req.decision||null)},
+    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null),decision:(req.decision||null),applied:!!req.applied},
     status:req.status||'pending',
     actioned_by:req.by||null
   };
@@ -23532,6 +23600,10 @@ function gShowApp(){
     }
     var prevPending=NOTIFS.filter(function(n){return n.status==='pending';}).length;
     gLoadApprovalRequests(function(){
+      // A decision taken on a phone only wrote the request. Carry it onto the quotation here,
+      // on a machine that has the engine and Sheets access. Without this the request reads
+      // "approved" while the quotation keeps its old price.
+      try{ _apprApplyRemoteDecisions(); }catch(e){ console.warn('[approval] apply pass failed',e); }
       // ── Approver side: ring bell when new requests arrive ──────────────
       var newPending=NOTIFS.filter(function(n){return n.status==='pending';}).length;
       _updateNotifBadge();
