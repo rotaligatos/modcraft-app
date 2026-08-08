@@ -4780,6 +4780,149 @@ would have been wrong if taken from this file rather than measured.
 
 ---
 
+## What was changed on 2026-08-08/09 (session 5 — MOBILE APPROVALS Phases 1 & 2, plus 8 live bugs)
+
+Long session. Two threads: **built the mobile approvals app end to end**, and **fixed eight faults
+in the deployed app** — seven of them pre-existing, one mine, several found by Rommel testing
+deliberately. 23 commits, `cbac20a`..`743e5f8`, all pushed and confirmed SERVED.
+
+### A. Mobile approvals — the goal, in Rommel's words
+> *"even if their in the moon, they can still do their job and will not cause any delay just
+> because you dont have access to your laptop."*
+
+And the design constraint he corrected me on, which shaped everything:
+> *"even if it will adopt, with all the information that it need to display will be somehow
+> useless."*
+
+**So it is NOT the app made responsive.** `approve.html` is a purpose-built decision surface
+carrying only what a decision needs. Everything else is Lami's job (Phase 3) — and he corrected me
+there too: **Lami does not narrate.** She is a gateway you ASK, silent until then, answering in
+text and aloud only if you want it.
+
+### B. Phase 1 — the decision surface (`a512563`, `6c52a7e`, `8462bee`, `ede6567`, `8e916d4`)
+- **No pricing maths on the phone, ever.** The engine is in `index.html`; a second copy would
+  drift exactly as `recalc`/`recalcFQ` do. Figures are computed by the REAL engine at request time
+  and carried on the request as `payload.decision`.
+- **Counter offers** use a real 0–20% sweep (21 genuine recalcs, ~5.6ms each) rather than
+  interpolation — discount lands on selected buckets after markup, then VAT, and a minimum charge
+  can bend the curve. The sweep mutates the live quotation, so it restores and then PROVES it.
+- **Cost-factor override** cannot be tabulated (nine rates), so the tail is evaluated in closed
+  form — but **only after being checked against the engine at four rate sets at request time**. If
+  it cannot reproduce it to the centavo there is no model and the phone says use a laptop. That
+  proof caught three faults in my own model (see the method notes below).
+- **A phone decision is carried onto the quotation by a laptop** (`_apprApplyRemoteDecisions`, run
+  from the approvals poll). The phone has no engine and no Sheets access; giving it either means a
+  second implementation. Without this the request would read "approved" while the quotation kept
+  its old price — the 2026-06-16 CF override failure again.
+- Every notification now carries a tap-through link. Required moving the request-id generation
+  ABOVE the notification in `submitApprovalRequest`.
+
+### C. Phase 2 — installable + push (`55bf6e0`, `3b52838`, `0d0aa3a`, `743e5f8`)
+- `manifest.webmanifest`, `sw.js`, generated PNG icons (`icons/`), a pending-approvals list when
+  opened with no `?r=`, and the subscribe flow.
+- **`push_subscriptions`** table, keyed on endpoint. An endpoint is a capability — whoever holds it
+  can push to that device — so RLS allows a signed-in user only their own rows and anon nothing.
+- **`send-approval-push`** Edge Function. Takes ONLY a request id; recipient, client, serial and
+  wording all come from the stored row read with the service role, so a signed-in user cannot
+  choose who is notified or what it says. Dead subscriptions (404/410) are deleted.
+- **No money on the notification** — a lock screen is readable without unlocking, and margin is
+  Admin/Director/Manager only inside the app. Figures live behind the tap.
+
+> ### ⚠ `verify_jwt` IS NOT ENOUGH ON THIS PROJECT — remember for ANY future Edge Function
+> Deployed with `verify_jwt: true` alone, an **unauthenticated** caller got HTTP 200. Supabase's
+> gateway accepts the project's **publishable key** as authorized, and that key is printed in the
+> source of a public page. `dryRun` then returned the client name, the serial and the approver's
+> email for any request id guessed. Fixed by resolving the bearer token to an actual USER inside
+> the function. Re-tested: no header 401, publishable key 401, garbage token 401.
+
+> ### ⚠ `sw.js` MUST NEVER CACHE
+> It has a fetch handler ONLY because Chrome will not offer to install without one (verified:
+> with none, `beforeinstallprompt` never fired). It is network-only and stores nothing; its sole
+> extra behaviour is a plain offline notice when a NAVIGATION fails. This app has twice served
+> cached JS that a hard refresh could not clear — a caching worker would make that permanent.
+> Registration is scoped to `approve.html`, so the main app is out of reach regardless.
+
+### D. Push credentials — where they are
+- **Public** VAPID key: in `approve.html` (`VAPID_PUBLIC_KEY`). Correct and safe there.
+- **Private** VAPID key: Supabase → Project Settings → Edge Functions → Secrets, as
+  `VAPID_PRIVATE_KEY` (plus `VAPID_PUBLIC_KEY`, `VAPID_SUBJECT`). **Rommel has set these.**
+  A copy is in the session scratchpad, which is temporary — if it is ever lost, generate a new
+  pair, update `approve.html` and the secret; every device then has to re-subscribe.
+  **NEVER commit the private key — this repo is public.**
+
+### E. State of the mobile app as of handoff
+- Rommel has **installed it on Android** and subscribed. Two subscription rows exist for him (one
+  from a Desktop-site tab at 16:47, one from the installed app at 17:05) — he may get two
+  notifications on the first push; the dead one self-deletes on the first send.
+- **The only untested hop is actual delivery.** Everything up to it is verified. It needs a
+  request ASSIGNED TO HIM, and he cannot fully self-test: the signature flow excludes the
+  preparer, and as an approver his own discount/VAT requests go straight to the PIN.
+- **Phase 3 (Lami on the phone) is NOT started.**
+
+### F. Eight live bugs fixed in the deployed app
+1. **Every re-save of a quotation was failing** (`4171904`). The row carries 27 values (A..AA) but
+   the UPDATE range still said `:X` (24). Only bit on a RE-save — a first save appends at `A:AA`
+   and works. Left behind when Final Client Approved / Last Updated / Sent At were added. Range is
+   now derived from the row (`_a1Col`/`_rowRange`) so it cannot drift again.
+2. **A failed save burned its serial** (`0bdeb2d`), which is what produced the QT-M00000108/109/110
+   duplicate. An unused claim is now pocketed in localStorage and reused, released only once a row
+   exists. Survives a reload, which the in-memory flag cannot.
+3. **My own regression** (`3902c2f`). `_apprApplyRemoteDecisions` matched all 43 historical
+   approvals because the "applied" flag was new, and retried them every 60s — exhausting the
+   Sheets quota so the USER's own saves failed. 17 were unlocks; re-applying one would silently
+   unlock an issued quotation. Gated to decisions carrying a decision context, capped at 2/poll.
+4. **Carcass line items showed LIST price** while totals charged the reduced Subsidiary price
+   (`420bdcd`) — including on the **client printout**, which would have listed ₱31,184.25 of
+   cabinets under a ₱6,352.36 total. Five display sites now use `_carcassUnitPrice`.
+5. **Opening a saved quotation rendered no scope panels** (`b15a0d0`). `restoreFullQuotationState`
+   called only `recalc()`, which prices but renders nothing — so the materials switch stayed empty
+   and hidden. Client-supplied materials masked it (that row is static markup).
+6. **The Stage 2 Fabrication Cost Basis card went stale** when a quantity was TYPED (`d7f20e8`) —
+   that path calls `recalcFQSoon()`, which never redrew the card.
+7. **An inverted message** (`910cb80`): the override sentence fired when there was NO override, so
+   a WCLI quotation was told "you have switched it off" when nothing had been touched.
+8. **Hardcoded light-mode hex** on the materials panel (`6a41316`) — a pale slab in dark mode.
+   Now on tokens; measured AA in all six state/theme combinations.
+
+Also: the materials switch moved below Fabrication Cost Basis, and the summary's Fabrication line
+now says **"services & labour only, materials and hardware not billed"** when that is what it is.
+
+### G. A concern I raised and then DISPROVED (`330c23c` then `3478702`)
+I flagged `_fabCarcassMargin` as overstating profit because `CARCASS_PRICES` (list price) is in its
+formula. **Wrong — the term cancels.** For WCLI, materials and hardware are costed at full price,
+so `margin = listPrice − servicesCost − materials − hardware` = `revenue billed − servicesCost`.
+Verified: ₱5,587.85 − ₱1,040 = ₱4,547.85, exactly what it reports. It was already correct.
+**Do the arithmetic before flagging a number as wrong.**
+
+### H. PIN mirror columns dropped (`6259b26`, `b9114db`)
+`users.pin_hash` / `pin_salt` were **write-only** — written by `supaUpsertUser`, read by nothing,
+anywhere. They were also wrong (claimed "no PIN" for 12 of 13 users, because the write no-ops
+unless that user's own browser is Supabase-connected). Believed twice in one day. Dropped rather
+than documented — the warning had already been written and walked past.
+**PIN lives ONLY in Google Sheet `User Roles` cols W/X. Never delete those.**
+
+### I. Method notes worth keeping
+- **Rommel's testing found four real faults**, three pre-existing and one client-facing. Poking at
+  it deliberately was the right call and should continue.
+- **I guessed twice on the missing switch before checking.** The answer was one console line away
+  both times, and I shipped a fix (`f85ec1e`) built on the wrong diagnosis. It survives as a
+  genuine safety net — a control must not vanish while the thing it controls is still acting — but
+  it was not the bug. **Ask for the console output on the second failed hypothesis, not the third.**
+- **My test rigs misled me repeatedly** — measuring a cached resource and calling the page fast,
+  losing a dropdown value on re-render, guessing element ids, a prober whose fixed nudge pattern
+  left one rate untouched so it certified a model it had never tested. When a measurement is
+  impossible rather than merely surprising, suspect the rig.
+- **Look at visual things.** The generated icons had the chevrons pointing the WRONG WAY and every
+  numeric check passed. Same lesson as the channel badges.
+- **A new "has this been done" flag makes every pre-existing row read as NOT done.** It needs a
+  backfill or a gate that makes old rows ineligible. I wrote the flag and did neither.
+- **Four places to touch when adding a field to an approval request**: the payload write, the
+  Supabase read mapping, the merge-into-NOTIFS push, and `_apprMergeWithKnown`'s key list. Missing
+  one drops the field on the first partial save. This has now bitten four times (`sigSlot`,
+  `to_email`, `decision`, `applied`).
+
+---
+
 # OPEN — updated 2026-08-08 (THIS IS THE AUTHORITATIVE LIST)
 
 ## Cleared 2026-08-08 (session 3)
@@ -4868,6 +5011,12 @@ The 12 that stay blank are the June quotations predating the activity log. That 
 **leave them.** Do not add a repair that invents a date for those.
 
 ## Rommel's to do
+- **Test the mobile app** — installed and subscribed on his Android. Needs a request routed to him
+  (see the MOBILE APPROVALS section above). Watch the invisible half too: approve from the phone,
+  then open that quotation on a laptop a minute later and confirm the price actually moved.
+- ~~QT-M00000109 duplicate~~ **DONE** — he deleted both 108 and 109. Their Storage files remain
+  (deleting a quotation does not remove them); recoverable if that Peace Maker quotation is ever
+  wanted back.
 - **Tell the WCL and MSSI staff to try the signature flow** — cleared 2026-08-08, see above. Expect
   one wrinkle: Allan is a Manager, so his own PIN is mandatory; if he has not set one the app sends
   him to set it and then resumes the signing. That is designed behaviour, not an error.
@@ -4953,8 +5102,37 @@ BOM and cutting-list mode), and the narrower point that carcass services with no
 entry are counted at full price, so their margin shows as zero rather than unknown — conservative,
 but it means carcass margin understates until Cost Breakdown is filled in.
 
+## MOBILE APPROVALS — where it stands, and what is next (2026-08-09)
+**Phases 1 and 2 are complete, deployed and served.** `approve.html` + `sw.js` +
+`manifest.webmanifest` + `icons/` + the `send-approval-push` Edge Function + the
+`push_subscriptions` table. Rommel has installed it on Android and subscribed.
+
+**The one thing never proven: a notification actually arriving.** Everything up to delivery is
+verified. It needs a request ASSIGNED TO HIM — his own list correctly reads "Nothing waiting", and
+he cannot self-test (the signature flow excludes the preparer; his own discount/VAT requests go
+straight to the PIN because he is an approver). **First real request routed to him is the proof.**
+
+**Immediate follow-ups, small:**
+- He has **two push subscriptions** (a Desktop-site tab and the installed app). First push may
+  buzz twice; a dead endpoint self-deletes on send. Remove the older one if it duplicates.
+- If load is still slow, the next candidate is the two SEQUENTIAL startup round trips
+  (session → role → list). Not done tonight because it touches working auth code.
+
+**Phase 3 — Lami on the phone. NOT started.** Per Rommel: she does NOT narrate. Silent until
+asked; a gateway to everything the screen cannot hold ("what services are involved in this
+project"), answering in text, aloud only on request. Voice INPUT works on Android and NOT on iOS
+Safari (`SpeechRecognition` unsupported) — decided against paying for speech-to-text to close
+that; iPhone users type the question. She will need the quotation state and the client history,
+and the same `canViewCostReport()` gating the rest of the app uses.
+
+⚠ **When Lami answers "what services are involved", note `svcItems` stores `{qty, svcIdx}` with NO
+name** — `svcIdx` is a POSITIONAL index into `price_services` ordered by id. Load it in exactly
+that order or she will confidently name the WRONG services. Where a line stores its own `price`,
+cross-check it against the catalogue and refuse to answer if they disagree.
+
 ## NEXT SESSION
-Nothing queued for building. See the two habits above first, then Rommel's list.
+Nothing queued for building. See the two habits above first, then Rommel's list, then the mobile
+follow-ups directly above.
 
 Known and deliberately left, so nobody "fixes" them by surprise:
 - **`QT-W00000075` (Keystone Construction) appears twice** in the Quotations sheet — a genuine
