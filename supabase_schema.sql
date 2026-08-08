@@ -144,8 +144,13 @@ create table if not exists public.users (
   device_id        text,                        -- device binding (optional)
   feature_access   jsonb default '{}'::jsonb,   -- { Dashboard:true, KPI:false, ... }
   delegate_to      text,                        -- email of delegate (approval delegation)
-  pin_hash         text,                        -- SHA-256(pin+salt)  (was sheet col W)
-  pin_salt         text,                        -- per-user salt       (was sheet col X)
+  -- NO pin_hash / pin_salt HERE ON PURPOSE. Dropped 2026-08-08. PIN material lives ONLY in
+  -- the Google Sheet ("User Roles" cols W/X), which parseUserRows reads and every PIN check
+  -- uses. Mirroring it here achieved nothing -- the columns were written and never once read
+  -- -- and actively misled: supaUpsertUser silently no-ops unless that user's own browser is
+  -- Supabase-connected, so the mirror claimed "no PIN" for 12 of 13 users, including a
+  -- Manager who had provably approved twice (impossible without one). Do not re-add them.
+  -- See rollback_pin_columns.sql if a restore is ever genuinely needed.
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now()
 );

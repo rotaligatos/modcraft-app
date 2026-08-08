@@ -4893,13 +4893,35 @@ The 12 that stay blank are the June quotations predating the activity log. That 
 - **"Handgrab Groove" / "Flush Handle Groove"** — under no minimum charge (they say *groove*, not
   *grooving*); rename if they should count toward the ₱400.
 
-## ⚠ CORRECTION — do NOT trust `users.pin_hash` in Supabase
-Rommel checked Settings → Users on 2026-08-08: **Joanna has a PIN and a signature on file**, while
-the Supabase `users` row said `pin_hash` was empty. I asserted "5 of 6 approvers have no PIN" several
-times today from that column. **The User Roles SHEET is authoritative** (cols W/X); the Supabase
-mirror only refreshes on an Admin-driven save, so anyone who set their own PIN via the avatar menu
-can look empty there indefinitely. Re-check PIN and signature state in the app, not in SQL — and
-treat the earlier "5 of 6" figure as unverified.
+## ✅ RESOLVED 2026-08-08 — `users.pin_hash` / `pin_salt` are GONE, and cannot mislead again
+**PIN state lives in exactly one place: the Google Sheet `User Roles`, columns W (hash) and X
+(salt).** `parseUserRows` reads them into `sheetUsers[].pinHash`, and every check in the app —
+`_verifyApproverPin`, `_openPinModal`, the mandatory-PIN gate, the "PIN set ✓" badge — uses that.
+**Never delete Sheet W/X: that would destroy every PIN in the company.**
+
+The Supabase mirror columns were **dropped** (migration `drop_write_only_pin_columns_from_users`,
+code commit `6259b26`). They were **write-only** — `supaUpsertUser` wrote them and *nothing,
+anywhere, ever read them* (verified across Modcraft, the MSSI website, PMES, and every view,
+function, RLS policy and index in the database). They were also **wrong**: `supaUpsertUser`
+silently no-ops unless that individual user's own browser is Supabase-connected, so a PIN set on an
+unconnected browser never arrived. The column claimed "no PIN" for **12 of 13 users**.
+
+**Why it mattered, and the lesson.** It was believed twice in one day, and Rommel had to correct it
+both times. The second correction was the sharp one: *"you said no pin, but allan was able to
+approve where you said is not going to work if no pin."* He was right, and the contradiction was
+internal — `_pinRequiredFor()` returns true for **Manager/Director/Admin**, so `_verifyApproverPin`
+refuses *everything* for a Manager with no PIN, **including the legacy 1234**. Allan is a Manager
+and had approved twice. His approvals already proved he had a PIN; the column never needed
+querying. **When two of your own statements cannot both be true, resolve them against each other
+before reaching for a data source.**
+
+⚠ **A Staff approval does NOT prove a PIN** — the `1234` fallback is still open to Staff unless
+"Require own PIN" is ticked. Manager/Director/Admin approvals do prove it.
+
+The warning that used to sit here had been written and was walked past anyway. Deleting the column
+was the fix; documenting it was not. Restore path if ever needed: `rollback_pin_columns.sql` +
+`git revert 6259b26` + `supaMigrateUsers()` (values come back from the Sheet, so no secret is
+stored — this repo is public).
 
 ## NEXT SESSION
 Nothing queued for building. See the two habits above first, then Rommel's list.
