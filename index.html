@@ -1550,8 +1550,10 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         <button class="btn" onclick="runDriveDiagnostics()" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Drive diagnostics</button>
         <a href="https://docs.google.com/spreadsheets/d/1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o/edit" target="_blank" class="btn" style="font-size:12px"><i class="ti ti-table"></i>Open Google Sheets</a>
         <button class="btn" onclick="openModcraftDriveFolder()" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Open Drive folder</button>
+        <button class="btn" onclick="checkProjectListData()" style="font-size:12px;border-color:var(--navy);color:var(--navy)"><i class="ti ti-list-search"></i>Check Project List</button>
       </div>
       <div id="db-status"></div>
+      <div id="dbcheck-result"></div>
       <div style="font-size:11px;color:var(--text2);margin-top:8px">
         Google Sheets ID: <code style="background:var(--bg);padding:2px 6px;border-radius:4px;font-size:11px">1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o</code>
       </div>
@@ -19268,24 +19270,36 @@ function _qTotalBar(){
 //
 // There is no 'Closed'. The quotation ends when the client says yes or no; delivery belongs to
 // Admin (payment) and then Production, which extend this chain rather than sit inside it.
-function _computeQuotationStatus(){
-  var serial=qBaseSerial||qSerial;
-  if(qCancelled) return 'Declined';
-  if(fqClientApproved) return 'FQ Approved';
-  // The Final loop opens once the client has accepted the Initial Quotation. qApproved is the
+// The ladder itself, as a PURE function of a saved state object — so the same rule can be applied
+// to a quotation that is open, and to one sitting in the database that nobody has loaded. That is
+// what makes checkProjectListData() trustworthy: it is not a second opinion, it is this one.
+// Key names are the saved-state names (see getFullQuotationState), not the globals'.
+function _statusFromState(s,serial){
+  s=s||{};
+  if(s.qCancelled) return 'Declined';
+  if(s.fqClientApproved) return 'FQ Approved';
+  // The Final loop opens once the client has accepted the Initial Quotation. `approved` is the
   // older flag for the same moment, kept so quotations approved before this ladder still resolve.
-  if(qClientApproved||qApproved){
+  if(s.clientApproved||s.approved){
     // Checked BEFORE the locked branch: a revision is asked for while the quotation is still
     // locked, so testing lock first would mean "Revision Requested" could never appear at all.
     if(_pendingRevisionCtx(serial)==='fq') return 'FQ Revision Requested';
-    if(fqLocked) return _wasSent(fqSentStatus)?'FQ Awaiting Client Approval':'FQ Locked';
-    if(fqLockedAt) return 'FQ Under Revision';   // locked once, reopened since
-    return fqStarted?'FQ Draft':'IQ Approved';
+    if(s.fqLocked) return _wasSent(s.fqSentStatus)?'FQ Awaiting Client Approval':'FQ Locked';
+    if(s.finalLockedAt) return 'FQ Under Revision';   // locked once, reopened since
+    return s.fqStarted?'FQ Draft':'IQ Approved';
   }
   if(_pendingRevisionCtx(serial)==='s1') return 'IQ Revision Requested';
-  if(qLocked) return _wasSent(qSentStatus)?'IQ Awaiting Client Approval':'IQ Locked';
-  if(qInitLockedAt) return 'IQ Under Revision';
+  if(s.locked) return _wasSent(s.sentStatus)?'IQ Awaiting Client Approval':'IQ Locked';
+  if(s.initLockedAt) return 'IQ Under Revision';
   return 'Draft';
+}
+function _computeQuotationStatus(){
+  return _statusFromState({
+    qCancelled:qCancelled, fqClientApproved:fqClientApproved,
+    clientApproved:qClientApproved, approved:qApproved,
+    fqLocked:fqLocked, fqSentStatus:fqSentStatus, finalLockedAt:fqLockedAt, fqStarted:fqStarted,
+    locked:qLocked, sentStatus:qSentStatus, initLockedAt:qInitLockedAt
+  }, qBaseSerial||qSerial);
 }
 // 'Not sent' is what a lock writes before anyone shares it, so it is emphatically not sent.
 function _wasSent(s){ s=String(s||'').trim(); return !!s&&s!=='Not sent'; }
@@ -23887,6 +23901,127 @@ function openModcraftDriveFolder(){
   var id=gDriveFolderId;
   try{if(!id) id=localStorage.getItem('mc_drive_folder_id');}catch(e){}
   window.open(id?'https://drive.google.com/drive/folders/'+id:'https://drive.google.com/drive/my-drive','_blank');
+}
+// ══ Project List data check ══════════════════════════════════════════════════════════════
+// Built 2026-08-08 after "the initial quotation is actually locked but the status is draft" could
+// not be traced from outside the app — every diagnosis had to go through Supabase, while the
+// Project List reads the Google SHEET. Nobody could see the two disagree.
+//
+// The Status column is only rewritten when a quotation is SAVED. Anything that changes a
+// quotation's state without a successful save — a save that failed, a session that closed first,
+// an older row written before the ladder existed — leaves a stale word in that column while the
+// quotation's own state says something else. This finds every one of them and offers to correct
+// them, using _statusFromState: the same rule the app uses, not a second opinion.
+var _dbCheckFindings=[];
+function _statesFromSheet(cb){
+  sheetsGet('Quotation State!A:K').then(function(d){
+    var rows=(d&&d.values)||[], out={};
+    for(var i=1;i<rows.length;i++){
+      var r=rows[i]; if(!r||!r[0]) continue;
+      var json=''; for(var c=1;c<=10;c++) json+=(r[c]||'');
+      if(!json) continue;
+      try{ out[r[0]]=JSON.parse(json); }catch(e){}
+    }
+    cb(out);
+  }).catch(function(){ cb({}); });
+}
+function _allQuotationStates(cb){
+  // Supabase first because it is one query rather than a whole-sheet read; the Sheet is the
+  // fallback, and also the only source when nobody has connected.
+  if(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady()){
+    try{
+      supa.from('quotation_states').select('serial,state').then(function(r){
+        if(r.error||!r.data){ _statesFromSheet(cb); return; }
+        var out={}; r.data.forEach(function(row){ if(row.serial) out[row.serial]=row.state||{}; });
+        cb(out,'Supabase');
+      });
+      return;
+    }catch(e){}
+  }
+  _statesFromSheet(function(o){ cb(o,'Google Sheets'); });
+}
+function checkProjectListData(){
+  var box=el('dbcheck-result'); if(!box) return;
+  if(!gToken){ box.innerHTML='<div class="alert" style="margin-top:10px">Sign in first.</div>'; return; }
+  box.innerHTML='<div class="alert alert-info" style="margin-top:10px"><i class="ti ti-loader"></i> Reading the Quotations sheet and every saved quotation…</div>';
+  sheetsGet('Quotations!A:AA').then(function(d){
+    if(!d||d.error){ box.innerHTML='<div class="alert alert-error" style="margin-top:10px">Could not read the Quotations sheet.</div>'; return; }
+    var rows=(d.values)||[];
+    _allQuotationStates(function(states,src){
+      var findings=[], noState=0, checked=0;
+      for(var i=1;i<rows.length;i++){
+        var r=rows[i]; if(!r||!r[0]) continue;
+        var serial=r[0], stored=(r[5]||'').trim(), st=states[serial];
+        if(!st){ noState++; continue; }
+        checked++;
+        var should=_statusFromState(st,serial);
+        if(_normalizeStatusLabel(stored)===should) continue;
+        findings.push({row:i+1, serial:serial, client:r[2]||'', stored:stored||'(blank)',
+                       should:should, shown:_normalizeStatusLabel(stored)});
+      }
+      _dbCheckFindings=findings;
+      var h='<div style="margin-top:12px;border:1px solid var(--border);border-radius:10px;overflow:hidden">'
+        +'<div style="padding:12px 16px;background:var(--card2);font-size:13px">'
+        +'Checked <b>'+checked+'</b> quotations against their saved state (states read from '+src+'). '
+        +(noState?'<span style="color:var(--text2)">'+noState+' had no saved state and were skipped.</span>':'')
+        +'</div>';
+      if(!findings.length){
+        h+='<div style="padding:16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
+          +'Every Status matches what the quotation actually is. Nothing to fix.</div></div>';
+        box.innerHTML=h; return;
+      }
+      h+='<div style="padding:12px 16px;background:var(--wash-amber);font-size:13px">'
+        +'<b>'+findings.length+'</b> quotation'+(findings.length===1?'':'s')+' show the wrong stage in the Project List. '
+        +'The Status column is only rewritten when a quotation is saved, so these are stale — the quotation itself is fine.'
+        +'</div><div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">'
+        +'<thead><tr><th style="text-align:left;padding:7px 12px;background:var(--card2);border-bottom:1px solid var(--border)">Serial</th>'
+        +'<th style="text-align:left;padding:7px 12px;background:var(--card2);border-bottom:1px solid var(--border)">Client</th>'
+        +'<th style="text-align:left;padding:7px 12px;background:var(--card2);border-bottom:1px solid var(--border)">Shows</th>'
+        +'<th style="text-align:left;padding:7px 12px;background:var(--card2);border-bottom:1px solid var(--border)">Should be</th></tr></thead><tbody>';
+      findings.slice(0,200).forEach(function(f){
+        h+='<tr><td style="padding:6px 12px;border-bottom:.5px solid var(--border);font-family:ui-monospace,monospace">'+escHtml(f.serial)+'</td>'
+          +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border)">'+escHtml(f.client)+'</td>'
+          +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border);color:var(--coral)">'+escHtml(f.shown)+'</td>'
+          +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border);color:var(--teal);font-weight:600">'+escHtml(f.should)+'</td></tr>';
+      });
+      h+='</tbody></table></div>';
+      if(findings.length>200) h+='<div style="padding:8px 16px;font-size:12px;color:var(--text2)">Showing the first 200 of '+findings.length+'.</div>';
+      h+='<div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+        +'<button class="btn btn-primary" onclick="fixProjectListStatuses()" style="font-size:12px"><i class="ti ti-wand"></i> Correct all '+findings.length+'</button>'
+        +'<span style="font-size:12px;color:var(--text2)">Rewrites only the Status column. Nothing else on the quotation is touched.</span>'
+        +'</div></div>';
+      box.innerHTML=h;
+    });
+  }).catch(function(){
+    box.innerHTML='<div class="alert alert-error" style="margin-top:10px">Could not read the Quotations sheet.</div>';
+  });
+}
+function fixProjectListStatuses(){
+  var list=_dbCheckFindings.slice();
+  if(!list.length) return;
+  _confirm('Correct the Status of '+list.length+' quotation'+(list.length===1?'':'s')+'?\n\n'
+    +'Only the Status column is rewritten, to match what each quotation already is. No prices, scope or client details are touched.',
+  function(){
+    var box=el('dbcheck-result');
+    if(box) box.innerHTML='<div class="alert alert-info" style="margin-top:10px"><i class="ti ti-loader"></i> Correcting '+list.length+'…</div>';
+    var done=0, failed=0;
+    // One cell at a time, paced — a burst of writes is what triggered the 429s during the
+    // Supabase migration, and this runs against the same per-minute quota.
+    (function next(i){
+      if(i>=list.length){
+        logActivity('Project List statuses corrected — '+done+' updated'+(failed?', '+failed+' failed':'')+'.');
+        if(box) box.innerHTML='<div class="alert" style="margin-top:10px;border-left:3px solid var(--teal)">'
+          +'<i class="ti ti-circle-check"></i> Corrected <b>'+done+'</b>'+(failed?', <b>'+failed+'</b> could not be written':'')
+          +'. Reopen the Project List to see them.</div>';
+        dirData=[]; if(typeof renderDirectory==='function'){ try{ renderDirectory(); }catch(e){} }
+        return;
+      }
+      var f=list[i];
+      sheetsUpdate('Quotations!F'+f.row,[[f.should]]).then(function(){ done++; })
+        .catch(function(){ failed++; })
+        .then(function(){ setTimeout(function(){ next(i+1); },120); });
+    })(0);
+  });
 }
 function verifyDatabaseConnection(){
   if(!gToken){alert('Please sign in first to test the database connection.');return;}
