@@ -4426,7 +4426,126 @@ number that is not theirs. Fix deferred deliberately rather than rushed at the e
   reported, 69 washes by hue not one screen at a time.
 
 ---
+## What was changed on 2026-08-08 (session 2 — signature routing fallbacks, sigSlot, serial preview)
+
+Five commits, `822f7bf`..`e4fc76c`, all pushed and confirmed SERVED on GitHub Pages. Everything
+below was found by driving the code or by querying live data — none of it by reading.
+
+### 1. Fallback signatories, both slots (`822f7bf`, `98e046a`)
+`APPR_ROUTING[co].checkedAlt` and `.notedAlt` — a fallback row per slot per company in
+Settings → Approval Routing. Where the assigned signatory cannot sign this document the request
+goes to the fallback; where no usable fallback is set it is **REFUSED with the reason** and the
+Admin is messaged, never routed to somebody who cannot act.
+
+Who cannot sign: **Checked by** — the preparer. **Noted by** — the preparer AND whoever already
+signed Checked by (noting is a second pair of eyes; one person holding both boxes is one pair).
+The auto hand-off after Checked by passes the signer's own email, because the signatory acts from
+the Approvals page with the quotation not open, so `qSignatures.checked` cannot be relied on.
+
+`_findSignatory(slot, excludes[], coOverride)` is now slot-generic with a per-slot `<slot>Alt`
+key. Guarded as a class: the generic routing gets the same check (it can land on an excluded
+person just as easily), an inactive or unknown fallback refuses rather than falling through,
+emails compare trimmed and lowercased, and **all four slots were added to `_isSignatory`** — every
+slot that can be ROUTED to must reach the Approvals page, or the person is notified and then
+turned away at the door (the bug fixed the session before, recurring for the new fields).
+
+Preparer comes from `qSignatures.prepared` (stamped at lock, and the name on the printout), so it
+holds when somebody else raises the request.
+
+**Why a fallback and not "skip Checked-by, let Noted-by cover both":** Noted-by is
+threshold-gated, so that rule leaves a quotation below the threshold with NO signature at all. It
+only looks safe today because the threshold is blank.
+
+### 2. ⚠ `sigSlot` was never persisted — the signature flow had NEVER completed (`28ea111`)
+Reported by Jhover as *"request for signature keep on repeating. but the system does not
+acknowledge it."* Not the poll — there are no duplicate rows. One root cause behind both halves:
+
+`supaUpsertApprovalRequest`'s payload is a fixed field list and omitted `sigSlot`;
+`_mergeApprovalReqsIntoNotifs`'s push is a fixed field list and omitted it too. So after any
+reload a signature request carried `sigSlot: undefined`, and:
+- `_sigPendingFor()` never matched → the bar reported nothing was ever requested → the user asked
+  again → **"keeps repeating"**
+- `_persistApprovedFieldToQuotation` built no mutate and wrote nothing → **"does not acknowledge
+  it"**
+
+**Proven on live data, not inferred:** `payload ? 'sigSlot'` was false on all six signature
+requests ever raised, and `QT-W00000085` / `QT-W00000070` / `QT-M00000106` are all marked
+**approved** while their states carry only a `prepared` signature. No `checked` signature existed
+anywhere. Those three were never really signed.
+
+Fixed at both ends and at the source:
+- `sigSlot` + `notedRequired` persisted in the payload and read back; carried on the merge push and
+  backfilled on the found branch
+- `_apprSigSlot()` recovers it for already-stored rows from the request's own message, so the six
+  existing ones work with no data migration
+- **`gSaveApprovalRequest` now merges a partial req over the in-memory record.** Every action path
+  saves only what it changed, but BOTH stores overwrite wholesale (the Settings row is
+  `JSON.stringify(req)`, the Supabase upsert replaces `payload`) — which is why `to_email` came back
+  **null** on every actioned signature request, leaving the stored record with no assigned signatory
+- `notedRequired` recorded at request time while the ex-VAT total is known
+
+### 3. Signature requests were badged "Revision" (`98e046a`)
+The Approvals card built its type label from a ternary chain whose **final fallback was
+`"Revision"`**, and `signature` was not in the chain. Rommel read it as the app reporting the
+unlock that preceded the request; it was the catch-all, which is why the badge contradicted the
+card's own message line ("Checked by signature requested on QT-W00000087").
+
+Settled by data: all six signature rows are `req_type 'signature'`, and there is **no `revision`
+request type in the table at all** — unlock 17, nonvat 7, signature 6, discount 5, null 5.
+Genuine unlock requests still read "Unlock" (verified by rendering all three real cards plus one).
+
+**Four hand-written copies of that map existed and this was the only one missing `signature`** —
+collapsed to one `APPR_TYPE_LABELS` / `_apprTypeLabel()` / `_apprTypeColor()`. A card now says
+WHICH signature — "Signature — Checked by" — since a signatory may hold both on one quotation.
+
+### 4. Re-route, for a request already stuck (`98e046a`)
+Setting a fallback does not re-route a request already raised, so `QT-W00000087` stayed stuck. A
+pending signature routed to its own requester now says plainly that it cannot be signed as it
+stands and offers **Re-route**: re-resolves against the CURRENT routing and **moves the same
+request** rather than cancelling and re-raising, so there is one row and the original date
+survives. Refuses with the reason when there is still nowhere to send it, or when the routing
+resolves to the same person.
+
+### 5. Serial preview no longer shows a number that isn't yours (`48cefd0`)
+`serialCounters` defaults to `{W:1,C:1,M:1}` and is replaced only when the Settings read lands, so
+a draft created in that window showed a confident `QT-W00000001`. New `serialCountersLoaded`
+records whether the counters are actually KNOWN: an uncommitted draft reads **`QT-W — assigning…`**
+until the read lands, then fills in. Committed serials and the pre-login legacy placeholder are
+untouched. A missing `SERIAL_COUNTERS` row counts as loaded (a real answer, not an unknown); only a
+failed READ leaves them unknown, and that retries once then falls back rather than sticking on
+"assigning…" forever. Six display sites now route through one `_refreshSerialTag()`.
+
+### 6. SLA day label follows the schedule, not the calendar (`e4fc76c`)
+MSSI works a **6-day week**; Rommel ticked Saturday so the response timer keeps running. The timer
+itself was already correct — verified against the stored schedule: Fri 16:00 → Sat 10:00 counts
+**3h for MSSI vs 1h for WCL**, a whole Saturday **9h vs 0m**, Fri → Mon **11h vs 2h**, and hours
+outside the shift and Sundays count zero for both. But the label, row shading and font weight were
+keyed on `d===0||d===6` rather than on whether the day is worked, so a ticked Saturday counting 9h
+still read **"(rest)"** and greyed — the row saying the opposite of what it does. Now keyed on the
+actual schedule, and verified to track it in both directions.
+
+### Method notes worth keeping
+- **Rommel corrected me on the "Revision" badge and told me not to be careless.** The right answer
+  was neither to argue nor to fold: query the request types, find there are none of type
+  `revision`, and show that. His reading of *why* was reasonable; the badge simply was not
+  reporting it.
+- **My own test rig misled me three times again** — routing keyed under `COMPANIES[0]` while
+  `getCompanyName()` returned another company (which incidentally proved `_findSignatory` correctly
+  keys on the QUOTATION's company), a second `#orders-sla-wrap` appended so `getElementById` found
+  the real one and rendered there, and reading `orders-sla-wrap` when the renderer writes to
+  `sla-company-wrap`. When a measurement is impossible rather than surprising, suspect the rig.
+- **Verify configuration against the stored CONFIG row, never a screenshot.** The routing dropdowns
+  write to memory and persist only on Save; the CWL column on screen had never been saved.
+
+---
+
 # OPEN — updated 2026-08-08 (THIS IS THE AUTHORITATIVE LIST)
+
+## Cleared 2026-08-08 (session 2)
+Fallback Checked-by **and** Noted-by · the "repeating" signature request (it was `sigSlot` never
+being persisted — the flow had never completed) · partial saves nulling `to_email` · signature
+requests badged "Revision" · Re-route for a stuck request · serial preview showing `1` · SLA day
+label on a 6-day week.
 
 ## Cleared 2026-08-08
 Deploy backlog (was a stuck run, not the outage) · collision checker + pre-commit hook · remote
@@ -4435,17 +4554,56 @@ minimum charge shown on the printout and the column reconciles · unit-count flo
 pinned actions column · sticky horizontal scrollbar · light/dark/device with **zero** low-contrast
 text in either theme · 51 lost Wufoo attachments recovered.
 
-## Blocking — the signature flow is unusable until these are done
-Re-checked against live data 2026-08-08 — I had been repeating "Checked by unassigned" all session
-from the older list; it IS assigned now. The PIN and signature gaps are real and verified.
-| | State |
-|---|---|
-| **Checked by** | assigned now (`designer-ce1@`) for all three companies — verify it is the person intended |
-| **Noted-by threshold** | `{}` → Noted by always required. Valid, but a decision. |
-| **Signature images** | Same caveat — Joanna's shows Signature ✓ in the app. Re-check the others in Settings → Users rather than trusting the earlier list. |
-| **PINs** | ⚠ **UNVERIFIED — see the correction below.** A Supabase read said 5 of 6 had none, but Joanna's app record shows a PIN set, so that column is stale. Check Settings → Users per person, not SQL. |
+## Signature flow — LIVE for WCL and MSSI as of 2026-08-08 session 2
+Routing set by Rommel and verified against the STORED config (not the screen — see the CWL
+trap below). All 39 combinations of 13 preparers × 3 companies were driven through
+`_findSignatory`:
+
+| | WCL | MSSI |
+|---|---|---|
+| Checked by | Joanna | Joanna |
+| Checked by (fallback) | Allan Lagsao | Allan Lagsao |
+| Noted by | Allan Lagsao | Allan Lagsao |
+| Noted by (fallback) | Rommel | Rommel |
+
+**No dead ends, nobody signs both boxes, every resolved signatory has a signature on file.**
+Rommel only appears when Joanna or Allan is already in the chain — the `notedAlt` row absorbs
+the double-signing he had accepted as a temporary cost, so that cost never materialised.
+
+Still true and still his: **the Noted-by threshold is `{}`**, so Noted by is required on every
+quotation regardless of value — nothing can complete on Checked by alone.
+
+Signature images on file (7, from `settings` `SIG_*`): Allan, Joanna, Rommel, Jhover, Kaye,
+Rafael, Stephanie. **Missing: Stiffany Gabut, Michael Delos Reyes, Kathleen Tiu.**
+
+## ⚠ CWL — PARKED 2026-08-08, pick up at the deployment (Rommel: "next week")
+Set up for future use only; CWL is not deployed yet. Two things must happen before anyone there
+can sign, both measured from what is STORED, not from what the screen showed:
+
+1. **Re-apply the CWL column in Settings → Approval Routing and press Save.** The screen showed
+   Joanna / Stiffany / Stiffany / Rommel; the database still holds the older
+   Stiffany / Michael / Rommel / **(blank)**. The CONFIG row *was* written at 05:15 — that write
+   carried the Saturday SLA change — so the CWL dropdowns were almost certainly edited in a tab
+   that was not the one that saved. **A blank `notedAlt` dead-ends any CWL quotation Rommel
+   prepares himself** (`noted` is him, he is excluded as preparer, and there is no fallback).
+2. **Upload Stiffany's signature** (and Michael's if he stays as the fallback). As stored, CWL
+   Checked by resolves to Stiffany and the fallback to Michael, and **neither has a signature on
+   file**, so no CWL quotation can be checked by anyone. Signing is refused without one rather
+   than printing a blank name.
+
+**Lesson worth keeping: verify routing against the stored CONFIG row, never against a
+screenshot.** The dropdowns write to `APPR_ROUTING` in memory and persist only on Save, so a
+screen and the database can disagree indefinitely with nothing to show for it.
 
 ## Rommel's to do
+- **Tell the WCL and MSSI staff to try the signature flow** — cleared 2026-08-08, see above. Expect
+  one wrinkle: Allan is a Manager, so his own PIN is mandatory; if he has not set one the app sends
+  him to set it and then resumes the signing. That is designed behaviour, not an error.
+- **`QT-W00000087`** — press **Re-route** on it (Joanna can do this herself). It was routed to its
+  own requester before the fallback existed; setting a fallback does not move a request already
+  raised.
+- **CWL at its deployment (next week)** — see the parked section above: re-apply the CWL routing
+  column and Save, and upload Stiffany's signature.
 - **Deploy the Wufoo webhook.** Script is confirmed correct in the editor (`testFileFields` on entry
   8864 found Field140 — one of the nine the old code discarded — and flagged nothing unknown). Needs
   **Deploy → Manage deployments → edit the existing one → New VERSION**. A new *deployment* mints a
@@ -4471,35 +4629,10 @@ mirror only refreshes on an Admin-driven save, so anyone who set their own PIN v
 can look empty there indefinitely. Re-check PIN and signature state in the app, not in SQL — and
 treat the earlier "5 of 6" figure as unverified.
 
-## Signature flow — where it actually stands (2026-08-08)
-- **Fixed and live:** a named signatory can always reach Approvals (`_isSignatory()` exempts them in
-  both `canNavigate` and `applyNavAccess`). Joanna is Staff and was being refused at the door by the
-  Approvals access key while assigned as Checked-by for all three companies.
-- **`QT-W00000087` is stuck**: `from_email` and `to_email` are both `designer-ce1@` — she prepared it,
-  requested the signature, and the routing sent it back to herself. The app withholds the sign action
-  from the requester so nobody signs their own work, so Withdraw is the only button left. Correct
-  behaviour on a request that should never have been routed to her.
-- **`QT-W00000088`** (Jhover → Joanna, pending 11:58) is correctly routed. Reported as "not working";
-  it was waiting on her, and she could not reach the page until the fix above.
-- **"It keeps repeating"** — verified there are **no duplicate signature rows** in
-  `approval_requests`, so it is the on-screen notification repeating, not the request. Points at the
-  60s approval poll re-announcing the same pending item. Not yet traced.
-
-## NEXT SESSION — start here, in this order
-1. **Fallback Checked-by** (agreed with Rommel 2026-08-08, spec settled, NOT built).
-   `APPR_ROUTING[co].checkedAlt` — one extra field per company on Settings → Approval Routing.
-   At request time in `_findSignatory('checked')`: if the preparer IS the assigned Checked-by, route
-   to the fallback; if no fallback is set, **refuse with the reason** rather than routing to self and
-   dead-ending. Rommel will put the Noted-by person in it for now — he knows that means one person
-   signs both boxes above the threshold, and accepts it because the hierarchy is currently too small.
-   It is a field, not a rule, so the day a third person exists he changes one name and the
-   double-signing stops. **Why a fallback and not "skip Checked-by and let Noted-by cover both":**
-   Noted-by is threshold-gated, so below the threshold that rule would leave a quotation with NO
-   signature at all — working today only because the threshold is blank.
-2. **The repeating notification** (above).
-3. **Serial preview can show `1`** — `serialCounters` defaults to `{W:1,C:1,M:1}`; a draft created
-   before the Settings read lands shows a confident wrong number. Counter is intact (M at 106) and
-   the committed serial is claimed atomically, so display only.
+## NEXT SESSION
+Nothing queued. The three items that were queued here are done (see the 2026-08-08 session 2
+record above). Next moves are Rommel's: the WCL/MSSI staff try the signature flow, the Wufoo
+webhook gets deployed, and CWL is picked up at its deployment.
 
 ## Status ladder — investigated 2026-08-08, unresolved
 Rommel: the team cannot see quotations moving. Measured against saved state (`state->>'locked'`, NOT
