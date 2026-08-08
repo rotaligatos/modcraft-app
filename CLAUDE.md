@@ -4539,7 +4539,180 @@ actual schedule, and verified to track it in both directions.
 
 ---
 
+## What was changed on 2026-08-08 (session 3 — the stage ladder, and the drift it exposed)
+
+Thirteen commits, `bbef417`..`56c3036`, all pushed and confirmed SERVED. This session started as
+"map the stages so they're clear for everyone" and turned into finding why the numbers never
+matched Rommel's impression. **Almost every fix below was found by querying live data or driving
+the code — none by reading it.**
+
+### The map, agreed before any code
+Published as a private artifact and iterated three times against Rommel's corrections:
+`https://claude.ai/code/artifact/0da41768-d0ba-423e-9f92-33b9503022f4`
+
+### 1. The stage ladder, as decided (`bbef417`)
+Two matching loops, each running prepare → lock → send → hear back. IQ/FQ shorthand so the labels
+fit the Project List pill (Rommel: *"IQ and FQ is fine to shorten the status"*).
+
+| | | |
+|---|---|---|
+| 1 Draft | 2 IQ Locked | 3 IQ Awaiting Client Approval · 4 IQ Approved |
+| 5 FQ Draft | 6 FQ Locked | 7 FQ Awaiting Client Approval · 8 FQ Approved |
+
+Plus **Declined**, and **Revision Requested** / **Under Revision** prefixed by the loop.
+
+Four things this fixed, each a real gap:
+- **Sending is a stage.** It never was — Share only recorded HOW it went out, so the one thing
+  everybody reliably does after locking had nowhere to sit and a sent quotation looked identical to
+  one locked and abandoned.
+- **Approve means the CLIENT accepted it**, on both loops. `qClientApproved` already recorded that
+  for the Initial Quotation; the ladder simply never showed it.
+- **FQ Locked exists.** Locking the Final used to jump straight to "awaiting", hiding its signature
+  step entirely. Rommel caught this himself.
+- **Revision is visible.** Requesting an unlock changed nothing on screen; an approved unlock
+  dropped the quotation back to Draft, losing that it had ever been issued.
+
+**Closed is gone.** Rommel: *"it ends there, either the client declined or approved… once I move to
+Admin which is the gate for payment status, then production, this will all extend."* The order
+archiving that hung off Close Project moved to client-approve and decline, or those orders would
+have sat in the queue with their clock running forever.
+
+**Ageing reworked** to his rule — *"the 30 day limit for no update whatsoever"*. The clock measures
+silence of any kind (`updatedAt`, new Quotations column Z, written on every save) rather than time
+since the last lock, archives at 30 days with one nudge at 21, and drops the `inactive` rung. A
+stale DRAFT ages too. **Declined stays visible for 30 days then hides** behind the archived toggle
+(`c7b183e`) — his choice — with no follow-up nudge, since there is nobody to chase.
+
+> ⚠ **Legacy mapping:** `Approved` / `In Final Quotation` map to **FQ Draft**, NOT IQ Approved.
+> Checked against live data: not one of those 13 carries a recorded client approval, so calling
+> them "the client approved it" would assert something nobody ever recorded.
+
+### 2. ⚠ Reopening a locked quotation was DESTROYING its lock timestamps (`502a419`)
+Rommel asked why the Initial Locked column was mostly empty. **The app was deleting them.**
+
+`restoreFullQuotationState` never read `initLockedAt`, `initApprovedAt`, `finalLockedAt` or
+`closedAt` back. They were saved, cleared by `initQuotation`, and never restored — so opening a
+locked quotation left them empty and the next save wrote that emptiness over the real values in
+BOTH stores. **They agreed because they were wiped together, which is exactly why it never looked
+like drift** and why I wrongly reported the write path healthy.
+
+12 quotations from the last ten days lost theirs; QT-W00000088 was locked that morning. Not
+cosmetic: `initLockedAt` ends the response clock for a walk-in job and drives the Under Revision
+rung; `finalLockedAt` does the same on the Final side; both anchor the follow-up clock.
+
+Fixed at source. The damage is repairable — the activity log is append-only, so each quotation's
+own "Quotation locked." entry IS the true moment. Settings → Company & DB offers to put them back
+(state + sheet cell + Supabase). Quotations predating the log keep a dash and are counted, not
+invented.
+
+### 3. Statuses drifted because two actions never saved (`53854c1`)
+Audited all fourteen actions that move the ladder. Twelve saved; two did not:
+- **`confirmUnlock`** — unlocking moves a quotation to Under Revision or back to Draft and never
+  wrote it. The row went on saying locked and sent.
+- **`confirmSendVersions`** (sending several options at once) — sending is a stage now.
+
+`acceptCounter` deliberately still does not: it applies a discount rather than moving the ladder,
+and writes through a guarded path rather than saving whatever is open.
+
+### 4. The real fix: derive the stage, don't trust the stored copy (`970c052`)
+Rommel: *"is this a real solution or a band-aid… I cannot move forward with the other projects if
+we cut corners."* Correct challenge — correcting the column afterwards is cleanup and the banner is
+a detector; neither prevents recurrence.
+
+New Postgres view **`quotation_stage_flags`** (`security_invoker`, so RLS on `quotation_states`
+still applies) holding just the dozen flags the ladder reads — **156 quotations = 11 kB, one
+query**. The Project List now computes each row's stage through the same `_statusFromState` the app
+uses. The stored column stays as the fallback.
+
+**Stated drawbacks:** derivation needs a Supabase connection; a quotation with no saved state
+cannot be derived. Both degrade to today's behaviour, not to nothing.
+
+### 5. Finding and repairing drift from inside the app (`8de2c31`, `adb25ec`, `60f1291`)
+Rommel: *"you're telling me you cannot read something that we did. I need solution not back
+pedalling."* Also correct — every diagnosis had been going through Supabase while the Project List
+reads the **Google Sheet**, so nobody could see them disagree.
+
+Settings → Company & DB → **Check Project List** reads both, lists every disagreement and corrects
+them, writing **both stores** (the first version wrote only the Sheet, which would have re-split
+them; and it was keyed on `id`, which is not that table's key — it would have matched nothing and
+reported success). A once-per-session banner on the Project List reports drift without anyone
+remembering to look, and clears when a correction lands.
+
+Found **54** by SQL, **32** by the app — trust the app's, it reads the Sheet, which is the list.
+
+### 6. Team performance was counting drafts (`f5f186d`, `0a64d04`)
+Rommel's instinct, and the biggest distortion. "Quotes" counted every job including drafts, so work
+that never left the building sat in the win-rate denominator: **Jhover 20 of 35 (57%), Stephanie 13
+of 28 (46%)**. Now two columns — **Issued** and **Drafts** — so work in progress stays visible
+without dragging the rate. Declined still counts as issued: it went out and was lost.
+
+**The response clock now ends where the client actually got it** — Rommel: *"how can you send if the
+client is in front of you?"* A walk-in ends at the LOCK (you hand it over); an emailed job ends at
+the SEND. That needed a send TIME, which never existed — added `qSentAt`/`fqSentAt` (column AA)
+stamped through one `_markSent()` all seven share paths route through. **"Orders answered" renamed
+"Jobs timed"** — it counted walk-ins and emailed jobs with no order behind them; it is the sample
+size behind the average.
+
+### 7. Client-facing carcass names, without renaming anything (`71526c0`)
+Users want names matching the client's vocabulary. A rename would be dangerous — the furniture-type
+NAME is the key for `CARCASS_PRICES`, `CARCASS_COMPONENTS`, `INST_COST.complexity`, the cabinet
+template (`t.cabinet===name`) and every saved line item, and **all five fail silently**.
+
+So the type is never renamed. Each carcass line gains an optional `label`, set from a tag button,
+reaching **client documents only**. On the by-type printout lines group under the CLIENT's name so
+two differently-named lines stay two lines — the price still comes from `item.type`, so the alias
+never reaches a number. Setting, changing and clearing are all logged.
+
+### 8. Discard a draft, never an issued quotation (`23cf877`)
+Rommel: *"a draft can be deleted, but a locked one should not."* **Discard draft** in the Stage 1
+toolbar, visible only while it IS a draft. Refused — with the reason and what to use instead — when
+locked at either stage, client-approved, already declined, **or locked and later unlocked for
+revision**, which is still a record. Only the preparer or an Admin. The deletion goes to the
+append-only log.
+
+### 9. Lami taught all of it (`56c3036`)
+Her manual described the old workflow, and her prompt read retired status keys. **That breakdown
+line has now named non-existent statuses twice** — 'Locked'/'Approved' before, these after, each
+time telling managers "X=undefined". Built from `STATUS_LADDER` now, so it cannot go stale a third
+time. Also told her the two things the app cannot do for anyone (see the standing note below).
+
+### Pre-existing bugs found on the way
+- Dashboard ageing chart read `age.followup`, which `quotAgeStage` has never returned (it returns
+  `'alert'`) — the follow-up bar has always shown zero.
+- The state JSON carried its own hand-rolled status expression that drifted the moment the ladder
+  grew.
+- `_stageFlags` / status filter / funnel are now all built from `STATUS_LADDER` rather than
+  hand-listed, which is how the filter came to still be offering 'Closed'.
+
+### ⚠ TWO THINGS CODE CANNOT FIX — tell the team, not the developer
+- **A job only counts as WON when somebody presses Client Approve.** It has been pressed twice ever.
+- **A response time only exists when the arrival source (Walk-in / Email order) is picked.**
+
+Until those become habits the dashboard will keep reading near-zero, and that is not a bug.
+
+### Method notes worth keeping
+- **Rommel was right and I was wrong, twice.** I said only 3 quotations could show Draft while
+  further along — the real number was 54, because I searched for lock evidence and missed every row
+  whose state records an APPROVAL. And I called the timestamp write path healthy because the row and
+  the state agreed; they agreed because both had been emptied.
+- **"I cannot read that from here" is a cop-out when the answer is in the code.** It was, twice.
+- **My test rig misled me five more times** — routing keyed under the wrong company, a second
+  `#orders-sla-wrap` so `getElementById` found the real one, reading the wrong container id, a rig
+  that forgot `QUOT_AGE_START` clamps every anchor, and test data where `updatedAt` preceded
+  `created`. When a measurement is impossible rather than surprising, suspect the rig.
+- **Play the rule back as a table before building.** Rommel corrected the ladder twice mid-design
+  (the FQ lock rung, and revision as a stage); both would have shipped wrong otherwise.
+
+---
+
 # OPEN — updated 2026-08-08 (THIS IS THE AUTHORITATIVE LIST)
+
+## Cleared 2026-08-08 (session 3)
+The stage ladder as agreed · sending as a rung · FQ Locked · revision visible · Closed removed ·
+ageing on last-update with a 30-day archive · declined hidden after 30 days · lock timestamps no
+longer destroyed on reopen · the two actions that never saved · stage derived rather than trusted ·
+in-app drift detection and repair · drafts out of the win rate · the response clock ending per
+arrival source · client-facing carcass names · discard a draft · Lami taught all of it.
 
 ## Cleared 2026-08-08 (session 2)
 Fallback Checked-by **and** Noted-by · the "repeating" signature request (it was `sigSlot` never
@@ -4595,6 +4768,23 @@ can sign, both measured from what is STORED, not from what the screen showed:
 screenshot.** The dropdowns write to `APPR_ROUTING` in memory and persist only on Save, so a
 screen and the database can disagree indefinitely with nothing to show for it.
 
+## ⚠ FIRST THING NEXT SESSION — the two habits, not more code
+The ladder, the derivation, the detection and the repair are all done. What is left is behavioural,
+and no amount of code fixes it:
+- **Client Approve has been pressed twice, ever.** Until estimators press it when a client says yes,
+  win rate and won revenue stay near zero and the dashboard will look broken when it is not.
+- **The arrival source (Walk-in / Email order) has to be picked** or a quotation has no response
+  time and drops out of the average. The Team performance footer already names who is affected.
+
+Do NOT respond to "the dashboard shows no wins" by changing the KPI. Check whether the button was
+pressed first — that has already been the answer once.
+
+## Run these once, in the app (Rommel)
+- **Settings → Company & DB → Check Project List.** Two offers: correct the stale statuses, and
+  restore the lock dates lost to the reopen bug. Both write the Sheet, the state and Supabase
+  together. He ran the status correction on 2026-08-08 and it came back clean (71 checked); the
+  lock-date restore had not been run yet at session end.
+
 ## Rommel's to do
 - **Tell the WCL and MSSI staff to try the signature flow** — cleared 2026-08-08, see above. Expect
   one wrinkle: Allan is a Manager, so his own PIN is mandatory; if he has not set one the app sends
@@ -4630,9 +4820,19 @@ can look empty there indefinitely. Re-check PIN and signature state in the app, 
 treat the earlier "5 of 6" figure as unverified.
 
 ## NEXT SESSION
-Nothing queued. The three items that were queued here are done (see the 2026-08-08 session 2
-record above). Next moves are Rommel's: the WCL/MSSI staff try the signature flow, the Wufoo
-webhook gets deployed, and CWL is picked up at its deployment.
+Nothing queued for building. See the two habits above first, then Rommel's list.
+
+Known and deliberately left, so nobody "fixes" them by surprise:
+- **`QT-W00000075` (Keystone Construction) appears twice** in the Quotations sheet — a genuine
+  duplicate row, spotted while correcting statuses. Harmless to the corrector; worth cleaning up.
+- **Supabase holds ~170 quotations, the Sheet ~74.** The difference is quotations deleted from the
+  Sheet before `supaDeleteQuotation` existed (added 2026-08-02). Harmless orphans — but it is why
+  a SQL count and the app's count disagree, and why the app's number is the one to trust.
+- **`_stageFlags` is loaded once per session.** A quotation another user changes mid-session shows
+  its stored status until the next reload. Acceptable; noted so it is not mistaken for drift.
+- **Stage 4 vs 5 rests on `fqStarted`**, set when Stage 2 is first opened. It is a real flag saved
+  with the quotation, but it is the only thing separating "the client said yes" from "we are
+  working on the Final" — nothing else records that the Final was ever touched.
 
 ## Status ladder — investigated 2026-08-08, unresolved
 Rommel: the team cannot see quotations moving. Measured against saved state (`state->>'locked'`, NOT
