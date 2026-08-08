@@ -4378,6 +4378,25 @@ var qInitLockedAt='', qInitApprovedAt='', fqLockedAt='', qClosedAt='';
 // Quotation is being worked on). Without it the two are indistinguishable, because approving
 // jumps straight to Stage 2 and nothing else records that the Final was ever opened.
 var fqStarted=false;
+// WHEN it went to the client. The app recorded only that a quotation had been sent, never the
+// moment — fine while sending was invisible, but it is a stage now, and an emailed job's response
+// time has to be measured to the send, not to the lock.
+var qSentAt='', fqSentAt='';
+// One place that marks a quotation sent, so no share path can record the status without the time.
+// The first send stands: re-sharing the same quotation is a follow-up, not a new response.
+function _markSent(ctx,status){
+  var now=new Date().toISOString();
+  if(ctx==='fq'){
+    fqSentStatus=status;
+    if(_wasSent(status)&&!fqSentAt) fqSentAt=now;
+    if(typeof updateFQSentStatus==='function') updateFQSentStatus();
+  } else {
+    qSentStatus=status;
+    if(_wasSent(status)&&!qSentAt) qSentAt=now;
+    if(typeof updateSentStatus==='function') updateSentStatus();
+  }
+  if(typeof _updateQStatusBadge==='function') _updateQStatusBadge();
+}
 var qCancelled=false, qCancelledAt='', qCancelReason=''; // client declined to proceed — can happen from either stage
 
 // ── Utility ────────────────────────────────────────────────────────────────
@@ -5726,7 +5745,7 @@ function initQuotation() {
   var _qpsn=el('q-prev-serial-note'); if(_qpsn) _qpsn.style.display='none';
   qAreas=[{name:"Area 1",items:[{type:"Kitchen Base Cabinet",qty:0}],svcItems:[],matItems:[],hwItems:[],bomItems:[{type:"Kitchen Base Cabinet",qty:0,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]}],outsourceMaterials:[],outsourceHardware:[]}];
   qFabMode="carcass"; qHasCuttingList=false;
-  qLocked=false; qApproved=false; qSaved=false; qSentStatus=''; qLockedRates=null;
+  qLocked=false; qApproved=false; qSaved=false; qSentStatus=''; qSentAt=''; qLockedRates=null;
   // The pill is only redrawn by _freezeRates/_thawRates/restoreFullQuotationState, so clearing the
   // variable here left the previous quotation's "Rates as at lock" badge on screen — a brand-new
   // draft claiming a lock it never had. Redraw it from the (now empty) state.
@@ -5855,7 +5874,7 @@ function initQuotation() {
   // service dropdown was actually changed — which nobody does when it already reads the default.
   var fccInit=el('fabcont-card'); if(fccInit) fccInit.style.display=(svcInit==='Fabrication only'||svcInit==='')?"block":"none";
   // Reset Final Quotation state for fresh start
-  fqLocked=false; fqSentStatus=''; fqInitialized=false; fqApprovalsFromSave=false;
+  fqLocked=false; fqSentStatus=''; fqSentAt=''; fqInitialized=false; fqApprovalsFromSave=false;
   fqClientApproved=false; fqClientApprovedAt='';
   fqPreviewed=false; fqFabBasis='own'; fqFabCostOverride=0; fqBasisFromSave=false;
   fqAreas=null; fqScopeForked=false;   // a new quotation has no Stage 2 scope until it reaches Stage 2
@@ -10577,7 +10596,7 @@ function gLoadDirData(cb){
   if(dirLoading){setTimeout(function(){gLoadDirData(cb);},300); return;}
   if(!gToken){if(cb) cb(); return;}
   dirLoading=true;
-  sheetsGet('Quotations!A:Z').then(function(d){
+  sheetsGet('Quotations!A:AA').then(function(d){
     if(!d.error){
       var rows=d.values||[],seen={};
       dirData=[];
@@ -10598,7 +10617,7 @@ function gLoadDirData(cb){
         var entry={id:ser,baseSerial:baseS,created:r[1]||'',client:r[2]||'',contact:r[4]||'',type:r[12]||'',
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,user:r[7]||'',segment:r[8]||'',
           status:r[5]||'Draft',locked:r[9]==='Yes',stage:r[10]||'Initial',options:parseInt(r[11])||1,
-          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim()),updatedAt:r[25]||''};
+          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim()),updatedAt:r[25]||'',sentAt:r[26]||''};
         dirData.push(entry); seen[baseS]=entry;
       }
     }
@@ -10866,15 +10885,21 @@ function _dashUpdateKPIs(){
     if(!byUser[key]) return;
     if(teamCo==='none'){ if(_quotCompanyKey(e)!=='') return; }
     else if(teamCo){ if(_quotCompanyKey(e)!==teamCo) return; }
-    if(!e.initLockedAt) return;              // still being worked — no end yet
+    // Where the client's wait actually ENDS depends on how the job arrived (Rommel, 2026-08-08):
+    // a walk-in client is standing in front of you, so there is nothing to send — handing the
+    // locked quotation over IS the answer. An emailed job is a real send, and the wait runs until
+    // it goes out. Older rows have no recorded send time; those fall back to the lock rather than
+    // dropping out of the average altogether.
+    var endAt=(e.jobSource==='email'&&e.sentAt)?e.sentAt:e.initLockedAt;
+    if(!endAt) return;                       // still being worked — no end yet
     if(!e.jobStartedAt){ noClockStart++; return; }
     var m=(typeof calcWorkingMinutes==='function')
-      ? calcWorkingMinutes(e.jobStartedAt,e.initLockedAt,e.company||'')
-      : (new Date(e.initLockedAt)-new Date(e.jobStartedAt))/60000;
+      ? calcWorkingMinutes(e.jobStartedAt,endAt,e.company||'')
+      : (new Date(endAt)-new Date(e.jobStartedAt))/60000;
     if(m!==null&&m>=0){ byUser[key].respMins.push(m); byUser[key].answered++; }
   });
   var users=Object.values(byUser).sort(function(a,b){return b.quotes-a.quotes;});
-  var teamHtml='<thead><tr><th>User</th><th>Quotes</th><th>Won</th><th>Rate</th><th>Orders answered</th><th>Avg. response</th><th>Revenue</th></tr></thead><tbody>';
+  var teamHtml='<thead><tr><th>User</th><th>Quotes</th><th>Won</th><th>Rate</th><th title="How many jobs had a measurable response time — the sample size behind the average beside it. Not every quotation has one.">Jobs timed</th><th>Avg. response</th><th>Revenue</th></tr></thead><tbody>';
   if(!users.length){
     teamHtml+='<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:16px">'
       +'Nobody is included yet — tick <b>Include in Team performance</b> on each person in Settings &rarr; Users.</td></tr>';
@@ -12598,7 +12623,7 @@ function _applyApprovedRequest(notif){
     var ubtn2=el(ctx==='fq'?'fq-unlock-btn':'unlock-btn');
     if(ubtn2){ubtn2.innerHTML='<i class="ti ti-lock-open"></i>Request unlock';ubtn2.disabled=false;}
     if(ctx==='fq'){
-      fqLocked=false; fqSentStatus='';
+      fqLocked=false; fqSentStatus=''; fqSentAt='';
       _thawRatesVisible('unlock approved');
       fqClientApproved=false; fqClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
       logActivity('Final quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+').');
@@ -12606,7 +12631,7 @@ function _applyApprovedRequest(notif){
       if(typeof updateFQSentStatus==='function') updateFQSentStatus();
       if(typeof _updateQStatusBadge==='function') _updateQStatusBadge();
     } else {
-      qLocked=false; qSentStatus='';
+      qLocked=false; qSentStatus=''; qSentAt='';
       _thawRatesVisible('unlock approved');
       qClientApproved=false; qClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
       logActivity('Quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+').');
@@ -12669,8 +12694,8 @@ function _persistApprovedFieldToQuotation(notif,callback){
   // A signature is not stage-specific — it signs the issued document, not a stage.
   else if(type==='signature'&&notif.sigSlot&&notif.sigValue) mutate=function(s){ s.signatures=s.signatures||{}; s.signatures[notif.sigSlot]=notif.sigValue; };
   else if(type==='unlock') mutate=ctx==='fq'
-    ?function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; }
-    :function(s){ s.locked=false; s.sentStatus=''; };
+    ?function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqSentAt=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; }
+    :function(s){ s.locked=false; s.sentStatus=''; s.sentAt=''; };
   if(!mutate){ if(callback) callback(false); return; }
 
   _loadQuotationJsonFromSheets(serial,function(state){
@@ -18184,7 +18209,7 @@ function captureQuotationSnapshot(){
     customCFApproved:qCustomCFApproved,
     outMarkup:qOutMarkup,outContingency:qOutContingency,outBuffer:qOutBuffer,
     vatApproved:qVatApproved,discApproved:qDiscApproved,discPct:qDiscPct,discScope:JSON.parse(JSON.stringify(qDiscScope)),premApproved:qPremApproved,
-    locked:qLocked,saved:qSaved,sentStatus:qSentStatus,
+    locked:qLocked,saved:qSaved,sentStatus:qSentStatus,sentAt:qSentAt,
     projectSize:qProjectSize,
     instWorkers:qInstWorkers,instDays:qInstDays,
     instRegion:qInstRegion,
@@ -18221,7 +18246,7 @@ function restoreQuotationSnapshot(snap){
   qOutMarkup=snap.outMarkup;qOutContingency=snap.outContingency;qOutBuffer=snap.outBuffer;
   qVatApproved=snap.vatApproved;qDiscApproved=snap.discApproved;qDiscPct=snap.discPct;qPremApproved=snap.premApproved;
   qDiscScope=snap.discScope?JSON.parse(JSON.stringify(snap.discScope)):{materials:false,edgeband:false,hardware:false,services:false,installation:false};
-  if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';}
+  if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';qSentAt=snap.sentAt||'';}
   if(snap.initLockedAt!==undefined){qInitLockedAt=snap.initLockedAt||'';qInitApprovedAt=snap.initApprovedAt||'';fqLockedAt=snap.finalLockedAt||'';qClosedAt=snap.closedAt||'';}
   if(snap.fqStarted!==undefined) fqStarted=!!snap.fqStarted;
   qProjectSize=snap.projectSize||0;
@@ -18323,7 +18348,7 @@ function _doCreateNewOption(){
   qOptionsList.push({id:newId,label:'Option '+newId,snapshot:newSnap,status:'active',locked:false,saved:false,grand:_pCalc.grand||0});
   switchToOption(newId);
   // New option starts unlocked so user can freely edit before locking and sending
-  qLocked=false; qSaved=false; qSentStatus=''; qLockedRates=null;
+  qLocked=false; qSaved=false; qSentStatus=''; qSentAt=''; qLockedRates=null;
   var lb=el('lock-btn');
   if(lb){lb.disabled=false;lb.style.background='var(--navy)';lb.style.opacity='1';lb.innerHTML='<i class="ti ti-lock"></i>Lock &amp; Send';}
   var sb=el('sent-status'); if(sb) sb.style.display='none';
@@ -18616,7 +18641,7 @@ function doShareNative(){
     navigator.share(data)
       .then(function(){
         closeModal('ov-share');
-        qSentStatus='Shared'; updateSentStatus();
+        _markSent('s1','Shared');
         logActivity('Quotation shared via device share sheet'+(data.files?' with PDF attached':'')+'.');
         // Same as the other four share paths. This one was missed, and it is the
         // worst one to miss: it is the top button, the only one that genuinely
@@ -18644,7 +18669,7 @@ function doShareEmail(){
     }
     window.open('mailto:'+encodeURIComponent(em)+'?subject='+encodeURIComponent(subj)+'&body='+encodeURIComponent(body),'_blank');
     closeModal('ov-share');
-    qSentStatus='Sent via email'; updateSentStatus();
+    _markSent('s1','Sent via email');
     logActivity('Quotation shared via email.');
     orderMarkSentFromQuotation();
     gSaveQuotation();
@@ -18654,7 +18679,7 @@ function doShareWhatsApp(){
   var txt=_shareText('msg');
   window.open('https://wa.me/?text='+encodeURIComponent(txt),'_blank');
   closeModal('ov-share');
-  qSentStatus='Shared via WhatsApp'; updateSentStatus();
+  _markSent('s1','Shared via WhatsApp');
   logActivity('Quotation shared via WhatsApp.');
   orderMarkSentFromQuotation();
   gSaveQuotation();
@@ -18664,7 +18689,7 @@ function doShareViber(){
   window.open('viber://forward?text='+encodeURIComponent(txt),'_blank');
   closeModal('ov-share');
   showToast('Viber opened — message pre-filled. Attach the PDF from your Downloads folder manually.');
-  qSentStatus='Shared via Viber'; updateSentStatus();
+  _markSent('s1','Shared via Viber');
   logActivity('Quotation shared via Viber.');
   orderMarkSentFromQuotation();
   gSaveQuotation();
@@ -18675,7 +18700,7 @@ function doShareCopy(){
     navigator.clipboard.writeText(txt).then(function(){
       showToast('Quotation details copied to clipboard');
       closeModal('ov-share');
-      qSentStatus='Copied to clipboard'; updateSentStatus();
+      _markSent('s1','Copied to clipboard');
       logActivity('Quotation details copied to clipboard.');
       orderMarkSentFromQuotation();
       gSaveQuotation();
@@ -18735,8 +18760,7 @@ function confirmSendVersions(via){
   // Log activity
   var sentOpts=lines.join(', ');
   logActivity('Sent versions to client: '+sentOpts);
-  qSentStatus='Sent via '+(via==='email'?'email':'messaging');
-  updateSentStatus();
+  _markSent('s1','Sent via '+(via==='email'?'email':'messaging'));
 }
 function confirmSend(via) {
   var sentTxt=via==="email"?"Sent via email":via==="messaging"?"Sent via messaging":"Not sent";
@@ -18748,7 +18772,7 @@ function confirmSend(via) {
   if(qRevisionPending) _applyRevisionBump();
   _stampPreparedBySignature();
   if(modalCtx==='fq'){
-    fqLocked=true; fqSentStatus=sentTxt; fqLockedAt=new Date().toISOString();
+    fqLocked=true; fqLockedAt=new Date().toISOString(); _markSent('fq',sentTxt);
     _freezeRates('Final Quotation lock'); _captureLockedTotal();
     logActivity(stage+" locked. "+sentTxt+".");
     updateFQLockUI(); updateFQSentStatus();
@@ -18758,7 +18782,7 @@ function confirmSend(via) {
     _copyOrderAttachmentsToQuotationFolder();
     gSaveQuotation();
   } else {
-    qLocked=true; qSentStatus=sentTxt; qInitLockedAt=qInitLockedAt||new Date().toISOString();
+    qLocked=true; qInitLockedAt=qInitLockedAt||new Date().toISOString(); _markSent('s1',sentTxt);
     _freezeRates('Stage 1 lock & send'); _captureLockedTotal();
     logActivity(stage+" locked. "+sentTxt+".");
     gSaveQuotation(); updateLockUI(); updateSentStatus();
@@ -19607,7 +19631,7 @@ function renderDirectory(){
     dirLoading=true;
     var wrap=el('dir-table');
     if(wrap) wrap.innerHTML='<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite;font-size:20px"></i> Loading...</td></tr>';
-    sheetsGet('Quotations!A:Z').then(function(d){
+    sheetsGet('Quotations!A:AA').then(function(d){
       if(d.error){ // Quotations tab not created yet — no quotations saved so far. Show empty, not demo.
         dirData=[]; dirLoading=false; renderDirectoryTable(); return;
       }
@@ -19637,7 +19661,7 @@ function renderDirectory(){
           value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,
           user:r[7]||'',segment:r[8]||'',status:r[5]||'Draft',locked:r[9]==='Yes',
           stage:r[10]||'Initial',options:parseInt(r[11])||1,
-          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim()),updatedAt:r[25]||''};
+          initLockedAt:r[13]||'',initApprovedAt:r[14]||'',finalLockedAt:r[15]||'',closedAt:r[16]||'',sourceOrder:r[17]||'',leadSource:r[18]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim()),updatedAt:r[25]||'',sentAt:r[26]||''};
         dirData.push(entry);
         seen[baseS]=entry;
       }
@@ -22331,7 +22355,7 @@ function supaMigrateAll(){
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(); }
   console.log('[migrate] starting — this can take a few minutes for a large dataset. Do not close this tab.');
   var stats={quotHeaders:0,quotHeaderErrors:0,states:0,stateErrors:0};
-  return sheetsGet('Quotations!A:Z').then(function(d){
+  return sheetsGet('Quotations!A:AA').then(function(d){
     var rows=(d&&!d.error&&d.values)||[];
     var headerRows=[];
     for(var i=1;i<rows.length;i++){
@@ -22344,7 +22368,7 @@ function supaMigrateAll(){
         value:parseFloat((r[6]||'0').replace(/[^\d.]/g,''))||0,
         user:r[7]||'',stage:r[10]||'',type:r[12]||'',
         baseSerial:baseS,initLockedAt:r[13]||'',initApprovedAt:r[14]||'',
-        finalLockedAt:r[15]||'',sourceOrder:r[17]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim()),updatedAt:r[25]||''
+        finalLockedAt:r[15]||'',sourceOrder:r[17]||'',project:r[19]||'',company:r[20]||'',jobSource:r[21]||'',jobStartedAt:r[22]||'',additionalFrom:r[23]||'',clientApprovedAt:r[24]||'',clientApproved:!!(r[24]&&String(r[24]).trim()),updatedAt:r[25]||'',sentAt:r[26]||''
       });
     }
     console.log('[migrate] found',headerRows.length,'quotation header rows in Sheets — migrating...');
@@ -24008,12 +24032,12 @@ function setupMissingSheetTabs(){
   // A freshly created tab got a 13-column header while every writer sends 23.
   // _syncQuotHeader would eventually widen it, but there is no reason to create it
   // wrong in the first place.
-  var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated']];
+  var QUOT_HDR=[['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated','Sent At']];
   var CLI_HDR=[['ID','Contact Name','Business Name','Contact No','Email','Address','City','Account Type','Segment','Segment Group','Segment Custom','Notes']];
   var STATE_HDR=[['Serial','State JSON (chunked across columns B–K — do not edit manually)']];
   Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1'),sheetsGet('Quotation State!A1')]).then(function(res){
     var tasks=[];
-    if(res[0].error) tasks.push(sheetsCreateTab('Quotations').then(function(){return sheetsAppend('Quotations!A:Z',QUOT_HDR);}));
+    if(res[0].error) tasks.push(sheetsCreateTab('Quotations').then(function(){return sheetsAppend('Quotations!A:AA',QUOT_HDR);}));
     if(res[1].error) tasks.push(sheetsCreateTab('Clients').then(function(){return sheetsAppend('Clients!A:L',CLI_HDR);}));
     if(res[2].error) tasks.push(sheetsCreateTab('Quotation State').then(function(){return sheetsAppend('Quotation State!A1:K1',STATE_HDR);}));
     if(!tasks.length){if(status) status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div>All tabs already exist — nothing to create.</div></div>';return Promise.resolve();}
@@ -26466,8 +26490,8 @@ function _syncQuotHeader(){
   // The range must be as wide as HDR. It was A1:T1 against a 21-entry HDR, so
   // 'Company' was never actually written and cur.length<HDR.length stayed true
   // forever — the header was rewritten every session and never converged.
-  var HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated'];
-  var RANGE='Quotations!A1:Z1';   // must stay as wide as HDR — see the A1:T1 bug below
+  var HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated','Sent At'];
+  var RANGE='Quotations!A1:AA1';   // must stay as wide as HDR — see the A1:T1 bug below
   sheetsGet(RANGE).then(function(d){
     var cur=(d.values&&d.values[0])||[];
     if(d.error||!cur.length) return; // tab missing/empty — append path writes the header
@@ -26893,30 +26917,30 @@ function _proceedSaveQuotation(){
   // editable copies of the same fact would eventually disagree.
   var _jobSrc=qSourceOrderId?'':(qJobSource||'');
   var _jobStart=qSourceOrderId?'':(qJobStartedAt||'');
-  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',fqClientApprovedAt||'',now];
+  var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',fqClientApprovedAt||'',now,(fqSentAt||qSentAt||'')];
   // Store in session memory immediately so directory shows it without waiting for Sheets
-  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated'];
+  var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated','Sent At'];
   var _bsM=serial.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
-  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:fqClientApprovedAt||'',clientApproved:!!fqClientApproved,updatedAt:now};
+  sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:fqClientApprovedAt||'',clientApproved:!!fqClientApproved,updatedAt:now,sentAt:(fqSentAt||qSentAt||'')};
   try{ supaUpsertQuotation(sessionQuotations[serial]); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
   sheetsGet('Quotations!A:A').then(function(d){
     if(d.error){
       return sheetsCreateTab('Quotations').then(function(){
-        return sheetsAppend('Quotations!A:Z',[QUOT_HDR]).then(function(){
-          return sheetsAppend('Quotations!A:Z',[row]);
+        return sheetsAppend('Quotations!A:AA',[QUOT_HDR]).then(function(){
+          return sheetsAppend('Quotations!A:AA',[row]);
         });
       });
     }
     var vals=d.values||[];
     if(!vals.length){
-      return sheetsAppend('Quotations!A:Z',[QUOT_HDR]).then(function(){
-        return sheetsAppend('Quotations!A:Z',[row]);
+      return sheetsAppend('Quotations!A:AA',[QUOT_HDR]).then(function(){
+        return sheetsAppend('Quotations!A:AA',[row]);
       });
     }
     var rowIdx=-1;
     for(var i=1;i<vals.length;i++){if(vals[i][0]===serial){rowIdx=i+1;break;}}
     if(rowIdx>0){return sheetsUpdate('Quotations!A'+rowIdx+':X'+rowIdx,[row]);}
-    else{return sheetsAppend('Quotations!A:Z',[row]);}
+    else{return sheetsAppend('Quotations!A:AA',[row]);}
   }).then(function(){
     showSheetsToast(true,'Quotation '+serial+' saved to database');
     // Only now that the NEW row exists is it safe to remove the row this quotation used to have.
@@ -26980,7 +27004,7 @@ function getFullQuotationState(){
   return {
     serial:qSerial, baseSerial:qBaseSerial||qSerial,
     activeOptionId:qActiveOptionId, optionsList:JSON.parse(JSON.stringify(qOptionsList)),
-    locked:qLocked, approved:qApproved, saved:qSaved, sentStatus:qSentStatus,
+    locked:qLocked, approved:qApproved, saved:qSaved, sentStatus:qSentStatus, sentAt:qSentAt, fqSentAt:fqSentAt,
     stage:qStage, fabMode:qFabMode,
     areas:JSON.parse(JSON.stringify(qAreas)),
     vatApproved:qVatApproved, discApproved:qDiscApproved, discPct:qDiscPct, discScope:JSON.parse(JSON.stringify(qDiscScope)), premApproved:qPremApproved,
@@ -27157,6 +27181,7 @@ function restoreFullQuotationState(state){
   // (called lazily on first Stage-2 visit this session, see goStage()) never touches these fields, so
   // setting them here before that lazy init runs is sufficient — no other change needed.
   fqLocked=!!state.fqLocked; fqSentStatus=state.fqSentStatus||'';
+  qSentAt=state.sentAt||''; fqSentAt=state.fqSentAt||'';
   // ── Stage 2 must be re-initialised for THIS quotation ────────────────────
   // fqInitialized was only ever reset by initQuotation(), which opening a saved
   // quotation never calls. So after viewing Stage 2 on quotation A, opening
