@@ -4923,6 +4923,24 @@ was the fix; documenting it was not. Restore path if ever needed: `rollback_pin_
 `git revert 6259b26` + `supaMigrateUsers()` (values come back from the Sheet, so no secret is
 stored — this repo is public).
 
+## ⚠ OPEN CONCERN — carcass margin is measured against a price that is not charged
+`_fabCarcassMargin` (~`index.html:30002`) computes margin as
+`(CARCASS_PRICES[type] - unitCost) * qty` — the **list** price. Since 2026-08-06 a Subsidiary
+quotation can exclude materials and hardware (`_carcassUnitPrice` subtracts their template value),
+so on those the revenue actually billed is far lower — Kitchen Base bills ₱1,134.35 of a ₱6,237
+list. The margin therefore counts revenue that was never charged and **overstates profit**.
+
+**Cost Report only** — it does not touch what the client pays. Raised by Rommel 2026-08-08 and
+deliberately not fixed the same night: the revenue side is a one-line change, but the **cost** side
+needs a decision first. `unitCost` is built from the full cabinet template, so simply swapping in
+`_carcassUnitPrice` would leave materials and hardware in the cost while removing them from the
+revenue, and understate margin instead. Both sides have to move together, and which cost is the
+right one to keep is a business question: are transferred materials a cost to this company at all,
+or do they belong wholly to the receiving subsidiary?
+
+Related, same area and also unresolved: **item 1+2** below (subsidiary material billing differing
+between BOM and cutting-list mode).
+
 ## NEXT SESSION
 Nothing queued for building. See the two habits above first, then Rommel's list.
 
