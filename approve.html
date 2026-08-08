@@ -3,7 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f172a">
+<meta name="theme-color" content="#1e3a5f">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icons/icon-192.png">
+<!-- iOS ignores the manifest icons; this is what it uses on the home screen, and on iOS the app
+     must BE on the home screen before it can receive a push at all (Safari 16.4+). -->
+<link rel="apple-touch-icon" href="./icons/icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Approvals">
 <title>Modcraft — Approve</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
@@ -83,7 +91,12 @@ var SUPA_URL='https://nkpekroogqsmfilypowd.supabase.co';
 var SUPA_ANON_KEY='sb_publishable_jpp6ZiFup3v0VVRJtjCOTQ_bF-SEpt4';
 var supa=supabase.createClient(SUPA_URL,SUPA_ANON_KEY,{auth:{persistSession:true,detectSessionInUrl:true,flowType:'pkce'}});
 
-var ME=null, MYROLE='', REQ=null, DEC=null, COUNTER=null, BUSY=false;
+/* Public half of the VAPID pair. Safe in the page — it is what the browser needs to create a
+   subscription. The private half signs the push and lives only in a Supabase Edge Function
+   secret; if it ever appears in this repo it must be regenerated, because this repo is public. */
+var VAPID_PUBLIC_KEY='BOyJ46OOn0HByBwCXgadNFms0-qH_rudJkUL1U7I08WEabPcL653SzxeZ3g3bGNF8OWo9wGoPAU8HMupYAeo9WU';
+
+var ME=null, MYROLE='', REQ=null, DEC=null, COUNTER=null, BUSY=false, SWREG=null;
 var el=function(id){return document.getElementById(id);};
 var esc=function(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});};
@@ -158,7 +171,104 @@ function authoriseAction(what){
   return Promise.resolve(true);   // Phase 1b replaces this body. Callers already await it.
 }
 
+/* ── Push notifications ─────────────────────────────────────────────────────────────────────
+   Registered against approve.html specifically, NOT the whole site. sw.js has no fetch handler
+   and must never gain one (see the note in that file), and the narrow scope means that even if
+   the rule were broken the main app could not be served stale by it.
+   Everything here degrades quietly: a browser without push, a blocked permission, or a failed
+   subscribe leaves the surface fully usable. Push is an improvement on the notification, not
+   the way in. */
+function pushSupported(){
+  return ('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window);
+}
+function isStandalone(){
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone===true;
+}
+function isIOS(){
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+         (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+}
+function _swInit(){
+  if(!('serviceWorker' in navigator)) return Promise.resolve(null);
+  return navigator.serviceWorker.register('./sw.js',{scope:'./approve.html'})
+    .then(function(reg){ SWREG=reg; return reg; })
+    .catch(function(e){ console.warn('[push] worker did not register',e); return null; });
+}
+function _urlB64ToUint8(s){
+  var pad='='.repeat((4-s.length%4)%4);
+  var b=atob((s+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  var out=new Uint8Array(b.length);
+  for(var i=0;i<b.length;i++) out[i]=b.charCodeAt(i);
+  return out;
+}
+function pushCardHtml(){
+  if(!pushSupported()){
+    // iOS only exposes push once the app is on the home screen. Say so, rather than showing a
+    // button that cannot work.
+    if(isIOS()&&!isStandalone())
+      return '<div class="card"><div class="lbl">Notifications</div>'
+        +'<div class="muted">To get alerts on iPhone, add this to your Home Screen first — '
+        +'tap Share, then <b>Add to Home Screen</b>, and open it from there.</div></div>';
+    return '';
+  }
+  var p=(window.Notification&&Notification.permission)||'default';
+  if(p==='granted') return '<div class="card" id="push-card"><div class="lbl">Notifications</div>'
+    +'<div class="muted" id="push-msg">Checking…</div></div>';
+  if(p==='denied') return '<div class="card"><div class="lbl">Notifications</div>'
+    +'<div class="muted">Blocked for this site. Turn them back on in your browser settings for '
+    +'this page if you want alerts.</div></div>';
+  return '<div class="card" id="push-card"><div class="lbl">Notifications</div>'
+    +'<div class="muted" style="margin-bottom:8px">Get told the moment a request needs you, '
+    +'instead of checking.</div>'
+    +'<button class="btn btn-go" id="push-on">Turn on notifications</button></div>';
+}
+function wirePushCard(){
+  var btn=el('push-on');
+  if(btn) btn.onclick=function(){ btn.disabled=true; enablePush(); };
+  if(Notification.permission==='granted') refreshPushState();
+}
+function refreshPushState(){
+  var m=el('push-msg'); if(!m) return;
+  _swInit().then(function(reg){
+    if(!reg){ m.textContent='Not available on this browser.'; return; }
+    return reg.pushManager.getSubscription().then(function(sub){
+      if(sub){ m.innerHTML='<span style="color:var(--teal)">On</span> — this device will be alerted.'; return; }
+      m.innerHTML='Allowed, but this device is not subscribed yet. '
+        +'<button class="btn" id="push-on2" style="min-height:44px;margin-top:8px">Subscribe</button>';
+      var b=el('push-on2'); if(b) b.onclick=function(){ b.disabled=true; enablePush(); };
+    });
+  });
+}
+function enablePush(){
+  if(!pushSupported()) return;
+  Notification.requestPermission().then(function(p){
+    if(p!=='granted'){ alert('Notifications were not allowed, so nothing will be sent to this device.'); return; }
+    return _swInit().then(function(reg){
+      if(!reg) throw new Error('no service worker');
+      return reg.pushManager.subscribe({userVisibleOnly:true,
+        applicationServerKey:_urlB64ToUint8(VAPID_PUBLIC_KEY)});
+    }).then(function(sub){
+      var j=sub.toJSON();
+      // One row per endpoint. Upserting on endpoint means re-subscribing the same device
+      // replaces its row instead of accumulating duplicates that would each get a copy.
+      return supa.from('push_subscriptions').upsert({
+        endpoint:j.endpoint, p256dh:j.keys&&j.keys.p256dh, auth:j.keys&&j.keys.auth,
+        user_email:ME.trim().toLowerCase(),
+        user_agent:(navigator.userAgent||'').slice(0,300)
+      },{onConflict:'endpoint'});
+    }).then(function(r){
+      if(r&&r.error){ alert('Could not save this device. '+r.error.message); return; }
+      var c=el('push-card');
+      if(c) c.innerHTML='<div class="lbl">Notifications</div>'
+        +'<div class="muted"><span style="color:var(--teal)">On</span> — this device will be alerted.</div>';
+    });
+  }).catch(function(e){ console.warn('[push] enable failed',e); alert('Could not turn on notifications. '+e); });
+}
+
 function boot(){
+  // Register early and independently of sign-in: a device that already granted permission should
+  // keep receiving pushes without waiting for anything here to succeed.
+  _swInit();
   supa.auth.getSession().then(function(r){
     var s=r&&r.data&&r.data.session;
     if(!s){ renderSignIn(); return; }
@@ -186,9 +296,49 @@ function renderSignIn(){
 }
 function fail(msg){ el('root').innerHTML='<div class="err">'+esc(msg)+'</div>'; }
 
+/* Installed from the home screen there is no ?r= — the app just opens. Showing "no request in
+   the link" there would make the installed app useless, so with no id it lists what is actually
+   waiting on you. Also the natural landing place after tapping a notification for a request that
+   has since been actioned by someone else. */
+function loadList(){
+  el('root').innerHTML='<div class="card"><div class="lbl">Waiting on you</div>'
+    +'<div class="sk"></div><div class="sk"></div></div>';
+  supa.from('approval_requests')
+    .select('id,req_type,serial,client_name,company,from_email,note,created_at,payload')
+    .eq('status','pending').ilike('to_email',ME.trim())
+    .order('created_at',{ascending:true}).limit(30)
+    .then(function(r){
+      if(r.error){ fail('Could not load your approvals. '+r.error.message); return; }
+      var rows=r.data||[];
+      var h='<div class="card"><div class="lbl">Waiting on you</div>';
+      if(!rows.length){
+        h+='<div style="padding:6px 0"><div style="font-size:16px;font-weight:600">Nothing waiting</div>'
+          +'<div class="muted" style="margin-top:4px">You have no approval requests right now.</div></div>';
+      } else {
+        h+='<div class="muted" style="margin-bottom:8px">'+rows.length+' request'+(rows.length===1?'':'s')+'</div>';
+        rows.forEach(function(x){
+          var lbl=TYPE_LABEL[x.req_type]||'Request';
+          if(x.req_type==='signature'&&x.payload&&x.payload.sigSlot)
+            lbl+=' — '+(x.payload.sigSlot==='noted'?'Noted by':'Checked by');
+          var age=Math.round((Date.now()-new Date(x.created_at).getTime())/3600000);
+          h+='<a href="?r='+encodeURIComponent(x.id)+'" style="display:block;text-decoration:none;color:inherit;'
+            +'border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;min-height:44px">'
+            +'<span class="pill p-navy">'+esc(lbl)+'</span> '
+            +'<span class="pill p-amber">'+(age<1?'just now':age+'h')+'</span>'
+            +'<div style="font-weight:600;margin-top:8px">'+esc(x.client_name||'—')+'</div>'
+            +'<div class="muted">'+esc(x.serial||'')+' · from '+esc((x.payload&&x.payload.from)||x.from_email||'')+'</div>'
+            +(x.note?'<div class="muted" style="margin-top:4px">'+esc(x.note)+'</div>':'')
+            +'</a>';
+        });
+      }
+      h+='</div>';
+      el('root').innerHTML=h+pushCardHtml();
+      wirePushCard();
+    });
+}
 function loadRequest(){
   var id=reqIdFromUrl();
-  if(!id){ fail('No request in the link. Open the link from the notification.'); return; }
+  if(!id){ loadList(); return; }
   supa.from('approval_requests').select('*').eq('id',id).limit(1).then(function(r){
     if(r.error){ fail('Could not read that request. '+r.error.message); return; }
     REQ=r.data&&r.data[0];
@@ -298,7 +448,8 @@ function render(){
       +(REQ.actioned_by?' by '+esc(REQ.actioned_by):'')+'. Nothing to do.</div></div>';
   }
 
-  el('root').innerHTML=h;
+  el('root').innerHTML=h+pushCardHtml();
+  wirePushCard();
 
   var cs=el('cs');
   if(cs){ cs.oninput=onCounter; onCounter(); }
