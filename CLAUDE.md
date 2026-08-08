@@ -4541,7 +4541,7 @@ actual schedule, and verified to track it in both directions.
 
 ## What was changed on 2026-08-08 (session 3 — the stage ladder, and the drift it exposed)
 
-Thirteen commits, `bbef417`..`56c3036`, all pushed and confirmed SERVED. This session started as
+Sixteen commits, `bbef417`..`5bbd618`, all pushed and confirmed SERVED. This session started as
 "map the stages so they're clear for everyone" and turned into finding why the numbers never
 matched Rommel's impression. **Almost every fix below was found by querying live data or driving
 the code — none by reading it.**
@@ -4684,6 +4684,37 @@ time. Also told her the two things the app cannot do for anyone (see the standin
 - `_stageFlags` / status filter / funnel are now all built from `STATUS_LADDER` rather than
   hand-listed, which is how the filter came to still be offering 'Closed'.
 
+### 10. The lock-date repair, finished (`b10f9e2`, `b31081d`, `5bbd618`)
+Three more rounds after the ladder, all triggered by Rommel looking at the Initial Locked column
+and saying it was still empty. Each round found a different fault, and the third was mine twice
+over.
+
+**Round 1 — it was hidden and it failed silently (`b10f9e2`).** The restore only appeared after
+opening Settings and running the check, so nothing ever said it was waiting; and when it could not
+read it rendered NOTHING, which is indistinguishable from "all fine". It now reports on the Project
+List itself and says what it could not do. Verified against his own account before claiming the
+path worked: the view returns 156 rows to him with 24 needing a date, and he can read all 98 lock
+entries in the log.
+
+**Round 2 — most of them were never lost (`b31081d`).** *"many of the initial locked are empty even
+the recent one."* Checked rather than assumed: QT-W00000089 has 2026-08-08 07:29, 87 has 03:24, 85
+has 00:25, 79 has 02:04 — present in BOTH the Supabase row and the quotation's own state. **The
+date exists; it never reached column N of the Quotations SHEET**, which is what the Project List
+reads. A different fault from the destroyed ones and a far easier one — nothing has to be worked
+out. The check now compares column N against each quotation's saved state (it already reads both
+sides) and offers to copy it across, **offered first and kept separate** from the log recovery
+because this one is certain and that one is a reconstruction.
+
+**Round 3 — the repair worked and the banner said otherwise (`5bbd618`).** The log restore ran
+correctly — 12 quotations, dates 73 → 85, recorded in the activity log — but the banner went on
+asking for it, which reads exactly like failure. **I had fixed this for the status banner earlier
+in the session and then wrote two more repairs without applying it.** All three now call one
+`_clearDataBanners()`. Doing it per-fixer is how one of three forgets.
+
+**Where the Initial Locked column stands now:** 85 quotations carry their date. 12 remain blank —
+the June ones that predate the activity log. Those keep a dash deliberately; inventing a date would
+be worse than an honest gap.
+
 ### ⚠ TWO THINGS CODE CANNOT FIX — tell the team, not the developer
 - **A job only counts as WON when somebody presses Client Approve.** It has been pressed twice ever.
 - **A response time only exists when the arrival source (Walk-in / Email order) is picked.**
@@ -4702,6 +4733,12 @@ Until those become habits the dashboard will keep reading near-zero, and that is
   `created`. When a measurement is impossible rather than surprising, suspect the rig.
 - **Play the rule back as a table before building.** Rommel corrected the ladder twice mid-design
   (the FQ lock rung, and revision as a stage); both would have shipped wrong otherwise.
+- **"It still isn't working" is often the REPORT, not the repair.** Twice a fix had genuinely
+  worked and a stale banner said otherwise. Check whether the underlying data moved before touching
+  the fix — the activity log and a row count answer it in one query.
+- **When a repair is added, ask what it has to clear.** Three separate repairs in one session, and
+  the same tidy-up had to be written into each; the third one forgot, and looked like a failure.
+  One shared function, not three careful authors.
 
 ---
 
@@ -4711,8 +4748,9 @@ Until those become habits the dashboard will keep reading near-zero, and that is
 The stage ladder as agreed · sending as a rung · FQ Locked · revision visible · Closed removed ·
 ageing on last-update with a 30-day archive · declined hidden after 30 days · lock timestamps no
 longer destroyed on reopen · the two actions that never saved · stage derived rather than trusted ·
-in-app drift detection and repair · drafts out of the win rate · the response clock ending per
-arrival source · client-facing carcass names · discard a draft · Lami taught all of it.
+in-app drift detection and repair (statuses, lost lock dates, and dates that never reached the
+Sheet) · every repair clearing its own banner · drafts out of the win rate · the response clock
+ending per arrival source · client-facing carcass names · discard a draft · Lami taught all of it.
 
 ## Cleared 2026-08-08 (session 2)
 Fallback Checked-by **and** Noted-by · the "repeating" signature request (it was `sigSlot` never
@@ -4779,11 +4817,16 @@ and no amount of code fixes it:
 Do NOT respond to "the dashboard shows no wins" by changing the KPI. Check whether the button was
 pressed first — that has already been the answer once.
 
-## Run these once, in the app (Rommel)
-- **Settings → Company & DB → Check Project List.** Two offers: correct the stale statuses, and
-  restore the lock dates lost to the reopen bug. Both write the Sheet, the state and Supabase
-  together. He ran the status correction on 2026-08-08 and it came back clean (71 checked); the
-  lock-date restore had not been run yet at session end.
+## Run once, in the app (Rommel) — ONE STEP LEFT
+**Settings → Company & DB → Check Project List.** As of session end:
+- ✅ **Statuses corrected** — ran clean afterwards (71 checked, nothing to fix).
+- ✅ **12 lock dates restored** from the activity log — 73 → 85 quotations now carry one.
+- ⏳ **"Fill in N dates" not yet run.** This is the one that fixes the empty Initial Locked column
+  he was looking at — it copies dates the quotations ALREADY have into the Sheet column. Certain,
+  no reconstruction. Shipped after his last run, so it has not been pressed.
+
+The 12 that stay blank afterwards are the June quotations predating the activity log. That is
+correct — leave them.
 
 ## Rommel's to do
 - **Tell the WCL and MSSI staff to try the signature flow** — cleared 2026-08-08, see above. Expect
