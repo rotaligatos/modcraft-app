@@ -4374,6 +4374,23 @@ var qCancelled=false, qCancelledAt='', qCancelReason=''; // client declined to p
 // ── Utility ────────────────────────────────────────────────────────────────
 // ── Serial counters — loaded from Settings sheet at login ─────────────────
 var serialCounters = { W: 1, C: 1, M: 1 };  // next available number per prefix
+// The real counters live in the Settings sheet and load asynchronously. Until they arrive the
+// object above is still its default, so a preview built from it reads "QT-W00000001" — a
+// confident number belonging to nobody, shown to an estimator as if it were theirs. This flag
+// says whether the counters are actually KNOWN, so the preview can decline to guess.
+// Committed serials are unaffected either way: the number that is finally claimed comes from the
+// atomic claim service, not from this preview.
+var serialCountersLoaded = false;
+// What the serial tag should read. A draft whose counter is not yet known shows that it is still
+// being worked out rather than a wrong number; everything else shows the real serial.
+function _serialTagText(){
+  if(qSerialCommitted||serialCountersLoaded||!currentUserCompany) return qSerial;
+  return 'QT-'+_serialPrefix()+' — assigning…';
+}
+function _refreshSerialTag(){
+  var qs=(typeof el==='function')&&el('q-serial');
+  if(qs) qs.textContent=_serialTagText();
+}
 
 // Prefix follows the QUOTATION's own company (Direct → the staff member's own
 // company; Subsidiary → whichever company is selected in Client Information),
@@ -4436,6 +4453,7 @@ function _saveSerialCounters(){
       M: Math.max(serialCounters.M||1, stored.M||1)
     };
     serialCounters.W=merged.W; serialCounters.C=merged.C; serialCounters.M=merged.M;
+    serialCountersLoaded=true;   // this read answered the same question the load does
     var payload=JSON.stringify(merged);
     if(rowIdx>0){
       sheetsUpdate('Settings!A'+rowIdx+':B'+rowIdx,[['SERIAL_COUNTERS',payload]]).catch(function(){});
@@ -4444,7 +4462,7 @@ function _saveSerialCounters(){
     }
   }).catch(function(){});
 }
-function _loadSerialCounters(cb){
+function _loadSerialCounters(cb,_retried){
   if(!gToken){if(cb)cb();return;}
   sheetsGet('Settings!A:B').then(function(d){
     var vals=d.values||[];
@@ -4454,8 +4472,19 @@ function _loadSerialCounters(cb){
         break;
       }
     }
+    // Resolved — the counters are now known. A missing SERIAL_COUNTERS row is a real answer
+    // (nothing issued yet), not an unknown, so it counts as loaded too.
+    serialCountersLoaded=true;
     if(cb)cb();
-  }).catch(function(){if(cb)cb();});
+  }).catch(function(){
+    // A failed READ leaves the counters genuinely unknown. Retry once rather than showing a
+    // number straight away; if it fails again fall back to showing the preview, because a
+    // permanent "assigning…" would be worse than an approximate number the claim service
+    // corrects at save anyway.
+    if(!_retried){ setTimeout(function(){ _loadSerialCounters(cb,true); },2000); return; }
+    serialCountersLoaded=true;
+    if(cb)cb();
+  });
 }
 function resetSerialCounter(prefix, newVal){
   // Admin only — called from Settings → Company & DB
@@ -5759,7 +5788,7 @@ function initQuotation() {
   var qdl=el('q-drive-links'); if(qdl) qdl.innerHTML='';
   var fqdl=el('fq-drive-links'); if(fqdl) fqdl.innerHTML='';
   renderOptionBar();
-  el("q-serial").textContent=qSerial;
+  _refreshSerialTag();
   qSourceOrderId=null;
   // Cleared before _updateOrderBadge, which re-renders the source row — otherwise a
   // new quotation would inherit the previous job's clock, the same way qRevisedFrom
@@ -5987,7 +6016,7 @@ function _onQuotationCompanyMightChange(){
     _lastAcceptedClType=newType; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
     qSerial=_peekNextSerial();
     _syncBaseSerialToPreview();
-    var qs=el('q-serial'); if(qs) qs.textContent=qSerial;
+    _refreshSerialTag();
     return;
   }
 
@@ -9138,7 +9167,7 @@ function confirmRevise() {
   qDriveLinks={}; qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
   var qdl=el('q-drive-links'); if(qdl) qdl.innerHTML='';
   var fqdl=el('fq-drive-links'); if(fqdl) fqdl.innerHTML='';
-  el("q-serial").textContent=qSerial;
+  _refreshSerialTag();
   el("q-status").textContent="Draft (Revised)"; el("q-status").className="pill pill-amber";
   el("revise-btn").style.display="none";
   el("s2btn").style.opacity=".4"; el("s2btn").style.cursor="not-allowed";
@@ -18313,7 +18342,7 @@ function removeOption(optId){
     var remaining=qOptionsList.filter(function(o){return o.status!=='archived';});
     if(remaining.length===1){
       qOptionsList=[]; qBaseSerial=''; qActiveOptionId=0;
-      var qs=el('q-serial'); if(qs) qs.textContent=qSerial;
+      _refreshSerialTag();
     }
     logActivity(opt.label+' removed.');
     gSaveQuotation(); renderOptionBar();
@@ -18871,7 +18900,7 @@ function _applyRevisionBump(){
   qRevisedFrom=old;
   qSerialCommitted=false;          // the new number still has to be written
   if(qBaseSerial) qBaseSerial=_serialStem(qBaseSerial);
-  var s=el('q-serial'); if(s) s.textContent=qSerial;
+  _refreshSerialTag();
   var b=el('banner-revised');
   if(b){ b.style.display='inline'; b.textContent='Revised from: '+old; }
   if(typeof _updateQStatusBadge==='function') _updateQStatusBadge();
@@ -22969,7 +22998,7 @@ function gShowApp(){
     if(!qSerialCommitted){
       qSerial=_peekNextSerial();
       _syncBaseSerialToPreview();
-      var qs=el('q-serial'); if(qs) qs.textContent=qSerial;
+      _refreshSerialTag();
     }
   });
   gLoadFollowed(function(){renderDashFollowed();renderDirectory();}); // restore followed quotations per user
