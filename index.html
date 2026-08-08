@@ -12868,7 +12868,12 @@ function submitApprovalRequest(){
 
   // Persist — toast fires ONLY after confirmed save; error shown if save fails
   gSaveApprovalRequest(req, function(ok){
-    if(ok){ showToast('Request sent to '+appr.name+'. They will see it in their Approvals page.'); }
+    if(ok){
+      showToast('Request sent to '+appr.name+'. They will see it in their Approvals page.');
+      // Only after the row exists: the Edge Function reads the request back by id, so pushing
+      // before the save could land on nothing.
+      _pushApprovalRequest(reqId);
+    }
     else   { showToast('⚠ Request could not be saved — check your Sheets access. Contact Admin.'); _clearPendingBadge(type); }
   });
 }
@@ -15606,7 +15611,10 @@ function _sendSignatureRequest(slot,auto,serialOverride,clientOverride,checkedSi
     // normal case, since they act from the Approvals page.
     notedRequired:(slot==='checked'?_notedRequired():undefined)};
   NOTIFS.unshift(Object.assign({id:NOTIFS.length+1,reqId:id},req));
-  if(typeof gSaveApprovalRequest==='function') gSaveApprovalRequest(req);
+  // Push only once the row is actually stored — the Edge Function reads the request back by id,
+  // so firing alongside an async save would race it and land on nothing.
+  if(typeof gSaveApprovalRequest==='function')
+    gSaveApprovalRequest(req, function(){ _pushApprovalRequest(id); });
   gSendMessage(apprObj.email,apprObj.name,
     who+' is requesting your signature — '+_sigLabel(slot)+' on '+serial+' for '+client
       +'. '+_apprLink(id),'normal',
@@ -22062,6 +22070,28 @@ function supaConnect(){
 // True once a Supabase session is restored/established — used to show a one-time
 // "Connect" affordance only when needed.
 function supaConnected(){ return !!supaSession; }
+// Wake the approver's phone. Fire-and-forget on purpose: a request must be raised and saved
+// whether or not a notification can be delivered, so nothing here is allowed to block or throw
+// into the caller. The Edge Function takes only the id -- recipient and wording come from the
+// stored row, so this cannot be used to notify someone about something that is not theirs.
+// Silently does nothing when the session is not connected, which is the same condition under
+// which the rest of the Supabase path stands down.
+function _pushApprovalRequest(reqId){
+  try{
+    if(!reqId||!supaReady()) return;
+    var tok=supaSession&&supaSession.access_token; if(!tok) return;
+    fetch(SUPA_URL+'/functions/v1/send-approval-push',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
+      body:JSON.stringify({reqId:reqId})
+    }).then(function(r){ return r.json().catch(function(){ return {}; }); })
+      .then(function(j){
+        if(j&&j.sent>0) console.log('[push] notified '+j.sent+' device(s) for '+reqId);
+        else console.log('[push] nothing sent for '+reqId,j&&(j.skipped||j.error||''));
+      })
+      .catch(function(e){ console.warn('[push] send failed',e); });
+  }catch(e){ console.warn('[push] send threw',e); }
+}
 // Small, corner-anchored window features — makes the popup read as an
 // unobtrusive toast-style notification rather than a big centered dialog.
 // Still wide/tall enough to comfortably show Google's own consent screen on
