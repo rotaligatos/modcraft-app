@@ -12704,6 +12704,10 @@ function _persistApprovedFieldToQuotation(notif,callback){
   else if(type==='premium') mutate=ctx==='fq'?function(s){ s.fqPremApproved=true; }:function(s){ s.premApproved=true; };
   // A signature is not stage-specific — it signs the issued document, not a stage.
   else if(type==='signature'&&notif.sigSlot&&notif.sigValue) mutate=function(s){ s.signatures=s.signatures||{}; s.signatures[notif.sigSlot]=notif.sigValue; };
+  // Restoring a lock timestamp the old restore bug destroyed. Writing the STATE is what matters —
+  // the ladder and the response clock read from there, and without it the next save would simply
+  // wipe the sheet cell again.
+  else if(type==='lockts'&&notif.lockedAt) mutate=function(s){ if(!s.initLockedAt) s.initLockedAt=notif.lockedAt; };
   else if(type==='unlock') mutate=ctx==='fq'
     ?function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqSentAt=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; }
     :function(s){ s.locked=false; s.sentStatus=''; s.sentAt=''; };
@@ -24004,7 +24008,28 @@ function _allQuotationStates(cb){
   }
   _statesFromSheet(function(o){ cb(o,'Google Sheets'); });
 }
-// The comparison itself, separated so the manual check and the automatic one can never disagree.
+// Lock timestamps destroyed by the restore bug (fixed 2026-08-08: restoreFullQuotationState never
+// read initLockedAt back, so reopening a locked quotation and saving wrote emptiness over it in
+// both stores). The activity log is append-only and cannot be edited, so "Quotation locked." in it
+// is the true moment — that is what these are recovered from. Nothing is invented: a quotation
+// with no such entry is left alone and reported.
+function _findLostLockTimes(cb){
+  if(!(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady())){ cb(null); return; }
+  supaGetStageFlags().then(function(flags){
+    if(!flags){ cb(null); return; }
+    var need=Object.keys(flags).filter(function(s){ return flags[s].locked&&!flags[s].initLockedAt; });
+    if(!need.length){ cb([]); return; }
+    supa.from('activity_log').select('serial,at,action').in('serial',need)
+      .ilike('action','Quotation locked%').order('at',{ascending:true})
+      .then(function(r){
+        if(r.error||!r.data){ cb(null); return; }
+        var first={};
+        r.data.forEach(function(a){ if(a.serial&&!first[a.serial]) first[a.serial]=a.at; });
+        cb(need.filter(function(s){ return first[s]; }).map(function(s){ return {serial:s, lockedAt:first[s]}; }),
+           need.length);
+      });
+  });
+}
 // cb(findings, checkedCount, skippedCount, source) — or cb(null) if the sheet could not be read.
 function _findStaleStatuses(cb){
   if(!gToken){ cb(null); return; }
@@ -24064,8 +24089,8 @@ function checkProjectListData(){
         +'</div>';
       if(!findings.length){
         h+='<div style="padding:16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
-          +'Every Status matches what the quotation actually is. Nothing to fix.</div></div>';
-        box.innerHTML=h; return;
+          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-locks"></div></div>';
+        box.innerHTML=h; _reportLostLockTimes(); return;
       }
       h+='<div style="padding:12px 16px;background:var(--wash-amber);font-size:13px">'
         +'<b>'+findings.length+'</b> quotation'+(findings.length===1?'':'s')+' show the wrong stage in the Project List. '
@@ -24086,9 +24111,60 @@ function checkProjectListData(){
       h+='<div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
         +'<button class="btn btn-primary" onclick="fixProjectListStatuses()" style="font-size:12px"><i class="ti ti-wand"></i> Correct all '+findings.length+'</button>'
         +'<span style="font-size:12px;color:var(--text2)">Rewrites only the Status column. Nothing else on the quotation is touched.</span>'
-        +'</div></div>';
+        +'</div><div id="dbcheck-locks"></div></div>';
       box.innerHTML=h;
+      _reportLostLockTimes();
     }
+  });
+}
+var _lostLockFindings=[];
+function _reportLostLockTimes(){
+  var host=el('dbcheck-locks'); if(!host) return;
+  _findLostLockTimes(function(list,totalMissing){
+    if(!list||!list.length) return;          // not connected, or nothing recoverable
+    _lostLockFindings=list;
+    var unrecoverable=(totalMissing||list.length)-list.length;
+    host.innerHTML='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
+      +'<div style="font-size:13px;margin-bottom:8px"><b>'+list.length+'</b> locked quotation'+(list.length===1?' has':'s have')
+      +' no <b>Initial Locked</b> date. The true time is in the activity log and can be put back.'
+      +(unrecoverable>0?' <span style="color:var(--text2)">'+unrecoverable+' predate the log and cannot be recovered — those keep a dash.</span>':'')
+      +'</div><button class="btn btn-primary" onclick="fixLostLockTimes()" style="font-size:12px">'
+      +'<i class="ti ti-clock-plus"></i> Restore '+list.length+' lock date'+(list.length===1?'':'s')+'</button></div>';
+  });
+}
+function fixLostLockTimes(){
+  var list=_lostLockFindings.slice(); if(!list.length) return;
+  _confirm('Put back the Initial Locked date on '+list.length+' quotation'+(list.length===1?'':'s')+'?\n\n'
+    +'Each date comes from that quotation\'s own "Quotation locked" entry in the activity log, which cannot be edited. Nothing else is changed.',
+  function(){
+    var host=el('dbcheck-locks');
+    if(host) host.innerHTML='<div style="padding:12px 16px">Restoring '+list.length+'…</div>';
+    sheetsGet('Quotations!A:A').then(function(d){
+      var vals=(d&&d.values)||[], rowOf={};
+      for(var i=1;i<vals.length;i++) if(vals[i][0]) rowOf[vals[i][0]]=i+1;
+      var done=0, failed=0;
+      (function next(i){
+        if(i>=list.length){
+          logActivity('Initial Locked dates restored from the activity log — '+done+' quotation'+(done===1?'':'s')+(failed?', '+failed+' failed':'')+'.');
+          if(host) host.innerHTML='<div style="padding:12px 16px;color:var(--teal)"><i class="ti ti-circle-check"></i> Restored <b>'+done+'</b>'
+            +(failed?', <b>'+failed+'</b> could not be written':'')+'.</div>';
+          _stageFlags=null; dirData=[];
+          if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
+          return;
+        }
+        var f=list[i];
+        // The state first — it is what the ladder and the clock read, and what a later save
+        // would otherwise write back over the sheet cell.
+        _persistApprovedFieldToQuotation({serial:f.serial,type:'lockts',lockedAt:f.lockedAt},function(ok){
+          if(!ok) failed++; else done++;
+          var r=rowOf[f.serial];
+          if(ok&&r) sheetsUpdate('Quotations!N'+r,[[f.lockedAt]]).catch(function(){});
+          if(ok){ try{ supa.from('quotations').update({initial_locked_at:f.lockedAt}).eq('serial',f.serial)
+            .then(function(){}); }catch(e){} }
+          setTimeout(function(){ next(i+1); },150);
+        });
+      })(0);
+    }).catch(function(){ if(host) host.innerHTML='<div style="padding:12px 16px;color:var(--coral)">Could not read the Quotations sheet.</div>'; });
   });
 }
 function fixProjectListStatuses(){
@@ -27422,6 +27498,17 @@ function restoreFullQuotationState(state){
   // setting them here before that lazy init runs is sufficient — no other change needed.
   fqLocked=!!state.fqLocked; fqSentStatus=state.fqSentStatus||'';
   qSentAt=state.sentAt||''; fqSentAt=state.fqSentAt||'';
+  // The lifecycle timestamps were SAVED and reset by initQuotation, but never read back — so
+  // reopening a locked quotation left them empty, and the next save wrote that emptiness over the
+  // real values in both the row and the state. That is why 12 quotations locked in the last ten
+  // days have a "Quotation locked" entry in the activity log and no Initial Locked date.
+  // Not cosmetic: initLockedAt ends the response clock for a walk-in job and drives the
+  // "IQ Under Revision" branch of the ladder; finalLockedAt does the same on the Final side; both
+  // feed the follow-up clock's anchor.
+  qInitLockedAt=state.initLockedAt||'';
+  qInitApprovedAt=state.initApprovedAt||'';
+  fqLockedAt=state.finalLockedAt||'';
+  qClosedAt=state.closedAt||'';
   // ── Stage 2 must be re-initialised for THIS quotation ────────────────────
   // fqInitialized was only ever reset by initQuotation(), which opening a saved
   // quotation never calls. So after viewing Stage 2 on quotation A, opening
