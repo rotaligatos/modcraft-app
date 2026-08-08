@@ -12838,8 +12838,32 @@ function cancelApprovalRequest(reqId, type){
 }
 
 // Save approval request to Settings sheet
+// Every action path (sign, approve, decline, counter, cancel, override-approved) saves only the
+// fields it changed — but BOTH stores overwrite wholesale: the Settings row is JSON.stringify(req)
+// and the Supabase upsert replaces payload. So a partial save silently DROPS everything it did not
+// mention. That is how to_email came back null on every actioned signature request, leaving the
+// stored record with no assigned signatory. Merge over the in-memory record first, so what reaches
+// either store is always complete.
+function _apprMergeWithKnown(req){
+  if(!req||!req.id) return req;
+  for(var i=0;i<NOTIFS.length;i++){
+    if(NOTIFS[i].reqId!==req.id) continue;
+    var base=NOTIFS[i], out={}, keys=['type','sigSlot','notedRequired','serial','client','company',
+      'from','fromEmail','approverEmail','approver','msg','note','date','status','amount',
+      'reqDisc','counterDisc','cfValues','ctx','by'];
+    for(var k=0;k<keys.length;k++){
+      var v=base[keys[k]];
+      if(v!==undefined&&v!==null&&v!=='') out[keys[k]]=v;
+    }
+    for(var p in req){ if(req[p]!==undefined) out[p]=req[p]; }  // the caller's values always win
+    out.id=req.id;
+    return out;
+  }
+  return req;
+}
 function gSaveApprovalRequest(req,cb){
   if(!gToken||!gUser){if(cb)cb(false);return;}
+  req=_apprMergeWithKnown(req);
   var key='APPREQ_'+req.id;
   var row=[key,JSON.stringify(req),new Date().toISOString()];
   sheetsGet('Settings!A:A').then(function(d){
@@ -12852,6 +12876,14 @@ function gSaveApprovalRequest(req,cb){
 // Load all approval requests from Settings sheet and merge into NOTIFS
 // Shared by both the Supabase and Sheets read paths so they can never drift —
 // same merge-into-NOTIFS logic regardless of where the request rows came from.
+// Requests stored before sigSlot was persisted have none. Recover it from the message the request
+// was created with ("Checked by signature requested on …") rather than leaving it undefined, which
+// is what stalls the flow. Checked by always goes first, so it is also the right default.
+function _apprSigSlot(req){
+  if(req.sigSlot) return req.sigSlot;
+  if(req.type!=='signature') return undefined;
+  return /noted/i.test(String(req.msg||'')) ? 'noted' : 'checked';
+}
 function _mergeApprovalReqsIntoNotifs(reqs){
   for(var idx=0;idx<reqs.length;idx++){
     var req=reqs[idx]; if(!req||!req.id) continue;
@@ -12876,6 +12908,8 @@ function _mergeApprovalReqsIntoNotifs(reqs){
           if(req.cfValues) NOTIFS[j].cfValues=req.cfValues;
           if(req.reqDisc)  NOTIFS[j].reqDisc=req.reqDisc;
           if(req.ctx)      NOTIFS[j].ctx=req.ctx;
+          if(!NOTIFS[j].sigSlot&&req.sigSlot) NOTIFS[j].sigSlot=req.sigSlot;
+          if(!NOTIFS[j].approverEmail&&req.approverEmail) NOTIFS[j].approverEmail=req.approverEmail;
         }
         found=true; break;
       }
@@ -12888,6 +12922,9 @@ function _mergeApprovalReqsIntoNotifs(reqs){
         msg:req.msg,note:req.note||'',
         date:req.date,status:req.status,company:req.company,
         approverEmail:req.approverEmail||'',cfValues:req.cfValues||null,
+        // Carried, not dropped: this push is a fixed field list, and anything missing from it is
+        // lost on every reload. sigSlot decides which signature the request is for.
+        sigSlot:_apprSigSlot(req),notedRequired:req.notedRequired,
         ctx:req.ctx||'s1',by:req.by||''});
     }
   }
@@ -12903,7 +12940,7 @@ function gLoadApprovalRequests(cb){
           company:row.company,fromEmail:row.from_email,approverEmail:row.to_email,
           note:row.note,counterDisc:row.counter_disc,status:row.status,by:row.actioned_by,
           from:p.from,msg:p.msg,amount:p.amount||0,reqDisc:p.reqDisc||0,cfValues:p.cfValues||null,
-          ctx:p.ctx||'s1',date:p.date};
+          ctx:p.ctx||'s1',date:p.date,sigSlot:p.sigSlot||null,notedRequired:p.notedRequired};
       });
       _mergeApprovalReqsIntoNotifs(reqs);
       if(cb)cb();
@@ -15047,7 +15084,11 @@ function _sendSignatureRequest(slot,auto,serialOverride,clientOverride){
     approverEmail:apprObj.email,approver:apprObj.email,
     msg:_sigLabel(slot)+' signature requested on '+serial+' for '+client+'.',
     note:'',date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
-    status:'pending',amount:(_pCalc&&_pCalc.grand)||0,ctx:(qStage===2?'fq':'s1')};
+    status:'pending',amount:(_pCalc&&_pCalc.grand)||0,ctx:(qStage===2?'fq':'s1'),
+    // Recorded now, while the quotation is open and its ex-VAT total is known. confirmSignature
+    // falls back to this when the signatory signs without that quotation loaded — which is the
+    // normal case, since they act from the Approvals page.
+    notedRequired:(slot==='checked'?_notedRequired():undefined)};
   NOTIFS.unshift(Object.assign({id:NOTIFS.length+1,reqId:id},req));
   if(typeof gSaveApprovalRequest==='function') gSaveApprovalRequest(req);
   gSendMessage(apprObj.email,apprObj.name,
@@ -22450,7 +22491,13 @@ function supaUpsertApprovalRequest(req){
     to_email:req.approverEmail||null,
     note:req.note||null,
     counter_disc:(req.counterDisc!=null?req.counterDisc:null),
-    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null},
+    // sigSlot decides WHICH signature this is. Without it a reloaded request carries
+    // sigSlot:undefined, so _sigPendingFor never matches (the bar says nothing was requested and
+    // the user asks again) and _persistApprovedFieldToQuotation builds no mutate (the signature is
+    // never written into the quotation). Both halves of "it keeps repeating but the system does
+    // not acknowledge it" — proven on QT-W00000085/70/M00000106, all approved, none with a
+    // checked signature on the state.
+    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null)},
     status:req.status||'pending',
     actioned_by:req.by||null
   };
