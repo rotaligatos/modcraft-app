@@ -10186,6 +10186,72 @@ function _ccfReadPCalc(){
     rawCost:_directCostFromPCalc(p)
   };
 }
+// ── Mobile approvals: the decision context carried on the request ──────────────────────────
+// An approver on a phone cannot recompute anything -- the pricing engine lives here, in the
+// requester's browser, and a second implementation on the phone would drift exactly the way
+// Stage 1 and Stage 2 do. So the outcomes are computed HERE, once, by the real engine, and
+// carried on the request.
+//
+// COUNTER_STEPS is a real sweep, not interpolation: discount lands on the selected buckets
+// after markup, then VAT, and a minimum charge can raise the floor -- so the curve is not
+// reliably straight. Measured at ~5.6ms per step on a 12-line quotation (117ms for the whole
+// sweep), which is imperceptible at submit, so there is no reason to gamble on linearity.
+var APPR_COUNTER_MAX=20;   // percent
+function _apprCounterTable(ctx){
+  var isFq=(ctx==='fq');
+  var out=[], baseline=(_pCalc&&_pCalc.grand)||0, restored=false;
+  var _pP=isFq?fqDiscPct:qDiscPct, _pA=isFq?fqDiscApproved:qDiscApproved;
+  try{
+    for(var p=0;p<=APPR_COUNTER_MAX;p++){
+      if(isFq){ fqDiscPct=p; fqDiscApproved=true; } else { qDiscPct=p; qDiscApproved=true; }
+      try{
+        if(isFq) recalcFQ(); else recalc();
+        var s=_ccfReadPCalc();
+        var profit=s.exVat-s.rawCost;
+        out.push({p:p, grand:s.grand, exVat:s.exVat, cost:s.rawCost, profit:profit,
+                  marginPct:(s.exVat>0?+(profit/s.exVat*100).toFixed(2):0)});
+      }catch(e){ console.warn('[appr] counter step '+p+' failed',e); }
+    }
+  } finally {
+    // Restoring matters more than the table. This loop mutates the live quotation, so if it is
+    // left holding a discount nobody asked for, the next save writes that to the client's
+    // quotation. Restore, then PROVE it -- and if the proof fails, say so rather than carry on.
+    if(isFq){ fqDiscPct=_pP; fqDiscApproved=_pA; } else { qDiscPct=_pP; qDiscApproved=_pA; }
+    try{ if(isFq) recalcFQ(); else recalc(); }catch(e2){}
+    restored=Math.abs(((_pCalc&&_pCalc.grand)||0)-baseline)<0.01;
+    if(!restored){
+      console.error('[appr] counter sweep did not restore the quotation total',
+                    {expected:baseline,got:(_pCalc&&_pCalc.grand)||0});
+      showToast('The quotation total did not settle after previewing counter-offers — reload before saving.');
+    }
+  }
+  return restored?out:[];   // a table built on a broken restore is not trustworthy
+}
+// Everything the phone shows, gathered once by the engine that owns these numbers.
+// Margin is included: it is ALREADY readable by anyone who can see the quotation, because
+// quotation_states RLS is company-scoped and costReport carries profit/marginPct. Withholding
+// it here would protect nothing while making the approver's decision worse. Gating stays where
+// it is today -- at render, on canViewCostReport().
+function _apprDecisionContext(type,data){
+  data=data||{};
+  if(!_pCalc||!_pCalc.grand) return null;
+  var s=_ccfReadPCalc(), profit=s.exVat-s.rawCost;
+  var ctx=data.ctx||'s1';
+  var d={
+    ctx:ctx,
+    before:s.grand, exVat:s.exVat, cost:s.rawCost, profit:profit,
+    marginPct:(s.exVat>0?+(profit/s.exVat*100).toFixed(2):0),
+    projectSize:(typeof projectSizeValue==='function'?projectSizeValue():0),
+    vatOn:!!(_pCalc&&_pCalc.vatOn),
+    discScope:(_discScopeOn()?_discScopeLabel():''),
+    builtAt:new Date().toISOString()
+  };
+  if(type==='discount'){
+    d.requested=data.discPct||0;
+    d.counter=_apprCounterTable(ctx);
+  }
+  return d;
+}
 function _submitCFRequest() {
   var reason=((el('ccf-reason')||{}).value||'').trim();
   var err=el('ccf-reason-err');
@@ -12573,7 +12639,10 @@ function submitApprovalRequest(){
     date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
     approver:appr.name,approverEmail:appr.email,
     amount:(_pCalc&&_pCalc.grand)||0,reqDisc:data.discPct||0,
-    cfValues:null,ctx:data.ctx||'s1',by:'',actionDate:''
+    cfValues:null,ctx:data.ctx||'s1',by:'',actionDate:'',
+    // Computed here by the real engine so an approver on a phone can judge this without the
+    // app -- and without a second copy of the pricing maths that would drift.
+    decision:_apprDecisionContext(type,data)
   };
 
   // Push to in-memory NOTIFS (fromEmail required for ownRequests filtering and status-change toast)
@@ -12948,9 +13017,13 @@ function _apprMergeWithKnown(req){
   if(!req||!req.id) return req;
   for(var i=0;i<NOTIFS.length;i++){
     if(NOTIFS[i].reqId!==req.id) continue;
+    // Every field a request can carry must be listed here. A partial save (doApprovalAction,
+    // _markOverrideApproved) sends only what changed, and both stores replace the record
+    // wholesale -- so anything missing from this list is silently dropped the first time an
+    // approver acts. That is how sigSlot was lost, and how to_email came back null.
     var base=NOTIFS[i], out={}, keys=['type','sigSlot','notedRequired','serial','client','company',
       'from','fromEmail','approverEmail','approver','msg','note','date','status','amount',
-      'reqDisc','counterDisc','cfValues','ctx','by'];
+      'reqDisc','counterDisc','cfValues','ctx','by','decision'];
     for(var k=0;k<keys.length;k++){
       var v=base[keys[k]];
       if(v!==undefined&&v!==null&&v!=='') out[keys[k]]=v;
@@ -13010,6 +13083,9 @@ function _mergeApprovalReqsIntoNotifs(reqs){
           if(req.ctx)      NOTIFS[j].ctx=req.ctx;
           if(!NOTIFS[j].sigSlot&&req.sigSlot) NOTIFS[j].sigSlot=req.sigSlot;
           if(!NOTIFS[j].approverEmail&&req.approverEmail) NOTIFS[j].approverEmail=req.approverEmail;
+          // Only ever fill in — never overwrite with nothing. The decision context is built once,
+          // at request time, by the engine; a later partial save has no newer version of it.
+          if(!NOTIFS[j].decision&&req.decision) NOTIFS[j].decision=req.decision;
         }
         found=true; break;
       }
@@ -13025,6 +13101,7 @@ function _mergeApprovalReqsIntoNotifs(reqs){
         // Carried, not dropped: this push is a fixed field list, and anything missing from it is
         // lost on every reload. sigSlot decides which signature the request is for.
         sigSlot:_apprSigSlot(req),notedRequired:req.notedRequired,
+        decision:req.decision||null,
         ctx:req.ctx||'s1',by:req.by||''});
     }
   }
@@ -13040,7 +13117,8 @@ function gLoadApprovalRequests(cb){
           company:row.company,fromEmail:row.from_email,approverEmail:row.to_email,
           note:row.note,counterDisc:row.counter_disc,status:row.status,by:row.actioned_by,
           from:p.from,msg:p.msg,amount:p.amount||0,reqDisc:p.reqDisc||0,cfValues:p.cfValues||null,
-          ctx:p.ctx||'s1',date:p.date,sigSlot:p.sigSlot||null,notedRequired:p.notedRequired};
+          ctx:p.ctx||'s1',date:p.date,sigSlot:p.sigSlot||null,notedRequired:p.notedRequired,
+          decision:p.decision||null};
       });
       _mergeApprovalReqsIntoNotifs(reqs);
       if(cb)cb();
@@ -22944,7 +23022,13 @@ function supaUpsertApprovalRequest(req){
     // never written into the quotation). Both halves of "it keeps repeating but the system does
     // not acknowledge it" — proven on QT-W00000085/70/M00000106, all approved, none with a
     // checked signature on the state.
-    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null)},
+    // `decision` is the mobile approver's whole basis for judging this. Like sigSlot above, it
+    // must be listed HERE and read back in _mergeApprovalReqsIntoNotifs -- a field present in
+    // one and not the other is exactly how sigSlot went missing and the signature flow never
+    // completed. Only ever overwrite it with something real: partial saves (doApprovalAction,
+    // _markOverrideApproved) send just the changed fields, and both stores replace the payload
+    // wholesale, so an unguarded write would blank it on the first approval action.
+    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null),decision:(req.decision||null)},
     status:req.status||'pending',
     actioned_by:req.by||null
   };
