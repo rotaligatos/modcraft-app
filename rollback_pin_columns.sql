@@ -1,0 +1,38 @@
+-- Rollback: put public.users.pin_hash / pin_salt back
+-- ---------------------------------------------------------------------------
+-- Only needed if dropping those two columns (2026-08-08) turns out to have missed
+-- something. Nothing is expected to need this -- the columns were write-only.
+--
+-- WHY THEY WERE DROPPED
+--   index.html wrote them at lines 22861-22862 inside supaUpsertUser(), and NOTHING read
+--   them -- not the app, not the MSSI website, not PMES, and no view, function, RLS policy
+--   or index in the database. Verified by searching every project on the machine and by
+--   querying pg_proc / pg_policy / information_schema.views / pg_indexes.
+--
+--   They were also wrong. supaUpsertUser() silently no-ops unless that individual user's
+--   own browser is Supabase-connected, so a PIN set on an unconnected browser never
+--   reached the mirror. The column reported "no PIN" for 12 of 13 users, including a
+--   Manager who had provably approved twice that day -- which for a Manager is impossible
+--   without a PIN (_pinRequiredFor() returns true for Manager/Director/Admin, so
+--   _verifyApproverPin() refuses everything, including the legacy 1234).
+--
+--   Because it read as authoritative but was false, it caused two wrong conclusions in one
+--   session. Deleting it removes the trap rather than documenting it.
+--
+-- THE REAL PIN STORE IS THE GOOGLE SHEET -- "User Roles" columns W (hash) and X (salt).
+-- That is what parseUserRows() reads and what every PIN check in the app uses. It was not
+-- touched and is not affected by any of this. NEVER delete Sheet W/X -- that would destroy
+-- every PIN in the company.
+--
+-- TO ROLL BACK, IN THIS ORDER
+--   1. git revert <the commit that removed the two write lines from supaUpsertUser>
+--   2. run this file
+--   3. in the browser console, signed in and Supabase-connected: supaMigrateUsers()
+--      -- repopulates both columns from the Sheet, which is authoritative.
+--
+-- Step 3 is why this file carries no values: the correct data lives in the Sheet, and
+-- copying PIN hashes into a tracked file in a PUBLIC repo would be a real leak. (A local,
+-- untracked byte-exact snapshot was taken at drop time and kept out of git.)
+
+alter table public.users add column if not exists pin_hash text;
+alter table public.users add column if not exists pin_salt text;
