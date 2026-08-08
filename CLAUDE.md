@@ -4711,9 +4711,10 @@ asking for it, which reads exactly like failure. **I had fixed this for the stat
 in the session and then wrote two more repairs without applying it.** All three now call one
 `_clearDataBanners()`. Doing it per-fixer is how one of three forgets.
 
-**Where the Initial Locked column stands now:** 85 quotations carry their date. 12 remain blank —
-the June ones that predate the activity log. Those keep a dash deliberately; inventing a date would
-be worse than an honest gap.
+**Where the Initial Locked column stands now (final, 2026-08-08 session 4):** all three repairs have
+been run. **85 quotations carry their date in BOTH stores.** 12 remain blank — the June ones that
+predate the activity log. Those keep a dash deliberately; inventing a date would be worse than an
+honest gap.
 
 ### ⚠ TWO THINGS CODE CANNOT FIX — tell the team, not the developer
 - **A job only counts as WON when somebody presses Client Approve.** It has been pressed twice ever.
@@ -4739,6 +4740,43 @@ Until those become habits the dashboard will keep reading near-zero, and that is
 - **When a repair is added, ask what it has to clear.** Three separate repairs in one session, and
   the same tidy-up had to be written into each; the third one forgot, and looked like a failure.
   One shared function, not three careful authors.
+
+---
+
+## What was changed on 2026-08-08 (session 4 — verification only, no code)
+
+No commits to `index.html`. The session's whole job was to confirm what session 3 claimed, and to
+finish the one repair that was still outstanding. Worth recording because two of the four findings
+would have been wrong if taken from this file rather than measured.
+
+1. **Deploy confirmed SERVED**, not merely pushed — `_clearDataBanners` and the fill-in-dates repair
+   are both present in the page GitHub Pages actually returns.
+2. **Both habits measured, both as stated.** Of 156 saved states: `fqClientApproved` true on **2**,
+   a job source set on **7**. Neither figure is a code fault; do not "fix" a KPI in response.
+3. **The last repair is done.** `Initial Locked dates copied from each quotation's saved record —
+   10 filled in`, 09:53 UTC, no failures, and the re-check came back clean. See the section above.
+4. **Why nobody could tell in advance whether it was owed.** The repair compares the **Google Sheet**
+   column N (`r[13]`) against `state.initLockedAt`. Supabase agreed on all 85, so SQL said "nothing
+   missing" — and the Sheet was short by exactly 10. **A Supabase query cannot answer a
+   Sheet-vs-state question.** Only the app reads both.
+5. **Checked the two ways that repair could fail silently**, since both would have looked like
+   success: `_allQuotationStates` reads the full `quotation_states.state` (not the twelve-column
+   `quotation_stage_flags` view), so `initLockedAt` is genuinely available and the button cannot
+   silently under-report; and `supaGetStageFlags` maps `init_locked_at → initLockedAt` correctly — a
+   wrong mapping there would have made every locked quotation look dateless and overwritten 80 good
+   dates with log timestamps.
+6. **"Have I already run this?" is answerable, not a matter of memory.** Each repair writes its own
+   distinct activity-log line, and that log is append-only. The absence of `copied from each
+   quotation's saved record` proved it had not been run; comparing the run at 09:26 UTC against
+   commit `b31081d` at 09:31 UTC proved it *could* not have been — the button did not exist yet.
+   **Two repairs log near-identical wording — `restored from the activity log` (reconstruction) vs
+   `copied from each quotation's saved record` (certain copy). Do not read one as the other.**
+7. **Reconciliation, so the counts do not look contradictory later:** 85 dated + 12 locked-undated is
+   97, against 92 currently locked. Not a discrepancy — 5 dated quotations were unlocked for revision
+   and kept their date. 80 + 5 = 85.
+8. **Noticed, not chased:** the Settings panel shows *"3 failed background saves"* with
+   `TypeError: Failed to fetch`. That is the intermittent outbound-connection item already on the
+   watch list, not a code fault; Sheets still holds the work.
 
 ---
 
@@ -4817,16 +4855,17 @@ and no amount of code fixes it:
 Do NOT respond to "the dashboard shows no wins" by changing the KPI. Check whether the button was
 pressed first — that has already been the answer once.
 
-## Run once, in the app (Rommel) — ONE STEP LEFT
-**Settings → Company & DB → Check Project List.** As of session end:
-- ✅ **Statuses corrected** — ran clean afterwards (71 checked, nothing to fix).
-- ✅ **12 lock dates restored** from the activity log — 73 → 85 quotations now carry one.
-- ⏳ **"Fill in N dates" not yet run.** This is the one that fixes the empty Initial Locked column
-  he was looking at — it copies dates the quotations ALREADY have into the Sheet column. Certain,
-  no reconstruction. Shipped after his last run, so it has not been pressed.
+## Run once, in the app (Rommel) — ✅ ALL DONE 2026-08-08
+**Settings → Company & DB → Check Project List.** All three repairs are run and confirmed in the
+append-only activity log — nothing here is outstanding:
+- ✅ 08:11 UTC — `Project List statuses corrected — 2 updated`. Re-check afterwards came back clean
+  ("Every Status matches what the quotation actually is", 71 checked, 3 skipped for having no state).
+- ✅ 09:26 UTC — `Initial Locked dates restored from the activity log — 12 quotations`.
+- ✅ 09:53 UTC — `Initial Locked dates copied from each quotation's saved record — 10 filled in`,
+  **no failures**.
 
-The 12 that stay blank afterwards are the June quotations predating the activity log. That is
-correct — leave them.
+The 12 that stay blank are the June quotations predating the activity log. That is correct —
+**leave them.** Do not add a repair that invents a date for those.
 
 ## Rommel's to do
 - **Tell the WCL and MSSI staff to try the signature flow** — cleared 2026-08-08, see above. Expect
