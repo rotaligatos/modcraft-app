@@ -4923,7 +4923,145 @@ than documented — the warning had already been written and walked past.
 
 ---
 
-# OPEN — updated 2026-08-08 (THIS IS THE AUTHORITATIVE LIST)
+## What was changed on 2026-08-09 (session — the signature blind spot, and the serial split)
+
+Five commits, `489cdb9`..`df0c9c5`, all pushed and confirmed SERVED, plus one Supabase migration.
+Every finding below came from querying live data or driving the code — none from reading it.
+
+### 1. Signature requests reached the phone with no figures (`489cdb9`)
+`requestSignatures` builds its own `req` object and, unlike `submitApprovalRequest`, **never called
+`_apprDecisionContext`** — so `payload.decision` was null on every signature request ever raised,
+and approve.html's `!DEC` branch fired every time: *"raised before the figures were carried on it —
+open it on the laptop."* Not stale data; the source never asked.
+
+It landed on the one type with real traffic (10 signature requests on 08-08, nothing else since)
+and the type that reaches the Noted-by fallback first, so the first live push test would have
+failed for a reason unrelated to push.
+
+Costs nothing: the counter sweep and the override model are discount/override only, so for a
+signature this is a plain read of `_pCalc`. Measured **0 sweeps, 7ms**, quotation total unchanged.
+Verified before and after by driving it, and at 375px (no overflow, buttons 52px).
+
+> The four-places trap did NOT bite here — payload write, Supabase read, NOTIFS push and
+> `_apprMergeWithKnown` were already generic for `decision`. **The gap was only the source.**
+> Worth remembering: that checklist covers propagation, not origination.
+
+### 2. ⚠ The serial split — a LIVE bug, not the history it was filed as
+OPEN item #8 described nine quotations filed under the number they were first previewed as
+(fixed 2026-08-06, `7f2b41a`) with `reconcileRenumbered()` queued to repair eight of them.
+Checking it turned up **13 mismatches, not 8** — and four created AFTER that fix, the newest
+**58 minutes after** Saturday's pocketed-claim fix (`0bdeb2d`). A second, still-live mechanism.
+
+**Root cause (`016cfd1`), reproduced before fixing.** `qSerialCommitted=true` is set INSIDE the
+async claim callback, so it stays false for the whole round-trip. A second save entered in that
+window claimed a SECOND serial. `_acceptClaimedSerial` then correctly refused to move
+`qBaseSerial` twice — it only moves when the base still equals the serial the claim started from —
+so the row key stayed on the first claim while the quotation carried the second.
+
+The activity log had recorded it all along:
+```
+22:13:23  QT-W00000091  was provisional QT-M00000111
+22:13:25  QT-W00000092  was provisional QT-M00000111
+```
+Three saves in one tick reproduced it with a log **byte-identical to production**.
+
+Same root cause explains the **QT-M00000108/109/110 triple** (showing as a burned serial rather
+than a mismatch) and why **Keystone drifted BACKWARDS** — its two entries took *different*
+branches, the fallback's collision path at 16:57:04 and the atomic claim at 16:57:12. So the guard
+(`_serialClaimWaiters`) covers every exit from the uncommitted state, not just the claim.
+
+Verified across all five exits with three saves each: one claim every time, all saves still write
+(only the claim is deduped), and — tested hardest — a dead network still releases the waiters.
+**A held queue would silently drop every later save in the session, worse than the race.**
+
+### 3. The repair: the client's copy wins (`2309428`, `ed1617d`)
+Rommel's call. The printed header uses `qSerial` (index.html:9750), so the number already out in
+the world is the SECOND one; the row moves to it. `reconcileRenumbered` now takes a plan (the
+no-arg call is unchanged); `reconcileClientCopySerials()` runs the new one.
+
+**Run and verified 2026-08-09 — 3 applied, 0 failed.** Wesly Uy → W00000072, TMWI → W00000086,
+Zhiel → W00000092. Confirmed in Supabase: row/base/state all agree, old numbers preserved in
+`prevSerials`, no old rows left, TMWI's signature request followed. **Keystone skipped** (below).
+
+Two hazards found and closed while building it:
+- **`_supaReconcileOne` ended in a DELETE on the old parent**, and ON DELETE CASCADE would have
+  taken any `board_layouts` / `drawing_analyses` row still pointing at the old serial — rows it
+  never copied across. Nothing was lost (verified: none of the 12 planned serials has either), but
+  that was luck and nothing checked it. The serial FKs are now **ON UPDATE CASCADE** (migration
+  `quotation_serial_fks_on_update_cascade`), so the parent renames in one statement and the
+  children follow. DELETE behaviour unchanged.
+- **The row index was built by overwrite**, so a duplicated serial left only the LAST row in
+  `qIdx` — one row renamed, its twin stranded. Duplicates are now counted and **refused**.
+
+`ed1617d` refuses to EXECUTE when Supabase is disconnected: `_supaReconcileOne` no-ops without a
+session, so it would rename the Sheet only and split the two stores — the struck cleanup SQL's
+failure in reverse. Verified: refused, and **no sheet write is attempted**.
+
+### 4. Making it structural, not lucky (`df0c9c5`)
+Rommel: *"we don't rely on chance only but concrete solution."* Correct — the cause fix covers two
+saves in ONE tab; two tabs or two devices each carry their own guard. And the deeper problem was
+never the cause: **when it happened, nothing said so.**
+
+**`_assertSerialAgreement()` on every save**, and it does not care why. `qBaseSerial` keys the row,
+`qSerial` is what the state records and prints; they may differ only by an option (`-2`) or
+revision (`.R1`) suffix, so it compares `_serialRoot`.
+- **not yet filed** → aligns to `qSerial`, keeps the other in `prevSerials`, logs it. The split
+  cannot reach the sheet at all.
+- **already filed** → does NOT re-file (that would strand the row) but records it permanently.
+
+**Check Project List now reports splits** (`_reportSerialSplits`), reusing the walk that already
+reads both sides, so it costs nothing. Reported only, never auto-corrected — which number wins is
+a business call, because on an issued quotation the client already holds the state's serial.
+
+Verified across all eight shapes: equal · option · revision · option+revision · legacy
+`QT-YYMMDD-RRRR` · split-unfiled · split-filed · empty base. The five legitimate ones stay silent.
+
+> ### ⚠ NOT closed by construction — the real fix is still open
+> `qBaseSerial` is STORED when it is always derivable: **`qBaseSerial === _serialRoot(qSerial)`**
+> holds in every legitimate case (verified: normal, option, revision, both). It is a second copy of
+> information that already exists, and any two-copies-that-must-agree design eventually disagrees.
+> Layers 1–3 are guard rails around it, not removal of it.
+> **Delete it** — make it a derived getter so disagreement is unrepresentable. Measured scope:
+> **76 references, 13 of them assignments.** Bounded complications: it is persisted inside saved
+> state (old quotations must still load), it is the Drive folder cache key, and it is the option
+> grouping key. Own session, with a before/after test over real saved states.
+
+### Method notes worth keeping
+- **Two user claims were testable, and the data settled both.** "8864 proves the webhook deploy" —
+  it didn't (it arrived 2h16m before the script existed, and its `attachments` carry Wufoo URLs =
+  backfill, while `attachment_1` holds a Drive URL: **two writers, one row**). But **8865 did**
+  prove it. And "something is off with your date" — four independent sources (Google and
+  Cloudflare `Date` headers, the Supabase server, the local clock) all agreed on Sunday 08-09.
+  The reconciliation was real though: **our sessions run past midnight**, so work Rommel remembers
+  as Friday evening is filed under Saturday in git.
+- **`git log` is newest-first** — `tail -40` gave me the OLDEST commits and made Friday and
+  Saturday look empty. Use `head`, or `| cat`.
+- **A hardcoded plan is not a scan.** `RENUMBER_PLAN` holds 8 specific serials, which is why my
+  count didn't match the file's. Read what a repair actually does before quoting its coverage.
+- **Ask what a repair must CLEAR.** Same lesson as 08-08's three banners — here it was: what must
+  a rename touch? The survey (approval_requests, orders, boards, drawings, revision links,
+  activity log) is what found the cascade hazard.
+- **The activity log is the diagnostic tool of choice on this app.** It is append-only and it
+  recorded the double claim to the second, weeks before anyone looked.
+
+---
+
+# OPEN — updated 2026-08-09 (THIS IS THE AUTHORITATIVE LIST)
+
+## ⚠ FIRST TWO THINGS NEXT SESSION — Rommel asked to be reminded of these
+1. **Keystone `QT-W00000075`** — the last of the four split quotations. Blocked on its
+   **duplicate row in the Quotations sheet**: renaming one of a pair would strand the other, so
+   `reconcileClientCopySerials()` refuses it by design. Decide which of the two rows goes, remove
+   it, re-run the same command. Look at both rows before deciding.
+2. **Remove `qBaseSerial`** — the by-construction fix for the serial split (see the box above).
+   76 references, 13 assignments. Own session with a before/after test over real saved states.
+
+## Cleared 2026-08-09
+Signature requests carry their figures to the phone · the double-claim serial race (cause) ·
+three of the four split quotations repaired onto the client's number · a split can no longer reach
+the sheet silently · Check Project List reports splits · the `_supaReconcileOne` cascade hazard ·
+duplicate rows refused rather than half-renamed · serial FKs ON UPDATE CASCADE ·
+**item #4 (QT-W00000087 re-route) confirmed done** — both slots signed 08-08.
 
 ## Cleared 2026-08-08 (session 3)
 The stage ladder as agreed · sending as a rung · FQ Locked · revision visible · Closed removed ·
@@ -5020,27 +5158,44 @@ The 12 that stay blank are the June quotations predating the activity log. That 
 - **Tell the WCL and MSSI staff to try the signature flow** — cleared 2026-08-08, see above. Expect
   one wrinkle: Allan is a Manager, so his own PIN is mandatory; if he has not set one the app sends
   him to set it and then resumes the signing. That is designed behaviour, not an error.
-- **`QT-W00000087`** — press **Re-route** on it (Joanna can do this herself). It was routed to its
-  own requester before the fallback existed; setting a fallback does not move a request already
-  raised.
+- ~~**`QT-W00000087`** — press Re-route~~ **DONE** — confirmed 2026-08-09: both slots signed on
+  08-08 (Checked by Allan 11:24, Noted by Rommel 13:40).
 - **CWL at its deployment (next week)** — see the parked section above: re-apply the CWL routing
   column and Save, and upload Stiffany's signature.
-- **Deploy the Wufoo webhook.** Script is confirmed correct in the editor (`testFileFields` on entry
-  8864 found Field140 — one of the nine the old code discarded — and flagged nothing unknown). Needs
-  **Deploy → Manage deployments → edit the existing one → New VERSION**. A new *deployment* mints a
-  different URL and leaves the old code serving. Then a live order with 3+ files, and I check the
-  attachments land on `drive.google.com` rather than `wufoo.com`.
+- ~~**Deploy the Wufoo webhook**~~ **DONE — deployed and confirmed running 2026-08-09.** Proven by
+  order **8865** (Sat 08-08 17:40 PHT): its `attachments` array carries a `docs.google.com` URL
+  written AT INSERT, and neither the array nor a Drive upload was possible under the old script.
+  ⚠ **8864 is NOT the evidence** — it arrived 2h16m before the script existed, and holds a Drive
+  URL in `attachment_1` but a `wufoo.com` URL in `attachments[0]`: **two writers in one row**, the
+  old script at insert and the backfill afterwards. That mismatch is the discriminator; reuse it.
+  **Still open, resolves itself:** no order since has carried a file outside Field128/129, so the
+  nine extra fields have not fired live. Corpus check: **68 orders, 0 mismatched** between
+  `attachments` and the file fields Wufoo actually sent; 15 carry 3+; 140 files total.
 - **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
 - **GYMFIX `QT-M00000087`** — final-locked and Client Approved at ₱0.00, should be ₱616. Unlock,
   recalculate, re-lock.
 - **MABA CONSTRAK `QT-260619-3668`** — needs Joanna's sent PDF; cannot be recomputed (its service
   lines carry no stored price and resolve positionally into a catalogue since reordered).
-- **Bella Ferma** (W00000036 / W00000039) — one job or two? Blocks both KPI decisions.
-- **Run `reconcileRenumbered()`** — repairs 8 stale-serial records (dry run first).
+- **Bella Ferma** (W00000036 / W00000039) — one job or two? Blocks both KPI decisions, AND it is
+  one of the 13 serial mismatches (deliberately absent from `RENUMBER_PLAN` — removing the older
+  row would drop ₱640,323 of live pipeline).
+- **Run `reconcileRenumbered()`** — repairs 8 stale-serial records (dry run first). ⚠ **This is a
+  HARDCODED 8-serial plan, not a scan** — it covers only the 2026-07-30→08-05 W↔M company-change
+  set. The four from the double-claim race were a *different* mechanism and are already repaired
+  (see 2026-08-09), and Bella Ferma is deliberately excluded.
+- **Keystone `QT-W00000075`** — see the two reminders at the top of this list.
 - **Clear ~56 old drafts** — Project List → filter Draft → Delete selected. **Not** the struck SQL.
-- **Deactivate Andrei Salvador** — `designer-ce2@` still active across all three companies.
+- **Deactivate Andrei Salvador** — `designer-ce2@` still shows `active: true` (MSSI) as of
+  2026-08-09. Confirm against the Sheet — the Supabase mirror can lag.
 - **"Handgrab Groove" / "Flush Handle Groove"** — under no minimum charge (they say *groove*, not
   *grooving*); rename if they should count toward the ₱400.
+
+## Still true 2026-08-09 — the two habits, measured again
+- **Client Approve**: `quotations.client_approved_at` set on **0 of 171**; only **2** saved states
+  carry `fqClientApproved`. Win rate and won revenue stay near zero until estimators press it.
+- **Arrival source**: set on **7 of 171**. Without it a quotation has no response time.
+
+Do NOT respond to "the dashboard shows no wins" by changing the KPI. Check the button first.
 
 ## ✅ RESOLVED 2026-08-08 — `users.pin_hash` / `pin_salt` are GONE, and cannot mislead again
 **PIN state lives in exactly one place: the Google Sheet `User Roles`, columns W (hash) and X
@@ -5131,12 +5286,13 @@ that order or she will confidently name the WRONG services. Where a line stores 
 cross-check it against the catalogue and refuse to answer if they disagree.
 
 ## NEXT SESSION
-Nothing queued for building. See the two habits above first, then Rommel's list, then the mobile
-follow-ups directly above.
+**The two reminders at the top of this list — Keystone, then removing `qBaseSerial`.** Rommel
+asked to be reminded of both (2026-08-09). Then the two habits, then his list.
 
 Known and deliberately left, so nobody "fixes" them by surprise:
 - **`QT-W00000075` (Keystone Construction) appears twice** in the Quotations sheet — a genuine
-  duplicate row, spotted while correcting statuses. Harmless to the corrector; worth cleaning up.
+  duplicate row. No longer harmless: it **blocks** the last of the four serial repairs, because
+  `reconcileClientCopySerials()` refuses to rename one of a pair and strand the other. Reminder #1.
 - **Supabase holds ~170 quotations, the Sheet ~74.** The difference is quotations deleted from the
   Sheet before `supaDeleteQuotation` existed (added 2026-08-02). Harmless orphans — but it is why
   a SQL count and the app's count disagree, and why the app's number is the one to trust.
