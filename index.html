@@ -27632,9 +27632,35 @@ function _cleanupPrevSerialRows(currentSerial){
   // duplicate LIST ROW is removed; the history stays.
   if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
 }
+// ── One claim per quotation, however many saves are pressed ────────────────────────────────
+// qSerialCommitted is set INSIDE the async claim callback, so it is still false for the whole
+// round-trip. A second save entered in that window claimed a SECOND serial, and the two then
+// disagreed: _acceptClaimedSerial only moves qBaseSerial when it still equals the serial the
+// claim started from, which is right (it must not act on a stale number) but leaves the row key
+// on the first claim while the quotation carries the second.
+//
+// The row is keyed on qBaseSerial and the state records qSerial, so the client's copy and the
+// Project List ended up with different numbers. Confirmed in the activity log — two claims
+// seconds apart from one provisional number:
+//   22:13:23  QT-W00000091  was provisional QT-M00000111
+//   22:13:25  QT-W00000092  was provisional QT-M00000111
+// Four live quotations (Wesly Uy, Keystone, TMWI, Zhiel) and the QT-M00000108/109/110 triple.
+//
+// Keystone drifted BACKWARDS because its two entries took different branches — the fallback's
+// collision path and the atomic claim — so the guard covers both, not just the claim.
+// Waiters re-enter the same function, which by then finds the serial committed and simply saves,
+// so a second save still happens; it just does not mint a second number.
+var _serialClaimWaiters=null;   // null = nothing in flight; array = saves waiting on the claim
+function _serialClaimSettled(){
+  var w=_serialClaimWaiters; _serialClaimWaiters=null;
+  if(!w||!w.length) return;
+  w.forEach(function(fn){ try{ fn(); }catch(e){ console.warn('[serial] queued save failed',e); } });
+}
 function _gSaveQuotationCore(){
   if(!gToken||!gUser) return;
   if(!qSerialCommitted){
+    if(_serialClaimWaiters){ _serialClaimWaiters.push(_gSaveQuotationCore); return; }
+    _serialClaimWaiters=[];
     var claimSerial=qBaseSerial||qSerial;
     if(SERIAL_CLAIM_URL){
       // A number claimed by an earlier attempt that never got a row is reused rather than
@@ -27643,7 +27669,7 @@ function _gSaveQuotationCore(){
       if(pocketed){
         _acceptClaimedSerial(claimSerial,pocketed,false);
         qSerialCommitted=true;
-        _proceedSaveQuotation();
+        try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
         return;
       }
       _claimSerialAtomic(_serialPrefix(),function(newSerial){
@@ -27651,10 +27677,10 @@ function _gSaveQuotationCore(){
           _pendingSerialSet(_serialPrefix(),newSerial);   // held until a row exists
           _acceptClaimedSerial(claimSerial,newSerial,false);
           qSerialCommitted=true;
-          _proceedSaveQuotation();
+          try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
         } else {
           // Claim service configured but unreachable this attempt — don't block the save,
-          // fall back to the existence-check tier instead.
+          // fall back to the existence-check tier instead. It settles the waiters itself.
           _fallbackSerialCheck(claimSerial);
         }
       });
@@ -27769,7 +27795,7 @@ function _fallbackSerialCheck(claimSerial){
       return _resolveSerialCollision(claimSerial).then(function(newSerial){
         _acceptClaimedSerial(claimSerial,newSerial,true);
         qSerialCommitted=true;
-        _proceedSaveQuotation();
+        try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
       });
     }
     // No collision — this previewed number (see _peekNextSerial) is genuinely
@@ -27777,11 +27803,13 @@ function _fallbackSerialCheck(claimSerial){
     // so the next quotation's preview doesn't show this same number again.
     _claimPeekedSerial(claimSerial);
     qSerialCommitted=true;
-    _proceedSaveQuotation();
+    try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
   }).catch(function(){
     // Check itself failed (offline/network) — don't block saving; proceed optimistically.
+    // Settling matters most here: leave the waiters held and every later save in this session
+    // is silently dropped, which is worse than the race this guard replaced.
     qSerialCommitted=true;
-    _proceedSaveQuotation();
+    try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
   });
 }
 // While a quotation is still an unsaved draft, its number is only a preview and can change more
