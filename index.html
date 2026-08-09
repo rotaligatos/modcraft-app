@@ -24648,12 +24648,19 @@ function _findStaleStatuses(cb){
     if(!d||d.error){ cb(null); return; }
     var rows=(d.values)||[];
     _allQuotationStates(function(states,src){
-      var findings=[], noState=0, checked=0, lockFromState=[];
+      var findings=[], noState=0, checked=0, lockFromState=[], serialSplit=[];
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var serial=r[0], stored=(r[5]||'').trim(), st=states[serial];
         if(!st){ noState++; continue; }
         checked++;
+        // The row key and the quotation's own number must describe the same job. Option (-2) and
+        // revision (.R1) suffixes are legitimate, so compare roots. A difference here means the
+        // client's copy and the Project List carry different numbers — the printed header uses
+        // the state's serial.
+        var stSerial=String(st.serial||'').trim();
+        if(stSerial && _serialRoot(stSerial)!==_serialRoot(serial))
+          serialSplit.push({serial:serial, client:r[2]||'', says:stSerial});
         // Column N holds the Initial Locked date the Project List shows. Where the quotation's own
         // state HAS that date and the column does not, there is nothing to work out — the true
         // value is right there. This is a different fault from a date that was destroyed
@@ -24667,6 +24674,7 @@ function _findStaleStatuses(cb){
                        should:should, shown:_normalizeStatusLabel(stored)});
       }
       _lockFromStateFindings=lockFromState;
+      _serialSplitFindings=serialSplit;
       cb(findings, checked, noState, src);
     });
   }).catch(function(){ cb(null); });
@@ -24723,8 +24731,8 @@ function checkProjectListData(){
         +'</div>';
       if(!findings.length){
         h+='<div style="padding:16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
-          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-locks"></div></div>';
-        box.innerHTML=h; _reportLostLockTimes(); return;
+          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-serials"></div><div id="dbcheck-locks"></div></div>';
+        box.innerHTML=h; _reportSerialSplits(); _reportLostLockTimes(); return;
       }
       h+='<div style="padding:12px 16px;background:var(--wash-amber);font-size:13px">'
         +'<b>'+findings.length+'</b> quotation'+(findings.length===1?'':'s')+' show the wrong stage in the Project List. '
@@ -24745,8 +24753,9 @@ function checkProjectListData(){
       h+='<div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
         +'<button class="btn btn-primary" onclick="fixProjectListStatuses()" style="font-size:12px"><i class="ti ti-wand"></i> Correct all '+findings.length+'</button>'
         +'<span style="font-size:12px;color:var(--text2)">Rewrites only the Status column. Nothing else on the quotation is touched.</span>'
-        +'</div><div id="dbcheck-locks"></div></div>';
+        +'</div><div id="dbcheck-serials"></div><div id="dbcheck-locks"></div></div>';
       box.innerHTML=h;
+      _reportSerialSplits();
       _reportLostLockTimes();
     }
   });
@@ -24789,6 +24798,32 @@ function fixLockDatesFromState(){
         .then(function(){ setTimeout(function(){ next(i+1); },120); });
     })(0);
   });
+}
+var _serialSplitFindings=[];
+// Reported, never auto-corrected: which number wins is a business call, because the printed header
+// uses the state's serial, so on an issued quotation the client is already holding it. Rommel's
+// answer on 2026-08-09 was the client's copy — but that is a decision each time, not a default.
+function _reportSerialSplits(){
+  var host=el('dbcheck-serials'); if(!host) return;
+  if(!_serialSplitFindings.length){ host.innerHTML=''; return; }
+  var h='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
+    +'<div style="font-size:13px;margin-bottom:8px"><b>'+_serialSplitFindings.length+'</b> quotation'
+    +(_serialSplitFindings.length===1?' is':'s are')+' filed under a different number from the one the '
+    +'quotation itself carries. The printed header uses the quotation\'s own number, so the client\'s '
+    +'copy shows the second column below.</div>'
+    +'<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'
+    +'<th style="text-align:left;padding:6px 0">Client</th>'
+    +'<th style="text-align:left;padding:6px 0">Project List shows</th>'
+    +'<th style="text-align:left;padding:6px 0">Client\'s copy says</th></tr></thead><tbody>';
+  _serialSplitFindings.slice(0,50).forEach(function(f){
+    h+='<tr><td style="padding:4px 0">'+escHtml(f.client)+'</td>'
+      +'<td style="padding:4px 0;font-family:ui-monospace,monospace;color:var(--coral)">'+escHtml(f.serial)+'</td>'
+      +'<td style="padding:4px 0;font-family:ui-monospace,monospace;color:var(--teal);font-weight:600">'+escHtml(f.says)+'</td></tr>';
+  });
+  h+='</tbody></table><div style="font-size:12px;color:var(--text2);margin-top:8px">'
+    +'Correcting these is a deliberate step — ask before running it, since it decides which number '
+    +'is authoritative on a quotation a client may already hold.</div></div>';
+  host.innerHTML=h;
 }
 function _reportLostLockTimes(){
   var host=el('dbcheck-locks'); if(!host) return;
@@ -27944,6 +27979,35 @@ function _resolveSerialCollision(oldSerial){
   }
   return attempt(0);
 }
+// ── The row key and the quotation's own number must describe the same job ───────────────────
+// qBaseSerial keys the Project List row; qSerial is what the state records and what the printed
+// header shows. They may legitimately differ only by an option suffix (-2) or a revision one
+// (.R1), which _serialRoot strips — so a difference in the ROOT means two different jobs, and
+// something has gone wrong.
+//
+// The double-claim race (see _serialClaimWaiters) is fixed, but it was fixed only for two saves
+// in ONE tab: two tabs or two devices each have their own guard. More to the point, when it did
+// happen nothing said so — four quotations sat split for days and were found only by chance.
+// This makes any future occurrence loud at the moment it happens, whatever the cause.
+function _assertSerialAgreement(){
+  if(!qSerial||!qBaseSerial) return;
+  if(_serialRoot(qSerial)===_serialRoot(qBaseSerial)) return;
+  if(!qSerialCommitted){
+    // Nothing is filed yet, so aligning is safe — and qSerial is the number on screen and on any
+    // preview, so it is the one to keep. The other is recorded rather than dropped.
+    if(qPrevSerials&&qPrevSerials.indexOf(qBaseSerial)<0) qPrevSerials.push(qBaseSerial);
+    logActivity('Serial disagreement caught before filing — saved as '+qSerial
+      +' (the row would have been filed under '+qBaseSerial+').');
+    console.warn('[serial] base '+qBaseSerial+' != serial '+qSerial+' — aligned to '+qSerial);
+    qBaseSerial=qSerial;
+    return;
+  }
+  // A row already exists under qBaseSerial. Renaming it here would strand that row, so this only
+  // REPORTS — permanently, in the append-only log — and leaves the repair to a deliberate act.
+  logActivity('⚠ Serial disagreement: this quotation is filed under '+qBaseSerial
+    +' but calls itself '+qSerial+'. Settings → Company & DB → Check Project List.');
+  console.warn('[serial] filed under '+qBaseSerial+' but state says '+qSerial);
+}
 function _proceedSaveQuotation(){
   if(!gToken||!gUser) return;
   _syncQuotHeader();
@@ -27972,6 +28036,7 @@ function _proceedSaveQuotation(){
   }
   var total=grand.toFixed(2);
   var now=new Date().toISOString();
+  _assertSerialAgreement();
   var serial=qBaseSerial||qSerial;
   var status=_computeQuotationStatus();
   var stage=qStage===2?'Final':'Initial';
