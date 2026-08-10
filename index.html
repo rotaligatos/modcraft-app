@@ -22199,6 +22199,75 @@ function _supaWritePopupPlaceholder(popup){
 // long-lived session keeps getting re-evaluated instead of only at login.
 var _SUPA_BANNER_COOLDOWN_MS=30*60*1000; // 30 minutes
 var _supaBannerRecheckTimer=null;
+// ── "You are running an old version" ────────────────────────────────────────────────────────
+// The Google Sites embed serves a cached build long after a fix ships, and a plain hard refresh
+// often does NOT clear it. That has repeatedly produced the same conversation: a fix is deployed
+// and verified, someone reports it missing, and everyone hunts a bug that is not there. It has
+// caught Rommel out as well as the staff, which is why guessing is not good enough.
+//
+// No build step and no version file needed. GitHub Pages sends Last-Modified, so document
+// .lastModified is when the build THIS TAB loaded was published; a cache-busted HEAD says what is
+// published now. If the server is meaningfully newer, this tab is stale.
+//
+// Fails safe in every direction: if Last-Modified is missing, document.lastModified falls back to
+// "now" per spec and the comparison simply never fires. A failed fetch is ignored. It can only
+// ever produce a dismissible banner — it never blocks anything.
+var BUILD_STALE_MIN_GAP_MS=60000;      // ignore sub-minute clock skew between browser and CDN
+var _buildStaleShown=false, _buildCheckTimer=null;
+function _thisBuildTime(){ var t=Date.parse(document.lastModified); return isFinite(t)?t:0; }
+// The two decisions are split out and take their inputs as arguments so they can actually be
+// tested. window.location cannot be overridden in a browser, so a check that read it directly
+// was untestable — every attempt simply hit the localhost guard and proved nothing.
+function _buildStaleGuardsAllow(loc){
+  if(!loc) return false;
+  if(loc.protocol!=='http:'&&loc.protocol!=='https:') return false;
+  if(/^(localhost|127\.|\[::1\])/.test(loc.hostname||'')) return false;   // dev preview
+  var qs=new URLSearchParams(loc.search||'');
+  // Never interrupt a sign-in round-trip; reloading mid-OAuth would lose the callback.
+  if(qs.get('supaAuthPopup')==='1'||qs.has('code')) return false;
+  if(String(loc.hash||'').indexOf('access_token=')>=0) return false;
+  return true;
+}
+function _buildIsStale(mineMs,lastModifiedHeader){
+  if(!mineMs||!lastModifiedHeader) return false;
+  var served=Date.parse(lastModifiedHeader);
+  if(!isFinite(served)) return false;
+  return (served-mineMs)>BUILD_STALE_MIN_GAP_MS;
+}
+function _checkForNewBuild(){
+  if(_buildStaleShown) return;                                     // already said so
+  if(!_buildStaleGuardsAllow(location)) return;
+  var mine=_thisBuildTime(); if(!mine) return;
+  fetch(location.pathname+'?cb='+Date.now(),{method:'HEAD',cache:'no-store'})
+    .then(function(r){
+      var lm=r.headers.get('Last-Modified');
+      if(_buildIsStale(mine,lm)){ _buildStaleShown=true; _showStaleBuildBanner(Date.parse(lm)); }
+    }).catch(function(){});
+}
+// Keeps every existing parameter (fs, and anything added later) and only swaps the cache-buster,
+// so reloading cannot quietly drop state the app reads out of the URL.
+function _reloadForNewBuild(){
+  var qs=new URLSearchParams(location.search);
+  qs.set('cb',Date.now());
+  location.replace(location.pathname+'?'+qs.toString()+location.hash);
+}
+function _dismissStaleBuildBanner(){ var b=el('build-stale-banner'); if(b) b.remove(); }
+function _showStaleBuildBanner(servedAt){
+  if(el('build-stale-banner')) return;
+  var age=Math.max(1,Math.round((servedAt-_thisBuildTime())/60000));
+  var when=age<60?(age+' minute'+(age===1?'':'s')):(Math.round(age/60)+' hour'+(Math.round(age/60)===1?'':'s'));
+  var d=document.createElement('div');
+  d.id='build-stale-banner';
+  d.style.cssText='position:fixed;left:16px;bottom:16px;z-index:100000;max-width:340px;'
+    +'background:var(--card);border:1px solid var(--amber);border-left:4px solid var(--amber);'
+    +'border-radius:10px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,.18);font-size:13px';
+  d.innerHTML='<div style="font-weight:700;margin-bottom:4px">You are running an old version</div>'
+    +'<div style="color:var(--text2);margin-bottom:10px">A newer build was published '+escHtml(when)
+    +' after the one this tab loaded. Reload to pick it up — anything you have not saved will be lost.</div>'
+    +'<button class="btn btn-primary" onclick="_reloadForNewBuild()" style="font-size:12px">Reload now</button> '
+    +'<button class="btn" onclick="_dismissStaleBuildBanner()" style="font-size:12px">Later</button>';
+  document.body.appendChild(d);
+}
 function _maybeShowSupaConnectBanner(){
   if(!supa||supaSession) return; // client failed to init (nothing to offer), or already connected (nothing to show)
   if(!gUser||!gUser.email||gUser.email==='local') return;
@@ -24007,6 +24076,15 @@ function gShowApp(){
   // round-trip) time to finish first, so this doesn't fire while it's still
   // legitimately in progress.
   setTimeout(_maybeShowSupaConnectBanner,6000);
+  // Stale-build check. Once shortly after login, then on a 15-min interval, and again whenever the
+  // tab is brought back to the front — the realistic case is a tab (or a Google Sites page) left
+  // open for days across several deploys, which is exactly how this keeps going unnoticed.
+  setTimeout(_checkForNewBuild,20000);
+  if(!_buildCheckTimer) _buildCheckTimer=setInterval(_checkForNewBuild,15*60*1000);
+  if(!window._buildVisHooked){
+    window._buildVisHooked=true;
+    document.addEventListener('visibilitychange',function(){ if(!document.hidden) _checkForNewBuild(); });
+  }
   // Also recheck periodically for as long as this tab stays open — the dismissal cooldown below
   // is time-based (not "silenced for the rest of this tab session"), so someone who leaves the
   // browser open for days (very plausible — no forced logout) still gets re-warned instead of the
