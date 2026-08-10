@@ -1744,14 +1744,15 @@ A single quotation (Fabrication-only + Assembly, Site Visit enabled, Cutting lis
 
 ## Known remaining areas to watch
 - **⚠️ Price DB direct-Sheet edits need a manual Supabase resync** — since Phase 4a (2026-07-05), `loadPriceDatabase()` reads Supabase first for Services/Materials/Hardware/CabinetTemplates. Editing through the app's own **Import Materials Excel / Import Hardware Excel** buttons (Settings → Price Database) is automatic — writes both Sheets and Supabase. But editing the **Google Sheet directly** (e.g. manual fixes, the Materials dedup cleanup) only updates Sheets — Supabase silently goes stale until someone runs `supaMigratePriceDb()` in the browser console afterward. No error, no warning — connected users just keep seeing old data. **Rule: direct Sheet edit → always follow with `supaMigratePriceDb()`.**
-- **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. No hint banner needed (user decision 2026-06-14).
+- **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. **Installing the app (2026-08-10, `5675047`) sidesteps this entirely — no iframe, so fullscreen just works.**
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
 - **Carcass pricing tab** — now persisted ✓
 - **Drive saves in Google Sites embed** — RESOLVED ✅ (confirmed 2026-06-13)
 - **First-time setup flow** — user needs to: sign in → Settings → Test connection → Create missing tabs → Save settings
 - **Google Sites iframe cache** — RESOLVED 2026-08-10 for anyone on that build or later: the app now
   detects a stale build itself and offers a reload (`_checkForNewBuild`, commit `8942164`). Bump
-  `?v=N` on the embed ONCE to pull everyone onto it; after that it is self-announcing.
+  `?v=N` on the embed ONCE to pull everyone onto it; after that it is self-announcing. **Installing
+  the app avoids the embed altogether** — see the PWA entry in the 2026-08-10 session.
 - **Cross-session approval apply** — `_applyApprovedRequest()` updates the quotation form only if it is open in the same browser session; requester must navigate away and back to see the approved state if they were on a different page when approval happened
 - **User Roles sheet column R** — Claude API key is stored in header row column R (index 17); this is the same column used by the `Projects` ACC_KEY for data rows — no conflict because Claude key is only read from `rows[0]` (header) and ACC_KEY data is read from `rows[1+]` (data rows)
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
@@ -5209,6 +5210,40 @@ lacked). **Existing quotations self-heal the next time Stage 2 is opened** — n
 > shape here — the bug was a **sentinel that could never be false**, because the field it tested is
 > always written. When a guard keys on "did this state have X", check whether X is written
 > unconditionally.
+
+### Modcraft is installable — the way off the Google Sites embed (`5675047`)
+Rommel: *"I'm thinking if we can make the app installable so we can get away with google site?"*
+Neither tedious nor risky, because `approve.html` had already proved the pattern in this repo.
+
+`app.webmanifest` (separate — approve.html's is scoped to `./approve.html` and cannot serve the
+main app), the manifest/theme-color/apple-touch-icon tags, and a **root-scope** registration of the
+existing `sw.js`. No `orientation` in the manifest: this is desktop-first and pinning it to portrait
+would be wrong on the machines it is mostly used on.
+
+**Verified on the live site**, not inferred: root worker `activated` and controlling the page,
+secure context, manifest resolves as `application/manifest+json` (a wrong MIME type silently breaks
+installability), icons 192/512/maskable all 200, and **approve.html's registration intact alongside
+it**.
+
+- **approve.html's worker is deliberately untouched.** Scoped to `./approve.html`, which is
+  narrower and therefore wins for that path, and its push subscriptions are bound to it. Push works
+  and its first live test is still pending.
+- **Two registrations share one `sw.js`, which caches NOTHING.** That is precisely what makes the
+  overlapping scopes harmless.
+- Never registers on `file://` or localhost — a worker installed from the dev preview would sit in
+  front of it for every later session.
+
+**Additive on purpose. Nothing was taken away** — the Google Site still works, both point at the
+same URL, nobody is forced to move. Retire the Site later, once it is already redundant.
+
+> ⚠ **One consequence:** installed, there is no iframe, so today's Supabase session does not carry
+> over — one "Connect now" each. After that auto-connect works *properly* instead of fighting the
+> storage partition that forced the manual button in the first place (see 2026-08-05).
+
+> `sw.js`'s header claimed it was scoped to approve.html "so the main app is out of reach
+> regardless", and its offline notice talked only about approvals. Both stop being true the moment
+> it serves the main app, so both were corrected. A comment that lies is what produced the
+> `getInstallCarcassUnits` bug.
 
 ### Also worth knowing
 - **`QT-W00000048` (Prime Dimension) is in Supabase but not the Sheet**, so the in-app check never
