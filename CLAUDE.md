@@ -5026,6 +5026,39 @@ Verified across all eight shapes: equal · option · revision · option+revision
 > state (old quotations must still load), it is the Drive folder cache key, and it is the option
 > grouping key. Own session, with a before/after test over real saved states.
 
+### 5. Keystone investigated — same cause, opposite repair, and a gap in my own fix (`17308da`)
+Rommel asked what the floating concern was. Answer: the **sibling** failure. `_serialClaimWaiters`
+is per-tab, and the duplicate-row case was neither fixed nor detected — with Keystone's
+unexplained duplicate row the only candidate instance. Investigating it settled three things.
+
+**The log records `serial: qSerial` (`gLogToSheets`), which is the number on the printed PDF** —
+so it says exactly what each client received. For three of the four the client-facing event came
+AFTER both claims, so the client holds the second number and the repair was right. Keystone did
+not:
+```
+16:57:00  locked as QT-W00000071
+16:57:04  collision detected -> renumbered to QT-W00000075, row written
+16:57:05  shared via Viber as QT-W00000075        <- the client's copy
+16:57:12  late atomic claim -> QT-W00000074, row written AGAIN under 075
+```
+**Keystone's client holds 075, which is already the row key.** The row is CORRECT; `state.serial`
+= 074 is the stale artifact. Renaming it to 074 would have been wrong — the duplicate-row guard
+refused it for an unrelated reason and happened to prevent a real mistake. Its repair is the
+opposite of the other three: delete the duplicate row, then correct the state.
+
+**The duplicate row is the same race**, writing twice under `qBaseSerial`=075 — and closing it
+exposed a gap in the morning's fix. The row write is read-then-append; two overlapping saves both
+read before either append lands, so BOTH append. `_serialClaimWaiters` does not stop that, because
+`_proceedSaveQuotation` **does not return its promise**, so the waiters are released when the save
+STARTS, not when it lands. Now serialised per serial via `_quotRowWrite`, which also covers
+overlapping saves that never touch the claim path.
+
+> **The first test passed for the wrong reason** — the rig snapshotted the sheet at RESOLVE time,
+> so the first append always landed before the second read and it serialised by accident. A real
+> server fixes its view when the REQUEST is sent. Corrected: pre-fix control **2 appends / 2 rows**
+> (the duplicate reproduced), with fix **1 append + 1 update / 1 row**. A control that cannot
+> reproduce the bug proves nothing about the fix.
+
 ### Method notes worth keeping
 - **Two user claims were testable, and the data settled both.** "8864 proves the webhook deploy" —
   it didn't (it arrived 2h16m before the script existed, and its `attachments` carry Wufoo URLs =
@@ -5049,12 +5082,15 @@ Verified across all eight shapes: equal · option · revision · option+revision
 # OPEN — updated 2026-08-09 (THIS IS THE AUTHORITATIVE LIST)
 
 ## ⚠ FIRST TWO THINGS NEXT SESSION — Rommel asked to be reminded of these
-1. **Keystone `QT-W00000075`** — the last of the four split quotations. Blocked on its
-   **duplicate row in the Quotations sheet**: renaming one of a pair would strand the other, so
-   `reconcileClientCopySerials()` refuses it by design. Decide which of the two rows goes, remove
-   it, re-run the same command. Look at both rows before deciding.
+1. **Keystone `QT-W00000075` — do NOT rename it.** Investigated 2026-08-09 (below): its client
+   holds **075**, which is already the row key, so the row is CORRECT and it is `state.serial`
+   (074) that is the stale artifact. The opposite of the other three. Two steps, both needing the
+   app: **delete the duplicate 075 row**, then **correct `state.serial` 074 → 075**. Look at both
+   rows first. `reconcileClientCopySerials()` must NOT be pointed at this one.
 2. **Remove `qBaseSerial`** — the by-construction fix for the serial split (see the box above).
    76 references, 13 assignments. Own session with a before/after test over real saved states.
+   ⚠ Note it does **not** address the duplicate-row failure mode — that is a different problem
+   (two rows for one job, rather than one row under the wrong number).
 
 ## Cleared 2026-08-09
 Signature requests carry their figures to the phone · the double-claim serial race (cause) ·
