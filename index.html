@@ -24777,10 +24777,14 @@ function _findStaleStatuses(cb){
     if(!d||d.error){ cb(null); return; }
     var rows=(d.values)||[];
     _allQuotationStates(function(states,src){
-      var findings=[], noState=0, checked=0, lockFromState=[], serialSplit=[];
+      var findings=[], noState=0, checked=0, lockFromState=[], serialSplit=[], _rowCount={};
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var serial=r[0], stored=(r[5]||'').trim(), st=states[serial];
+        // Counted here, BEFORE the no-state skip, and independently of any mismatch. A duplicate
+        // ROW is its own fault and can exist with a perfectly consistent state — Keystone was
+        // caught only because it happened to have both, which is not a detection strategy.
+        _rowCount[serial]=(_rowCount[serial]||0)+1;
         if(!st){ noState++; continue; }
         checked++;
         // The row key and the quotation's own number must describe the same job. Option (-2) and
@@ -24804,6 +24808,8 @@ function _findStaleStatuses(cb){
       }
       _lockFromStateFindings=lockFromState;
       _serialSplitFindings=serialSplit;
+      _dupRowFindings=Object.keys(_rowCount).filter(function(k){ return _rowCount[k]>1; })
+        .map(function(k){ return {serial:k, rows:_rowCount[k]}; });
       cb(findings, checked, noState, src);
     });
   }).catch(function(){ cb(null); });
@@ -24932,30 +24938,33 @@ var _serialSplitFindings=[];
 // Reported, never auto-corrected: which number wins is a business call, because the printed header
 // uses the state's serial, so on an issued quotation the client is already holding it. Rommel's
 // answer on 2026-08-09 was the client's copy — but that is a decision each time, not a default.
+var _dupRowFindings=[];
 function _reportSerialSplits(){
   var host=el('dbcheck-serials'); if(!host) return;
-  if(!_serialSplitFindings.length){ host.innerHTML=''; return; }
-  // Count ROWS and distinct SERIALS separately. A serial appearing twice is a duplicate ROW —
-  // a different fault from a mismatch, and one that showed up here only as an accidentally
-  // repeated line. QT-W00000075 (Keystone) is exactly that.
-  var _seen={}, _dupes={};
-  _serialSplitFindings.forEach(function(f){
-    if(_seen[f.serial]) _dupes[f.serial]=(_dupes[f.serial]||1)+1;
-    _seen[f.serial]=true;
-  });
-  var _distinct=Object.keys(_seen).length, _dupList=Object.keys(_dupes);
-  var h='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
+  // Duplicates are counted over EVERY row in _findStaleStatuses, not derived from the mismatch
+  // list. A duplicate ROW is its own fault and can exist with a perfectly consistent state; when
+  // this was built off _serialSplitFindings, such a row was invisible, and QT-W00000075 showed up
+  // only because it happened to carry both faults at once.
+  var _dupHtml=_dupRowFindings.length
+    ? '<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-coral)">'
+      +'<b>'+_dupRowFindings.length+' serial'+(_dupRowFindings.length===1?'':'s')
+      +' appear'+(_dupRowFindings.length===1?'s':'')+' on more than one row</b> — '
+      +escHtml(_dupRowFindings.map(function(d){ return d.serial+' ('+d.rows+' rows)'; }).join(', '))
+      +'.<div style="font-size:13px;margin-top:6px">One job listed twice. The Project List only ever '
+      +'updates the FIRST of them, so the others are stale copies that will never change again. It also '
+      +'has to be resolved before that quotation can be renumbered, because renaming one row would '
+      +'strand the other.</div></div>'
+    : '';
+  if(!_serialSplitFindings.length){ host.innerHTML=_dupHtml; return; }
+  var _seen={};
+  _serialSplitFindings.forEach(function(f){ _seen[f.serial]=true; });
+  var _distinct=Object.keys(_seen).length;
+  var h=_dupHtml
+    +'<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
     +'<div style="font-size:13px;margin-bottom:8px"><b>'+_distinct+'</b> quotation'
     +(_distinct===1?' is':'s are')+' filed under a different number from the one the '
     +'quotation itself carries. The printed header uses the quotation\'s own number, so the client\'s '
     +'copy shows the second column below.</div>'
-    +(_dupList.length
-      ? '<div style="font-size:13px;margin-bottom:8px;padding:8px 10px;border-radius:8px;'
-        +'background:var(--wash-coral)"><b>Also: '+_dupList.length+' serial'+(_dupList.length===1?'':'s')
-        +' appear'+(_dupList.length===1?'s':'')+' on more than one row</b> — '+escHtml(_dupList.join(', '))
-        +'. That is a duplicate ROW, not a wrong number: one job listed twice. It has to be resolved '
-        +'before that quotation can be renumbered, because renaming one row would strand the other.</div>'
-      : '')
     +'<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'
     +'<th style="text-align:left;padding:6px 0">Client</th>'
     +'<th style="text-align:left;padding:6px 0">Project List shows</th>'
