@@ -5081,16 +5081,53 @@ overlapping saves that never touch the claim path.
 
 # OPEN — updated 2026-08-09 (THIS IS THE AUTHORITATIVE LIST)
 
-## ⚠ FIRST TWO THINGS NEXT SESSION — Rommel asked to be reminded of these
-1. **Keystone `QT-W00000075` — do NOT rename it.** Investigated 2026-08-09 (below): its client
-   holds **075**, which is already the row key, so the row is CORRECT and it is `state.serial`
-   (074) that is the stale artifact. The opposite of the other three. Two steps, both needing the
-   app: **delete the duplicate 075 row**, then **correct `state.serial` 074 → 075**. Look at both
-   rows first. `reconcileClientCopySerials()` must NOT be pointed at this one.
+## ⚠ FIRST THING NEXT SESSION
+1. ~~Keystone~~ **DONE 2026-08-10** — see the 2026-08-10 session below. Row 64 (the orphan)
+   deleted, `state.serial` corrected 074 → 075, 074 kept in `prevSerials`. Verified: row, state
+   and base all agree; Keystone is off the mismatch list. All four split quotations are now closed.
 2. **Remove `qBaseSerial`** — the by-construction fix for the serial split (see the box above).
    76 references, 13 assignments. Own session with a before/after test over real saved states.
    ⚠ Note it does **not** address the duplicate-row failure mode — that is a different problem
-   (two rows for one job, rather than one row under the wrong number).
+   (two rows for one job, rather than one row under the wrong number), already closed separately
+   by `_quotRowWrite`.
+
+## What was changed on 2026-08-10 (session — Keystone closed, and the duplicate made legible)
+
+### Keystone `QT-W00000075` resolved (`9ae0f59`) — RUN AND VERIFIED
+The two Sheet rows were confirmed identical in **26 of 27 columns** — only the Date differed,
+`08:57:03.620Z` vs `08:57:04.149Z`, **529ms apart**. That is the double-append race caught exactly:
+two saves both read column A before either append landed.
+
+`reconcileDuplicateRows()` — plan-driven, dry run first, same shape as the other repairs.
+**Which row goes is not arbitrary:** `_proceedSaveQuotation` finds its row with `break` on the
+FIRST match, so the earlier row is the live one it keeps updating and any later row is an orphan
+that will never be written again. `sheetsDeleteRowByKey` also breaks on first, so using it would
+have deleted the LIVE row and kept the orphan — hence `_sheetsDeleteRowsByIndex`, deleting by
+index, highest first so one delete cannot shift the next. Supabase needed no row delete (`serial`
+is its primary key, so the duplicate was Sheet-only); the state fix went to both.
+
+Applied 2026-08-10: 1 applied, 0 failed. Verified in Supabase — row key, `state.serial` and
+`baseSerial` all `QT-W00000075`, `prevSerials` holds `QT-W00000074`. **9 mismatches remain, all
+previously known** (8 in `RENUMBER_PLAN` + Bella Ferma).
+
+> **Rommel's rule, stated 2026-08-10:** *"we keep the client portion since it's consistent with the
+> quotation itself and the printout."* Keystone was sent to the client as **075**, seven seconds
+> before the stray claim produced 074 — so the ROW was right and the STATE was the artifact, the
+> reverse of the other three. Same principle, opposite mechanical direction. Do not assume the
+> repair direction from the symptom; read the log, which records `serial: qSerial` — the number on
+> the printed PDF.
+
+### A duplicate row now reads as a duplicate (`09aa4ca`)
+The split report counted ROWS and called them quotations, so Keystone showed as two identical
+lines and the headline read "10 quotations" when it was 9. The duplicate was visible only as an
+accidentally repeated line — the weakest possible way to surface a distinct fault. Now the
+headline counts distinct serials, and any serial on more than one row gets its own coral callout
+naming it and saying what it means. Contrast checked in both themes (14.73 light, 12.03 dark).
+
+### Also worth knowing
+- **`QT-W00000048` (Prime Dimension) is in Supabase but not the Sheet**, so the in-app check never
+  lists it while a SQL query does. That is the known orphan gap (Supabase ~171 rows vs Sheet ~75),
+  not a new fault — but it is why the two counts differ by one.
 
 ## Cleared 2026-08-09
 Signature requests carry their figures to the phone · the double-claim serial race (cause) ·
