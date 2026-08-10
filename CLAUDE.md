@@ -5191,6 +5191,52 @@ callback). Reload preserves every existing parameter and only swaps the cache-bu
   has bitten twice: `renderSignatureBar` hooked to a function `updateLockUI` never called, and the
   build-check rig above.
 
+## QUEUED — requested by the team 2026-08-10 (not started)
+
+### 1. Sort the Project List by user — ⚠ ALREADY EXISTS, confirm what they actually want
+**It works today.** The **"Assigned"** column header is clickable and sorts by user
+(`_th('user', …, 'user')` → `setDirSort('user')` → `dirSort==='user'`), it carries the same
+sort-arrows icon as Serial/Client/Value/Created, and the column is on by default.
+
+So before building anything, ask the team which of these they mean:
+- **They did not know it was clickable** — likely, since it is labelled *Assigned*, not *User*.
+  Nothing to build; possibly relabel, or make the sortable headers look more obviously clickable.
+- **They want to FILTER, not sort** — this does NOT exist and is probably the real ask. With 75+
+  quotations, sorting by user still means scrolling to find your own. A user dropdown in the filter
+  bar (next to the status filter), plus an "Only mine" quick toggle, is small work.
+
+Do not build a sort that is already there. Establish which one first.
+
+### 2. Attach a screenshot or file to a quotation as evidence
+Their examples: a client declines by message → attach the screenshot; a client asks to change
+materials → attach the email or photo. The point is a durable record of WHY something happened.
+
+**The storage half already exists** and should be reused, not rebuilt:
+`supaUploadQuotationBinaryFile()`, `_driveUpsertBinaryFile()`, `_base64ToBlob()`, and the
+per-quotation folder that already holds the state JSON, printouts, board layouts, drawing analyses
+and copied Wufoo attachments.
+
+What is missing: an attach control + a note/reason, a list to view and download, and a link from
+the **activity log**, since an attachment is evidence *for an event* and the log is the app's
+existing permanent record.
+
+Decisions to settle with Rommel before building:
+- **Where it lives** — a card on the quotation, or an action on the activity-log entry it explains?
+- **Deletion** — evidence probably should not be deletable at all, or Admin-only with a log entry.
+  Worth deciding deliberately rather than defaulting.
+- ⚠ **`_cleanupCancelledQuotationFiles()` deletes supplementary files when a quotation is
+  cancelled.** Evidence must be EXEMPT from that, or the record of *why it was cancelled* is
+  destroyed by the cancellation — exactly the case they are asking for. Its allowlist is matched on
+  4 exact filename markers, so a new marker has to be added and deliberately left out of the wipe.
+
+### 3. Make the serial and client name clickable on the Approvals page
+`renderApprovals()` shows serial + client as plain text; an approver has to go and find the
+quotation themselves. Make both open it, the way Project List rows already do.
+
+⚠ Must route through **`confirmUnsavedThen()`** — an approver may have a quotation part-written,
+and navigating away without that guard silently discards it. The Project List rows go through it;
+this must too.
+
 ## Cleared 2026-08-09
 Signature requests carry their figures to the phone · the double-claim serial race (cause) ·
 three of the four split quotations repaired onto the client's number · a split can no longer reach
