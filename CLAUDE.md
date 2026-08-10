@@ -1749,7 +1749,9 @@ A single quotation (Fabrication-only + Assembly, Site Visit enabled, Cutting lis
 - **Carcass pricing tab** — now persisted ✓
 - **Drive saves in Google Sites embed** — RESOLVED ✅ (confirmed 2026-06-13)
 - **First-time setup flow** — user needs to: sign in → Settings → Test connection → Create missing tabs → Save settings
-- **Google Sites iframe cache** — after pushing a fix, the embed shows stale version; fix: edit the Google Site, append `?v=N` (increment N each time) to the embed URL, republish
+- **Google Sites iframe cache** — RESOLVED 2026-08-10 for anyone on that build or later: the app now
+  detects a stale build itself and offers a reload (`_checkForNewBuild`, commit `8942164`). Bump
+  `?v=N` on the embed ONCE to pull everyone onto it; after that it is self-announcing.
 - **Cross-session approval apply** — `_applyApprovedRequest()` updates the quotation form only if it is open in the same browser session; requester must navigate away and back to see the approved state if they were on a different page when approval happened
 - **User Roles sheet column R** — Claude API key is stored in header row column R (index 17); this is the same column used by the `Projects` ACC_KEY for data rows — no conflict because Claude key is only read from `rows[0]` (header) and ACC_KEY data is read from `rows[1+]` (data rows)
 - **`_localActions` guard duration** — approval/counter actions are guarded for 30 s against poll revert; if the Sheets write takes longer than 30 s (network issue), the next 60 s poll may briefly revert the status before the write completes
@@ -5124,10 +5126,70 @@ accidentally repeated line — the weakest possible way to surface a distinct fa
 headline counts distinct serials, and any serial on more than one row gets its own coral callout
 naming it and saying what it means. Contrast checked in both themes (14.73 light, 12.03 dark).
 
+### ⚠ The carcass count is required, not invented (`93b1720`)
+Reported as *"its super bloated"* on **QT-C00000004** (Stiffany Gabut, CWL): a ₱27,374,680
+quotation with ₱10,273,375 of installation against ₱136k of fabrication.
+
+**Cause:** `getInstallCarcassUnits()` fell back to `getTotU()` in services mode when no carcass
+count was entered — contradicting the comment directly above it, which says svcItems quantities
+are panel/edge-banding counts in mixed units and **NOT a cabinet count**. It billed 1,112.69
+linear metres and holes as 1,112 cabinets to install. The quotation already knew its project size
+was 228 COMPONENTS; nothing knew how many cabinets there were, because a cutting list does not say.
+
+**Rommel's call:** *"since carcass is critical instead of inventing it, why not show notification
+that it is required since many are dependent on it. Then prevent lock activation."* — better than
+the floor-at-1 option offered, and it made the fix simpler.
+
+- `getInstallCarcassUnits()` returns **0** in services mode when blank. Zero is safe ONLY because
+  of the gate — a quotation with no count can never be issued — so it cannot become a silent
+  under-charge, which is the failure that would actually cost money.
+- `_carcassCountRequired()` is true only in services mode AND when something is installed or
+  assembled. Carcass and BOM modes are untouched: their item quantities ARE a real cabinet count.
+- The lock gate now covers both requirements. `_projectSizeGateOk/Fail` became
+  `_lockGateOk`/`_lockGateFail`/`_lockGateReason` and route to whichever card is missing —
+  **renamed rather than left with a name that no longer says what it checks.**
+- `renderCarcassCountNote()` states it on the card itself, not only in a disabled button's tooltip.
+
+Verified through the normal `recalc()` path: blank → units 0, lock disabled, Lock refuses and the
+quotation stays unlocked; count 30 → instBase **₱10,273,375 → ₱108,098**; Fab-only → not required;
+Fab-only + Assembly → required; carcass mode → untouched; the service dropdown moves the gate both ways.
+
+**Scope:** only 3 quotations in the database are services-mode with installation. QT-C00000004 is a
+Draft (nothing issued). QT-260603-8162 has no service lines (₱1,200). **QT-W00000052 reviewed by
+Rommel 2026-08-10 — fine, no action.**
+
+### "You are running an old version" (`8942164`)
+The Google Sites embed serves a cached build long after a fix ships, and a plain hard refresh often
+does not clear it. Same conversation repeatedly: fix deployed and verified, someone reports it
+missing, time spent hunting a bug that is not there. Rommel: *"even I sometime got confused also."*
+
+No build step, no version file. Pages sends `Last-Modified`, so `document.lastModified` is when the
+build THIS TAB loaded was published; a cache-busted HEAD says what is published now. Checked ~20s
+after login, every 15 min, and on `visibilitychange` — the realistic case is a tab left open for
+days across several deploys.
+
+Fails safe in every direction: no header → `document.lastModified` falls back to "now" per spec and
+it never fires; failed fetch ignored; only ever a dismissible banner. 60s tolerance for clock skew.
+Skipped on localhost/`file://` and during a sign-in round-trip (reloading mid-OAuth loses the
+callback). Reload preserves every existing parameter and only swaps the cache-buster.
+
+> ⚠ **Bootstrap:** anyone already on an old build cannot be warned by code they do not have. Bump
+> `?v=N` on the embed ONCE to pull everyone onto this build; after that it is self-announcing.
+
+> **The first version was untestable and I did not notice.** It read `window.location` inline —
+> which cannot be overridden in a browser — so all six test cases silently hit the localhost guard
+> and passed without testing anything. Restructured so the guards and the comparison take their
+> inputs as arguments; now genuinely covered by 15 cases.
+
 ### Also worth knowing
 - **`QT-W00000048` (Prime Dimension) is in Supabase but not the Sheet**, so the in-app check never
   lists it while a SQL query does. That is the known orphan gap (Supabase ~171 rows vs Sheet ~75),
   not a new fault — but it is why the two counts differ by one.
+- **Calling a function directly proves the logic, not that the app ever reaches it.** Rommel asked
+  what this meant; it is worth keeping. A note that only appears when summoned is invisible to a
+  user. Test through the path the app actually uses (`recalc()`, the button's own handler). This
+  has bitten twice: `renderSignatureBar` hooked to a function `updateLockUI` never called, and the
+  build-check rig above.
 
 ## Cleared 2026-08-09
 Signature requests carry their figures to the phone · the double-claim serial race (cause) ·
