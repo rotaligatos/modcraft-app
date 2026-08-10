@@ -27735,6 +27735,7 @@ function _cleanupPrevSerialRows(currentSerial){
 // collision path and the atomic claim — so the guard covers both, not just the claim.
 // Waiters re-enter the same function, which by then finds the serial committed and simply saves,
 // so a second save still happens; it just does not mint a second number.
+var _quotRowWrite={};           // {serial: Promise} — serialises the Quotations row write per serial
 var _serialClaimWaiters=null;   // null = nothing in flight; array = saves waiting on the claim
 function _serialClaimSettled(){
   var w=_serialClaimWaiters; _serialClaimWaiters=null;
@@ -28063,7 +28064,20 @@ function _proceedSaveQuotation(){
   var _bsM=serial.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
   sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:fqClientApprovedAt||'',clientApproved:!!fqClientApproved,updatedAt:now,sentAt:(fqSentAt||qSentAt||'')};
   try{ supaUpsertQuotation(sessionQuotations[serial]); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
-  sheetsGet('Quotations!A:A').then(function(d){
+  // ── Two saves must not both APPEND the same serial ──────────────────────────────────────
+  // The write is read-then-append: look for the row in column A, update it if found, append if
+  // not. Two overlapping saves both read before either append lands, so neither finds a row and
+  // BOTH append — one job, two rows. That is what left QT-W00000075 (Keystone) duplicated: the
+  // collision path wrote at 16:57:04 and the late atomic claim wrote again at :12, both keyed on
+  // the same qBaseSerial.
+  //
+  // _serialClaimWaiters stops the double CLAIM, but not this: _proceedSaveQuotation does not
+  // return its promise, so the waiters are released when the save STARTS, not when it lands.
+  // Rather than rework this function's control flow, the row write is serialised per serial —
+  // which also covers overlapping saves that never went near the claim path at all.
+  _quotRowWrite[serial]=(_quotRowWrite[serial]||Promise.resolve()).catch(function(){})
+  .then(function(){
+  return sheetsGet('Quotations!A:A').then(function(d){
     if(d.error){
       return sheetsCreateTab('Quotations').then(function(){
         return sheetsAppend('Quotations!A:AA',[QUOT_HDR]).then(function(){
@@ -28097,6 +28111,7 @@ function _proceedSaveQuotation(){
     console.warn('Sheets save failed:',e);
     showSheetsToast(false,'Sheets save failed — check connection ('+serial+')');
   });
+  });   // ← end of the per-serial row-write chain opened above
   saveQuotationJson();
   // Also upsert client record from quotation info
   if(clName||contactName){
