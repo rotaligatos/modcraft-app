@@ -5181,6 +5181,35 @@ callback). Reload preserves every existing parameter and only swaps the cache-bu
 > and passed without testing anything. Restructured so the guards and the comparison take their
 > inputs as arguments; now genuinely covered by 15 cases.
 
+### ⚠ Stage 2 never inherited an approved override (`86a7f5a`)
+Reported on **QT-W00000052**: a cost-factor override approved at Stage 1 did not reflect on the
+Final Quotation.
+
+`initFinalQuotation()` gated ALL inheritance on `if(!fqApprovalsFromSave)`, and that flag comes
+from `state.fqVatApproved!==undefined` — **a key every save writes unconditionally** (line 28574).
+So it was true for any quotation ever saved and reopened, and Stage 2 inherited nothing.
+Inheritance only worked if Stage 2 was opened in the SAME SESSION the quotation was created,
+before the first save. Normal use loses it every time.
+
+Measured: **`fqCustomCFApproved` true on 0 of 157 quotations**, while 3 carry an approved Stage 1
+override — so those priced at the override in Stage 1 and the global rates in Stage 2. W52 is one
+(markup 20% via the override, 30% global at Stage 2).
+
+**The same flaw hit VAT, discount and premium.** Gaps: CF 3, VAT 76, discount 8, premium 0.
+Nothing already issued moved — 0 of the CF and discount gaps are locked at Stage 2, and the single
+locked VAT-gap quotation has a frozen total.
+
+Now inherited **per field**. The original intent stands and is preserved exactly — a real Stage 2
+approval must never be reset by Stage 1's — and per-field says precisely that: take Stage 1's value
+only where Stage 2 has none of its own. Verified including the protection case (a Stage 2 with its
+own override keeps it; a Stage 2 with its own 3% discount keeps that AND inherits the override it
+lacked). **Existing quotations self-heal the next time Stage 2 is opened** — no repair script.
+
+> Same family as every other Stage1/Stage2 drift: the two stages are hand-duplicated. But note the
+> shape here — the bug was a **sentinel that could never be false**, because the field it tested is
+> always written. When a guard keys on "did this state have X", check whether X is written
+> unconditionally.
+
 ### Also worth knowing
 - **`QT-W00000048` (Prime Dimension) is in Supabase but not the Sheet**, so the in-app check never
   lists it while a SQL query does. That is the known orphan gap (Supabase ~171 rows vs Sheet ~75),
@@ -5191,21 +5220,23 @@ callback). Reload preserves every existing parameter and only swaps the cache-bu
   has bitten twice: `renderSignatureBar` hooked to a function `updateLockUI` never called, and the
   build-check rig above.
 
-## QUEUED — requested by the team 2026-08-10 (not started)
+## QUEUED — requested by the team 2026-08-10
 
-### 1. Sort the Project List by user — ⚠ ALREADY EXISTS, confirm what they actually want
-**It works today.** The **"Assigned"** column header is clickable and sorts by user
-(`_th('user', …, 'user')` → `setDirSort('user')` → `dirSort==='user'`), it carries the same
-sort-arrows icon as Serial/Client/Value/Created, and the column is on by default.
+### 1. Filter the Project List by user — ✅ DONE (`74b22e4`)
+Rommel corrected the ask: **filter, not sort** — "so what they can see are the quotation made by
+them only." (Sorting by the Assigned column already existed and is a different thing; at 171
+quotations, sorting still leaves you hunting for your own block.)
 
-So before building anything, ask the team which of these they mean:
-- **They did not know it was clickable** — likely, since it is labelled *Assigned*, not *User*.
-  Nothing to build; possibly relabel, or make the sortable headers look more obviously clickable.
-- **They want to FILTER, not sort** — this does NOT exist and is probably the real ask. With 75+
-  quotations, sorting by user still means scrolling to find your own. A user dropdown in the filter
-  bar (next to the status filter), plus an "Only mine" quick toggle, is small work.
+A user dropdown in the filter bar with **"Only mine (N)"** first, then everyone else. A **VIEW
+filter, not a permission** — everyone can still see everything; this only changes what is on
+screen. Choice persisted to `localStorage`.
 
-Do not build a sort that is already there. Establish which one first.
+"Only mine" matches the same expression the save writes into the User column
+(`gUser.name||gUser.email`), so it cannot fail to match something you saved. Verified against live
+data first: that column holds real names (Rommel 81, Jhover 34, Stephanie 31, Joanna 15, Kaye 10),
+no blanks, no shared-mailbox aliases. The dropdown is built from the rows present, never the
+roster, and is only rewritten when the option set changes — otherwise an open dropdown would be
+dropped mid-click on the next render.
 
 ### 2. Attach a screenshot or file to a quotation as evidence
 Their examples: a client declines by message → attach the screenshot; a client asks to change
