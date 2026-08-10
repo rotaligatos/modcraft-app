@@ -12,9 +12,16 @@
  * network and stores nothing; its sole extra behaviour is a plain "you are offline" page when a
  * NAVIGATION genuinely fails. No cache is opened anywhere in this file, and none should be.
  *
- * Its real jobs are to receive a push and to open the right request when the notification is
- * tapped. Registration is scoped to approve.html specifically, so the main app is out of reach
- * regardless.
+ * Its other jobs are to receive a push and to open the right request when the notification is
+ * tapped.
+ *
+ * SCOPE — this file now serves TWO registrations, deliberately:
+ *   ./approve.html  (from approve.html)  — narrower, so it wins for that path. Push subscriptions
+ *                                          are bound to it; do not disturb it.
+ *   ./              (from index.html)    — makes the whole app installable, which is what lets us
+ *                                          leave the Google Sites embed behind.
+ * Nothing here is path-specific except the notification target, so one file serving both is safe.
+ * It caches nothing either way, which is what makes overlapping scopes harmless.
  */
 'use strict';
 
@@ -35,8 +42,9 @@ var OFFLINE_HTML =
   'color:#e5e9f0;font:15px/1.5 -apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">'+
   '<div style="text-align:center;padding:24px">'+
   '<div style="font-size:18px;font-weight:600;margin-bottom:6px">No connection</div>'+
-  '<div style="color:#9aa5b5">Approvals need to be online — the figures are read live so you are '+
-  'never deciding on a stale number.</div></div>';
+  '<div style="color:#9aa5b5">Modcraft reads and writes live — quotations, orders and approval '+
+  'figures all come from the database, so there is nothing useful to show offline. Reconnect and '+
+  'reload.</div></div>';
 
 self.addEventListener('fetch', function(event){
   // Only navigations. Assets are left entirely alone.
