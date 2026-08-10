@@ -895,6 +895,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
             </div>
             <button class="btn" onclick="suggestCarcassUnitCount()" style="font-size:12px;padding:6px 10px"><i class="ti ti-wand"></i> Suggest from materials</button>
           </div>
+          <div id="carcass-count-required-note" style="font-size:12px;margin-top:10px;display:none"></div>
           <div id="carcass-count-suggest-note" style="font-size:11px;color:var(--text2);margin-top:8px"></div>
         </div>
       </div>
@@ -6661,10 +6662,28 @@ function getTotU() {
 // in mixed units — not a cabinet count — so use the manual/suggested
 // qCarcassUnitCount instead. getTotU() itself is untouched (still used as-is
 // for fabrication capacity checks and report displays, a separate concept).
+// The getTotU() fallback in services mode contradicted the comment directly above it, and it
+// was not harmless: on QT-C00000004 it billed 1,112.69 linear metres and holes as 1,112 cabinets
+// to install — ₱10.27M of installation on a ₱136k fabrication job, a ₱27.4M quotation.
+//
+// Rommel's call, 2026-08-10: do not invent a number. The count is required, it is asked for, and
+// the quotation cannot be LOCKED without it (see _carcassCountGateOk). Zero here is safe precisely
+// because of that gate — a quotation with no count can never be issued, so this cannot become a
+// silent under-charge, which is the failure that would actually cost money.
 function getInstallCarcassUnits(){
-  if(qFabMode==='services') return qCarcassUnitCount>0?qCarcassUnitCount:getTotU();
+  if(qFabMode==='services') return qCarcassUnitCount>0?qCarcassUnitCount:0;
   return getTotU();
 }
+// Only needed when there is something to install or assemble, and only in services mode —
+// carcass and BOM modes get a real cabinet count from the item quantities themselves.
+function _carcassCountRequired(){
+  if(qFabMode!=='services') return false;
+  var svc=(el('cl-service')?el('cl-service').value:'')||'';
+  var ni=svc.indexOf('Installation')>=0;
+  var na=ni||(svc==='Fabrication only'&&qAssembly&&qAssembly.enabled);
+  return ni||na;
+}
+function _carcassCountGateOk(){ return !_carcassCountRequired()||qCarcassUnitCount>0; }
 function clientMatMult(){
   // service uplift when client supplies the materials; 1 (no effect) otherwise
   if(!qClientSupplyMat) return 1;
@@ -8189,35 +8208,68 @@ function renderProjectSizeNote(){
 // One rule in one place. recalc/recalcFQ and their lock paths are hand-duplicated
 // and have drifted apart repeatedly; this gate is not going to be the next one.
 var PROJECT_SIZE_GATE_MSG='Set the project size (no. of components) before locking';
+var CARCASS_COUNT_GATE_MSG='Enter the carcass / unit count before locking';
+// Two things must be known before a quotation can be issued, for the same reason: everything
+// downstream is priced off them, and both are cheaper to ask for now than to discover missing on
+// a locked quotation later. The carcass count joined this on 2026-08-10, after the getTotU()
+// fallback billed 1,112 linear metres as 1,112 cabinets to install.
+function _lockGateOk(){ return _projectSizeGateOk()&&_carcassCountGateOk(); }
 function _projectSizeGateOk(){ return projectSizeValue()>0; }
-// fromStage2: the Project Size card lives inside #s1-wrap, so on Stage 2 it is
-// hidden and scrolling to it would do nothing at all. Go to Stage 1 first.
-function _projectSizeGateFail(fromStage2){
+function _lockGateReason(){
+  if(!_projectSizeGateOk()) return PROJECT_SIZE_GATE_MSG;
+  if(!_carcassCountGateOk()) return CARCASS_COUNT_GATE_MSG;
+  return '';
+}
+// fromStage2: both cards live inside #s1-wrap, so on Stage 2 they are hidden and
+// scrolling to one would do nothing at all. Go to Stage 1 first.
+function _lockGateFail(fromStage2){
+  var needSize=!_projectSizeGateOk();
+  var cardId=needSize?'project-size-card':'carcass-count-card';
+  var inputId=needSize?'project-size':'carcass-unit-count';
+  var what=needSize?'the project size (no. of components)':'the carcass / unit count';
   showToast(fromStage2
-    ? 'Set the project size (no. of components) on the Initial Quotation before locking.'
-    : PROJECT_SIZE_GATE_MSG+' — see the Project Size card.');
+    ? 'Set '+what+' on the Initial Quotation before locking.'
+    : 'Set '+what+' before locking — see the card highlighted below.');
   if(fromStage2&&typeof goStage==='function') goStage(1);
-  var _pc=el('project-size-card');
+  var _pc=el(cardId);
   if(_pc) _pc.scrollIntoView({behavior:'smooth',block:'center'});
-  var _pi=el('project-size'); if(_pi) setTimeout(function(){_pi.focus();},400);
+  var _pi=el(inputId); if(_pi) setTimeout(function(){_pi.focus();},400);
 }
 function _applyGateToBtn(btn,ok){
   if(!btn) return;
   btn.disabled=!ok;
   btn.style.opacity=ok?'1':'.5';
   btn.style.cursor=ok?'':'not-allowed';
-  btn.title=ok?'':PROJECT_SIZE_GATE_MSG;
+  btn.title=ok?'':_lockGateReason();
 }
 function _updateLockGate(){
   if(typeof renderSignatureBar==='function') renderSignatureBar();
+  renderCarcassCountNote();
   var lb=el('lock-btn'); if(!lb) return;
   if(qLocked||qCancelled) return;   // updateLockUI owns the button in those states
-  _applyGateToBtn(lb,_projectSizeGateOk());
+  _applyGateToBtn(lb,_lockGateOk());
 }
 function _updateFQLockGate(){
   var lb=el('fq-lock-btn'); if(!lb) return;
   if(fqLocked||qCancelled) return;  // updateFQLockUI owns the button in those states
-  _applyGateToBtn(lb,_projectSizeGateOk());
+  _applyGateToBtn(lb,_lockGateOk());
+}
+// Says it plainly on the card itself, not only in a disabled button's tooltip — a tooltip is
+// not discoverable, and this is the field the whole installation price hangs off.
+function renderCarcassCountNote(){
+  var n=el('carcass-count-required-note'); if(!n) return;
+  if(!_carcassCountRequired()){ n.style.display='none'; return; }
+  n.style.display='block';
+  if(qCarcassUnitCount>0){
+    n.className='alert alert-ok';
+    n.innerHTML='<i class="ti ti-circle-check"></i> Installation and Assembly are billing against <b>'
+      +qCarcassUnitCount+'</b> unit'+(qCarcassUnitCount===1?'':'s')+'.';
+  } else {
+    n.className='alert alert-warn';
+    n.innerHTML='<i class="ti ti-alert-triangle"></i> <b>Required.</b> This quotation includes '
+      +'installation or assembly, and a cutting list does not say how many cabinets there are. '
+      +'Until this is set, installation counts as <b>zero</b> and the quotation <b>cannot be locked</b>.';
+  }
 }
 function _updateCarcassCountCardVisibility(){
   var card=el('carcass-count-card');
@@ -18943,7 +18995,7 @@ function doLock() {
 }
 function doLockOnly(){
   if(qLocked||qCancelled) return;
-  if(!_projectSizeGateOk()){ _projectSizeGateFail(false); return; }
+  if(!_lockGateOk()){ _lockGateFail(false); return; }
   if(qRevisionPending) _applyRevisionBump();   // stamp the revision as it is issued
   _stampPreparedBySignature();
   qLocked=true; qSentStatus='Not sent'; qInitLockedAt=new Date().toISOString();
@@ -19485,7 +19537,7 @@ function confirmUnlock() {
 // ── Final Quotation Lock / Unlock ─────────────────────────────────────────
 function doFQLock() {
   if(qCancelled){ showToast('This quotation was cancelled — the client declined to proceed.'); return; }
-  if(!_projectSizeGateOk()){ _projectSizeGateFail(true); return; }
+  if(!_lockGateOk()){ _lockGateFail(true); return; }
   modalCtx='fq';
   openModal('ov-lock');
 }
