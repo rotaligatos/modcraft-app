@@ -23016,6 +23016,135 @@ var CLIENT_COPY_PLAN=[
 function reconcileClientCopySerials(execute){
   return reconcileRenumbered(execute,CLIENT_COPY_PLAN,'Client-copy serial reconciliation');
 }
+// ── A quotation listed twice, and a state that disagrees with it ────────────────────────────
+// QT-W00000075 (Keystone) is the double-APPEND symptom of the same race: two saves 529ms apart
+// both read column A before either append landed, so both appended. Rows 63 and 64 are identical
+// in 26 of 27 columns — only the Date differs.
+//
+// It is NOT the same repair as CLIENT_COPY_PLAN, and must not be run through it. The log records
+// `serial: qSerial`, the number on the printed PDF, and Keystone was shared via Viber as 075 at
+// 16:57:05 — SEVEN SECONDS BEFORE the late atomic claim set qSerial to 074. So the client holds
+// 075, which is already the row key: here the ROW is right and the STATE is the artifact. The
+// other nine are the other way round.
+//
+// Rommel's rule, 2026-08-09: keep whatever is consistent with the quotation and its printout —
+// i.e. the number the client was actually sent. Same principle, opposite mechanical direction.
+//
+// Which duplicate row goes is not arbitrary: _proceedSaveQuotation finds its row with `break` on
+// the FIRST match, so the earlier row is the live one it keeps updating and any later row is an
+// orphan that will never be written again. sheetsDeleteRowByKey also breaks on first, so using it
+// here would delete the LIVE row and keep the orphan — this deletes by index instead.
+//
+// Supabase needs no row delete: `serial` is the primary key there, so the duplicate is Sheet-only.
+var DUPLICATE_ROW_PLAN=[
+  {serial:'QT-W00000075', stateSaysNow:'QT-W00000074', shouldSay:'QT-W00000075', client:'Keystone Construction'}
+];
+function reconcileDuplicateRows(execute){
+  if(!gToken){ console.log('Sign in first.'); return; }
+  var mode=execute?'EXECUTE':'DRY RUN';
+  console.log('=== Duplicate row + state reconciliation ('+mode+') ===');
+  if(execute&&!supaReady()){
+    console.log('REFUSED — not connected to Supabase. The state fix has to land in both stores or '
+      +'they disagree about what this quotation is called. Run supaConnect(), then re-run.');
+    return Promise.resolve({refused:'supabase-not-connected'});
+  }
+  return Promise.all([sheetsGet('Quotations!A:AA'),sheetsGet('Quotation State!A:K')])
+  .then(function(res){
+    var qRows=(res[0].values||[]), sRows=(res[1].values||[]), hdr=qRows[0]||[];
+    var ops=[], skipped=[];
+    DUPLICATE_ROW_PLAN.forEach(function(p){
+      var hits=[];
+      for(var i=1;i<qRows.length;i++) if(String(qRows[i][0]||'').trim()===p.serial) hits.push(i);
+      if(hits.length<2){ skipped.push(p.serial+' — '+hits.length+' row(s) in Quotations, nothing to de-duplicate (already done?)'); return; }
+      // Only remove a row that is genuinely redundant. Anything beyond the Date column differing
+      // means these are not duplicates and a person has to look.
+      var base=qRows[hits[0]], bad=null;
+      for(var k=1;k<hits.length&&!bad;k++){
+        for(var c=0;c<Math.max(hdr.length,base.length,qRows[hits[k]].length);c++){
+          if(String(hdr[c]||'')==='Date') continue;
+          if(String(base[c]||'').trim()!==String(qRows[hits[k]][c]||'').trim())
+            bad=(hdr[c]||('col '+c))+' differs ('+(base[c]||'(blank)')+' vs '+(qRows[hits[k]][c]||'(blank)')+')';
+        }
+      }
+      if(bad){ skipped.push(p.serial+' — rows are NOT identical: '+bad+'. LEFT ALONE.'); return; }
+      // State must currently say what we expect, or this is not the case diagnosed.
+      var si=-1;
+      for(var j=1;j<sRows.length;j++) if(String(sRows[j][0]||'').trim()===p.serial){ si=j; break; }
+      var st=null;
+      if(si>=0){ try{ st=JSON.parse((sRows[si].slice(1)||[]).join('')); }catch(e){ st=null; } }
+      if(!st){ skipped.push(p.serial+' — saved state missing or unreadable. LEFT ALONE.'); return; }
+      if(String(st.serial||'')!==p.stateSaysNow){
+        skipped.push(p.serial+' — its state says '+JSON.stringify(st.serial||'')+', not '+p.stateSaysNow+'. LEFT ALONE.');
+        return;
+      }
+      ops.push({p:p, keep:hits[0]+1, drop:hits.slice(1).map(function(x){return x+1;}), si:si, st:st});
+    });
+    console.log('');
+    ops.forEach(function(o){
+      console.log('KEEP row '+o.keep+', DELETE row'+(o.drop.length>1?'s':'')+' '+o.drop.join(', ')
+        +'   '+o.p.serial+'  '+(o.p.client||''));
+      console.log('    then state.serial  '+o.p.stateSaysNow+'  ->  '+o.p.shouldSay
+        +'   (the number the client was sent)');
+    });
+    skipped.forEach(function(s){ console.log('SKIPPED  '+s); });
+    console.log('');
+    console.log(ops.length+' to change, '+skipped.length+' skipped.');
+    if(!execute){ console.log('Dry run only. Re-run with (true) to apply.'); return {ops:ops.length,skipped:skipped}; }
+
+    var done=0, failed=[];
+    return ops.reduce(function(chain,o){
+      return chain.then(function(){
+        // Highest index first, so deleting one cannot shift the next.
+        var drops=o.drop.slice().sort(function(a,b){return b-a;});
+        return _sheetsDeleteRowsByIndex('Quotations',drops).then(function(){
+          var st=o.st;
+          st.serial=o.p.shouldSay;
+          st.prevSerials=(st.prevSerials||[]);
+          if(st.prevSerials.indexOf(o.p.stateSaysNow)<0) st.prevSerials.push(o.p.stateSaysNow);
+          var row=_qstateRow(o.p.serial,JSON.stringify(st));
+          return sheetsUpdate('Quotation State!A'+(o.si+1)+':K'+(o.si+1),[row]).then(function(){
+            if(!supaReady()) return null;
+            return supa.from('quotation_states').update({state:st}).eq('serial',o.p.serial);
+          });
+        }).then(function(){
+          done++;
+          logActivity('Duplicate row removed for '+o.p.serial+' ('+o.drop.length+' row'
+            +(o.drop.length===1?'':'s')+'), and its saved state corrected from '+o.p.stateSaysNow
+            +' to '+o.p.shouldSay+' — the number the client was sent.');
+          console.log('  done  '+o.p.serial);
+        }).catch(function(e){
+          failed.push(o.p.serial+': '+(e&&e.message||e));
+          console.warn('  FAILED '+o.p.serial, e);
+        });
+      });
+    }, Promise.resolve()).then(function(){
+      console.log('');
+      console.log('=== DONE — '+done+' applied, '+failed.length+' failed ===');
+      if(failed.length) console.log(failed);
+      console.log('Reload the app to see it.');
+      return {done:done,failed:failed};
+    });
+  });
+}
+// Delete by ROW INDEX, not by key. sheetsDeleteRowByKey resolves the index by scanning column A
+// and breaking on the first match — which is the row we want to KEEP when a serial is duplicated.
+function _sheetsDeleteRowsByIndex(sheetName,rowNumbers){
+  if(!rowNumbers||!rowNumbers.length) return Promise.resolve();
+  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'?fields=sheets.properties',{})
+  .then(function(meta){
+    var sheets=meta.sheets||[], sheetId=null;
+    for(var j=0;j<sheets.length;j++) if(sheets[j].properties.title===sheetName){ sheetId=sheets[j].properties.sheetId; break; }
+    if(sheetId===null) throw new Error('Sheet not found: '+sheetName);
+    // Descending, so an earlier delete cannot shift a later index.
+    var reqs=rowNumbers.slice().sort(function(a,b){return b-a;}).map(function(n){
+      return {deleteDimension:{range:{sheetId:sheetId,dimension:'ROWS',startIndex:n-1,endIndex:n}}};
+    });
+    return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+':batchUpdate',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({requests:reqs})
+    });
+  });
+}
 
 function supaMigrateAll(){
   if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(); }
