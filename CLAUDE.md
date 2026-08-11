@@ -5184,14 +5184,29 @@ rows — **1 correction, 54 confirmed, 1 with two hands, 113 with no evidence ei
   Rommel) looks odd, and the log is too unreliable there to call it.
 
 `reconcileQuotationCreators()` stays, permanently refusing, and now points at the replacement.
-Verified by driving the function against the real data — 14 assertions, including that a dry run
-and both refusals write nothing, and that it never touches the created date.
+
+**Surfaced as a button** (`b4ff744`), in **Settings → Company & DB → Check Project List**, with the
+other repairs — a console-only repair is one nobody runs. `_findQuotationCredits` is the single
+analysis both the panel and the console call, so they cannot disagree. 21 assertions, covering the
+button path: it makes the identical change, confirms first, does nothing before a check has run,
+and the panel stays silent when it cannot read.
+
+**Contrast, measured:** full-strength `--coral` on `--wash-amber` is **3.49:1** in light — under the
+4.5 needed at 12.5px. Now `--pill-coral` (the ink darkened 2026-08-11 for exactly this), 5.1:1. The
+identical pairing one block up in `_reportSerialSplits` had the same miss and is fixed with it.
+
+> ⚠ **Found, NOT fixed — every `.btn-primary` in the app fails AA in dark mode.** White on
+> `rgb(91,149,209)` = **3.15:1**, all **31** of them. Pre-existing and app-wide, so it was left out
+> of a credits repair — but note the 2026-08-08 dark-mode pass claimed "zero low-contrast text in
+> dark", and that measurement evidently did not cover button labels on accent backgrounds. Fixing
+> it changes the primary button on every screen, so it is Rommel's call to see first.
 
 ### Still open from today
-- **Client Declined is a one-way door.** People are using it for *"Draft only"*, *"Revision"*,
-  *"Wrong Pricing"* — two of those on the morning of 08-11, minutes apart. Nothing can un-decline a
-  quotation. If what they want is *park this*, that is a different button. Raised with Rommel;
-  his call, not started.
+- ~~**Client Declined is a one-way door**~~ — **NOT AN ASK. Corrected by Rommel 2026-08-11:**
+  *"I never asked for the decline but the archived for the option which you already corrected."*
+  He meant restoring an **archived option**, which shipped in `e32ba30`. The decline observation was
+  mine, not his, and it was written into the open list as though he had raised it. **Do not raise
+  it again unless he does.**
 - **The in-quotation Reactivate banner is dead code.** `_qIsArchived()` tests `status==='Archived'`,
   which is not on `STATUS_LADDER` and is never written — archived is derived from age now. The
   Project List's Restore button uses the correct derived test and works.
@@ -5210,10 +5225,11 @@ credited quotations to whoever's admin session happened to be open. **Do not re-
 not rebuild it on activity-log markers** — both markers the handoff prescribed turned out wrong
 too. See the ✅ REBUILT note in the 2026-08-11 session entry for what the data actually says.
 
-**`checkQuotationCredits()`** (dry run) / `checkQuotationCredits(true)` (apply) replaces it, reading
-each quotation's own saved record. **It has one correction to make: `QT-W00000076` (Japan Baking
-Inc), Stephanie → Joanna** — the row Rommel reported. Everything else is either confirmed, or has
-no evidence either way and says so. Safe to re-run; refuses if Supabase is disconnected.
+**Settings → Company & DB → Check Project List** now lists it with the other repairs, with a
+"Correct all N" button (`checkQuotationCredits()` / `(true)` is the same thing from the console).
+**It has one correction to make: `QT-W00000076` (Japan Baking Inc), Stephanie → Joanna** — the row
+Rommel reported. Everything else is either confirmed, or carries no evidence either way and says so.
+Safe to re-run; refuses if Supabase is disconnected.
 
 ## ⚠ FIRST THING NEXT SESSION
 1. ~~Keystone~~ **DONE 2026-08-10** — see the 2026-08-10 session below. Row 64 (the orphan)
