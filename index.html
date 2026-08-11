@@ -23348,6 +23348,133 @@ var CLIENT_COPY_PLAN=[
 function reconcileClientCopySerials(execute){
   return reconcileRenumbered(execute,CLIENT_COPY_PLAN,'Client-copy serial reconciliation');
 }
+// ── Put each quotation back with the person who made it ──────────────────────────────────────
+// Every save used to rewrite columns B (Created) and H (User) with "now" and whoever was saving,
+// so both followed the last saver. Fixed forward on 2026-08-11; this repairs what it already did.
+//
+// The evidence is the activity log: it is append-only, it records every action against the person
+// who performed it, and its EARLIEST entry for a serial is that quotation being created. Nothing
+// is guessed — a quotation with no log entry is left alone.
+//
+// ⚠ One honest limit on the DATE. A quotation that was renumbered logged its first entries under
+// the provisional serial, so the earliest entry under its final serial can be slightly later than
+// the true creation. It is still far closer than "whenever it was last saved", but it is a floor,
+// not a stopwatch. The creator is unaffected by this — it is the same person either way.
+//
+// Writes are batched (Sheets values:batchUpdate, 50 ranges per call) rather than one call per
+// cell. supaMigrateAll hit the per-minute quota doing it the other way.
+function _batchSheetValues(updates){
+  if(!updates.length) return Promise.resolve();
+  var chunks=[];
+  for(var i=0;i<updates.length;i+=50) chunks.push(updates.slice(i,i+50));
+  return chunks.reduce(function(chain,c){
+    return chain.then(function(){
+      return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values:batchUpdate',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({valueInputOption:'USER_ENTERED',data:c})
+      });
+    });
+  },Promise.resolve());
+}
+function reconcileQuotationCreators(execute){
+  if(!gToken){ console.log('Sign in first.'); return; }
+  var mode=execute?'EXECUTE':'DRY RUN';
+  console.log('=== Creator / created-date reconciliation ('+mode+') ===');
+  if(!supaReady()){
+    console.log('REFUSED — not connected to Supabase. The activity log is read from there, and the '
+      +'correction has to land in BOTH stores or they disagree about who made what. Run '
+      +'supaConnect(), then re-run.');
+    return Promise.resolve({refused:'supabase-not-connected'});
+  }
+  if(!sheetUsers||!sheetUsers.length){
+    console.log('REFUSED — the user list is not loaded, so an email cannot be resolved to a name. '
+      +'Open Settings → Users once, then re-run.');
+    return Promise.resolve({refused:'no-user-list'});
+  }
+  var nameOf={};
+  sheetUsers.forEach(function(u){ if(u.email) nameOf[String(u.email).trim().toLowerCase()]=u.name||u.email; });
+
+  return Promise.all([
+    sheetsGet('Quotations!A:AA'),
+    supa.from('activity_log').select('serial,user_email,at').order('at',{ascending:true}).limit(50000)
+  ]).then(function(res){
+    var rows=(res[0]&&res[0].values)||[];
+    var log=(res[1]&&res[1].data)||[];
+    if(!rows.length){ console.log('Could not read the Quotations sheet.'); return; }
+    // Earliest entry per serial = its creation.
+    var first={};
+    log.forEach(function(e){
+      var s=String(e.serial||'').trim(); if(!s) return;
+      if(!first[s]) first[s]={email:String(e.user_email||'').trim().toLowerCase(), at:e.at};
+    });
+
+    var ops=[], skipped={noLog:0,unknownUser:0,alreadyRight:0};
+    for(var i=1;i<rows.length;i++){
+      var r=rows[i], serial=String(r[0]||'').trim(); if(!serial) continue;
+      var f=first[serial]; if(!f){ skipped.noLog++; continue; }
+      var trueUser=nameOf[f.email]; if(!trueUser){ skipped.unknownUser++; continue; }
+      var curUser=String(r[7]||'').trim(), curCreated=String(r[1]||'').trim();
+      var userWrong=(curUser!==trueUser);
+      // Only ever move a date EARLIER, and only by more than 10 minutes — never invent a later one.
+      var cur=Date.parse(curCreated), tru=Date.parse(f.at);
+      var dateWrong=isFinite(cur)&&isFinite(tru)&&(cur-tru)>600000;
+      if(!userWrong&&!dateWrong){ skipped.alreadyRight++; continue; }
+      ops.push({row:i+1, serial:serial, client:r[2]||'',
+                userFrom:curUser||'(blank)', userTo:trueUser, userWrong:userWrong,
+                dateFrom:curCreated, dateTo:f.at, dateWrong:dateWrong});
+    }
+
+    console.log('');
+    ops.forEach(function(o){
+      console.log((o.userWrong?'CREDIT  '+o.userFrom+'  ->  '+o.userTo:'date only')
+        +'   '+o.serial+'  '+(o.client||'')
+        +(o.dateWrong?'   |  created '+String(o.dateFrom).slice(0,16)+' -> '+String(o.dateTo).slice(0,16):''));
+    });
+    var nUser=ops.filter(function(o){return o.userWrong;}).length;
+    var nDate=ops.filter(function(o){return o.dateWrong;}).length;
+    console.log('');
+    console.log(nUser+' credited to the wrong person, '+nDate+' with a moved created date '
+      +'('+ops.length+' rows to touch).');
+    console.log('Left alone: '+skipped.alreadyRight+' already correct, '+skipped.noLog
+      +' with no activity-log entry, '+skipped.unknownUser+' whose creator is not a known user.');
+    if(!execute){ console.log('Dry run only. Re-run with (true) to apply.'); return {ops:ops.length,user:nUser,date:nDate}; }
+
+    var updates=[];
+    ops.forEach(function(o){
+      if(o.dateWrong) updates.push({range:'Quotations!B'+o.row,values:[[o.dateTo]]});
+      if(o.userWrong) updates.push({range:'Quotations!H'+o.row,values:[[o.userTo]]});
+    });
+    return _batchSheetValues(updates).then(function(){
+      // Supabase must agree, or the two stores disagree about who made what.
+      return ops.reduce(function(chain,o){
+        return chain.then(function(){
+          var patch={};
+          if(o.userWrong) patch.prepared_by=o.userTo;
+          if(o.dateWrong) patch.created_at=o.dateTo;
+          return supa.from('quotations').update(patch).eq('serial',o.serial).then(function(){},function(){});
+        });
+      },Promise.resolve());
+    }).then(function(){
+      // In-memory too, so the Project List is right without a reload.
+      ops.forEach(function(o){
+        var e=sessionQuotations[o.serial];
+        if(e){ if(o.userWrong) e.user=o.userTo; if(o.dateWrong) e.created=o.dateTo; }
+        for(var i=0;i<dirData.length;i++) if(dirData[i].id===o.serial){
+          if(o.userWrong) dirData[i].user=o.userTo;
+          if(o.dateWrong) dirData[i].created=o.dateTo;
+          break;
+        }
+      });
+      logActivity('Quotation credits repaired — '+nUser+' returned to the person who made them, '
+        +nDate+' created dates corrected, from the activity log.');
+      console.log('');
+      console.log('=== DONE — '+ops.length+' rows corrected ===');
+      console.log('Reload to see the Project List update.');
+      if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
+      return {done:ops.length,user:nUser,date:nDate};
+    });
+  });
+}
 // ── A quotation listed twice, and a state that disagrees with it ────────────────────────────
 // QT-W00000075 (Keystone) is the double-APPEND symptom of the same race: two saves 529ms apart
 // both read column A before either append landed, so both appended. Rows 63 and 64 are identical
