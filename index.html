@@ -4744,13 +4744,36 @@ function findEscalatedDiscountApprover(){
   if(dir) return dir;
   return sheetUsers.find(function(u){return u.active&&u.pos==='Admin';})||null;
 }
+// ⚠ Company strings in User Roles have drifted: 8 of 13 users are on "Module System and Services,
+// Inc." (singular) while APPR_ROUTING is keyed on the canonical "Module Systems and Services, Inc."
+// (plural), because the routing table is built from COMPANIES[]. An exact-match lookup therefore
+// found NOTHING for those eight — which is every estimator who raises requests — so every request
+// fell through to "first active Manager/Director/Admin" and landed on the Admin. That is why all
+// unlocks came to Rommel despite unlock being routed to Allan.
+//
+// Matched by keyword, the same way _quotCompanyKey, _orderCompanyKey and the RLS helpers already
+// do. Exact match still wins; the keyword pass is only the fallback. 'cebu' is tested before
+// 'world class' because "Cebu World Laminate" contains both.
+function _canonCompany(co){
+  var s=String(co||'').trim().toLowerCase();
+  if(!s) return '';
+  for(var i=0;i<COMPANIES.length;i++)
+    if(String(COMPANIES[i]).toLowerCase()===s) return COMPANIES[i];
+  var want = s.indexOf('cebu')>=0 ? 'cebu'
+           : s.indexOf('module')>=0 ? 'module'
+           : s.indexOf('world class')>=0 ? 'world class' : '';
+  if(!want) return co||'';
+  for(var j=0;j<COMPANIES.length;j++)
+    if(String(COMPANIES[j]).toLowerCase().indexOf(want)>=0) return COMPANIES[j];
+  return co||'';
+}
 function findApproverForAction(type, data) {
   if(type==='discount'&&data&&(parseFloat(data.discPct)||0)>(CF.discountEscalationThreshold||10)){
     var esc=findEscalatedDiscountApprover();
     if(esc) return esc;
     // No Director/Admin at all — fall through to normal routing below rather than block the request
   }
-  var co = currentUserCompany||'';
+  var co = _canonCompany(currentUserCompany||'');
   // Check APPR_ROUTING for this company + action type
   var routeEmail = APPR_ROUTING[co] && APPR_ROUTING[co][type];
   if(routeEmail) {
@@ -13590,7 +13613,7 @@ function renderNotifPanel(){
       +'<span class="pill pill-'+tc+'" style="font-size:10px;padding:1px 6px">'+tl+'</span>'
       +'<span class="pill pill-'+sc+'" style="font-size:10px;padding:1px 6px">'+sl+'</span>'
       +'</div>'
-      +'<div style="font-size:12px;font-weight:500;padding-left:12px">'+escHtml(n.client)+' · '+escHtml(n.serial)+'</div>'
+      +'<div style="font-size:12px;font-weight:500;padding-left:12px">'+_apprQuotLink(n,11)+'</div>'
       +'<div style="font-size:11px;color:var(--text2);padding-left:12px">'+escHtml(n.from)+' · '+escHtml(n.date||'')+'</div>'
       +(n.by?'<div style="font-size:11px;color:'+(n.status==='approved'?'var(--teal)':'var(--coral)')+';padding-left:12px">Actioned by: '+escHtml(n.by)+'</div>':'')
       +'</div>';
@@ -13751,7 +13774,7 @@ function renderApprovals() {
       +'<span class="pill pill-'+tc+'">'+tl+'</span><span class="pill pill-'+sc+'">'+sl+'</span>'
       +(n.company?'<span class="pill pill-muted" style="font-size:10px">'+n.company+'</span>':'')
       +'</div>'
-      +'<div style="font-weight:500;font-size:14px;margin-bottom:2px">'+escHtml(n.client)+' · '+escHtml(n.serial)+'</div>'
+      +'<div style="font-weight:500;font-size:14px;margin-bottom:2px">'+_apprQuotLink(n,13)+'</div>'
       +'<div style="font-size:12px;color:var(--text2);margin-bottom:4px">By: '+escHtml(n.from)+' · '+escHtml(n.date||'')+'</div>'
       +'<div style="font-size:13px">'+escHtml(n.msg)+'</div>'
       // Say who is being waited on. Without this the approver sees "Counter-offer: 3%" and
@@ -14397,6 +14420,29 @@ function _orderQuotationLine(o){
 // part-written quotation is not silently discarded on the way.
 function openQuotationFromOrder(serial){
   if(serial&&typeof openQuotationFromDir==='function') openQuotationFromDir(serial);
+}
+// An approver should be one click from the thing they are being asked to judge. Routed through
+// openQuotationFromDir, which goes via confirmUnsavedThen — an approver may have a quotation
+// part-written, and navigating away without that guard discards it silently.
+function openQuotationFromApproval(serial){
+  var s=String(serial||'').trim();
+  if(!s||s==='—'){ showToast('This request has no quotation number on it.'); return; }
+  if(typeof openQuotationFromDir!=='function') return;
+  closeNotifPanel&&closeNotifPanel();
+  openQuotationFromDir(s);
+}
+// The client + serial line, clickable when there is a real quotation behind it. A request raised
+// before the first save carries '—' or a DRAFT key, and neither can be opened from the directory.
+function _apprQuotLink(n,size){
+  var cl=escHtml(n.client||'—'), se=String(n.serial||'').trim();
+  var openable=se&&se!=='—'&&!/^DRAFT-/.test(se);
+  if(!openable) return cl+' · '+escHtml(se||'—')
+    +(/^DRAFT-/.test(se)?' <span style="font-weight:400;color:var(--text2)">(not yet numbered)</span>':'');
+  var oc='onclick="openQuotationFromApproval(\''+se.replace(/'/g,"\\'")+'\');return false;"';
+  return '<a href="#" '+oc+' style="color:inherit;text-decoration:none;cursor:pointer" '
+    +'title="Open this quotation">'+cl+' · <span style="color:var(--pill-navy);'
+    +'text-decoration:underline;font-family:ui-monospace,monospace;font-size:'+(size||12)+'px">'
+    +escHtml(se)+'</span></a>';
 }
 function renderOrders(){
   renderOrdersTabs();
@@ -15607,7 +15653,7 @@ function _sigCheckCostChanged(){
 }
 
 function _notedThresholdFor(co){
-  var v=parseFloat(NOTED_THRESHOLD[co||getCompanyName()]);
+  var v=parseFloat(NOTED_THRESHOLD[_canonCompany(co||getCompanyName())]);
   return (isFinite(v)&&v>0)?v:0;         // 0 or unset = always require Noted by
 }
 // Total project cost BEFORE VAT. _pCalc.preDisc is the subtotal the discount comes off; the
@@ -15681,7 +15727,7 @@ function _sigLabel(slot){ return slot==='noted'?'Noted by':'Checked by'; }
 // The generic routing is guarded the same way — it can land on an excluded person just as easily
 // as the assigned name can.
 function _findSignatory(slot,excludes,coOverride){
-  var co=coOverride||getCompanyName()||currentUserCompany||'';
+  var co=_canonCompany(coOverride||getCompanyName()||currentUserCompany||'');
   var r=APPR_ROUTING[co]||{};
   var bad={};
   (excludes||[]).forEach(function(e){ if(e) bad[String(e).trim().toLowerCase()]=true; });
