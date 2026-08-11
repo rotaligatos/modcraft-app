@@ -3082,10 +3082,17 @@ var qApproved = false;
 var qClientApproved = false;
 var qClientApprovedAt = '';
 var qSaved = false;       // true once Stage 1 Save Draft is clicked (gates Lock & Send)
+var qDraftKey = '';   // DRAFT-xxxxxx while unsaved. A draft must NEVER borrow a real quotation
+                      // number: every draft open in the company shared the same peeked number, so
+                      // anything logged, exported or filed before the first save landed on a serial
+                      // that was not its own. See _newDraftKey().
 var qSerialCommitted = false; // true once this serial has survived a first-save collision check (see gSaveQuotation)
 var qLoadedSavedAt = null;    // savedAt of the state as last loaded/saved by THIS session — used to detect another user's save in between (see gSaveQuotation opts.checkConflict)
 var qLoadedSavedBy = '';      // savedBy of the state as last loaded/saved by THIS session
-var qSerial = makeSerial();
+// Empty until login: gShowApp() calls initQuotation(), which mints the draft key. This used to
+// hold a throwaway legacy-format serial, which is the same mistake one level up — a number nothing
+// owns, sitting where real code reads one.
+var qSerial = '';
 var qRevisedFrom = "";
 // Additional work the client asks for AFTER the Final Quotation is finalised. Rommel,
 // 2026-08-05: editing a finalised quotation "will definitely create distortion, problem
@@ -4432,12 +4439,12 @@ var serialCounters = { W: 1, C: 1, M: 1 };  // next available number per prefix
 // says whether the counters are actually KNOWN, so the preview can decline to guess.
 // Committed serials are unaffected either way: the number that is finally claimed comes from the
 // atomic claim service, not from this preview.
-var serialCountersLoaded = false;
 // What the serial tag should read. A draft whose counter is not yet known shows that it is still
 // being worked out rather than a wrong number; everything else shows the real serial.
 function _serialTagText(){
-  if(qSerialCommitted||serialCountersLoaded||!currentUserCompany) return qSerial;
-  return 'QT-'+_serialPrefix()+' — assigning…';
+  // An unclaimed draft shows its own key, not a quotation number it does not own.
+  if(!qSerial) return qDraftKey||'New quotation';
+  return qSerial;
 }
 function _refreshSerialTag(){
   var qs=(typeof el==='function')&&el('q-serial');
@@ -4464,19 +4471,20 @@ function _serialPrefix(){
 // without saving doesn't burn through real numbers or make the displayed
 // number jump around confusingly. The real claim happens once, at first save
 // (see makeSerial() below, called lazily from gSaveQuotation()).
-function _peekNextSerial(){
-  if(!currentUserCompany){
-    var n=new Date();
-    return 'QT-'+n.getFullYear().toString().slice(-2)+String(n.getMonth()+1).padStart(2,'0')+String(n.getDate()).padStart(2,'0')+'-'+Math.floor(Math.random()*9000+1000);
-  }
-  var prefix = _serialPrefix();
-  var num = serialCounters[prefix] || 1;
-  return 'QT-' + prefix + String(num).padStart(8, '0');
+// A draft's own identity, unique to this draft on this machine. It replaces the old practice of
+// showing the NEXT REAL SERIAL on an unsaved quotation, which was the single root of: order
+// exports landing on the wrong serial (QT-M00000107 carried eight, for five orders, by three
+// people), the row/state serial split, contaminated signature entries, the double-claim race, and
+// the creator repair that had to be disabled because it read those entries as fact. A number that
+// has not been claimed is not a number, and is no longer displayed as one.
+function _newDraftKey(){
+  var h='0123456789abcdef', k='';
+  for(var i=0;i<6;i++) k+=h.charAt(Math.floor(Math.random()*16));
+  return 'DRAFT-'+k;
 }
-// Actually CLAIMS the next serial: increments + persists the counter. Only
-// call this when a number is genuinely being committed (first save of a new
-// quotation, a revision, or state restore with no recorded serial) — never
-// just to display a preview (see _peekNextSerial() for that).
+// CLAIMS the next serial: increments + persists the counter. Only call this when a number is
+// genuinely being committed (first save, a revision, or a state restore with no recorded serial).
+// There is deliberately no 'peek' counterpart any more — see _newDraftKey() above.
 function makeSerial(){
   // Before login currentUserCompany is not set — return legacy format as placeholder
   // (this init value is always overwritten by initQuotation() after login)
@@ -4505,7 +4513,6 @@ function _saveSerialCounters(){
       M: Math.max(serialCounters.M||1, stored.M||1)
     };
     serialCounters.W=merged.W; serialCounters.C=merged.C; serialCounters.M=merged.M;
-    serialCountersLoaded=true;   // this read answered the same question the load does
     var payload=JSON.stringify(merged);
     if(rowIdx>0){
       sheetsUpdate('Settings!A'+rowIdx+':B'+rowIdx,[['SERIAL_COUNTERS',payload]]).catch(function(){});
@@ -4526,7 +4533,6 @@ function _loadSerialCounters(cb,_retried){
     }
     // Resolved — the counters are now known. A missing SERIAL_COUNTERS row is a real answer
     // (nothing issued yet), not an unknown, so it counts as loaded too.
-    serialCountersLoaded=true;
     if(cb)cb();
   }).catch(function(){
     // A failed READ leaves the counters genuinely unknown. Retry once rather than showing a
@@ -4534,7 +4540,6 @@ function _loadSerialCounters(cb,_retried){
     // permanent "assigning…" would be worse than an approximate number the claim service
     // corrects at save anyway.
     if(!_retried){ setTimeout(function(){ _loadSerialCounters(cb,true); },2000); return; }
-    serialCountersLoaded=true;
     if(cb)cb();
   });
 }
@@ -4661,7 +4666,7 @@ function navigate(pg) {
   else if(pg==="directory"){dirData=[];renderDirectory();}
   else if(pg==="users") { navigate('settings'); setTimeout(function(){setStTab('users');},150); return; }
   else if(pg==="settings") { stTab="company"; renderSettings(); }
-  else if(pg==="quotation"){ if(!qSerial) initQuotation(); try{ _buildQuotationLayout(); }catch(e){} } // only init if no quotation loaded
+  else if(pg==="quotation"){ if(!qSerial&&!qDraftKey) initQuotation(); try{ _buildQuotationLayout(); }catch(e){} } // only init if no quotation loaded
   else if(pg==="help") renderHelp();
   else if(pg==="production") renderProductionPage();
   else if(pg==="orders") { if(!ordersLoaded){gLoadPendingOrders(function(){renderOrders();});}else{renderOrders();} }
@@ -5753,15 +5758,13 @@ function initQuotation() {
   qStep=1;   // a new quotation starts on the client step
   try{ _buildQuotationLayout(); qGoStep(1); }catch(e){}
   // ── Full state reset — every field, every variable ──────────────────────
-  // Reset client type/company FIRST — _peekNextSerial()/_serialPrefix() reads
-  // the live cl-type/cl-company-sel DOM state, so if this ran after the peek,
-  // a fresh "+ New quotation" would inherit whatever company was left selected
-  // on the PREVIOUS quotation (e.g. showing a stale "C" prefix and restarting
-  // that prefix's counter from 1, even though the new quotation should default
+  // Reset client type/company FIRST — _serialPrefix() reads the live cl-type/cl-company-sel DOM
+  // state at CLAIM time, so a fresh "+ New quotation" must not inherit whatever company was left
+  // selected on the PREVIOUS quotation (which would file it under the wrong entity's sequence,
   // to the staff member's own company).
   if(el('cl-type'))el('cl-type').value='Direct';
   if(typeof renderClientCompanyField==='function') renderClientCompanyField();
-  qSerial=_peekNextSerial(); // preview only — real number claimed at first save, see gSaveQuotation()
+  qSerial=''; qDraftKey=_newDraftKey(); // no number until one is claimed, at first save
   qSerialCommitted=false;
   qLoadedSavedAt=null; qLoadedSavedBy='';
   qPrevSerials=[];
@@ -6064,10 +6067,9 @@ function _onQuotationCompanyMightChange(){
 
   if(!qSerialCommitted){
     // Not saved yet — just keep the provisional number preview accurate.
+    // Nothing to re-preview: an unsaved draft has no number, and the prefix is decided from the
+    // company at claim time. This used to repoint the provisional number and qBaseSerial with it.
     _lastAcceptedClType=newType; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
-    qSerial=_peekNextSerial();
-    _syncBaseSerialToPreview();
-    _refreshSerialTag();
     return;
   }
 
@@ -20967,7 +20969,7 @@ function confirmUnsavedThen(callback){
   // whether items[]/bomItems[] were non-empty, which is true of a BLANK quotation —
   // initQuotation seeds both with a default cabinet — so this prompted on every open.
   var touched=!_pristineQuotSig||_quotContentSig()!==_pristineQuotSig;
-  var hasWork=qSerial&&!qSaved&&!qLocked&&touched;
+  var hasWork=(qSerial||qDraftKey)&&!qSaved&&!qLocked&&touched;
   if(!hasWork){callback();return;}
   // Use the custom unsaved modal (native confirm() is blocked in Google Sites iframe)
   window._unsavedCallback=callback;
@@ -23142,7 +23144,7 @@ function _sheetsGetWithRetry(range,maxRetries){
 // ── One-time reconciliation: quotations filed under a stale preview serial ───────────────
 // Nine quotations were recorded under the number they were FIRST previewed as, while they
 // display and print under the number they were actually saved with (see
-// _syncBaseSerialToPreview for the cause, fixed 2026-08-06 — this repairs the rows that
+// the previewed-serial mechanism for the cause, removed entirely 2026-08-11 — this repairs rows that
 // pre-date the fix).
 //
 // Rommel's rule: keep the LATEST number. The old number is retained in prevSerials so a
@@ -24534,13 +24536,9 @@ function gShowApp(){
   // point. Once it does, refresh the preview if the quotation is still an
   // unsaved draft (not yet committed to a real claim), so the number shown
   // right after login/refresh is correct instead of always starting at 1.
-  _loadSerialCounters(function(){
-    if(!qSerialCommitted){
-      qSerial=_peekNextSerial();
-      _syncBaseSerialToPreview();
-      _refreshSerialTag();
-    }
-  });
+  // Counters are still loaded for the Settings display and for claim time, but a draft no longer
+  // shows a number, so there is nothing to correct once they arrive.
+  _loadSerialCounters(function(){});
   gLoadFollowed(function(){renderDashFollowed();renderDirectory();}); // restore followed quotations per user
   gLoadDashPref(function(){renderDashboard();}); // load widget prefs + admin restrictions, then re-render
   _loadSeenNotifs(); // restore unread-tracking state from localStorage
@@ -28572,7 +28570,7 @@ function _saveConflictReload(){
 //
 // Safe by construction: every base-serial regex in this file is start-anchored
 // (/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/), so the suffix is stripped wherever the base
-// is needed — directory grouping, Drive folders, dedup. _claimPeekedSerial's
+// is needed — directory grouping, Drive folders, dedup. The claim path's
 // $-anchored regex only ever sees a freshly minted serial, before any suffix exists.
 // W / M / C from the serial — the quotation's own company, already encoded at creation.
 // Old-format serials (QT-YYMMDD-RRRR) predate the prefix and return '' (unassigned).
@@ -28606,43 +28604,24 @@ function _bumpRevision(serial){ return _serialStem(serial)+'.R'+(_revisionOf(ser
 
 // (only if it isn't already), so a previewed-then-successfully-claimed serial
 // isn't handed out again as the "next" preview for a subsequent quotation.
-function _claimPeekedSerial(serial){
-  var prefix=_serialPrefix();
-  var m=String(serial||'').match(/^QT-([WCM])(\d+)$/);
-  if(!m) return;
-  var num=parseInt(m[2],10);
-  if(!isNaN(num) && (serialCounters[prefix]||1)<=num){
-    serialCounters[prefix]=num+1;
-    _saveSerialCounters();
-  }
-}
 function _fallbackSerialCheck(claimSerial){
-  sheetsGet('Quotations!A:A').then(function(d){
-    var vals=(d&&!d.error&&d.values)||[];
-    var rowExists=false;
-    for(var i=1;i<vals.length;i++){ if(vals[i][0]===claimSerial){rowExists=true; break;} }
-    if(rowExists){
-      // A row for this serial already exists, and this is genuinely our first
-      // save of this quotation — that row cannot be ours, so it belongs to
-      // someone/something else. Claim a fresh number instead of overwriting it.
-      return _resolveSerialCollision(claimSerial).then(function(newSerial){
-        _acceptClaimedSerial(claimSerial,newSerial,true);
-        qSerialCommitted=true;
-        try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
-      });
+  // No claim service configured. A draft carries no number, so there is nothing to collision-check
+  // — mint one. _resolveSerialCollision takes the next counter value and verifies it is genuinely
+  // free in the Quotations sheet before returning it, retrying if not.
+  _resolveSerialCollision(claimSerial).then(function(newSerial){
+    if(!/^QT-[WCM]\d+$/.test(newSerial||'')){
+      // Refuse rather than write a row with no key. A failed save can be retried; a row filed
+      // under an empty serial is the mess this whole change exists to prevent.
+      showToast('Could not assign a quotation number — nothing was saved. Check your connection and try again.');
+      _serialClaimSettled();
+      return;
     }
-    // No collision — this previewed number (see _peekNextSerial) is genuinely
-    // free. Claim it for real now (advances + persists the shared counter),
-    // so the next quotation's preview doesn't show this same number again.
-    _claimPeekedSerial(claimSerial);
+    _acceptClaimedSerial(claimSerial,newSerial,false);
     qSerialCommitted=true;
     try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
   }).catch(function(){
-    // Check itself failed (offline/network) — don't block saving; proceed optimistically.
-    // Settling matters most here: leave the waiters held and every later save in this session
-    // is silently dropped, which is worse than the race this guard replaced.
-    qSerialCommitted=true;
-    try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
+    showToast('Could not assign a quotation number — nothing was saved. Check your connection and try again.');
+    _serialClaimSettled();
   });
 }
 // While a quotation is still an unsaved draft, its number is only a preview and can change more
@@ -28658,11 +28637,6 @@ function _fallbackSerialCheck(claimSerial){
 //
 // Now the base follows the preview for as long as the number is still provisional. Guarded on
 // having no options: once options exist, qBaseSerial is their grouping key and must not move.
-function _syncBaseSerialToPreview(){
-  if(qSerialCommitted) return;               // number is real — only the renumber paths may change it
-  if(qOptionsList&&qOptionsList.length) return; // base serial is the option group's key
-  qBaseSerial=qSerial;
-}
 // Updates qSerial/qBaseSerial + the on-screen number when the claimed serial
 // differs from what was provisionally displayed since "New Quotation".
 // ── A claimed serial that never got used must be kept, not abandoned ───────────────────────────
@@ -28700,8 +28674,12 @@ function _acceptClaimedSerial(oldSerial,newSerial,wasCollision){
     showToast('⚠ '+oldSerial+' was already claimed by another quotation — this one is now '+newSerial);
     logActivity('Serial auto-renumbered '+oldSerial+' → '+newSerial+' (save-time collision detected)');
   } else {
-    showToast('Quotation number confirmed as '+newSerial+' (was showing '+oldSerial+' provisionally).');
-    logActivity('Serial confirmed as '+newSerial+' via atomic claim (was provisional '+oldSerial+')');
+    showToast('Quotation number assigned: '+newSerial+'.');
+    // Names the DRAFT KEY, not oldSerial — oldSerial is empty on a first save, and the draft key is
+    // what everything logged before this moment was stamped with. The log is append-only, so this
+    // line is the only thing joining those entries to the quotation. Without it the pre-save trail
+    // is orphaned, which is the failure this whole change exists to end.
+    logActivity('Quotation number '+newSerial+' assigned'+(qDraftKey?' (draft '+qDraftKey+')':'')+'.');
   }
 }
 // Picks a fresh, verified-free serial for a quotation that lost a naming
@@ -28712,7 +28690,7 @@ function _acceptClaimedSerial(oldSerial,newSerial,wasCollision){
 function _resolveSerialCollision(oldSerial){
   var prefix=_serialPrefix();
   function attempt(n){
-    if(n>5) return Promise.resolve(oldSerial+'-'+Date.now()); // pathological fallback, should never trigger
+    if(n>5) return Promise.resolve(''); // give up rather than invent a key — the caller refuses the save
     return new Promise(function(res){ _loadSerialCounters(res); }).then(function(){
       var num=serialCounters[prefix]||1;
       serialCounters[prefix]=num+1;
@@ -29113,6 +29091,7 @@ function restoreFullQuotationState(state){
   // and what you came back for is the pricing.
   try{ _buildQuotationLayout(); qStep=2; qGoStep(2); }catch(e){}
   qSerial=state.serial||makeSerial();
+  qDraftKey='';                       // it has a real number; the draft key is spent
   qSerialCommitted=true; // loading a quotation that was already saved under this serial
   qLoadedSavedAt=state.savedAt||null; qLoadedSavedBy=state.savedBy||''; // baseline for save-conflict detection (see gSaveQuotation opts.checkConflict)
   // Stage 2 (Final Quotation) lock/approval state — previously NOT restored at all, meaning
@@ -29415,7 +29394,9 @@ function _updateLogOutboxBadge(){
 function gLogToSheets(action){
   var e={ at:new Date().toISOString(),
           disp:new Date().toLocaleString('en-PH',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}),
-          email:(gUser&&gUser.email)||'', action:action, serial:qSerial||'',
+                    // A draft logs under its own key. Stamping the peeked serial is what put unrelated
+          // actions on real quotations and made the activity log untrustworthy by serial.
+          email:(gUser&&gUser.email)||'', action:action, serial:qSerial||qDraftKey||'',
           needSheets:true, needSupa:true };
   _writeLogEntry(e).then(function(owe){
     if(owe.sheets||owe.supa){ e.needSheets=owe.sheets; e.needSupa=owe.supa; _logOutboxAdd(e); }
@@ -31188,9 +31169,8 @@ function _daLightweightSummary(){
 // _saveBoardLayoutToDrive handles above) to the quotation's Drive folder AND Supabase Storage, plus
 // a metadata row in the drawing_analyses table so the Designers Support "Saved Analyses" tab can
 // list and re-open it later. Fires at the same lock/approve points as _saveBoardLayoutToDrive (see
-// its 3 call sites) — deliberately the same timing, not earlier: before locking, qSerial is only a
-// preview number (_peekNextSerial()), so saving sooner risks orphaned files if the draft never gets
-// saved. No-ops silently if this quotation never went through Designers Support.
+// its 3 call sites) — deliberately the same timing, not earlier: an unsaved draft has NO serial at
+// all now, so there is no folder to file under until one is claimed. No-ops silently if this quotation never went through Designers Support.
 function _saveDrawingAnalysisToDrive(){
   if(!gToken||!qSerial||!qDrawingAnalysis||!qDrawingAnalysis.result) return;
   var baseSerial=qBaseSerial||qSerial;
@@ -33537,14 +33517,14 @@ function prodReflectToQuotation(){
 // A short description of the quotation currently on screen, or '' when there is nothing
 // worth adding to (no serial yet, or a brand-new untouched form).
 function _prodOpenQuotationLabel(){
-  if(!qSerial) return '';
+  if(!qSerial&&!qDraftKey) return '';
   var hasWork=(qAreas||[]).some(function(a){
     return (a.svcItems&&a.svcItems.length)||(a.matItems&&a.matItems.length)||(a.hwItems&&a.hwItems.length)
       ||(a.outsourceMaterials&&a.outsourceMaterials.length)||(a.outsourceHardware&&a.outsourceHardware.length);
   });
   var cl=(el('cl-bizname')&&el('cl-bizname').value)||(el('cl-name')&&el('cl-name').value)||'';
   if(!hasWork&&!cl&&!qSerialCommitted) return '';    // an untouched blank form — just start fresh
-  return qSerial+(cl?' — '+cl:'');
+  return (qSerial||qDraftKey)+(cl?' — '+cl:'');
 }
 // Is this area still the empty default? (items[] holds the default carcass, which is
 // irrelevant once we switch to cutting-list mode.)
