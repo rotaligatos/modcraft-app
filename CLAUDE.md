@@ -5210,7 +5210,12 @@ identical pairing one block up in `_reportSerialSplits` had the same miss and is
 - **The in-quotation Reactivate banner is dead code.** `_qIsArchived()` tests `status==='Archived'`,
   which is not on `STATUS_LADDER` and is never written — archived is derived from age now. The
   Project List's Restore button uses the correct derived test and works.
-- **Duplicate rows: `QT-W00000041` and `QT-C00000004`.** Two different causes, one consequence.
+- ✅ **`QT-W00000041` CLOSED 2026-08-11** — Rommel checked: it is a **single row** in the Project
+  List (₱138,932.64, FQ Awaiting Client Approval). The duplicate came from an older dry-run and had
+  already been resolved by the `_cleanupPrevSerialRows` run on 08-11 01:10 that removed the
+  superseded `QT-M00000057` entry. **`QT-C00000004` still to check.** Everything below is the
+  background on the shape, kept for when C4 is looked at.
+- **Duplicate rows: ~~`QT-W00000041`~~ and `QT-C00000004`.** Two different causes, one consequence.
   W41's log shows a **renumber** (`QT-M00000057 → QT-W00000041`, 07-31 23:32) whose old-row cleanup
   did not run until 08-11 01:10 — ten days of two rows. C4's shows **five saves in 2.4 seconds**
   (05:25:23.019 · 24.190 · 25.027 · 25.195 · 25.376 — the last three ~170ms apart), the
