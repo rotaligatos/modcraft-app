@@ -5217,6 +5217,111 @@ identical pairing one block up in `_reportSerialSplits` had the same miss and is
 
 ---
 
+## What was changed on 2026-08-11 (session 2 — A DRAFT HAS NO QUOTATION NUMBER: the cause fix)
+
+Rommel, after clicking the credits repair: *"why it keeps happening? Can we do a permanent solution
+to avoid mix up, issues on numbers. I cannot do this forever you know."* Correct, and the answer was
+one cause, not many. Commits `7e2bae5`, `9e87bab`, `ef05328`.
+
+### ⚠⚠ THE RULE, AND DO NOT UNDO IT
+**A quotation has NO number until one is claimed at its FIRST SAVE.** An unsaved draft carries
+`qDraftKey` — `DRAFT-xxxxxx`, six random hex, unique to that draft on that machine.
+**`_peekNextSerial()` IS DELETED. Never reintroduce a "what the next number would be" preview.**
+
+`initQuotation()` used to set `qSerial = _peekNextSerial()`. The counter does not move until someone
+saves, so **every draft open anywhere in the company showed the same number at the same time**, and
+everything logged, exported or filed until the first save carried it.
+
+Six separately-documented problems were all that one line:
+| Symptom (each previously "fixed" on its own) | |
+|---|---|
+| Order exports landing on the wrong serial | `QT-M00000107` carries **8** entries, 5 orders, 3 people; **10** of the serials named never existed |
+| The row/state serial split | 9 quotations |
+| Four contaminated "Signature applied to Prepared by" entries | the log disagreeing with the state |
+| "The serial reset to 1" | the peek before counters loaded |
+| The double-claim race → 108/109/110 | two claims in flight for one draft |
+| **The creator repair that had to be disabled** | it failed ENTIRELY because it read those entries as fact |
+
+The repair Rommel ran that morning was itself logged under `QT-M00000111`, **a serial that does not
+exist** — the bug stamping itself onto the record of its own repair. That is the one-line proof.
+
+### What was removed, not just unused
+`_peekNextSerial`, `_claimPeekedSerial`, `_syncBaseSerialToPreview`, `serialCountersLoaded` (a
+write-only flag — the same shape as the `pin_hash` mirror columns dropped 2026-08-08), and the
+module-load `var qSerial = makeSerial()` placeholder. All existed only to keep a fake number honest.
+
+### New
+```javascript
+qDraftKey          // 'DRAFT-xxxxxx' while unsaved; '' once a real serial exists
+_newDraftKey()     // mints one
+_quotRefLabel()    // what to PRINT where a number goes: qSerial, else 'DRAFT-xxxxxx — DRAFT, not yet numbered'
+```
+
+### ⚠ `!qSerial` CHANGED MEANING — it now means "this is a draft", not "nothing is open"
+All 120 `qSerial` reads were audited, not sampled. Sixteen guard on emptiness. Fifteen were already
+right; **the four Drive/Storage savers are now MORE correct** — they used to file under a borrowed
+number and now correctly wait. **Any new `!qSerial` guard must decide which it means.** The three
+that were wrong:
+1. **The client-facing printout header** printed a blank. Preview & Print is lock-exempt, so this
+   reaches a client's screen — now `_quotRefLabel()`.
+2. **`generateBomReport` archived to Drive under an empty serial**, which would have created a
+   folder and a file named `" — Client — BOM"` belonging to no quotation. It now opens the report
+   and says the archive waits for the number.
+3. **`generateBomReport`'s own first guard** read `!qSerial` as "nothing is open" and would have
+   refused a good draft while saying no quotation was open.
+
+Checked and safe: options (`createNewOption` requires a lock, which requires a save, so it never
+sees a draft), approval requests (already `||'—'`), `_canDiscardDraft`, `_archiveOrdersForQuotation`,
+`_assertSerialAgreement`, and every `sessionQuotations`/`dirData` lookup — an empty key matches
+nothing. `_fallbackSerialCheck` (no claim service) used to collision-check the previewed number;
+it now mints one and **refuses the save** if it cannot, rather than filing under an empty key.
+
+### Orders link at pickup (`ef05328`) — Rommel's observation, and he was right
+The order got **no** link between export and share, which is why 9 read *"In Progress · no quotation
+saved yet"* indefinitely. There was nothing to record. Now `exportOrderToQuotation` stores the draft
+key immediately and `_acceptClaimedSerial` swaps it for the real number at claim (without that swap
+the card would say "being drafted" forever and `_archiveOrdersForQuotation` would never match).
+Card reads *"being drafted — DRAFT-96c48f (number assigned when it is saved)"*, then the normal
+clickable serial. Returns before `_orderQuotationEntry`, which looks up `dirData` and would never
+find a draft key.
+
+### Why the number is claimed at SAVE and not at LOCK (Rommel asked; the answer matters)
+A saved quotation needs a key — the Quotations row, the state record, the Drive folder, options and
+the Project List are all filed under it. If the number arrived at lock, a saved-but-unlocked
+quotation (56 of them) would be filed under its draft key and **renamed** at lock — and renaming an
+already-filed row is exactly the mechanism that produced the split and the duplicate rows.
+**Claim at the first moment a permanent record exists, never before.**
+
+### Not changed
+The **status ladder is untouched.** A quotation only enters the Project List once saved, so an
+unsaved draft was never on the ladder. "Draft" still means *saved but never locked*.
+
+### Verified in a browser against the real code, not by reading
+No number before login · a new quotation shows only its draft key · two drafts get distinct keys ·
+navigating away and back keeps the draft (this one matters — `navigate()` and `confirmUnsavedThen()`
+both tested `qSerial` as "is a quotation open", and without the draft key they would have silently
+discarded it) · a pre-save action logs under the draft key · saving claims `QT-W00000200`, files the
+row under it, matches `qBaseSerial`, advances the counter, logs the join · reopening a saved
+quotation, options, revisions, the printout header and the serial-agreement assert all unaffected ·
+a tripwire on every write path (`sheetsAppend`, Drive folder, Drive file, Supabase upload) asserting
+none is ever called with an empty or leading-dash key while a draft — **zero violations** · the same
+run after saving confirming the BOM does archive as `QT-W00000400 — Ripple Test Client — BOM.html` ·
+full order chain Pending → *being drafted* → `QT-W00000500` with the link following.
+
+> ⚠ **A `\d` in a `node -e` patch script became a literal `d`**, so the save-refusal guard rejected
+> every valid serial and refused the save outright. Caught only because the save test failed.
+> **Use the Edit tool for anything containing a regex or a backslash** — this is the third time a
+> shell/heredoc has mangled an escape in this repo. Every regex added in a session should be
+> re-listed and eyeballed before commit (`git diff | grep -oE '/[^/]*/[gimsuy]*'`).
+
+### Still open after this
+It does **not** repair the 9 existing split rows or the 2 duplicate rows — those still need
+`reconcileRenumbered()` (8), Bella Ferma (1), and `reconcileDuplicateRows`. `qBaseSerial` still
+exists as a stored copy; it is now much safer (only ever set from a real claim) but removing it is
+still the next structural step, and it is unblocked once those rows are clean.
+
+---
+
 # OPEN — updated 2026-08-11 (THIS IS THE AUTHORITATIVE LIST)
 
 ## Quotation credits — `reconcileQuotationCreators()` is dead; use `checkQuotationCredits()`
@@ -5230,6 +5335,14 @@ too. See the ✅ REBUILT note in the 2026-08-11 session entry for what the data 
 **It has one correction to make: `QT-W00000076` (Japan Baking Inc), Stephanie → Joanna** — the row
 Rommel reported. Everything else is either confirmed, or carries no evidence either way and says so.
 Safe to re-run; refuses if Supabase is disconnected.
+
+## ⚠⚠ A DRAFT HAS NO QUOTATION NUMBER — do not undo this
+Shipped 2026-08-11 (`7e2bae5`), the cause fix behind six separate "number" problems. An unsaved
+draft carries `qDraftKey` (`DRAFT-xxxxxx`); a real serial is claimed at **first save**, never before,
+and **never at lock** (that would reintroduce the rename-a-filed-row mechanism that caused the split).
+**`_peekNextSerial()` is deleted — never reintroduce a next-number preview.** Note `!qSerial` now
+means "this is a draft", not "nothing is open" — any new guard must decide which. Full detail in the
+2026-08-11 session 2 entry above.
 
 ## ⚠ FIRST THING NEXT SESSION
 1. ~~Keystone~~ **DONE 2026-08-10** — see the 2026-08-10 session below. Row 64 (the orphan)
