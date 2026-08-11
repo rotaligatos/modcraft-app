@@ -25483,6 +25483,96 @@ var _serialSplitFindings=[];
 // uses the state's serial, so on an issued quotation the client is already holding it. Rommel's
 // answer on 2026-08-09 was the client's copy — but that is a decision each time, not a default.
 var _dupRowFindings=[];
+// ── One job listed twice ────────────────────────────────────────────────────────────────────
+// Finds duplicates itself rather than working from a hardcoded plan, because they keep appearing
+// and a plan is one more thing to maintain. Distinct from reconcileDuplicateRows, which handles the
+// Keystone case — a duplicate whose STATE also disagrees and has to be corrected with it.
+//
+// ⚠ The Project List can NEVER show these. gLoadDirData dedupes by base serial, so two rows always
+// render as one line — searching the list returns "1 quotation" and looks clean. Only this check,
+// which counts over the raw rows, can see them. (That is exactly how the item was wrongly closed
+// on 2026-08-11.)
+//
+// WHICH ROW GOES: _proceedSaveQuotation finds its row with `break` on the FIRST match, so the
+// earliest row is the live one and every later one is an orphan that will never be written again.
+// Keep the first, delete the rest. Deleting by INDEX, highest first — sheetsDeleteRowByKey also
+// breaks on first match and would remove the live row.
+//
+// Supabase needs nothing: `serial` is the primary key there, so the duplicate is Sheet-only.
+function _fixDuplicateRows(){
+  _confirm('Remove the stale duplicate rows?\n\nThe live row is kept — it is the one the app has '
+    +'been updating. Any pair that is not actually a copy of one job is left alone and named, not '
+    +'guessed at.',
+  function(){
+    var host=el('dbcheck-serials');
+    removeDuplicateQuotationRows(true).then(function(r){
+      if(host&&r&&r.done!=null)
+        host.innerHTML='<div style="padding:12px 16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
+          +r.done+' stale row'+(r.done===1?'':'s')+' removed.'
+          +(r.blocked?' '+r.blocked+' left alone — see the console for why.':'')+'</div>';
+    });
+  });
+}
+function removeDuplicateQuotationRows(execute){
+  if(!gToken){ console.log('Sign in first.'); return Promise.resolve({refused:'signed-out'}); }
+  console.log('=== Duplicate rows ('+(execute?'EXECUTE':'DRY RUN')+') ===');
+  return sheetsGet('Quotations!A:AA').then(function(d){
+    var rows=(d&&d.values)||[], hdr=rows[0]||[];
+    if(!rows.length){ console.log('Could not read the Quotations sheet.'); return {refused:'no-sheet'}; }
+    var at={};
+    for(var i=1;i<rows.length;i++){
+      var s=String(rows[i][0]||'').trim(); if(!s) continue;
+      (at[s]=at[s]||[]).push(i+1);                       // 1-based sheet row numbers
+    }
+    var ops=[], blocked=[];
+    Object.keys(at).forEach(function(s){
+      var r=at[s]; if(r.length<2) return;
+      // Only remove a row that is genuinely redundant. Date is expected to differ — it is the write
+      // time, and these were written seconds apart. Anything ELSE differing means they are not
+      // copies of one job, and a person has to decide.
+      var keep=rows[r[0]-1], why=null;
+      for(var k=1;k<r.length&&!why;k++){
+        var other=rows[r[k]-1];
+        for(var c=0;c<Math.max(hdr.length,keep.length,other.length);c++){
+          if(String(hdr[c]||'')==='Date') continue;
+          if(String(keep[c]||'').trim()!==String(other[c]||'').trim()){
+            why=(hdr[c]||('column '+c))+': "'+(keep[c]||'(blank)')+'" vs "'+(other[c]||'(blank)')+'"';
+            break;
+          }
+        }
+      }
+      if(why){ blocked.push({serial:s,rows:r,why:why}); return; }
+      ops.push({serial:s, client:keep[2]||'', keep:r[0], drop:r.slice(1)});
+    });
+
+    console.log('');
+    ops.forEach(function(o){
+      console.log('KEEP row '+o.keep+', DELETE row'+(o.drop.length>1?'s':'')+' '+o.drop.join(', ')
+        +'   '+o.serial+'  '+(o.client||''));
+    });
+    blocked.forEach(function(b){
+      console.log('LEFT ALONE  '+b.serial+' (rows '+b.rows.join(', ')+') — these are NOT copies of '
+        +'one job. '+b.why+'. Someone has to decide which is right.');
+    });
+    console.log('');
+    console.log(ops.length+' to remove, '+blocked.length+' left alone.');
+    if(!execute){ console.log('Dry run only. Re-run with removeDuplicateQuotationRows(true) to apply.');
+                  return {ops:ops.length,blocked:blocked.length}; }
+    if(!ops.length){ console.log('Nothing to remove.'); return {done:0,blocked:blocked.length}; }
+
+    var drop=[]; ops.forEach(function(o){ drop=drop.concat(o.drop); });
+    return _sheetsDeleteRowsByIndex('Quotations',drop).then(function(){
+      logActivity('Duplicate Project List rows removed — '+drop.length+' stale row'
+        +(drop.length===1?'':'s')+' for '+ops.length+' quotation'+(ops.length===1?'':'s')
+        +' ('+ops.map(function(o){return o.serial;}).join(', ')+').');
+      _clearDataBanners();
+      showToast(drop.length+' duplicate row'+(drop.length===1?'':'s')+' removed.');
+      console.log('');
+      console.log('=== DONE — '+drop.length+' row(s) removed ===');
+      return {done:drop.length,blocked:blocked.length};
+    });
+  });
+}
 function _reportSerialSplits(){
   var host=el('dbcheck-serials'); if(!host) return;
   // Duplicates are counted over EVERY row in _findStaleStatuses, not derived from the mismatch
@@ -25495,9 +25585,15 @@ function _reportSerialSplits(){
       +' appear'+(_dupRowFindings.length===1?'s':'')+' on more than one row</b> — '
       +escHtml(_dupRowFindings.map(function(d){ return d.serial+' ('+d.rows+' rows)'; }).join(', '))
       +'.<div style="font-size:13px;margin-top:6px">One job listed twice. The Project List only ever '
-      +'updates the FIRST of them, so the others are stale copies that will never change again. It also '
-      +'has to be resolved before that quotation can be renumbered, because renaming one row would '
-      +'strand the other.</div></div>'
+      +'updates the FIRST of them, so the others are stale copies that will never change again. '
+      +'<b>The Project List itself cannot show you this</b> — it merges rows with the same number, so '
+      +'searching it always returns one line. It also has to be resolved before that quotation can be '
+      +'renumbered, because renaming one row would strand the other.</div>'
+      +'<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      +'<button class="btn btn-primary" onclick="_fixDuplicateRows()" style="font-size:12px">'
+      +'<i class="ti ti-layers-off"></i> Remove the stale copies</button>'
+      +'<span style="font-size:12px;color:var(--text2)">Keeps the live row. Any pair that is not '
+      +'actually a copy is left alone and named.</span></div></div>'
     : '';
   if(!_serialSplitFindings.length){ host.innerHTML=_dupHtml; return; }
   var _seen={};
