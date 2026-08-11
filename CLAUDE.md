@@ -5210,24 +5210,16 @@ identical pairing one block up in `_reportSerialSplits` had the same miss and is
 - **The in-quotation Reactivate banner is dead code.** `_qIsArchived()` tests `status==='Archived'`,
   which is not on `STATUS_LADDER` and is never written — archived is derived from age now. The
   Project List's Restore button uses the correct derived test and works.
-- ✅ **`QT-W00000041` CLOSED 2026-08-11** — Rommel checked: it is a **single row** in the Project
-  List (₱138,932.64, FQ Awaiting Client Approval). The duplicate came from an older dry-run and had
-  already been resolved by the `_cleanupPrevSerialRows` run on 08-11 01:10 that removed the
-  superseded `QT-M00000057` entry. **`QT-C00000004` still to check.** Everything below is the
-  background on the shape, kept for when C4 is looked at.
-- **Duplicate rows: ~~`QT-W00000041`~~ and `QT-C00000004`.** Two different causes, one consequence.
-  W41's log shows a **renumber** (`QT-M00000057 → QT-W00000041`, 07-31 23:32) whose old-row cleanup
-  did not run until 08-11 01:10 — ten days of two rows. C4's shows **five saves in 2.4 seconds**
-  (05:25:23.019 · 24.190 · 25.027 · 25.195 · 25.376 — the last three ~170ms apart), the
-  double-append shape: both saves read column A before either append landed.
-  ⚠ **Cannot be confirmed from Supabase** — `serial` is its primary key there, so duplicates exist
-  only in the Sheet. **Settings → Company & DB → Check Project List** reports them.
-  **Why it matters:** the value is counted twice in every dashboard figure (₱138,932 + ₱487,740);
-  saving finds its row with `break` on the FIRST match so the later row is frozen forever, showing a
-  stale status and total; and it blocks both `reconcileClientCopySerials` (renaming one would strand
-  the other) and the `qBaseSerial` removal.
-  ⚠ **`sheetsDeleteRowByKey` also breaks on first match** — using it here deletes the LIVE row and
-  keeps the orphan. `reconcileDuplicateRows` deletes by index for exactly this reason.
+- ✅ **Duplicate rows CLOSED 2026-08-11 — there are none.** Rommel checked both in the Project
+  List: `QT-W00000041` and `QT-C00000004` each return a single row ("1 quotation"). The claim came
+  from a stale dry-run of the since-disabled creator repair; W41's duplicate had already been
+  cleared by the `_cleanupPrevSerialRows` run on 08-11 01:10 that removed the superseded
+  `QT-M00000057` entry. **Nothing to fix, and nothing blocking `reconcileRenumbered()` or the
+  `qBaseSerial` removal on this account.**
+  ⚠ Kept for whenever a duplicate DOES turn up, because the trap is real:
+  saving finds its row with `break` on the FIRST match, so the earlier row is live and any later
+  one is frozen forever — and `sheetsDeleteRowByKey` also breaks on first match, so using it would
+  delete the LIVE row. `reconcileDuplicateRows` deletes by index for exactly that reason.
   **Keep the earlier row, remove the later one.**
 
 ---
