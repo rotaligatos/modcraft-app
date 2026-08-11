@@ -5141,12 +5141,6 @@ M00000028  earliest = "Quotation unlocked (approved by ...)"      → an approva
 session was open.** Applying it would have replaced one wrong answer with a different wrong answer,
 on live data, permanently.
 
-**To rebuild, use evidence that means what it says:**
-- `"Signature applied to Prepared by (NAME)"` — stamped at lock, names the preparer. **48 serials.**
-- `"Quotation created from Order #NNNN"` — a real creation event. **17 serials.**
-
-Only a subset is recoverable. That is the honest answer — fix 48 correctly rather than 63 wrongly.
-
 **DROP the created-date repair entirely.** An unrelated admin action makes the earliest entry too
 early; a renumber (first entries logged under the provisional serial) makes it too late. Not
 recoverable, and a differently-wrong date is not an improvement.
@@ -5156,8 +5150,44 @@ recoverable, and a differently-wrong date is not an improvement.
 > A dry run is only as good as the assumption behind it — read what the rows actually SAY, not just
 > how many there are.
 
+### ✅ REBUILT 2026-08-11 (`e8eed32`) — and the prescribed markers were BOTH wrong
+This entry originally said to rebuild on two activity-log markers, "48 and 17 serials". Checked
+against the data before writing anything: **one is void and the other is the worse copy of a fact
+the state already holds.** Same lesson as above, one level down — the counts were right and the
+meaning was assumed.
+
+- **`"Quotation created from Order #NNNN"` is UNUSABLE BY SERIAL** — the identical failure.
+  `exportOrderToQuotation` clears `qSerial`, so every export before the next save reuses the same
+  **preview** number. `QT-M00000107` carries **eight** such entries for five different orders by
+  three people; `M00000106` five; `M00000108` six. **Ten of the serials it names do not exist as
+  quotations at all.** Matched by **ORDER NUMBER** instead it is sound — all 11 order-created
+  quotations resolve to exactly one exporter — but every one **already agrees** with column H, so
+  it yields no corrections whatsoever.
+- **`"Signature applied to Prepared by (NAME)"` is real but redundant and dirtier.**
+  `state.signatures.prepared` already holds the same name **plus the email**, as structured data.
+  On the 4 serials where the two disagree (`M00000106`, `W00000052`, `W00000070`, `W00000080`) it is
+  the **LOG** that is contaminated — its entry sits before or after the state's own stamp, from
+  someone else's session. Using the log would have added four errors.
+
+**`checkQuotationCredits(execute)`** replaces it: signature out of the state, exporter matched by
+order number where there is no signature, **nothing from the log by serial**. Measured on all 169
+rows — **1 correction, 54 confirmed, 1 with two hands, 113 with no evidence either way.**
+
+- The 1 is **`QT-W00000076` (Japan Baking Inc), Stephanie → Joanna** — exactly the one Rommel
+  reported. **The "14 mis-credited" figure was an artefact of the broken repair's own comparison.**
+- The 1 "two hands" is `QT-W00000034`: Kaye exported it from Order #8834, **Rafael signed it**,
+  column H says Kaye. It changes nothing and prints both, because which of them owns it is a
+  question for a human.
+- The 113 are reported as a gap, not as a clean bill of health. Of those, 108 show only one person
+  in their log, so nothing suggests they are wrong; **14 show more than one and are simply
+  unknowable** — of which only `QT-W00000027` (column H = Stephanie, log shows only Jhover and
+  Rommel) looks odd, and the log is too unreliable there to call it.
+
+`reconcileQuotationCreators()` stays, permanently refusing, and now points at the replacement.
+Verified by driving the function against the real data — 14 assertions, including that a dry run
+and both refusals write nothing, and that it never touches the created date.
+
 ### Still open from today
-- **Rebuild the creator repair** on the two reliable markers above.
 - **Client Declined is a one-way door.** People are using it for *"Draft only"*, *"Revision"*,
   *"Wrong Pricing"* — two of those on the morning of 08-11, minutes apart. Nothing can un-decline a
   quotation. If what they want is *park this*, that is a different button. Raised with Rommel;
@@ -5174,11 +5204,16 @@ recoverable, and a differently-wrong date is not an improvement.
 
 # OPEN — updated 2026-08-11 (THIS IS THE AUTHORITATIVE LIST)
 
-## ⚠⚠ DO NOT RUN `reconcileQuotationCreators()` — DISABLED, WRONG PREMISE
-It is deployed and Rommel has the command in his scrollback. It now refuses and explains itself,
-but do not re-enable it without reading the 2026-08-11 session entry above. It would credit
-quotations to whoever's admin session happened to be open. **The forward fix is unaffected** —
-creators and created dates stop being overwritten from now on; only the historical repair is void.
+## Quotation credits — `reconcileQuotationCreators()` is dead; use `checkQuotationCredits()`
+The old one stays deployed and permanently refuses (Rommel has the command in his scrollback); it
+credited quotations to whoever's admin session happened to be open. **Do not re-enable it, and do
+not rebuild it on activity-log markers** — both markers the handoff prescribed turned out wrong
+too. See the ✅ REBUILT note in the 2026-08-11 session entry for what the data actually says.
+
+**`checkQuotationCredits()`** (dry run) / `checkQuotationCredits(true)` (apply) replaces it, reading
+each quotation's own saved record. **It has one correction to make: `QT-W00000076` (Japan Baking
+Inc), Stephanie → Joanna** — the row Rommel reported. Everything else is either confirmed, or has
+no evidence either way and says so. Safe to re-run; refuses if Supabase is disconnected.
 
 ## ⚠ FIRST THING NEXT SESSION
 1. ~~Keystone~~ **DONE 2026-08-10** — see the 2026-08-10 session below. Row 64 (the orphan)
