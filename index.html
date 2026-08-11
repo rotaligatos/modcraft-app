@@ -23410,28 +23410,22 @@ function reconcileQuotationCreators(){
 // The created DATE is deliberately NOT repaired. An unrelated admin action makes the earliest
 // entry too early and a renumber makes it too late. It is not recoverable, and a differently wrong
 // date is not an improvement.
-function checkQuotationCredits(execute){
-  if(!gToken){ console.log('Sign in first.'); return Promise.resolve({refused:'signed-out'}); }
-  console.log('=== Quotation credits ('+(execute?'EXECUTE':'DRY RUN')+') ===');
-  if(!supaReady()){
-    console.log('REFUSED — not connected to Supabase. The evidence is read from there, and a '
-      +'correction has to land in BOTH stores or they end up disagreeing about who made what. '
-      +'Run supaConnect(), then re-run.');
-    return Promise.resolve({refused:'supabase-not-connected'});
-  }
+// The analysis, shared by the console entry point and the Check Project List panel — one
+// definition, so the button and the command can never disagree about who made what.
+function _findQuotationCredits(cb){
+  if(!gToken||!supaReady()){ cb(null,!gToken?'signed-out':'supabase-not-connected'); return; }
   var nameOf={}, haveUsers=!!(sheetUsers&&sheetUsers.length);
   (sheetUsers||[]).forEach(function(u){
     if(u.email) nameOf[String(u.email).trim().toLowerCase()]=u.name||u.email;
   });
-
-  return Promise.all([
+  Promise.all([
     sheetsGet('Quotations!A:AA'),
     supa.from('quotation_states').select('serial,state'),
     supa.from('activity_log').select('user_email,action,at')
         .like('action','Quotation created from Order #%').order('at',{ascending:true})
   ]).then(function(res){
     var rows=(res[0]&&res[0].values)||[];
-    if(!rows.length){ console.log('Could not read the Quotations sheet.'); return {refused:'no-sheet'}; }
+    if(!rows.length){ cb(null,'no-sheet'); return; }
 
     // The quotation's own record of who prepared it, stamped at its first lock.
     var sigOf={};
@@ -23465,53 +23459,74 @@ function checkQuotationCredits(execute){
       ops.push({row:i+1, serial:serial, client:r[2]||'', from:cur||'(blank)', to:(exp||sig),
                 why:(exp?'exported it from Order #'+ord:'their signature is on the quotation')});
     }
-
-    console.log('');
-    ops.forEach(function(o){
-      console.log('CREDIT  '+o.from+'  ->  '+o.to+'   '+o.serial+'  '+(o.client||'')+'   ('+o.why+')');
-    });
-    if(bothHands.length){
-      console.log('');
-      console.log('Two hands on these. Column H is one of them, so nothing is changed — who owns a '
-        +'quotation one person opened and another signed is your call, not this script\'s:');
-      bothHands.forEach(function(b){
-        console.log('   '+b.serial+'  '+(b.client||'')+'   column H says '+b.cur
-          +'   |  exported it: '+b.exp+' (Order #'+b.ord+')   |  signed it: '+b.sig);
+    cb({ops:ops, bothHands:bothHands, agree:agree, noEvidence:noEvidence, haveUsers:haveUsers});
+  },function(){ cb(null,'read-failed'); });
+}
+// Sheet column H and Supabase prepared_by are the same field. Both, or the two stores end up
+// disagreeing about who made what.
+function _applyCreditOps(ops){
+  return _batchSheetValues(ops.map(function(o){
+    return {range:'Quotations!H'+o.row, values:[[o.to]]};
+  })).then(function(){
+    return ops.reduce(function(chain,o){
+      return chain.then(function(){
+        return supa.from('quotations').update({prepared_by:o.to}).eq('serial',o.serial)
+          .then(function(){},function(){});
       });
-    }
-    console.log('');
-    console.log(ops.length+' credited to someone the quotation\'s own record does not support, '
-      +agree+' confirmed correct, '+bothHands.length+' with two hands on them.');
-    console.log(noEvidence+' carry no evidence either way — never locked and not from an order, so '
-      +'there is nothing to check them against. That is a gap, not a clean bill of health.');
-    if(!haveUsers) console.log('⚠ The user list is not loaded, so order exports were skipped entirely. '
-      +'Open Settings → Users once and re-run for the full picture.');
-    console.log('The created DATE is not repaired — it is not recoverable. See the note above this function.');
-    if(!execute){
+    },Promise.resolve());
+  }).then(function(){
+    ops.forEach(function(o){ var e=sessionQuotations[o.serial]; if(e) e.user=o.to; });
+    logActivity('Quotation credits corrected — '+ops.length+' returned to the person the '
+      +'quotation\'s own saved record names.');
+    _clearDataBanners();
+  });
+}
+function checkQuotationCredits(execute){
+  console.log('=== Quotation credits ('+(execute?'EXECUTE':'DRY RUN')+') ===');
+  return new Promise(function(resolve){
+    _findQuotationCredits(function(f,why){
+      if(!f){
+        console.log(why==='signed-out' ? 'Sign in first.'
+          : why==='supabase-not-connected'
+            ? 'REFUSED — not connected to Supabase. The evidence is read from there, and a '
+              +'correction has to land in BOTH stores or they end up disagreeing about who made '
+              +'what. Run supaConnect(), then re-run.'
+            : 'Could not read the Quotations sheet.');
+        resolve({refused:why}); return;
+      }
       console.log('');
-      console.log('Dry run only. Re-run with checkQuotationCredits(true) to apply.');
-      return {ops:ops.length,agree:agree,bothHands:bothHands.length,noEvidence:noEvidence};
-    }
-    if(!ops.length){ console.log('Nothing to change.'); return {done:0}; }
-
-    return _batchSheetValues(ops.map(function(o){
-      return {range:'Quotations!H'+o.row, values:[[o.to]]};
-    })).then(function(){
-      // Supabase mirrors column H as prepared_by. Both, or they disagree about who made what.
-      return ops.reduce(function(chain,o){
-        return chain.then(function(){
-          return supa.from('quotations').update({prepared_by:o.to}).eq('serial',o.serial)
-            .then(function(){},function(){});
+      f.ops.forEach(function(o){
+        console.log('CREDIT  '+o.from+'  ->  '+o.to+'   '+o.serial+'  '+(o.client||'')+'   ('+o.why+')');
+      });
+      if(f.bothHands.length){
+        console.log('');
+        console.log('Two hands on these. Column H is one of them, so nothing is changed — who owns a '
+          +'quotation one person opened and another signed is your call, not this script\'s:');
+        f.bothHands.forEach(function(b){
+          console.log('   '+b.serial+'  '+(b.client||'')+'   column H says '+b.cur
+            +'   |  exported it: '+b.exp+' (Order #'+b.ord+')   |  signed it: '+b.sig);
         });
-      },Promise.resolve());
-    }).then(function(){
-      ops.forEach(function(o){ var e=sessionQuotations[o.serial]; if(e) e.user=o.to; });
-      logActivity('Quotation credits corrected — '+ops.length+' returned to the person the '
-        +'quotation\'s own saved record names.');
-      _clearDataBanners();
+      }
       console.log('');
-      console.log('=== DONE — '+ops.length+' corrected ===');
-      return {done:ops.length};
+      console.log(f.ops.length+' credited to someone the quotation\'s own record does not support, '
+        +f.agree+' confirmed correct, '+f.bothHands.length+' with two hands on them.');
+      console.log(f.noEvidence+' carry no evidence either way — never locked and not from an order, '
+        +'so there is nothing to check them against. That is a gap, not a clean bill of health.');
+      if(!f.haveUsers) console.log('⚠ The user list is not loaded, so order exports were skipped '
+        +'entirely. Open Settings → Users once and re-run for the full picture.');
+      console.log('The created DATE is not repaired — it is not recoverable. See the note above this function.');
+      if(!execute){
+        console.log('');
+        console.log('Dry run only. Re-run with checkQuotationCredits(true) to apply.');
+        resolve({ops:f.ops.length,agree:f.agree,bothHands:f.bothHands.length,noEvidence:f.noEvidence});
+        return;
+      }
+      if(!f.ops.length){ console.log('Nothing to change.'); resolve({done:0}); return; }
+      _applyCreditOps(f.ops).then(function(){
+        console.log('');
+        console.log('=== DONE — '+f.ops.length+' corrected ===');
+        resolve({done:f.ops.length});
+      });
     });
   });
 }
@@ -25374,8 +25389,8 @@ function checkProjectListData(){
         +'</div>';
       if(!findings.length){
         h+='<div style="padding:16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
-          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-serials"></div><div id="dbcheck-locks"></div></div>';
-        box.innerHTML=h; _reportSerialSplits(); _reportLostLockTimes(); return;
+          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div></div>';
+        box.innerHTML=h; _reportSerialSplits(); _reportQuotationCredits(); _reportLostLockTimes(); return;
       }
       h+='<div style="padding:12px 16px;background:var(--wash-amber);font-size:13px">'
         +'<b>'+findings.length+'</b> quotation'+(findings.length===1?'':'s')+' show the wrong stage in the Project List. '
@@ -25396,9 +25411,10 @@ function checkProjectListData(){
       h+='<div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
         +'<button class="btn btn-primary" onclick="fixProjectListStatuses()" style="font-size:12px"><i class="ti ti-wand"></i> Correct all '+findings.length+'</button>'
         +'<span style="font-size:12px;color:var(--text2)">Rewrites only the Status column. Nothing else on the quotation is touched.</span>'
-        +'</div><div id="dbcheck-serials"></div><div id="dbcheck-locks"></div></div>';
+        +'</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div></div>';
       box.innerHTML=h;
       _reportSerialSplits();
+      _reportQuotationCredits();
       _reportLostLockTimes();
     }
   });
@@ -25408,7 +25424,7 @@ var _lostLockFindings=[];
 // Doing this per-fixer meant one of the three forgot, and the banner went on asking for work that
 // had already been done — which is indistinguishable from the repair not having worked.
 function _clearDataBanners(){
-  _dbCheckFindings=[]; _lostLockFindings=[]; _lockFromStateFindings=[];
+  _dbCheckFindings=[]; _lostLockFindings=[]; _lockFromStateFindings=[]; _creditFindings=[];
   _dbCheckAutoDone=false; _stageFlags=null; dirData=[];
   ['dir-stale-banner','dir-lock-banner'].forEach(function(id){ var n=el(id); if(n) n.innerHTML=''; });
   if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
@@ -25479,13 +25495,82 @@ function _reportSerialSplits(){
     +'<th style="text-align:left;padding:6px 0">Client\'s copy says</th></tr></thead><tbody>';
   _serialSplitFindings.slice(0,50).forEach(function(f){
     h+='<tr><td style="padding:4px 0">'+escHtml(f.client)+'</td>'
-      +'<td style="padding:4px 0;font-family:ui-monospace,monospace;color:var(--coral)">'+escHtml(f.serial)+'</td>'
+      +'<td style="padding:4px 0;font-family:ui-monospace,monospace;color:var(--pill-coral)">'+escHtml(f.serial)+'</td>'
       +'<td style="padding:4px 0;font-family:ui-monospace,monospace;color:var(--teal);font-weight:600">'+escHtml(f.says)+'</td></tr>';
   });
   h+='</tbody></table><div style="font-size:12px;color:var(--text2);margin-top:8px">'
     +'Correcting these is a deliberate step — ask before running it, since it decides which number '
     +'is authoritative on a quotation a client may already hold.</div></div>';
   host.innerHTML=h;
+}
+var _creditFindings=[];
+function _reportQuotationCredits(){
+  var host=el('dbcheck-credits'); if(!host) return;
+  _findQuotationCredits(function(f){
+    if(!f) return;                                  // refusals are already explained by the panel above
+    _creditFindings=f.ops;
+    var h='';
+    if(f.ops.length){
+      h+='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
+        +'<div style="font-size:13px;margin-bottom:8px"><b>'+f.ops.length+'</b> quotation'
+        +(f.ops.length===1?' is':'s are')+' credited to someone the quotation\'s own saved record '
+        +'does not support. Until 2026-08-11 every save rewrote this column with whoever was saving.</div>'
+        +'<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'
+        +'<th style="text-align:left;padding:6px 0">Client</th>'
+        +'<th style="text-align:left;padding:6px 0">Listed as</th>'
+        +'<th style="text-align:left;padding:6px 0">Should be</th>'
+        +'<th style="text-align:left;padding:6px 0">Why</th></tr></thead><tbody>';
+      f.ops.slice(0,50).forEach(function(o){
+        h+='<tr><td style="padding:4px 0">'+escHtml(o.client||o.serial)+'</td>'
+          +'<td style="padding:4px 0;color:var(--pill-coral)">'+escHtml(o.from)+'</td>'
+          +'<td style="padding:4px 0;color:var(--teal);font-weight:600">'+escHtml(o.to)+'</td>'
+          +'<td style="padding:4px 0;font-size:12px;color:var(--text2)">'+escHtml(o.why)+'</td></tr>';
+      });
+      h+='</tbody></table>'
+        +'<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+        +'<button class="btn btn-primary" onclick="fixQuotationCredits()" style="font-size:12px">'
+        +'<i class="ti ti-user-check"></i> Correct all '+f.ops.length+'</button>'
+        +'<span style="font-size:12px;color:var(--text2)">Rewrites only the User column. '
+        +'The created date is not touched — it is not recoverable.</span></div></div>';
+    }
+    // Two hands on it is not a fault to fix, but it is the one case a person has to settle.
+    if(f.bothHands.length){
+      h+='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--card2)">'
+        +'<div style="font-size:13px"><b>'+f.bothHands.length+'</b> with two hands on '
+        +(f.bothHands.length===1?'it':'them')+' — nothing is changed, because who owns a quotation '
+        +'one person opened and another signed is your call:</div>';
+      f.bothHands.forEach(function(b){
+        h+='<div style="font-size:12.5px;margin-top:6px">'+escHtml(b.client||b.serial)
+          +' — listed as <b>'+escHtml(b.cur)+'</b>; '+escHtml(b.exp)+' exported it from Order #'
+          +escHtml(b.ord)+', '+escHtml(b.sig)+' signed it.</div>';
+      });
+      h+='</div>';
+    }
+    if(!f.ops.length&&!f.bothHands.length)
+      h+='<div style="padding:12px 16px;border-top:1px solid var(--border);color:var(--teal);font-size:13px">'
+        +'<i class="ti ti-circle-check"></i> Every quotation with a record of who prepared it is '
+        +'credited to that person.</div>';
+    h+='<div style="padding:8px 16px;font-size:12px;color:var(--text2);border-top:.5px solid var(--border)">'
+      +f.agree+' confirmed, '+f.noEvidence+' carry no evidence either way — never locked and not '
+      +'from an order, so there is nothing to check them against. That is a gap, not a clean bill of health.'
+      +(f.haveUsers?'':' ⚠ The user list is not loaded, so order exports were skipped.')+'</div>';
+    host.innerHTML=h;
+  });
+}
+function fixQuotationCredits(){
+  var list=_creditFindings.slice(); if(!list.length) return;
+  _confirm('Return '+list.length+' quotation'+(list.length===1?'':'s')+' to the person the '
+    +'quotation\'s own saved record names?\n\nOnly the User column changes. The created date is '
+    +'left alone — it is not recoverable.',
+  function(){
+    var host=el('dbcheck-credits');
+    if(host) host.innerHTML='<div style="padding:12px 16px">Correcting '+list.length+'…</div>';
+    _applyCreditOps(list).then(function(){
+      if(host) host.innerHTML='<div style="padding:12px 16px;color:var(--teal)">'
+        +'<i class="ti ti-circle-check"></i> '+list.length+' corrected.</div>';
+      showToast(list.length+' quotation'+(list.length===1?'':'s')+' returned to the right person.');
+    });
+  });
 }
 function _reportLostLockTimes(){
   var host=el('dbcheck-locks'); if(!host) return;
