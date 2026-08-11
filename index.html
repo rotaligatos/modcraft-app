@@ -25507,58 +25507,106 @@ function _fixDuplicateRows(){
     var host=el('dbcheck-serials');
     removeDuplicateQuotationRows(true).then(function(r){
       if(host&&r&&r.done!=null)
-        host.innerHTML='<div style="padding:12px 16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
+        host.innerHTML='<div style="padding:12px 16px;color:'+(r.done?'var(--teal)':'var(--text2)')+'">'
+          +'<i class="ti ti-'+(r.done?'circle-check':'info-circle')+'"></i> '
           +r.done+' stale row'+(r.done===1?'':'s')+' removed.'
-          +(r.blocked?' '+r.blocked+' left alone — see the console for why.':'')+'</div>';
+          // Name them here rather than sending the user to the console — "see the console for why"
+          // is the same go-look-elsewhere pattern this panel exists to replace.
+          +(r.blockedList&&r.blockedList.length
+            ? '<div style="margin-top:8px;font-size:13px;color:var(--pill-coral)">Left alone, because '
+              +'the live row is not the first one — a person has to decide:<br>'
+              +r.blockedList.map(function(b){return '• '+escHtml(b.serial)+' — '+escHtml(b.why);}).join('<br>')
+              +'</div>'
+            : '')+'</div>';
     });
   });
 }
 function removeDuplicateQuotationRows(execute){
   if(!gToken){ console.log('Sign in first.'); return Promise.resolve({refused:'signed-out'}); }
   console.log('=== Duplicate rows ('+(execute?'EXECUTE':'DRY RUN')+') ===');
-  return sheetsGet('Quotations!A:AA').then(function(d){
+  // Supabase holds one row per serial (it is the primary key there), mirroring whatever the app
+  // last wrote — so it is the independent check on which sheet row is the live one.
+  var supaP = supaReady()
+    ? supa.from('quotations').select('serial,total').then(function(r){
+        var m={}; ((r&&r.data)||[]).forEach(function(x){ if(x.serial!=null) m[x.serial]=Number(x.total); });
+        return m;
+      },function(){ return null; })
+    : Promise.resolve(null);
+  return Promise.all([sheetsGet('Quotations!A:AA'),supaP]).then(function(res){
+    var d=res[0], supaTotals=res[1];
     var rows=(d&&d.values)||[], hdr=rows[0]||[];
     if(!rows.length){ console.log('Could not read the Quotations sheet.'); return {refused:'no-sheet'}; }
+    if(!supaTotals) console.log('(Not connected to Supabase — keeping the first row of each pair '
+      +'without the independent cross-check. That is still correct, just unverified.)');
     var at={};
     for(var i=1;i<rows.length;i++){
       var s=String(rows[i][0]||'').trim(); if(!s) continue;
       (at[s]=at[s]||[]).push(i+1);                       // 1-based sheet row numbers
     }
+    // ⚠ The first version of this refused any pair differing in anything but Date, on the Keystone
+    // precedent where two rows were written 529ms apart and were near-identical. That was wrong, and
+    // it blocked all three real cases: a duplicate that has sat for days DOES differ, because the
+    // live row keeps being updated while the stale one is frozen. QT-C00000004's orphan still held
+    // ₱27,524,032.69, the bloated figure from before its cabinet count was entered.
+    //
+    // Two rows under the SAME serial are always one quotation — there is exactly one saved state per
+    // number, so "are these copies" is the wrong question. The right one is "which row is live", and
+    // that is the FIRST: _proceedSaveQuotation finds its row with `break` on first match.
+    //
+    // Rather than trust that, it is verified. Supabase mirrors whatever the app last wrote, so the
+    // sheet row whose Total matches it IS the live one. If that turns out not to be the first row,
+    // refuse — the assumption underneath this repair would be wrong for that quotation.
+    var liveTotal=(supaTotals&&supaTotals)||{};
     var ops=[], blocked=[];
+    var TOTAL_COL=hdr.indexOf('Total'); if(TOTAL_COL<0) TOTAL_COL=6;
     Object.keys(at).forEach(function(s){
       var r=at[s]; if(r.length<2) return;
-      // Only remove a row that is genuinely redundant. Date is expected to differ — it is the write
-      // time, and these were written seconds apart. Anything ELSE differing means they are not
-      // copies of one job, and a person has to decide.
-      var keep=rows[r[0]-1], why=null;
-      for(var k=1;k<r.length&&!why;k++){
-        var other=rows[r[k]-1];
-        for(var c=0;c<Math.max(hdr.length,keep.length,other.length);c++){
-          if(String(hdr[c]||'')==='Date') continue;
-          if(String(keep[c]||'').trim()!==String(other[c]||'').trim()){
-            why=(hdr[c]||('column '+c))+': "'+(keep[c]||'(blank)')+'" vs "'+(other[c]||'(blank)')+'"';
-            break;
-          }
+      var keep=rows[r[0]-1];
+      var known=liveTotal[s];
+      if(known!=null){
+        var num=function(v){ var n=parseFloat(String(v||'').replace(/[^0-9.\-]/g,'')); return isNaN(n)?null:n; };
+        var first=num(keep[TOTAL_COL]), match=[];
+        for(var k=0;k<r.length;k++){
+          var t=num(rows[r[k]-1][TOTAL_COL]);
+          if(t!=null&&Math.abs(t-known)<0.005) match.push(r[k]);
+        }
+        if(match.length&&match.indexOf(r[0])<0){
+          blocked.push({serial:s,rows:r,why:'the LIVE record is row '+match.join('/')+' (₱'+known
+            +'), not the first row (₱'+first+'). Removing the later rows would delete the current '
+            +'one. This needs a person.'});
+          return;
         }
       }
-      if(why){ blocked.push({serial:s,rows:r,why:why}); return; }
-      ops.push({serial:s, client:keep[2]||'', keep:r[0], drop:r.slice(1)});
+      // What is being dropped, so it is visible rather than silent.
+      var diffs=[];
+      for(var m=1;m<r.length;m++){
+        var other=rows[r[m]-1];
+        for(var c=0;c<Math.max(hdr.length,keep.length,other.length);c++){
+          if(String(hdr[c]||'')==='Date') continue;
+          if(String(keep[c]||'').trim()!==String(other[c]||'').trim())
+            diffs.push((hdr[c]||('column '+c))+' '+(other[c]||'(blank)')+' → '+(keep[c]||'(blank)'));
+        }
+      }
+      ops.push({serial:s, client:keep[2]||'', keep:r[0], drop:r.slice(1), diffs:diffs});
     });
 
     console.log('');
     ops.forEach(function(o){
       console.log('KEEP row '+o.keep+', DELETE row'+(o.drop.length>1?'s':'')+' '+o.drop.join(', ')
         +'   '+o.serial+'  '+(o.client||''));
+      // The stale row is frozen at an older save, so it WILL differ. Print what is going, rather
+      // than deleting quietly — these are the values the orphan was still showing.
+      o.diffs.slice(0,6).forEach(function(x){ console.log('      stale copy had  '+x); });
+      if(o.diffs.length>6) console.log('      …and '+(o.diffs.length-6)+' more field(s)');
     });
     blocked.forEach(function(b){
-      console.log('LEFT ALONE  '+b.serial+' (rows '+b.rows.join(', ')+') — these are NOT copies of '
-        +'one job. '+b.why+'. Someone has to decide which is right.');
+      console.log('LEFT ALONE  '+b.serial+' (rows '+b.rows.join(', ')+') — '+b.why);
     });
     console.log('');
     console.log(ops.length+' to remove, '+blocked.length+' left alone.');
     if(!execute){ console.log('Dry run only. Re-run with removeDuplicateQuotationRows(true) to apply.');
-                  return {ops:ops.length,blocked:blocked.length}; }
-    if(!ops.length){ console.log('Nothing to remove.'); return {done:0,blocked:blocked.length}; }
+                  return {ops:ops.length,blocked:blocked.length,blockedList:blocked}; }
+    if(!ops.length){ console.log('Nothing to remove.'); return {done:0,blocked:blocked.length,blockedList:blocked}; }
 
     var drop=[]; ops.forEach(function(o){ drop=drop.concat(o.drop); });
     return _sheetsDeleteRowsByIndex('Quotations',drop).then(function(){
@@ -25569,7 +25617,7 @@ function removeDuplicateQuotationRows(execute){
       showToast(drop.length+' duplicate row'+(drop.length===1?'':'s')+' removed.');
       console.log('');
       console.log('=== DONE — '+drop.length+' row(s) removed ===');
-      return {done:drop.length,blocked:blocked.length};
+      return {done:drop.length,blocked:blocked.length,blockedList:blocked};
     });
   });
 }
