@@ -5245,6 +5245,38 @@ same URL, nobody is forced to move. Retire the Site later, once it is already re
 > it serves the main app, so both were corrected. A comment that lies is what produced the
 > `getInstallCarcassUnits` bug.
 
+### ⚠ Opening a quotation from the Project List showed the PREVIOUS one (`30261a5`)
+Reported as a delay — *"it retains the previous quotation, then going back and returning updates
+it."* It was **not** a delay, not the network, and not a race: it happened every single time, and
+the quotation data was never wrong. Only the **pinned total bar** was stale, showing the previous
+quotation's serial, stage and grand total.
+
+`restoreFullQuotationState` reveals the page **last**, after everything that renders into it. The
+total bar refuses to redraw unless the quotation page is on screen (`_qTotalBar`'s `onQuot` early
+return), so `recalc()`'s refresh of it ran while the page was still hidden, took the "not my page"
+branch, switched the bar OFF, and kept the old figures. The hand-rolled `.active` class toggle that
+followed never asked it again. Going back and returning goes through `navigate()`, which does.
+
+Reproduced before fixing: bar showed A's ₱65,478.17 after opening B, then B's ₱14,550.70 once
+navigated away and back.
+
+**Fixed by calling `navigate('quotation')` instead of a hand-rolled copy of it.** That block did
+most of what `navigate()` does but not all — it also does `_navScrollActiveIntoView()`,
+`_qTotalBar()`, and clears `dirSelected`. Anything added to `navigate()` later is now picked up
+here instead of quietly going missing.
+
+Three risks checked rather than assumed, and all three would have been regressions:
+- `canNavigate('quotation')` allows **Quotations OR Projects**, so view-only users still get in.
+- `_buildQuotationLayout()` is idempotent (containers built once, every move guarded), so the call
+  earlier in the restore plus `navigate()`'s is harmless — verified no duplicated cards or rails.
+- `navigate()` calls `initQuotation()` only when `qSerial` is empty, which **would have wiped the
+  state just restored**. `qSerial` is set at the top of the restore and always gets a value.
+
+> **The shape worth keeping:** a hand-rolled copy of an existing routine that does *most* of it.
+> The copy does not stay in step, and the gap surfaces as something that "fixes itself on the
+> second try". When a symptom is *intermittent-looking but actually deterministic*, suspect an
+> ordering or a duplicated code path, not timing.
+
 ### Also worth knowing
 - **`QT-W00000048` (Prime Dimension) is in Supabase but not the Sheet**, so the in-app check never
   lists it while a SQL query does. That is the known orphan gap (Supabase ~171 rows vs Sheet ~75),
