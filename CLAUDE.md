@@ -5210,17 +5210,35 @@ identical pairing one block up in `_reportSerialSplits` had the same miss and is
 - **The in-quotation Reactivate banner is dead code.** `_qIsArchived()` tests `status==='Archived'`,
   which is not on `STATUS_LADDER` and is never written — archived is derived from age now. The
   Project List's Restore button uses the correct derived test and works.
-- ✅ **Duplicate rows CLOSED 2026-08-11 — there are none.** Rommel checked both in the Project
-  List: `QT-W00000041` and `QT-C00000004` each return a single row ("1 quotation"). The claim came
-  from a stale dry-run of the since-disabled creator repair; W41's duplicate had already been
-  cleared by the `_cleanupPrevSerialRows` run on 08-11 01:10 that removed the superseded
-  `QT-M00000057` entry. **Nothing to fix, and nothing blocking `reconcileRenumbered()` or the
-  `qBaseSerial` removal on this account.**
-  ⚠ Kept for whenever a duplicate DOES turn up, because the trap is real:
-  saving finds its row with `break` on the FIRST match, so the earlier row is live and any later
-  one is frozen forever — and `sheetsDeleteRowByKey` also breaks on first match, so using it would
-  delete the LIVE row. `reconcileDuplicateRows` deletes by index for exactly that reason.
-  **Keep the earlier row, remove the later one.**
+- ✅ **SERIAL DATA CLEANED 2026-08-11 — renumbers and duplicates both done, live.**
+  `reconcileRenumbered(true)` applied 7 (6 renames + the MASTECH duplicate); verified in the
+  database that every row now matches the number the quotation itself carries. Then
+  `removeDuplicateQuotationRows(true)` cleared the 3 duplicate rows (`QT-W00000031`,
+  `QT-W00000041`, `QT-C00000004`) — the sheet went 70 rows to 67. **Check Project List now reports
+  only Bella Ferma**, deliberately left for Stephanie. `qBaseSerial` removal is unblocked once
+  that one is settled.
+
+  ⚠ **Two things I got wrong here. Both are the same mistake — asserting from the wrong source.**
+
+  **(a) The Project List CANNOT show a duplicate row.** `gLoadDirData` dedupes by base serial, so
+  two rows always render as ONE line and a search returns "1 quotation". Rommel checked two serials
+  that way, saw one row each, and I closed the item on it. Only Check Project List, which counts
+  raw rows, can see them — it then reported three. **Never treat the Project List as evidence about
+  rows.**
+
+  **(b) The first duplicate rule refused all three real cases.** It removed only rows identical
+  apart from Date, taken from Keystone where two rows were written 529ms apart. But a stale copy is
+  FROZEN while the live row keeps updating, so it differs *by definition* — C00000004's orphan
+  still held ₱27,524,032.69, the bloated pre-cabinet-count figure from 08-10. The differences were
+  the evidence and the check treated them as the objection.
+
+  **The right rule:** two rows under one serial are always one quotation (there is exactly one
+  saved state per number), so the question is never "are these copies" but "which row is LIVE" —
+  the first, since `_proceedSaveQuotation` breaks on first match. That is now cross-checked against
+  Supabase's own total for the serial, and refused if the live row turns out not to be the first.
+
+  ⚠ Still true if a duplicate reappears: `sheetsDeleteRowByKey` also breaks on first match, so it
+  would delete the LIVE row. Delete by index — `_sheetsDeleteRowsByIndex`.
 
 ---
 
