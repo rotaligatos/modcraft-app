@@ -5082,7 +5082,103 @@ overlapping saves that never touch the claim path.
 
 ---
 
-# OPEN — updated 2026-08-09 (THIS IS THE AUTHORITATIVE LIST)
+## What was changed on 2026-08-11 (session — user filter, Stage 2 override, PWA, order links, and a repair that was WRONG)
+
+Eleven commits, `74b22e4`..`5a3231f`, all pushed and confirmed SERVED. Everything below was found by
+running the code, querying live data, or by the team using the app.
+
+### Shipped and verified
+1. **Project List "Only mine" filter** (`74b22e4`) — Rommel corrected the queued ask: **filter, not
+   sort**. A VIEW filter, not a permission. Matches the same expression the save writes into the
+   User column, so it cannot fail to match your own work. Verified against the real distribution
+   (171 all / 31 mine / 34 Jhover / 81 Rommel); persists; survives re-renders.
+2. **⚠ Stage 2 never inherited an approved override** (`86a7f5a`) — reported on QT-W00000052.
+   `initFinalQuotation` gated ALL inheritance on `if(!fqApprovalsFromSave)`, and that flag comes
+   from `state.fqVatApproved!==undefined` — **a key every save writes unconditionally**. The
+   sentinel could never be false, so Stage 2 inherited nothing unless opened in the same session
+   the quotation was created. `fqCustomCFApproved` was true on **0 of 157**. Now inherited **per
+   field**, so a real Stage 2 approval is still never reset. Gaps were CF 3, VAT 76, discount 8,
+   premium 0; nothing already issued moved. Existing quotations self-heal on next open — confirmed
+   by Rommel: W52 now matches the Initial Quotation.
+3. **Modcraft is installable** (`5675047`) — its own section above.
+4. **Orders show what became of each order's quotation** (`e4c63e4`) — serial + live status + value,
+   clickable via `openQuotationFromDir` (which already guards unsaved work). Where there is none it
+   says why: In Progress → *exported, no quotation saved yet* (that is the 10).
+5. **Status pills were under AA** (`17b8d56`) — app-wide, not just the new card. Fixed the INK via
+   new `--pill-*` tokens; base palette untouched so nothing else moved. Worst 3.06 → **4.66**.
+6. **⚠ Opening a quotation from the Project List showed the PREVIOUS one** (`30261a5`) — its own
+   section above. A hand-rolled copy of `navigate()`.
+7. **An archived option can be brought back** (`e32ba30`) — Rommel's "un-archive" question was
+   about **options**, not quotations (I answered the wrong thing first). Approving one option
+   archives the others but KEEPS them; there was no way to reach them. "N archived" is now a button
+   → Restore. Also fixed a bug it made reachable: `confirmOptionApprove` archived only ACTIVE
+   options, so re-approving left **two approved at once**.
+8. **⚠ The creator no longer loses their quotation** (`8542794`) — reported as a user mix-up on
+   QT-W00000076 (Japan Baking Inc): Joanna made it, the list showed Stephanie. Every save rewrote
+   column B (Created) and column H (User) with *now* and whoever was saving, so both followed the
+   last saver. Measured: **14 credited to the wrong person, 61 with a moved created date** (two
+   claiming they were created that same morning). It also skewed Team performance and the new "Only
+   mine" filter, which read the same field. The row lookup now reads `A:H` and keeps what the row
+   already recorded; a first save still records its creator; a blank legacy User is filled in.
+   Rommel's rule: *"the original who open should keep that quotation. However, if any changes were
+   made by other users, it should show in the log files."* — which it already does, and column Z
+   (Last Updated) still moves.
+
+### ⚠⚠ THE REPAIR IS DISABLED — READ BEFORE TOUCHING IT (`4cff4e0`, disabled by `5a3231f`)
+`reconcileQuotationCreators()` was built to repair those 14 + 61. **Its premise was wrong.** It
+assumed the EARLIEST `activity_log` entry for a serial is that quotation being created. It is not:
+`gLogToSheets` stamps `serial: qSerial` — whatever quotation is open in that person's browser — so
+unrelated admin actions land on an unrelated serial.
+
+Caught by spot-checking the dry run **before applying**:
+```
+M00000090  earliest = "Signature uploaded for Rommel Taligatos"   → Jhover actually built it
+M00000106  earliest = "Signature uploaded for Allan Lagsao"       → Jhover, from Order #8843
+M00000091  earliest = "Message sent to Jhover Galupo"             → Rafael, from Order #8844
+M00000028  earliest = "Quotation unlocked (approved by ...)"      → an approval, not a creation
+```
+**Five of its thirteen credit changes pointed at Rommel purely because he is the admin whose
+session was open.** Applying it would have replaced one wrong answer with a different wrong answer,
+on live data, permanently.
+
+**To rebuild, use evidence that means what it says:**
+- `"Signature applied to Prepared by (NAME)"` — stamped at lock, names the preparer. **48 serials.**
+- `"Quotation created from Order #NNNN"` — a real creation event. **17 serials.**
+
+Only a subset is recoverable. That is the honest answer — fix 48 correctly rather than 63 wrongly.
+
+**DROP the created-date repair entirely.** An unrelated admin action makes the earliest entry too
+early; a renumber (first entries logged under the provisional serial) makes it too late. Not
+recoverable, and a differently-wrong date is not an improvement.
+
+> **The lesson, and it nearly cost real data:** I verified the *mechanism* (the log is append-only
+> and records who did what) and inferred the *meaning* (earliest entry = creation) without checking.
+> A dry run is only as good as the assumption behind it — read what the rows actually SAY, not just
+> how many there are.
+
+### Still open from today
+- **Rebuild the creator repair** on the two reliable markers above.
+- **Client Declined is a one-way door.** People are using it for *"Draft only"*, *"Revision"*,
+  *"Wrong Pricing"* — two of those on the morning of 08-11, minutes apart. Nothing can un-decline a
+  quotation. If what they want is *park this*, that is a different button. Raised with Rommel;
+  his call, not started.
+- **The in-quotation Reactivate banner is dead code.** `_qIsArchived()` tests `status==='Archived'`,
+  which is not on `STATUS_LADDER` and is never written — archived is derived from age now. The
+  Project List's Restore button uses the correct derived test and works.
+- **New duplicate rows:** `QT-W00000041` and `QT-C00000004` are each on two rows in the Quotations
+  sheet (seen in the repair's dry-run output). C00000004 is dated AFTER the `_quotRowWrite`
+  serialisation fix, so it is likely the **two-tab** case that fix does not cover.
+  `reconcileDuplicateRows` handles this shape — check both rows before deleting either.
+
+---
+
+# OPEN — updated 2026-08-11 (THIS IS THE AUTHORITATIVE LIST)
+
+## ⚠⚠ DO NOT RUN `reconcileQuotationCreators()` — DISABLED, WRONG PREMISE
+It is deployed and Rommel has the command in his scrollback. It now refuses and explains itself,
+but do not re-enable it without reading the 2026-08-11 session entry above. It would credit
+quotations to whoever's admin session happened to be open. **The forward fix is unaffected** —
+creators and created dates stop being overwritten from now on; only the historical repair is void.
 
 ## ⚠ FIRST THING NEXT SESSION
 1. ~~Keystone~~ **DONE 2026-08-10** — see the 2026-08-10 session below. Row 64 (the orphan)
@@ -5327,7 +5423,11 @@ Decisions to settle with Rommel before building:
   destroyed by the cancellation — exactly the case they are asking for. Its allowlist is matched on
   4 exact filename markers, so a new marker has to be added and deliberately left out of the wipe.
 
-### 3. Make the serial and client name clickable on the Approvals page
+### 3. Make the serial and client name clickable on the Approvals page — STILL OPEN
+(The same pattern shipped for ORDERS on 2026-08-11 via `_orderQuotationLine` / `openQuotationFromOrder`
+— reuse that: it calls `openQuotationFromDir`, which already routes through `confirmUnsavedThen`.)
+
+### 3 (detail)
 `renderApprovals()` shows serial + client as plain text; an approver has to go and find the
 quotation themselves. Make both open it, the way Project List rows already do.
 
@@ -5450,6 +5550,10 @@ The 12 that stay blank are the June quotations predating the activity log. That 
   **Still open, resolves itself:** no order since has carried a file outside Field128/129, so the
   nine extra fields have not fired live. Corpus check: **68 orders, 0 mismatched** between
   `attachments` and the file fields Wufoo actually sent; 15 carry 3+; 140 files total.
+- ⚠ **DO NOT run `reconcileQuotationCreators()`** — disabled 2026-08-11, wrong premise. See the
+  session entry. The forward fix is fine; only the historical repair is void.
+- **Bella Ferma** still needs Stephanie — it blocks the last serial mismatch AND the `qBaseSerial`
+  removal.
 - **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
 - **GYMFIX `QT-M00000087`** — final-locked and Client Approved at ₱0.00, should be ₱616. Unlock,
   recalculate, re-lock.
