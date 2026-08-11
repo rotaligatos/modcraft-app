@@ -5210,10 +5210,20 @@ identical pairing one block up in `_reportSerialSplits` had the same miss and is
 - **The in-quotation Reactivate banner is dead code.** `_qIsArchived()` tests `status==='Archived'`,
   which is not on `STATUS_LADDER` and is never written — archived is derived from age now. The
   Project List's Restore button uses the correct derived test and works.
-- **New duplicate rows:** `QT-W00000041` and `QT-C00000004` are each on two rows in the Quotations
-  sheet (seen in the repair's dry-run output). C00000004 is dated AFTER the `_quotRowWrite`
-  serialisation fix, so it is likely the **two-tab** case that fix does not cover.
-  `reconcileDuplicateRows` handles this shape — check both rows before deleting either.
+- **Duplicate rows: `QT-W00000041` and `QT-C00000004`.** Two different causes, one consequence.
+  W41's log shows a **renumber** (`QT-M00000057 → QT-W00000041`, 07-31 23:32) whose old-row cleanup
+  did not run until 08-11 01:10 — ten days of two rows. C4's shows **five saves in 2.4 seconds**
+  (05:25:23.019 · 24.190 · 25.027 · 25.195 · 25.376 — the last three ~170ms apart), the
+  double-append shape: both saves read column A before either append landed.
+  ⚠ **Cannot be confirmed from Supabase** — `serial` is its primary key there, so duplicates exist
+  only in the Sheet. **Settings → Company & DB → Check Project List** reports them.
+  **Why it matters:** the value is counted twice in every dashboard figure (₱138,932 + ₱487,740);
+  saving finds its row with `break` on the FIRST match so the later row is frozen forever, showing a
+  stale status and total; and it blocks both `reconcileClientCopySerials` (renaming one would strand
+  the other) and the `qBaseSerial` removal.
+  ⚠ **`sheetsDeleteRowByKey` also breaks on first match** — using it here deletes the LIVE row and
+  keeps the orphan. `reconcileDuplicateRows` deletes by index for exactly this reason.
+  **Keep the earlier row, remove the later one.**
 
 ---
 
@@ -5415,9 +5425,14 @@ Verified through the normal `recalc()` path: blank → units 0, lock disabled, L
 quotation stays unlocked; count 30 → instBase **₱10,273,375 → ₱108,098**; Fab-only → not required;
 Fab-only + Assembly → required; carcass mode → untouched; the service dropdown moves the gate both ways.
 
-**Scope:** only 3 quotations in the database are services-mode with installation. QT-C00000004 is a
-Draft (nothing issued). QT-260603-8162 has no service lines (₱1,200). **QT-W00000052 reviewed by
-Rommel 2026-08-10 — fine, no action.**
+**Scope:** only 3 quotations in the database are services-mode with installation. QT-260603-8162 has
+no service lines (₱1,200). **QT-W00000052 reviewed by Rommel 2026-08-10 — fine, no action.**
+
+✅ **QT-C00000004 CLOSED 2026-08-11** (Rommel: *"yes the c4 is close already"*). The gate worked as
+intended — its own activity log shows the correction: `Project size 0 → 228` entered 08-10 05:25,
+total ₱27,524,032.69 → **₱631,128.99** at lock 06:50, and it has since been locked, unlocked,
+revised and shared normally at **₱487,740.38**. Nothing further to do on the carcass count.
+(The separate DUPLICATE ROW concern for this serial is still open — see the OPEN list.)
 
 ### "You are running an old version" (`8942164`)
 The Google Sites embed serves a cached build long after a fix ships, and a plain hard refresh often
