@@ -654,6 +654,9 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         <span id="q-prev-serial-note" style="display:none;font-size:10px;color:var(--text2);cursor:help"></span>
         <span id="q-order-badge" style="display:none;background:var(--wash-sky);color:var(--ink6);border:1px solid #acd;border-radius:4px;font-size:11px;padding:2px 7px;font-weight:500"></span>
         <span class="pill pill-amber" id="q-status">Draft</span>
+        <!-- Declined is reversible — see reactivateDeclinedQuotation(). Sits right beside the
+             status pill because that is where the pill itself sends you looking. -->
+        <span id="q-decline-wrap" style="display:none;align-items:center;gap:8px"></span>
         <!-- Signature state lives with the other status pills, not buried above the form —
              it is status, and this row is where people look for it. -->
         <span id="sig-top" style="display:none;align-items:center;gap:6px"></span>
@@ -20302,6 +20305,7 @@ function _updateQStatusBadge(){
   var st=_computeQuotationStatus();
   statusEl.textContent=st;
   statusEl.className='pill pill-'+(_STATUS_PILL_COLOR[st]||'amber');
+  _renderDeclineWrap();
 }
 function confirmClientApprove(){
   fqClientApproved=true;
@@ -20343,59 +20347,57 @@ function confirmCancelQuotation(){
   if(typeof updateFQLockUI==='function') updateFQLockUI();
   _updateQStatusBadge();
   gSaveQuotation();
-  _cleanupCancelledQuotationFiles();
+  // Deliberately no file cleanup here — see reactivateDeclinedQuotation(). Decline used to delete
+  // the drawing analysis and board layout immediately, on the reasoning that decline was final and
+  // there was no undo window to protect. Rommel, 2026-08-12: "Decline, yes but revivable" — a
+  // client saying no today and yes next month is normal, and deleting the design work the moment
+  // they said no meant reviving really meant redoing it from scratch. Nothing is deleted now.
 }
-// Removes drawing-analysis, board-layout, and Wufoo-attachment-copy files from a cancelled
-// quotation's Drive/Storage folder — the quotation's own record (state, printouts, BOM
-// report, cost detail) is never touched. Allowlist match on filename (only ever deletes a
-// file whose name contains one of these 4 exact markers) rather than a blanket folder wipe,
-// so a bug here can only under-delete, never accidentally remove a real deliverable. Fires
-// once, immediately, from confirmCancelQuotation() — the only place in the app qCancelled
-// gets set, and there's no "un-cancel" action, so there's no undo window to protect.
-// Forward-only: does not retroactively clean up quotations cancelled before this shipped.
-var _SUPPLEMENTARY_FILE_MARKERS=[' — analysis output.',' — raw upload.',' — board layout.',' — Wufoo attachment '];
-function _cleanupCancelledQuotationFiles(){
-  if(!gToken||!qSerial) return;
-  var baseSerial=qBaseSerial||qSerial;
-  var isSupplementary=function(name){
-    return _SUPPLEMENTARY_FILE_MARKERS.some(function(marker){ return name.indexOf(marker)>=0; });
-  };
-
-  ensureDriveFolder().then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);})
-    .then(function(folderId){
-      var q=encodeURIComponent("'"+folderId+"' in parents and trashed=false");
-      return _driveGet('files?q='+q+'&fields=files(id,name)').then(function(d){
-        var files=(d.files||[]).filter(function(f){return isSupplementary(f.name);});
-        return Promise.all(files.map(function(f){
-          return gApiFetch('https://www.googleapis.com/drive/v3/files/'+f.id+'?supportsAllDrives=true',{method:'DELETE'})
-            .then(function(){ logActivity('Removed supplementary file from Drive (quotation cancelled): '+f.name); })
-            .catch(function(e){ console.warn('Drive cleanup delete failed for',f.name,e); });
-        }));
-      });
-    }).catch(function(e){ console.warn('Drive cleanup failed:',e); });
-
-  if(SUPA_DUAL_WRITE&&supaReady()){
-    try{
-      supa.storage.from('quotations').list(_supaSafeStorageKey(baseSerial)).then(function(r){
-        if(r.error||!r.data) return;
-        var toRemove=r.data.filter(function(f){return isSupplementary(f.name);})
-          .map(function(f){return _supaSafeStorageKey(baseSerial)+'/'+f.name;});
-        if(!toRemove.length) return;
-        return supa.storage.from('quotations').remove(toRemove).then(function(r2){
-          if(r2&&r2.error) console.warn('[supa] storage cleanup error:',r2.error.message||r2.error);
-        });
-      }).catch(function(e){ console.warn('[supa] storage cleanup threw',e); });
-    }catch(e){ console.warn('[supa] storage cleanup threw',e); }
-    // Table rows — the structured data itself IS the "supplementary analysis" for these two.
-    try{
-      supa.from('drawing_analyses').delete().eq('serial',baseSerial).then(function(r){
-        if(r&&r.error) console.warn('[supa] drawing_analyses cleanup error:',r.error.message||r.error);
-      });
-      supa.from('board_layouts').delete().eq('serial',baseSerial).then(function(r){
-        if(r&&r.error) console.warn('[supa] board_layouts cleanup error:',r.error.message||r.error);
-      });
-    }catch(e){ console.warn('[supa] table cleanup threw',e); }
+// The inverse of _archiveOrdersForQuotation — brings back into the queue any order this
+// quotation's decline had archived, so reactivating genuinely undoes both halves of what
+// declining did. Reuses reopenOrder() rather than writing the status change a second time.
+function _reopenOrdersForQuotation(serial){
+  if(!serial) return;
+  var root=_serialRoot(serial);
+  for(var i=0;i<pendingOrders.length;i++){
+    var o=pendingOrders[i];
+    if(o.status!=='Archived'||!o.quotSerial) continue;
+    if(_serialRoot(o.quotSerial)===root) reopenOrder(o.id);
   }
+}
+// Decline is reversible. It always could be undone in principle — nothing about a typed reason
+// makes a client's "no" permanent — the app just never offered a way back. No PIN: declining
+// itself needs none, so undoing it holds to the same bar. The confirm dialog carries the original
+// reason and date, since that context matters to the decision.
+function reactivateDeclinedQuotation(){
+  if(!qCancelled) return;
+  var reason=qCancelReason, at=qCancelledAt;
+  _confirm('Reactivate this quotation?\n\nDeclined '+(at?fmtDT(at):'')+(reason?' — "'+reason+'"':'')
+    +'\n\nThis clears the decline and reopens the order it came from, if any. Everything else is '
+    +'exactly as it was left.',
+  function(){
+    qCancelled=false; qCancelledAt=''; qCancelReason='';
+    logActivity('Quotation reactivated'+(at?' (was declined '+fmtDT(at)+(reason?' — "'+reason+'"':'')+')':'')+'.');
+    try{ _reopenOrdersForQuotation(qBaseSerial||qSerial); }catch(e){}
+    updateLockUI();
+    if(typeof updateFQLockUI==='function') updateFQLockUI();
+    if(typeof updateFQClientApproveUI==='function') updateFQClientApproveUI();
+    _updateQStatusBadge();
+    gSaveQuotation();
+    showToast('Quotation reactivated.');
+  });
+}
+// The decline banner beside the status pill — reason, date, and the way back. Called from
+// _updateQStatusBadge(), which already runs on every point in the quotation's lifecycle where
+// this could have changed (load, save, decline, reactivate, stage change).
+function _renderDeclineWrap(){
+  var w=el('q-decline-wrap'); if(!w) return;
+  if(!qCancelled){ w.style.display='none'; w.innerHTML=''; return; }
+  w.style.display='inline-flex';
+  w.innerHTML='<span style="font-size:11px;color:var(--text2)" title="'+escHtml(qCancelReason||'')+'">'
+    +'Declined'+(qCancelledAt?' '+fmtDT(qCancelledAt):'')+'</span>'
+    +'<button class="btn" onclick="reactivateDeclinedQuotation()" style="font-size:11px;padding:3px 10px;'
+    +'color:var(--teal);border-color:var(--teal)"><i class="ti ti-refresh"></i>Reactivate</button>';
 }
 function updateFQSentStatus() {
   var ss=el('fq-sent-status'); if(!ss) return;
