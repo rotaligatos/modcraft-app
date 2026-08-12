@@ -5362,7 +5362,103 @@ still the next structural step, and it is unblocked once those rows are clean.
 
 ---
 
-# OPEN — updated 2026-08-11 (THIS IS THE AUTHORITATIVE LIST)
+## What was changed on 2026-08-12 (session — approval routing typo, BOM client names, price DB completeness, Client Declined made reversible)
+
+Five separate reports/requests, worked through in order.
+
+### Approval routing ignored because of a company-name typo (commit `96accfc`)
+Rommel: *"why I keep receiving request for unlock even though I already defined the approval
+route?"* Routing WAS configured correctly — unlock → Allan for WCL/MSSI, Stiffany for CWL — but
+`findApproverForAction` looked it up by **exact match** on `currentUserCompany`, and **8 of 13
+users** are on `"Module System and Services, Inc."` (singular) in User Roles while the routing
+table is keyed on the canonical `"Module Systems and Services, Inc."` (plural). For every one of
+those eight — every estimator who raises a request — the lookup found nothing and fell through to
+"first active Manager/Director/Admin", landing on Rommel. Not just unlock: non-VAT was silently
+doing the same, invisible only because it also routes to an Admin-tier person by default.
+New `_canonCompany()` matches by keyword (same pattern `_quotCompanyKey`/`_orderCompanyKey` already
+use), applied at all three lookups: `findApproverForAction`, `_findSignatory`'s fallback, and
+`_notedRequired`'s threshold lookup. Fixing the data instead would work until the next hire.
+
+**Follow-up, same thread:** an approver seeing a request via Admin/Director's full-visibility
+(`filterApprovalsByRouting` returns everything for that tier, by design) had no way to tell it
+apart from an actual assignment. New `_apprAssigneeName(n)` + an "Assigned to: NAME" line on both
+the Approvals card and the bell panel, shown only while pending (once actioned, "Actioned by"
+already answers it).
+
+### Client names on BOM cabinets, matching carcass mode (commit `6908209`)
+The carcass "Name for client" alias (2026-07 session) only existed for `qAreas[].items[]`, not
+`bomItems[]`. `setItemAlias(a,i,which)` now serves both arrays through one implementation;
+`_carcassClientName` renamed `_lineClientName` since it no longer serves only carcass. The alias
+reaches client documents only — pricing, the BOM report, the cutting list and every report stay on
+`bItem.type`. Verified: unit cost identical for two same-type cabinets with different aliases, the
+BOM report contains no alias text, both printout layouts (by-area, by-type) honour it and merge
+same-type same-alias lines while keeping differently-aliased lines separate.
+
+### Price DB — completeness, not just freshness (commits `9516cac`, `1d10768`, `22e02b4`)
+See the "Price DB staleness" entry earlier in this file for the freshness fix itself. Same day, a
+sync interrupted mid-run left the mirror at **5,000 of ~145,000 materials** — DuraSave among the
+missing, reported by Rommel as a plain "SKU should exist" (correct; it did, in the sheet — the app
+just wasn't reading the sheet). A truncated-but-recent mirror passes freshness by construction (its
+rows carry a fresh timestamp), so **completeness is now checked separately and first**: a successful
+sync records the row count it wrote; the loader refuses a mirror short of that count, however recent
+it looks. The "Sync fast copy from Sheets" button was also moved out of the warning banner and made
+permanent — it had been hidden exactly when the truncation made the detector blind to the problem.
+
+### Orders "suddenly archived" traced to Client Declined destroying recoverable work (commit `bc43d39`)
+Rommel's report: *"When Orders suddenly got archived. Some with quotation already and locked."*
+Checked the actual data first — all 6 currently-archived orders matched the documented design
+exactly (4 client-approved/won, 2 declined), nothing anomalous. First pass wrongly generalised this
+into a design discussion about win-triggering; Rommel redirected: *"wait, what are we even
+discussing about client declined? we are talking about archive of orders."* — correctly separating
+the ORDER-archiving question from what turned out to be the real, connected finding underneath it.
+
+**The actual finding:** clicking "Client Declined" is `confirmCancelQuotation()`, which — until
+today — set `qCancelled=true` (permanent, no undo anywhere in the app) AND immediately deleted the
+drawing analysis, raw upload, and board layout from Drive/Storage, on the reasoning (written into
+the function's own comment) that decline was final so there was no undo window to protect. That is
+exactly what broke: a client saying no today and yes next month is ordinary, and the design work
+was gone before anyone could revive it — *"when they revive it, the quotation needs to be redone."*
+
+Rommel's decision: *"Decline, yes but revivable."* Two changes:
+1. **`_cleanupCancelledQuotationFiles()` and its call are removed outright** — nothing deletes
+   supplementary files on decline any more. The function had exactly one caller; an unused
+   destructive function is worse than not having it.
+2. **A "Reactivate" button** beside the status pill, shown whenever `qCancelled`, with the original
+   reason and date. Clears the decline, reopens whichever order it had archived
+   (`_reopenOrdersForQuotation` — the literal inverse of `_archiveOrdersForQuotation`, reusing
+   `reopenOrder()` rather than a second copy of the status-change logic), logs both the reactivation
+   and what it undoes. No PIN — declining itself needs none, so undoing it holds the same bar.
+
+⚠ **This reverses the 2026-08-11 note that said not to raise Client Declined again** — that note
+was correct for what was actually said that day (Rommel meant restoring an archived OPTION), but
+Rommel has now separately and explicitly asked for decline to be reversible, and it is built.
+
+**A contrast check went sideways and is worth recording as a caution, not a finding.** The banner
+text first measured 3.66:1 in light mode — under the 4.5 needed. Investigated rather than patched:
+the reading came from a DOM background-walker landing on a **leftover coral-tinted element from
+earlier testing in the same long-lived preview tab**, not the real header. A fresh page load still
+produced a wrong-looking amber background for the same reason (accumulated test-page state, not a
+clean quotation-page context). Measuring the two tokens the row's source literally uses
+(`background:var(--card)`, `color:var(--text2)`) via a clean isolated probe gave 5.74:1 light /
+8.18:1 dark — both pass. **No code change was needed; three consecutive bad readings were the rig.**
+Long-lived test tabs accumulate DOM state across unrelated features — a stale coral/amber div from
+an earlier test can silently corrupt a later contrast check. Reload before trusting a contrast
+number in a tab that has been used for several different feature tests.
+
+### Still open from today
+- **Should a WON quotation still auto-archive its order?** Rommel: *"I don't remember having such
+  direction."* `confirmClientApprove()` calls `_archiveOrdersForQuotation(...,'quotation won')` —
+  this was added when Close Project was removed (2026-08-08), to stop orders sitting with their
+  clock running forever, but was not something Rommel recalls directing. **Not changed** — ask him
+  directly: keep it, remove it, or tie it to a different trigger (e.g. the quotation's own 30-day
+  ageing-archived stage) before touching `confirmClientApprove`.
+- The pre-existing, unrelated, genuinely dead `_qIsArchived()` / `_updateReactivationBanner()` /
+  `doReactivate()` subsystem (tied to the OLD ageing-archived status value that is never actually
+  written) is a **different "Reactivate" concept** from the one shipped today. Same label, same
+  icon, unrelated code, no collision (checked) — but worth knowing there are now two, so a future
+  session does not try to merge them. The old one stays exactly as documented in the entry below.
+
+# OPEN — updated 2026-08-12 (THIS IS THE AUTHORITATIVE LIST)
 
 ## Quotation credits — `reconcileQuotationCreators()` is dead; use `checkQuotationCredits()`
 The old one stays deployed and permanently refuses (Rommel has the command in his scrollback); it
@@ -5393,6 +5489,10 @@ means "this is a draft", not "nothing is open" — any new guard must decide whi
    ⚠ Note it does **not** address the duplicate-row failure mode — that is a different problem
    (two rows for one job, rather than one row under the wrong number), already closed separately
    by `_quotRowWrite`.
+3. **Ask Rommel: should a client-approved (won) quotation still auto-archive its order?** He does
+   not remember directing `confirmClientApprove()`'s `_archiveOrdersForQuotation(...,'quotation
+   won')` call. Not changed pending his answer — see the 2026-08-12 session entry below for the
+   full context (this came up while fixing Client Declined, which IS confirmed and shipped).
 
 ## What was changed on 2026-08-10 (session — Keystone closed, and the duplicate made legible)
 
