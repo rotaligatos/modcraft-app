@@ -1743,7 +1743,22 @@ A single quotation (Fabrication-only + Assembly, Site Visit enabled, Cutting lis
 19. **Stage 1 (`recalc()`) and Stage 2 (`recalcFQ()`) are separate, hand-duplicated implementations of the same cost-calculation and summary-rendering logic** — they do not share code and routinely drift out of sync (found this session: Outsource missing entirely from Stage 2, admin-box rows missing from Stage 1, a labeling fix applied to one stage initially and needing a matching fix in the other). **When fixing any quotation cost/summary bug, check both `recalc()` and `recalcFQ()` — a fix in one almost never automatically covers the other.**
 
 ## Known remaining areas to watch
-- **⚠️ Price DB direct-Sheet edits need a manual Supabase resync** — since Phase 4a (2026-07-05), `loadPriceDatabase()` reads Supabase first for Services/Materials/Hardware/CabinetTemplates. Editing through the app's own **Import Materials Excel / Import Hardware Excel** buttons (Settings → Price Database) is automatic — writes both Sheets and Supabase. But editing the **Google Sheet directly** (e.g. manual fixes, the Materials dedup cleanup) only updates Sheets — Supabase silently goes stale until someone runs `supaMigratePriceDb()` in the browser console afterward. No error, no warning — connected users just keep seeing old data. **Rule: direct Sheet edit → always follow with `supaMigratePriceDb()`.**
+- ✅ **Price DB staleness — FIXED 2026-08-11 (`9516cac`). The old rule below is retired; do not
+  reinstate it.** `loadPriceDatabase()` reads Supabase first (Phase 4a, 2026-07-05), and editing the
+  Price Database **Google Sheet directly** never reached Supabase — only the app's own Import
+  buttons dual-write. So a newly added, renamed or repriced SKU was invisible to every signed-in
+  user, silently. **This is the whole explanation for the recurring "an SKU is missing" reports.**
+  Measured on 2026-08-11: all 153,552 material rows carried the same `updated_at` of **2026-07-18**
+  — one bulk write, nothing since. The mirror held DuraSave in Real White and Warm White only (no
+  Coastal Driftwood), and the edgeband at its pre-rename name and old ₱20 price.
+  ⚠ **The old rule was "direct Sheet edit → always follow with `supaMigratePriceDb()`". That is a
+  reminder, not a safeguard, which is why it failed repeatedly.** A banner asking someone to notice
+  and click was the same mistake one step along. Now: `_checkPriceDbFreshness()` compares the
+  spreadsheet's Drive `modifiedTime` against the newest mirrored row BEFORE the load decision — if
+  the sheet is newer the mirror is **not used at all** (the app reads the sheet, which is right by
+  definition) and `_autoSyncPriceDb()` re-mirrors in the background. When freshness cannot be
+  determined it uses the mirror exactly as before, so an unrelated Drive failure never makes the
+  catalogue slow for everyone. Nobody has to remember or notice anything.
 - **Fullscreen ✅ COMPLETE** — works on GitHub Pages; suppressed in Google Sites embed (no `allowfullscreen`); ⛶ button opens app in new tab from embed. **Installing the app (2026-08-10, `5675047`) sidesteps this entirely — no iframe, so fullscreen just works.**
 - **Blank PDF on Send email** — RESOLVED ✅ (confirmed 2026-06-13)
 - **Carcass pricing tab** — now persisted ✓
