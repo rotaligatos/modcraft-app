@@ -8403,6 +8403,12 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
     }
   }
   var addLabel=hasDb?('Add '+catLabel.toLowerCase().replace(/s$/,'')):'Add '+catLabel.toLowerCase()+' row';
+  // An amber row means "not in the catalogue". When the catalogue we loaded is out of date that is
+  // very often the real reason — the SKU exists in the price sheet, the fast copy just has not
+  // caught up. Said here, once per section, so the estimator sees it at the moment they would
+  // otherwise conclude the SKU is missing and report it.
+  if(priceDbStale&&hasDb&&(rows||[]).some(function(rw){ return rw&&rw.name&&!lookupInSource(db,rw.name); }))
+    h+=_priceDbStaleNote();
   h+='<button class="btn" onclick="'+_hEdit('addBOMRow('+a+','+ci+',\''+cat+'\')')+'" style="font-size:10px;padding:3px 8px;margin-top:2px"><i class="ti ti-plus"></i>'+addLabel+'</button>'
     +'</div>';
   return h;
@@ -26073,6 +26079,50 @@ function showDriveToast(url,label){
 // an obvious "done" yet. supaReplaceTable() now guards each individual table
 // too, but this stops the redundant Sheets reads and duplicate work outright.
 var _priceDbMigrationInFlight=false;
+// ── Is the fast copy of the price catalogue out of date? ────────────────────────────────────
+// THE CAUSE OF THE RECURRING "an SKU is missing" REPORTS. loadPriceDatabase reads Supabase first,
+// and editing the Price Database GOOGLE SHEET directly does not reach Supabase — only the app's own
+// import buttons dual-write. So a newly added or renamed SKU is invisible to every connected user,
+// with no error and nothing on screen: the mirror just quietly serves an older catalogue. On
+// 2026-08-11 it was 24 days behind, which is why "DuraSave Plywood 2F Coastal Driftwood 18mm" could
+// not be found and why the edgeband still priced at ₱20 after being renamed and repriced to ₱13.61.
+//
+// The old safeguard was a line in CLAUDE.md telling whoever edits the sheet to run
+// supaMigratePriceDb() afterwards. That is not a safeguard, it is a hope — hence the repeats.
+//
+// Signal: the spreadsheet's own Drive modifiedTime against the newest row we hold. One small Drive
+// call, and it catches renames and price edits, which a row COUNT would miss entirely.
+var priceDbStale=null;   // {sheetModified, mirrorWritten, days} once checked, false when fresh
+function _checkPriceDbFreshness(){
+  if(!gToken||!PRICE_DB_ID||!supaReady()) return Promise.resolve(null);
+  return Promise.all([
+    gApiFetch('https://www.googleapis.com/drive/v3/files/'+PRICE_DB_ID
+      +'?fields=modifiedTime&supportsAllDrives=true',{}).catch(function(){return null;}),
+    supa.from('price_materials').select('updated_at').order('updated_at',{ascending:false}).limit(1)
+      .then(function(r){return (r&&r.data&&r.data[0])?r.data[0].updated_at:null;},function(){return null;})
+  ]).then(function(res){
+    var sheetT=res[0]&&res[0].modifiedTime?Date.parse(res[0].modifiedTime):NaN;
+    var mirrorT=res[1]?Date.parse(res[1]):NaN;
+    if(!isFinite(sheetT)||!isFinite(mirrorT)){ priceDbStale=null; return null; }   // cannot tell — say nothing
+    // A minute of slack: the mirror is written moments after the sheet, so they are never equal.
+    if(sheetT-mirrorT < 60000){ priceDbStale=false; return false; }
+    priceDbStale={ sheetModified:res[0].modifiedTime, mirrorWritten:res[1],
+                   days:Math.floor((sheetT-mirrorT)/86400000) };
+    console.warn('[pricedb] the fast copy is '+priceDbStale.days+' day(s) behind the Google Sheet — '
+      +'recently added or renamed SKUs will not be findable. Settings → Price Database → Sync now.');
+    return priceDbStale;
+  }).catch(function(){ priceDbStale=null; return null; });
+}
+// Shown wherever a user is about to conclude an SKU does not exist.
+function _priceDbStaleNote(){
+  if(!priceDbStale) return '';
+  return '<div style="margin-top:6px;font-size:11.5px;color:var(--amber-ink);background:var(--wash-amber);'
+    +'border:.5px solid var(--wash-gold);border-radius:6px;padding:6px 9px">'
+    +'<i class="ti ti-alert-triangle"></i> The fast copy of the catalogue is <b>'+priceDbStale.days
+    +' day'+(priceDbStale.days===1?'':'s')+' behind</b> the price sheet, so an SKU added or renamed '
+    +'since then will not appear here. Ask an Admin to run Settings → Price Database → <b>Sync now</b>.'
+    +'</div>';
+}
 function supaMigratePriceDb(){
   if(_priceDbMigrationInFlight){ console.warn('[migrate] already running — wait for the "Price DB backfill done" log before running this again.'); return Promise.resolve(null); }
   if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
@@ -27712,6 +27762,8 @@ function loadPriceDatabase(showFeedback) {
       renderPriceDbSettings();
       if(qFabMode==='bom') renderItems();
       if(qFabMode==='services') syncSvcMatHwPricesFromDB();
+      // Only meaningful on the Supabase path — the Sheets path IS the sheet, so it cannot be stale.
+      _checkPriceDbFreshness().then(function(st){ if(st) renderPriceDbSettings(); });
     });
     return;
   }
@@ -27855,6 +27907,24 @@ function importServicesExcel() {
   importPriceDbExcel('Services', 1, {name:0, unit:1, price:2});
 }
 
+function _syncPriceDbNow(){
+  _confirm('Copy the Google Sheet over the fast copy?\n\nThe sheet is the source of truth, so this '
+    +'only ever moves data one way. It takes about a minute on a catalogue this size, and everyone '
+    +'signed in picks up the new SKUs on their next reload.',
+  function(){
+    var s=el('db-status-row');
+    if(s) s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Syncing the price '
+      +'catalogue… this takes about a minute. Leave this tab open.</div>';
+    supaMigratePriceDb().then(function(r){
+      if(!r){ if(s) s.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i> '
+        +'Sync did not run — see the console.</div>'; return; }
+      priceDbStale=false;
+      logActivity('Price catalogue re-synced to the fast copy from the Google Sheet.');
+      showToast('Price catalogue synced. Ask anyone signed in to reload.');
+      loadPriceDatabase(true);
+    });
+  });
+}
 function renderPriceDbSettings() {
   var s=el('db-status-row'); if(!s) return;
   if(!gToken){s.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Sign in to Google first.</div>';return;}
@@ -27862,6 +27932,19 @@ function renderPriceDbSettings() {
   var statusHtml=dbLoaded
     ?'<div class="alert alert-success" style="margin-bottom:10px"><i class="ti ti-check"></i> Loaded — <b>'+dbServices.length+'</b> services · <b>'+dbMaterials.length+'</b> materials · <b>'+dbHardware.length+'</b> hardware · <b>'+dbTemplates.length+'</b> template rows ('+tmplTypes+' cabinet types)</div>'
     :'<div class="alert alert-warn" style="margin-bottom:10px"><i class="ti ti-alert-triangle"></i> Not yet loaded. Click <b>Reload from Sheets</b> to fetch data.</div>';
+  // The silent failure made loud. Without this the only symptom is a user saying an SKU is missing.
+  if(priceDbStale){
+    statusHtml+='<div class="alert alert-warn" style="margin-bottom:10px">'
+      +'<i class="ti ti-alert-triangle"></i> <b>The fast copy is '+priceDbStale.days+' day'
+      +(priceDbStale.days===1?'':'s')+' behind the price sheet.</b> Everyone signed in reads the fast '
+      +'copy, so any SKU added, renamed or repriced in the Google Sheet since then is invisible to '
+      +'them — no error, it simply cannot be found. This is what an "SKU is missing" report usually '
+      +'means.<div style="margin-top:8px">'
+      +'<button class="btn btn-primary" onclick="_syncPriceDbNow()" style="font-size:12px">'
+      +'<i class="ti ti-refresh"></i> Sync now</button>'
+      +'<span style="font-size:12px;color:var(--text2);margin-left:10px">Copies the sheet over the '
+      +'fast copy. Takes a minute on a catalogue this size.</span></div></div>';
+  }
   s.innerHTML=statusHtml;
   var prev=el('db-preview'); if(!prev) return;
   if(!dbLoaded){prev.innerHTML='';return;}
