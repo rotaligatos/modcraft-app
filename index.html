@@ -26116,8 +26116,25 @@ function _checkPriceDbFreshness(){
     gApiFetch('https://www.googleapis.com/drive/v3/files/'+PRICE_DB_ID
       +'?fields=modifiedTime&supportsAllDrives=true',{}).catch(function(){return null;}),
     supa.from('price_materials').select('updated_at').order('updated_at',{ascending:false}).limit(1)
-      .then(function(r){return (r&&r.data&&r.data[0])?r.data[0].updated_at:null;},function(){return null;})
+      .then(function(r){return (r&&r.data&&r.data[0])?r.data[0].updated_at:null;},function(){return null;}),
+    // How many rows the last SUCCESSFUL sync said it wrote, and how many are actually there.
+    supa.from('settings').select('value').eq('key','PRICEDB_MATERIALS_COUNT').limit(1)
+      .then(function(r){var v=(r&&r.data&&r.data[0])?r.data[0].value:null;
+                        return (v&&typeof v.count==='number')?v.count:null;},function(){return null;}),
+    supa.from('price_materials').select('id',{count:'exact',head:true})
+      .then(function(r){return (r&&typeof r.count==='number')?r.count:null;},function(){return null;})
   ]).then(function(res){
+    // COMPLETENESS first. A sync that died partway leaves a truncated table whose rows carry a NEW
+    // timestamp, so it passes any freshness test while missing most of the catalogue — that is how
+    // 5,000 of ~145,000 materials came to look current on 2026-08-12. Checked before freshness
+    // because a short mirror must be refused however recent it is.
+    var expected=res[2], actual=res[3];
+    if(expected!=null&&actual!=null&&actual<expected){
+      priceDbStale={ incomplete:true, have:actual, expected:expected, days:0 };
+      console.warn('[pricedb] the fast copy is INCOMPLETE — '+actual+' of '+expected+' materials. A '
+        +'sync was interrupted. Reading the Google Sheet instead so nothing is missing.');
+      return priceDbStale;
+    }
     var sheetT=res[0]&&res[0].modifiedTime?Date.parse(res[0].modifiedTime):NaN;
     var mirrorT=res[1]?Date.parse(res[1]):NaN;
     if(!isFinite(sheetT)||!isFinite(mirrorT)){ priceDbStale=null; return null; }   // cannot tell — say nothing
@@ -26135,9 +26152,13 @@ function _priceDbStaleNote(){
   if(!priceDbStale) return '';
   return '<div style="margin-top:6px;font-size:11.5px;color:var(--amber-ink);background:var(--wash-amber);'
     +'border:.5px solid var(--wash-gold);border-radius:6px;padding:6px 9px">'
-    +'<i class="ti ti-alert-triangle"></i> The fast copy of the catalogue is <b>'+priceDbStale.days
-    +' day'+(priceDbStale.days===1?'':'s')+' behind</b> the price sheet, so an SKU added or renamed '
-    +'since then will not appear here. Ask an Admin to run Settings → Price Database → <b>Sync now</b>.'
+    +'<i class="ti ti-alert-triangle"></i> '+(priceDbStale.incomplete
+        ? 'The fast copy of the catalogue is <b>incomplete</b> ('+priceDbStale.have+' of '
+          +priceDbStale.expected+' items) — a sync was interrupted, so many SKUs will not appear here.'
+        : 'The fast copy of the catalogue is <b>'+priceDbStale.days+' day'
+          +(priceDbStale.days===1?'':'s')+' behind</b> the price sheet, so an SKU added or renamed '
+          +'since then will not appear here.')
+    +' Ask an Admin to run Settings → Price Database → <b>Sync now</b>.'
     +'</div>';
 }
 function supaMigratePriceDb(){
@@ -26176,8 +26197,28 @@ function supaMigratePriceDb(){
       tasks.push(supaReplaceTable('price_services',svcs));
     }
     return Promise.all(tasks).then(function(){
-      console.log('[migrate] Price DB backfill done:',stats);
-      return stats;
+      // ⚠ supaReplaceTable DELETES then inserts in chunks. Anything that interrupts it — a closed
+      // tab, a dropped connection, a rate limit — leaves the table truncated, and the rows it did
+      // write carry a NEW timestamp. So a half-finished sync looks FRESH to _checkPriceDbFreshness
+      // and gets served to everyone: on 2026-08-12 that left 5,000 of ~145,000 materials in place,
+      // which is worse than the stale copy it replaced. Freshness is not completeness.
+      //
+      // So the sync records how many rows it should have written, and the loader refuses a mirror
+      // that does not match. Written only after the inserts resolve, so an interrupted sync leaves
+      // the OLD marker in place and the mismatch is caught on the next load.
+      return supa.from('price_materials').select('id',{count:'exact',head:true}).then(function(c){
+        var actual=(c&&typeof c.count==='number')?c.count:null;
+        if(actual!=null&&stats.materials&&actual<stats.materials){
+          console.warn('[migrate] INCOMPLETE — wrote '+actual+' of '+stats.materials+' materials. '
+            +'Not marking the mirror usable; the app will keep reading the sheet until a full sync '
+            +'succeeds.');
+          stats.incomplete=true;
+          return stats;      // marker deliberately NOT written
+        }
+        return supaUpsertSetting('PRICEDB_MATERIALS_COUNT',{count:stats.materials,at:new Date().toISOString()})
+          .then(function(){ console.log('[migrate] Price DB backfill done:',stats); return stats; },
+                function(){ console.log('[migrate] Price DB backfill done (marker not saved):',stats); return stats; });
+      },function(){ console.log('[migrate] Price DB backfill done (count unverified):',stats); return stats; });
     });
   }).catch(function(e){
     console.warn('[migrate] Price DB backfill failed',e);
@@ -27761,8 +27802,11 @@ function loadPriceDatabase(showFeedback) {
   if(USE_SUPABASE&&supaReady()){
     _checkPriceDbFreshness().then(function(stale){
       if(stale){
-        console.warn('[pricedb] fast copy is '+stale.days+' day(s) behind — reading the Google Sheet '
-          +'instead so nothing is missing, and re-syncing in the background.');
+        console.warn(stale.incomplete
+          ? '[pricedb] fast copy holds only '+stale.have+' of '+stale.expected+' materials — reading '
+            +'the Google Sheet instead so nothing is missing, and re-syncing in the background.'
+          : '[pricedb] fast copy is '+stale.days+' day(s) behind — reading the Google Sheet instead '
+            +'so nothing is missing, and re-syncing in the background.');
         if(showFeedback){var s2=el('db-status-row');if(s2)s2.innerHTML='<div class="alert alert-info">'
           +'<i class="ti ti-loader"></i> The fast copy is behind the price sheet — loading from the '
           +'sheet so nothing is missing. This one takes longer.</div>';}
@@ -28001,8 +28045,11 @@ function renderPriceDbSettings() {
   // The silent failure made loud. Without this the only symptom is a user saying an SKU is missing.
   if(priceDbStale){
     statusHtml+='<div class="alert alert-warn" style="margin-bottom:10px">'
-      +'<i class="ti ti-alert-triangle"></i> <b>The fast copy is '+priceDbStale.days+' day'
-      +(priceDbStale.days===1?'':'s')+' behind the price sheet.</b> Everyone signed in reads the fast '
+      +'<i class="ti ti-alert-triangle"></i> <b>'+(priceDbStale.incomplete
+          ? 'The fast copy is incomplete — '+priceDbStale.have+' of '+priceDbStale.expected
+            +' materials. A sync was interrupted.'
+          : 'The fast copy is '+priceDbStale.days+' day'+(priceDbStale.days===1?'':'s')
+            +' behind the price sheet.')+'</b> Everyone signed in reads the fast '
       +'copy, so any SKU added, renamed or repriced in the Google Sheet since then is invisible to '
       +'them — no error, it simply cannot be found. This is what an "SKU is missing" report usually '
       +'means.<div style="margin-top:8px">'
