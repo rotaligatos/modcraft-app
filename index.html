@@ -27723,10 +27723,62 @@ function supaGetPriceDb(){
     }).catch(function(){ return null; });
   }catch(e){ return Promise.resolve(null); }
 }
+// ⚠ THE MIRROR IS NEVER ALLOWED TO SERVE A CATALOGUE OLDER THAN THE SHEET.
+//
+// This has been "dealt with" several times and kept coming back, because every previous fix was a
+// reminder — a note saying run supaMigratePriceDb() after editing the sheet, then a banner asking
+// someone to notice and click. Both depend on a person remembering, so both fail the same way and
+// the symptom is always the same: an estimator reports an SKU missing that is plainly in the price
+// sheet, because the fast copy they are actually reading is weeks behind.
+//
+// So correctness no longer depends on anyone noticing. The freshness check runs BEFORE the load
+// decision: if the sheet is newer, the mirror is simply not used — the app reads the sheet, which
+// is right by definition — and a background re-sync makes it fast again for the next load. Slower
+// for one load beats wrong for three weeks.
+//
+// When freshness cannot be determined (Drive call fails, no timestamps) it does NOT degrade: the
+// mirror is used exactly as before. An unrelated failure must not make the catalogue slow.
 function loadPriceDatabase(showFeedback) {
   if(!gToken) return;
   if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Loading price database…</div>';}
   if(USE_SUPABASE&&supaReady()){
+    _checkPriceDbFreshness().then(function(stale){
+      if(stale){
+        console.warn('[pricedb] fast copy is '+stale.days+' day(s) behind — reading the Google Sheet '
+          +'instead so nothing is missing, and re-syncing in the background.');
+        if(showFeedback){var s2=el('db-status-row');if(s2)s2.innerHTML='<div class="alert alert-info">'
+          +'<i class="ti ti-loader"></i> The fast copy is behind the price sheet — loading from the '
+          +'sheet so nothing is missing. This one takes longer.</div>';}
+        _loadPriceDatabaseFromSheets(showFeedback);
+        _autoSyncPriceDb();
+        return;
+      }
+      _loadPriceDbFromMirror(showFeedback);
+    });
+    return;
+  }
+  _loadPriceDatabaseFromSheets(showFeedback);
+}
+// Re-mirrors the sheet without being asked. Guarded so several people signing in at once cannot
+// each kick off a 153k-row rewrite: supaMigratePriceDb has its own in-flight flag, and this adds a
+// short cross-tab lock for the same reason.
+var _AUTOSYNC_KEY='mc_pricedb_autosync';
+function _autoSyncPriceDb(){
+  try{
+    var last=parseFloat(localStorage.getItem(_AUTOSYNC_KEY)||'0');
+    if(isFinite(last)&&(new Date().getTime()-last)<600000) return;   // one attempt per 10 min, any tab
+    localStorage.setItem(_AUTOSYNC_KEY,String(new Date().getTime()));
+  }catch(e){}
+  if(typeof supaMigratePriceDb!=='function') return;
+  supaMigratePriceDb().then(function(r){
+    if(!r) return;
+    priceDbStale=false;
+    logActivity('Price catalogue re-synced automatically — the Google Sheet had been edited since '
+      +'the last sync.');
+    if(typeof renderPriceDbSettings==='function') try{ renderPriceDbSettings(); }catch(e){}
+  },function(){});
+}
+function _loadPriceDbFromMirror(showFeedback){
     supaGetPriceDb().then(function(data){
       if(data===null){ _loadPriceDatabaseFromSheets(showFeedback); return; }
       dbServices=data.services.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
@@ -27765,9 +27817,6 @@ function loadPriceDatabase(showFeedback) {
       // Only meaningful on the Supabase path — the Sheets path IS the sheet, so it cannot be stale.
       _checkPriceDbFreshness().then(function(st){ if(st) renderPriceDbSettings(); });
     });
-    return;
-  }
-  _loadPriceDatabaseFromSheets(showFeedback);
 }
 function _loadPriceDatabaseFromSheets(showFeedback) {
   // Fetch all 4 tabs in PARALLEL (was sequential — 4 round-trips end-to-end).
