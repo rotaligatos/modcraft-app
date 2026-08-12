@@ -5761,8 +5761,13 @@ The 12 that stay blank are the June quotations predating the activity log. That 
   `attachments` and the file fields Wufoo actually sent; 15 carry 3+; 140 files total.
 - ⚠ **DO NOT run `reconcileQuotationCreators()`** — disabled 2026-08-11, wrong premise. See the
   session entry. The forward fix is fine; only the historical repair is void.
-- **Bella Ferma** still needs Stephanie — it blocks the last serial mismatch AND the `qBaseSerial`
-  removal.
+- ✅ **Bella Ferma RESOLVED 2026-08-12.** Confirmed in the database: `QT-W00000036` no longer
+  exists; the sole surviving record is `QT-W00000039` (Bella Ferma, ₱898,462.14, IQ Approved), row
+  and quotation in agreement. It was one job. Check Project List confirms zero serial mismatches
+  and zero duplicate rows — **every quotation number in the system now agrees with itself.**
+  **`qBaseSerial` removal is UNBLOCKED** — see the item below, next up.
+  ⚠ Also unblocks the two KPI figures parked behind it in the 2026-08-06 session (won revenue /
+  win rate) — they were double-counting this ₱898,462.14. Re-derive before quoting either number.
 - **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
 - **GYMFIX `QT-M00000087`** — final-locked and Client Approved at ₱0.00, should be ₱616. Unlock,
   recalculate, re-lock.
