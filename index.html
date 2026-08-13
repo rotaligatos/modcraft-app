@@ -29594,13 +29594,32 @@ function saveQuotationJson(callback){
   });
 }
 var _qStateRowCache={}; // {serial: rowIdx} — populated whenever we scan column A, so repeat opens this session skip straight to the 1-call path
-function _qStateReadRow(serial,rowIdx,callback){
+// A cached row index goes stale the moment ANY row above it is deleted or re-keyed by ANYONE —
+// another browser tab, another user's session, an Admin running reconcileRenumbered() or
+// removeDuplicateQuotationRows() from the console. Those functions only clear THIS tab's own
+// _qStateRowCache (a plain in-memory var, never shared across sessions), so every OTHER already-
+// open tab keeps a now-wrong index until it happens to re-scan. Reading at that stale index then
+// returns a completely different row: either garbage that JSON.parse throws on ("is corrupted",
+// alarming but at least loud), or — worse — a row that parses FINE but belongs to a different
+// quotation entirely, which would silently load the wrong data under the requested serial's name.
+// Both cases mean "this cache entry is wrong," not "this quotation's saved state is actually
+// broken." Self-heal once: drop the stale entry, re-scan column A for the TRUE current row, and
+// retry — only escalate to the user if a freshly-scanned row also fails.
+function _qStateReadRow(serial,rowIdx,callback,alreadyRescanned){
   sheetsGet('Quotation State!A'+rowIdx+':K'+rowIdx).then(function(d2){
     if(d2.error){alert('Failed to load quotation state.');if(callback)callback(null);return;}
     var row=(d2.values||[])[0]||[];
     var json=(row.slice(1)).join(''); // reassemble chunked JSON from columns B..K
-    try{var state=JSON.parse(json);if(callback)callback(state);}
-    catch(e){alert('Saved state for '+serial+' is corrupted.');if(callback)callback(null);}
+    var state=null;
+    try{ state=JSON.parse(json); }catch(e){ state=null; }
+    var mismatched=state&&String(state.baseSerial||state.serial||'')!==String(serial);
+    if((!state||mismatched)&&!alreadyRescanned){
+      delete _qStateRowCache[serial];
+      _loadQuotationJsonFromSheets(serial,callback,true);
+      return;
+    }
+    if(!state||mismatched){ alert('Saved state for '+serial+' is corrupted.'); if(callback)callback(null); return; }
+    if(callback)callback(state);
   }).catch(function(e){
     console.warn('Load state failed',e);
     alert('Failed to load quotation state. Check your connection.');
@@ -29620,13 +29639,15 @@ function loadQuotationJson(serial,callback){
   }
   _loadQuotationJsonFromSheets(serial,callback);
 }
-function _loadQuotationJsonFromSheets(serial,callback){
+function _loadQuotationJsonFromSheets(serial,callback,forceRescan){
   // In-session row cache: if we've already scanned column A this session (via a prior load or save),
-  // skip straight to the single-row read — 1 call instead of 2.
-  if(_qStateRowCache[serial]>0){ _qStateReadRow(serial,_qStateRowCache[serial],callback); return; }
-  // First time this session: read only column A (cheap) to find the row, then fetch just that row's
-  // chunked columns — avoids downloading the WHOLE sheet (every quotation's 10 chunked columns, up to
-  // 450KB each) just to find one row. While we're scanning, cache every serial's row for later.
+  // skip straight to the single-row read — 1 call instead of 2. forceRescan bypasses it — set only by
+  // _qStateReadRow's own self-heal retry above, once a cached index has already proven stale.
+  if(!forceRescan&&_qStateRowCache[serial]>0){ _qStateReadRow(serial,_qStateRowCache[serial],callback); return; }
+  // First time this session (or a forced re-scan after a stale cache hit): read only column A
+  // (cheap) to find the row, then fetch just that row's chunked columns — avoids downloading the
+  // WHOLE sheet (every quotation's 10 chunked columns, up to 450KB each) just to find one row.
+  // While we're scanning, cache every serial's row for later.
   sheetsGet('Quotation State!A:A').then(function(d){
     if(d.error){alert('Quotation State sheet not found. Save the quotation once to create it.');if(callback)callback(null);return;}
     var vals=d.values||[];
@@ -29636,7 +29657,7 @@ function _loadQuotationJsonFromSheets(serial,callback){
       alert('No saved state found for '+serial+'.\nSave or lock the quotation at least once to store its state.');
       if(callback)callback(null);return;
     }
-    _qStateReadRow(serial,rowIdx,callback);
+    _qStateReadRow(serial,rowIdx,callback,true); // fresh scan just ran — this index is trusted, no further retry
   }).catch(function(e){
     console.warn('Load state failed',e);
     alert('Failed to load quotation state. Check your connection.');
