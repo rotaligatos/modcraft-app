@@ -11183,11 +11183,26 @@ function _dashUpdateKPIs(){
   var jobs=_rollupJobs(filtered);
   var extrasRolled=jobs.reduce(function(s,j){return s+j.extras;},0);
   var total=jobs.length;
-  var rev=jobs.reduce(function(s,j){return s+j.revenue;},0);
+  // totalValue = every rolled-up job's value in the period, won or not — the denominator for
+  // both the count-based win rate below and the value-based one. rev (the headline "Revenue
+  // (period)" figure) is deliberately NOT this. Rommel, 2026-08-13: "It's supposed to be once
+  // the final quotation has been approved by the client." Before this it summed every
+  // quotation's value regardless of status — a P10M pipeline total was being shown as revenue,
+  // most of it never approved by anyone. _dashMetrics().wonRevenue (the "Won revenue" grid
+  // widget) already got this right; this headline tile did not.
+  var totalValue=jobs.reduce(function(s,j){return s+j.revenue;},0);
   // Conversion = quotation reached Final Quotation locked (Stage 2 locked)
   // Same test as Team performance and every report — one definition of a win.
-  var closedN=jobs.filter(function(j){ return _isClientApprovedEntry(j.root); }).length;
+  var wonJobs=jobs.filter(function(j){ return _isClientApprovedEntry(j.root); });
+  var closedN=wonJobs.length;
+  var rev=wonJobs.reduce(function(s,j){return s+j.revenue;},0);
   var convRate=total?Math.round(closedN/total*100):0;
+  // Win rate by project cost, requested alongside the count-based rate: total value of
+  // client-approved final quotations / total value of all quotations in the period. A handful
+  // of small wins and one lost large job can read as a healthy rate by count while being a
+  // losing rate by money — same population (jobs/totalValue above) as the count-based rate,
+  // just weighted by peso instead of by job.
+  var convRateByValue=totalValue?Math.round(rev/totalValue*100):0;
 
   // Avg response time
   // Wufoo orders: receivedAt → sentAt (Done) or receivedAt → now (still running)
@@ -11244,9 +11259,10 @@ function _dashUpdateKPIs(){
   setText('kpi-total-sub', (total===all.length?total+' total':total+' of '+all.length+' total')
     +(extrasRolled?' · '+extrasRolled+' additional order'+(extrasRolled!==1?'s':'')+' rolled up':''));
   setText('kpi-conv', total?convRate+'%':'—');
-  setText('kpi-conv-sub', total?closedN+' closed of '+total:'No data');
+  setText('kpi-conv-sub', total?closedN+' closed of '+total+' · '+convRateByValue+'% by value':'No data');
   setText('kpi-rev', rev?fmtK(rev):'₱0');
-  setText('kpi-rev-sub', (fromVal||toVal)?'In selected period':'All time · '+total+' quotations');
+  setText('kpi-rev-sub', closedN+' won · client-approved final quotation'+(closedN!==1?'s':'')
+    +((fromVal||toVal)?' · selected period':' · all time'));
   setText('kpi-resp', avgResp!=null?(avgResp<24?avgResp.toFixed(1)+'h':Math.round(avgResp/24)+'d'):'—');
   setText('kpi-resp-sub', avgResp!=null?'Avg of '+respTimes.length+' quotations':'No locked quotations yet');
   setText('kpi-exp', expiring);
@@ -11375,6 +11391,30 @@ function _dashUpdateKPIs(){
       : (new Date(endAt)-new Date(e.jobStartedAt))/60000;
     if(m!==null&&m>=0){ byUser[key].respMins.push(m); byUser[key].answered++; }
   });
+  // Orders sitting unclaimed — received, but nobody has opened/exported them to a quotation yet
+  // (status still 'Pending'). Rommel, 2026-08-13: "It should be included to everyone's
+  // performance average. It will only be removed to everyone['s] performance once someone
+  // claim[s] it for quotation." So the elapsed wait is a SHARED liability until one specific
+  // person picks the order up — it counts toward every ticked team member's average, not
+  // nobody's. The moment it is claimed, exportOrderToQuotation() flips its status away from
+  // 'Pending', so it drops out of this pool automatically on the very next render — no separate
+  // bookkeeping needed. From there it follows the existing per-person tracking above (attributed
+  // to whoever exported it, once that quotation is actually sent).
+  var unclaimedCount=0, unclaimedMinsTotal=0;
+  var nowIsoUnclaimed=new Date().toISOString();
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
+    if(!o||o.status!=='Pending'||!o.receivedAt) return;
+    if(!(ORDER_KINDS[orderKind(o)]||{}).sla) return;     // site visits etc. are SLA-exempt everywhere else too
+    var ck=_orderCompanyKey(o);
+    if(teamCo==='none'){ if(ck!=='') return; }
+    else if(teamCo){ if(ck!==teamCo) return; }
+    var age=(typeof calcWorkingMinutes==='function')
+      ? calcWorkingMinutes(o.receivedAt,nowIsoUnclaimed,o.sourceCompany||'')
+      : (new Date(nowIsoUnclaimed)-new Date(o.receivedAt))/60000;
+    if(age==null||age<0) return;
+    unclaimedCount++; unclaimedMinsTotal+=age;
+    Object.keys(byUser).forEach(function(k){ byUser[k].respMins.push(age); byUser[k].answered++; });
+  });
   var users=Object.values(byUser).sort(function(a,b){return b.quotes-a.quotes;});
   var teamHtml='<thead><tr><th>User</th><th title="Quotations actually issued to a client. Drafts are counted separately — a draft was never sent, so it cannot be won or lost.">Issued</th><th title="Started but never issued. Not counted in the rate.">Drafts</th><th>Won</th><th>Rate</th><th title="How many jobs had a measurable response time — the sample size behind the average beside it. Not every quotation has one.">Jobs timed</th><th>Avg. response</th><th>Revenue</th></tr></thead><tbody>';
   if(!users.length){
@@ -11419,6 +11459,19 @@ function _dashUpdateKPIs(){
     teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--text2);background:var(--card2);padding:7px 10px">'
       +'<i class="ti ti-info-circle"></i> '+noClockStart+' locked quotation'+(noClockStart===1?'':'s')
       +' not timed — no arrival source was picked on the form. Tick <b>Walk-in</b> or <b>Email order</b> at the top of Client information to start the clock.'
+      +'</td></tr></tfoot>';
+  }
+  // Unclaimed orders — their wait is baked into every ticked person's average above, not shown
+  // as anyone's own row, so it must be named or the jump in "Jobs timed" and the average looks
+  // unexplained.
+  if(unclaimedCount){
+    var unclaimedAvg=Math.round(unclaimedMinsTotal/unclaimedCount);
+    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--ink3);background:var(--wash-amber);padding:7px 10px">'
+      +'<i class="ti ti-clock-exclamation"></i> '+unclaimedCount+' order'+(unclaimedCount===1?' is':'s are')
+      +' still unclaimed — nobody has opened '+(unclaimedCount===1?'it':'them')+' yet, averaging '
+      +(typeof fmtWorkMins==='function'?fmtWorkMins(unclaimedAvg):unclaimedAvg+'m')
+      +' waiting. That wait counts toward <b>every</b> person\'s average above until someone claims it in Orders — '
+      +'it drops out on its own the moment it is exported to a quotation.'
       +'</td></tr></tfoot>';
   }
   var un=Object.keys(unmatched);
