@@ -13250,7 +13250,16 @@ function _persistApprovedFieldToQuotation(notif,callback){
     :function(s){ s.locked=false; s.sentStatus=''; s.sentAt=''; };
   if(!mutate){ if(callback) callback(false); return; }
 
-  _loadQuotationJsonFromSheets(serial,function(state){
+  // Supabase-first, Sheets-fallback — the same convention loadQuotationJson() uses everywhere
+  // else. This used to call _loadQuotationJsonFromSheets() directly, skipping Supabase even when
+  // it holds a perfectly healthy copy. Confirmed live on QT-W00000038 (2026-08-13): a signature
+  // decision retried every poll for hours, console.warn-ing "could not load quotation" each time,
+  // while Supabase's quotation_states row for that exact serial was valid, correctly keyed, and
+  // more current than the Quotations row itself — the Sheets-only read was the only thing
+  // failing. _apprApplyRemoteDecisions retries forever on a load failure (by design, so a
+  // genuinely transient miss doesn't strand an approved decision), which is exactly why a
+  // permanent Sheets-side failure hammers the API every poll indefinitely instead of just once.
+  loadQuotationJson(serial,function(state){
     if(!state){
       console.warn('[approval] could not load quotation '+serial+' to persist the approval — relying on the requester\'s own session/save to pick it up.');
       if(callback) callback(false); return;
@@ -13263,17 +13272,23 @@ function _persistApprovedFieldToQuotation(notif,callback){
     }
     var row=_qstateRow(serial,json);
     function writeRow(rowIdx){ return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]); }
-    var p;
-    if(_qStateRowCache[serial]>0){
-      p=writeRow(_qStateRowCache[serial]);
-    } else {
-      p=sheetsGet('Quotation State!A:A').then(function(d){
-        var vals=(d&&d.values)||[]; var rowIdx=-1;
-        for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
-        if(rowIdx<0) throw new Error('quotation row not found for '+serial);
-        return writeRow(rowIdx);
-      });
-    }
+    // Always re-scan before writing rather than trusting _qStateRowCache — a write to the WRONG
+    // row would silently corrupt a completely different quotation's state, which is worse than
+    // the read-side staleness fixed above. This path is also now reachable straight after a
+    // Supabase-only read (loadQuotationJson can succeed via Supabase without ever touching the
+    // Sheets cache), so a cached index here could easily be stale or simply never populated.
+    // saveQuotationJson() never takes this shortcut either, for the same reason — this only ran
+    // a handful of times per poll (APPR_APPLY_PER_POLL), so the extra call costs nothing.
+    var p=sheetsGet('Quotation State!A:A').then(function(d){
+      var vals=(d&&d.values)||[]; var rowIdx=-1;
+      for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
+      if(rowIdx>0) return writeRow(rowIdx);
+      // No Sheets row yet — this quotation's state may so far only exist in Supabase, or this is
+      // its first approval-driven write. Create it, matching saveQuotationJson()'s own
+      // create-if-missing behavior, rather than throwing and silently discarding an approved
+      // decision every poll forever.
+      return sheetsAppend('Quotation State!A:K',[row]).then(function(){ delete _qStateRowCache[serial]; });
+    });
     p.then(function(){
       try{ supaUpsertState(serial,state); }catch(e){}
       // Record that this decision has landed, wherever it was applied from. Marked centrally so
