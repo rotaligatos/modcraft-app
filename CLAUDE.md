@@ -5458,7 +5458,83 @@ number in a tab that has been used for several different feature tests.
   icon, unrelated code, no collision (checked) — but worth knowing there are now two, so a future
   session does not try to merge them. The old one stays exactly as documented in the entry below.
 
-# OPEN — updated 2026-08-12 (THIS IS THE AUTHORITATIVE LIST)
+## What was changed on 2026-08-12 (session 2 — option locking, and the mobilization/transportation investigation)
+
+### ✅ FIXED — unlocking an option didn't stick; switching away and back silently relocked it (`20c5cd0`)
+Rommel: *"when they lock quotation of option 1, the option 2 also gets locked... when you unlock one
+option for example option 1, option 1 should be unlocked and options must remain on their current
+state."*
+
+**Root cause, confirmed by reproduction, not by reading.** `doLockOnly()` correctly stamps
+`qOptionsList[activeId].locked=true` on the option it locks. `confirmUnlock()` correctly clears the
+LIVE `qLocked` variable in the moment — but never cleared the OPTION's own `.locked` flag. And
+`switchToOption()` always lets the option's own `.locked` win over whatever the snapshot says on
+switch-IN (deliberately, so a stale snapshot can't misreport lock state). So the sequence was:
+unlock option 1 (looks unlocked, right now) → switch to option 2 → switch back to option 1 →
+`switchToOption` reads the STALE `qOptionsList[1].locked` (still `true`, never cleared) and
+re-locks it. That is the exact shape of "option 1 shows locked again" — most likely what Rommel's
+team described as "option 2 also gets locked," garbled in the retelling of a confusing back-and-forth.
+
+**Fix:** `confirmUnlock()`'s Stage-1 branch now also clears `qOptionsList[activeId].locked` — the
+exact mirror of what `doLockOnly()` sets. One line.
+
+**Reproduced with the real functions** (`doLockOnly`, `createNewOption`, `switchToOption`,
+`confirmUnlock`), not a synthetic mock of the lock logic: before the fix, lock opt1 → branch opt2 →
+switch to opt1 → unlock → switch to opt2 → switch back to opt1 showed `qLocked===true` again.
+After the fix, the same sequence holds `qLocked===false` through the round trip, and option 2's own
+`.locked` flag is confirmed untouched throughout — genuinely independent, as it should be.
+
+⚠ **First test run gave a false "still broken" reading** — `confirmUnlock()` is async
+(`_verifyApproverPin().then(...)`), and reading `qLocked` synchronously right after calling it
+captured the pre-unlock state before the `.then()` callback had run. Corrected by awaiting properly
+before asserting. Worth remembering for any future test of this function.
+
+### ⚠ NOT confirmed, NOT fixed — mobilization reads zero after unlock; Designers Support Transportation "still locked"
+Two more parts of the same report. Investigated at length; did not reach a fix, and said so rather
+than guess. Recorded here so the next session does not re-walk the same ground.
+
+**Mobilization → zero on unlock:** built a direct repro of the actual mechanism unlocking triggers
+(`_thawRates()` → `recalc()`) against a quotation with `qMobCalc` populated and the service type
+set to Fabrication with Installation. **Did not reproduce** — `_pCalc.mobBase` was identical before
+and after (₱15,000 → ₱15,000). `ni` (installation-included) is read live from the `cl-service` DOM
+select on every `recalc()` call, not from anything unlock could leave stale, and `_thawRates()`
+only ever calls Stage 1's bare `recalc()` — it never calls Stage 2's `recalcFQ()` at all, so
+unlocking Stage 2 does not even refresh Stage 2's own mobilization figure at unlock time (it goes
+stale, not to zero, until something else triggers a Stage-2 recalc).
+
+**One real, confirmed structural asymmetry found along the way, NOT yet fixed:** Stage 1's
+mobilization fallback (`_recalcCore`, ~line 8908) defaults the region cost to **₱3,500** when the
+region selector has no valid value. Stage 2's equivalent (`_recalcFQCore`, ~line 22154) defaults to
+**₱0** in the same situation. Same class of Stage1/Stage2 drift this codebase has repeatedly had.
+This is a plausible contributor if Stage 2's `fq-mob-area` element is ever unpopulated when a
+Stage-2 recalc runs, but it was not caught in the act — flagged, not fixed, until it can be
+reproduced.
+
+**Designers Support Transportation "still locked":** checked every plausible gate.
+`computeTransportation()`'s own `canSearch` depends only on the AI toggle, the API key, and the
+destination field being filled — **nothing checks `qLocked`/`fqLocked` at all**. Searched the whole
+Mobility & Accommodation Planner render region (~line 30700–31790) for any lock-state reference —
+**zero matches**. The Mobilization Calculator card on the quotation page itself
+(`renderMobCalc`/`computeMobCalcAI`, ~line 5564–5760) was also checked — its `disabled` attributes
+are tied to whether a line is excluded (`ex`), not to lock state either. **No code-level gate tying
+either tool to the quotation's lock state was found.** This does not mean nothing is wrong — it
+means the cause is not a simple "checks qLocked" gate, and needs either a live repro with the
+Designers Support tab actually open in a real signed-in session, or the exact button/field Rommel's
+team found unresponsive, named specifically.
+
+### What to ask for next time this comes up
+1. **Exact button or field** that stayed "locked" in Designers Support — a screenshot or the precise
+   label, not "the transportation tool" generally. Two different UI surfaces both mention
+   transportation (the quotation's own Mobilization card vs. the separate Designers Support →
+   Mobility & Accommodation Planner tab) and the investigation could not tell which from the report.
+2. **Whether the zero was seen in Stage 1 or Stage 2** — the two stages have separate, hand-written
+   mobilization calculations (see the ₱3,500-vs-₱0 asymmetry above), and "mobilization" without a
+   stage is not enough to point at one function over the other.
+3. If possible, catch it live and check the browser console for `[pricedb]`/`[migrate]`/error output
+   at the moment mobilization reads zero — the existing console warnings in this app are usually the
+   fastest way to the real cause, faster than reconstructing the sequence after the fact.
+
+# OPEN — updated 2026-08-12 (session 2) (THIS IS THE AUTHORITATIVE LIST)
 
 ## Quotation credits — `reconcileQuotationCreators()` is dead; use `checkQuotationCredits()`
 The old one stays deployed and permanently refuses (Rommel has the command in his scrollback); it
@@ -5489,10 +5565,15 @@ means "this is a draft", not "nothing is open" — any new guard must decide whi
    ⚠ Note it does **not** address the duplicate-row failure mode — that is a different problem
    (two rows for one job, rather than one row under the wrong number), already closed separately
    by `_quotRowWrite`.
-3. **Ask Rommel: should a client-approved (won) quotation still auto-archive its order?** He does
-   not remember directing `confirmClientApprove()`'s `_archiveOrdersForQuotation(...,'quotation
-   won')` call. Not changed pending his answer — see the 2026-08-12 session entry below for the
-   full context (this came up while fixing Client Declined, which IS confirmed and shipped).
+3. ~~Ask Rommel: should a client-approved (won) quotation still auto-archive its order?~~
+   **ANSWERED + SHIPPED 2026-08-12 (`dc2e78b`).** No — removed outright, no replacement trigger.
+   See that session's entry for the full reasoning (stays on record until production/logistics can
+   signal real completion, which does not exist yet).
+4. **Mobilization reads zero after unlock; Designers Support Transportation "still locked" after
+   unlocking.** Reported 2026-08-12, investigated at length, NOT reproduced or fixed — see that
+   session's entry (session 2) for everything ruled out. Need from Rommel: which stage (1 or 2),
+   and the exact button/field, before this can be chased further. One real but unconfirmed lead:
+   Stage 2's mobilization region fallback defaults to ₱0 where Stage 1's defaults to ₱3,500.
 
 ## What was changed on 2026-08-10 (session — Keystone closed, and the duplicate made legible)
 
