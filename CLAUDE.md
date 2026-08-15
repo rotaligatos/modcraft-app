@@ -7125,10 +7125,54 @@ only. W65 still reads `clientApproved: true` while unlocked, which is why its st
 "IQ Approved". Making them agree changes whether a client sign-off survives a reopen, which is a
 business rule, not a tidy-up.
 
+### A client-approved Initial Quotation is now closed to editing (`3b2bd58`)
+Rommel, asked how far an unlock should roll the status back, replaced the question with a simpler
+rule: *"when the initial quotation is already Approved by the client, then it should not be allowed
+to be edited. And changes should already happen in the final quotation wherein they have the option
+still to provide multiple options. When an attempt was made to request for revision for already an
+approved quotation, a pop message should appear... For any unlock by the user to quotation that is
+not approved yet by the client or still waiting for client approval, status should change
+accordingly."*
+
+- `requestUnlock()` and `openRevise()` refuse once the client has approved, with a popup saying the
+  change belongs in the Final Quotation. Both the approver's PIN route and the non-approver's
+  send-request route are gated at the same point, so neither can slip past.
+- **Not-yet-approved quotations needed no work** — with no approval flag set, `_statusFromState`
+  never enters the Final-loop branch and already falls through to `IQ Under Revision`. The status
+  only failed to move on *approved* quotations, and this rule removes that case entirely.
+- The gate tests `qClientApproved || qApproved` — **the same test `_statusFromState` uses** — so what
+  it refuses and what the Project List shows cannot disagree. `approved` is the older flag for the
+  same moment, so legacy quotations are covered.
+- **Forward-only** (Rommel: *"no need to get back to already existing quotation. This should reflect
+  on new revisions only."*). The 3 quotations already sitting reopened-but-approved are left alone.
+
+### ⚠ The revision number had never once appeared for anyone but Rommel
+He noticed `.R1` was missing. The mechanism was entirely present and correct — `confirmUnlock` sets
+`qRevisionPending`, `doLockOnly`/`confirmSend` call `_applyRevisionBump()` — but **only the PIN path
+ever set the flag.** The approval-request unlock paths, on-screen and state-writer alike, cleared the
+lock and never marked a revision as owed.
+
+Measured on the live log: **53 of 71 unlocks came through the request route.** The only four
+revisions ever stamped were his own via the PIN, all on test quotations since deleted — which is why
+no serial, row or state anywhere carries `.R`. Nobody else could ever have got one.
+
+Both paths now owe it, and `revisionPending` rides on the saved state so it survives to whenever the
+quotation is next opened. Still stamped **at re-lock, never at unlock** — a draft is an unfinished
+edit, not a version — and the row key stays on the base serial, so nothing is renamed.
+
+> ⚠ Do not "fix" this by stamping at unlock. And note `_applyRevisionBump` sets
+> `qSerialCommitted=false`; the row key deliberately keeps the base serial while `qSerial` carries
+> `.R1`, which is why a revision never appears as a `quotation_states` row key.
+
 ### Method notes
 - **Investigate before building, even when the handoff specifies the design.** The specified rule was
   wrong in two independent ways, and one query found both. Same shape as the disabled credits repair:
   mechanism verified, meaning assumed.
+- **"Feature X never appears" is a question about which code path users actually take.** The revision
+  code was correct and had been for two weeks; the flag that arms it sat on the one route almost
+  nobody uses. Counting the two routes in the activity log settled it in one query.
+- **A missing artifact can mean the records were deleted, not that the code failed.** Four revisions
+  were stamped and none survives, because all four were test quotations Rommel later removed.
 - **A handoff naming a stored field may be naming the global instead.** `qLockedTotal` vs
   `lockedTotal` — check the data, not the prose.
 - **When two candidate rules disagree on identical inputs, neither is the rule.** That is the signal
@@ -7218,6 +7262,11 @@ both candidate rules are proven to break a real quotation.
 Two rules, opposite answers, identical inputs → no flag-based rule exists. The distinguisher is the
 approval requests and the activity log, not the state. Full working in the 2026-08-15 session 4
 entry above.
+
+## ✅ PWA install — CLOSED 2026-08-15 (session 4)
+Rommel: *"PWA is working fine based on earlier update."* Both apps install separately with their own
+icons. The scope fix (`67cab3c`) did it; nothing further is owed. **Ignore the "still pending — one
+device test" section below, kept only for the background on how it was diagnosed.**
 
 ## ⚠ Still pending from session 2 — one device test, then it is closed
 The PWA install collision is **fixed and deployed** (`67cab3c`, confirmed serving). Nothing left to
