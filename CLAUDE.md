@@ -7305,6 +7305,19 @@ right now, presumably for exactly this. Nothing is broken and nothing needs fixi
 only question is whether the revision goes to the client at ₱1,000. **Do not let anyone "repair" the
 ₱34.32 in the Project List instead** — see the closed checker item below for why that would be wrong.
 
+⚠ **STILL UNDECIDED as of 2026-08-15 — do not record it as settled.** Rommel answered "honour ₱34.32,
+stop the drift" earlier that day, but **on a premise that turned out to be wrong** (I had reported a
+silent price drift; there was none — the quotation had been deliberately unlocked). He was told so,
+and has not re-decided. A later remark that "its revision belongs in the Final Quotation" was *my
+inference from the new client-approved rule*, not his decision about this quotation.
+
+Two facts he needs when he does decide:
+- **Today's gate does not re-close it.** The rule blocks new attempts to reopen a client-approved
+  quotation; W65 is ALREADY reopened (`locked:false`, `fqStarted:false`, unchanged since 13 Aug), so
+  there is nothing for the gate to bite on and Stage 1 remains editable on that job.
+- Consequently anyone who opens and saves it moves the Project List figure from ₱34.32 to ₱1,000 —
+  not silently any more, but without a decision having been taken either.
+
 ## Known, not urgent — Supabase holds ~189 quotations, the Sheet ~85
 Quotations deleted from the Sheet before `supaDeleteQuotation` existed (2026-08-02) never reached
 Supabase. **So any SQL count of `quotations` overcounts by roughly 100** — trust the app's number,
