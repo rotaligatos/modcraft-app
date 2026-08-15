@@ -4297,7 +4297,6 @@ var qBondIns = {
   insurances:  []
 };
 // ── Final Quotation (Stage 2) independent state ───────────────────────────
-var fqVatApproved = true;
 var fqDiscPct = 0;
 var fqDiscApproved = false;
 var fqPremApproved = false;
@@ -6105,7 +6104,6 @@ function _applyVatDefaultForType(announce){
   if(!!qVatApproved===wantVat){ _syncVatUI(); return; }
   var before=(_pCalc&&_pCalc.grand)||0;
   qVatApproved=wantVat;
-  if(typeof fqVatApproved!=='undefined') fqVatApproved=wantVat;
   _syncVatUI();
   recalc();
   var after=(_pCalc&&_pCalc.grand)||0;
@@ -9524,7 +9522,7 @@ function confirmVat() {
   _verifyApproverPin((el("vat-pin")||{}).value||'').then(function(ok){
     if(!ok){ el("vat-err").style.display="block"; return; }
     if(modalCtx==='fq'){
-      fqVatApproved=false;
+      qVatApproved=false;
       var fqTag=el('fq-vat-ok-tag'); if(fqTag) fqTag.style.display='inline';
       var fqRadios=document.querySelectorAll("[name='fq-vat']"); if(fqRadios[1]) fqRadios[1].checked=true;
       closeModal("ov-vat"); recalcFQ();
@@ -13213,7 +13211,7 @@ function _applyApprovedRequest(notif){
   var appliesToOpenQuotation = !notif.serial || notif.serial===(qBaseSerial||qSerial);
   if(type==='nonvat'&&appliesToOpenQuotation){
     if(ctx==='fq'){
-      fqVatApproved=false;
+      qVatApproved=false;
       var r=document.querySelectorAll("[name='fq-vat']"); if(r[1]) r[1].checked=true;
       var t=el('fq-vat-ok-tag'); if(t){t.style.display='inline';t.style.color='var(--teal)';t.innerHTML='<i class="ti ti-check"></i> Non-VAT approved';}
       recalcFQ();
@@ -13314,7 +13312,8 @@ function _persistApprovedFieldToQuotation(notif,callback){
   if(!serial||!gToken){ if(callback) callback(false); return; }
   var type=notif.type, ctx=notif.ctx||'s1';
   var mutate=null;
-  if(type==='nonvat') mutate=ctx==='fq'?function(s){ s.fqVatApproved=false; }:function(s){ s.vatApproved=false; };
+  // One VAT treatment per quotation, so both stages persist the same field.
+  if(type==='nonvat') mutate=function(s){ s.vatApproved=false; };
   else if(type==='discount') mutate=ctx==='fq'
     ?function(s){ s.fqDiscPct=notif.reqDisc||0; s.fqDiscApproved=true; }
     :function(s){ s.discPct=notif.reqDisc||0; s.discApproved=true; };
@@ -20271,6 +20270,39 @@ function _computeQuotationStatus(){
     locked:qLocked, sentStatus:qSentStatus, initLockedAt:qInitLockedAt
   }, qBaseSerial||qSerial);
 }
+// ── One VAT treatment per quotation ──────────────────────────────────────────────────────
+// VAT used to be TWO independent flags: Stage 1 priced from qVatApproved, Stage 2 rendered its
+// radio from a separate fqVatApproved, and nothing kept them in step. Measured on live data,
+// 86 of 174 quotations had them disagreeing — the same job priced 12% apart depending on which
+// tab was open. QT-M00000115 is the one that surfaced it: locked and issued to the client at
+// ₱1,989.00 with VAT, then recomputing ₱1,775.90 without it, so the quotation permanently
+// disagreed with the Project List.
+//
+// It cannot legitimately differ by stage: the client and the account type are the same on both,
+// and VAT is a fact about the sale, not about which screen you are on. So there is one flag.
+//
+// Saves made before this carry both. Resolve to the treatment the ISSUED document was produced
+// with — Stage 2's if the Final was locked, otherwise Stage 1's — because that is the figure the
+// client is actually holding, and it is what the locked-total guard is protecting.
+var _vatSplitLogged={};   // {serial:true} — say it once per serial per session, not on every open
+function _resolveLegacyVatSplit(state){
+  if(!state||state.fqVatApproved===undefined) return;
+  var s2=!!state.fqVatApproved, s1=!!qVatApproved;
+  if(s2===s1) return;                                  // already agree — nothing to resolve
+  var issued=state.fqLocked?s2:s1;                     // the treatment the client's copy carries
+  if(issued===s1) return;                              // Stage 1 already holds it
+  qVatApproved=issued;
+  var ser=state.baseSerial||state.serial||'';
+  if(!_vatSplitLogged[ser]){
+    _vatSplitLogged[ser]=true;
+    console.warn('[vat] '+ser+': stages disagreed (Stage 1 '+(s1?'on':'off')+', Stage 2 '
+      +(s2?'on':'off')+') — using the issued treatment: VAT '+(issued?'on':'off'));
+    try{
+      logActivity('VAT treatment unified to '+(issued?'Vatable (12%)':'Non-VAT')
+        +' — the two stages had disagreed, and this is the treatment the quotation was locked and issued with.');
+    }catch(e){}
+  }
+}
 // 'Not sent' is what a lock writes before anyone shares it, so it is emphatically not sent.
 function _wasSent(s){ s=String(s||'').trim(); return !!s&&s!=='Not sent'; }
 // A revision is only "requested" while an unlock approval is genuinely outstanding, so this reads
@@ -21683,7 +21715,9 @@ function initFinalQuotation() {
   // reset by Stage 1's. Per-field says precisely that — take Stage 1's value only where Stage 2
   // has none of its own. For a brand-new Stage 2 every field is empty, so this inherits everything,
   // which is what the old code did on the one occasion it worked.
-  if(!fqVatApproved && qVatApproved) fqVatApproved=true;
+  // VAT is deliberately absent from this list. It is ONE treatment for the whole quotation now
+  // (qVatApproved) rather than a per-stage approval, so there is nothing to inherit — see the
+  // single-flag note at the qVatApproved declaration.
   if(!fqDiscApproved && qDiscApproved){ fqDiscPct=qDiscPct; fqDiscApproved=true; }
   if(!fqPremApproved && qPremApproved) fqPremApproved=true;
   if(!fqCustomCFApproved && qCustomCFApproved && qCustomCF){
@@ -21929,9 +21963,9 @@ function renderFQCards() {
     +'<div class="card-body"><div class="g2">'
     +'<div><label class="fld">VAT treatment <span class="pill pill-teal" style="font-size:10px;margin-left:4px">Default: Vatable</span></label>'
     +'<div style="display:flex;gap:16px;margin-top:6px;align-items:center;flex-wrap:wrap">'
-    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fq-vat" value="y" '+(fqVatApproved?'checked':'')+' onchange="recalcFQ()"> Vatable (12%)</label>'
-    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fq-vat" value="n" '+(!fqVatApproved?'checked':'')+' onchange="fqOnNonVat()"> Non-vatable</label>'
-    +'<span class="pill pill-amber" id="fq-vat-ok-tag" style="display:'+(!fqVatApproved?'inline':'none')+'">Approved</span>'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fq-vat" value="y" '+(qVatApproved?'checked':'')+' onchange="recalcFQ()"> Vatable (12%)</label>'
+    +'<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer"><input type="radio" name="fq-vat" value="n" '+(!qVatApproved?'checked':'')+' onchange="fqOnNonVat()"> Non-vatable</label>'
+    +'<span class="pill pill-amber" id="fq-vat-ok-tag" style="display:'+(!qVatApproved?'inline':'none')+'">Approved</span>'
     +'</div></div>'
     +'<div><label class="fld">Discount request</label>'
     +'<div style="display:flex;gap:8px;margin-top:4px;align-items:flex-start">'
@@ -22399,7 +22433,7 @@ function _recalcFQCore() {
   var dA=(fqDiscApproved&&fqDiscPct)?_dBase*fqDiscPct/100:0;
   var afterD=preDisc-dA;
   var fqVatRadio=document.querySelector("[name='fq-vat']:checked");
-  var vatOn=fqVatRadio?fqVatRadio.value==='y':fqVatApproved;
+  var vatOn=fqVatRadio?fqVatRadio.value==='y':qVatApproved;
   var tempVat=vatOn?afterD*vat/100:0;
   var totalForBonds=afterD+tempVat;
   var biCosts=calcBondInsCosts(totalForBonds,fqBondIns);
@@ -29672,7 +29706,7 @@ function getFullQuotationState(){
     lockedTotal:qLockedTotal, fqLockedTotal:fqLockedTotal,
     clientApproved:qClientApproved, clientApprovedAt:qClientApprovedAt,
     fqClientApproved:fqClientApproved, fqClientApprovedAt:fqClientApprovedAt,
-    fqVatApproved:fqVatApproved, fqDiscPct:fqDiscPct, fqDiscApproved:fqDiscApproved, fqPremApproved:fqPremApproved,
+    fqVatApproved:qVatApproved, fqDiscPct:fqDiscPct, fqDiscApproved:fqDiscApproved, fqPremApproved:fqPremApproved,
     fqCustomCF:fqCustomCF?JSON.parse(JSON.stringify(fqCustomCF)):null, fqCustomCFApproved:fqCustomCFApproved,
     sourceOrderId:qSourceOrderId||'',
     jobSource:qJobSource||'', jobStartedAt:qJobStartedAt||'',
@@ -29875,7 +29909,7 @@ function restoreFullQuotationState(state){
   // Stage 2 was never customized" — in the latter case fqApprovalsFromSave stays false and
   // initFinalQuotation() falls back to copying Stage 1's values as a starting point, same as always.
   if(state.fqVatApproved!==undefined){
-    fqVatApproved=state.fqVatApproved; fqDiscPct=state.fqDiscPct||0; fqDiscApproved=!!state.fqDiscApproved;
+    fqDiscPct=state.fqDiscPct||0; fqDiscApproved=!!state.fqDiscApproved;
     fqPremApproved=!!state.fqPremApproved;
     fqCustomCF=state.fqCustomCF?JSON.parse(JSON.stringify(state.fqCustomCF)):null;
     fqCustomCFApproved=!!state.fqCustomCFApproved;
@@ -29892,6 +29926,7 @@ function restoreFullQuotationState(state){
   qStage=state.stage||1; qFabMode=state.fabMode||'carcass';
   qAreas=JSON.parse(JSON.stringify(state.areas||[]));
   qVatApproved=state.vatApproved!==undefined?state.vatApproved:true;
+  _resolveLegacyVatSplit(state);
   qDiscApproved=!!state.discApproved; qDiscPct=state.discPct||0; qPremApproved=!!state.premApproved;
   qDiscScope=state.discScope?JSON.parse(JSON.stringify(state.discScope)):{materials:false,edgeband:false,hardware:false,services:false,installation:false};
   qBondIns=state.bondIns?JSON.parse(JSON.stringify(state.bondIns)):{enabled:false,surety:{active:false,basis:0,insuredPct:0,premiumPct:0},thirdParty:{active:false,insuredPct:0,premiumPct:0},performance:{active:false,insuredPct:0,premiumPct:0},insurances:[]};
