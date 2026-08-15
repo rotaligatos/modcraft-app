@@ -7164,10 +7164,45 @@ edit, not a version — and the row key stays on the base serial, so nothing is 
 > `qSerialCommitted=false`; the row key deliberately keeps the base serial while `qSerial` carries
 > `.R1`, which is why a revision never appears as a `quotation_states` row key.
 
+### ⚠ Options: an approved unlock left the option itself locked (`54098ad`)
+Rommel's report: *"they unlocked the option 1 and option 2, and locked the option 1 only, the option
+2 is also locked."* He also linked it to mobilization reading zero.
+
+An option carries its **own** `locked` flag, set by `doLockOnly`, and `switchToOption` lets that flag
+win over the snapshot on the way in. `confirmUnlock` has cleared it since 2026-08-12 — **but only
+`confirmUnlock`.** The approved-request unlock (on-screen branch AND state writer) cleared `qLocked`
+and left the option flag true, so the quotation looked unlocked until you switched options, and
+switching back re-locked it.
+
+**Third instance of the same shape in one day** — the PIN path fixed once, the request path never
+brought along (see also the revision flag, `3b2bd58`). 53 of 71 unlocks come through the request
+route, so for anyone who is not an approver unlocking via PIN, the flag never cleared at all. Both
+paths now call one shared helper (`_unlockActiveOption` / `_unlockActiveOptionInState`).
+
+> ⚠ **When fixing anything about locking, unlocking or approval, fix BOTH routes.** The PIN path
+> (`confirmUnlock`, `doApprovalAction`) and the approval-request path (`_applyApprovedRequest` +
+> `_persistApprovedFieldToQuotation`) are separate implementations of the same decision, and the
+> request path carries ~75% of real traffic.
+
+**The mobilization half was NOT reproduced.** `restoreQuotationSnapshot` did overwrite
+`mobCalc`/`mobTransport`/`mobAccom` on **absence**, turning "this option predates the field" into
+"this option has no mobilization" — hardened so absent now means unknown (present-but-empty still
+clears; `locked` was always guarded this way). But measured: only **10 of 40** option snapshots lack
+`mobCalc`, **all June test-era quotations with no mobilization to lose**. So it is real in code and
+costs nothing today. **Mobilization-reads-zero remains unexplained** — if it recurs, get the stage
+and the exact field, and check whether it followed an option switch.
+
 ### Method notes
 - **Investigate before building, even when the handoff specifies the design.** The specified rule was
   wrong in two independent ways, and one query found both. Same shape as the disabled credits repair:
   mechanism verified, meaning assumed.
+- **Two symptoms reported together often share one cause, but verify rather than assume.** The option
+  lock and mobilization-zero were reported as one thing; the option half reproduced exactly, the
+  mobilization half turned out to affect only dead test data. Fixing both was right; *claiming* both
+  were the report would not have been.
+- **`restoreQuotationSnapshot` throws on a snapshot missing `areas`/`assembly`/`siteVisit`/
+  `cuttingList`** — build test snapshots from a real `captureQuotationSnapshot()` and delete keys,
+  never hand-roll a minimal one.
 - **"Feature X never appears" is a question about which code path users actually take.** The revision
   code was correct and had been for two weeks; the flag that arms it sat on the one route almost
   nobody uses. Counting the two routes in the activity log settled it in one query.
