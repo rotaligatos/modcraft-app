@@ -7355,6 +7355,27 @@ only. **Run 2026-08-15: W65 re-closed, still pinned at ₱34.32.**
 
 ---
 
+## What was changed on 2026-08-15 (session 4c — the unlinked-order picker)
+
+### An Admin can link an unlinked order to its quotation (`4401a06`)
+Orders picked up before the quotation link was reliable carry no serial at all, so nothing can stop
+their clock and nothing says where the job went. **Settings → Company & DB → Check Project List** now
+lists, for each unlinked order, the quotations that could be it — matched by the order number
+appearing in the project name, or by the client name — with project, value, preparer, status and the
+evidence for each. A person picks; `linkOrderToQuotation` then takes the send time from the activity
+log, or leaves the order open if that quotation has never been sent.
+
+> ⚠ **It must never auto-link, and the live data is why.** ROBERT VALERA has four quotations, so two
+> of his orders each match all four by name; and the team's `MSRF#` convention already collides —
+> **`MSRF#8842` sits on both `QT-W00000044` (Katrina Chua) and `QT-W00000065` (DCD Office)**. An
+> automatic match would have closed the wrong order and left a real one running, which is worse than
+> leaving it open. A quotation already claimed by another order is never offered.
+
+**Admin only, guarded twice** (the panel does not render, and the action refuses if called directly)
+— Rommel: *"I'm ok with this, but only admin."*
+
+---
+
 ## ⚠ APPROVAL ROUTING — the rule, as Rommel defined it 2026-08-15 (`e171985`, `349b97a`)
 
 **Routing allocates responsibility according to the process. It does not describe authority.**
