@@ -13373,7 +13373,7 @@ function _syncRowFromState(serial,state){
       .then(function(){ return sheetsUpdate('Quotations!J'+rowIdx,[[lockedCell]]); });
   }).catch(function(e){ console.warn('[approval] could not sync the Project List row for '+serial,e); });
 }
-function _persistApprovedFieldToQuotation(notif,callback){
+function _persistApprovedFieldToQuotation(notif,callback,source){
   var serial=notif.serial;
   if(!serial||!gToken){ if(callback) callback(false); return; }
   var type=notif.type, ctx=notif.ctx||'s1';
@@ -13447,6 +13447,18 @@ function _persistApprovedFieldToQuotation(notif,callback){
       // and the row still read IQ Locked. That is the reason the Project List check "always finds
       // something": the app was manufacturing the very drift it then asked someone to clean up.
       try{ _syncRowFromState(serial,state); }catch(e){}
+      // ── and say so in that quotation's own history ─────────────────────────────────────
+      // An approval applied while the quotation is NOT open used to leave no trace at all. The
+      // on-screen path logs "Quotation unlocked (approved by X)"; this one logged nothing. So
+      // QT-W00000065 read as locked, shared via Viber, then the lock simply gone — which looks
+      // like corruption rather than the deliberate unlock it was, and cost a whole investigation
+      // to tell apart. It could not be logged before this: gLogToSheets stamped whatever
+      // quotation was open, so the line would have landed on someone else's quotation.
+      try{
+        logActivity((APPR_TYPE_LABELS[type]||type)+' approved by '
+          +((notif&&(notif.by||notif.approverEmail))||'an approver')
+          +' — applied to this quotation'+(source?' (from '+source+')':'')+'.', serial);
+      }catch(e){}
       // Record that this decision has landed, wherever it was applied from. Marked centrally so
       // every path is covered, and PERSISTED because in-memory alone would let the next session's
       // poll apply it a second time. Most mutations set a value and would survive that, but
@@ -13512,7 +13524,7 @@ function _apprApplyRemoteDecisions(){
         n.applied=true;
         logActivity('A phone decision on '+(APPR_TYPE_LABELS[n.type]||n.type)+' could not be applied automatically — '
           +'the request was raised before its quotation was ever saved, so there is no saved record to update. '
-          +'Requester: '+(n.by||n.approverEmail||n.fromEmail||'?')+'.');
+          +'Requester: '+(n.by||n.approverEmail||n.fromEmail||'?')+'.', n.serial);
         try{ gSaveApprovalRequest({id:n.reqId,applied:true},function(){}); }catch(e3){}
       }
       return;
@@ -13544,13 +13556,16 @@ function _apprApplyRemoteDecisions(){
     _persistApprovedFieldToQuotation(payload,function(ok){
       if(ok){
         n.applied=true;   // payload may be the fabricated signature object, not this notif
-        logActivity('Applied a decision taken on a phone — '+(APPR_TYPE_LABELS[n.type]||n.type)
-                    +' on '+n.serial+', actioned by '+(n.by||n.approverEmail||'?')+'.');
+        // The line itself is written centrally by _persistApprovedFieldToQuotation, against the
+        // target serial. It used to be written here, where it could only be stamped with the
+        // open quotation — so it named the right serial in its text while being filed under the
+        // wrong one. Provenance is passed down instead of logged separately, so one decision
+        // leaves one line.
       } else {
         n.applied=false;   // genuinely failed — let the next poll try again
         console.warn('[approval] could not apply the phone decision for '+n.serial);
       }
-    });
+    },'a phone');
   });
 }
 // Update the pending badge to show "Counter-offer received" state
@@ -20723,13 +20738,18 @@ function updateFQSentStatus() {
   }
 }
 // ── Activity log ──────────────────────────────────────────────────────────
-function logActivity(action) {
+// An action does not always belong to the quotation on screen. An approval applied in the
+// background is the main case: it changes a saved quotation that nobody has open. Passing the
+// serial files the entry against the quotation it is actually about, instead of stamping
+// whatever happens to be open — which is what made the activity log untrustworthy by serial.
+// The on-screen panel still only shows the open quotation's own history.
+function logActivity(action, serial) {
   var now=new Date();
   var ts=now.toLocaleString("en-PH",{month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit"});
   var userName=gUser?(gUser.name||gUser.email)+' ('+currentRole+')':'System';
-  qLog.unshift({ts:ts,action:action,user:userName});
-  renderActivityLog();
-  gLogToSheets(action);
+  var _openSer=qSerial||qDraftKey||'';
+  if(!serial||serial===_openSer){ qLog.unshift({ts:ts,action:action,user:userName}); renderActivityLog(); }
+  gLogToSheets(action, serial);
 }
 function renderActivityLog() {
   var body=el("activity-log-body"); if(!body) return;
@@ -30558,12 +30578,12 @@ function _updateLogOutboxBadge(){
   b.textContent='⚠ '+n+' log entr'+(n===1?'y':'ies')+' not yet saved';
   b.title='Activity that could not be written to the audit trail yet. It is kept and retried — nothing is discarded.';
 }
-function gLogToSheets(action){
+function gLogToSheets(action,serial){
   var e={ at:new Date().toISOString(),
           disp:new Date().toLocaleString('en-PH',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}),
                     // A draft logs under its own key. Stamping the peeked serial is what put unrelated
           // actions on real quotations and made the activity log untrustworthy by serial.
-          email:(gUser&&gUser.email)||'', action:action, serial:qSerial||qDraftKey||'',
+          email:(gUser&&gUser.email)||'', action:action, serial:serial||qSerial||qDraftKey||'',
           needSheets:true, needSupa:true };
   _writeLogEntry(e).then(function(owe){
     if(owe.sheets||owe.supa){ e.needSheets=owe.sheets; e.needSupa=owe.supa; _logOutboxAdd(e); }
