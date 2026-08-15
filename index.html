@@ -25798,7 +25798,7 @@ function _findStaleStatuses(cb){
     if(!d||d.error){ cb(null); return; }
     var rows=(d.values)||[];
     _allQuotationStates(function(states,src){
-      var findings=[], noState=0, checked=0, lockFromState=[], serialSplit=[], _rowCount={};
+      var findings=[], noState=0, checked=0, lockFromState=[], serialSplit=[], _rowCount={}, _rowsOf={};
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]) continue;
         var serial=r[0], stored=(r[5]||'').trim(), st=states[serial];
@@ -25806,6 +25806,15 @@ function _findStaleStatuses(cb){
         // ROW is its own fault and can exist with a perfectly consistent state — Keystone was
         // caught only because it happened to have both, which is not a detection strategy.
         _rowCount[serial]=(_rowCount[serial]||0)+1;
+        // Keep what each row actually SAYS, not just how many there are. Rommel, 2026-08-15, on
+        // being asked to approve the removal: "How would I know if I'm making the right decision
+        // when I checked the project list there's only 1 qtm114." He could not — the list merges
+        // rows with the same number, so the only place the two are visible is here. A count is not
+        // evidence; the rows are.
+        (_rowsOf[serial]=_rowsOf[serial]||[]).push({
+          row:i+1, created:r[1]||'', client:r[2]||'', status:(r[5]||'').trim(),
+          value:r[6]||'', user:r[7]||'', updatedAt:r[25]||''
+        });
         if(!st){ noState++; continue; }
         checked++;
         // The row key and the quotation's own number must describe the same job. Option (-2) and
@@ -25830,7 +25839,7 @@ function _findStaleStatuses(cb){
       _lockFromStateFindings=lockFromState;
       _serialSplitFindings=serialSplit;
       _dupRowFindings=Object.keys(_rowCount).filter(function(k){ return _rowCount[k]>1; })
-        .map(function(k){ return {serial:k, rows:_rowCount[k]}; });
+        .map(function(k){ return {serial:k, rows:_rowCount[k], detail:(_rowsOf[k]||[])}; });
       cb(findings, checked, noState, src);
     });
   }).catch(function(){ cb(null); });
@@ -26110,6 +26119,44 @@ function _reportSerialSplits(){
   // list. A duplicate ROW is its own fault and can exist with a perfectly consistent state; when
   // this was built off _serialSplitFindings, such a row was invisible, and QT-W00000075 showed up
   // only because it happened to carry both faults at once.
+  // Shows the rows themselves, marked KEEP / REMOVE, so the button is an informed click rather
+  // than a leap of faith. The Project List cannot display these — it merges same-numbered rows —
+  // so if they are not shown here they are not visible anywhere in the app.
+  function _dupDetailHtml(){
+    var h='';
+    _dupRowFindings.forEach(function(d){
+      if(!d.detail||d.detail.length<2) return;
+      h+='<div style="margin-top:10px;background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden">'
+        +'<div style="padding:6px 12px;background:var(--card2);font-size:12px;font-family:ui-monospace,monospace">'+escHtml(d.serial)+'</div>'
+        +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+        +'<thead><tr>'
+        +['','Sheet row','Client','Value','Status','Assigned','Last updated'].map(function(t){
+            return '<th style="text-align:left;padding:5px 10px;border-bottom:1px solid var(--border);white-space:nowrap">'+escHtml(t)+'</th>'; }).join('')
+        +'</tr></thead><tbody>';
+      d.detail.forEach(function(x,ix){
+        var keep=(ix===0);   // every save updates the FIRST row, so that one is the live record
+        h+='<tr>'
+          +'<td style="padding:5px 10px;border-bottom:.5px solid var(--border);white-space:nowrap;font-weight:700;color:'
+            +(keep?'var(--pill-teal)':'var(--pill-coral)')+'">'+(keep?'KEEP':'REMOVE')+'</td>'
+          +'<td style="padding:5px 10px;border-bottom:.5px solid var(--border);font-family:ui-monospace,monospace">'+x.row+'</td>'
+          +'<td style="padding:5px 10px;border-bottom:.5px solid var(--border)">'+escHtml(x.client||'—')+'</td>'
+          // Formatted the same way the Project List formats them, so the KEEP row can be compared
+          // against the line he is actually looking at rather than translated in his head.
+          +'<td style="padding:5px 10px;border-bottom:.5px solid var(--border);white-space:nowrap">'
+            +escHtml(x.value!==''&&x.value!=null?fmtMoney(parseFloat(String(x.value).replace(/[^\d.-]/g,''))||0):'—')+'</td>'
+          +'<td style="padding:5px 10px;border-bottom:.5px solid var(--border);white-space:nowrap">'+escHtml(x.status||'—')+'</td>'
+          +'<td style="padding:5px 10px;border-bottom:.5px solid var(--border);white-space:nowrap">'+escHtml(x.user||'—')+'</td>'
+          +'<td style="padding:5px 10px;border-bottom:.5px solid var(--border);white-space:nowrap">'
+            +escHtml(x.updatedAt?(typeof fmtDT==='function'?fmtDT(x.updatedAt):x.updatedAt):'never')+'</td>'
+          +'</tr>';
+      });
+      h+='</tbody></table></div>'
+        +'<div style="padding:6px 12px;font-size:12px;color:var(--text2)">The KEEP row is the one every '
+        +'save writes to. A REMOVE row has not been written since it was created and never will be — '
+        +'compare the two above and you can see which is carrying the current figures.</div></div>';
+    });
+    return h;
+  }
   var _dupHtml=_dupRowFindings.length
     ? '<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-coral)">'
       +'<b>'+_dupRowFindings.length+' serial'+(_dupRowFindings.length===1?'':'s')
@@ -26120,6 +26167,7 @@ function _reportSerialSplits(){
       +'<b>The Project List itself cannot show you this</b> — it merges rows with the same number, so '
       +'searching it always returns one line. It also has to be resolved before that quotation can be '
       +'renumbered, because renaming one row would strand the other.</div>'
+      +_dupDetailHtml()
       +'<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
       +'<button class="btn btn-primary" onclick="_fixDuplicateRows()" style="font-size:12px">'
       +'<i class="ti ti-layers-off"></i> Remove the stale copies</button>'
