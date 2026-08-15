@@ -7388,6 +7388,19 @@ because they saw it even though their not authorize?"*
 than asked for a PIN and refused afterwards. Every bypass sets `overrodeRouting` on the request and
 writes its own activity-log line naming who it was routed to.
 
+> ⚠ **UPDATED 2026-08-15 (`0cb85c0`) — absence IS now handled, and "not even Admin" was wrong.**
+> _findSignatory only stepped past the assigned signatory when they were the preparer or
+> deactivated, so a signatory who was simply **away** left the quotation stuck with nobody able to
+> act. Rommel: *"if joan is absent, who will sign? ... So admin will intervene."* Correct — nothing
+> may be left with nobody to call.
+>
+> **Admin and Director can now move any pending signature.** The current assignee is excluded so it
+> resolves to the slot fallback, and that person signs in their **own** name. Logged with both
+> names. A Manager cannot move someone else’s. Delegation is still not consulted for signatures.
+>
+> The rule that stands: **nobody ever signs as somebody else.** Rommel chose re-assignment over
+> signing on another’s behalf, so no block ever reads "Checked by" over a person who did not check
+> it — which is what makes a signature worth anything.
 > ⚠ **Signatures were ALREADY correct and are stricter — do not "align" them.** `confirmSignature`
 > checks the signatory twice and allows **no delegate and no override, not even Admin**, because a
 > signature puts a named person's mark on a client document. That asymmetry is deliberate.
