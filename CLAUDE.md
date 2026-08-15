@@ -6693,6 +6693,18 @@ This is the textbook scenario the manifest **`id` field** exists to solve: an ex
 on each manifest overrides scope-based identity inference entirely, per spec, regardless of scope
 overlap. Neither manifest sets one today.
 
+> ## ⚠⚠ STRUCK 2026-08-15 — THE `id` HALF OF THIS DIAGNOSIS IS WRONG
+> **An omitted `id` defaults to `start_url`** ([MDN](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Manifest/Reference/id):
+> *"If `id` is not specified or the value is invalid in any way … the `start_url` value is used"*).
+> The two `start_url`s already differed — `/modcraft-app/index.html` vs `/modcraft-app/approve.html`
+> — so **the two apps already had distinct identities**, and "neither manifest sets an `id`" was
+> never the cause. Adding `id`s alone would have been a knowing no-op, and shipping it as "the fix"
+> would have cost a wasted device-test cycle.
+> **Scope containment was the whole cause.** See the 2026-08-15 session entry below for the fix.
+> Note also: a relative `id` resolves against the **ORIGIN** of `start_url`, not the manifest's
+> directory — so `"id": "modcraft"` becomes `https://origin/modcraft`, not `…/modcraft-app/modcraft`.
+> Use a root-relative path.
+
 **Not yet attempted, and why:** the fix itself (adding a distinct `id` to each manifest, e.g.
 `"id": "/modcraft-app/"` and `"id": "/modcraft-app/approve.html"` — exact values need checking
 against the spec's resolution-against-scope-or-manifest-URL rules before writing them) is small and
@@ -6714,6 +6726,11 @@ with Rommel before building anything new** — if it turns out to mean something
 literally wanting a distinct icon for something called "support"), that needs its own clarification,
 not an assumption.
 
+> ✅ **CONFIRMED 2026-08-15.** Rommel: *"Im just saying that theres 2 icon, 1 for each but I only
+> see 1."* The working guess was right — it describes the install collision, **not** a request for a
+> third icon. Both icon designs exist and are correct; only one was visible because the two installs
+> had merged. **No new icon work. Do not raise this again.**
+
 ### Also worth knowing
 - `git push` failed twice this session with `Failed to connect to github.com port 443` while
   `curl` reached the exact same GitHub endpoint fine — same intermittent-connectivity class already
@@ -6729,30 +6746,108 @@ not an assumption.
 
 ---
 
-# OPEN — updated 2026-08-15 (THIS IS THE AUTHORITATIVE LIST)
+## What was changed on 2026-08-15 (session — the PWA install collision fixed: scope, not `id`)
 
-## ⚠⚠ FIRST THING NEXT SESSION — installing both PWAs collapses into one app
-Full diagnosis in the session entry immediately above — do not re-diagnose from scratch, the cause
-is already confirmed (manifest `scope`/`start_url` overlap with no `id` field set on either
-manifest). What is actually left to do:
-1. **Confirm exact `id` values** against the current Web App Manifest spec's resolution rules
-   (an `id` is resolved as a URL against either the manifest's own `start_url`/scope or the
-   manifest's location, and behaviour has shifted across spec drafts — check current MDN/spec text
-   before writing them, do not guess).
-2. **Decide whether to also narrow `app.webmanifest`'s `scope`** away from `"./"`, or whether the
-   `id` field alone is sufficient per spec to fix this regardless of scope overlap. Check whether
-   anything relies on the current wide scope before narrowing it.
-3. **Write the fix, deploy, and have Rommel test on his actual phone**: uninstall both apps
-   completely first, then install Modcraft, then install Approval, confirming both now appear as
-   two separate home-screen entries with their own (already-correct) icons. This cannot be verified
-   by any script or headless-browser check in this repo — it is a real device install test only.
-4. Confirm with Rommel what *"one for support and one for main"* meant before building anything new
-   — the working assumption (same symptom as the install collision, not a request for a third icon)
-   is written above but not yet confirmed.
+One commit, `67cab3c`, deployed and confirmed SERVED. Fixes the bug left open the session before.
+
+### The recorded diagnosis was half wrong, and checking the spec is what caught it
+The handoff blamed **both** the missing `id` and the scope overlap. Read the spec before writing
+anything, per Rommel's instruction — and the `id` half does not survive it:
+
+**An omitted `id` defaults to `start_url`.** The two `start_url`s already differed
+(`/modcraft-app/index.html` vs `/modcraft-app/approve.html`), so **the two apps already had distinct
+identities**. Adding explicit `id`s would have changed nothing about this bug. Shipping that as "the
+fix" would have burned a device-test cycle and looked like a fix that failed.
+
+Also learned, and worth keeping: **a relative `id` resolves against the ORIGIN of `start_url`, not
+the manifest's directory** — `"id": "modcraft"` becomes `https://origin/modcraft`, NOT
+`…/modcraft-app/modcraft`. Root-relative is the only honest way to write it here.
+
+### Scope containment was the entire cause
+A manifest `scope` is a plain **path PREFIX**. `app.webmanifest`'s `"./"` resolved against its own
+URL to `https://rotaligatos.github.io/modcraft-app/` — the whole directory, which **contains**
+`approve.html`. So Chrome saw that page as belonging to the already-installed Modcraft app and
+offered "open in app" instead of installing Approval separately.
+
+Rommel confirmed the trigger was **a clean Chrome tab at the approve.html URL** (not a link followed
+from inside the installed Modcraft window), which rules out the in-app-navigation explanation and
+leaves plain scope containment.
+
+### The fix
+1. **`app.webmanifest` scope `"./"` → `"./index.html"`** — the only prefix that covers index.html
+   while excluding approve.html. Both files live in the same directory, so there is no other option
+   short of moving files (which would break the Google Site embed URL, the Supabase redirect config,
+   Google OAuth origins, everyone's bookmarks, and the existing install).
+2. **A `history.replaceState` normaliser at the very top of `<head>`, before the manifest link.**
+   The narrow scope leaves the bare `/modcraft-app/` URL (no filename) outside scope, which could
+   stop Chrome offering to install Modcraft from a bookmark. This rewrites the address onto
+   `index.html` **without navigating** — no reload, no refetch, nothing in the auth flow touched.
+   Deliberately skipped inside an iframe (the Google Site embed) and in the Supabase auth popup
+   (`?supaAuthPopup=1`), so neither of those paths can be affected at all; also skipped on `file://`
+   and when a filename is already present. Query and hash are preserved.
+3. **Explicit `id`s added anyway**, set to exactly the current implicit values
+   (`/modcraft-app/index.html`, `/modcraft-app/approve.html`) so nobody already installed is
+   orphaned. **Hygiene, not the fix** — it stops a future `start_url` change silently
+   re-identifying either app.
+
+### Why index.html could take the narrow scope safely
+Checked rather than assumed: index.html **never does a cross-page navigation.** The only
+`location.replace` (`_reloadForNewBuild`) preserves `location.pathname`, and the Google/Supabase
+OAuth redirect runs **in the popup**, not the opener (`_supaAutoConnect` → `window.open`, and the
+opener's own code carries the comment *"No signInWithOAuth here in the opener"*). So once launched at
+`start_url`, the app stays on `/modcraft-app/index.html` for the whole session.
+
+### Verified
+Both manifests parse as served by a real browser with distinct ids/scopes/icon sets · containment
+proved broken in both directions (approve.html outside Modcraft's scope, index.html still inside it,
+approve.html still inside Approval's own) · all 8 icon files 200 on the live site with byte sizes
+matching disk · the normaliser passes **9 cases** covering every URL shape (bare dir, query+hash
+preserved, already-index.html, approve.html untouched, iframe, auth popup with the param in either
+position, `file://`, localhost root) — and the test **extracts the snippet out of the shipped file**
+so it cannot drift from what deploys · index.html boots with `recalc`/`navigate`/`initQuotation`/
+`gShowApp` all defined and a clean console · collision checker clean · all three files confirmed
+serving live on GitHub Pages, no stuck workflow run.
+
+### ⚠ Cannot be verified from here — needs Rommel's phone
+There is no way to simulate "does Android offer this as a separate app" from a script or headless
+browser. **The test: uninstall BOTH apps completely, install Modcraft, then install Approval, and
+confirm two separate home-screen entries with their own icons.** Also worth confirming Modcraft
+still installs from the bare `/modcraft-app/` bookmark URL — that is the one thing the normaliser
+exists to protect, and it is the only residual risk in this change.
+
+### Method notes
+- **A 404 sweep on all 8 icons was the preview server, not the app.** `preview_server.ps1` has a
+  `.png` MIME branch but did not serve them from subdirectories; the same 8 URLs are 200 on the live
+  site with byte sizes matching disk exactly. Suspect the rig — again.
+- **I offered "leave it, not worth the risk" as an option after having already built the feature.**
+  Rommel, correctly: *"what kind of option is that? You made it worked and now your telling me this?"*
+  Do not offer abandoning finished work as a choice.
+
+---
+
+# OPEN — updated 2026-08-15 (session 2) (THIS IS THE AUTHORITATIVE LIST)
+
+## ⚠ FIRST THING NEXT SESSION — one device test, then it is closed
+The PWA install collision is **fixed and deployed** (`67cab3c`, confirmed serving). Nothing left to
+build. What remains is Rommel's test, which no tooling here can do:
+
+1. **Uninstall BOTH apps completely**, then install **Modcraft**, then install **Modcraft Approval**.
+   Expected: two separate home-screen entries, each with its own icon.
+2. **Also check Modcraft still installs from the bare `https://rotaligatos.github.io/modcraft-app/`
+   URL** (a bookmark, not the home-screen app). That is the only residual risk the narrow scope
+   introduces, and the `replaceState` normaliser exists specifically to protect it.
+3. **If it still collapses**, the remaining lever is bigger and needs a decision, not another patch:
+   the two apps must stop sharing a directory — either move `index.html` under `/modcraft-app/app/`
+   (breaks the Google Site embed URL, Supabase redirect config, Google OAuth origins and everyone's
+   bookmarks) or serve `approve.html` from a separate origin (changes the push subscription
+   endpoints and every notification link already sent). Neither is worth doing on a guess — get the
+   test result first.
+4. ~~Confirm what "one for support and one for main" meant~~ **DONE** — it described this same
+   collision, not a third icon. **Do not raise it again.**
 
 ## Everything else
 Nothing else changed this session that affects prior open items. **The 2026-08-12 session 2 list
 above (line ~5537, "OPEN — updated 2026-08-12 (session 2)") is still the authoritative source for
 all OTHER open work** — the 4 "FIRST THING NEXT SESSION" items there (remove `qBaseSerial`;
 mobilization-reads-zero-after-unlock investigation; the two already-resolved items struck through)
-are unchanged and still pending, in that order, once the PWA install bug above is dealt with.
+are unchanged and still pending, in that order, once the device test above confirms this is closed.
