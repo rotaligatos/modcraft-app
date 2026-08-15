@@ -13430,6 +13430,13 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
   // the ladder and the response clock read from there, and without it the next save would simply
   // wipe the sheet cell again.
   else if(type==='lockts'&&notif.lockedAt) mutate=function(s){ if(!s.initLockedAt) s.initLockedAt=notif.lockedAt; };
+  // Puts an issued quotation back to locked WITHOUT recapturing its total. That distinction is
+  // the whole point: doLockOnly() calls _captureLockedTotal(), which pins whatever the quotation
+  // computes NOW - so pressing Lock on QT-W00000065 would have written P1,000 over the P34.32
+  // the client actually holds. lockedTotal is left exactly as it was, so the existing save guard
+  // goes back to protecting the issued figure. revisionPending is cleared because the revision
+  // was abandoned, and a later re-lock must not stamp .R1 for a version that never existed.
+  else if(type==='reclose') mutate=function(s){ s.locked=true; s.revisionPending=false; };
   else if(type==='unlock') mutate=ctx==='fq'
     // revisionPending: the same revision the on-screen path now owes, carried on the saved state
     // so it survives to whenever the quotation is next opened and re-locked.
@@ -13494,6 +13501,7 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
       // to tell apart. It could not be logged before this: gLogToSheets stamped whatever
       // quotation was open, so the line would have landed on someone else's quotation.
       try{
+        if(notif&&notif.logAs) logActivity(notif.logAs, serial); else
         logActivity((APPR_TYPE_LABELS[type]||type)+' approved by '
           +((notif&&(notif.by||notif.approverEmail))||'an approver')
           +' — applied to this quotation'+(source?' (from '+source+')':'')+'.', serial);
@@ -26205,8 +26213,8 @@ function checkProjectListData(){
         +'</div>';
       if(!findings.length){
         h+='<div style="padding:16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
-          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div></div>';
-        box.innerHTML=h; _reportSerialSplits(); _reportQuotationCredits(); _reportLostLockTimes(); return;
+          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div><div id="dbcheck-reopened"></div></div>';
+        box.innerHTML=h; _reportSerialSplits(); _reportQuotationCredits(); _reportLostLockTimes(); _reportReopenedIssued(); return;
       }
       h+='<div style="padding:12px 16px;background:var(--wash-amber);font-size:13px">'
         +'<b>'+findings.length+'</b> quotation'+(findings.length===1?'':'s')+' show the wrong stage in the Project List. '
@@ -26227,11 +26235,12 @@ function checkProjectListData(){
       h+='<div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
         +'<button class="btn btn-primary" onclick="fixProjectListStatuses()" style="font-size:12px"><i class="ti ti-wand"></i> Correct all '+findings.length+'</button>'
         +'<span style="font-size:12px;color:var(--text2)">Rewrites only the Status column. Nothing else on the quotation is touched.</span>'
-        +'</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div></div>';
+        +'</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div><div id="dbcheck-reopened"></div></div>';
       box.innerHTML=h;
       _reportSerialSplits();
       _reportQuotationCredits();
       _reportLostLockTimes();
+      _reportReopenedIssued();
     }
   });
 }
@@ -26573,6 +26582,104 @@ function fixQuotationCredits(){
         +'<i class="ti ti-circle-check"></i> '+list.length+' corrected.</div>';
       showToast(list.length+' quotation'+(list.length===1?'':'s')+' returned to the right person.');
     });
+  });
+}
+var _reopenedIssuedFindings=[];
+// ── Issued, reopened, and the price would move ──────────────────────────────────────────────
+// A quotation that was locked and sent, then unlocked for a revision, is unprotected while it
+// sits open: the save guard only holds a total while the stage is locked. If the revision is then
+// abandoned, nothing puts it back, and the next person who opens and saves it silently moves the
+// Project List figure to whatever the quotation computes today.
+//
+// QT-W00000065 is the case this was built for: issued at P34.32 on 6 Aug, unlocked 13 Aug, and it
+// now computes P1,000 because minimum charges are enforced. Rommel decided the P34.32 stands - it
+// is what the client was sent - so it needs to go back to being closed at that figure.
+//
+// ⚠ NOT automatic, and it must not become automatic. "Reopened and abandoned" and "reopened and
+// being revised right now" look identical in the data; only a person knows which. So this lists
+// them with both figures and waits. Re-closing one that IS mid-revision would freeze it at the
+// old price, which is the opposite mistake.
+function _findReopenedIssued(cb){
+  _allQuotationStates(function(states,src){
+    if(!states){ cb(null); return; }
+    var byId={};
+    (typeof dirData!=='undefined'?(dirData||[]):[]).forEach(function(d){ if(d&&d.id) byId[d.id]=d; });
+    var out=[];
+    Object.keys(states).forEach(function(ser){
+      var s=states[ser]||{};
+      if(!s.initLockedAt) return;                       // never issued - nothing to protect
+      if(s.locked===true) return;                       // still closed, the guard already holds it
+      var pinned=parseFloat(s.lockedTotal); if(!(pinned>0)) return;
+      var now=parseFloat(s.pCalc&&s.pCalc.grand); if(!(now>0)) return;
+      if(Math.abs(now-pinned)<=0.01) return;            // reopening cost nothing - leave it alone
+      out.push({serial:ser, client:(byId[ser]&&byId[ser].client)||'', issued:pinned, now:now,
+                issuedAt:s.initLockedAt||''});
+    });
+    out.sort(function(a,b){ return Math.abs(b.now-b.issued)-Math.abs(a.now-a.issued); });
+    cb(out,src);
+  });
+}
+function _reportReopenedIssued(){
+  var host=el('dbcheck-reopened'); if(!host) return;
+  _findReopenedIssued(function(list){
+    if(!list){
+      host.innerHTML='<div style="padding:12px 16px;border-top:1px solid var(--border);font-size:13px;color:var(--text2)">'
+        +'<i class="ti ti-info-circle"></i> Could not check for reopened quotations - this needs the saved states.</div>';
+      return;
+    }
+    if(!list.length) return;
+    _reopenedIssuedFindings=list;
+    var h='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-amber)">'
+      +'<div style="font-size:13px;margin-bottom:8px"><b>'+list.length+'</b> quotation'+(list.length===1?' was':'s were')
+      +' sent to the client and then reopened, and '+(list.length===1?'its':'their')+' price has moved since. '
+      +'While a quotation is open nothing holds the issued figure, so the next save writes the new one.</div>'
+      +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">'
+      +'<thead><tr><th style="text-align:left;padding:6px 10px">Serial</th><th style="text-align:left;padding:6px 10px">Client</th>'
+      +'<th style="text-align:right;padding:6px 10px">Sent to client at</th><th style="text-align:right;padding:6px 10px">Would become</th></tr></thead><tbody>';
+    list.forEach(function(f){
+      h+='<tr><td style="padding:5px 10px;font-family:ui-monospace,monospace">'+escHtml(f.serial)+'</td>'
+        +'<td style="padding:5px 10px">'+escHtml(f.client||'—')+'</td>'
+        +'<td style="padding:5px 10px;text-align:right;color:var(--teal);font-weight:600">'+fmtMoney(f.issued)+'</td>'
+        +'<td style="padding:5px 10px;text-align:right;color:var(--coral)">'+fmtMoney(f.now)+'</td></tr>';
+    });
+    h+='</tbody></table></div>'
+      +'<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      +'<button class="btn btn-primary" onclick="reCloseIssuedQuotations()" style="font-size:12px">'
+      +'<i class="ti ti-lock"></i> Close '+(list.length===1?'it':'them')+' at the sent figure</button>'
+      +'<span style="font-size:12px;color:var(--text2)">Only do this where the revision was abandoned. '
+      +'A quotation somebody is revising right now should stay open.</span></div></div>';
+    host.innerHTML=h;
+  });
+}
+// Deliberately NOT doLockOnly(): that recaptures the total and would write the new figure, which
+// is the exact outcome this exists to prevent. Only `locked` moves; lockedTotal is untouched.
+function reCloseIssuedQuotations(){
+  var list=_reopenedIssuedFindings.slice(); if(!list.length) return;
+  _confirm('Close '+list.length+' quotation'+(list.length===1?'':'s')+' at the figure the client was sent?'+String.fromCharCode(10,10)
+    +list.map(function(f){ return '• '+f.serial+'  '+fmtMoney(f.issued)+'  (instead of '+fmtMoney(f.now)+')'; }).join(String.fromCharCode(10))
+    +String.fromCharCode(10,10)
+    +'Each goes back to locked at the price it was issued at. Nothing is recalculated. Unlock again at any time.',
+  function(){
+    var host=el('dbcheck-reopened');
+    if(host) host.innerHTML='<div style="padding:12px 16px">Closing '+list.length+'…</div>';
+    var done=0, failed=0;
+    (function next(i){
+      if(i>=list.length){
+        if(host) host.innerHTML='<div style="padding:12px 16px;color:var(--teal)"><i class="ti ti-circle-check"></i> Closed <b>'+done+'</b>'
+          +(failed?', <b>'+failed+'</b> could not be written':'')+' at the sent figure.</div>';
+        _clearDataBanners();
+        return;
+      }
+      var f=list[i];
+      _persistApprovedFieldToQuotation({
+        serial:f.serial, type:'reclose', ctx:'s1',
+        logAs:'Closed again at '+fmtMoney(f.issued)+', the figure sent to the client. A recompute now gives '
+              +fmtMoney(f.now)+'; the revision it was reopened for was not made.'
+      },function(ok){
+        if(ok) done++; else failed++;
+        setTimeout(function(){ next(i+1); },150);
+      });
+    })(0);
   });
 }
 function _reportLostLockTimes(){
