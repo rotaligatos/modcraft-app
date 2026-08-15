@@ -7423,7 +7423,57 @@ Director fix after misreading a rebuke as "stop changing things".
 
 ---
 
-# OPEN — updated 2026-08-15 (session 3) (THIS IS THE AUTHORITATIVE LIST)
+# OPEN — updated 2026-08-15 (session 4, END OF DAY) — THIS IS THE AUTHORITATIVE LIST
+
+## Nothing is waiting on the developer. Three things are waiting on people.
+1. **⚠ Rotate the Wufoo API key.** Still in public git history since July. The only item with a
+   security clock on it. Wufoo → Account → API Information, then update `WUFOO_API_KEY` in the Apps
+   Script project.
+2. **Orders 8834 and 8840** — the team says which quotation each was. **Settings → Company & DB →
+   Check Project List** now lists the candidates with their evidence and a Link button (Admin only).
+   8834 is either `QT-W00000040` (RJJ Kitchenette, never sent — order correctly stays open) or
+   `QT-M00000101` (Africano Kitchen, sent 12 Aug). 8840 is very likely `QT-W00000046` (Ronald
+   Rellera, sent 3 Aug).
+3. **Two habits no code can fix.** **Client Approve** has been pressed twice ever, so win rate and
+   won revenue read near-zero. **Arrival source** (Walk-in / Email order) is set on 16 of 189, so
+   most jobs have no response time. Do NOT "fix" either by changing the KPI — check whether the
+   button was pressed first. That has already been the answer once.
+
+## Now that approval routing is enforced — two things to check
+- **Nobody has a delegate configured.** Every absence now falls to an Admin/Director bypass rather
+  than a named stand-in. Delegation is available to every approver in Settings → Users. See the
+  APPROVAL ROUTING section above for the full rule.
+- **PINs cannot be checked from SQL** (Google Sheet cols W/X only). A routed approver with no PIN can
+  no longer be quietly covered by someone else — worth confirming Kathleen, Allan and Stiffany have
+  one.
+
+## Open, unexplained
+- **Mobilization reads zero.** Reported 2026-08-12, never reproduced. The option-lock half of that
+  report WAS real and is fixed (`54098ad`). The snapshot path that could null mobilization was
+  hardened, but the only affected snapshots are ten June test options with nothing to lose. **If it
+  recurs: get the stage (1 or 2), the exact field, and whether it followed an option switch.**
+- **Order #8862 carries a `sent_at` of 8 Aug while still In Progress.** The app only writes a send
+  time when marking Done, so it was probably closed then reopened. Flagged, not touched — it will
+  distort the average when it does close.
+- **The Orders page sometimes falls back to reading the Google Sheet** (amber banner), which holds
+  more rows than Supabase. While that banner is up, the tab counts and any SQL query will disagree.
+
+## Parked by Rommel
+- **Colour / readability sweep.** Not a priority; he will say when. The measured one: **all 31
+  `.btn-primary` buttons fail AA in dark mode** (white on `rgb(91,149,209)` = 3.15, needs 4.5).
+- **Six remaining unlinked orders** (8820, 8862 and others) — the Admin picker exists; it needs the
+  team's knowledge, not more code.
+
+## Longer-term, unchanged
+Subsidiary material billing differs between BOM and cutting-list mode · Price DB ~39,420 blank-unit
+rows (**fill the units, delete nothing** — ~10,000 SKUs exist only as one) · hardware still on the
+assumed 30% pending procurement data · **PMES sign-in (do not drop its anon policies first)** ·
+website order pipeline (live SKUs, hole count, grooving variants) · Cabinet POC unverified types +
+oven tower · FORGE detection.
+
+---
+
+# OPEN — superseded, kept for detail — updated 2026-08-15 (session 3)
 
 ## ⚠ ONE click left for Rommel — everything else now handles itself
 Rommel ran the checks on 2026-08-15: **"Every Status matches"**, *1 credit corrected*, *1 date filled
