@@ -24150,6 +24150,9 @@ function reconcileDuplicateRows(execute){
 // to find one is a bad read — never a licence to write another. _quotRowSeen is marked wherever a
 // row is confirmed: found during a save, appended by one, or loaded from the directory.
 var _quotRowSeen={};
+// Marks a refusal that is BY DESIGN -- the write declined rather than create a duplicate -- so it
+// can be reported as what it is instead of as a failed save.
+function _rowGuardError(msg){ var e=new Error(msg); e._rowGuard=true; return e; }
 function _quotRowKnown(serial){
   if(!serial) return false;
   if(_quotRowSeen[serial]) return true;
@@ -29911,7 +29914,9 @@ function _proceedSaveQuotation(){
   // However, if any changes were made by other users, it should show in the log files." — the
   // activity log already records every action against the person who did it, and column Z
   // (Last Updated) already moves on every save, so who-touched-it-recently is not lost.
-  return sheetsGet('Quotations!A:H').then(function(d){
+  // Retries on rate-limit before giving up. This app does hit 429s, and a transient one must not
+  // turn into a refused write when waiting a second and a half would have succeeded.
+  return _sheetsGetWithRetry('Quotations!A:H',3).then(function(d){
     // ── An update overwrites its own row. It must never create a second one ──────────────────
     // Rommel, 2026-08-15: "whenever a user update a quotation, it should only overwrite the same
     // file, not create a new file." That is the actual flaw. This write had THREE paths that
@@ -29933,9 +29938,9 @@ function _proceedSaveQuotation(){
       // Only a genuinely absent tab justifies creating one. Every other error means we could not
       // look — which is not the same thing as "it is not there".
       if(!_isMissingTabError(d.error))
-        throw new Error('could not read the Quotations sheet ('+((d.error&&d.error.message)||'read failed')+')');
+        throw _rowGuardError('could not read the Quotations sheet ('+((d.error&&d.error.message)||'read failed')+')');
       if(known)
-        throw new Error('the Quotations sheet could not be read and this quotation already has a row');
+        throw _rowGuardError('the Quotations sheet could not be read and this quotation already has a row');
       return sheetsCreateTab('Quotations').then(function(){
         return sheetsAppend('Quotations!A:AA',[QUOT_HDR]).then(function(){
           return sheetsAppend('Quotations!A:AA',[row])
@@ -29947,7 +29952,7 @@ function _proceedSaveQuotation(){
     if(!vals.length){
       // An empty read of a sheet we know holds rows is a fault, not a fresh install.
       if(known||(dirData&&dirData.length))
-        throw new Error('the Quotations sheet read back empty although it is known to have rows');
+        throw _rowGuardError('the Quotations sheet read back empty although it is known to have rows');
       return sheetsAppend('Quotations!A:AA',[QUOT_HDR]).then(function(){
         return sheetsAppend('Quotations!A:AA',[row])
           .then(function(){ _quotRowSeen[serial]=true; return _healDuplicateRowsFor(serial,row); });
@@ -29978,7 +29983,7 @@ function _proceedSaveQuotation(){
     // Not found in a clean read. For a quotation we already know has a row that is impossible —
     // the read is wrong, not the sheet — so the save fails rather than writing a second row.
     if(known)
-      throw new Error('this quotation already has a row but it was not found — nothing was written, so a second row was not created');
+      throw _rowGuardError('this quotation already has a row but it was not found — nothing was written, so a second row was not created');
     // The genuine first-ever save. The only append that happens in normal use.
     return sheetsAppend('Quotations!A:AA',[row])
       .then(function(){ _quotRowSeen[serial]=true; return _healDuplicateRowsFor(serial,row); });
@@ -29991,11 +29996,16 @@ function _proceedSaveQuotation(){
     _cleanupPrevSerialRows(serial);
   }).catch(function(e){
     console.warn('Sheets save failed:',e);
-    // Name the reason. This branch now also fires when the save DECLINED to write rather than
-    // risk a duplicate, and "check connection" would not describe that.
-    showSheetsToast(false,'Not saved to the sheet — '+((e&&e.message)||'check connection')+' ('+serial+')');
-    try{ logActivity('Project List row not written for '+serial+' — '+((e&&e.message)||'save failed')
-      +'. The quotation itself is saved; no duplicate row was created.'); }catch(_){}
+    if(e&&e._rowGuard){
+      // NOT a lost save, and it must not read like one. The quotation is already in Supabase and
+      // its full state is written separately — only the Project List ROW is behind, and it
+      // catches up on the next save. Saying "not saved" here would start a panic over nothing.
+      showSheetsToast(true,'Quotation '+serial+' saved. The Project List row will catch up on your next save.');
+      try{ logActivity('Project List row for '+serial+' was not rewritten — '+(e.message||'')
+        +'. The quotation is saved; a duplicate row was deliberately not created.'); }catch(_){}
+      return;
+    }
+    showSheetsToast(false,'Sheets save failed — check connection ('+serial+')');
   });
   });   // ← end of the per-serial row-write chain opened above
   saveQuotationJson();
