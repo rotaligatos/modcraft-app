@@ -7070,9 +7070,13 @@ seems off in the next few days:
 3. **Extra Sheets reads.** `dirData` expiry (30s), the heal's re-read after an append,
    `_syncRowFromState` per approval, and the archive read before a delete. All on infrequent
    actions, but this app **does** hit 429 quota limits — if those reappear, this is where to look.
-4. **The save can now REFUSE.** A toast reading *"Not saved to the sheet — …"* is the new behaviour
-   working, not a regression: it declined to write rather than create a duplicate. The quotation
-   itself is safe in Supabase; retry the save.
+4. **The save can decline to rewrite the row** (`118f888`). A NORMAL save overwrites its own row —
+   that is every ordinary save. The decline only fires when the READ failed, which is precisely
+   where the old code created a duplicate. The read now retries with backoff on 429 first, so
+   this should be rare. When it does happen the user sees *"Quotation QT-XXXX saved. The Project
+   List row will catch up on your next save."* — **not** a loss message, because nothing is lost
+   (Supabase and the state are already written). ⚠ Rommel: *"if this will what appear then
+   everyone will panic"* — do NOT reword this back into anything that reads as a failed save.
 
 ## Known, not urgent — Supabase holds ~189 quotations, the Sheet ~85
 Quotations deleted from the Sheet before `supaDeleteQuotation` existed (2026-08-02) never reached
