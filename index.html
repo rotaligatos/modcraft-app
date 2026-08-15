@@ -23895,12 +23895,35 @@ function _findQuotationCredits(cb){
   (sheetUsers||[]).forEach(function(u){
     if(u.email) nameOf[String(u.email).trim().toLowerCase()]=u.name||u.email;
   });
+  // ── Who OWNS a quotation: the person who authored it. Nothing transfers that ──────────────
+  // Rommel, 2026-08-15: "whoever authored the quotation will remain as the owner of that
+  // quotation. For example, I'm an admin. and I made some changes or I decided to approve the
+  // vat. does it make me the owner. of course not."
+  //
+  // So the evidence is ranked and the FIRST match wins — the sources are never cross-checked
+  // against each other, which is what used to produce a "two people have hands on this, you
+  // decide" question that the rule above had already answered:
+  //   1. who claimed the quotation number  — literally the moment it was created
+  //   2. who exported it from a Wufoo order — the same creation event, for order-backed jobs
+  //   3. the Prepared-by signature          — LAST resort only
+  //
+  // The signature is ranked last deliberately: it is stamped at LOCK, so it names whoever locked
+  // the quotation, which is the author only when they happen to be the same person. QT-W00000034
+  // is the case that exposed it — Kaye exported it from Order #8834 and Rafael locked it, so the
+  // signature said Rafael while column H correctly said Kaye. Ranked, that conflict cannot arise.
   Promise.all([
     sheetsGet('Quotations!A:AA'),
     supa.from('quotation_states').select('serial,state'),
     supa.from('activity_log').select('user_email,action,at')
-        .like('action','Quotation created from Order #%').order('at',{ascending:true})
+        .like('action','Quotation created from Order #%').order('at',{ascending:true}),
+    supa.from('activity_log').select('serial,user_email,at')
+        .like('action','Quotation number %assigned%').order('at',{ascending:true})
   ]).then(function(res){
+    // 1 — the strongest evidence there is: whoever claimed the number brought it into existence.
+    var authorOf={};
+    ((res[3]&&res[3].data)||[]).forEach(function(e){
+      if(e.serial&&!authorOf[e.serial]) authorOf[e.serial]=String(e.user_email||'').trim().toLowerCase();
+    });
     var rows=(res[0]&&res[0].values)||[];
     if(!rows.length){ cb(null,'no-sheet'); return; }
 
@@ -23922,20 +23945,22 @@ function _findQuotationCredits(cb){
     for(var i=1;i<rows.length;i++){
       var r=rows[i], serial=String(r[0]||'').trim(); if(!serial) continue;
       var cur=String(r[7]||'').trim();
-      var sig=sigOf[serial]||'';
       var ord=String(r[17]||'').trim();
-      var exp=(haveUsers&&ord&&exporterOfOrder[ord])?(nameOf[exporterOfOrder[ord]]||''):'';
-      if(!sig&&!exp){ noEvidence++; continue; }
-      if(cur&&(cur===sig||cur===exp)){
-        if(sig&&exp&&sig!==exp) bothHands.push({serial:serial,client:r[2]||'',cur:cur,sig:sig,exp:exp,ord:ord});
-        else agree++;
-        continue;
+      // Ranked, first match wins. No cross-checking — see the note above.
+      var owner='', why='';
+      if(haveUsers&&authorOf[serial]&&nameOf[authorOf[serial]]){
+        owner=nameOf[authorOf[serial]]; why='they created it';
+      } else if(haveUsers&&ord&&exporterOfOrder[ord]&&nameOf[exporterOfOrder[ord]]){
+        owner=nameOf[exporterOfOrder[ord]]; why='they exported it from Order #'+ord;
+      } else if(sigOf[serial]){
+        owner=sigOf[serial]; why='the quotation was prepared under their name';
       }
-      // Column H names someone neither piece of evidence supports. The export is the creation
-      // event, so it wins where both exist.
-      ops.push({row:i+1, serial:serial, client:r[2]||'', from:cur||'(blank)', to:(exp||sig),
-                why:(exp?'exported it from Order #'+ord:'their signature is on the quotation')});
+      if(!owner){ noEvidence++; continue; }
+      if(cur===owner){ agree++; continue; }
+      ops.push({row:i+1, serial:serial, client:r[2]||'', from:cur||'(blank)', to:owner, why:why});
     }
+    // bothHands stays in the shape the renderer expects, but is now always empty: ranking the
+    // evidence means there is never a conflict left for a person to arbitrate.
     cb({ops:ops, bothHands:bothHands, agree:agree, noEvidence:noEvidence, haveUsers:haveUsers});
   },function(){ cb(null,'read-failed'); });
 }
