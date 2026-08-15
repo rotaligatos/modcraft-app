@@ -7192,10 +7192,43 @@ clears; `locked` was always guarded this way). But measured: only **10 of 40** o
 costs nothing today. **Mobilization-reads-zero remains unexplained** — if it recurs, get the stage
 and the exact field, and check whether it followed an option switch.
 
+### ✅ `qBaseSerial` REMOVED — the number is stored once (`91c9801`)
+The long-standing structural item, done. `qBaseSerial` was a second copy of the quotation number kept
+in step by hand in **eleven** places; it is now a **read-only derived property** — a getter on
+`window` returning `_serialRoot(qSerial)`. All eleven assignments are gone; assigning warns and is
+inert. 77 references → 69.
+
+**Why the derivation is exact** (this is the fact that makes it safe, and it was checked before any
+edit): `getDisplaySerial()` builds `qBaseSerial+'-'+optionId`, so **the option suffix is DISPLAY ONLY
+and `qSerial` never carries it.** A revision keeps the row on the base. So `_serialRoot(qSerial)`
+equals the old `qBaseSerial` for plain, option-active, revision and draft alike.
+
+**Checked against all 175 saved quotations BEFORE changing anything: 174 already identical.** The one
+exception is `QT-W00000048` — the Supabase-only orphan absent from the Sheet — whose state carries
+`QT-M00000086`; it now files under the number the quotation itself carries, which is the settled rule
+for a split (the client's copy wins).
+
+> ⚠ `baseSerial` is **still WRITTEN** into the saved state (line ~30164), so a browser on an older
+> cached build still reads what it expects. It is simply no longer read back —
+> `restoreFullQuotationState` derives from `state.serial` and only *warns* if the stored field
+> disagrees. Do not remove that write until every client is known to be on this build or later.
+>
+> ⚠ `_assertSerialAgreement` is now largely moot by construction. Left in place: it still guards the
+> Sheet row key, which is a different store.
+
+Verified on a fresh load: no console errors, every function that reads it defined, eight serial shapes
+deriving correctly (plain · option active · revision · revision+option · second revision · both legacy
+formats · empty), filing key stable across all of them, assignment refused.
+
 ### Method notes
 - **Investigate before building, even when the handoff specifies the design.** The specified rule was
   wrong in two independent ways, and one query found both. Same shape as the disabled credits repair:
   mechanism verified, meaning assumed.
+- **A patch script that throws before `writeFileSync` leaves the file untouched** — that fail-safe
+  caught three bad anchors on the `qBaseSerial` change with no cleanup needed. Keep the write last.
+- **Plain-string replace matches SUBSTRINGS, not lines.** `"  qSerial=''; qBaseSerial='';…"` is inside
+  the 8-space-indented copy of itself, so a 2-space anchor matched twice. Anchor on the preceding line
+  whenever indentation is the only difference, and never trust an indented one-liner to be unique.
 - **Two symptoms reported together often share one cause, but verify rather than assume.** The option
   lock and mobilization-zero were reported as one thing; the option half reproduced exactly, the
   mobilization half turned out to affect only dead test data. Fixing both was right; *claiming* both
