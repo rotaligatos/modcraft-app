@@ -11144,7 +11144,9 @@ function downloadStage2Template() {
 // ── Dashboard ─────────────────────────────────────────────────────────────
 // Load dirData without rendering the directory table (for dashboard use)
 function gLoadDirData(cb){
-  if((dirData&&dirData.length)||Object.keys(sessionQuotations||{}).length){if(cb) cb(); return;}
+  // The old guard also returned early whenever sessionQuotations had ANY entry, which pinned the
+  // list to this session's own saves for the life of the tab.
+  if(dirData&&dirData.length&&!_dirIsStale()){if(cb) cb(); return;}
   if(dirLoading){setTimeout(function(){gLoadDirData(cb);},300); return;}
   if(!gToken){if(cb) cb(); return;}
   dirLoading=true;
@@ -11173,18 +11175,51 @@ function gLoadDirData(cb){
         dirData.push(entry); seen[baseS]=entry;
       }
     }
+    if(!d.error) _dirLoadedAt=Date.now();
     dirLoading=false; if(cb) cb();
   }).catch(function(){dirLoading=false; if(cb) cb();});
 }
+
+// ── The list must show the LATEST change, not YOUR latest change ─────────────────────────
+// sessionQuotations exists so a quotation you have just saved appears immediately, without waiting
+// for the sheet to be read again. What it must never do is win FOREVER. dirData was only loaded
+// when it was empty, so a tab left open never picked up anyone else's work, and your own copy sat
+// on top of theirs indefinitely -- QT-M00000115 showed P4,285.90 (Rommel's 16:05 save) for a day
+// while everyone else saw the real P1,989.00. Rommel, 2026-08-15: "regardless if I'm the one who
+// update, it doesnt make sense that it retain my last changes versus the latest changes of the
+// user or whoever."
+//
+// Every sheet row carries updatedAt (column Z) and every session entry stamps its own, so this is
+// an exact comparison, not a heuristic.
+function _entryIsNewer(a,b){
+  var ta=Date.parse((a&&a.updatedAt)||'')||0, tb=Date.parse((b&&b.updatedAt)||'')||0;
+  if(ta&&tb) return ta>tb;
+  // No timestamp on the sheet row means it predates that column, so it cannot be newer than a save
+  // made in this session. With neither timestamp this is the original behaviour.
+  return !tb;
+}
+// Lays session saves over the sheet rows, but ONLY where they are genuinely newer. keyFor keeps
+// each call site's own keying (some key by base serial, some by the raw serial) so behaviour is
+// unchanged apart from the recency guard.
+function _mergeSessionOver(merged,keyFor){
+  keyFor=keyFor||function(e,k){ return e.baseSerial||e.id; };
+  Object.keys(sessionQuotations||{}).forEach(function(k){
+    var e=sessionQuotations[k]; if(!e||!e.id) return;
+    var key=keyFor(e,k), cur=merged[key];
+    if(!cur||_entryIsNewer(e,cur)) merged[key]=e;
+  });
+  return merged;
+}
+// dirData is a cache of the sheet. It has to expire, or nobody ever sees anyone else's changes.
+var _dirLoadedAt=0;
+var DIR_MAX_AGE_MS=30000;
+function _dirIsStale(){ return !_dirLoadedAt || (Date.now()-_dirLoadedAt)>DIR_MAX_AGE_MS; }
 
 // Merge dirData + sessionQuotations into a flat array (base-serial deduped)
 function _dashAllEntries(){
   var merged={};
   (dirData||[]).forEach(function(e){if(e&&e.id) merged[e.baseSerial||e.id]=e;});
-  Object.keys(sessionQuotations||{}).forEach(function(k){
-    var e=sessionQuotations[k]; if(e&&e.id) merged[e.baseSerial||e.id]=e;
-  });
-  return Object.values(merged);
+  return Object.values(_mergeSessionOver(merged));
 }
 
 // ── Additional orders roll up under the job they came from ─────────────────────────────────
@@ -11973,7 +12008,7 @@ function renderDashFollowed() {
   // Build merged list from real data (same as Project List)
   var merged={};
   dirData.forEach(function(e){merged[e.id]=e;});
-  Object.keys(sessionQuotations).forEach(function(k){merged[k]=sessionQuotations[k];});
+  _mergeSessionOver(merged,function(e,k){return k;});
   var followed=Object.values(merged).filter(function(p){return qFollowed[p.id]||qFollowed[p.baseSerial];});
   if(!followed.length){
     tbl.innerHTML='<tbody><tr><td colspan="7" style="text-align:center;padding:20px;color:var(--text2)">'
@@ -12398,7 +12433,7 @@ function renderCostReportTab(){
   if(!canViewCostReport()){w.innerHTML='<div class="alert alert-warn"><i class="ti ti-lock"></i> Admin / Director / Manager access only.</div>';return;}
   var merged={};
   (dirData||[]).forEach(function(e){if(e&&e.id)merged[e.id]=e;});
-  Object.keys(sessionQuotations||{}).forEach(function(k){merged[k]=sessionQuotations[k];});
+  _mergeSessionOver(merged,function(e,k){return k;});
   var list=Object.keys(merged).map(function(k){return merged[k];})
     .sort(function(a,b){return String(b.created||'').localeCompare(String(a.created||''));});
   var opts=list.map(function(e){
@@ -14618,9 +14653,7 @@ function _orderQuotationEntry(serial){
   if(!serial) return null;
   var merged={};
   (typeof dirData!=='undefined'&&dirData?dirData:[]).forEach(function(e){ merged[e.id]=e; });
-  Object.keys(typeof sessionQuotations!=='undefined'?sessionQuotations:{}).forEach(function(k){
-    merged[k]=sessionQuotations[k];
-  });
+  if(typeof sessionQuotations!=='undefined') _mergeSessionOver(merged,function(e,k){return k;});
   return merged[serial]||merged[_serialRoot(serial)]||null;
 }
 function _orderQuotationLine(o){
@@ -20531,7 +20564,7 @@ function quotAgeDays(e){
 function _quotAgeCount(stage){
   var merged={};
   (dirData||[]).forEach(function(e){merged[e.id]=e;});
-  Object.keys(sessionQuotations||{}).forEach(function(k){merged[k]=sessionQuotations[k];});
+  _mergeSessionOver(merged,function(e,k){return k;});
   var n=0;
   Object.keys(merged).forEach(function(k){ if(quotAgeStage(merged[k])===stage) n++; });
   return n;
@@ -20695,10 +20728,13 @@ function renderDirectory(){
   try{ _ensureStageFlags(); }catch(e){}
   try{ _dbCheckAuto(); }catch(e){}
   // Load from Sheets if signed in, else use demo
-  if(gToken&&!dirLoading&&(!dirData||dirData.length===0)){
+  if(gToken&&!dirLoading&&(!dirData||dirData.length===0||_dirIsStale())){
+    var _hadRows=!!(dirData&&dirData.length);
     dirLoading=true;
     var wrap=el('dir-table');
-    if(wrap) wrap.innerHTML='<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite;font-size:20px"></i> Loading...</td></tr>';
+    // Only show the spinner on a cold load. A staleness refresh happens under rows that are
+    // already on screen, so replacing them with a spinner every visit would just flicker.
+    if(wrap&&!_hadRows) wrap.innerHTML='<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite;font-size:20px"></i> Loading...</td></tr>';
     sheetsGet('Quotations!A:AA').then(function(d){
       if(d.error){ // Quotations tab not created yet — no quotations saved so far. Show empty, not demo.
         dirData=[]; dirLoading=false; renderDirectoryTable(); return;
@@ -20733,6 +20769,7 @@ function renderDirectory(){
         dirData.push(entry);
         seen[baseS]=entry;
       }
+      _dirLoadedAt=Date.now();
       dirLoading=false;
       renderDirectoryTable();
     }).catch(function(e){
@@ -20849,7 +20886,7 @@ function renderDirectoryTable(){
   // Merge session saves on top of Sheets data (session wins for same serial)
   var baseList=dirData&&dirData.length?dirData:DEMO_PROJS.map(function(p){return {id:p.id,baseSerial:p.id,created:p.created,client:p.client,contact:'',type:p.type,value:p.value,user:p.user,segment:'',status:p.status,locked:p.status!=='Draft',stage:'Initial',options:1};});
   var merged={}; baseList.forEach(function(e){merged[e.id]=e;});
-  Object.keys(sessionQuotations).forEach(function(k){merged[k]=sessionQuotations[k];});
+  _mergeSessionOver(merged,function(e,k){return k;});
   var list=Object.values(merged).slice();
   // Count archived before filtering so the toggle button can show the number
   // Was (e.status==='Archived'), which could never be true — nothing ever wrote it.
