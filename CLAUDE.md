@@ -7249,6 +7249,112 @@ formats · empty), filing key stable across all of them, assignment refused.
 
 ---
 
+## What was changed on 2026-08-15 (session 4b — the order response clock, and status alignment)
+
+Eight more commits, `40d6d4c`..`378d161`. All deployed and confirmed serving. Every finding below
+came from querying live data or driving the code.
+
+### ⚠ The response clock was not stopping — two causes, both measured (`4ebd2b6`, `ff79e88`, `7f4fd86`)
+Rommel: *"how come the time does not stop even if many of this were sent already?"* He was right, and
+it was worse than a display fault — orders sat at 71h and 76h and climbing on quotations sent days
+earlier.
+
+1. **The link died with the session.** `orderMarkSentFromQuotation` did nothing unless
+   `qSourceOrderId` was set, and that is assigned only by `exportOrderToQuotation` and lives in
+   memory. Reload the tab, or open the quotation from the Project List rather than from its order,
+   and the Share buttons had nothing to close. **8 of the 9 open orders had no usable link**, four of
+   them on quotations already marked *"Shared via Viber"*. The order has always stored the quotation
+   serial, so it is now looked up from that side too (`_orderAwaitingQuotation`), matched on
+   `_serialRoot` so an option or revision suffix still resolves. A Done/Cancelled/Archived order is
+   never matched, so a later re-share cannot reopen something finished.
+2. **Three send paths never stopped it at all.** Lock & Send (`confirmSend`) and the multi-option
+   send (`confirmSendVersions`) marked the quotation sent and left the order running. Measured across
+   the whole activity log: **Share→Viber 121, Lock & Send→messaging 28, Share→Email 14, Lock &
+   Send→email 11, Share→via apps 6, Copy 5** — so **39 real sends** went through the path that never
+   stopped the clock.
+
+> **The rule, now uniform and checkable in one line:** every function that calls `_markSent` also
+> calls `orderMarkSentFromQuotation`, with exactly ONE deliberate exception — **copy to clipboard**
+> (Rommel: *"what is not included that will stop the clock is the copy to clipboard and download"*).
+> Download and Skip do neither. **Locking never stops the clock**, by any route — verified against
+> all 15 real log strings.
+
+### Mark Done removed, and the stranded clocks corrected from the log (`c9698e2`)
+Rommel: the button is redundant now the Share buttons work. It also could never have repaired
+anything — it stamps `sentAt` as NOW, so a job answered on 6 August would read as answered today,
+slower than it was. `_setOrderStatus` gained an optional explicit send time; every ordinary caller
+omits it and still gets now.
+
+**`_findUnclosedSentOrders` / `fixUnclosedSentOrders`** (Settings → Company & DB) reads the
+append-only activity log for the real moment. Deliberately narrow because it writes history: the
+FIRST send only, never an entry recorded before the order arrived, never a draft key, never a
+non-send line, never an already-finished order. **Run 2026-08-15: 7 orders corrected** (8836, 8848,
+8852, 8854, 8856, 8857, 8858), all at their true send times.
+
+⚠ The matcher was initially missing `"Sent versions to client: …"`. Rommel: *"some of the team is
+also using other options I mentioned to send to clients so you should check their log as well."*
+**Take the phrasings from the functions themselves, never guess them.**
+
+### Three unlinked orders traced by hand — and why auto-tracing was rejected
+The team confirmed four orders were quoted in the app but never linked. Verified each against the
+log before writing: **8814→QT-W00000038, 8833→QT-W00000034, 8842→QT-W00000044** applied;
+**8834** refused because the serial Rommel gave (`QT-W00000046`) has project *"Ronald Rellera"*,
+which belongs to order **8840**, not 8834.
+
+**Automatic tracing was investigated and rejected on the evidence:** ROBERT VALERA has four
+quotations, so orders 8833/8834 each match all four by name; and the team's `MSRF#` convention
+already collides — **`MSRF#8842` appears on both `QT-W00000044` and `QT-W00000065`**. An auto-link
+would have closed the wrong order and left a real one running. A candidate *picker* was offered
+(app finds, person decides — the duplicate-row pattern) and not yet taken up.
+
+### Team performance filters by whose team (`bbf8169`)
+Rommel: *"It should filter based on the company of the user and by subsidiary that they catered."*
+
+**Every one of the 109 quotations by the Module Systems staff** — Jhover 40, Stephanie 36, Joanna 21,
+Kaye 12 — **was raised under World Class Laminate or Cebu World, never their own company.** MSSI is
+in practice a shared service centre. The single filter keyed on the QUOTATION, so "Module Systems"
+returned **nothing** and "World Class" showed MSSI's work as WCL's. Now two: **Team** (the person's
+company) and **Catered for** (the quotation's). Both use `_quotCompanyKey`, so the singular
+*"Module System and Services, Inc."* in the Sheet still maps.
+
+### The order card leads with the quotation's status (`d8d853f`, `378d161`)
+Rommel: *"I want to flow similar with the quotation … so its clear whether I check in the project
+list or order."* Once a real quotation exists the card shows its ladder status — same words, same
+theme-aware pill classes as the Project List. **Nothing is stored or synced**: it reads the quotation
+at render time, so it cannot drift.
+
+**Only `Cancelled` overrides it** — a person pressed Cancel on the order and nothing in the quotation
+records that. **`Archived` defers**, because archiving is the quotation's own doing.
+
+> ⚠ **Corrected by Rommel:** I illustrated this with "archived after the job was won", which **cannot
+> happen** — the win trigger was removed 2026-08-12 (`dc2e78b`). **`confirmCancelQuotation` is the
+> ONLY caller of `_archiveOrdersForQuotation`**, so the Archived tab holds declined jobs only, and
+> now reads *Declined* rather than *Archived*. A won job is the start of the work, not the end.
+
+### An order action stops landing in an unrelated draft (`b95b60c`)
+Deleting orders 8758/8796/8821 filed *"Order #8821 deleted"* against `DRAFT-ed2929`. `gLogToSheets`
+treated `''` and *not given* identically, so an explicit "no quotation" was impossible. Now
+`undefined` = use the screen; `''` = belongs to no quotation. Order actions file against the order's
+own quotation when it has one (`_orderLogSerial`), and nothing when it does not.
+
+### Re-close a reopened quotation at the issued figure (`40d6d4c`)
+`_findReopenedIssued` / `reCloseIssuedQuotations`. **The Lock button cannot do this** —
+`doLockOnly` calls `_captureLockedTotal`, which pins whatever the quotation computes NOW, so pressing
+Lock on QT-W00000065 would have written ₱1,000 over the ₱34.32 the client holds. This moves `locked`
+only. **Run 2026-08-15: W65 re-closed, still pinned at ₱34.32.**
+
+### Method notes
+- **Rommel corrected me three times and was right every time**: copy-to-clipboard should not stop the
+  clock; the other send paths are in real use (39 sends); and a won job is never archived. **Play the
+  rule back before building, and when he says a behaviour was already decided, check the code rather
+  than the memory of it.**
+- **A test case you invent to prove logic is not evidence of behaviour.** "Archived after the job was
+  won" passed the test and misrepresented the app. Illustrate with states that actually occur.
+- **Ambiguity is a reason not to automate.** Four candidates for one client, and a naming convention
+  that already collides, is the signal to build a picker rather than a matcher.
+
+---
+
 # OPEN — updated 2026-08-15 (session 3) (THIS IS THE AUTHORITATIVE LIST)
 
 ## ⚠ ONE click left for Rommel — everything else now handles itself
