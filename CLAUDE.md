@@ -6988,6 +6988,41 @@ placement: *"so its visible and accessible."* Lists what went, by whom, its valu
 keeps the archive copy either way. Appended, not reinserted at its old position — the sheet has
 moved on and every lookup here scans column A, never row numbers.
 
+**7. ⚠⚠ THE ACTUAL ROOT CAUSE — a save could CREATE a row when one already existed (`251c1b9`).**
+Rommel rejected a reconcile-then-migrate plan as another workaround: *"Why not check the logic why
+this occur rather than countering again the symptoms again. in my mind, whenever a user update a
+quotation, it should only overwrite the same file, not create a new file."* He was right — items 5
+and 6 above both treat the symptom.
+
+The row write had **three** paths that append, and all three read *"I could not find the row"* as
+*"it is not there, so make one"*:
+
+| Branch | Fires on |
+|---|---|
+| `d.error` | **ANY** read failure — `sheetsGet` surfaces quota (this app hits 429s), expired tokens and dropped connections all as `d.error`, and it created the tab and appended for every one |
+| `!vals.length` | an empty or partial response |
+| `rowIdx < 0` | absent from whatever came back |
+
+**So the duplicate was never a race — it was created deliberately, by design.** That is why
+`_quotRowWrite` (2026-08-09) and `_healDuplicateRowsFor` (`95aebca`) never stopped it: both were
+aimed at concurrency, and concurrency was not the cause.
+
+An append now needs **positive evidence** that no row exists: a clean read, of a sheet that plainly
+has content, in which the serial genuinely does not appear, for a quotation `_quotRowKnown()` does
+not already know has a row (confirmed during a save, appended by one, or loaded from the directory).
+Anything short of that **fails the save out loud**, names the reason, and logs that no duplicate was
+created. A failed save is visible and retryable; a duplicate stays invisible for days — and the
+Supabase dual-write has already happened by that point, so the work is never lost.
+`_isMissingTabError()` keeps the one legitimate create: only a genuinely absent tab (Google answers
+with a parse error naming the range) qualifies.
+
+> ⚠ **QUOTATION OPTIONS ARE UNAFFECTED — verified, not assumed**, after Rommel flagged the risk
+> ("This should not affect the quotation option creation, just a reminder"). Options share **ONE**
+> row: `_doCreateNewOption` sets `qBaseSerial=qSerial` and the row write uses `qBaseSerial||qSerial`,
+> so option 2, option 3 and revision `.R1` all resolve to the base serial and take the UPDATE path.
+> If anything this protects them — an option save that hit a read failure previously appended a
+> duplicate. **Any future change here must re-check that options still resolve to the base serial.**
+
 ### Method notes (session 3, part 2)
 - **"Is this backlog or new?" is the question that finds a root cause.** Both findings were new,
   which immediately disproved "just clean it up and move on".
@@ -7022,6 +7057,30 @@ in*. Only one item remains, and it is the only one that still needs a person:
 **Do NOT re-add "clicks for the user" that a rule already answers.** Status now auto-corrects
 (derived value → its own derivation, no judgement possible) and credits resolve by ranked evidence.
 The remaining manual step exists only because it deletes rows that predate the prevention.
+
+## Watch these — shipped this session, correct in test, not yet observed in production
+Not defects, and **do not "fix" them pre-emptively** — just the things to look at first if something
+seems off in the next few days:
+1. **`_resolveLegacyVatSplit`** resolves 86 quotations as they are opened, one activity-log line
+   each. Expected. If a total moves 12% on open, that is this — and it is moving it TO the figure
+   the quotation was locked and issued at.
+2. **Status now auto-corrects** on opening the Project List (`fixProjectListStatuses(true)`). It
+   should be silent after the first pass; repeated corrections of the SAME serial would mean
+   something is still writing a stale status.
+3. **Extra Sheets reads.** `dirData` expiry (30s), the heal's re-read after an append,
+   `_syncRowFromState` per approval, and the archive read before a delete. All on infrequent
+   actions, but this app **does** hit 429 quota limits — if those reappear, this is where to look.
+4. **The save can now REFUSE.** A toast reading *"Not saved to the sheet — …"* is the new behaviour
+   working, not a regression: it declined to write rather than create a duplicate. The quotation
+   itself is safe in Supabase; retry the save.
+
+## Known, not urgent — Supabase holds ~189 quotations, the Sheet ~85
+Quotations deleted from the Sheet before `supaDeleteQuotation` existed (2026-08-02) never reached
+Supabase. **So any SQL count of `quotations` overcounts by roughly 100** — trust the app's number,
+not a query. It also means the Project List read cannot be flipped to Supabase until those orphans
+are reconciled. That flip is now **optional hardening** (`serial` is the PRIMARY KEY there, so a
+duplicate would be rejected outright rather than prevented in app logic) — it is no longer the fix,
+because `251c1b9` addressed the cause.
 
 ## ⚠ Not built — the total column has no checker
 `checkProjectListData()` compares **status only**; `fixProjectListStatuses()` says outright it
