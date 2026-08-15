@@ -7037,6 +7037,106 @@ with a parse error naming the range) qualifies.
 
 ---
 
+## What was changed on 2026-08-15 (session 4 — the value-column checker was investigated and rejected; the audit gap behind it fixed)
+
+One commit, `7b4adc4`, deployed and confirmed serving. Started as item 2 of the handoff (a checker
+for the Project List's total column). **It should not be built, and investigating why turned up the
+real defect underneath it.**
+
+### The checker was specified with a rule that would have corrupted a live quotation
+The handoff said: repair from `fqLockedTotal` if `fqLocked`, else `qLockedTotal`, else the state's
+`pCalc.grand`. Two things were wrong with it before a line was written.
+
+**First, the key name.** Stage 1's locked total is stored as **`lockedTotal`**, not `qLockedTotal` —
+that is the *global's* name, not the state's. Measured: 72 states carry `lockedTotal`, **zero**
+carry `qLockedTotal`. A repair written from the handoff would have found nothing at Stage 1 and
+fallen through to `pCalc.grand` on every single quotation.
+
+**Second, and worse, the fallback.** Across all 175 saved states there is exactly **one** total
+mismatch, and on that one — **QT-W00000065 (DCD Studio)** — the rule would have rewritten ₱34.32 to
+₱1,000, a quotation the client already holds. +2,800%.
+
+The obvious correction (trust a stored locked total whenever it exists) is *also* wrong.
+**QT-W00000080 (KME)** has an identical flag shape — `locked:false`, `fqLocked:false`, `lockedTotal`
+present, `pCalc` differs — but there the row is right and `lockedTotal` is the stale figure, because
+it was genuinely reopened and re-priced. **Two rules, opposite answers, indistinguishable from the
+state.** No flag-based rule can separate them; the distinguisher is *why* they diverged, which lives
+in the approval requests and the activity log.
+
+⚠ **So the "Not built — the total column has no checker" item is now CLOSED as deliberately not
+built, not as pending.** If it is ever revisited: the mismatch class is one row in 175, and both
+candidate repair rules are proven to break a real quotation.
+
+### QT-W00000065 — I was wrong about it, and the correction matters
+I reported it as a silent drift with "nobody deciding to". **That was wrong.** There is an approved
+**unlock request** on it: `req_1786588378178_on68f4`, raised by Jhover 13 Aug 02:33, approved by
+Allan, `applied:true`. The quotation was deliberately reopened and the price guard released exactly
+as designed — Rommel's own rule, *"unless the user intervene or unlocked the quotation."*
+
+Two of my own filters produced the false lead, and both are worth remembering:
+- `NOT IN` against `activity_log.serial`, which is **nullable** — the classic NULL trap. It made a
+  count return 0 when the row plainly qualified. **List the rows; don't count them.**
+- Excluding `'%Stage 2 unlocked%'` from an `ilike '%unlock%'` search — but **the price guard's own
+  message ends "Unlock the quotation to change the price."**, so the guard's log line reads as an
+  unlock. That is what first told me W65 had never been unlocked.
+
+What remains true is commercial, not technical: the client was quoted **₱34.32** (₱27.18 cutting +
+₱7.14 edgebanding) for work whose minimums are ₱500 + ₱500, issued 6 Aug minutes around
+minimum-charge enforcement shipping that same day. It is unlocked now, presumably to fix precisely
+that. **Rommel's call, no code involved.**
+
+### ⚠ The real defect: an approval applied in the background left no trace (`7b4adc4`)
+When an approved unlock is applied while the quotation is **not open on screen**, the app changes
+the saved record — clears `locked`, wipes `sentStatus`/`sentAt`, releases the frozen price — and
+wrote **nothing** to that quotation's history. The on-screen branch of `_applyApprovedRequest` logs
+*"Quotation unlocked (approved by X)"*, but it is gated on `appliesToOpenQuotation`; the state-writing
+path in `_persistApprovedFieldToQuotation` logged nothing at all.
+
+That is exactly why W65 read as corruption: locked, shared via Viber, then the lock simply gone with
+no line saying who or why.
+
+**It could not be logged before.** `logActivity(action)` took no serial and `gLogToSheets` hardcoded
+`serial: qSerial||qDraftKey||''` — the quotation *on screen*. The apply path acts on a quotation that
+is by definition not open, so a line written there would have been filed onto **someone else's**
+quotation. Both existing `logActivity` calls in the phone-apply path already had this defect: they
+name the target serial *in their text* while being filed under the open one.
+
+Fixed: `logActivity(action, serial)` and `gLogToSheets(action, serial)`. The on-screen panel still
+shows only the open quotation's own history (`qLog`/`renderActivityLog` are skipped when the serial
+is someone else's), and a draft still logs under its `DRAFT-` key. The line is written **centrally**,
+in `_persistApprovedFieldToQuotation` where the change is actually made, with provenance passed down
+as a third argument — so one decision leaves **one** line, on the right quotation, instead of two on
+the wrong one.
+
+**Verified against the real functions, with a control.** Five stamping cases (no serial → open
+quotation and shows in the panel; another serial → that quotation and *not* in the panel; the open
+serial passed explicitly → still shows; a draft on screen → its draft key; a background approval
+while a draft is open → the target serial, not the draft). Then W65's exact scenario end to end:
+with the serial argument ignored (old behaviour) the entry lands on **QT-M00000115**, an unrelated
+quotation; with the fix, on **QT-W00000065**. The simulated apply reproduces W65's stored state
+exactly — `locked:false`, `sentStatus:''`, `lockedTotal` preserved at 34.32 — which is what confirms
+the mechanism rather than merely fitting it.
+
+### Flagged, deliberately NOT changed
+The two unlock paths disagree about the client's approval: the on-screen one clears
+`qClientApproved`/`qClientApprovedAt` when reopening (*"re-editing after unlock invalidates any prior
+client sign-off"*), the background state mutate does not — it clears the fq fields in the `fq` branch
+only. W65 still reads `clientApproved: true` while unlocked, which is why its status shows
+"IQ Approved". Making them agree changes whether a client sign-off survives a reopen, which is a
+business rule, not a tidy-up.
+
+### Method notes
+- **Investigate before building, even when the handoff specifies the design.** The specified rule was
+  wrong in two independent ways, and one query found both. Same shape as the disabled credits repair:
+  mechanism verified, meaning assumed.
+- **A handoff naming a stored field may be naming the global instead.** `qLockedTotal` vs
+  `lockedTotal` — check the data, not the prose.
+- **When two candidate rules disagree on identical inputs, neither is the rule.** That is the signal
+  to stop and find the real distinguisher, not to pick the more plausible one.
+- `activity_log` columns are `at / user_email / action / serial` — **not** `created_at`.
+
+---
+
 # OPEN — updated 2026-08-15 (session 3) (THIS IS THE AUTHORITATIVE LIST)
 
 ## ⚠ ONE click left for Rommel — everything else now handles itself
@@ -7077,6 +7177,21 @@ seems off in the next few days:
    List row will catch up on your next save."* — **not** a loss message, because nothing is lost
    (Supabase and the state are already written). ⚠ Rommel: *"if this will what appear then
    everyone will panic"* — do NOT reword this back into anything that reads as a failed save.
+5. **Approvals applied in the background now leave a line** (`7b4adc4`, session 4) — e.g. *"Unlock
+   approved by Allan Lagsao — applied to this quotation (from a phone)."* on the quotation it
+   actually changed. One line per decision; the phone path no longer writes its own. If a quotation's
+   history starts showing entries that belong to a different job, that is the serial argument being
+   passed wrongly somewhere and it is the thing to look at.
+
+## For Rommel — one commercial decision, no code involved
+**QT-W00000065 (DCD Studio)** went to the client at **₱34.32** — ₱27.18 cutting + ₱7.14 edgebanding —
+for work whose minimum charges are ₱500 + ₱500, so a recompute today gives **₱1,000**. It was issued
+6 Aug, minutes around minimum-charge enforcement shipping that same day.
+
+It is **already unlocked** (Jhover requested it 13 Aug, Allan approved) so it is open for revision
+right now, presumably for exactly this. Nothing is broken and nothing needs fixing in the app — the
+only question is whether the revision goes to the client at ₱1,000. **Do not let anyone "repair" the
+₱34.32 in the Project List instead** — see the closed checker item below for why that would be wrong.
 
 ## Known, not urgent — Supabase holds ~189 quotations, the Sheet ~85
 Quotations deleted from the Sheet before `supaDeleteQuotation` existed (2026-08-02) never reached
@@ -7086,13 +7201,23 @@ are reconciled. That flip is now **optional hardening** (`serial` is the PRIMARY
 duplicate would be rejected outright rather than prevented in app logic) — it is no longer the fix,
 because `251c1b9` addressed the cause.
 
-## ⚠ Not built — the total column has no checker
-`checkProjectListData()` compares **status only**; `fixProjectListStatuses()` says outright it
-*"Rewrites only the Status column."* **Nothing in the app ever checks or repairs the total (column
-G).** A stale value can sit there indefinitely with no detector — which is why M115 was found by eye.
-If it is added, repair from the **locked/issued** figure (`fqLockedTotal` if `fqLocked`, else
-`qLockedTotal`, else the state's `pCalc.grand`), never from a live recompute, so no issued price can
-move. Not started — it was not needed for M115 in the end, since the data was correct.
+## ✅ CLOSED 2026-08-15 (session 4) — the total-column checker was investigated and REJECTED
+It is still true that `checkProjectListData()` compares status only and nothing checks column G.
+**Do not build the repair.** Measured on live data: the mismatch class is **one row in 175**, and
+both candidate rules are proven to break a real quotation.
+
+- The rule this list used to prescribe (`fqLockedTotal` → `qLockedTotal` → `pCalc.grand`) names
+  **`qLockedTotal`, which does not exist in the state** — it is the global's name; the stored key is
+  **`lockedTotal`** (72 states have it, 0 have `qLockedTotal`). It would therefore fall through to
+  `pCalc.grand` on every quotation, and on **QT-W00000065** that rewrites ₱34.32 → ₱1,000 on a
+  quotation the client already holds.
+- The obvious correction (prefer a stored locked total whenever present) breaks **QT-W00000080**,
+  which has an identical flag shape but is legitimately mid-revision, so its row correctly follows
+  the new price.
+
+Two rules, opposite answers, identical inputs → no flag-based rule exists. The distinguisher is the
+approval requests and the activity log, not the state. Full working in the 2026-08-15 session 4
+entry above.
 
 ## ⚠ Still pending from session 2 — one device test, then it is closed
 The PWA install collision is **fixed and deployed** (`67cab3c`, confirmed serving). Nothing left to
