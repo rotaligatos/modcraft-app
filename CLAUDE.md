@@ -6825,9 +6825,108 @@ exists to protect, and it is the only residual risk in this change.
 
 ---
 
-# OPEN — updated 2026-08-15 (session 2) (THIS IS THE AUTHORITATIVE LIST)
+## What was changed on 2026-08-15 (session 3 — QT-M00000115: one VAT flag, and the list showing YOUR change)
 
-## ⚠ FIRST THING NEXT SESSION — one device test, then it is closed
+Two commits, `9f26ede` and `a707c5b`, both deployed and confirmed SERVED. Started from Rommel:
+*"For QTM115 quotation project cost versus what was displayed in the project list is not the same."*
+
+### ⚠ THREE different numbers, and I chased the wrong one first
+- Quotation screen: **₱1,775.90** ("VAT exclusive · rates as at lock")
+- Stored total, Sheet **and** Supabase: **₱1,989.00**
+- His Project List: **₱4,285.90**
+
+**I assumed the list showed ₱1,989.00 and said so confidently**, then built a duplicate-row theory on
+it. His screenshots and his own **Check Project List** run disproved both — the only duplicate row is
+`QT-M00000114`, and M115 was not flagged at all. **Ask for the screenshot and the built-in check
+BEFORE theorising.** Both were one message away.
+
+### Fault 1 — VAT was two flags, so the same job priced 12% apart (`9f26ede`)
+Stage 1 priced from `qVatApproved`; Stage 2 rendered its radio from a **separate** `fqVatApproved`
+and read that back in `recalcFQ`. Nothing kept them in step. On M115 they disagreed (Stage 1 off,
+Stage 2 on) — exactly the ×1.12. Its own activity log had recorded the guard catching it:
+*"Locked total kept at ₱1,989.00 — a recompute produced ₱1,775.90 (−₱213.11)."*
+
+**Measured: 86 of 174 quotations had the two disagreeing**, 5 Final-Quotation locked, 3 with locked
+totals differing by exactly the VAT factor.
+
+VAT cannot legitimately differ by stage — same client, same account type, same sale — so it is now
+**one flag**. `fqVatApproved` is **deleted as a variable**; the Stage 2 radio renders from
+`qVatApproved`, `recalcFQ` falls back to it, and the approved-non-VAT persist path writes one field
+instead of branching on stage. The state still carries an `fqVatApproved` **key**, written FROM
+`qVatApproved` as a mirror an older cached build can read — nothing reads it back as truth, so they
+cannot drift again.
+
+**`_resolveLegacyVatSplit(state)`** migrates old saves to the treatment the **ISSUED** document
+carried — Stage 2's if the Final was locked, else Stage 1's — because that is the figure the client
+holds and what the locked-total guard protects. M115 → VAT on → ₱1,989.00, matching the list.
+Announced in the activity log, once per serial per session.
+
+### Fault 2 — the Project List showed YOUR last change, not the latest (`a707c5b`)
+Rommel: *"regardless if I'm the one who update, it doesnt make sense that it retain my last changes
+versus the latest changes of the user or whoever."* Correct, and it was two "load once and never
+again" bugs stacked:
+
+- **`gLoadDirData` returned early if `sessionQuotations` had ANY entry** — one save pinned the whole
+  list to that session for the life of the tab. `renderDirectory` only read the sheet when `dirData`
+  was completely empty. Neither could ever pick up another person's work.
+- **All 7 merge sites laid `sessionQuotations` over `dirData` unconditionally**, so even a fresh read
+  put your older copy straight back on top.
+
+₱4,285.90 was real — **his own save at 16:05:21 on 14 Aug**, shown back to him for a day while
+everyone else correctly saw ₱1,989.00. **The stored data was never wrong.**
+
+`dirData` is now treated as a cache: **expires after 30s** (`DIR_MAX_AGE_MS`, `_dirIsStale()`) and
+re-reads when the list is opened, *under* rows already on screen — the spinner is cold-load only, or
+every visit flickers. The merge is recency-based through one shared helper **`_mergeSessionOver`**
+(replacing 7 hand-rolled copies): a session entry wins only when genuinely newer. **Exact, not
+heuristic** — every row carries `updatedAt` (column Z) and every session entry stamps its own. A row
+with no timestamp predates that column, so the session copy still stands (original behaviour).
+
+**Deliberately NOT pruning `sessionQuotations`** once the sheet catches up: ~10 other call sites read
+it for things like "has this ever been saved", and deleting entries would change those answers. It
+can no longer shadow anything, so letting it grow within a session is harmless.
+
+### Verified
+VAT: 7 resolution cases, extracted **from the shipped file** so the test cannot drift (the real M115
+shape, both reverse splits, final-locked and not, both-agree untouched, pre-schema save untouched);
+dedupe confirmed; driven through the real function in the real app. Newest-wins: 7 cases in the real
+app against the real numbers — the later save wins ₱1,989.00 over ₱4,285.90, your own newest still
+appears at once, a legacy row yields to the session copy, a session-only quotation still shows,
+staleness true at 31s / false when just loaded. Both: collision checker clean, no console errors, no
+encoding damage (0 replacement chars, em-dashes/peso/emoji counts intact), both confirmed serving.
+
+### Method notes
+- **A scripted patch must be CRLF-aware.** `index.html`'s working copy is **CRLF** (37,087 lines;
+  autocrlf converts on checkout) — a `\n` pattern silently matches nothing. ⚠ **This contradicts the
+  2026-08-04 note claiming the working copy is LF.** Detect it in the script rather than assuming.
+  Always re-check `U+FFFD`/em-dash/peso/emoji counts afterwards.
+- **Suspect the rig, twice more.** A "logs once" assertion failed because the harness shared one
+  sink across 7 fresh instances; and `/tmp` does not exist on Windows — use the scratchpad.
+- **The activity log solved this**, again. `serial: qSerial` on every entry meant the whole history —
+  the VAT toggles, both locks, the guard firing — was reconstructible in one query.
+
+---
+
+# OPEN — updated 2026-08-15 (session 3) (THIS IS THE AUTHORITATIVE LIST)
+
+## ⚠ Rommel's to click — these do NOT clear themselves
+Settings → Company & DB → **Check Project List** reports but never auto-repairs, deliberately. Three
+buttons are waiting, all verified genuine against the live flags:
+1. **Remove the stale copies** — `QT-M00000114` has **2 rows**; the Project List only ever updates
+   the first, so the other is frozen. Do this one first.
+2. **Correct all 2** — `QT-M00000114` (shows Draft, is IQ Awaiting Client Approval) and
+   `QT-W00000116` (shows IQ Locked, is IQ Under Revision — unlocked without a save).
+3. **Fill in 1 date** — an Initial Locked date that never reached the Project List column.
+
+## ⚠ Not built — the total column has no checker
+`checkProjectListData()` compares **status only**; `fixProjectListStatuses()` says outright it
+*"Rewrites only the Status column."* **Nothing in the app ever checks or repairs the total (column
+G).** A stale value can sit there indefinitely with no detector — which is why M115 was found by eye.
+If it is added, repair from the **locked/issued** figure (`fqLockedTotal` if `fqLocked`, else
+`qLockedTotal`, else the state's `pCalc.grand`), never from a live recompute, so no issued price can
+move. Not started — it was not needed for M115 in the end, since the data was correct.
+
+## ⚠ Still pending from session 2 — one device test, then it is closed
 The PWA install collision is **fixed and deployed** (`67cab3c`, confirmed serving). Nothing left to
 build. What remains is Rommel's test, which no tooling here can do:
 
