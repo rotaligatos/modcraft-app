@@ -4929,6 +4929,26 @@ var _evidence={};                       // ctxId -> [{name,mime,size,b64}] pendi
 var EVIDENCE_MAX_FILES=5;
 var EVIDENCE_MAX_BYTES=10*1024*1024;    // per file
 var EVIDENCE_ACCEPT='image/*,application/pdf';
+// The path segment every evidence file lives under, inside its quotation's folder in the
+// `quotations` bucket. The Storage rule that forbids deleting evidence matches on this exact
+// segment, so the two must always agree — changing it here without changing the policy would
+// leave evidence deletable again, with nothing to show for it.
+var EVIDENCE_PATH_SEG='evidence';
+// Uploads one evidence file to an exact storage path. Deliberately not reusing
+// supaUploadQuotationBinaryFile: that one builds its own key from a serial, so it cannot place a
+// file under a sub-path, and passing it a serial containing a slash would also mangle the Drive
+// folder name it shares.
+function _supaUploadEvidence(path,mime,b64){
+  if(!SUPA_DUAL_WRITE||!supaReady()||!path||!b64) return Promise.resolve();
+  try{
+    return supa.storage.from('quotations')
+      .upload(path,_base64ToBlob(b64,mime),{contentType:mime,upsert:true})
+      .then(function(r){
+        if(r&&r.error) console.warn('[supa] evidence upload error:',r.error.message||r.error);
+        else console.log('[supa] evidence uploaded:',path);
+      }).catch(function(e){ console.warn('[supa] evidence upload threw',e); });
+  }catch(e){ console.warn('[supa] evidence upload threw',e); return Promise.resolve(); }
+}
 function _evidenceList(ctxId){ return _evidence[ctxId]||(_evidence[ctxId]=[]); }
 function _evidenceReset(ctxId){ _evidence[ctxId]=[]; _evidenceRender(ctxId); }
 function _evidenceRender(ctxId){
@@ -5008,11 +5028,16 @@ function _evidenceCommit(ctxId,serialKey,cb){
     // printouts. The timestamp keeps a second attachment from overwriting the first.
     var fileName=key+' — evidence '+stamp+' '+(i+1)+' — '+f.name;
     chain=chain.then(function(){
+      // Evidence goes in its own `evidence/` sub-path, and the storage rule that forbids deleting
+      // it keys on THAT path segment. A rule matching the file NAME instead would quietly stop
+      // protecting anything the day this naming changed — and it would fail silently, which is the
+      // worst way for a safeguard to fail. The folder structure is the guarantee.
+      var storagePath=_supaSafeStorageKey(key)+'/'+EVIDENCE_PATH_SEG+'/'+_supaSafeStorageKey(fileName);
       var d={name:f.name,size:f.size,mime:f.mime,
              by:(gUser&&gUser.email)||'',at:new Date().toISOString(),
-             path:_supaSafeStorageKey(key)+'/'+_supaSafeStorageKey(fileName)};
+             path:storagePath};
       var jobs=[];
-      try{ jobs.push(Promise.resolve(supaUploadQuotationBinaryFile(key,fileName,f.mime,f.b64))); }catch(e){}
+      try{ jobs.push(_supaUploadEvidence(storagePath,f.mime,f.b64)); }catch(e){}
       // Drive is the failover copy, exactly as it is for every other quotation file.
       try{
         jobs.push(ensureDriveFolder()
