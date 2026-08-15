@@ -24162,6 +24162,55 @@ function _sheetsDeleteRowsByIndex(sheetName,rowNumbers){
   });
 }
 
+// ── After adding a row, check it is the only one ─────────────────────────────────────────────
+// The row write is look-then-add: find the serial in column A, update that row if it is there, add
+// one if it is not. Two saves in the same instant — two tabs, or a laptop and a phone — both look,
+// neither finds a row yet, and BOTH add one. _quotRowWrite serialises this within a page, but it is
+// a plain object living in one tab and cannot see another, which is why the 2026-08-09 fix did not
+// stop QT-M00000114 ending up with row 57 still updating at ₱119,521.06 and row 58 frozen at ₱0.00.
+//
+// Rather than trying to coordinate across tabs, look again straight after adding and undo it. A
+// second later the extra row is brand new and holds nothing the first does not. Approved by Rommel
+// 2026-08-15 ("yes"), on the understanding that it deletes sheet rows on its own.
+var _dupHealInFlight={};
+function _healDuplicateRowsFor(serial,rowData){
+  if(!serial||_dupHealInFlight[serial]) return Promise.resolve(0);
+  _dupHealInFlight[serial]=true;
+  var done=function(n){ delete _dupHealInFlight[serial]; return n; };
+  return sheetsGet('Quotations!A:A').then(function(d){
+    var vals=(d&&d.values)||[], hits=[];
+    for(var i=1;i<vals.length;i++) if(String(vals[i][0]||'').trim()===serial) hits.push(i+1);
+    if(hits.length<2) return done(0);                    // nothing to undo — the normal case
+    // Keep the FIRST. Every save scans column A and stops at the first match, so that row is the
+    // one this quotation goes on being written to; the rest can never be written again.
+    var drop=hits.slice(1);
+    return _sheetsDeleteRowsByIndex('Quotations',drop).then(function(){
+      // Verify, because the one genuinely bad outcome is over-deleting. Two tabs healing in the
+      // same instant would both compute indexes from their own read, and a delete shifts the rows
+      // under the other one. If that leaves the quotation with NO row it is invisible in the
+      // Project List — so check, and put it back from the row we still hold in memory.
+      return sheetsGet('Quotations!A:A').then(function(d2){
+        var v2=(d2&&d2.values)||[], left=0;
+        for(var j=1;j<v2.length;j++) if(String(v2[j][0]||'').trim()===serial) left++;
+        if(left===0&&rowData){
+          console.warn('[dup-heal] '+serial+' lost every row — restoring it');
+          return sheetsAppend('Quotations!A:AA',[rowData]).then(function(){
+            logActivity('Duplicate row cleanup for '+serial+' removed one row too many — the '
+              +'quotation was immediately restored from the copy still in memory.');
+            return done(0);
+          });
+        }
+        logActivity('Removed '+drop.length+' duplicate Project List row'+(drop.length===1?'':'s')
+          +' for '+serial+', created by two saves landing at once. The live row is untouched.');
+        return done(drop.length);
+      });
+    });
+  }).catch(function(e){
+    console.warn('[dup-heal] could not check for duplicate rows on '+serial,e);
+    return done(0);
+  });
+}
+
 function supaMigrateAll(){
   if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(); }
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(); }
@@ -29711,14 +29760,16 @@ function _proceedSaveQuotation(){
     if(d.error){
       return sheetsCreateTab('Quotations').then(function(){
         return sheetsAppend('Quotations!A:AA',[QUOT_HDR]).then(function(){
-          return sheetsAppend('Quotations!A:AA',[row]);
+          return sheetsAppend('Quotations!A:AA',[row])
+            .then(function(){ return _healDuplicateRowsFor(serial,row); });
         });
       });
     }
     var vals=d.values||[];
     if(!vals.length){
       return sheetsAppend('Quotations!A:AA',[QUOT_HDR]).then(function(){
-        return sheetsAppend('Quotations!A:AA',[row]);
+        return sheetsAppend('Quotations!A:AA',[row])
+          .then(function(){ return _healDuplicateRowsFor(serial,row); });
       });
     }
     var rowIdx=-1, existing=null;
@@ -29743,7 +29794,10 @@ function _proceedSaveQuotation(){
     // second time it is written. Left behind when Final Client Approved / Last Updated / Sent At
     // were added -- the header and both append calls were widened, this one was not.
     if(rowIdx>0){return sheetsUpdate(_rowRange('Quotations',rowIdx,row),[row]);}
-    else{return sheetsAppend('Quotations!A:AA',[row]);}
+    // The ordinary first-ever save of a quotation. This is the only append that happens in
+    // normal use, so it is the one that can race another tab.
+    else{return sheetsAppend('Quotations!A:AA',[row])
+      .then(function(){ return _healDuplicateRowsFor(serial,row); });}
   }).then(function(){
     showSheetsToast(true,'Quotation '+serial+' saved to database');
     // The number is now spent on a real row, so release the pocket. Deliberately here and not in
