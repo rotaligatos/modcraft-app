@@ -1598,9 +1598,11 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         <a href="https://docs.google.com/spreadsheets/d/1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o/edit" target="_blank" class="btn" style="font-size:12px"><i class="ti ti-table"></i>Open Google Sheets</a>
         <button class="btn" onclick="openModcraftDriveFolder()" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Open Drive folder</button>
         <button class="btn" onclick="checkProjectListData()" style="font-size:12px;border-color:var(--navy);color:var(--navy)"><i class="ti ti-list-search"></i>Check Project List</button>
+        <button class="btn" onclick="showDeletedRows()" style="font-size:12px"><i class="ti ti-archive"></i>Deleted rows</button>
       </div>
       <div id="db-status"></div>
       <div id="dbcheck-result"></div>
+      <div id="deleted-rows-result"></div>
       <div style="font-size:11px;color:var(--text2);margin-top:8px">
         Google Sheets ID: <code style="background:var(--bg);padding:2px 6px;border-radius:4px;font-size:11px">1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o</code>
       </div>
@@ -24112,7 +24114,7 @@ function reconcileDuplicateRows(execute){
       return chain.then(function(){
         // Highest index first, so deleting one cannot shift the next.
         var drops=o.drop.slice().sort(function(a,b){return b-a;});
-        return _sheetsDeleteRowsByIndex('Quotations',drops).then(function(){
+        return _sheetsDeleteRowsByIndex('Quotations',drops,'Renumbered — superseded row').then(function(){
           var st=o.st;
           st.serial=o.p.shouldSay;
           st.prevSerials=(st.prevSerials||[]);
@@ -24144,8 +24146,52 @@ function reconcileDuplicateRows(execute){
 }
 // Delete by ROW INDEX, not by key. sheetsDeleteRowByKey resolves the index by scanning column A
 // and breaking on the first match — which is the row we want to KEEP when a serial is duplicated.
-function _sheetsDeleteRowsByIndex(sheetName,rowNumbers){
+// ── Nothing is removed without a copy being kept first ───────────────────────────────────────
+// Rommel, 2026-08-15, looking at a REMOVE row holding ₱146,081.29: "for such dangerous decision,
+// will it be possible that it will autoback up or will stage in a like a recycle bin or trash and
+// retain it for a week to make sure that in case it was misanalyze there's a point that we can
+// actually restore it."
+//
+// He was right to ask. A duplicate row is not always the empty draft the examples suggest — that
+// one carried real money and the same status as the row being kept. The reasoning for which row is
+// live is sound, but "sound reasoning" is not a reason to make something irreversible.
+//
+// So every row removal writes the whole row into a "Deleted Rows" tab FIRST. This lives INSIDE the
+// delete helper rather than at the call sites, so no future caller can delete without archiving —
+// that gap (one path doing the right thing and another not) is exactly what produced several of
+// the faults in this file.
+var DELETED_ROWS_TAB='Deleted Rows';
+var DELETED_ROWS_HDR=['Deleted At','Deleted By','Source Sheet','Serial','Original Row','Reason','Row Values (JSON)'];
+function _ensureDeletedRowsTab(){
+  return sheetsGet(DELETED_ROWS_TAB+'!A1').then(function(d){
+    if(d&&!d.error&&d.values&&d.values.length) return;
+    return sheetsCreateTab(DELETED_ROWS_TAB)
+      .catch(function(){})                       // already there — appending the header is enough
+      .then(function(){ return sheetsAppend(DELETED_ROWS_TAB+'!A:G',[DELETED_ROWS_HDR]); });
+  });
+}
+function _archiveSheetRows(sheetName,rowNumbers,reason){
   if(!rowNumbers||!rowNumbers.length) return Promise.resolve();
+  return sheetsGet(sheetName+'!A:AA').then(function(d){
+    var vals=(d&&d.values)||[];
+    var now=new Date().toISOString(), who=(gUser&&(gUser.name||gUser.email))||'';
+    var out=rowNumbers.map(function(n){
+      var r=vals[n-1]||[];                        // 1-based sheet row -> 0-based array
+      return [now,who,sheetName,String(r[0]||''),String(n),reason||'',JSON.stringify(r)];
+    });
+    return _ensureDeletedRowsTab().then(function(){
+      return sheetsAppend(DELETED_ROWS_TAB+'!A:G',out);
+    });
+  });
+}
+// reason is free text and ends up in the archive, so a restore months later still says why it went.
+function _sheetsDeleteRowsByIndex(sheetName,rowNumbers,reason){
+  if(!rowNumbers||!rowNumbers.length) return Promise.resolve();
+  // The archive is a PRECONDITION, not a side effect. If the copy cannot be written the row stays
+  // where it is — losing the record is the exact failure this exists to prevent, so a failed
+  // backup must never be followed by a successful delete.
+  return _archiveSheetRows(sheetName,rowNumbers,reason)
+  .then(function(){
   return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'?fields=sheets.properties',{})
   .then(function(meta){
     var sheets=meta.sheets||[], sheetId=null;
@@ -24158,6 +24204,90 @@ function _sheetsDeleteRowsByIndex(sheetName,rowNumbers){
     return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+':batchUpdate',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({requests:reqs})
+    });
+  });
+  });
+}
+
+// Reads the archive back, newest first. Nothing is ever purged from it — a week was the ask, and
+// keeping them longer costs a few rows in a tab, while deleting the archive would be the same
+// mistake this was built to prevent.
+function listDeletedRows(cb,limit){
+  sheetsGet(DELETED_ROWS_TAB+'!A:G').then(function(d){
+    if(!d||d.error){ cb([]); return; }
+    var v=(d.values||[]).slice(1), out=[];
+    for(var i=v.length-1;i>=0&&out.length<(limit||50);i--){
+      var r=v[i]; if(!r||!r[0]) continue;
+      out.push({archiveRow:i+2, at:r[0], by:r[1], sheet:r[2], serial:r[3], origRow:r[4], reason:r[5], values:r[6]});
+    }
+    cb(out);
+  }).catch(function(){ cb([]); });
+}
+// Puts a row back. It is appended rather than pushed in at its old position: the sheet has moved on
+// since, and every lookup in this app finds a quotation by scanning column A, not by row number.
+function restoreDeletedRow(entry,cb){
+  if(!entry||!entry.values){ if(cb) cb(false); return; }
+  var vals; try{ vals=JSON.parse(entry.values); }catch(e){ if(cb) cb(false); return; }
+  if(!vals||!vals.length){ if(cb) cb(false); return; }
+  sheetsAppend((entry.sheet||'Quotations')+'!A:AA',[vals]).then(function(){
+    logActivity('Restored a deleted '+(entry.sheet||'Quotations')+' row for '+(entry.serial||'(no serial)')
+      +' from the Deleted Rows archive (removed '+(entry.at||'')+' — '+(entry.reason||'no reason recorded')+').');
+    _dirLoadedAt=0;                              // force the Project List to re-read
+    if(cb) cb(true);
+  }).catch(function(){ if(cb) cb(false); });
+}
+
+// Sits beside Check Project List in Settings → Company & DB, because a safety net nobody can find
+// is not a safety net. Rommel, 2026-08-15: "could you put the restore on the same where project
+// list button in the setting is located. so its visible and accessible."
+var _delRowCache=[];
+function showDeletedRows(){
+  var box=el('deleted-rows-result'); if(!box) return;
+  if(!gToken){ box.innerHTML='<div class="alert" style="margin-top:10px">Sign in first.</div>'; return; }
+  box.innerHTML='<div class="alert alert-info" style="margin-top:10px"><i class="ti ti-loader"></i> Reading the Deleted Rows archive…</div>';
+  listDeletedRows(function(list){
+    _delRowCache=list;
+    if(!list.length){
+      box.innerHTML='<div style="margin-top:12px;border:1px solid var(--border);border-radius:10px;padding:16px;font-size:13px;color:var(--text2)">'
+        +'<i class="ti ti-archive"></i> Nothing has been removed. Every row this app deletes is copied here first — '
+        +'with its full contents, who removed it and why — and nothing is ever purged, so anything removed by mistake can be put back.</div>';
+      return;
+    }
+    var h='<div style="margin-top:12px;border:1px solid var(--border);border-radius:10px;overflow:hidden">'
+      +'<div style="padding:12px 16px;background:var(--card2);font-size:13px">'
+      +'<b>'+list.length+'</b> removed row'+(list.length===1?'':'s')+', newest first. Nothing is ever purged from this archive — '
+      +'it is the <b>Deleted Rows</b> tab of the same Google Sheet, so you can also read it there.</div>'
+      +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr>'
+      +['Removed','By','Serial','Value','Why','',''].slice(0,6).map(function(t){
+          return '<th style="text-align:left;padding:7px 12px;background:var(--card2);border-bottom:1px solid var(--border);white-space:nowrap">'+escHtml(t)+'</th>'; }).join('')
+      +'</tr></thead><tbody>';
+    list.forEach(function(x,i){
+      var v=[]; try{ v=JSON.parse(x.values)||[]; }catch(e){}
+      var money=v[6]?fmtMoney(parseFloat(String(v[6]).replace(/[^\d.-]/g,''))||0):'—';
+      h+='<tr>'
+        +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border);white-space:nowrap">'+escHtml(typeof fmtDT==='function'?fmtDT(x.at):x.at)+'</td>'
+        +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border);white-space:nowrap">'+escHtml(x.by||'—')+'</td>'
+        +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border);font-family:ui-monospace,monospace">'+escHtml(x.serial||'—')+'</td>'
+        +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border);white-space:nowrap">'+escHtml(money)+'</td>'
+        +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border)">'+escHtml(x.reason||'—')+'</td>'
+        +'<td style="padding:6px 12px;border-bottom:.5px solid var(--border);white-space:nowrap">'
+        +'<button class="btn" style="font-size:11px;height:26px;padding:0 9px" onclick="_restoreDeletedRow('+i+')">'
+        +'<i class="ti ti-arrow-back-up"></i> Put it back</button></td></tr>';
+    });
+    h+='</tbody></table></div></div>';
+    box.innerHTML=h;
+  });
+}
+function _restoreDeletedRow(i){
+  var e=_delRowCache[i]; if(!e) return;
+  _confirm('Put '+(e.serial||'this row')+' back into '+(e.sheet||'Quotations')+'?\n\n'
+    +'It was removed '+(e.at||'')+' — '+(e.reason||'no reason recorded')+'.\n\n'
+    +'It is added back as a new row with exactly the contents it had. The archive copy is kept either way.',
+  function(){
+    restoreDeletedRow(e,function(ok){
+      showToast(ok?('Restored '+(e.serial||'the row')+'. Reopen the Project List to see it.')
+                 :'Could not restore it — nothing was changed.');
+      if(ok) showDeletedRows();
     });
   });
 }
@@ -24184,7 +24314,7 @@ function _healDuplicateRowsFor(serial,rowData){
     // Keep the FIRST. Every save scans column A and stops at the first match, so that row is the
     // one this quotation goes on being written to; the rest can never be written again.
     var drop=hits.slice(1);
-    return _sheetsDeleteRowsByIndex('Quotations',drop).then(function(){
+    return _sheetsDeleteRowsByIndex('Quotations',drop,'Duplicate row created by two saves at once').then(function(){
       // Verify, because the one genuinely bad outcome is over-deleting. Two tabs healing in the
       // same instant would both compute indexes from their own read, and a delete shifts the rows
       // under the other one. If that leaves the quotation with NO row it is invisible in the
@@ -26150,7 +26280,7 @@ function removeDuplicateQuotationRows(execute){
     if(!ops.length){ console.log('Nothing to remove.'); return {done:0,blocked:blocked.length,blockedList:blocked}; }
 
     var drop=[]; ops.forEach(function(o){ drop=drop.concat(o.drop); });
-    return _sheetsDeleteRowsByIndex('Quotations',drop).then(function(){
+    return _sheetsDeleteRowsByIndex('Quotations',drop,'Stale duplicate copy removed from Check Project List').then(function(){
       logActivity('Duplicate Project List rows removed — '+drop.length+' stale row'
         +(drop.length===1?'':'s')+' for '+ops.length+' quotation'+(ops.length===1?'':'s')
         +' ('+ops.map(function(o){return o.serial;}).join(', ')+').');
@@ -26221,7 +26351,11 @@ function _reportSerialSplits(){
       +'<button class="btn btn-primary" onclick="_fixDuplicateRows()" style="font-size:12px">'
       +'<i class="ti ti-layers-off"></i> Remove the stale copies</button>'
       +'<span style="font-size:12px;color:var(--text2)">Keeps the live row. Any pair that is not '
-      +'actually a copy is left alone and named.</span></div></div>'
+      +'actually a copy is left alone and named.</span></div>'
+      +'<div style="margin-top:8px;font-size:12px;color:var(--text2)"><i class="ti ti-archive"></i> '
+      +'Every removed row is copied to a <b>Deleted Rows</b> tab in the same Google Sheet first — '
+      +'with its full contents, who removed it and why — and nothing is ever purged from it. If a '
+      +'row turns out to have been removed wrongly it can be put straight back.</div></div>'
     : '';
   if(!_serialSplitFindings.length){ host.innerHTML=_dupHtml; return; }
   var _seen={};
