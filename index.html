@@ -26325,8 +26325,8 @@ function checkProjectListData(){
         +'</div>';
       if(!findings.length){
         h+='<div style="padding:16px;color:var(--teal)"><i class="ti ti-circle-check"></i> '
-          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div><div id="dbcheck-reopened"></div><div id="dbcheck-orders"></div></div>';
-        box.innerHTML=h; _reportSerialSplits(); _reportQuotationCredits(); _reportLostLockTimes(); _reportReopenedIssued(); _reportUnclosedSentOrders(); return;
+          +'Every Status matches what the quotation actually is.</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div><div id="dbcheck-reopened"></div><div id="dbcheck-orders"></div><div id="dbcheck-unlinked"></div></div>';
+        box.innerHTML=h; _reportSerialSplits(); _reportQuotationCredits(); _reportLostLockTimes(); _reportReopenedIssued(); _reportUnclosedSentOrders(); _reportUnlinkedOrders(); return;
       }
       h+='<div style="padding:12px 16px;background:var(--wash-amber);font-size:13px">'
         +'<b>'+findings.length+'</b> quotation'+(findings.length===1?'':'s')+' show the wrong stage in the Project List. '
@@ -26347,13 +26347,14 @@ function checkProjectListData(){
       h+='<div style="padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
         +'<button class="btn btn-primary" onclick="fixProjectListStatuses()" style="font-size:12px"><i class="ti ti-wand"></i> Correct all '+findings.length+'</button>'
         +'<span style="font-size:12px;color:var(--text2)">Rewrites only the Status column. Nothing else on the quotation is touched.</span>'
-        +'</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div><div id="dbcheck-reopened"></div><div id="dbcheck-orders"></div></div>';
+        +'</div><div id="dbcheck-serials"></div><div id="dbcheck-credits"></div><div id="dbcheck-locks"></div><div id="dbcheck-reopened"></div><div id="dbcheck-orders"></div><div id="dbcheck-unlinked"></div></div>';
       box.innerHTML=h;
       _reportSerialSplits();
       _reportQuotationCredits();
       _reportLostLockTimes();
       _reportReopenedIssued();
       _reportUnclosedSentOrders();
+      _reportUnlinkedOrders();
     }
   });
 }
@@ -26893,6 +26894,113 @@ function fixUnclosedSentOrders(){
       setTimeout(function(){ next(i+1); },150);
     })(0);
   });
+}
+var _orderCandidates=[];
+// ── Unlinked orders: the app finds, a person decides ───────────────────────────────────────
+// An order picked up before the quotation link was reliable has no serial at all, so nothing
+// can stop its clock and nothing says where the job went.
+//
+// ⚠ This must NEVER auto-link, and the evidence is why. Measured 2026-08-15: ROBERT VALERA has
+// four quotations, so two of his orders each match all four by name; and the team MSRF# naming
+// convention already collides — MSRF#8842 appears on both QT-W00000044 (Katrina Chua) and
+// QT-W00000065 (DCD Office). An automatic match would have closed the wrong order and left a
+// real one running, which is worse than leaving it open. So: list the candidates with the
+// evidence for each, and wait. Same shape as the duplicate-row panel.
+//
+// Admin only, guarded twice — it links an order to a client document and writes a send time.
+function _orderCandidateQuotations(o){
+  var out=[];
+  var oc=String(o.clientName||'').trim().toLowerCase();
+  var taken={};
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(x){
+    if(x&&x.quotSerial) taken[_serialRoot(x.quotSerial)]=x.id;
+  });
+  (typeof dirData!=='undefined'&&dirData?dirData:[]).forEach(function(e){
+    if(!e||!e.id) return;
+    if(taken[_serialRoot(e.id)]) return;             // already another order's quotation
+    var proj=String(e.project||'').toLowerCase();
+    var ec=String(e.client||'').trim().toLowerCase();
+    var why=null;
+    if(o.id&&proj.indexOf(String(o.id).toLowerCase())>=0) why='order number appears in the project name';
+    else if(oc&&ec&&oc===ec) why='client name matches';
+    if(!why) return;
+    out.push({serial:e.id, project:e.project||'', client:e.client||'', value:e.value,
+              user:e.user||'', status:e.status||'', why:why});
+  });
+  return out;
+}
+function _findUnlinkedOrders(){
+  var out=[];
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
+    if(!o) return;
+    if(o.status!=='In Progress'&&o.status!=='Pending') return;
+    if(o.quotSerial&&!/^DRAFT-/.test(o.quotSerial)) return;
+    var c=_orderCandidateQuotations(o);
+    if(c.length) out.push({order:o, candidates:c});
+  });
+  return out;
+}
+function _reportUnlinkedOrders(){
+  var host=el('dbcheck-unlinked'); if(!host) return;
+  if(currentRole!=='Admin') return;                  // guard 1 of 2
+  var list=_findUnlinkedOrders();
+  if(!list.length) return;
+  _orderCandidates=list;
+  var h='<div style="padding:12px 16px;border-top:1px solid var(--border);background:var(--wash-navy)">'
+    +'<div style="font-size:13px;margin-bottom:8px"><b>'+list.length+'</b> order'+(list.length===1?'':'s')
+    +' in the queue '+(list.length===1?'has':'have')+' no quotation linked, but there '
+    +(list.length===1?'is a quotation that':'are quotations that')+' could be '+(list.length===1?'it':'theirs')+'. '
+    +'Nothing is matched automatically — one client can have several quotations, and the MSRF# '
+    +'naming already repeats, so a wrong guess would close the wrong order.</div>';
+  list.forEach(function(row,ri){
+    var o=row.order;
+    h+='<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:var(--card)">'
+      +'<div style="font-size:12.5px;margin-bottom:6px"><b>#'+escHtml(o.id)+'</b> · '+escHtml(o.clientName||'—')
+      +' <span style="color:var(--text2)">· received '+escHtml(fmtDT(o.receivedAt))+'</span></div>';
+    row.candidates.forEach(function(c,ci){
+      h+='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:5px 0;border-top:.5px solid var(--border)">'
+        +'<span style="font-family:ui-monospace,monospace;font-size:12px">'+escHtml(c.serial)+'</span>'
+        +'<span style="font-size:12px">'+escHtml(c.project||c.client||'—')+'</span>'
+        +'<span style="font-size:12px;color:var(--text2)">'+(typeof c.value==='number'?fmtMoney(c.value):'')+'</span>'
+        +'<span style="font-size:11px;color:var(--text2)">'+escHtml(c.user||'')+' · '+escHtml(c.status||'')+'</span>'
+        +'<span style="font-size:11px;color:var(--text2)">'+escHtml(c.why)+'</span>'
+        +'<button class="btn" style="font-size:11px;margin-left:auto" onclick="linkOrderToQuotation(\''
+        +escHtml(o.id)+'\',\''+escHtml(c.serial)+'\')">Link this one</button></div>';
+    });
+    h+='</div>';
+  });
+  h+='</div>';
+  host.innerHTML=h;
+}
+// Links the order and, if the quotation has already gone out, closes it at the time the activity
+// log records. If it has never been sent the order stays open — correctly, because nobody has
+// answered that client yet.
+function linkOrderToQuotation(orderId,serial){
+  if(currentRole!=='Admin'){ showToast('Only an Admin can link an order to a quotation'); return; }   // guard 2 of 2
+  if(!(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady())){
+    showToast('This needs the fast database — connect it in this card first.'); return;
+  }
+  supa.from('activity_log').select('at,action').eq('serial',serial).order('at',{ascending:true})
+    .then(function(r){
+      var sentAt=null;
+      ((r&&r.data)||[]).forEach(function(a){
+        if(sentAt) return;
+        if(/shared via|locked\. sent via|sent versions to client/i.test(a.action||'')) sentAt=a.at;
+      });
+      var msg='Link order #'+orderId+' to '+serial+'?'+String.fromCharCode(10,10)
+        +(sentAt?('It was sent to the client on '+fmtDT(sentAt)+', so the order will be closed at that '
+                 +'time — taken from the activity log, not from now.')
+               :'That quotation has never been sent, so the order stays open and its clock keeps running.');
+      _confirm(msg,function(){
+        _setOrderStatus(orderId, sentAt?'Done':'In Progress', serial, sentAt||undefined);
+        logActivity('Order #'+orderId+' linked to this quotation'
+          +(sentAt?(' and closed at '+fmtDT(sentAt)+', the send time recorded in the activity log.')
+                  :'. It has not been sent yet, so the response clock keeps running.'), serial);
+        showToast('Order #'+orderId+' linked to '+serial);
+        try{ renderOrders(); }catch(e){}
+        _reportUnlinkedOrders();
+      });
+    });
 }
 function _reportLostLockTimes(){
   var host=el('dbcheck-locks'); if(!host) return;
