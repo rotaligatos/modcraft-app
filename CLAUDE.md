@@ -6627,3 +6627,132 @@ never became quotations**:
 - **Wufoo API key** — still needs rotating; it is in public git history.
 - **Price DB blank-unit rows** — ~39,420; fill the units, delete nothing (~10,000 have no
   populated twin).
+
+---
+
+## What was changed on 2026-08-14/15 (session — separate PWA icons for both apps, then a real install bug found)
+
+### Distinct home-screen icons — DONE, deployed (`a9b54f2`)
+Both installable apps (`index.html` via `app.webmanifest`, `approve.html` via `manifest.webmanifest`)
+shared the exact same icon files, so on a phone home screen the two were indistinguishable. First
+pass was Claude hand-drawing simple flat SVG marks (a Lami-mascot smiley for Modcraft, a checkmark
+for Approval) — **Rommel rejected the look outright** ("I don't like what it looks like. Stop it.")
+and asked for a Gemini prompt instead, describing the app's real functionality so Gemini could
+propose several directions. That prompt was written and handed over (not reproduced here — see the
+session transcript if it's ever needed again); Rommel ran it himself and picked a result: a navy
+clipboard with a teal % and a ₱ badge for **Modcraft**, and a navy fountain pen writing a teal
+signature for **Modcraft Approval** (renamed from "Approvals" in this same pass, per request —
+manifest `name`/`short_name` and `approve.html`'s `apple-mobile-web-app-title`, which iOS uses
+instead of the manifest on older versions).
+
+Rommel saved the Gemini output — a single JPEG mocking up both icons side-by-side on two fake phone
+screens — directly into the repo's `icons/` folder. It was **not** a clean icon export: extracting
+usable square art meant cropping it out of the phone-mockup image with `sharp` (installed on demand
+in the scratchpad, since neither `sharp` nor any image lib is a project dependency), by eye,
+iterating on the crop box until the neighbouring home-screen icons stopped bleeding into the
+corners. Found and fixed one real defect during that process: the mockup's own icon squares carry a
+baked-in soft rounded-corner + drop-shadow treatment, which produced ugly grey triangle artifacts
+when composited onto the maskable variant's flat white safe-zone canvas — fixed with a SECOND, more
+tightly-cropped "flat" source (fully inside the rounding) used only for the maskable build, kept
+separate from the slightly looser crop used for the plain "any"-purpose sizes.
+
+Shipped: `icons/modcraft/` and `icons/approvals/` (icon-180/192/512 + a maskable-512, each verified
+by simulating a real circular adaptive-icon crop and by rendering down to actual 48×48 display size
+before committing — both survive with clean margin). Both manifests and both HTML files'
+`apple-touch-icon`/`icon` links updated to the new per-app paths; the old shared root-level
+`icons/icon-*.png` and the raw mockup JPEG were removed once extraction was confirmed good.
+
+### ⚠⚠ NOT FIXED — installing both apps on one phone collapses them into ONE install
+Reported immediately after deploy: Rommel uninstalled and reinstalled both apps to see the new
+icons. Installed **Modcraft first**, then tried to install **Modcraft Approval** — the browser said
+it was **already installed**, and only one icon appears on the home screen. This is not a caching
+problem (the icon work above is separately confirmed correct and live) — it is a genuine PWA
+identity collision, diagnosed but **deliberately left unfixed this session** per Rommel's explicit
+instruction to document and hand over first rather than keep changing things blind.
+
+**Root cause, confirmed by reading both manifests and both service-worker registrations directly —
+not guessed:**
+
+| | Modcraft (`app.webmanifest`) | Modcraft Approval (`manifest.webmanifest`) |
+|---|---|---|
+| `scope` | `"./"` — the **whole origin** | `"./approve.html"` |
+| `start_url` | `"./index.html"` | `"./approve.html"` |
+| `id` | **not set** | **not set** |
+| SW registration | `index.html`: `register('./sw.js',{scope:'./'})` | `approve.html`: `register('./sw.js',{scope:'./approve.html'})` |
+
+Modcraft's manifest scope (`"./"`) is the **entire site**, which already **contains**
+`approve.html` — Approval's whole scope sits nested inside Modcraft's. Per the Web App Manifest
+spec, when a manifest has no explicit `id`, a browser falls back to `start_url` (resolved against
+scope) to decide an app's identity, and when one installed app's scope already covers another
+app's `start_url`, Chrome/Android's install manager can treat the second one as *the same app,
+different page* rather than a separate installable entity — which matches exactly what was
+reported: install Modcraft (claims the whole origin as its scope) → try to install Approval
+(`start_url` already falls inside that claimed scope) → "already installed."
+
+This is the textbook scenario the manifest **`id` field** exists to solve: an explicit, unique `id`
+on each manifest overrides scope-based identity inference entirely, per spec, regardless of scope
+overlap. Neither manifest sets one today.
+
+**Not yet attempted, and why:** the fix itself (adding a distinct `id` to each manifest, e.g.
+`"id": "/modcraft-app/"` and `"id": "/modcraft-app/approve.html"` — exact values need checking
+against the spec's resolution-against-scope-or-manifest-URL rules before writing them) is small and
+low-risk to WRITE, but **cannot be verified by anything in this repo's own tooling** — there is no
+way to simulate "does Android now offer to install this as a separate app" from a script or a
+headless browser; it needs Rommel's own phone, an actual uninstall of both apps, and a real
+reinstall attempt. Whether narrowing Modcraft's own `scope` away from `"./"` is also needed (so it
+no longer claims `approve.html` at all) is a second open question — worth checking whether index.html
+ever needs to navigate outside its own path first, since narrowing scope wrongly could break something
+currently relying on the wide scope.
+
+**Also raised in the same message, likely describing the SAME symptom from a different angle, not a
+separate ask:** *"there's supposed to have two design in the app. one for support and one for main.
+which currently you made only for main app."* Read in context (right after describing the
+already-installed collision and "the icon, there's 1 only") this most likely means: because the two
+installs collapsed into one, only ONE of the two already-correct icon designs is actually visible/in
+effect on the phone right now — not a request for a third, different icon. **Confirm this reading
+with Rommel before building anything new** — if it turns out to mean something else entirely (e.g.
+literally wanting a distinct icon for something called "support"), that needs its own clarification,
+not an assumption.
+
+### Also worth knowing
+- `git push` failed twice this session with `Failed to connect to github.com port 443` while
+  `curl` reached the exact same GitHub endpoint fine — same intermittent-connectivity class already
+  on the watch list (see "Intermittent outbound connection failures" earlier in this file). Running
+  with `GIT_CURL_VERBOSE=1` showed the underlying HTTPS connection actually succeeding on a later
+  attempt (401 anonymous probe → 200 with cached credentials) — the failures were real timeouts, not
+  something wrong with the repo or the commit. If this recurs, `GIT_CURL_VERBOSE=1 git push` is the
+  fastest way to see whether it is a genuine connect failure or something later in the exchange.
+- Repeated the same commit-message mistake as an earlier session (reusing a stale title from memory
+  instead of writing a fresh one) once before catching it — see `feedback` memory on this if it
+  keeps happening; worth writing the title as a first, separate, deliberate step before the `git
+  commit` command is composed at all, not inline with everything else.
+
+---
+
+# OPEN — updated 2026-08-15 (THIS IS THE AUTHORITATIVE LIST)
+
+## ⚠⚠ FIRST THING NEXT SESSION — installing both PWAs collapses into one app
+Full diagnosis in the session entry immediately above — do not re-diagnose from scratch, the cause
+is already confirmed (manifest `scope`/`start_url` overlap with no `id` field set on either
+manifest). What is actually left to do:
+1. **Confirm exact `id` values** against the current Web App Manifest spec's resolution rules
+   (an `id` is resolved as a URL against either the manifest's own `start_url`/scope or the
+   manifest's location, and behaviour has shifted across spec drafts — check current MDN/spec text
+   before writing them, do not guess).
+2. **Decide whether to also narrow `app.webmanifest`'s `scope`** away from `"./"`, or whether the
+   `id` field alone is sufficient per spec to fix this regardless of scope overlap. Check whether
+   anything relies on the current wide scope before narrowing it.
+3. **Write the fix, deploy, and have Rommel test on his actual phone**: uninstall both apps
+   completely first, then install Modcraft, then install Approval, confirming both now appear as
+   two separate home-screen entries with their own (already-correct) icons. This cannot be verified
+   by any script or headless-browser check in this repo — it is a real device install test only.
+4. Confirm with Rommel what *"one for support and one for main"* meant before building anything new
+   — the working assumption (same symptom as the install collision, not a request for a third icon)
+   is written above but not yet confirmed.
+
+## Everything else
+Nothing else changed this session that affects prior open items. **The 2026-08-12 session 2 list
+above (line ~5537, "OPEN — updated 2026-08-12 (session 2)") is still the authoritative source for
+all OTHER open work** — the 4 "FIRST THING NEXT SESSION" items there (remove `qBaseSerial`;
+mobilization-reads-zero-after-unlock investigation; the two already-resolved items struck through)
+are unchanged and still pending, in that order, once the PWA install bug above is dealt with.
