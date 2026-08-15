@@ -6905,18 +6905,90 @@ encoding damage (0 replacement chars, em-dashes/peso/emoji counts intact), both 
 - **The activity log solved this**, again. `serial: qSerial` on every entry meant the whole history —
   the VAT toggles, both locks, the guard firing — was reconstructible in one query.
 
+### The repairs kept finding new things because the app was CREATING them (`4d7141b`, `a5ed564`, `d93897c`, `95aebca`)
+Rommel, on being told to click three repair buttons: *"why do I have to keep on doing this and why
+does it always find something. this only means that we are not correcting the root cause."* Right.
+Checked whether the findings were backlog — **they were not.** Both were created AFTER the fixes
+meant to prevent them (QT-M00000114 on 08-14, QT-W00000116 on 08-15).
+
+**1. An approval updated the state but never the row (`4d7141b`).**
+`_persistApprovedFieldToQuotation` writes into the quotation's STATE. Status and Locked are a
+projection of that state, written only by `gSaveQuotation` — so an approval actioned by someone
+else left the row behind until the requester happened to open and save. QT-W00000116's log is the
+proof: locked 09:27:48, `Quotation unlocked (approved by Allan Lagsao)` 09:46:50, **and no save
+ever follows**. Every unlock/non-VAT/discount/premium/signature approved by another person created
+drift the same way. ⚠ `confirmUnlock` (the local PIN path) DOES save — only the approved-request
+path did not, which is exactly how this survived the 2026-08-08 fix. New `_syncRowFromState`
+writes Status + Locked to Sheet AND Supabase plus memory, straight after the state write.
+
+**2. It then asked a human to fix a derived value.** Status is DERIVED — correcting it to its own
+derivation is not a judgement anyone can get wrong. `fixProjectListStatuses(auto)` now corrects
+without asking and says so with a toast; above 25 it still goes to a person (that many at once
+means something systemic). One implementation shared with the manual button.
+
+**3. Credits ignored the rule Rommel had already settled (`a5ed564`).**
+*"whoever authored the quotation will remain as the owner… I'm an admin. and I made some changes or
+I decided to approve the vat. does it make me the owner. of course not."* The checker weighed the
+**Prepared-by signature** as authorship — but that is stamped **at LOCK**, so it names whoever
+locked it. Evidence is now RANKED, first match wins, never cross-checked:
+**1)** who claimed the number · **2)** who exported the Wufoo order · **3)** the signature, last
+resort only. QT-W00000034: Kaye exported it from Order #8834, Rafael locked it — column H already
+said Kaye and was **right all along**, reported only because the signature disagreed. Ranking
+removes the conflict by construction, so the "two hands on it, you decide" question cannot arise.
+The signature is kept as a fallback, not dropped: for older quotations it is the only record, and
+QT-W00000076 resolves through it.
+
+**4. The duplicate-row panel asked for a decision it made impossible (`d93897c`).**
+*"How would I know if I'm making the right decision when I checked the project list there's only 1
+qtm114."* He could not — the panel itself said *"The Project List itself cannot show you this"* and
+offered a **count** as evidence. `_dupRowFindings` now carries what each row SAYS (row, client,
+value, status, assigned, last updated), rendered marked KEEP/REMOVE, formatted with `fmtMoney`/
+`fmtDT` so it compares directly against the line on screen: *KEEP row 57 ₱119,521.06 IQ Awaiting
+Client Approval, updated 08/15/26 10:09 · REMOVE row 58 ₱0.00 Draft, never*. **"Which row is live"
+was never a judgement** — every save stops at the FIRST match, so that is the live one. That was my
+jargon, not something he was meant to decide.
+
+**5. Duplicates can no longer be created (`95aebca`, Rommel approved: "yes").**
+The row write is look-then-add. Two saves in the same instant — two tabs, or a laptop and a phone —
+both look, neither finds a row, and BOTH add one. `_quotRowWrite` serialises within a page but is a
+plain object in one tab and **cannot see another**, which is why the 2026-08-09 fix did not stop
+this. `_healDuplicateRowsFor` looks again immediately after appending and removes any extra copy,
+keeping the first. Deletes **by row position** (`_sheetsDeleteRowsByIndex`, descending) — never by
+searching the serial, which finds the first match, the row to KEEP.
+> ⚠ The one damaging outcome is **over-deleting**: two tabs healing at once compute positions from
+> their own read and a delete shifts rows under the other. If that left the quotation with no row it
+> would vanish from the Project List. So the result is verified and, if nothing is left, the row is
+> **restored from the copy still in memory**, logged as a recovery and reported as 0 removed.
+Forward-only: existing duplicates still need the button.
+
+### Method notes (session 3, part 2)
+- **"Is this backlog or new?" is the question that finds a root cause.** Both findings were new,
+  which immediately disproved "just clean it up and move on".
+- **A repair that keeps finding work is a symptom, not a service.** Three of these were the app
+  creating drift, detecting it, and delegating the cleanup to a human.
+- **Suspect the rig — three more times.** A `.like()` mock captured only the first argument
+  (it takes `(column, pattern)`), so both queries returned the same branch and a PASSING rule looked
+  broken; a shared log sink across 7 instances broke a "logs once" assertion; and `/tmp` does not
+  exist on Windows.
+- **Look at rendered output, don't just assert on it.** The duplicate table passed its assertions
+  while showing raw `119521.06` and an ISO timestamp — useless for comparing against the screen.
+
 ---
 
 # OPEN — updated 2026-08-15 (session 3) (THIS IS THE AUTHORITATIVE LIST)
 
-## ⚠ Rommel's to click — these do NOT clear themselves
-Settings → Company & DB → **Check Project List** reports but never auto-repairs, deliberately. Three
-buttons are waiting, all verified genuine against the live flags:
-1. **Remove the stale copies** — `QT-M00000114` has **2 rows**; the Project List only ever updates
-   the first, so the other is frozen. Do this one first.
-2. **Correct all 2** — `QT-M00000114` (shows Draft, is IQ Awaiting Client Approval) and
-   `QT-W00000116` (shows IQ Locked, is IQ Under Revision — unlocked without a save).
-3. **Fill in 1 date** — an Initial Locked date that never reached the Project List column.
+## ⚠ ONE click left for Rommel — everything else now handles itself
+Rommel ran the checks on 2026-08-15: **"Every Status matches"**, *1 credit corrected*, *1 date filled
+in*. Only one item remains, and it is the only one that still needs a person:
+
+- **Remove the stale copies** — `QT-M00000114` has **2 rows**. The panel now SHOWS both, so the
+  click is informed: *KEEP row 57 ₱119,521.06 IQ Awaiting Client Approval, updated 08/15/26 10:09* ·
+  *REMOVE row 58 ₱0.00 Draft, never updated*. Forward-only prevention shipped (`95aebca`), so this
+  is the last existing duplicate — no new ones can be created.
+
+**Do NOT re-add "clicks for the user" that a rule already answers.** Status now auto-corrects
+(derived value → its own derivation, no judgement possible) and credits resolve by ranked evidence.
+The remaining manual step exists only because it deletes rows that predate the prevention.
 
 ## ⚠ Not built — the total column has no checker
 `checkProjectListData()` compares **status only**; `fixProjectListStatuses()` says outright it
