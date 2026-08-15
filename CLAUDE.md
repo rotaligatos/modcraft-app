@@ -6961,6 +6961,33 @@ searching the serial, which finds the first match, the row to KEEP.
 > **restored from the copy still in memory**, logged as a recovery and reported as 0 removed.
 Forward-only: existing duplicates still need the button.
 
+**6. Nothing is deleted without a copy being kept (`23d7bad`, Rommel's ask).**
+*"for such dangerous decision, will it be possible that it will autoback up or will stage in a like a
+recycle bin or trash and retain it for a week… in case it was misanalyze there's a point that we can
+actually restore it."* He was right, and the live data is why: the REMOVE row on QT-M00000114 is
+**not** the empty draft the earlier examples used — it holds **₱146,081.29** and the same status as
+the row being kept (row 81 ₱119,521.06 updated 08/15 · row 83 ₱146,081.29 frozen 08/14 15:52). The
+which-row-is-live reasoning is sound, but sound reasoning is not a reason to make something
+irreversible.
+
+Every removal now copies the whole row into a **`Deleted Rows`** tab of the same Google Sheet —
+full contents as JSON, plus when / who / source sheet / serial / a free-text reason, so a restore
+months later still says why it went. **Nothing is ever purged** (a week was the ask; clearing the
+archive would be the same mistake it prevents).
+
+> ⚠ Two design points that must not be undone:
+> - It lives **inside `_sheetsDeleteRowsByIndex`**, not at the three call sites, so no future caller
+>   can delete without archiving. One path doing the right thing and another not is exactly what
+>   produced several faults in this file.
+> - The archive is a **PRECONDITION**: if the copy cannot be written, the row stays. A failed backup
+>   must never be followed by a successful delete. Tested explicitly.
+
+Restore is in **Settings → Company & DB → "Deleted rows"**, beside Check Project List — Rommel's
+placement: *"so its visible and accessible."* Lists what went, by whom, its value and why, each with
+**Put it back** (`restoreDeletedRow`), which re-appends the row with exactly its old contents and
+keeps the archive copy either way. Appended, not reinserted at its old position — the sheet has
+moved on and every lookup here scans column A, never row numbers.
+
 ### Method notes (session 3, part 2)
 - **"Is this backlog or new?" is the question that finds a root cause.** Both findings were new,
   which immediately disproved "just clean it up and move on".
@@ -6982,9 +7009,15 @@ Rommel ran the checks on 2026-08-15: **"Every Status matches"**, *1 credit corre
 in*. Only one item remains, and it is the only one that still needs a person:
 
 - **Remove the stale copies** — `QT-M00000114` has **2 rows**. The panel now SHOWS both, so the
-  click is informed: *KEEP row 57 ₱119,521.06 IQ Awaiting Client Approval, updated 08/15/26 10:09* ·
-  *REMOVE row 58 ₱0.00 Draft, never updated*. Forward-only prevention shipped (`95aebca`), so this
-  is the last existing duplicate — no new ones can be created.
+  click is informed: *KEEP row 81 ₱119,521.06 IQ Awaiting Client Approval, updated 08/15/26 10:09* ·
+  *REMOVE row 83 ₱146,081.29 IQ Awaiting Client Approval, 08/14/26 15:52*. Forward-only prevention
+  shipped (`95aebca`), so this is the last existing duplicate — no new ones can be created. And it
+  is now **reversible**: the row is archived to the `Deleted Rows` tab first and can be put back
+  from Settings → Company & DB → **Deleted rows** (`23d7bad`).
+  > ⚠ Note the REMOVE row carries **real money**, not the ₱0.00 draft the first examples assumed.
+  > Row 81 is still the correct keep — it holds ₱119,521.06, which is what the Project List reads,
+  > and row 83 froze mid-edit at 15:52 on 14 Aug (its own activity log shows ₱146,081.29 at 15:48,
+  > changed away at 15:52). Do not "simplify" the KEEP/REMOVE display back to a count.
 
 **Do NOT re-add "clicks for the user" that a rule already answers.** Status now auto-corrects
 (derived value → its own derivation, no judgement possible) and credits resolve by ranked evidence.
