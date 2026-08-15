@@ -14285,7 +14285,42 @@ function _markOverrideApproved(idx,cfObj){
   });
   if(typeof currentPage!=='undefined'&&currentPage==='approvals') renderApprovals();
 }
+// ── Routing decides who MAY decide, not only who is told ───────────────────────────────────
+// findApproverForAction resolves ONE named person — the routing table, then that person's active
+// delegate, then a fallback — and the escalation rule sends a discount over the threshold to a
+// Director specifically. All of that exists to put a particular decision in a particular pair of
+// hands. But nothing ever checked that the person clicking Approve was that person, so any
+// approver who could SEE a request could action it.
+//
+// Found 2026-08-15: three discount requests routed to Rommel were all approved by Allan Lagsao.
+// Rommel: "why make a route, if all senior can decide on the same level."
+//
+// Absence is already handled by the design and needs no exception here: delegation is what
+// delegateTo/delegateActive are for, and findApproverForAction already resolves through it.
+function _apprWhoMayAct(n){
+  var me=((gUser&&gUser.email)||'').trim().toLowerCase();
+  var routed=String((n&&n.approverEmail)||'').trim().toLowerCase();
+  if(!routed) return {ok:true};                       // never routed — nothing to enforce
+  if(me&&me===routed) return {ok:true};               // the person it was given to
+  // Their active delegate, which is what delegation means.
+  try{
+    var ru=(sheetUsers||[]).find(function(u){return String(u.email||'').trim().toLowerCase()===routed;});
+    if(ru&&ru.delegateActive&&String(ru.delegateTo||'').trim().toLowerCase()===me) return {ok:true,asDelegate:true};
+  }catch(e){}
+  // Admin may still act so nothing can ever be stuck — but it is an exception, and it is
+  // recorded as one on the request and in the log. Rommel, 2026-08-15: "Admin can override, but
+  // it is recorded as one."
+  if(currentRole==='Admin') return {ok:true,override:true,routedTo:(n&&n.approverName)||routed};
+  return {ok:false,routedTo:(n&&n.approverName)||routed};
+}
 function doApprovalAction(idx, action) {
+  // Checked BEFORE the PIN, so somebody who may not decide this is told so rather than being
+  // asked for a PIN and refused afterwards.
+  var _may=_apprWhoMayAct(NOTIFS[idx]);
+  if(!_may.ok){
+    showToast('This one is '+(_may.routedTo||'someone else')+'\u2019s to decide. If they are away, set a delegate or re-route it.');
+    return;
+  }
   var pin=el("appr-pin")?el("appr-pin").value:"";
   var apprSelf=findApproverForSelf(); var _prevAppr=_pinModalApprover; _pinModalApprover=apprSelf;
   _verifyApproverPin(pin).then(function(ok){
@@ -14300,6 +14335,13 @@ function doApprovalAction(idx, action) {
     counterDisc=cdInp?parseFloat(cdInp.value)||n.reqDisc||0:n.reqDisc||0;
   }
   NOTIFS[idx].status=action; NOTIFS[idx].by=byName;
+  // An Admin acting outside the routing is legitimate and must never pass unnoticed.
+  if(_may.override){
+    NOTIFS[idx].overrodeRouting=true;
+    logActivity((APPR_TYPE_LABELS[n.type]||n.type)+' '+action+' by '+byName
+      +' \u2014 actioned outside the routing, which sent it to '+(_may.routedTo||'someone else')+'.',
+      n.serial||'');
+  }
   if(action==='countered') NOTIFS[idx].counterDisc=counterDisc;
 
   // Guard: prevent the 60s poll from reverting this approval for 30 s
@@ -14314,7 +14356,7 @@ function doApprovalAction(idx, action) {
       approver:n.approverEmail||'',approverEmail:n.approverEmail||'',
       amount:n.amount||0,reqDisc:n.reqDisc||0,counterDisc:counterDisc,
       cfValues:n.cfValues||null,
-      ctx:n.ctx||'s1',by:byName,actionDate:new Date().toISOString()};
+      ctx:n.ctx||'s1',by:byName,actionDate:new Date().toISOString(),overrodeRouting:!!_may.override};
     var row=[key,JSON.stringify(updReq),new Date().toISOString()];
     sheetsGet('Settings!A:A').then(function(d){
       var vals=(d&&d.values)||[]; var rowIdx=-1;
@@ -24983,7 +25025,7 @@ function supaUpsertApprovalRequest(req){
     // completed. Only ever overwrite it with something real: partial saves (doApprovalAction,
     // _markOverrideApproved) send just the changed fields, and both stores replace the payload
     // wholesale, so an unguarded write would blank it on the first approval action.
-    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null),decision:(req.decision||null),applied:!!req.applied},
+    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null),decision:(req.decision||null),applied:!!req.applied,overrodeRouting:!!req.overrodeRouting},
     status:req.status||'pending',
     actioned_by:req.by||null
   };
