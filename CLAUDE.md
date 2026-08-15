@@ -7355,6 +7355,74 @@ only. **Run 2026-08-15: W65 re-closed, still pinned at ₱34.32.**
 
 ---
 
+## ⚠ APPROVAL ROUTING — the rule, as Rommel defined it 2026-08-15 (`e171985`, `349b97a`)
+
+**Routing allocates responsibility according to the process. It does not describe authority.**
+Rommel: *"it does not define authority but allocation of responsibility based on the process"*, and
+*"whoever is set in the routing that is the person who is responsible for it that is why we define
+it."*
+
+| Who | May act on a routed request |
+|---|---|
+| The person in the routing | **yes — it is theirs** |
+| Their **active delegate** | **yes** — delegation (Settings → Users) is the one function meant to change the flow |
+| **Admin** | bypass, **recorded as an exception** |
+| **Director** | bypass, **recorded as an exception** — same level of authority and access as Admin |
+| **Manager** | **refused** |
+| anyone else | **refused** |
+
+### What was wrong, and why it was invisible
+`findApproverForAction` has always resolved ONE named person, but **nothing ever checked that the
+person clicking Approve was that person.** Two things combined:
+1. **Visibility is deliberate** — `filterApprovalsByRouting` shows a Manager every request from their
+   own company, so managers can see what is happening in their area.
+2. **The PIN gate proved identity, never authority.** `doApprovalAction` set
+   `_pinModalApprover=findApproverForSelf()` — the CURRENT user — so it asked *"is this really you?"*
+   and never *"is this yours to decide?"*.
+
+Found on live data: **three discount requests routed to Rommel, all three approved by Allan Lagsao**
+(Manager). Rommel: *"What is the point of routing if someone can just snatch the approval just
+because they saw it even though their not authorize?"*
+
+`_apprWhoMayAct(n)` now decides, checked **before the PIN** so someone who may not act is told rather
+than asked for a PIN and refused afterwards. Every bypass sets `overrodeRouting` on the request and
+writes its own activity-log line naming who it was routed to.
+
+> ⚠ **Signatures were ALREADY correct and are stricter — do not "align" them.** `confirmSignature`
+> checks the signatory twice and allows **no delegate and no override, not even Admin**, because a
+> signature puts a named person's mark on a client document. That asymmetry is deliberate.
+>
+> ⚠ **The six decision types have no fallback row and do not need one** (asked and answered
+> 2026-08-15). Signature slots have `checkedAlt`/`notedAlt` precisely *because* nobody can sign for
+> another person; decisions do not, because Admin/Director hold that authority themselves —
+> *"That's why there's admin, since we have the same level of authority and access."*
+
+### Live configuration as at 2026-08-15
+Routing is **fully configured** for all three companies × all action types. Noted-by thresholds set
+to **₱20,000** each. Discount / CF Override / Premium / Accommodation → **Rommel** (all three
+companies); Non-VAT → **Kathleen Joyce Tiu**; Unlock → **Allan** (WCL, MSSI) / **Stiffany** (CWL);
+Checked by → **Joanna** (WCL, MSSI) / **Stiffany** (CWL), with fallbacks set.
+
+⚠ **Nobody has a delegate configured** — all six approvers have `delegate_to` empty. **Delegation is
+available to every approver in Settings → Users, Kathleen included** (Rommel, 2026-08-15: *"she has
+the delegation function as well in the user setting"*), so absence already has an in-process answer
+that needs no bypass — it simply is not set up yet. Until it is, an absent approver's items fall to
+an Admin/Director bypass. Working as designed; worth knowing before reading a rise in overrides as a
+fault.
+
+⚠ **PINs live ONLY in the Google Sheet (User Roles cols W/X)** — the Supabase mirror was dropped
+2026-08-08 for being wrong, so PIN state **cannot be checked from SQL**. With enforcement live, a
+routed approver with no PIN can no longer be quietly covered by someone else.
+
+### Method note
+I described this gap as though it were the design, and was told so: *"Your being reckless again …
+get back on how we design it before telling me this."* **The intent was recorded in this file and in
+`findApproverForAction` itself — routing table, delegation, escalation threshold. Read the intent
+before describing current behaviour as a choice.** I then compounded it by reverting a correct
+Director fix after misreading a rebuke as "stop changing things".
+
+---
+
 # OPEN — updated 2026-08-15 (session 3) (THIS IS THE AUTHORITATIVE LIST)
 
 ## ⚠ ONE click left for Rommel — everything else now handles itself
