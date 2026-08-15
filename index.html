@@ -13342,6 +13342,35 @@ function _applyApprovedRequest(notif){
 // alongside fqApprovalsFromSave/initFinalQuotation() so Stage 2 approvals stick permanently
 // instead of being silently re-copied from Stage 1 on next reopen; confirmed with the user that
 // Stage 2 is the basis for client payment and PMES, so this had to be real, not just Stage 1).
+// Brings the Project List row back in line with a state that has just been changed by an approval,
+// for a quotation that may not be open in anybody's browser. Status and Locked are derived from the
+// state, so this writes what the state already says rather than deciding anything. Both stores, or
+// it would recreate the Sheet/Supabase split that made this class of problem invisible.
+function _syncRowFromState(serial,state){
+  if(!serial||!state) return;
+  var status=_statusFromState(state,serial);
+  var lockedCell=(state.stage===2||state.fqStarted)?(state.fqLocked?'Yes':'No'):(state.locked?'Yes':'No');
+  // In memory first, so anything already on screen stops showing the old stage immediately.
+  try{
+    if(sessionQuotations[serial]){ sessionQuotations[serial].status=status; sessionQuotations[serial].locked=(lockedCell==='Yes'); }
+    for(var i=0;i<(dirData||[]).length;i++){
+      var d=dirData[i];
+      if(d.id===serial||d.baseSerial===serial){ d.status=status; d.locked=(lockedCell==='Yes'); break; }
+    }
+  }catch(e){}
+  try{
+    if(typeof SUPA_DUAL_WRITE!=='undefined'&&SUPA_DUAL_WRITE&&typeof supaReady==='function'&&supaReady())
+      supa.from('quotations').update({status:status}).eq('serial',serial)
+        .then(function(r){ if(r&&r.error) console.warn('[approval] supabase status',serial,r.error.message||r.error); });
+  }catch(e){}
+  sheetsGet('Quotations!A:A').then(function(d){
+    var vals=(d&&d.values)||[], rowIdx=-1;
+    for(var i=1;i<vals.length;i++){ if(vals[i][0]===serial){ rowIdx=i+1; break; } }
+    if(rowIdx<0) return;                                  // no row yet — the first save will write it
+    return sheetsUpdate('Quotations!F'+rowIdx,[[status]])
+      .then(function(){ return sheetsUpdate('Quotations!J'+rowIdx,[[lockedCell]]); });
+  }).catch(function(e){ console.warn('[approval] could not sync the Project List row for '+serial,e); });
+}
 function _persistApprovedFieldToQuotation(notif,callback){
   var serial=notif.serial;
   if(!serial||!gToken){ if(callback) callback(false); return; }
@@ -13408,6 +13437,14 @@ function _persistApprovedFieldToQuotation(notif,callback){
     });
     p.then(function(){
       try{ supaUpsertState(serial,state); }catch(e){}
+      // ── and the Project List row, or this approval creates drift by construction ──────────
+      // This used to update the STATE only. The Status and Locked columns are a projection of that
+      // state, written solely by gSaveQuotation — so an unlock approved by someone else left the
+      // row saying "IQ Locked" until the requester happened to open and save the quotation.
+      // Confirmed on QT-W00000116: unlocked 09:46:50 by Allan's approval, no save ever followed,
+      // and the row still read IQ Locked. That is the reason the Project List check "always finds
+      // something": the app was manufacturing the very drift it then asked someone to clean up.
+      try{ _syncRowFromState(serial,state); }catch(e){}
       // Record that this decision has landed, wherever it was applied from. Marked centrally so
       // every path is covered, and PERSISTED because in-memory alone would let the next session's
       // poll apply it a second time. Most mutations set a value and would survive that, but
@@ -25798,7 +25835,12 @@ function _dbCheckAuto(){
   });
   _findStaleStatuses(function(findings){
     var host=el('dir-stale-banner');
-    if(!host||!findings||!findings.length) return;
+    if(!findings||!findings.length) return;
+    // Nothing here needs a person: every one of these is a derived value being set to what it
+    // already derives to. Correct it and say so. An unusually large batch is the exception — that
+    // points at something systemic rather than ordinary drift, so that still goes to a human.
+    if(findings.length<=25){ _dbCheckFindings=findings.slice(); fixProjectListStatuses(true); return; }
+    if(!host) return;
     host.innerHTML='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 14px;'
       +'background:var(--wash-amber);border:1px solid #f5d78e;border-left:3px solid var(--amber);'
       +'border-radius:0 8px 8px 0;margin-bottom:10px;font-size:13px">'
@@ -26219,13 +26261,17 @@ function fixLostLockTimes(){
     }).catch(function(){ if(host) host.innerHTML='<div style="padding:12px 16px;color:var(--coral)">Could not read the Quotations sheet.</div>'; });
   });
 }
-function fixProjectListStatuses(){
+// Status is DERIVED. Correcting it to its own derivation is not a judgement anyone can get wrong,
+// so it has no business sitting behind a button waiting to be noticed. Rommel, 2026-08-15: "why do
+// I have to keep on doing this and why does it always find something. this only means that we are
+// not correcting the root cause." Right on both counts — the source hole is closed in
+// _persistApprovedFieldToQuotation, and whatever drift still turns up is now corrected without
+// asking. Pass auto=true to skip the confirmation; the writes themselves are identical.
+function fixProjectListStatuses(auto){
   var list=_dbCheckFindings.slice();
   if(!list.length) return;
-  _confirm('Correct the Status of '+list.length+' quotation'+(list.length===1?'':'s')+'?\n\n'
-    +'Only the Status column is rewritten, to match what each quotation already is. No prices, scope or client details are touched.',
-  function(){
-    var box=el('dbcheck-result');
+  var _go=function(){
+    var box=auto?null:el('dbcheck-result');
     if(box) box.innerHTML='<div class="alert alert-info" style="margin-top:10px"><i class="ti ti-loader"></i> Correcting '+list.length+'…</div>';
     var done=0, failed=0;
     // One cell at a time, paced — a burst of writes is what triggered the 429s during the
@@ -26241,6 +26287,9 @@ function fixProjectListStatuses(){
         if(box) box.innerHTML='<div class="alert" style="margin-top:10px;border-left:3px solid var(--teal)">'
           +'<i class="ti ti-circle-check"></i> Corrected <b>'+done+'</b>'+(failed?', <b>'+failed+'</b> could not be written':'')
           +'. Reopen the Project List to see them.</div>';
+        // Said, not silent — but as a note that it has been handled, not a job to go and do.
+        if(auto&&done){ try{ showToast('Project List brought up to date — '+done+' stage'+(done===1?'':'s')+' corrected.'); }catch(e){} }
+        if(auto) try{ renderDirectoryTable(); }catch(e){}
         return;
       }
       var f=list[i];
@@ -26257,7 +26306,10 @@ function fixProjectListStatuses(){
         .catch(function(){ failed++; })
         .then(function(){ setTimeout(function(){ next(i+1); },120); });
     })(0);
-  });
+  };
+  if(auto) return _go();
+  _confirm('Correct the Status of '+list.length+' quotation'+(list.length===1?'':'s')+'?\n\n'
+    +'Only the Status column is rewritten, to match what each quotation already is. No prices, scope or client details are touched.', _go);
 }
 function verifyDatabaseConnection(){
   if(!gToken){alert('Please sign in first to test the database connection.');return;}
