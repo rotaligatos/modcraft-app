@@ -7811,15 +7811,27 @@ changes under her.
 - **PMES sign-in** — 22 `pmes_*` tables still anon-readable. **Do not drop those policies before
   that app has auth**; it uses the public website's key and would go down.
 
-## ⚠ THE MOBILE APP IS FINISHED — one thing is unproven
-Approvals, push, the biometric gate and Lami are all live. **Everything up to the model call is
-tested; the round trip to the Claude API has never actually run.** Open the approval app, hold or
-tap Lami, ask something like *"what's in this job?"*. If she answers, the last box is ticked. If
-she does not, the likely causes in order: `ANTHROPIC_API_KEY` not saved correctly, `lami_enabled`
-off for the signed-in account, or the account differs from the one granted.
+## ✅ THE MOBILE APP IS FINISHED — and the last box is ticked (2026-08-17)
+Approvals, push, the biometric gate and Lami are all live. **Rommel asked Lami on his phone and she
+answered, naming a real pending quotation.** That was the one thing never proven.
 
-**Only Rommel has `lami_enabled = true`** (set 2026-08-16 so he could test). Everyone else is off;
-grant from Settings → Users.
+**What her answering proves, and why it is categorical.** `lami-ask` has no cache and no fallback —
+an answer can only come from the final `return`, which is reachable only past `if (!KEY) return 500`
+(so the secret IS set) and `if (!resp.ok) return 502` (so Anthropic ACCEPTED it — a bad key returns
+401 and would have surfaced as *"Lami could not answer just now"*). It also proves the JWT resolved
+to a real user, `lami_enabled` was on for that account, and the RLS-scoped reads returned live data.
+**So `ANTHROPIC_API_KEY` is set and valid — do not re-raise it as unverified.**
+
+⚠ The one way she can sound right and be wrong is **service names**: `svcItems` store `{qty, svcIdx}`
+with no name, and `svcIdx` is a POSITIONAL index into `price_services` **ordered by id**. The
+function loads them in exactly that order and the desktop's `supaGetPriceDb()` does too, so they
+agree today. **Any change to how either loads that table breaks her silently** — she will name the
+wrong services with complete confidence. There is no error to catch; only a person reading her
+answer against the job would notice.
+
+**`lami_enabled` is on for TWO accounts** (verified 2026-08-17): Rommel and **Kathleen Joyce Tiu**
+(Director). Everyone else is off; grant from Settings → Users. Note the earlier "only Rommel" line
+was stale within a day — check the column rather than this file.
 
 **Push still reaches one person.** 5 subscriptions, all `rommel.taligatos@`. Joanna and Stiffany
 need to open the approval app, sign in, and allow notifications — the subscription registers
@@ -7831,6 +7843,18 @@ in the Edge Function was offered and not taken; worth revisiting if usage grows.
 
 **`device_capabilities` has 1 row** (Rommel's Android, `can_be_gated: true`, `enrolled: false` —
 he has not made a decision on the phone yet). The table is visibility only; the gate never reads it.
+
+**A duplicate `users` row, harmless — diagnosed 2026-08-17, deliberately NOT deleted.**
+`wcli-it-admin@…` appears twice: once with a **trailing space** (created `2026-07-18 13:19` by the
+`supaMigrateUsers()` backfill) and once clean (`2026-08-16 07:14`, a normal `supaUpsertUser`). So
+the 2026-07-18 `.trim()` fix WORKS — this is residue the cleanup that day could not have caught,
+because at that moment there was only one row and nothing to detect; it became a duplicate a month
+later when the clean row was written. **Checked whether it breaks RLS: it does not.** All five
+helpers are duplicate-safe by construction — `app_current_role` uses `limit 1`, `app_is_admin_tier`
+and `app_sees_all_companies` use `exists(...)`, `app_visible_companies` uses
+`array_agg(distinct …)` over a `union`. None is a scalar subquery, so two matching rows cannot
+error. Removing it is cosmetic and Rommel's call; the Google Sheet `User Roles` is the source of
+truth either way. ⚠ If it IS removed, delete the **trailing-space** row (len 40), not the clean one.
 
 ## Watch — shipped 2026-08-16, correct in test, not yet exercised in production
 Not defects. The first real use is the thing to look at.
