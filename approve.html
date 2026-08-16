@@ -198,6 +198,50 @@ function authoriseAction(what){
   return Promise.resolve(true);   // Phase 1b replaces this body. Callers already await it.
 }
 
+/* ── Can this device actually be gated? ────────────────────────────────────────────────────
+   authoriseAction() above still lets every approval through. Before making a check mandatory
+   we need to know what the team's real phones can do, rather than assume it.
+
+   WebAuthn's platform authenticator is the right gate for a phone: the device already has a
+   strong local authenticator, it is a browser standard, and it needs no new secret in the
+   database — which matters, because a PIN is not available here at all (PINs live only in the
+   Google Sheet and this page never talks to Sheets).
+
+   The common worry is "not everyone uses biometrics". On Android that mostly does not matter:
+   with a screen lock set but no fingerprint enrolled, the platform authenticator falls back to
+   the PIN/pattern. So this answers the question that actually decides the design — does the
+   phone have a lock at all.
+
+   Records a boolean, not a credential. Nothing is enrolled and the user is not prompted. */
+function _deviceKey(){
+  var k=null;
+  try{ k=localStorage.getItem('mc_devkey');
+       if(!k){ k=Math.random().toString(36).slice(2)+Date.now().toString(36);
+               localStorage.setItem('mc_devkey',k); } }
+  catch(e){ k='nostorage'; }        // private mode: still reports, just cannot dedupe by device
+  return k;
+}
+function recordDeviceCapability(){
+  if(!ME) return;
+  var probe = (window.PublicKeyCredential &&
+               typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable==='function')
+    ? PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+    : Promise.resolve(false);
+  probe.then(function(ok){
+    return supa.from('device_capabilities').upsert({
+      id: ME.trim().toLowerCase()+':'+_deviceKey(),
+      user_email: ME.trim().toLowerCase(),
+      platform_authenticator: !!ok,
+      user_agent: String(navigator.userAgent||'').slice(0,300),
+      checked_at: new Date().toISOString()
+    }, { onConflict:'id' });
+  }).then(function(r){
+    if(r&&r.error) console.warn('[cap] not recorded:', r.error.message||r.error);
+  }).catch(function(e){ console.warn('[cap] probe failed', e); });
+  /* Deliberately not awaited and never surfaced: this is measurement. A device that cannot
+     report must still be able to approve exactly as it does today. */
+}
+
 /* ── Push notifications ─────────────────────────────────────────────────────────────────────
    Registered against approve.html specifically, NOT the whole site. sw.js has no fetch handler
    and must never gain one (see the note in that file), and the narrow scope means that even if
@@ -301,6 +345,7 @@ function boot(){
     if(!s){ renderSignIn(); return; }
     ME=s.user.email||'';
     el('who').textContent=ME;
+    recordDeviceCapability();   // measurement only — never blocks or delays the request below
     return supa.from('users').select('name,role,active').ilike('email',ME.trim()).limit(1)
       .then(function(u){
         var row=u&&u.data&&u.data[0];
