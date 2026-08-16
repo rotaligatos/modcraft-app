@@ -7809,6 +7809,25 @@ The pre-commit hook needed **no change** — it already globs any staged `.html`
 covered there all along. It runs collisions only; the smoke gate is too slow for a hook, same as
 for index.html.
 
+### ⚠ A comment in `approve.html` said the gate was still open (`658c578`)
+Found while reading the file for the profile. The authorisation block described a plan that was
+superseded **before it shipped** — *"Phase 1 ships with this open"*, the authority being no more
+than a Google sign-in, PIN chosen as the next step and biometric after. None of it true: PIN was
+skipped and WebAuthn shipped 2026-08-16. **The block directly below it describes that gate, so the
+file held two adjacent comments contradicting each other, stale one first.** It was also orphaned
+above `reasonBoxHtml()`, which has nothing to do with authorisation — code had moved out from
+under it.
+
+Removed rather than patched, with its two still-true facts moved into the gate block where someone
+reading about authorisation actually is: that **`authoriseAction()` is the single seam** for who
+may act, and that a PIN second factor must **never mirror hashes into Supabase** (that copy was
+never reliably populated, was read by nothing, and caused two wrong conclusions before it was
+dropped). Comment only, no behaviour — and it was the first thing gate 3 was asked to cover.
+
+> This is the hazard this file already names: *a comment that lies is what produced the
+> `getInstallCarcassUnits` bug.* Worth a sweep for others — a superseded plan left in place reads
+> as current intent to the next person, and there is nothing that can catch it automatically.
+
 ### Method notes
 - **A control that cannot reproduce the bug proves nothing about the fix.** The fault-injection
   pass is the whole reason to believe these checks; without it they are decoration that always
@@ -7816,6 +7835,8 @@ for index.html.
 - **Read the intent before extending a tool.** `check-collisions.mjs` already accepted a file list
   and the hook was already generic — two thirds of "fold approve.html in" turned out to be
   wiring, not building.
+- **The first deploy poll returned 0 again**, and the second was green. Confirm SERVING and retry;
+  a single miss is not evidence of a failed deploy.
 
 ---
 
