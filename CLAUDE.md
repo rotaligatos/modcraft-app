@@ -7624,11 +7624,11 @@ and fails on an uncaught error, a missing critical function, or a failed logic c
 `tools/verify.mjs` runs it after `check-collisions.mjs` and exits 0 only if both pass.
 Installed Playwright + Chromium; `node tools/verify.mjs` passes.
 
-> Its value is the `CRITICAL` list and the logic checks — currently 14 functions and 2
-> assertions. It catches a deleted function or a crash on load; it will NOT catch a wrong
-> number. It earns its keep only if a check is added each time a real bug is found.
-> ⚠ It covers **index.html only**. `approve.html` is parse-checked separately by hand — worth
-> folding in.
+> Its value is the `CRITICAL` list and the logic checks. It catches a deleted function or a
+> crash on load; it will NOT catch a wrong number. It earns its keep only if a check is added
+> each time a real bug is found.
+> ✅ **`approve.html` was folded in on 2026-08-17** — see that session. `verify.mjs` now runs
+> three gates and covers both pages.
 
 ### Secrets out of a public repo (`a1137cc`, `77b7f90`)
 `.gitignore` added (`node_modules/`, `.env`, `.DS_Store`, `client_secret_*.json`) — there was
@@ -7747,6 +7747,75 @@ changes under her.
   and Lami had to be a character, not a card.
 - **Check the endpoint exists before shipping the thing that calls it** — `tickets` was verified
   before the Report button went out.
+
+---
+
+## What was changed on 2026-08-17 (session — Lami proven, and approve.html folded into the gate)
+
+Two commits, `584d042` and `d5b2244`. Short session: a verification sweep of what the previous
+handoff called unproven, then the one job that needed nobody else.
+
+### ✅ Lami answered on the phone — the last unproven box
+Rommel asked her and she named a real pending quotation. Recorded in the OPEN list with the
+reasoning for why that is categorical rather than encouraging (no cache, no fallback, so an answer
+is only reachable past the missing-key 500 and the `!resp.ok` 502). **`ANTHROPIC_API_KEY` is
+settled — do not re-raise it.** The remaining silent-failure risk is service names via the
+positional `svcIdx`; see that entry.
+
+### Verified from here, before touching anything
+`lami-ask` **ACTIVE v4**, and still refuses unauthenticated callers correctly — no header,
+publishable key, and garbage token all return 401, with the publishable key getting the app's own
+*"a signed-in user is required"*. **The caller-auth-first ordering survived the v4 redeploy**, so
+nothing about the function's configuration is disclosed before the bearer resolves to a user. Worth
+re-probing after any future deploy: it is a three-curl check and it has already been wrong once.
+
+Two briefing claims were stale within a day — `lami_enabled` is on for **two** accounts, and a
+duplicate `users` row had appeared. Both corrected in the OPEN list. **State claims in this file
+decay fast; re-measure rather than quote.**
+
+### `approve.html` now goes through the gate (`d5b2244`)
+It only ever got a hand eyeball, and it is load-bearing now. `verify.mjs` runs **three** gates:
+collisions over both files (the checker already took a file list, so that was free), then a
+headless smoke per page.
+
+**`smoke.mjs` became profile-driven rather than a second copied runner** — one runner, a table of
+what each page must satisfy, so a harness fix lands for both at once. A copied runner is what
+`recalc`/`recalcFQ` already demonstrates the cost of. index.html's profile is its previous
+behaviour verbatim and its output is byte-identical.
+
+> ⚠ **`approve.html` calls `supabase.createClient` at TOP LEVEL** (line ~144), so with the CDN
+> blocked the whole script dies before defining anything and every check reports a false failure.
+> The profile stubs that one script: chainable no-op queries and **no session**, a real reachable
+> state that sends `boot()` down `renderSignIn()`. It deliberately does not fake a signed-in user —
+> this gate proves the page loads and its pure logic holds, **not** that its data paths work.
+>
+> ⚠ Its liveness check is **`#si`, not `#root`** — `#root` is static markup and would pass even if
+> the script never ran.
+
+Checks chosen for what can break *silently*, not for coverage:
+| Check | The silent failure it catches |
+|---|---|
+| `OVR` is module-scoped | it shipped trapped inside `render()` — a ReferenceError only override requests reached, so every other type short-circuited past it |
+| `reasonBoxHtml` emits the id `act()` reads | rename either and the reason is dropped without a word; the decision still lands, with no record of why |
+| `ovrEval`'s `ni` gate, **both directions** | the phone must price exactly as the engine does; drift there is silent money |
+| unknown target refuses loudly | falling back to another page's profile would report a confident PASS for a file nothing had checked |
+
+**`tools/smoke.test.mjs` proves each of those goes red when its target is broken — and red for the
+right check.** All 8 cases behave. Mutations assert their anchor exists first, so a drifted anchor
+is reported rather than quietly becoming a second control. Matches the existing
+`check-collisions.test.mjs` convention.
+
+The pre-commit hook needed **no change** — it already globs any staged `.html`, so approve.html was
+covered there all along. It runs collisions only; the smoke gate is too slow for a hook, same as
+for index.html.
+
+### Method notes
+- **A control that cannot reproduce the bug proves nothing about the fix.** The fault-injection
+  pass is the whole reason to believe these checks; without it they are decoration that always
+  says PASS.
+- **Read the intent before extending a tool.** `check-collisions.mjs` already accepted a file list
+  and the hook was already generic — two thirds of "fold approve.html in" turned out to be
+  wiring, not building.
 
 ---
 
@@ -7872,8 +7941,8 @@ Not defects. The first real use is the thing to look at.
   their phone, that is the gate working — they set a lock, or use a laptop. Do NOT add a soft
   fallback that lets an unsupported device through: it turns the gate into a suggestion, since
   anyone could remove their lock to bypass it.
-- **`tools/verify.mjs` covers index.html only.** `approve.html` is parse-checked by hand. Folding it
-  in is a small job and would have caught nothing today, but will eventually.
+- ✅ **`tools/verify.mjs` now covers `approve.html` too** (2026-08-17) — three gates, and
+  `tools/smoke.test.mjs` proves each new check goes red when its target is broken.
 
 ## Longer-term, unchanged
 Subsidiary material billing differs between BOM and cutting-list mode · Price DB ~39,420 blank-unit
