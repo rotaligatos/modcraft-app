@@ -194,8 +194,117 @@ function reasonBoxHtml(){
   return '<div class="lbl" style="margin-top:4px">Your reason <span style="text-transform:none;letter-spacing:0">(optional — kept on the record)</span></div>'
     +'<textarea class="rsn" id="rsn" maxlength="1000" placeholder="Why you approved, countered or rejected this…"></textarea>';
 }
+/* ── The gate: prove it is you, on this device, before the decision lands ───────────────────
+   This asks the DEVICE, at the moment of use, every time. It is not configured from a list of
+   known phones and there is nothing to maintain: a new or replacement handset answers for
+   itself and enrols in a few seconds on its first approval, with no admin involvement. That
+   was Rommel's point, and it is why the check is runtime rather than fleet-tailored.
+
+   WHY WEBAUTHN AND NOT A PIN. PINs live only in the Google Sheet (User Roles W/X) and this
+   page never talks to Sheets, so there is nothing here to check a PIN against. The device
+   already has a strong local authenticator; on Android a phone with a screen lock but no
+   fingerprint enrolled falls back to its PIN or pattern, so "not everyone uses biometrics"
+   mostly does not matter — having a lock does.
+
+   ⚠ HONEST LIMIT. The ceremony is verified by the device and the browser, not by a server:
+   there is no challenge issued or signature checked in Postgres. That makes it exactly as
+   strong as the desktop PIN, which is also compared in the browser — and far stronger against
+   the threat that actually exists here, which is an unlocked phone in a bag, not someone
+   attacking the page with devtools. Server-side verification is a real upgrade and a much
+   larger job; it is deliberately not pretended at here.
+
+   Clearing the browser store does NOT bypass anything: with no local credential the flow
+   enrols, and enrolment itself requires the same user verification. */
+var CRED_KEY='mc_appr_cred';
+function _credId(){ try{ return localStorage.getItem(CRED_KEY)||''; }catch(e){ return ''; } }
+function _b64uToBuf(s){
+  s=String(s).replace(/-/g,'+').replace(/_/g,'/');
+  while(s.length%4) s+='=';
+  var raw=atob(s), b=new Uint8Array(raw.length);
+  for(var i=0;i<raw.length;i++) b[i]=raw.charCodeAt(i);
+  return b.buffer;
+}
+function _bufToB64u(buf){
+  var b=new Uint8Array(buf), s='';
+  for(var i=0;i<b.length;i++) s+=String.fromCharCode(b[i]);
+  return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function _randBuf(n){ var b=new Uint8Array(n); crypto.getRandomValues(b); return b.buffer; }
+function _noteEnrolment(enrolled){
+  if(!ME) return;
+  try{
+    supa.from('device_capabilities').upsert({
+      id: ME.trim().toLowerCase()+':'+_deviceKey(),
+      user_email: ME.trim().toLowerCase(),
+      platform_authenticator: true,
+      enrolled: !!enrolled,
+      last_verified_at: new Date().toISOString(),
+      user_agent: String(navigator.userAgent||'').slice(0,300),
+      checked_at: new Date().toISOString()
+    },{onConflict:'id'}).then(function(){}, function(){});
+  }catch(e){}
+}
 function authoriseAction(what){
-  return Promise.resolve(true);   // Phase 1b replaces this body. Callers already await it.
+  var verb = what==='approved' ? 'approve' : what==='rejected' ? 'reject' : 'send this counter-offer';
+  if(!(window.PublicKeyCredential&&navigator.credentials&&window.isSecureContext)){
+    alert('This device cannot confirm it is you, so approvals are not available here.\n\n'
+      +'Use the app on a laptop for this one.');
+    return Promise.resolve(false);
+  }
+  return PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(ok){
+    if(!ok){
+      /* The rule, and it self-applies to every future device: no way to verify you, no
+         approving from here. Nobody loses anything they have today — this is what everyone
+         did before the phone app existed. */
+      alert('This phone has no screen lock or biometric set up, so it cannot confirm it is you.\n\n'
+        +'Set a screen lock in your phone settings, or '+verb+' this on a laptop.');
+      return false;
+    }
+    var id=_credId();
+    if(id){
+      return navigator.credentials.get({publicKey:{
+        challenge:_randBuf(32),
+        allowCredentials:[{type:'public-key',id:_b64uToBuf(id)}],
+        userVerification:'required',
+        timeout:60000
+      }}).then(function(a){
+        if(!a) return false;
+        _noteEnrolment(true);
+        return true;
+      }).catch(function(e){
+        /* A credential can die with a wiped keychain or a restored handset. Re-enrol rather
+           than stranding someone — enrolment demands the same verification, so this is not a
+           softer path. */
+        if(String(e&&e.name)==='NotAllowedError'){ alert('Not confirmed, so nothing was changed.'); return false; }
+        try{ localStorage.removeItem(CRED_KEY); }catch(e2){}
+        return _enrolThisDevice(verb);
+      });
+    }
+    return _enrolThisDevice(verb);
+  }).catch(function(e){
+    alert('Could not confirm it is you on this device, so nothing was changed. '+(e&&e.message||''));
+    return false;
+  });
+}
+function _enrolThisDevice(verb){
+  /* First approval on this handset. One prompt, a few seconds, no admin anywhere. */
+  return navigator.credentials.create({publicKey:{
+    challenge:_randBuf(32),
+    rp:{name:'Modcraft Approvals'},
+    user:{id:_randBuf(16), name:ME||'approver', displayName:ME||'approver'},
+    pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+    authenticatorSelection:{authenticatorAttachment:'platform',userVerification:'required',residentKey:'preferred'},
+    timeout:60000, attestation:'none'
+  }}).then(function(c){
+    if(!c) return false;
+    try{ localStorage.setItem(CRED_KEY,_bufToB64u(c.rawId)); }catch(e){}
+    _noteEnrolment(true);
+    return true;
+  }).catch(function(e){
+    if(String(e&&e.name)==='NotAllowedError') alert('Not confirmed, so nothing was changed.');
+    else alert('This device could not set up the check, so nothing was changed. Use a laptop for this one.');
+    return false;
+  });
 }
 
 /* ── Can this device actually be gated? ────────────────────────────────────────────────────
