@@ -7612,6 +7612,144 @@ Measurements that decided it, none of which matched the CSS estimate:
 
 ---
 
+## What was changed on 2026-08-16 (session 2 — test gate, secrets, and the mobile app finished)
+
+Eleven commits, `541d475`..`2aa3b96`, all deployed and confirmed SERVING. This is the session
+that finished the phone: a reason box, a biometric gate, and Lami. Everything below was verified
+by driving the real code or querying live data.
+
+### A test gate that has to be green before shipping (`541d475`)
+`tools/smoke.mjs` loads index.html headless (Playwright, CDNs blocked so it needs no internet)
+and fails on an uncaught error, a missing critical function, or a failed logic check.
+`tools/verify.mjs` runs it after `check-collisions.mjs` and exits 0 only if both pass.
+Installed Playwright + Chromium; `node tools/verify.mjs` passes.
+
+> Its value is the `CRITICAL` list and the logic checks — currently 14 functions and 2
+> assertions. It catches a deleted function or a crash on load; it will NOT catch a wrong
+> number. It earns its keep only if a check is added each time a real bug is found.
+> ⚠ It covers **index.html only**. `approve.html` is parse-checked separately by hand — worth
+> folding in.
+
+### Secrets out of a public repo (`a1137cc`, `77b7f90`)
+`.gitignore` added (`node_modules/`, `.env`, `.DS_Store`, `client_secret_*.json`) — there was
+none at all, so `git add .` would have committed `node_modules` to a repo that publishes to
+GitHub Pages. The Google OAuth **client secret JSON was moved out to `~/secrets/`**.
+
+> ✅ **That one is genuinely closed**: checked before moving it, and it was **never committed to
+> any branch** — so unlike the Wufoo key there is no residue and no rotation needed. The ignore
+> rule was proven with a decoy file, not assumed.
+
+### The phone: a reason, a named decision, and an override that never worked (`cc7a18c`)
+- **Reason box on the phone.** The laptop got one that morning; the phone had none, so the same
+  decision was recorded or not depending on which device was nearest. Writes to the SAME
+  `payload.actionReason` the app reads. Merged with `Object.assign` onto the existing payload —
+  it is a partial patch, and replacing it wholesale is how `sigSlot` was lost. No reason typed →
+  payload untouched.
+- **The log said "an approver".** For signatures `_apprApplyRemoteDecisions` builds a fabricated
+  payload that REPLACES the notif for logging, and it carried no `by`/`approverEmail`. Both are
+  carried now.
+- ⚠ **APPROVING AN OVERRIDE FROM A PHONE HAD NEVER WORKED.** `OVR` was declared `var OVR` inside
+  `render()` but read by `onOverride()` and `act()` — a ReferenceError in both. Invisible because
+  each use sits behind `req_type==='override' &&`, which short-circuits for every other type, so
+  unlock/discount/non-VAT/premium/signature never evaluate it. Moved to module scope.
+- Caught before shipping: the reason and the override rates both wrote `patch.payload`, the
+  second overwriting the first.
+
+### Measure before designing a gate (`407b277`), then the gate (`dfde64d`)
+`authoriseAction()` had been `return Promise.resolve(true)` since the phone app shipped — the
+phone asked for **nothing** before approving a discount, an unlock or a signature, while the
+laptop demanded a PIN.
+
+**A PIN cannot close it**: PINs live only in the Google Sheet (User Roles W/X) and this page never
+talks to Sheets. Confirmed `users` has `require_pin` but no hash and no salt.
+
+First shipped a **capability probe** (`device_capabilities` table,
+`isUserVerifyingPlatformAuthenticatorAvailable()`, no enrolment, no prompt).
+
+> **Rommel's objection was the right one** and changed the design: a gate tailored to the phones
+> we happened to measure would be tedious and wrong the moment someone changes handset. So the
+> gate asks the DEVICE at the moment of use — a new or replacement phone enrols itself in seconds
+> with no admin work and no list to maintain. The capability table is visibility only; the gate
+> never reads it.
+
+WebAuthn platform authenticator, `userVerification:'required'`. On Android a phone with a screen
+lock but no fingerprint falls back to PIN/pattern, so **"not everyone uses biometrics" mostly does
+not matter — having a lock does**. Cost is one tap, less than the desktop PIN. Refuses only a
+phone with no lock at all, and says what to do instead. Clearing the browser store does not
+bypass it: with no credential it enrols, and enrolment demands the same verification.
+
+> ⚠ **HONEST LIMIT, in the code too:** verified by the device and the browser, NOT by a server —
+> no challenge issued or signature checked in Postgres. Exactly as strong as the desktop PIN
+> (also compared in the browser) and far stronger against an unlocked phone in a bag. Server-side
+> verification is a real upgrade and a much larger job.
+
+### Lami on the phone — Phase 3, finished (`8e4cd1d`, `eb204c5`, `ab9b530`, `400e0ab`, `2aa3b96`)
+Scope chosen by Rommel: **quotations plus client history** — the largest of the three options.
+
+**`lami-ask` Edge Function.** The Claude key was unreachable from the phone for the same reason
+the PIN was, so it lives in a **Supabase secret** and never touches the client — stricter than the
+desktop, where it sits in a Sheet any signed-in user can read and is copied into every browser's
+localStorage.
+
+> ⚠ **CALLER AUTH MUST RUN FIRST — this is the second time this trap has appeared.** Deployed
+> with the missing-secret check first, a caller holding only the **publishable key** got a 500
+> naming the function and its configuration. Reordered so nothing is disclosed before the bearer
+> token resolves to a real USER. Verified: no header, garbage token and the public key all return
+> a bare 401. Same lesson as `send-approval-push`.
+
+- **Visibility is not hand-rolled** — every read runs through a client bound to the caller's own
+  JWT, so existing RLS decides what they see. A second copy of that rule would drift (a
+  company-name typo already locked out 8 of 13 users once).
+- **Cost and margin are stripped SERVER-SIDE** for anyone outside Admin/Director/Manager — never
+  put in the context, so there is nothing on the device to inspect.
+- **Per-user access:** `users.lami_enabled`, off by default, enforced in the function *before* the
+  secret check and before any read. Its own column, not a `feature_access` key, because
+  feature_access is written from the Sheet and the phone cannot read Sheets — **a flag the phone
+  cannot see is not a gate.** Granted from Settings → Users.
+- ⚠ **`svcItems` carry `{qty, svcIdx}` with NO name**, and `svcIdx` is positional into
+  `price_services` ordered by `id`. Loaded in exactly that order; any other and she names the
+  wrong services with complete confidence.
+- The 110kB state is reduced to a compact brief **deterministically** before the model sees it.
+
+**Two bugs Rommel found, both mine:**
+1. **Ticking Lami then pressing Save made the tick vanish.** `saveUserRow` rebuilds the user object
+   field by field and `lamiEnabled` was not among them — so Supabase saved it and the re-render
+   wiped it. **The setting worked; the screen lied**, which is worse than failing.
+2. **He could not see her at all.** The card rendered only from `render()`, which draws a SPECIFIC
+   request — and with zero pending requests no screen could show her.
+
+**Then the shape was wrong.** Rommel: *"it looks kinda boring… theres a floating agent… while you
+hold lami, you can ask lami."* Right — a card is a form. She is now the **desktop chip's face**,
+floating, **hold to talk / tap to type**, mounted once on the body so she sits still while the page
+changes under her.
+
+- **Reachable while her sheet is open** — the sheet covered her, so a second question meant
+  closing first. Lifted above it and parked over the panel, measured and re-measured as her answer
+  changes the panel height, clamped so a long answer cannot push her off screen.
+- **Stopped auto-focusing the textarea** — on Android the keyboard covered both her answer and the
+  chip, the opposite of holding to talk.
+- **A speaker switch**, off by default, remembered per device. Only the ANSWER is spoken, never
+  "Thinking…" or an error. New question, closing, or switching off all stop her.
+
+> **Voice is the opposite way round from listening.** Hearing you (`SpeechRecognition`) is
+> Android-only; **talking (`speechSynthesis`) works on iPhone too**. So the only thing an iPhone
+> cannot do is the input. On a phone without recognition the hold opens the sheet and says so.
+
+### Method notes worth keeping
+- **My test rig misled me five more times**: `confirm()` blocks a headless run (and hung it);
+  `window.speechSynthesis` is a **read-only getter** in Chrome so a plain stub assignment is
+  silently ignored; `loadList()` returns nothing so it cannot be chained; a regex matched a
+  function *definition* and made a successful edit look failed; and I overwrote `renderApprovals`
+  with my own stub and then blamed the render.
+- **Shell heredocs mangled a scripted patch again** — write the block to a file with the Write
+  tool and splice it with node. Third time in this repo.
+- **Rommel's pushback improved the design twice**: the gate must be runtime, not fleet-tailored;
+  and Lami had to be a character, not a card.
+- **Check the endpoint exists before shipping the thing that calls it** — `tickets` was verified
+  before the Report button went out.
+
+---
+
 # OPEN — updated 2026-08-16 — THIS IS THE AUTHORITATIVE LIST
 
 ## Nothing is waiting on the developer. Three things are waiting on people.
@@ -7664,6 +7802,35 @@ Measurements that decided it, none of which matched the CSS estimate:
 - **Report button below 1180px** — hidden on the quotation page only, because the total bar's left
   gutter is too small to hold it. Fix is to shrink it to the 🐞 icon at narrow widths; offered
   2026-08-16, not taken.
+- **Voice input on iPhone.** iOS Safari has no `SpeechRecognition`; paying for a speech-to-text
+  service was decided against. iPhone users type. **Note her SPEAKING works on iPhone** — the gap
+  is input only, so do not record this as "Lami does not work on iPhone".
+- **Server-side WebAuthn verification.** The gate is device/browser-verified, which matches the
+  desktop PIN's trust model. Real server verification (challenge + signature in Postgres) is a
+  genuine upgrade and a much larger job. Not started, and not pretended at in the code.
+- **PMES sign-in** — 22 `pmes_*` tables still anon-readable. **Do not drop those policies before
+  that app has auth**; it uses the public website's key and would go down.
+
+## ⚠ THE MOBILE APP IS FINISHED — one thing is unproven
+Approvals, push, the biometric gate and Lami are all live. **Everything up to the model call is
+tested; the round trip to the Claude API has never actually run.** Open the approval app, hold or
+tap Lami, ask something like *"what's in this job?"*. If she answers, the last box is ticked. If
+she does not, the likely causes in order: `ANTHROPIC_API_KEY` not saved correctly, `lami_enabled`
+off for the signed-in account, or the account differs from the one granted.
+
+**Only Rommel has `lami_enabled = true`** (set 2026-08-16 so he could test). Everyone else is off;
+grant from Settings → Users.
+
+**Push still reaches one person.** 5 subscriptions, all `rommel.taligatos@`. Joanna and Stiffany
+need to open the approval app, sign in, and allow notifications — the subscription registers
+against whoever is signed in. Afterwards check three distinct emails appear, or routing will look
+fine while somebody never gets a buzz.
+
+**No spend cap on Lami.** Every question costs tokens and nothing limits it. A per-user daily cap
+in the Edge Function was offered and not taken; worth revisiting if usage grows.
+
+**`device_capabilities` has 1 row** (Rommel's Android, `can_be_gated: true`, `enrolled: false` —
+he has not made a decision on the phone yet). The table is visibility only; the gate never reads it.
 
 ## Watch — shipped 2026-08-16, correct in test, not yet exercised in production
 Not defects. The first real use is the thing to look at.
@@ -7677,6 +7844,12 @@ Not defects. The first real use is the thing to look at.
 - **⚠ Orion `tickets`** — the Report button writes there with the publishable key. Nothing in Modcraft
   reads that table; it is a separate system. If reports stop arriving, check the table's INSERT policy
   before touching index.html.
+- **The biometric gate refuses a phone with no screen lock.** If someone says they cannot approve on
+  their phone, that is the gate working — they set a lock, or use a laptop. Do NOT add a soft
+  fallback that lets an unsupported device through: it turns the gate into a suggestion, since
+  anyone could remove their lock to bypass it.
+- **`tools/verify.mjs` covers index.html only.** `approve.html` is parse-checked by hand. Folding it
+  in is a small job and would have caught nothing today, but will eventually.
 
 ## Longer-term, unchanged
 Subsidiary material billing differs between BOM and cutting-list mode · Price DB ~39,420 blank-unit
