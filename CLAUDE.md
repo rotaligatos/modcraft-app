@@ -4735,7 +4735,9 @@ predate the activity log. Those keep a dash deliberately; inventing a date would
 honest gap.
 
 ### ⚠ TWO THINGS CODE CANNOT FIX — tell the team, not the developer
-- **A job only counts as WON when somebody presses Client Approve.** It has been pressed twice ever.
+- **A job only counts as WON when somebody presses Client Approve.** ~~It has been pressed twice
+  ever.~~ **STALE — corrected 2026-08-16: it is now 28, with 27 of those in 10–14 August. The habit
+  took hold. See the current OPEN list; do not quote the "twice" figure.**
 - **A response time only exists when the arrival source (Walk-in / Email order) is picked.**
 
 Until those become habits the dashboard will keep reading near-zero, and that is not a bug.
@@ -5534,7 +5536,9 @@ team found unresponsive, named specifically.
    at the moment mobilization reads zero — the existing console warnings in this app are usually the
    fastest way to the real cause, faster than reconstructing the sequence after the fact.
 
-# OPEN — updated 2026-08-12 (session 2) (THIS IS THE AUTHORITATIVE LIST)
+# OPEN — 2026-08-12 (session 2) — ⚠ SUPERSEDED, kept for the detail only
+> The authoritative list is **`# OPEN — updated 2026-08-16`** at the end of this file. Read this one
+> only for background on an individual item, never as the current state.
 
 ## Quotation credits — `reconcileQuotationCreators()` is dead; use `checkQuotationCredits()`
 The old one stays deployed and permanently refuses (Rommel has the command in his scrollback); it
@@ -7457,7 +7461,158 @@ Director fix after misreading a rebuke as "stop changing things".
 
 ---
 
-# OPEN — updated 2026-08-15 (session 4, END OF DAY) — THIS IS THE AUTHORITATIVE LIST
+## What was changed on 2026-08-16 (session — dashboard company filter, reasons + proof on every approval, Report-a-problem)
+
+Seven commits, `3d20590`..`d6f8b35`, all deployed and confirmed SERVING. Three asks from Rommel plus
+an add-on he supplied. Everything below was verified by driving the real functions in a browser or by
+querying live data.
+
+### Dashboard: one company selector, driving the whole page (`3d20590`)
+The page had a date range and nothing else; only Team performance could be narrowed, by its own pair
+of dropdowns. Now one selector beside the date range — All / WCL / MSSI / CWL / Unassigned — applied
+**once**, in `_dashScopedEntries()`, so every KPI tile, chart, grid widget, the team table and the
+order queue read the same population.
+
+Team performance's own **"Catered for" dropdown is retired into it** — that was the same axis, and two
+controls for one thing is how a card comes to disagree with the page around it. Its **"whose team"
+dropdown stays**: measured 2026-08-15, all 109 quotations by the Module Systems staff were raised
+under WCL or Cebu, so the person's company and the work's company are genuinely different questions.
+
+> ⚠ **The filter is deliberately NOT inside `_dashAllEntries()`.** The Reports page's lead-source
+> report reads that same function, and a dashboard filter leaking onto another page would have been
+> silent. Verified: with the dashboard scoped to one company, `_dashAllEntries()` still returns
+> everything.
+
+The 137 pre-prefix quotations stay reachable under "Unassigned" and are **counted and named** under
+the team table whenever a company is chosen. That count comes from `_dashCoHidden`, set where the
+filtering happens — re-deriving it afterwards would have found nothing (the list is already scoped)
+and the note would have silently vanished. Orders follow the same selector by keyword, or "Orders
+past SLA" would keep counting another company's backlog beside filtered quotation figures.
+
+Verified with 6 quotations (2 W, 1 M, 1 C, 2 legacy) and 3 orders: all/W/M/C/Unassigned give
+6/2/1/1/2 and 2/1/1/0, the hidden-legacy note says 2 only when a company is chosen, no console
+errors. The select first stretched to 598px and pushed the date range onto a second row — caught by
+measuring it, fixed at 190px.
+
+### A reason on every approval — and three that recorded NOTHING (`25b62e5`)
+Rommel: override, non-VAT, discount, unlock and decline should all carry a written reason.
+**Required when ASKING** (the approver is being asked to judge something and deserves to know why, and
+it is the only part of the record that still explains the decision later); **optional when an approver
+decides for themselves**.
+
+> ⚠ **Found while mapping it: `confirmVat`, `confirmDisc` and `confirmPremium` wrote nothing to the
+> activity log at all.** A self-approved non-VAT — a decision that moves the total 12% — left no
+> trace. All three log now.
+
+Unlock and decline already had a reason box; override had one on the request path only; the four
+approver PIN modals had none. All six now go through **one** reader (`_reasonOf`), **one** gate
+(`_reasonGate`) and **one** suffix (`_reasonSuffix`), so six paths cannot drift into six behaviours.
+
+Every box carries `class="reason-box"` and the shared PIN opener clears them, so a modal can never
+open holding the previous decision's reason and attach one quotation's justification to another — the
+same shape as the stale `_ccfTargetSerial` bug.
+
+**`actionReason`** (the approver's own reason) was added in all **FOUR** places a request field must
+exist — payload write, Supabase read mapping, merge-into-NOTIFS push, and `_apprMergeWithKnown`'s key
+list. That trap has now bitten four times (`sigSlot`, `to_email`, `decision`, `applied`), so both
+directions are covered by a test. Decisions are logged against the **request's own serial**, not
+whatever is on screen. The requester's reason is shown back to the approver in the action modal, and
+the outcome message and Approvals card both carry the approver's.
+
+Also fixed: a blank unlock reason logged `"Reason: "` with nothing after it — the old ternary only
+produced "(no reason given)" when the ELEMENT was missing, never when merely empty.
+
+### Attach proof, kept on the log entry (`18dbff9`)
+Rommel: *"give the user the capability to attach proof such pics or pdf. and this attached file should
+reflect on the log files so whoever wants to check or audit, the attach file are still there for
+checking and validation."*
+
+So the durable record lives on the **ACTIVITY LOG entry**, which is append-only in both stores. Attach
+on all six, from either side, images + PDF, 5 files × 10 MB. Held in memory until the action is
+confirmed — a modal abandoned uploads nothing.
+
+Recorded in three places that already existed or were free: **`activity_log.attachments`** (new jsonb
+column + partial GIN index), **Activity Log sheet column E** — already in the written range and always
+blank, so no row shifts and no header change — and **`qLog`**, which is deep-cloned into the quotation
+state, so it rides along with no save-path change. Descriptors ride through the log outbox too.
+Opening uses a one-hour signed Supabase URL falling back to Drive: the FILE never expires, only the
+link.
+
+Two bugs found by testing, both mine:
+- **The file-count limit never fired.** It read `files.length` synchronously while every push happens
+  later in `FileReader.onload`, so picking six at once let all six through. Slots are now reserved as
+  the batch is walked.
+- **`_submitCFRequest` blanks `sreq-note` then calls `submitApprovalRequest`**, which the reason commit
+  had just made require it. The override path passes its own validated reason in `data.reason` and is
+  gated on that instead.
+
+### Evidence cannot be deleted (`6bc283a`)
+Rommel chose to protect **only the attachments**; the 517 existing files (state backups, printouts,
+BOM reports, cost detail, board layouts, Wufoo copies) keep the permission they had.
+
+Evidence goes in its own **`<serial>/evidence/`** sub-path and the Storage policy keys on **that path
+segment**, not the file name.
+
+> ⚠ A name-matching rule would have quietly stopped protecting anything the day the naming changed,
+> and a safeguard that fails silently is worse than none. Verified against the live policy read from
+> `pg_policies`: a printout whose own NAME contains "evidence" is still deletable, while anything under
+> `evidence/` is not. **`EVIDENCE_PATH_SEG` in index.html and the policy predicate must always agree.**
+
+`_supaUploadEvidence` writes to an exact path; `supaUploadQuotationBinaryFile` could not be reused (it
+builds its own key from a serial, so it cannot place a file in a sub-path, and a serial with a slash
+would mangle the Drive folder name it shares). Drive is unaffected.
+
+Learned while testing: **direct SQL deletion from `storage.objects` is already blocked by a trigger**,
+so this policy governs the Storage API — the route a browser holding the publishable key would use.
+
+### Orion "Report a problem" button (`55081bf`, then `1ef13c5`..`d6f8b35`)
+A self-contained add-on Rommel supplied, appended after the last `</script>`: a floating button that
+POSTs to `public.tickets` with the publishable key. Checked before deploying that the table exists and
+accepts it (`INSERT to {anon,authenticated}`, `SELECT to {authenticated}`) — had it not, every report
+would have 404'd and the button would have *looked* like it worked. Smoke-tested with `fetch`
+intercepted so no junk ticket was filed.
+
+**Then four attempts to place it, which is the part worth remembering.** It shipped at
+`z-index:2147483000`, above everything including the Supabase "not connected" banners it could hide.
+Moving it up to `bottom:72px` put it over the PROJECT NAME field; dropping it to `bottom:14px;
+z-index:90` hid it entirely on the quotation page.
+
+The answer was to put it **IN** the running-total bar: that bar centres its content, leaving a dead
+gutter down its left side. Final: `bottom:14px; z-index:90`, plus
+`@media (min-width:1180px){ #orpt-btn{z-index:96} }` — one step over the bar's 95, so it shows inside
+the empty gutter and covers nothing.
+
+Measurements that decided it, none of which matched the CSS estimate:
+
+| | |
+|---|---|
+| Total-bar height | **54px** (client step) · **100px** (step 2) · **92px** at 600–768 · **132px** at ≤480 |
+| Bar's empty left gutter | `(viewport − ~810) / 2` → 232px at 1265 · 104px at 1024 · 20px on a phone |
+| Button needs | 174px, so the gutter only fits it from ~1160px up |
+
+> ⚠ **Below 1180px it still tucks behind the bar, so it is hidden on the quotation page only** (every
+> other page has no bar). The fix if that ever matters is not more CSS — shrink the button to just the
+> 🐞 icon so it fits the smaller gutter. Offered, not taken.
+>
+> ⚠ A naive rectangle test reported the button "covering" `cl-project`. It was not: that field is
+> already behind the BAR at that scroll position. **An overlap test that ignores what is already on top
+> reports problems the user cannot see.**
+
+### Method notes worth keeping
+- **Two "facts" in this file were stale and would have misled.** See the OPEN list: Client Approve had
+  been pressed far more than "twice ever". Re-measure before repeating a number from here.
+- **My own test rig misled me six times**: a stale `renderApprovals` stub I had set myself; a viewport
+  that cannot be resized from inside the page (eight rows, all the same width); a bar that measured 0
+  height until driven by its real builder; a hit-test that returned `login-overlay` because the sign-in
+  screen was up; and the rectangle test above. When a measurement is impossible rather than merely
+  surprising, suspect the rig.
+- **Check the endpoint exists before shipping the thing that calls it.**
+- **`Activity Log!A:E` column E was already written blank** — a free column is worth looking for before
+  widening a sheet.
+
+---
+
+# OPEN — updated 2026-08-16 — THIS IS THE AUTHORITATIVE LIST
 
 ## Nothing is waiting on the developer. Three things are waiting on people.
 1. **⚠ Rotate the Wufoo API key.** Still in public git history since July. The only item with a
@@ -7467,11 +7622,20 @@ Director fix after misreading a rebuke as "stop changing things".
    Check Project List** now lists the candidates with their evidence and a Link button (Admin only).
    8834 is either `QT-W00000040` (RJJ Kitchenette, never sent — order correctly stays open) or
    `QT-M00000101` (Africano Kitchen, sent 12 Aug). 8840 is very likely `QT-W00000046` (Ronald
-   Rellera, sent 3 Aug).
-3. **Two habits no code can fix.** **Client Approve** has been pressed twice ever, so win rate and
-   won revenue read near-zero. **Arrival source** (Walk-in / Email order) is set on 16 of 189, so
-   most jobs have no response time. Do NOT "fix" either by changing the KPI — check whether the
-   button was pressed first. That has already been the answer once.
+   Rellera, sent 3 Aug). Measured 2026-08-16: **4 orders** now have no quotation linked, down from 6.
+3. **One habit, not two — and the other one CLEARED ITSELF.**
+   - ✅ **Client Approve is being used.** This list said "pressed twice ever" and that is now WRONG:
+     measured 2026-08-16, **28 quotations carry `client_approved_at`, and 27 of them landed 10–14
+     August** across five people (Jhover, Joanna, Kaye, Stephanie + one). Real adoption, not backfill.
+     The win rate should now show something. **Do not repeat the "twice" figure.**
+   - ⚠ **Arrival source has NOT taken hold — still 16 of 189.** Without it a quotation has no response
+     time, so Team performance can only measure a fraction. Rommel, 2026-08-16, is aware and content:
+     *"I know that not everything will be timed since we just started and the team is still adopting."*
+     The app already names the untimed ones under the team table rather than averaging them in as if
+     they were instant, so the figures stay honest while adoption catches up. **Nothing to fix.**
+
+   Do NOT "fix" a near-zero KPI by changing the KPI — check whether the button was pressed first.
+   That has already been the answer twice.
 
 ## Now that approval routing is enforced — two things to check
 - **Nobody has a delegate configured.** Every absence now falls to an Admin/Director bypass rather
@@ -7495,8 +7659,24 @@ Director fix after misreading a rebuke as "stop changing things".
 ## Parked by Rommel
 - **Colour / readability sweep.** Not a priority; he will say when. The measured one: **all 31
   `.btn-primary` buttons fail AA in dark mode** (white on `rgb(91,149,209)` = 3.15, needs 4.5).
-- **Six remaining unlinked orders** (8820, 8862 and others) — the Admin picker exists; it needs the
-  team's knowledge, not more code.
+- **Remaining unlinked orders** (4 as at 2026-08-16) — the Admin picker exists; it needs the team's
+  knowledge, not more code.
+- **Report button below 1180px** — hidden on the quotation page only, because the total bar's left
+  gutter is too small to hold it. Fix is to shrink it to the 🐞 icon at narrow widths; offered
+  2026-08-16, not taken.
+
+## Watch — shipped 2026-08-16, correct in test, not yet exercised in production
+Not defects. The first real use is the thing to look at.
+- **No log entry carries evidence yet** (0 as at 2026-08-16) — the feature is hours old. First real
+  attachment is worth opening from the log to confirm the signed URL round-trip on live data.
+- **The reason box is now REQUIRED on every request.** If anyone reports "I can't send my request",
+  that is this, working — the error line names it.
+- **`_evidenceCommit` uploads before the log line is written**, so on a slow connection the activity
+  entry appears a moment after the modal closes. Expected; nothing is lost if it fails (the log line
+  simply carries no attachment).
+- **⚠ Orion `tickets`** — the Report button writes there with the publishable key. Nothing in Modcraft
+  reads that table; it is a separate system. If reports stop arriving, check the table's INSERT policy
+  before touching index.html.
 
 ## Longer-term, unchanged
 Subsidiary material billing differs between BOM and cutting-list mode · Price DB ~39,420 blank-unit
