@@ -38630,6 +38630,8 @@ window.sendChat=function(){
       +'<input id="orpt-title" maxlength="120" placeholder="e.g. Quotation page, Approvals…">'
       +'<label>What went wrong? <span style="color:#c0392b">*</span></label>'
       +'<textarea id="orpt-body" maxlength="4000" placeholder="Describe what happened, and what you expected instead."></textarea>'
+      +'<label style="margin-top:12px">Attach a screenshot (optional)</label>'
+      +'<input id="orpt-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="padding:7px 8px;font-size:12.5px">'
       +'<div id="orpt-msg"></div>'
       +'<div id="orpt-cardrow">'
       +'<button id="orpt-cancel" type="button">Cancel</button>'
@@ -38641,7 +38643,8 @@ window.sendChat=function(){
         elBody=ov.querySelector('#orpt-body'),
         elMsg=ov.querySelector('#orpt-msg'),
         elSend=ov.querySelector('#orpt-send'),
-        elWho=ov.querySelector('#orpt-who');
+        elWho=ov.querySelector('#orpt-who'),
+        elFile=ov.querySelector('#orpt-file');
 
     function who(){
       var g=(window.gUser||{});
@@ -38649,48 +38652,81 @@ window.sendChat=function(){
       elWho.textContent='Reporting as '+(g.name||g.email||'guest')+(build?(' · build '+build):'');
       return {name:g.name||null,email:g.email||null,build:build||null};
     }
-    function openIt(){ who(); elMsg.textContent=''; elMsg.style.color=''; ov.classList.add('orpt-show'); setTimeout(function(){elBody.focus();},30); }
+    function openIt(){ who(); elMsg.textContent=''; elMsg.style.color=''; if(elFile) elFile.value=''; ov.classList.add('orpt-show'); setTimeout(function(){elBody.focus();},30); }
     function closeIt(){ ov.classList.remove('orpt-show'); }
 
     btn.addEventListener('click',openIt);
     ov.addEventListener('click',function(e){ if(e.target===ov) closeIt(); });
     ov.querySelector('#orpt-cancel').addEventListener('click',closeIt);
 
+    // Upload one screenshot to the ticket-attachments bucket. Never blocks the report:
+    // any failure (bad type, oversize, network) just calls back with null and the ticket
+    // still files without a screenshot.
+    function doUpload(file, cb){
+      if(!file){ cb(null); return; }
+      var url=window.SUPA_URL, key=window.SUPA_ANON_KEY;
+      if(!url||!key){ cb(null); return; }
+      var ext=((file.name||'').split('.').pop()||'png').toLowerCase().replace(/[^a-z0-9]/g,'')||'png';
+      var path='modcraft/'+Date.now()+'-'+Math.random().toString(36).slice(2,8)+'.'+ext;
+      try{
+        fetch(url.replace(/\/$/,'')+'/storage/v1/object/ticket-attachments/'+path,{
+          method:'POST',
+          headers:{'apikey':key,'Authorization':'Bearer '+key,'Content-Type':file.type||'application/octet-stream','x-upsert':'false'},
+          body:file
+        }).then(function(r){ cb(r.ok?path:null); }).catch(function(){ cb(null); });
+      }catch(e){ cb(null); }
+    }
+
     elSend.addEventListener('click',function(){
       var body=(elBody.value||'').trim();
       if(!body){ elMsg.style.color='#c0392b'; elMsg.textContent='Please describe the problem first.'; elBody.focus(); return; }
+      var shot=(elFile&&elFile.files&&elFile.files[0])||null;
+      if(shot && shot.size>5*1024*1024){ elMsg.style.color='#c0392b'; elMsg.textContent='Screenshot is over 5 MB — please attach a smaller image.'; return; }
       var g=who(), route='';
       try{ route=location.href; }catch(e){}
-      var payload={
-        app:'modcraft',
-        title:(elTitle.value||'').trim()||null,
-        body:body,
-        reporter_email:g.email,
-        reporter_name:g.name,
-        app_version:g.build,
-        url_route:route||null,
-        category:'bug',
-        severity:'normal'
-      };
       var url=window.SUPA_URL, key=window.SUPA_ANON_KEY;
       if(!url||!key){ elMsg.style.color='#c0392b'; elMsg.textContent='Could not reach the reporting service. Please screenshot this and message the admin.'; return; }
-      elSend.disabled=true; elMsg.style.color='#6b7280'; elMsg.textContent='Sending…';
-      fetch(url.replace(/\/$/,'')+'/rest/v1/tickets',{
-        method:'POST',
-        headers:{'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'},
-        body:JSON.stringify(payload)
-      }).then(function(r){
-        if(r.ok){
-          elMsg.style.color='#2f8a4e'; elMsg.textContent='Thanks — your report was sent. ✓';
-          elBody.value=''; elTitle.value='';
-          setTimeout(closeIt,1400);
-        }else{
+      elSend.disabled=true; elMsg.style.color='#6b7280'; elMsg.textContent=shot?'Uploading screenshot…':'Sending…';
+      doUpload(shot, function(shotPath){
+        elMsg.textContent='Sending…';
+        var payload={
+          app:'modcraft',
+          title:(elTitle.value||'').trim()||null,
+          body:body,
+          reporter_email:g.email,
+          reporter_name:g.name,
+          app_version:g.build,
+          url_route:route||null,
+          category:'bug',
+          severity:'normal'
+        };
+        if(shotPath) payload.screenshots=[shotPath];
+        fetch(url.replace(/\/$/,'')+'/rest/v1/tickets',{
+          method:'POST',
+          headers:{'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'},
+          body:JSON.stringify(payload)
+        }).then(function(r){
+          if(r.ok){
+            // Fire-and-forget Google Chat ping, reusing the app's own relay.
+            // Silent no-op if CHAT_WEBHOOK_URL / MSG_MAILER_URL are not configured.
+            try{
+              if(typeof window._sendMessageChat==='function'){
+                var area=(elTitle.value||'').trim();
+                var chatText='🐞 New bug report'+(area?(' — '+area):'')+(shotPath?' 📎':'')+'\n\n'+body;
+                window._sendMessageChat('the team',(g.name||g.email||'Someone'),chatText,'normal');
+              }
+            }catch(e){}
+            elMsg.style.color='#2f8a4e'; elMsg.textContent='Thanks — your report was sent. ✓';
+            elBody.value=''; elTitle.value=''; if(elFile) elFile.value='';
+            setTimeout(closeIt,1400);
+          }else{
+            elSend.disabled=false; elMsg.style.color='#c0392b';
+            elMsg.textContent='Sorry, it did not send (error '+r.status+'). Please try again.';
+          }
+        }).catch(function(){
           elSend.disabled=false; elMsg.style.color='#c0392b';
-          elMsg.textContent='Sorry, it did not send (error '+r.status+'). Please try again.';
-        }
-      }).catch(function(){
-        elSend.disabled=false; elMsg.style.color='#c0392b';
-        elMsg.textContent='Network problem — please try again in a moment.';
+          elMsg.textContent='Network problem — please try again in a moment.';
+        });
       });
     });
   }catch(e){ /* never break the app */ }
