@@ -7825,8 +7825,32 @@ never reliably populated, was read by nothing, and caused two wrong conclusions 
 dropped). Comment only, no behaviour — and it was the first thing gate 3 was asked to cover.
 
 > This is the hazard this file already names: *a comment that lies is what produced the
-> `getInstallCarcassUnits` bug.* Worth a sweep for others — a superseded plan left in place reads
-> as current intent to the next person, and there is nothing that can catch it automatically.
+> `getInstallCarcassUnits` bug.* A superseded plan left in place reads as current intent to the
+> next person, and nothing catches it automatically.
+
+### The sweep that followed (`31d85c0`) — and how few there actually were
+Rommel approved it on the condition it could not affect the app. **135 candidate comment lines on
+a loose pattern, 26 on a tight one, exactly TWO actually wrong.** The rest are accurate prose, real
+historical phase labels, or `pending` used as the domain status word it is — left alone.
+
+| Line | Said | Truth |
+|---|---|---|
+| `supaGetState` | the Supabase state read is *"off for now"* | it has been the PRIMARY read path since `USE_SUPABASE` was flipped 2026-07-02 |
+| tool-use schema | cites a memory item as *"NOT YET BUILT"* | recorded as done under `c570856` — and the code directly beneath the citation IS that conversion |
+
+Every other `USE_SUPABASE` comment says "used when true", which is correct and neutral; only that
+one claimed the path was dormant.
+
+⚠ **Checked and deliberately NOT changed:** the signature-routing comment saying seniority for
+Checked by and Noted by *"has not been defined"*. Still true — signatories are assigned explicitly
+and no rank rule exists. **Thresholds being set is a different thing**, and reading one as the
+other would have "corrected" an accurate comment into a wrong one.
+
+**Comment-only was proven mechanically, not by eye:** edits were restricted to whole comment lines,
+so the guarantee is checkable from the diff alone with no JS parser to get wrong — every changed
+line starts with `//`, and the count of changed non-comment lines is **0**. Encoding and line
+endings unchanged, verify green on all three gates. Reuse that method for any "this cannot affect
+behaviour" claim; a promise is not a proof.
 
 ### Method notes
 - **A control that cannot reproduce the bug proves nothing about the fix.** The fault-injection
