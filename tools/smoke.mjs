@@ -64,6 +64,22 @@ const PROFILES = {
       if (typeof window.fmtMoney === 'function')
         check('fmtMoney keeps 2 decimals',
               () => /234\.50/.test(String(window.fmtMoney(1234.5))), true);
+      /* Ticket 1c41c397: the KPI briefing labelled the figure "Conversion rate" while every
+         screen calls it "Win rate". Drives the real builder instead of grepping source, so it
+         stays honest if the string moves; `emitted` is asserted too, so the check cannot pass
+         vacuously if the role/data gate ever stops producing the block at all. */
+      if (typeof window._chipBuildSystemPrompt === 'function')
+        check('KPI briefing calls the figure "Win rate", matching the UI', () => {
+          const w = window, role = w.currentRole, sess = w.sessionQuotations;
+          try {
+            w.currentRole = 'Admin';   // canViewCostReport() gate
+            w.sessionQuotations = { 'QT-TEST-0001': { id: 'QT-TEST-0001', status: 'Draft', value: 0 } };
+            const sys = String(w._chipBuildSystemPrompt() || '');
+            return { emitted: sys.includes('Confidential KPI'),
+                     winRate: /Win rate:/.test(sys),
+                     conversionRate: /Conversion rate/.test(sys) };
+          } finally { w.currentRole = role; w.sessionQuotations = sess; }
+        }, { emitted: true, winRate: true, conversionRate: false });
       return out;
     }
   },
