@@ -2732,18 +2732,34 @@ var _lastSeenReqIds = {};  // {reqId: true} — tracks which requests the approv
 var _seenNotifIds   = {};  // {reqId_status: true} — tracks which notifications the user has read (for unread indicator)
 
 // ── Report / Export config ─────────────────────────────────────────────────
+// Every calc() below reads live data (_dashAllEntries/_rollupJobs/_isClientApprovedEntry/
+// _dashMetrics/_quotAgeCount — all real functions defined later in this file; safe to
+// reference here because they're hoisted function declarations, same pattern the
+// archived/followUp tiles already used before this rewrite).
+// DEMO_PROJS/DEMO_USERS are NOT deleted — Schedule (Gantt/Calendar) and the Reports
+// page's own "User" and "Projects" tabs still read them directly. That is a separate,
+// larger cleanup outside the scope of the Custom Report Export rebuild.
 var KPI_DEFS = {
-  totalQuotes:{label:'Total quotations',icon:'ti-receipt-2',color:'navy',fmt:'number',calc:function(){return DEMO_PROJS.length+308;}},
-  winRate:{label:'Win rate',icon:'ti-target',color:'teal',fmt:'pct',calc:function(){var q=DEMO_USERS.reduce(function(s,u){return s+u.quotes;},0);var c=DEMO_USERS.reduce(function(s,u){return s+u.converted;},0);return q?Math.round(c/q*100):0;}},
-  revenueYTD:{label:'Revenue YTD',icon:'ti-currency-peso',color:'amber',fmt:'money',calc:function(){return DEMO_USERS.reduce(function(s,u){return s+u.revenue;},0);}},
+  totalQuotes:{label:'Total quotations',icon:'ti-receipt-2',color:'navy',fmt:'number',calc:function(){return _dashAllEntries().length;}},
+  winRate:{label:'Win rate',icon:'ti-target',color:'teal',fmt:'pct',calc:function(){
+    var jobs=_rollupJobs(_dashAllEntries());
+    var won=jobs.filter(function(j){return _isClientApprovedEntry(j.root);}).length;
+    return jobs.length?Math.round(won/jobs.length*100):0;
+  }},
+  revenueYTD:{label:'Revenue YTD',icon:'ti-currency-peso',color:'amber',fmt:'money',calc:function(){return _reportRevenueYTD();}},
   archived:{label:'Archived quotations',icon:'ti-archive',color:'muted',fmt:'number',calc:function(){return _quotAgeCount('archived');}},
   // The one worth acting on: quotations sitting with a client past the follow-up
   // mark. These are sent proposals nobody has chased, not housekeeping.
   followUp:{label:'Need follow-up',icon:'ti-bell-ringing',color:'coral',fmt:'number',calc:function(){return _quotAgeCount('alert');}},
-  avgDeal:{label:'Avg. deal value',icon:'ti-chart-bar',color:'navy',fmt:'money',calc:function(){var t=DEMO_PROJS.reduce(function(s,p){return s+p.value;},0);return DEMO_PROJS.length?Math.round(t/DEMO_PROJS.length):0;}},
-  openPipeline:{label:'Open pipeline',icon:'ti-git-branch',color:'teal',fmt:'money',calc:function(){return DEMO_PROJS.filter(function(p){return p.status==='On-going';}).reduce(function(s,p){return s+p.value;},0);}},
-  avgResponse:{label:'Avg. response time',icon:'ti-clock',color:'teal',fmt:'hours',calc:function(){var u=DEMO_USERS;return Math.round(u.reduce(function(s,x){return s+x.avgHrs;},0)/u.length*10)/10;}},
-  topPerformer:{label:'Top performer',icon:'ti-trophy',color:'amber',fmt:'text',calc:function(){var b=DEMO_USERS.reduce(function(a,x){return a.rate>x.rate?a:x;});return b.name+' ('+b.rate+'%)';}}
+  avgDeal:{label:'Avg. deal value',icon:'ti-chart-bar',color:'navy',fmt:'money',calc:function(){return Math.round((typeof _dashMetrics==='function'?_dashMetrics().avgDeal:0)||0);}},
+  openPipeline:{label:'Open pipeline',icon:'ti-git-branch',color:'teal',fmt:'money',calc:function(){return Math.round((typeof _dashMetrics==='function'?_dashMetrics().openPipeline:0)||0);}},
+  avgResponse:{label:'Avg. response time',icon:'ti-clock',color:'teal',fmt:'hours',calc:function(){return _reportAvgResponseHours();}},
+  topPerformer:{label:'Top performer',icon:'ti-trophy',color:'amber',fmt:'text',calc:function(){
+    var stats=_reportTeamStats().filter(function(u){return u.quotes>0;});
+    if(!stats.length) return 'No data yet';
+    var best=stats.reduce(function(a,x){ if(x.rate>a.rate) return x; if(x.rate===a.rate&&x.revenue>a.revenue) return x; return a; });
+    return best.name+' ('+best.rate+'%)';
+  }}
 };
 var reportConfig = {
   kpis:['totalQuotes','winRate','revenueYTD','archived','avgDeal','openPipeline','avgResponse','topPerformer'],
@@ -2753,6 +2769,10 @@ var reportConfig = {
   pptCompany:''
 };
 var customKPIs = []; // [{label,value,id}]
+// Revenue Trend "Target" — doesn't exist anywhere else in the data model. Persisted like the
+// rest of app config (whole object round-tripped via _collectAppSettings/_applyAppSettings,
+// written to the Settings sheet CONFIG row + Supabase settings mirror on Save Settings).
+var reportTargets = { monthlyRevenue: 0 };
 
 // ── Users sheet state ─────────────────────────────────────────────────────
 var sheetUsers = [];
@@ -13228,7 +13248,17 @@ function renderExportTab() {
       +'<span style="font-size:12px;font-weight:500;color:var(--teal)"><i class="ti '+si+'" style="font-size:11px"></i> '+sl+'</span>'
       +'</label>';
   }
-  h+='</div></div></div>';
+  h+='</div>'
+  // Revenue Trend target — new setting, doesn't exist anywhere else. Right where it's used
+  // rather than buried in a general Settings tab. Persisted via Save Settings like the rest
+  // of CF/ordersSla/etc — value only takes effect for real once saved.
+  +'<div style="margin-top:14px;border-top:.5px solid var(--border);padding-top:14px">'
+  +'<div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em">Revenue Trend — monthly target</div>'
+  +'<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">'
+  +'<div><label class="fld" style="margin-top:0">Target per month (₱)</label><input id="rt-target" type="number" min="0" step="1000" value="'+(reportTargets.monthlyRevenue||0)+'" oninput="reportTargets.monthlyRevenue=parseFloat(this.value)||0" style="height:32px;width:180px"></div>'
+  +'<div style="font-size:11px;color:var(--text2);max-width:360px">Compared against real won revenue (client-approved final quotations) by month in the Revenue Trend sheet/slide. 0 = no target shown. Saved with the rest of Settings — click <b>Save settings</b> to keep it.</div>'
+  +'</div></div>'
+  +'</div></div>';
 
   // ── PPT Configuration ─────────────────────────────────────────────────
   h+='<div class="card" style="margin-bottom:14px">'
@@ -13291,12 +13321,143 @@ function removeCustomKPI(i) {
   renderExportTab();
 }
 
+// ── Real-data helpers for the Export tab (KPI tiles + Excel/PPT) ───────────────────────────
+// Everything below reads live quotations via _dashAllEntries()/_rollupJobs()/
+// _isClientApprovedEntry() — the same functions the Dashboard and Team performance use, so a
+// "win" or a "job" can never mean something different on an export than it does on screen.
+
+// Won revenue (client-approved final quotations) for the current calendar year, bucketed by
+// the approval date when recorded (column Y / clientApprovedAt), falling back to the
+// quotation's created date for older rows that carry the "Client Approved" status label but
+// no recorded timestamp (see _isClientApprovedEntry's own comment on that legacy case).
+function _reportRevenueYTD(){
+  var year=String(new Date().getFullYear());
+  var jobs=_rollupJobs(_dashAllEntries());
+  var total=0;
+  jobs.forEach(function(j){
+    if(!_isClientApprovedEntry(j.root)) return;
+    var d=j.root.clientApprovedAt||j.root.created||'';
+    if(String(d).indexOf(year)!==0) return;
+    total+=j.revenue;
+  });
+  return Math.round(total);
+}
+
+// Completed response cycles only (order received->sent, or created->initial lock for
+// non-order jobs) — a still-running order is deliberately excluded here, unlike the live
+// Dashboard headline tile, so a report snapshot isn't skewed by whatever happens to be open
+// at export time.
+function _reportAvgResponseHours(){
+  var all=_dashAllEntries();
+  var orderMap={};
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){ if(o&&o.id) orderMap[o.id]=o; });
+  var respTimes=[];
+  all.forEach(function(e){
+    if(e.sourceOrder&&orderMap[e.sourceOrder]){
+      var o=orderMap[e.sourceOrder];
+      if(o.status==='Done'&&o.sentAt&&o.receivedAt){
+        var d1=new Date(o.receivedAt),d2=new Date(o.sentAt);
+        if(!isNaN(d1)&&!isNaN(d2)&&d2>d1) respTimes.push((d2-d1)/3600000);
+      }
+    } else if(!e.sourceOrder&&e.initLockedAt&&e.created){
+      var d1=new Date(e.created),d2=new Date(e.initLockedAt);
+      if(!isNaN(d1)&&!isNaN(d2)&&d2>d1) respTimes.push((d2-d1)/3600000);
+    }
+  });
+  return respTimes.length?Math.round(respTimes.reduce(function(s,v){return s+v;},0)/respTimes.length*10)/10:0;
+}
+
+// Per-user stats for people ticked "Include in Team performance" (Settings -> Users) — same
+// gate the Dashboard's Team performance card uses, so an export can't rank someone who was
+// deliberately excluded from that measurement. One row per JOB (additional orders roll up
+// under the job they came from, via _rollupJobs), same as everywhere else in the app.
+function _reportTeamStats(){
+  var all=_dashAllEntries();
+  var people=(typeof sheetUsers!=='undefined'?sheetUsers:[]).filter(function(u){return u&&u.includeKpi&&u.active;});
+  var byUser={};
+  people.forEach(function(u){
+    byUser[String(u.name||'').trim().toLowerCase()]={name:u.name,pos:u.pos||'',quotes:0,drafts:0,won:0,revenue:0,respMins:[]};
+  });
+  var jobs=_rollupJobs(all);
+  jobs.forEach(function(j){
+    var e=j.root;
+    var key=String(e.user||'').trim().toLowerCase();
+    if(!byUser[key]) return;
+    if(_displayStatus(e)==='Draft'){ byUser[key].drafts++; return; }
+    byUser[key].quotes++;
+    if(_isClientApprovedEntry(e)){ byUser[key].won++; byUser[key].revenue+=j.revenue; }
+  });
+  var quotBySerial={};
+  all.forEach(function(e){ if(e.id) quotBySerial[String(e.id)]=e; });
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
+    if(!o||!o.receivedAt||!o.sentAt||!o.quotSerial) return;
+    var q=quotBySerial[o.quotSerial]||quotBySerial[_serialRoot(o.quotSerial)];
+    if(!q) return;
+    var key=String(q.user||'').trim().toLowerCase();
+    if(!byUser[key]) return;
+    var mins=(typeof calcWorkingMinutes==='function')?calcWorkingMinutes(o.receivedAt,o.sentAt,o.sourceCompany||''):(new Date(o.sentAt)-new Date(o.receivedAt))/60000;
+    if(mins>=0) byUser[key].respMins.push(mins);
+  });
+  all.forEach(function(e){
+    if(!e||e.sourceOrder) return;
+    var key=String(e.user||'').trim().toLowerCase();
+    if(!byUser[key]) return;
+    var endAt=(e.jobSource==='email'&&e.sentAt)?e.sentAt:e.initLockedAt;
+    if(!endAt||!e.jobStartedAt) return;
+    var m=(typeof calcWorkingMinutes==='function')?calcWorkingMinutes(e.jobStartedAt,endAt,e.company||''):(new Date(endAt)-new Date(e.jobStartedAt))/60000;
+    if(m!==null&&m>=0) byUser[key].respMins.push(m);
+  });
+  return Object.values(byUser).map(function(u){
+    var rate=u.quotes?Math.round(u.won/u.quotes*100):0;
+    var avgMins=u.respMins.length?u.respMins.reduce(function(s,v){return s+v;},0)/u.respMins.length:null;
+    return {name:u.name,pos:u.pos,quotes:u.quotes,drafts:u.drafts,won:u.won,rate:rate,avgHrs:avgMins!=null?Math.round(avgMins/60*10)/10:null,revenue:u.revenue};
+  }).sort(function(a,b){return b.quotes-a.quotes;});
+}
+
+// One row per real quotation (post-revision/option merge, same as the Project List) — the
+// replacement for the fabricated DEMO_PROJS milestone system, which has no equivalent in the
+// app's real status ladder.
+function _reportProjectRows(){
+  return _dashAllEntries().map(function(e){
+    return {
+      id:e.id, client:e.client||'', type:e.type||'', value:e.value||0,
+      user:e.user||'', created:(e.created||'').substring(0,10),
+      sent:(e.sentAt||'').substring(0,10),
+      status:_normalizeStatusLabel(e.status||''),
+      approved:_isClientApprovedEntry(e)
+    };
+  }).sort(function(a,b){ return (b.created||'').localeCompare(a.created||''); });
+}
+// Open pipeline rows — same population _dashMetrics() sums into the "Open pipeline" tile:
+// not won, not declined, not a draft.
+function _reportOpenPipelineRows(){
+  return _reportProjectRows().filter(function(p){
+    return !p.approved && p.status!=='Declined' && p.status!=='Draft';
+  });
+}
+// Real monthly revenue (client-approved final quotations, current calendar year) vs the
+// target set above the Export buttons. actual/target are in ₱K to match the sheet/slide's
+// existing column headers. target===null means nothing has been set.
+function _reportRevenueTrend(){
+  var year=new Date().getFullYear();
+  var monthNames=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var monthly=[0,0,0,0,0,0,0,0,0,0,0,0];
+  _rollupJobs(_dashAllEntries()).forEach(function(j){
+    if(!_isClientApprovedEntry(j.root)) return;
+    var d=j.root.clientApprovedAt||j.root.created||'';
+    if(String(d).indexOf(String(year))!==0) return;
+    var mo=parseInt(String(d).substring(5,7),10)-1;
+    if(mo>=0&&mo<=11) monthly[mo]+=j.revenue;
+  });
+  var targetK=(reportTargets.monthlyRevenue>0)?Math.round(reportTargets.monthlyRevenue/1000):null;
+  return monthNames.map(function(m,i){
+    return {month:m+' '+year, actual:Math.round(monthly[i]/1000), target:targetK};
+  });
+}
+
 function exportReportToExcel() {
   if(typeof XLSX==='undefined'){alert('Excel library not loaded.');return;}
   var wb=XLSX.utils.book_new();
-  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var actual=[1850,2100,1780,2450,2820,2380,3100,2950,3400,3150,3680,2900];
-  var target=[1600,1800,1900,2000,2200,2300,2400,2500,2600,2700,2800,2900];
   var fname='modcraft_report_'+new Date().toISOString().slice(0,10)+'.xlsx';
 
   // Sheet 1: KPI Summary
@@ -13314,42 +13475,57 @@ function exportReportToExcel() {
     XLSX.utils.book_append_sheet(wb,ws1,'KPI Summary');
   }
 
-  // Sheet 2: Revenue Trend
+  // Sheet 2: Revenue Trend — real won revenue (client-approved final quotations) by month,
+  // this calendar year, against the target set on this page (blank until one is set)
   if(reportConfig.sections.revenue){
+    var trend=_reportRevenueTrend();
+    var hasTarget=trend.length&&trend[0].target!=null;
     var rd=[['Month','Actual (₱K)','Target (₱K)','Variance (₱K)','Variance (%)']];
-    for(var i=0;i<12;i++){
-      var diff=actual[i]-target[i];
-      rd.push([months[i]+' 2026',actual[i],target[i],diff,Number((diff/target[i]*100).toFixed(1))]);
+    for(var i=0;i<trend.length;i++){
+      var t=trend[i];
+      if(hasTarget){
+        var diff=t.actual-t.target;
+        rd.push([t.month,t.actual,t.target,diff,t.target?Number((diff/t.target*100).toFixed(1)):0]);
+      } else {
+        rd.push([t.month,t.actual,'No target set','—','—']);
+      }
     }
     var ws2=XLSX.utils.aoa_to_sheet(rd);
     ws2['!cols']=[{wch:12},{wch:14},{wch:14},{wch:14},{wch:14}];
     XLSX.utils.book_append_sheet(wb,ws2,'Revenue Trend');
   }
 
-  // Sheet 3: User Performance
+  // Sheet 3: User Performance — people ticked "Include in Team performance" (Settings -> Users)
   if(reportConfig.sections.userKpi){
-    var ud=[['Name','Position','Quotations Sent','Converted','Win Rate (%)','Avg Response (hrs)','Revenue (₱)']];
-    for(var i=0;i<DEMO_USERS.length;i++){var u=DEMO_USERS[i];ud.push([u.name,u.pos,u.quotes,u.converted,u.rate,u.avgHrs,u.revenue]);}
+    var ud=[['Name','Position','Quotations Issued','Won','Win Rate (%)','Avg Response (hrs)','Revenue (₱)']];
+    var stats=_reportTeamStats();
+    for(var i=0;i<stats.length;i++){var u=stats[i];ud.push([u.name,u.pos,u.quotes,u.won,u.rate,u.avgHrs!=null?u.avgHrs:'—',u.revenue]);}
+    if(!stats.length) ud.push(['No one is ticked "Include in Team performance" yet — see Settings > Users.','','','','','','']);
     var ws3=XLSX.utils.aoa_to_sheet(ud);
-    ws3['!cols']=[{wch:18},{wch:12},{wch:18},{wch:12},{wch:14},{wch:20},{wch:16}];
+    ws3['!cols']=[{wch:18},{wch:12},{wch:18},{wch:10},{wch:14},{wch:20},{wch:16}];
     XLSX.utils.book_append_sheet(wb,ws3,'User Performance');
   }
 
-  // Sheet 4: Project Tracker
+  // Sheet 4: Project Tracker — every real quotation, most recent first
   if(reportConfig.sections.projects){
-    var pd=[['Serial','Client','Type','Value (₱)','Assigned To','Created','Sent','Response (hrs)','Milestone','Progress (%)','Status']];
-    for(var i=0;i<DEMO_PROJS.length;i++){var p=DEMO_PROJS[i];pd.push([p.id,p.client,p.type,p.value,p.user,p.created,p.sent,p.respHrs,MILESTONES[p.milestone],MILESTONE_PCT[p.milestone],p.status]);}
+    var pd=[['Serial','Client','Type','Value (₱)','Assigned To','Created','Sent','Status','Won']];
+    var rows=_reportProjectRows();
+    for(var i=0;i<rows.length;i++){var p=rows[i];pd.push([p.id,p.client,p.type,p.value,p.user,p.created,p.sent,p.status,p.approved?'Yes':'No']);}
+    if(!rows.length) pd.push(['No quotations yet.','','','','','','','','']);
     var ws4=XLSX.utils.aoa_to_sheet(pd);
-    ws4['!cols']=[{wch:18},{wch:18},{wch:16},{wch:14},{wch:16},{wch:12},{wch:12},{wch:16},{wch:26},{wch:14},{wch:12}];
+    ws4['!cols']=[{wch:18},{wch:18},{wch:16},{wch:14},{wch:16},{wch:12},{wch:12},{wch:24},{wch:8}];
     XLSX.utils.book_append_sheet(wb,ws4,'Project Tracker');
   }
 
-  // Sheet 5: Pipeline (if enabled)
+  // Sheet 5: Pipeline — open (not won, not declined, not draft), same population as the
+  // Dashboard's "Open pipeline" tile
   if(reportConfig.sections.pipeline){
-    var pl=[['Client','Type','Value (₱)','Status','Milestone','% Complete']];
-    for(var i=0;i<DEMO_PROJS.length;i++){var p=DEMO_PROJS[i];pl.push([p.client,p.type,p.value,p.status,MILESTONES[p.milestone],MILESTONE_PCT[p.milestone]]);}
+    var pl=[['Serial','Client','Type','Value (₱)','Status']];
+    var prows=_reportOpenPipelineRows();
+    for(var i=0;i<prows.length;i++){var p=prows[i];pl.push([p.id,p.client,p.type,p.value,p.status]);}
+    if(!prows.length) pl.push(['Nothing in the open pipeline right now.','','','','']);
     var ws5=XLSX.utils.aoa_to_sheet(pl);
-    ws5['!cols']=[{wch:20},{wch:16},{wch:14},{wch:12},{wch:26},{wch:14}];
+    ws5['!cols']=[{wch:18},{wch:20},{wch:16},{wch:14},{wch:24}];
     XLSX.utils.book_append_sheet(wb,ws5,'Pipeline');
   }
 
@@ -13364,9 +13540,6 @@ function exportReportToPPT() {
   pptx.company=reportConfig.pptCompany||'Modcraft';
   pptx.subject='Business Report';
   pptx.title=reportConfig.pptTitle||'Modcraft Business Report';
-  var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var actual=[1850,2100,1780,2450,2820,2380,3100,2950,3400,3150,3680,2900];
-  var target=[1600,1800,1900,2000,2200,2300,2400,2500,2600,2700,2800,2900];
   var NAVY='1A3C5E',TEAL='0F6E56',AMBER='BA7517',WHITE='FFFFFF',LGREY='F4F4F2',DKGREY='666666',GREEN='16A034',RED='D85A30';
   var today=new Date().toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'});
 
@@ -13398,11 +13571,15 @@ function exportReportToPPT() {
     s2.addText(kRows[r].val,{x:cx+0.12,y:cy+0.44,w:2.62,h:0.46,fontSize:17,bold:true,color:kRows[r].color,fontFace:'Calibri'});
   }
 
-  // ── Slide 3: Revenue Trend ───────────────────────────────────────────
+  // ── Slide 3: Revenue Trend — real won revenue (client-approved final quotations) by
+  //    month, this calendar year, against the target set on the Export tab ────────────────
   if(reportConfig.sections.revenue){
     var s3=pptx.addSlide();
+    var trendYear=new Date().getFullYear();
+    var trend=_reportRevenueTrend();
+    var hasTarget=trend.length&&trend[0].target!=null;
     s3.addShape('rect',{x:0,y:0,w:10,h:0.8,fill:{color:TEAL},line:{color:TEAL}});
-    s3.addText('Revenue Trend — 2026',{x:0.4,y:0.12,w:9.2,h:0.56,fontSize:20,bold:true,color:WHITE,fontFace:'Calibri'});
+    s3.addText('Revenue Trend — '+trendYear,{x:0.4,y:0.12,w:9.2,h:0.56,fontSize:20,bold:true,color:WHITE,fontFace:'Calibri'});
     var tbl3=[[
       {text:'Month',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:10}},
       {text:'Actual (₱K)',options:{bold:true,fill:NAVY,color:WHITE,align:'right',fontFace:'Calibri',fontSize:10}},
@@ -13410,21 +13587,33 @@ function exportReportToPPT() {
       {text:'Variance',options:{bold:true,fill:NAVY,color:WHITE,align:'right',fontFace:'Calibri',fontSize:10}},
       {text:'vs Target',options:{bold:true,fill:NAVY,color:WHITE,align:'right',fontFace:'Calibri',fontSize:10}}
     ]];
-    for(var i=0;i<12;i++){
-      var diff=actual[i]-target[i]; var pct=Number((diff/target[i]*100).toFixed(1));
-      var bg=i%2===0?WHITE:LGREY;
-      tbl3.push([
-        {text:months[i],options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'center'}},
-        {text:actual[i].toLocaleString(),options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right'}},
-        {text:target[i].toLocaleString(),options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right'}},
-        {text:(diff>=0?'+':'')+diff,options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right',color:diff>=0?GREEN:RED}},
-        {text:(pct>=0?'+':'')+pct+'%',options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right',color:pct>=0?GREEN:RED}}
-      ]);
+    for(var i=0;i<trend.length;i++){
+      var t=trend[i]; var bg=i%2===0?WHITE:LGREY;
+      if(hasTarget){
+        var diff=t.actual-t.target; var pct=t.target?Number((diff/t.target*100).toFixed(1)):0;
+        tbl3.push([
+          {text:t.month,options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'center'}},
+          {text:t.actual.toLocaleString(),options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right'}},
+          {text:t.target.toLocaleString(),options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right'}},
+          {text:(diff>=0?'+':'')+diff,options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right',color:diff>=0?GREEN:RED}},
+          {text:(pct>=0?'+':'')+pct+'%',options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right',color:pct>=0?GREEN:RED}}
+        ]);
+      } else {
+        tbl3.push([
+          {text:t.month,options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'center'}},
+          {text:t.actual.toLocaleString(),options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right'}},
+          {text:'No target set',options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right',color:DKGREY}},
+          {text:'—',options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right'}},
+          {text:'—',options:{fill:bg,fontSize:9,fontFace:'Calibri',align:'right'}}
+        ]);
+      }
     }
     s3.addTable(tbl3,{x:0.4,y:1.0,w:9.2,colW:[1.6,2,2,1.8,1.8],rowH:0.28,border:{type:'solid',color:'CCCCCC',pt:0.4}});
+    if(!hasTarget) s3.addText('Set a monthly revenue target in Reports → Export to see variance.',{x:0.4,y:4.7,w:9.2,h:0.3,fontSize:9,italic:true,color:DKGREY,fontFace:'Calibri'});
   }
 
-  // ── Slide 4: Team Performance ────────────────────────────────────────
+  // ── Slide 4: Team Performance — people ticked "Include in Team performance"
+  //    (Settings -> Users), same gate the Dashboard card uses ────────────────────────────
   if(reportConfig.sections.userKpi){
     var s4=pptx.addSlide();
     s4.addShape('rect',{x:0,y:0,w:10,h:0.8,fill:{color:AMBER},line:{color:AMBER}});
@@ -13432,56 +13621,66 @@ function exportReportToPPT() {
     var tbl4=[[
       {text:'Name',options:{bold:true,fill:NAVY,color:WHITE,fontFace:'Calibri',fontSize:11}},
       {text:'Position',options:{bold:true,fill:NAVY,color:WHITE,fontFace:'Calibri',fontSize:11}},
-      {text:'Quotes',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:11}},
-      {text:'Converted',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:11}},
+      {text:'Issued',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:11}},
+      {text:'Won',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:11}},
       {text:'Win Rate',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:11}},
       {text:'Avg Response',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:11}},
       {text:'Revenue (₱)',options:{bold:true,fill:NAVY,color:WHITE,align:'right',fontFace:'Calibri',fontSize:11}}
     ]];
-    for(var i=0;i<DEMO_USERS.length;i++){
-      var u=DEMO_USERS[i]; var bg2=i%2===0?WHITE:LGREY;
+    var teamStats=_reportTeamStats();
+    if(!teamStats.length){
+      tbl4.push([{text:'No one is ticked "Include in Team performance" yet — see Settings > Users.',options:{fill:WHITE,fontSize:10,fontFace:'Calibri',italic:true,color:DKGREY},colspan:7}]);
+    }
+    for(var i=0;i<teamStats.length;i++){
+      var u=teamStats[i]; var bg2=i%2===0?WHITE:LGREY;
       var rc=u.rate>=75?GREEN:u.rate>=65?AMBER:RED;
       tbl4.push([
         {text:u.name,options:{fill:bg2,fontSize:11,fontFace:'Calibri',bold:true}},
         {text:u.pos,options:{fill:bg2,fontSize:11,fontFace:'Calibri',color:DKGREY}},
         {text:String(u.quotes),options:{fill:bg2,fontSize:11,fontFace:'Calibri',align:'center'}},
-        {text:String(u.converted),options:{fill:bg2,fontSize:11,fontFace:'Calibri',align:'center'}},
+        {text:String(u.won),options:{fill:bg2,fontSize:11,fontFace:'Calibri',align:'center'}},
         {text:u.rate+'%',options:{fill:bg2,fontSize:11,fontFace:'Calibri',align:'center',color:rc,bold:true}},
-        {text:u.avgHrs+'h',options:{fill:bg2,fontSize:11,fontFace:'Calibri',align:'center'}},
+        {text:u.avgHrs!=null?u.avgHrs+'h':'—',options:{fill:bg2,fontSize:11,fontFace:'Calibri',align:'center'}},
         {text:'₱'+Number(u.revenue/1000000).toFixed(2)+'M',options:{fill:bg2,fontSize:11,fontFace:'Calibri',align:'right',bold:true}}
       ]);
     }
     s4.addTable(tbl4,{x:0.4,y:1.0,w:9.2,colW:[2,1.4,1,1.2,1,1.4,1.2],rowH:0.55,border:{type:'solid',color:'CCCCCC',pt:0.4}});
   }
 
-  // ── Slide 5: Active Projects ─────────────────────────────────────────
+  // ── Slide 5: Recent Projects — every real quotation, most recent first ─────────────────
+  // A slide table can't hold hundreds of rows, so this is capped and says so — the full list
+  // is in the Project Tracker sheet of the Excel export.
   if(reportConfig.sections.projects){
     var s5=pptx.addSlide();
+    var allProjRows=_reportProjectRows();
+    var PROJ_CAP=15;
+    var projRows=allProjRows.slice(0,PROJ_CAP);
     s5.addShape('rect',{x:0,y:0,w:10,h:0.8,fill:{color:'2D5A1E'},line:{color:'2D5A1E'}});
-    s5.addText('Active Projects',{x:0.4,y:0.12,w:9.2,h:0.56,fontSize:20,bold:true,color:WHITE,fontFace:'Calibri'});
+    s5.addText('Recent Quotations'+(allProjRows.length>PROJ_CAP?' (most recent '+PROJ_CAP+' of '+allProjRows.length+')':''),{x:0.4,y:0.12,w:9.2,h:0.56,fontSize:18,bold:true,color:WHITE,fontFace:'Calibri'});
     var tbl5=[[
       {text:'Client',options:{bold:true,fill:NAVY,color:WHITE,fontFace:'Calibri',fontSize:10}},
       {text:'Type',options:{bold:true,fill:NAVY,color:WHITE,fontFace:'Calibri',fontSize:10}},
       {text:'Value (₱)',options:{bold:true,fill:NAVY,color:WHITE,align:'right',fontFace:'Calibri',fontSize:10}},
-      {text:'Milestone',options:{bold:true,fill:NAVY,color:WHITE,fontFace:'Calibri',fontSize:10}},
-      {text:'Progress',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:10}},
+      {text:'Created',options:{bold:true,fill:NAVY,color:WHITE,fontFace:'Calibri',fontSize:10}},
       {text:'Assigned',options:{bold:true,fill:NAVY,color:WHITE,fontFace:'Calibri',fontSize:10}},
       {text:'Status',options:{bold:true,fill:NAVY,color:WHITE,align:'center',fontFace:'Calibri',fontSize:10}}
     ]];
-    for(var i=0;i<DEMO_PROJS.length;i++){
-      var p=DEMO_PROJS[i]; var pct=MILESTONE_PCT[p.milestone]; var bg3=i%2===0?WHITE:LGREY;
-      var sc=p.status==='Closed'?TEAL:AMBER;
+    if(!projRows.length){
+      tbl5.push([{text:'No quotations yet.',options:{fill:WHITE,fontSize:10,fontFace:'Calibri',italic:true,color:DKGREY},colspan:6}]);
+    }
+    for(var i=0;i<projRows.length;i++){
+      var p=projRows[i]; var bg3=i%2===0?WHITE:LGREY;
+      var sc=p.approved?TEAL:(p.status==='Declined'?RED:AMBER);
       tbl5.push([
         {text:p.client,options:{fill:bg3,fontSize:10,fontFace:'Calibri',bold:true}},
         {text:p.type,options:{fill:bg3,fontSize:10,fontFace:'Calibri',color:DKGREY}},
         {text:'₱'+Number(p.value/1000).toFixed(0)+'K',options:{fill:bg3,fontSize:10,fontFace:'Calibri',align:'right',bold:true}},
-        {text:MILESTONES[p.milestone],options:{fill:bg3,fontSize:9,fontFace:'Calibri'}},
-        {text:pct+'%',options:{fill:bg3,fontSize:10,fontFace:'Calibri',align:'center',bold:true,color:pct===100?TEAL:pct>=50?AMBER:NAVY}},
+        {text:p.created,options:{fill:bg3,fontSize:9,fontFace:'Calibri'}},
         {text:p.user,options:{fill:bg3,fontSize:10,fontFace:'Calibri',color:DKGREY}},
-        {text:p.status,options:{fill:bg3,fontSize:10,fontFace:'Calibri',align:'center',bold:true,color:sc}}
+        {text:p.status,options:{fill:bg3,fontSize:9,fontFace:'Calibri',align:'center',bold:true,color:sc}}
       ]);
     }
-    s5.addTable(tbl5,{x:0.4,y:1.0,w:9.2,colW:[1.8,1.4,1.2,2.2,0.9,1.4,0.9],rowH:0.5,border:{type:'solid',color:'CCCCCC',pt:0.4}});
+    s5.addTable(tbl5,{x:0.4,y:1.0,w:9.2,colW:[1.8,1.6,1.2,1.2,1.6,1.8],rowH:0.5,border:{type:'solid',color:'CCCCCC',pt:0.4}});
   }
 
   pptx.writeFile({fileName:'modcraft_report_'+new Date().toISOString().slice(0,10)+'.pptx'});
@@ -30164,11 +30363,15 @@ function _collectAppSettings(){
     approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING)),
     notedThreshold: JSON.parse(JSON.stringify(NOTED_THRESHOLD)),
     minChargeExcl: JSON.parse(JSON.stringify(MIN_CHARGE_EXCL)),
-    mtoMaterials: mtoMaterialNames.slice()
+    mtoMaterials: mtoMaterialNames.slice(),
+    // Custom Report Export -> Revenue Trend monthly target. Reads the live input on the
+    // Export tab when it's open (so an unsaved edit isn't lost), else the last-applied value.
+    reportTargets:{ monthlyRevenue:(el('rt-target')?(parseFloat(el('rt-target').value)||0):(reportTargets.monthlyRevenue||0)) }
   };
 }
 function _applyAppSettings(s){
   if(!s) return;
+  if(s.reportTargets&&typeof s.reportTargets.monthlyRevenue!=='undefined'){ reportTargets.monthlyRevenue=Number(s.reportTargets.monthlyRevenue)||0; }
   if(s.msgMailerUrl!==undefined){ MSG_MAILER_URL=s.msgMailerUrl||''; localStorage.setItem('mc_msg_mailer_url',MSG_MAILER_URL); var _mm=el('s-msg-mailer'); if(_mm) _mm.value=MSG_MAILER_URL; }
   if(s.quotRevived){ QUOT_REVIVED={}; for(var _qr in s.quotRevived){ if(s.quotRevived.hasOwnProperty(_qr)) QUOT_REVIVED[_qr]=s.quotRevived[_qr]; } }
   if(s.chatWebhookUrl!==undefined){ CHAT_WEBHOOK_URL=s.chatWebhookUrl||''; localStorage.setItem('mc_chat_webhook_url',CHAT_WEBHOOK_URL); var _cw=el('s-chat-webhook'); if(_cw) _cw.value=CHAT_WEBHOOK_URL; }

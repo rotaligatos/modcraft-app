@@ -106,6 +106,34 @@ const PROFILES = {
         return { exists: !!b, exempt: b ? b.getAttribute('data-lock-exempt') : null,
                  handler: typeof window.adminUndoIqApproval };
       }, { exists: true, exempt: '1', handler: 'function' });
+      /* Custom Report Export rebuild: KPI_DEFS used to be DEMO_PROJS.length+308 and
+         DEMO_USERS-summed money — fixed values regardless of what dirData held. Drives the
+         real KPI_DEFS.calc() against injected dirData so a future edit that reverts to a
+         hardcoded/demo source fails loudly instead of silently exporting fake numbers again. */
+      if (typeof window.KPI_DEFS === 'object' && typeof window._dashAllEntries === 'function')
+        check('KPI_DEFS.totalQuotes counts real dirData, not a fixed demo formula', () => {
+          const w = window, savedDir = w.dirData, savedSess = w.sessionQuotations;
+          try {
+            w.dirData = [
+              { id:'QT-W00000001', baseSerial:'QT-W00000001', status:'Draft', value:1000, created:'2026-01-01', user:'A' },
+              { id:'QT-W00000002', baseSerial:'QT-W00000002', status:'IQ Locked', value:2000, created:'2026-01-02', user:'B' }
+            ];
+            w.sessionQuotations = {};
+            return w.KPI_DEFS.totalQuotes.calc();
+          } finally { w.dirData = savedDir; w.sessionQuotations = savedSess; }
+        }, 2);
+      /* Revenue Trend used to be a hardcoded actual[]/target[] array with no data source at
+         all. _reportRevenueTrend() must respect the reportTargets setting (0 = no target set,
+         so the sheet/slide shows "No target set" rather than a fabricated comparison). */
+      if (typeof window._reportRevenueTrend === 'function')
+        check('_reportRevenueTrend: no target set -> target is null, not a hardcoded number', () => {
+          const w = window, saved = w.reportTargets;
+          try {
+            w.reportTargets = { monthlyRevenue: 0 };
+            const trend = w._reportRevenueTrend();
+            return { months: trend.length, target: trend[0] && trend[0].target };
+          } finally { w.reportTargets = saved; }
+        }, { months: 12, target: null });
       return out;
     }
   },
