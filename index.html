@@ -9190,6 +9190,65 @@ function recalcFQSoon(){
   },120);
 }
 
+// One row per real charge inside "Mobilization & Installation", shared by Stage 1 (recalc)
+// and Stage 2 (recalcFQ) so a component hidden in one stage cannot happen without the other
+// agreeing to hide it too.
+//
+// Built after QT-C00000006 showed a total of P291,885.08 explained by a note reading
+// "27 units x P8,753.15, 27 assm x P850.00" -- which only accounts for P259,285.05.
+// Mobilization (P31,400) and QA/QC (P1,200) were both correctly INCLUDED in the total, just
+// never SHOWN. Rommel, 2026-08-18: "very easy to analyze" -- a plain Component | Amount
+// table, one row per real charge, was the ask.
+function _miBreakdownHtml(o){
+  var rows=[];
+  function row(icon,label,note,amt,color){
+    if(!(amt>0)) return;
+    rows.push({icon:icon,label:label,note:note,amt:amt,color:color});
+  }
+  if(o.ni){
+    row('ti-truck','Mobilization','',o.mob);
+    if(o.instFloorApplied) row('ti-hammer',
+      'Labor — 3-unit minimum ('+o.instUnits+' cabinet'+(o.instUnits===1?'':'s')+' ordered)','',
+      o.instLaborCost,'var(--amber)');
+    else row('ti-hammer','Installation labor',o.instUnits+' × '+fmtMoney(o.instUnitPrice),o.instLaborCost);
+    row('ti-home-check','QA/QC supervision','',o.qaqcBase);
+    row('ti-bed','Working-night accommodation','',o.workAccom);
+    row('ti-wallet','Per diem on site','',o.perDiem);
+    row('ti-beach','Tourist area premium','',o.tourist);
+    if(o.qaqcAccom>0){
+      var qd=(typeof qInstPlanner!=='undefined'&&qInstPlanner)?qInstPlanner.detail:null;
+      var qLabel='QA/QC accommodation ('+((qd&&qd.qaqcPersons)||(typeof mobilityState!=='undefined'&&mobilityState.qaqcPersons)||1)
+        +'p × '+((qd&&qd.qaqcDays)||(typeof _getZoneQaqcDays==='function'?_getZoneQaqcDays():1))+'n)';
+      row('ti-user-check',qLabel,'',o.qaqcAccom);
+    }
+  }
+  // Unconditional in the underlying formula (instBase adds ocTotals.inst regardless of ni),
+  // so it must be unconditional here too, or an outsourced-install-only quotation would show
+  // a total with nothing itemized above it.
+  row('ti-truck-delivery','Outsourced installation','',o.ocInstTotal);
+  if(o.na) row('ti-armchair','Assembly',o.assmCarcass+' × '+fmtMoney(o.assmRate),o.assmBase);
+
+  // Loud, not silent: if the group total (computed independently, from _pCalc's own math)
+  // does not match the sum of every row above, something is being charged that this
+  // breakdown does not yet know how to name. Show it rather than let a total go
+  // unexplained again — that gap is exactly what prompted this function to exist.
+  var sum=rows.reduce(function(s,r){return s+r.amt;},0);
+  var unexplained=o.groupTotal-sum;
+  if(Math.abs(unexplained)>0.5){
+    console.warn('[mi-breakdown] '+fmtMoney(unexplained)+' unexplained between the group total and the itemized rows');
+    row('ti-alert-triangle','Other (not yet itemized)','',unexplained,'var(--coral)');
+  }
+
+  var h='';
+  rows.forEach(function(r){
+    h+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)">'
+      +'<span><span style="display:flex;align-items:center;gap:4px"><i class="ti '+r.icon+'" style="font-size:11px;color:var(--text2)"></i>'+r.label+'</span>'
+      +(r.note?'<span style="font-size:11px;color:var(--text2);padding-left:18px">'+r.note+'</span>':'')+'</span>'
+      +'<span style="'+(r.color?'color:'+r.color+';font-weight:600':'')+'">'+fmtMoney(r.amt)+'</span></div>';
+  });
+  if(rows.length>1) h+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:600"><span>Total</span><span>'+fmtMoney(o.groupTotal)+'</span></div>';
+  return h;
+}
 function recalc(fast){
   // See renderItems — while a Stage 2 scope edit is running, qAreas points at fqAreas, so
   // pricing Stage 1 here would price it off Stage 2's scope. _fqEdit runs recalcFQ() the
@@ -9490,28 +9549,17 @@ function _recalcCore(fast) {
     lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px">'
       +'<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;padding:5px 0 3px;display:flex;align-items:center;gap:4px">'
       +'<i class="ti ti-tool" style="font-size:11px"></i>Service charges</div>';
-    var miSvcNote='';
-    // Count and rate must come from the SAME source. instUnitPrice is derived as
-    // instLaborCost / instUnits (carcasses), so pairing it with totU was wrong twice
-    // over: in cutting-list mode getTotU() sums SERVICE quantities — linear metres and
-    // holes — so the line read e.g. "2342.56 units × P3,563.25", implying P8.3M against
-    // a line actually charging P83,438.54. Display only; instBase never used totU. Note
-    // the assembly half beside it was always right, which is what made the two disagree.
-    if(ni) miSvcNote=instUnits+' unit'+(instUnits!==1?'s':'')+' × '+fmtMoney(instUnitPrice);
-    if(na) miSvcNote+=(miSvcNote?', ':'')+assmCarcass+' assm × '+fmtMoney(assmRate);
-    // Fabrication-only + Assembly (no Installation on this quotation): mobBase
-    // and instBase are both 0, so label it "Assembly" — the combined
-    // "Mobilization & Installation" label reads as if those were being
-    // charged when this quotation has no installation service at all.
-    var miSvcLabel=ni?'Mobilization &amp; Installation':'Assembly';
-    var miSvcIcon=ni?'ti-truck':'ti-armchair';
-    var miTotal=mobBase+instBase+assmBase;
-    var miFolded=qSiteVisit.enabled&&!svSep; // site visit already folded into mobBase
-    var miBaseOnly=miFolded?miTotal-svCost:miTotal;
-    lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)">'
-      +'<span><span style="display:flex;align-items:center;gap:4px"><i class="ti '+miSvcIcon+'" style="font-size:11px;color:var(--text2)"></i>'+miSvcLabel+'</span>'
-      +(miSvcNote?'<span style="font-size:11px;color:var(--text2);padding-left:18px">'+miSvcNote+'</span>':'')+'</span>'
-      +'<span>'+fmtMoney(miBaseOnly)+'</span></div>';
+    var _miFolded=qSiteVisit.enabled&&!svSep; // site visit already folded into mobBase
+    var _miMobOnly=_miFolded?mobBase-svCost:mobBase;
+    var miBaseOnly=_miMobOnly+instBase+assmBase;
+    lines+=_miBreakdownHtml({
+      ni:ni, na:na, mob:_miMobOnly,
+      instLaborCost:instLaborCost, instUnits:instUnits, instUnitPrice:instUnitPrice, instFloorApplied:instFloorApplied,
+      qaqcBase:qaqcBase, workAccom:instPlannerWorkAccom, perDiem:instPlannerPerDiem, tourist:instPlannerTourist, qaqcAccom:instPlannerQaqcAccom,
+      ocInstTotal:ocTotals.inst,
+      assmBase:assmBase, assmCarcass:assmCarcass, assmRate:assmRate,
+      groupTotal:miBaseOnly
+    });
     if(qSiteVisit.enabled){
       var svFeeUsed=(qSiteVisit.fee!==null&&!isNaN(qSiteVisit.fee))?qSiteVisit.fee:(CF.siteVisitFee||0);
       lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)">'
@@ -23388,14 +23436,15 @@ function _recalcFQCore() {
     lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px"><div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;padding:5px 0 3px;display:flex;align-items:center;gap:4px"><i class="ti ti-tool" style="font-size:11px"></i>Service charges</div>';
     var svFolded=qSiteVisit.enabled&&!svSep; // site visit already folded into mobBase
     var mobBaseOnly=svFolded?mobBase-svCost:mobBase;
-    var miGroupTotal=0;
-    if(ni){ lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span><i class="ti ti-truck" style="font-size:11px;color:var(--text2)"></i> Mobilization</span><span>'+fmtMoney(mobBaseOnly)+'</span></div>'
-      +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span><i class="ti ti-home-check" style="font-size:11px;color:var(--text2)"></i> Installation <span style="font-size:11px;color:var(--text2);padding-left:4px">'+totU+' × '+fmtMoney(instUnitPrice)+'</span></span><span>'+fmtMoney(instBase)+'</span></div>';
-      miGroupTotal+=mobBaseOnly+instBase;
-    }
-    if(na){ lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span><i class="ti ti-armchair" style="font-size:11px;color:var(--text2)"></i> Assembly <span style="font-size:11px;color:var(--text2);padding-left:4px">'+assmCarcass+' × '+fmtMoney(assmRate)+'</span></span><span>'+fmtMoney(assmBase)+'</span></div>';
-      miGroupTotal+=assmBase;
-    }
+    var miGroupTotal=mobBaseOnly+instBase+assmBase;
+    lines+=_miBreakdownHtml({
+      ni:ni, na:na, mob:mobBaseOnly,
+      instLaborCost:instLaborCost, instUnits:instUnits, instUnitPrice:instUnitPrice, instFloorApplied:instFloorApplied,
+      qaqcBase:qaqcBase, workAccom:instPlannerWorkAccom, perDiem:instPlannerPerDiem, tourist:instPlannerTourist, qaqcAccom:instPlannerQaqcAccom,
+      ocInstTotal:ocTotals.inst,
+      assmBase:assmBase, assmCarcass:assmCarcass, assmRate:assmRate,
+      groupTotal:miGroupTotal
+    });
     if(qSiteVisit.enabled&&svCost>0){
       lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-bottom:.5px solid var(--border)"><span><i class="ti ti-map-pin" style="font-size:11px;color:var(--text2)"></i> Site visit ('+qSiteVisit.locations+' loc × '+qSiteVisit.areasPerLocation+' area)</span><span>'+fmtMoney(svCost)+'</span></div>'
         +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:600"><span>Total</span><span>'+fmtMoney(miGroupTotal+svCost)+'</span></div>';
