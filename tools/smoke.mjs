@@ -80,6 +80,22 @@ const PROFILES = {
                      conversionRate: /Conversion rate/.test(sys) };
           } finally { w.currentRole = role; w.sessionQuotations = sess; }
         }, { emitted: true, winRate: true, conversionRate: false });
+      /* Ticket 7376f5d0: when the override being actioned belongs to a quotation that is NOT the
+         one open, the panel now evaluates the request's stored model instead of blanking — so
+         _ccfEval is what the approver's cost, profit and margin are computed from. Asserted in
+         BOTH ni directions: the fabrication and discount buffers apply only when installation is
+         included, and a drift there is silent money on a live approval. */
+      if (typeof window._ccfEval === 'function')
+        check('_ccfEval: ni gates fab + discount buffer; profit and margin follow cost', () => {
+          const r2 = n => Math.round(n * 100) / 100;
+          const base = { regularBase:1000, mobBase:0, instBase:0, otherFixed:0, ni:false,
+                         mssiRate:0, desRate:0, discPct:0, premRate:0, vatRate:0.12, cost:600 };
+          const rates = { fabContingency:0, fabBuffer:10, mobContingency:0, mobBuffer:0, mobMarkup:0,
+                          instContingency:0, instBuffer:0, instMarkup:0, discountBuffer:5 };
+          const off = window._ccfEval(base, rates);
+          const on  = window._ccfEval(Object.assign({}, base, { ni:true }), rates);
+          return [r2(off.grand), r2(on.grand), r2(off.exVat), r2(off.profit), off.marginPct];
+        }, [1120, 1293.6, 1000, 400, 40]);
       return out;
     }
   },
