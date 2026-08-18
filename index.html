@@ -15905,6 +15905,7 @@ function _cutListToAnalysis(cl,order){
     var eb=_webEbtToModcraft(pn.ebt,L,W);
     if(eb.unknown) review.push('edge code "'+pn.ebt+'" was not recognised — set the banding manually');
     if(pn.emat) notes.push('edge tape: '+pn.emat);
+    if(pn.remark) notes.push('remarks: '+pn.remark);
     // Per-piece services. Grooving has a field of its own; the rest carry no
     // deterministic quantity on this path, so they become notes and flags, not guesses.
     var grooving='';
@@ -32436,12 +32437,70 @@ var MCL=(function(){
   var EBT=['','1L','2L','1S','2S','1L 1S','2L 1S','1L 2S','4S'];
   var SVC=['Grooving','Boring','Routing','Manual Edgebanding'];
 
+  // Same 12/7/4-column schema the MSSI website's own downloadable template uses
+  // (portal.html's XL_PANEL_HDR/XL_HPL_HDR/XL_HW_HDR) — a filled-in website
+  // template and one filled in from here are interchangeable either way.
+  var XL_PANEL_HDR=['Group (cabinet/area)','Part','Material SKU','Length (mm)','Width (mm)','Thickness (mm)','Qty','Edge Band','Edge Material','Grain (L/W)','Services','Remarks'];
+  var XL_HPL_HDR=['Substrate SKU','HPL Finish SKU','Faces (1F/2F)','Length (mm)','Width (mm)','Qty','Cut to size (Y/N)'];
+  var XL_HW_HDR=['Item','Qty','Unit','Notes'];
+  // The .xlsx file this fetches carries a REAL Excel dropdown on Part/Edge Band/
+  // Services — a library writing the file in the browser cannot produce that,
+  // and a dropdown at the point of entry is worth more than interpreting free
+  // text afterwards. Same file the MSSI website serves, copied into this repo.
+  var TEMPLATE_FILE='Cutting-List-Template.xlsx';
+
   function esc(s){ return escHtml(String(s==null?'':s)); }
   function num(v){ var n=parseFloat(v); return isFinite(n)?n:0; }
 
   function blankPanel(){
     return {group:S.groupBy==='area'?'Area 1':'Cabinet 1',part:'Side panel',mat:'',th:18,
-            L:0,W:0,qty:1,ebt:'',grain:'',svcs:[]};
+            L:0,W:0,qty:1,ebt:'',emat:'',grain:'',svcs:[],remark:''};
+  }
+  function blankPanels(n){ var a=[]; for(var i=0;i<n;i++) a.push(blankPanel()); return a; }
+  // The starting state is a ready sheet, not an empty table with an "add row"
+  // button — Rommel, 2026-08-18: "there must be 10 rows showing already than
+  // starting from zero." Seeded once at module load; Clear() returns to the
+  // same 10-row starting state rather than to nothing.
+  S.panels=blankPanels(10);
+
+  // ── Uploaded/pasted edge code -> the exact 9-value set the select offers ──
+  // A client (or a paste from their own sheet) rarely types the canonical
+  // string exactly. Matches case/spacing/punctuation variants and reordered
+  // L/S tokens; anything it cannot place is left blank and flagged, same as
+  // the website's own unreadable-legend handling — never guessed.
+  function normaliseEbt(raw){
+    var t=String(raw==null?'':raw).trim();
+    if(!t) return {code:'',matched:true,raw:t};
+    var up=t.toUpperCase().replace(/[,+/]/g,' ').replace(/\s+/g,' ').trim();
+    if(EBT.indexOf(up)>=0) return {code:up,matched:true,raw:t};
+    if(/^(4S|ALL|ALL\s*ROUND|ALL\s*SIDES)$/.test(up)) return {code:'4S',matched:true,raw:t};
+    if(/^(NONE|NO\s*BAND(ING)?|BLANK|N\/A|NA)$/.test(up)) return {code:'',matched:true,raw:t};
+    var toks=up.split(' ');
+    var lTok=null,sTok=null;
+    for(var i=0;i<toks.length;i++){
+      var m=toks[i].match(/^(\d*)L$/); if(m&&!lTok) lTok=(m[1]||'1')+'L';
+      var n2=toks[i].match(/^(\d*)S$/); if(n2&&!sTok) sTok=(n2[1]||'1')+'S';
+    }
+    var parts=[]; if(lTok) parts.push(lTok); if(sTok) parts.push(sTok);
+    var candidate=parts.join(' ');
+    if(candidate&&EBT.indexOf(candidate)>=0) return {code:candidate,matched:true,raw:t};
+    return {code:'',matched:false,raw:t};      // kept on the row (raw), never dropped
+  }
+  // Alt+Enter inside an Excel cell (the commonest way a client lists several
+  // services) and a comma/semicolon/slash are all treated as separators.
+  function splitServicesText(s){
+    return String(s==null?'':s).split(/[\n;,/]+/).map(function(x){return x.trim();}).filter(Boolean);
+  }
+  // A <select> built from a fixed list silently shows its FIRST option when fed
+  // a value outside that list — an imported Part name not in PARTS would look
+  // like "Side panel" was chosen while the real typed name sat in state,
+  // invisibly. Same fix as the service-UOM dropdown fix: include the actual
+  // value as an option, marked, so what is stored is what is shown.
+  function optsWithCustom(list,sel){
+    if(sel&&list.indexOf(sel)<0){
+      return '<option value="'+esc(sel)+'" selected>'+esc(sel)+' (typed)</option>'+opts(list,'');
+    }
+    return opts(list,sel);
   }
 
   // ── The composite label an HPL build offers ────────────────────────────
@@ -32465,23 +32524,34 @@ var MCL=(function(){
   }
 
   // ── Panels ──────────────────────────────────────────────────────────────
+  // Cell-level paste + Enter-to-advance — the two things that make typing into
+  // this grid feel like typing into Excel rather than filling in a web form.
+  // A plain single-value paste (no tab/newline in the clipboard) is left to the
+  // browser's own default paste; only a multi-cell block is intercepted.
+  function cellAttrs(field){
+    return ' class="mcl-f-'+field+'" onpaste="MCL.onCellPaste(event,'+'{{I}}'+',\''+field+'\')"'
+      +' onkeydown="MCL.onCellKey(event,'+'{{I}}'+',\''+field+'\')"';
+  }
   function panelRow(p,i){
     var inp='style="width:100%;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
     var sel='style="width:100%;padding:4px 4px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
+    var ca=function(f){ return cellAttrs(f).replace(/\{\{I\}\}/g,i); };
     var h='<tr data-i="'+i+'">';
-    h+='<td><input '+inp+' value="'+esc(p.group)+'" oninput="MCL.set('+i+',\'group\',this.value)"></td>';
-    h+='<td><select '+sel+' onchange="MCL.set('+i+',\'part\',this.value)">'+opts(PARTS,p.part)+'</select></td>';
-    h+='<td><input '+inp+' list="mcl-mat-dl-'+i+'" value="'+esc(p.mat)+'" placeholder="type to search the catalogue"'
+    h+='<td><input '+inp+ca('group')+' value="'+esc(p.group)+'" oninput="MCL.set('+i+',\'group\',this.value)"></td>';
+    h+='<td><select '+sel+' class="mcl-f-part" onchange="MCL.set('+i+',\'part\',this.value)">'+optsWithCustom(PARTS,p.part)+'</select></td>';
+    h+='<td><input '+inp+ca('mat')+' list="mcl-mat-dl-'+i+'" value="'+esc(p.mat)+'" placeholder="type to search the catalogue"'
       +' oninput="MCL.matSearch(this,'+i+')" onchange="MCL.matSearch(this,'+i+')">'
       +'<datalist id="mcl-mat-dl-'+i+'"></datalist></td>';
-    h+='<td><input '+inp+' type="number" min="0" step="0.1" value="'+(p.th||'')+'" oninput="MCL.set('+i+',\'th\',this.value)"></td>';
-    h+='<td><input '+inp+' type="number" min="0" value="'+(p.L||'')+'" oninput="MCL.set('+i+',\'L\',this.value)"></td>';
-    h+='<td><input '+inp+' type="number" min="0" value="'+(p.W||'')+'" oninput="MCL.set('+i+',\'W\',this.value)"></td>';
-    h+='<td><input '+inp+' type="number" min="1" value="'+(p.qty||1)+'" oninput="MCL.set('+i+',\'qty\',this.value)"></td>';
-    h+='<td><select '+sel+' onchange="MCL.set('+i+',\'ebt\',this.value)">'+opts(EBT,p.ebt)+'</select></td>';
-    h+='<td><select '+sel+' onchange="MCL.set('+i+',\'grain\',this.value)">'
+    h+='<td><input '+inp+ca('th')+' type="number" min="0" step="0.1" value="'+(p.th||'')+'" oninput="MCL.set('+i+',\'th\',this.value)"></td>';
+    h+='<td><input '+inp+ca('L')+' type="number" min="0" value="'+(p.L||'')+'" oninput="MCL.set('+i+',\'L\',this.value)"></td>';
+    h+='<td><input '+inp+ca('W')+' type="number" min="0" value="'+(p.W||'')+'" oninput="MCL.set('+i+',\'W\',this.value)"></td>';
+    h+='<td><input '+inp+ca('qty')+' type="number" min="1" value="'+(p.qty||1)+'" oninput="MCL.set('+i+',\'qty\',this.value)"></td>';
+    h+='<td><select '+sel+' class="mcl-f-ebt" onchange="MCL.set('+i+',\'ebt\',this.value)">'+opts(EBT,p.ebt)+'</select></td>';
+    h+='<td><input '+inp+ca('emat')+' value="'+esc(p.emat)+'" placeholder="edge tape (optional)" oninput="MCL.set('+i+',\'emat\',this.value)"></td>';
+    h+='<td><select '+sel+' class="mcl-f-grain" onchange="MCL.set('+i+',\'grain\',this.value)">'
       +opts(['','L','W'],p.grain)+'</select></td>';
     h+='<td>'+svcCell(p,i)+'</td>';
+    h+='<td><input '+inp+ca('remark')+' value="'+esc(p.remark)+'" placeholder="remarks" oninput="MCL.set('+i+',\'remark\',this.value)"></td>';
     h+='<td style="text-align:center"><button class="btn" style="padding:2px 7px" title="Remove row"'
       +' onclick="MCL.removePanel('+i+')"><i class="ti ti-trash"></i></button></td>';
     return h+'</tr>';
@@ -32550,6 +32620,9 @@ var MCL=(function(){
       +'<select onchange="MCL.setGroupBy(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
       +'<option value="cabinet"'+(S.groupBy==='cabinet'?' selected':'')+'>Cabinet</option>'
       +'<option value="area"'+(S.groupBy==='area'?' selected':'')+'>Area</option></select></label>'
+      +'<button class="btn" style="font-size:11px;padding:6px 10px" onclick="MCL.downloadTemplate()" title="A ready-made Excel workbook with real dropdowns on Part/Edge Band/Services — the same one the MSSI website offers"><i class="ti ti-file-spreadsheet"></i>Download Excel template</button>'
+      +'<label class="btn" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Upload a filled-in copy of the template"><i class="ti ti-upload"></i>Upload filled Excel'
+      +'<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="MCL.uploadExcel(this)"></label>'
       +'</div></div>';
 
     // HPL builds — declared first, because a panel's material can be one of them.
@@ -32589,12 +32662,13 @@ var MCL=(function(){
       +'<span style="font-size:11px;color:var(--text2);flex:1">Edge codes follow the piece — L is a long edge, S a short one — so a part entered taller than it is wide still bands correctly.</span>'
       +'<button class="btn" style="font-size:11px;padding:4px 9px" onclick="MCL.addPanel(1)"><i class="ti ti-plus"></i>Row</button>'
       +'<button class="btn" style="font-size:11px;padding:4px 9px" onclick="MCL.addPanel(5)">+5</button></div>'
-      +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:900px"><tr>'
+      +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:1160px"><tr>'
       +'<th '+th+'>'+(S.groupBy==='area'?'Area':'Cabinet')+'</th><th '+th+'>Part</th><th '+th+' style="min-width:220px">Material</th>'
       +'<th '+th+'>Th</th><th '+th+'>Long (mm)</th><th '+th+'>Short (mm)</th><th '+th+'>Qty</th>'
-      +'<th '+th+'>Edges</th><th '+th+'>Grain</th><th '+th+' style="min-width:170px">Services</th><th></th></tr>';
+      +'<th '+th+'>Edges</th><th '+th+'>Edge tape</th><th '+th+'>Grain</th><th '+th+' style="min-width:170px">Services</th>'
+      +'<th '+th+'>Remarks</th><th></th></tr>';
     if(!S.panels.length){
-      h+='<tr><td colspan="11" style="font-size:12px;color:var(--text2);font-style:italic;padding:10px 4px">No rows yet — add one to start.</td></tr>';
+      h+='<tr><td colspan="13" style="font-size:12px;color:var(--text2);font-style:italic;padding:10px 4px">No rows yet — add one to start, or upload a filled-in template.</td></tr>';
     } else {
       for(var p=0;p<S.panels.length;p++) h+=panelRow(S.panels[p],p);
     }
@@ -32706,8 +32780,199 @@ var MCL=(function(){
     d.innerHTML=footerText();
   }
 
+  // ── Feels like Excel: paste a block, Enter moves down ─────────────────────
+  // Columns a block paste can fan out across, in the on-screen left-to-right
+  // order EXCLUDING the three <select> cells (Part/Edge Band/Grain) — pasting
+  // into a native select is not reliable across browsers, and those three are
+  // short fixed lists anyway, not free text worth pasting into.
+  var PASTE_COLS=['group','mat','th','L','W','qty','emat','remark'];
+  function onCellPaste(ev,i,field){
+    var dt=ev.clipboardData||window.clipboardData; if(!dt) return;
+    var text=dt.getData('text');
+    // A single value with no tab/newline is a normal one-cell paste — let the
+    // browser do it natively rather than intercepting every paste.
+    if(!text||(text.indexOf('\t')<0&&text.indexOf('\n')<0)) return;
+    ev.preventDefault();
+    var startCol=PASTE_COLS.indexOf(field);
+    if(startCol<0){ set(i,field,text.split(/\t|\n/)[0]); rerender(); return; }
+    var rows=text.replace(/\r/g,'').split('\n');
+    if(rows.length&&rows[rows.length-1]==='') rows.pop();
+    for(var r=0;r<rows.length;r++){
+      var cells=rows[r].split('\t');
+      var ri=i+r;
+      while(S.panels.length<=ri) S.panels.push(blankPanel());
+      for(var c=0;c<cells.length&&(startCol+c)<PASTE_COLS.length;c++){
+        var f=PASTE_COLS[startCol+c], v=cells[c];
+        S.panels[ri][f]=(f==='L'||f==='W'||f==='qty'||f==='th')?num(v):String(v).trim();
+      }
+    }
+    rerender();
+  }
+  function onCellKey(ev,i,field){
+    if(ev.key!=='Enter') return;
+    ev.preventDefault();
+    if(i+1>=S.panels.length) S.panels.push(blankPanel());   // Enter on the last row grows the sheet, like Excel
+    rerender();
+    var w=el('prod-wrap');
+    var next=w&&w.querySelector('tr[data-i="'+(i+1)+'"] .mcl-f-'+field);
+    if(next) next.focus();
+  }
+
+  // ── Excel template download ────────────────────────────────────────────────
+  // Serves the same file the MSSI website offers — a real Excel dropdown on
+  // Part/Edge Band/Services that no JS library can write, so a client (or an
+  // estimator) filling this in gets the dropdown at the point of entry rather
+  // than free text to interpret afterwards. Falls back to a generated workbook
+  // if the file is unreachable (offline dev preview, wrong path).
+  function downloadTemplate(){
+    fetch(TEMPLATE_FILE,{cache:'no-store'}).then(function(r){
+      if(!r.ok) throw new Error('not found');
+      return r.blob();
+    }).then(function(blob){
+      var url=URL.createObjectURL(blob);
+      var a=document.createElement('a'); a.href=url; a.download=TEMPLATE_FILE;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); },5000);
+      showToast('Template downloaded — pick the edge code from the dropdown in column H.');
+    }).catch(function(){ buildTemplateFallback(); });
+  }
+  function buildTemplateFallback(){
+    if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return; }
+    var wb=XLSX.utils.book_new();
+    function add(rows,name,widths){
+      var ws=XLSX.utils.aoa_to_sheet(rows);
+      ws['!cols']=widths||rows[0].map(function(){ return {wch:18}; });
+      XLSX.utils.book_append_sheet(wb,ws,name);
+    }
+    add([XL_PANEL_HDR,
+      ['Kitchen — Base Cabinet 1','Side panel','Real White PB 4x8 2F (18mm, Matte)',720,560,18,2,'1L 1S','Bamboo .5mmx22mm Matte PVC Premium Edgeband','L','Boring 35mm (Hinges) x 4 holes',''],
+      ['Kitchen — Base Cabinet 1','Door','Walnut 259 PB 4x8 2F (18mm, Matte)',716,296,18,2,'4S','Bamboo .5mmx22mm Matte PVC Premium Edgeband','L','','']],
+      'Cutting List');
+    add([XL_HPL_HDR,['Raw Boards 4x8 18mm MDF','Pure white 4x8 0.7mm HPL','2F',1220,2440,4,'N']],'HPL Lamination');
+    add([XL_HW_HDR,['Overlay hinge',4,'pcs','2 per door']],'Hardware');
+    add([['Materials'],
+      ['The Material SKU column takes a ModCraft catalogue name, which already carries'],
+      ['substrate, board size, face count, thickness and texture — for example:'],
+      ['    Bleached Chestnut PB 4x8 1F (18mm, Crosscut)'],[''],
+      ['Type into the Material field on this tab to search the live catalogue as you go.'],
+      ['Anything typed that is not a catalogue name still comes through — it is'],
+      ['flagged for review rather than rejected.']],
+      'Materials (ModCraft)',[{wch:80}]);
+    add([['Code','Meaning'],['1L','one long edge'],['2L','both long edges'],['1S','one short edge'],
+      ['2S','both short edges'],['1L 1S','one long + one short'],['4S','all round'],['(blank)','no banding']],
+      'Edge Codes',[{wch:12},{wch:30}]);
+    XLSX.writeFile(wb,TEMPLATE_FILE);
+    showToast('Template downloaded — fill it in and upload.');
+  }
+
+  // ── Excel upload ────────────────────────────────────────────────────────────
+  // Same reasoning as _cutListToAnalysis's own tripwire: rows may be added
+  // freely, columns may not be moved — every cell is read by position, so one
+  // inserted column shifts everything after it with nothing on screen to say
+  // so. The header row is checked and named rather than assumed correct.
+  function uploadExcel(inputEl){
+    var file=inputEl.files&&inputEl.files[0]; if(!file) return;
+    if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); inputEl.value=''; return; }
+    var reader=new FileReader();
+    reader.onload=function(ev){
+      try{
+        var wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
+        var sheet=function(n){ var s=wb.Sheets[n]; return s?XLSX.utils.sheet_to_json(s,{header:1,blankrows:false}):null; };
+        var panelsSheet=sheet('Cutting List')||XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,blankrows:false});
+        var headerWarn='';
+        if(panelsSheet&&panelsSheet.length){
+          var want=XL_PANEL_HDR.map(function(h){ return String(h).toLowerCase().replace(/[^a-z]/g,''); });
+          var got=(panelsSheet[0]||[]).map(function(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z]/g,''); });
+          for(var wi=0;wi<want.length;wi++){
+            if(got[wi]!==want[wi]){
+              headerWarn='⚠ The columns do not match the template — check column '+(wi+1)
+                +' ("'+XL_PANEL_HDR[wi]+'"). Rows can be added freely, but columns must not be moved or inserted.';
+              break;
+            }
+          }
+        }
+        var newPanels=[], unknown=0, ebUnknown=[];
+        if(panelsSheet&&panelsSheet.length>1){
+          panelsSheet.slice(1).forEach(function(r){
+            if(!r||(!r[3]&&!r[4])) return;         // no length or width at all — nothing to import
+            var p=blankPanel();
+            if(r[0]) p.group=String(r[0]);
+            if(r[1]) p.part=String(r[1]);
+            var sku=String(r[2]||'').trim();
+            p.mat=sku;
+            if(sku){
+              var src=(typeof getMatSource==='function')?getMatSource():[];
+              var isKnown=false;
+              for(var mi=0;mi<src.length;mi++){ if((src[mi]&&(src[mi].name||src[mi]))===sku){ isKnown=true; break; } }
+              if(!isKnown) unknown++;
+            }
+            p.L=num(r[3]); p.W=num(r[4]); if(r[5]) p.th=num(r[5]);
+            p.qty=num(r[6])||1;
+            var ebn=normaliseEbt(r[7]);
+            p.ebt=ebn.code;
+            if(!ebn.matched&&ebn.raw){ p.remark=(p.remark?p.remark+' · ':'')+'edge code as written: "'+ebn.raw+'"'; ebUnknown.push(ebn.raw); }
+            if(r[8]) p.emat=String(r[8]).trim();
+            var g=String(r[9]||'').trim().toUpperCase();
+            if(g==='L'||g==='W') p.grain=g;
+            if(r[10]) p.svcs=splitServicesText(r[10]);
+            if(r[11]) p.remark=(p.remark?p.remark+' · ':'')+String(r[11]).trim();
+            newPanels.push(p);
+          });
+        }
+        var newHpl=[];
+        var hplSheet=sheet('HPL Lamination');
+        if(hplSheet&&hplSheet.length>1){
+          hplSheet.slice(1).forEach(function(r){
+            if(!r||!r[0]) return;
+            newHpl.push({sub:String(r[0]||'').trim(),fin:String(r[1]||'').trim(),
+              faces:(String(r[2]||'').toUpperCase()==='2F')?'2F':'1F'});
+          });
+        }
+        var newHw=[];
+        var hwSheet=sheet('Hardware');
+        if(hwSheet&&hwSheet.length>1){
+          hwSheet.slice(1).forEach(function(r){
+            if(!r||!r[0]) return;
+            newHw.push({name:String(r[0]||'').trim(),qty:num(r[1])||0,unit:String(r[2]||'pcs'),note:String(r[3]||'')});
+          });
+        }
+        if(!newPanels.length&&!newHpl.length&&!newHw.length){
+          showToast('No rows found — please use the downloaded template.'); inputEl.value=''; return;
+        }
+        // Uploading REPLACES the grid, same as the website's own import — but not
+        // silently over real typed work. The 10-row blank starting scaffold has
+        // nothing to protect, so it is replaced without asking.
+        var haveTyped=totals().rows>0;
+        var proceed=function(){
+          if(newPanels.length) S.panels=newPanels;
+          if(newHpl.length) S.hpl=newHpl;
+          if(newHw.length) S.hardware=newHw;
+          rerender();
+          var msg=(newPanels.length?newPanels.length+' cutting-list row'+(newPanels.length===1?'':'s'):'')
+            +(newHpl.length?(newPanels.length?' · ':'')+newHpl.length+' HPL build'+(newHpl.length===1?'':'s'):'')
+            +(newHw.length?(newPanels.length||newHpl.length?' · ':'')+newHw.length+' hardware line'+(newHw.length===1?'':'s'):'')
+            +' imported'+(unknown?' ('+unknown+' SKU not matched — check the flagged fields)':'')+' ✓';
+          if(headerWarn) showToast(headerWarn);
+          showToast(msg);
+          if(ebUnknown.length) showToast('⚠ '+ebUnknown.length+' edge code'+(ebUnknown.length===1?'':'s')
+            +' could not be read — kept as a remark on the row, set the banding manually.');
+        };
+        if(haveTyped&&!confirm('This replaces the '+totals().rows+' row(s) already on this list with the uploaded file. Continue?')){
+          inputEl.value=''; return;
+        }
+        proceed();
+      }catch(err){
+        showToast('Could not read that file — please use the downloaded template.');
+      }
+      inputEl.value='';
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
   return {
     build:build, afterRender:afterRender,
+    onCellPaste:onCellPaste, onCellKey:onCellKey,
+    downloadTemplate:downloadTemplate, uploadExcel:uploadExcel,
     setGrain:function(v){ S.grain=v; },
     setGroupBy:function(v){ S.groupBy=v; rerender(); },
     addPanel:function(n){ for(var i=0;i<(n||1);i++) S.panels.push(blankPanel()); rerender(); },
@@ -32732,9 +32997,11 @@ var MCL=(function(){
     setHw:function(i,f,v){ S.hardware[i][f]=(f==='qty')?num(v):v; _mclFooter(); },
     hwSearch:function(inp,i){ S.hardware[i].name=inp.value; _refillDatalist('mcl-hw-dl-'+i,getHwSource(),inp.value); },
     clear:function(){
-      if(!S.panels.length&&!S.hpl.length&&!S.hardware.length) return;
+      var t=totals();
+      if(!t.rows&&!S.hpl.length&&!S.hardware.length) return;
       if(!confirm('Clear this cutting list?')) return;
-      S.panels=[]; S.hpl=[]; S.hardware=[]; rerender();
+      // Back to the same 10-row starting state a fresh open shows, not to zero.
+      S.panels=blankPanels(10); S.hpl=[]; S.hardware=[]; rerender();
     },
     state:function(){ return S; },
     // Exposed so the conversion can be exercised without the DOM.
@@ -32745,7 +33012,8 @@ var MCL=(function(){
         var p=S.panels[i];
         if(!p.L&&!p.W&&!p.mat) continue;
         panels.push({group:p.group,part:p.part,mat:p.mat,th:p.th,
-                     L:p.L,W:p.W,qty:num(p.qty)||1,ebt:p.ebt,grain:p.grain,svcs:p.svcs.slice()});
+                     L:p.L,W:p.W,qty:num(p.qty)||1,ebt:p.ebt,emat:p.emat||'',
+                     grain:p.grain,svcs:p.svcs.slice(),remark:p.remark||''});
       }
       // No totals block on purpose: they would be computed here from these same
       // rows, so comparing them against themselves proves nothing. The

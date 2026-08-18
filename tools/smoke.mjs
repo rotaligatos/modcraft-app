@@ -134,6 +134,50 @@ const PROFILES = {
             return { months: trend.length, target: trend[0] && trend[0].target };
           } finally { w.reportTargets = saved; }
         }, { months: 12, target: null });
+      /* Cutting List tab rebuild (2026-08-18): the grid used to start at zero rows,
+         which read as an empty form rather than a ready sheet. Rommel: "there must be
+         10 rows showing already than starting from zero." Checked on a FRESH module
+         load, no MCL calls first — this is what a user actually sees on first open. */
+      if (typeof window.MCL === 'object' && typeof window.MCL.state === 'function')
+        check('MCL starts with 10 blank panel rows, not zero', () => window.MCL.state().panels.length, 10);
+      /* Clear() must return to that same 10-row starting state, not to an empty table —
+         otherwise "Clear" and "start fresh" would look different from each other.
+         window.confirm blocks headless Playwright indefinitely if not stubbed first
+         (bit this suite once before, see the method note on 2026-08-16). */
+      if (typeof window.MCL === 'object' && typeof window.MCL.clear === 'function')
+        check('MCL.clear() resets to 10 rows, not to zero', () => {
+          const w = window, savedConfirm = w.confirm;
+          try {
+            w.confirm = () => true;
+            w.MCL.addPanel(3);                        // prove clear() ignores extra rows too
+            w.MCL.set(0, 'mat', 'Real White PB 4x8 2F (18mm, Matte)');
+            w.MCL.clear();
+            return w.MCL.state().panels.length;
+          } finally { w.confirm = savedConfirm; }
+        }, 10);
+      /* Excel upload/download rebuild (2026-08-18): panels gained an Edge Material
+         (emat) and Remarks field so an uploaded/typed value has somewhere to land
+         instead of being silently dropped on the way into toCl(). Proven end-to-end
+         against the real converter, not just that the field exists on the object. */
+      if (typeof window.MCL === 'object' && typeof window._cutListToAnalysis === 'function')
+        check('MCL panel emat/remark survive toCl() -> _cutListToAnalysis() as notes', () => {
+          const w = window, savedConfirm = w.confirm;
+          try {
+            w.confirm = () => true;
+            w.MCL.clear();
+            w.MCL.set(0, 'group', 'Kitchen — Base Cabinet 1');
+            w.MCL.set(0, 'mat', 'Real White PB 4x8 2F (18mm, Matte)');
+            w.MCL.set(0, 'L', 720); w.MCL.set(0, 'W', 560); w.MCL.set(0, 'qty', 2);
+            w.MCL.set(0, 'emat', 'Bamboo .5mm PVC Edgeband');
+            w.MCL.set(0, 'remark', 'hinge side is the left edge');
+            const cl = w.MCL.toCl();
+            const payload = w._cutListToAnalysis(cl, null);
+            const notes = payload.components[0] ? payload.components[0].notes : '';
+            return { rows: payload.components.length,
+                     emat: notes.indexOf('edge tape: Bamboo .5mm PVC Edgeband') >= 0,
+                     remark: notes.indexOf('remarks: hinge side is the left edge') >= 0 };
+          } finally { w.confirm = savedConfirm; }
+        }, { rows: 1, emat: true, remark: true });
       return out;
     }
   },
