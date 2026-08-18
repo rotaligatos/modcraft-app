@@ -7974,9 +7974,127 @@ left as Rommel's call — not yet extended to Director.
   block that landed in `index.html` and ran it in the live page against real stored figures — not a
   fresh reimplementation that could quietly diverge from what was actually committed.
 
+### Same session, continued — PR #8 (combine/separate toggle) and PR #9 (option badge on Project Name)
+Two more direct fixes after PR #7 landed, same session, same discipline (not through `orion-ship`,
+written for review, verified before shipping).
+
+**PR #8 — Rommel reconsidered PR #7's default.** *"no need to show the Mobilization and installation
+separately... or better yet clickable... i think this is better."* Built the toggle, not a revert —
+a checkbox in the same toolbar as the existing By area/By cabinet type/Lump sum/itemized pills,
+**unchecked by default (combined)**, switching the totals section between PR #7's two rows and one
+summed row. Confirmed by reading `buildPrintRows()` end to end that it only ever builds the ITEM
+rows — the totals section underneath (where this lives) has been shared across all three view modes
+since 2026-08-04, so one patch point covers all three, exactly matching why Rommel saw the same
+duplication in every view. Verified: combined total (₱671,019.29) is provably PR #7's own two figures
+added together; toggling is idempotent.
+
+⚠ **This patch added ANOTHER level of ternary nesting on top of PR #7's own fix for the SAME
+mistake** — counted the parens carefully this time, then let the gate confirm rather than trust the
+count alone. Passed clean on the first try.
+
+**PR #9 — the Project Name field bled between options.** Reported: previewing Option 2, Project Name
+still read "OPT.1 WALL CABINET AND BASE CAB..."; on other quotations everything read "OPT.3"
+regardless of which option was open. Traced to `captureQuotationSnapshot`/`restoreQuotationSnapshot`
+never touching client fields (name, location, Project Name) — by design, since the client doesn't
+change between an option's pricing variants. So it is ONE shared field for the whole quotation, and
+estimators had started typing "OPT.1/2/3" into it themselves; each edit overwrote it for every option.
+
+Rommel's actual want, once clarified: not a *different* name per option (same project either way) —
+the option number showing **alongside** it. And explicitly: **never touch or strip what's already
+typed** — "*they might get confused if we touch it... only if they unlock and actually remove it*."
+So this is purely additive: the option badge already shown correctly next to the Quotation # (built
+fresh every render from `qActiveOptionId`/`qOptionsList`, so it can never go stale like typed text
+can) is now ALSO appended after whatever is already in the Project Name row. `clientRows[i][1]`
+itself — the typed value — is never modified. Verified: badge is byte-identical to the header's own,
+updates correctly per option, a quotation with no options renders with no stray badge.
+
+**Note the first proposed fix for this (make Project Name genuinely per-option, stored per
+snapshot) was WRONG** — Rommel corrected it once he explained the real need. Kept as a reminder: the
+first design that "solves the reported symptom" is not always what the person actually wants; ask
+before building when it's ambiguous, even after a plausible diagnosis.
+
+### Next up (not started) — the Custom Report Export is built on fabricated data
+Investigating "Dashboard demo data" turned up something bigger than the name suggested, and Rommel
+scoped the fix before this session ran out of room. **Full detail moved to the OPEN list below —
+this is the first thing to read in the next session.**
+
 ---
 
-# OPEN — updated 2026-08-16 — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-08-18 (session end) — THIS IS THE AUTHORITATIVE LIST
+> The 2026-08-16 list below is **superseded but not stale** — every item in it is still open and
+> still accurate. Read this block first, then continue into it for everything unchanged.
+
+## ⚠ FIRST THING NEXT SESSION — rebuild the Custom Report Export on real data
+Investigating "Dashboard demo data" (the last item on the 2026-08-16 list) turned up something
+bigger than that name suggested. **The live Dashboard screen is fine** — checked `renderDashboard()`
+directly, it never touches any of this. The problem is narrower and, in its own way, worse:
+**Settings/Reports → Custom Report Export (Excel + PowerPoint) is built almost entirely on
+fabricated data.**
+
+**Full scope, found by reading both export functions completely, not just `KPI_DEFS`:**
+
+| Excel sheet | Source | Real replacement exists? |
+|---|---|---|
+| KPI Summary | `KPI_DEFS` — 7 of 8 tiles read `DEMO_USERS`/`DEMO_PROJS` | Mostly yes — see below |
+| Revenue Trend | **Hardcoded arrays**, `actual=[1850,2100,...]` / `target=[1600,1800,...]` — not tied to ANY data, real or demo | No — see Rommel's decision below |
+| User Performance | `DEMO_USERS` (Maria Santos, Jose Reyes, Ana Cruz, Lea Tan — nobody real) | Yes — Team performance's own `_rollupJobs` |
+| Project Tracker | `DEMO_PROJS` | Yes — `_dashAllEntries()` |
+| Pipeline | `DEMO_PROJS` again | Yes — `_dashMetrics()` |
+
+PowerPoint export has the same shape: Cover slide is fine (just date/branding); KPI Summary and
+Revenue Trend reuse the identical fake sources; Team Performance slide almost certainly reads
+`DEMO_USERS` too (found the reference, did not fully trace it before the session ended).
+
+**`KPI_DEFS`/`DEMO_USERS`/`DEMO_PROJS` are consumed in exactly 3 places** — confirmed by grep, not
+assumed: `renderExportTab()` (the KPI picker checkboxes), `exportReportToExcel()`, `exportReportToPPT()`.
+Nowhere else. **No period or company filter exists at any of these three** — unlike the Dashboard,
+there's no date range or company picker on this tab, so a real-data version reads everything,
+unscoped, which is at least a clean like-for-like swap on that front — no new scoping decision needed.
+
+### Rommel's three decisions, 2026-08-18 — build to these, don't re-ask
+1. **"Give me the flexibility to choose on what I need since it will depend on what the goal is."**
+   → Keep the existing KPI picker mechanism (`renderExportTab()`'s checkboxes, `reportConfig.kpis`)
+   exactly as it is. The fix is making every `def.calc()` behind it return REAL numbers, so whichever
+   ones he picks are real — not narrowing which tiles exist.
+2. **Revenue Trend: "shows actual and a way to set the target."** Two-part build:
+   - **Actual** — real monthly revenue, from won/client-approved quotations (`_isClientApprovedEntry`
+     is the canonical win test this whole app uses — see the 2026-08-06/07/12 sessions), bucketed by
+     month.
+   - **Target** — currently doesn't exist anywhere in this app's data model. Needs a genuine small
+     feature: a settings input (Settings page, likely alongside Cost Factors/Scheduling — check the
+     existing settings-tab convention first) where Rommel sets a monthly or annual revenue target,
+     persisted the same way other global config is (`_collectAppSettings`/`_applyAppSettings`,
+     Settings sheet CONFIG row + Supabase settings mirror — same pattern as `CF`, `MOB_LOCATIONS`).
+     **This is new functionality, not a wiring fix — scope it as such.**
+3. **"It was unused at the moment since I'm still fine tuning the app."** → Confirmed low urgency,
+   not blocking anyone today. Do it properly rather than fast — there's no one currently depending on
+   the export's current (broken) output, so there's no rush that would justify cutting corners.
+
+### Suggested mapping for the 8 `KPI_DEFS` tiles (verify before building, not verified this session)
+Real functions already exist for most of these — this was found but not fully cross-checked line by
+line before the session ended:
+- `totalQuotes` → `_dashAllEntries().length` (raw count, unscoped, matching current unscoped intent)
+- `winRate` → the same canonical definition Team performance and the Dashboard headline already use
+  (`_isClientApprovedEntry`-based, count of won ÷ total — see `_dashUpdateKPIs()`'s `convRate`,
+  ~line 11775). **Reuse this exact test, do not invent a fourth slightly-different win-rate.**
+- `revenueYTD` → `_dashMetrics().wonRevenue`, or the Team performance `rev` variable (won revenue via
+  `_isClientApprovedEntry`) — check which population (YTD-filtered vs all-time) actually matches the
+  label before picking one.
+- `archived` / `followUp` → **already real**, unchanged (`_quotAgeCount('archived'/'alert')`) — the
+  only 1 of 8 tiles that was never fake.
+- `avgDeal` → `_dashMetrics().avgDeal`
+- `openPipeline` → `_dashMetrics().openPipeline`
+- `avgResponse` → Team performance's own response-time computation (`_dashUpdateKPIs()`'s `respTimes`
+  block, ~line 11784) — real per-quotation response times already computed there.
+- `topPerformer` → needs the SAME per-user rollup Team performance builds (`_rollupJobs`), picking
+  whoever has the best real win rate or revenue — not yet designed which metric decides "top".
+
+**Do not build this from the mapping above without re-verifying each line reference** — line numbers
+drift with every commit, and none of these were traced end-to-end this session, only located.
+
+---
+
+# OPEN — updated 2026-08-16 — SUPERSEDED, still accurate, read for everything not covered above
 
 ## Nothing is waiting on the developer. Three things are waiting on people.
 1. **⚠ Rotate the Wufoo API key.** Still in public git history since July. The only item with a
