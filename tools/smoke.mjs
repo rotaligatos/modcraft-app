@@ -96,6 +96,16 @@ const PROFILES = {
           const on  = window._ccfEval(Object.assign({}, base, { ni:true }), rates);
           return [r2(off.grand), r2(on.grand), r2(off.exVat), r2(off.profit), off.marginPct];
         }, [1120, 1293.6, 1000, 400, 40]);
+      /* Ticket 7376f5d0 follow-up: the Admin undo for an Initial-Quotation approval is the only
+         way back from a misclick — requestUnlock refuses while the approval stands, and unlock is
+         the only thing that clears it. An approved quotation is LOCKED, and updateLockUI disables
+         everything inside #s1-wrap without data-lock-exempt, so losing that attribute renders the
+         escape hatch disabled exactly when it is needed. Silent, so it is pinned here. */
+      check('undo-approval button exists and is exempt from the lock sweep', () => {
+        const b = document.getElementById('undo-iqappr-btn');
+        return { exists: !!b, exempt: b ? b.getAttribute('data-lock-exempt') : null,
+                 handler: typeof window.adminUndoIqApproval };
+      }, { exists: true, exempt: '1', handler: 'function' });
       return out;
     }
   },

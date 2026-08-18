@@ -1232,6 +1232,13 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         <!-- Only ever visible on a draft — see discardQuotation. Once a quotation has been issued
              it is a record, and the way out is Client Declined, not deletion. -->
         <button class="btn" id="discard-btn" onclick="discardQuotation()" style="display:none;color:var(--coral);border-color:var(--coral)"><i class="ti ti-trash"></i>Discard draft</button>
+        <!-- Admin escape hatch. "Approve & proceed to Stage 2" records a CLIENT approval, and
+             once recorded nothing could clear it: requestUnlock refuses while it stands and the
+             unlock path is the only thing that clears it. One misclick froze Stage 1 for good.
+             data-lock-exempt is required — an approved quotation is locked, so without it this
+             button renders disabled and the escape hatch is not one. -->
+        <button class="btn" id="undo-iqappr-btn" onclick="adminUndoIqApproval()" data-lock-exempt="1"
+          style="display:none;color:var(--coral);border-color:var(--coral)"><i class="ti ti-rotate-2"></i>Undo client approval</button>
         <!-- Close Project removed 2026-08-08: the quotation ends when the client says yes or no.
              Delivery is Admin's (payment) and then Production's, which extend the chain rather than
              sit inside it. The order archiving it was quietly responsible for moved to
@@ -20589,6 +20596,7 @@ function updateLockUI() {
   // Last, and after the disable sweep above: the signature indicator depends on lock state, and
   // rebuilding it here means its Request button is created fresh rather than caught by that sweep.
   if(typeof renderSignatureBar==='function') renderSignatureBar();
+  if(typeof _refreshUndoIqApprovalBtn==='function') _refreshUndoIqApprovalBtn();
 }
 // ── Reactivation (Archived → Draft) ───────────────────────────────────────
 function _qIsArchived(){
@@ -20661,6 +20669,45 @@ function doReactivate(){
 // _statusFromState uses, so what the gate refuses and what the Project List shows can never
 // disagree. A quotation still awaiting the client, or never sent, is untouched by this.
 function _iqClientApproved(){ return !!(qClientApproved||qApproved); }
+// Admin escape hatch for an Initial-Quotation approval recorded by accident. The button that
+// records it reads "Approve & proceed to Stage 2" — it does not say it marks the CLIENT as having
+// accepted — and until now nothing could undo it: requestUnlock refuses while the approval stands,
+// and unlock is the ONLY path that clears it. Rommel, 2026-08-18, after a user hit exactly this:
+// "the capability to unapprove a quotation is good capability for admin... from time to time there
+// may be some recurring cases."
+//
+// Clears BOTH flags because _iqClientApproved() tests both — clearing one would leave Stage 1 shut.
+// A reason is required and the whole thing is written to the append-only log: this erases a recorded
+// client decision, so it must never happen quietly.
+function adminUndoIqApproval(){
+  if(currentRole!=='Admin'){ showToast('Only an Admin can undo a client approval'); return; }
+  if(!_iqClientApproved()){ showToast('This Initial Quotation is not marked as approved'); return; }
+  // Undoing the Initial approval does not recall a Final already with the client — say so rather
+  // than let an Admin discover it afterwards.
+  var warn=(fqLocked||_wasSent(fqSentStatus))
+    ? String.fromCharCode(10,10)+'NOTE: the Final Quotation has already been locked or sent. Undoing this does NOT recall it — handle the Final Quotation separately.'
+    : '';
+  var why=prompt('Undo the client approval on '+(qSerial||'this quotation')+'?'+String.fromCharCode(10,10)
+    +'This clears the record that the client accepted the Initial Quotation and reopens Stage 1 for editing.'
+    +warn+String.fromCharCode(10,10)+'Reason (required):','');
+  if(why===null) return;
+  why=String(why||'').trim();
+  if(!why){ showToast('A reason is required to undo a client approval'); return; }
+  qClientApproved=false; qClientApprovedAt='';
+  qApproved=false; qInitApprovedAt='';
+  logActivity('Client approval on the Initial Quotation UNDONE by '
+    +((gUser&&gUser.name)||currentRole||'an Admin')+' — reason: '+why);
+  // The flags live in the saved state, so the state must be written too — the row alone would let
+  // the approval come back the next time the quotation is opened.
+  try{ saveQuotationJson(function(){}); }catch(e){ console.warn('[undo-appr] state save failed',e); }
+  try{ gSaveQuotation(); }catch(e){ console.warn('[undo-appr] row save failed',e); }
+  updateLockUI(); try{ updateSentStatus(); }catch(e){}
+  showToast('Client approval undone — Stage 1 is editable again');
+}
+function _refreshUndoIqApprovalBtn(){
+  var b=el('undo-iqappr-btn'); if(!b) return;
+  b.style.display=(currentRole==='Admin'&&_iqClientApproved())?'inline-flex':'none';
+}
 function _iqApprovedEditBlocked(what){
   alert('This Initial Quotation has already been approved by the client, so it can no longer be '
       + 'changed.' + String.fromCharCode(10,10)
