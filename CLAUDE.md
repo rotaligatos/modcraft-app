@@ -7864,6 +7864,118 @@ behaviour" claim; a promise is not a proof.
 
 ---
 
+## What was changed on 2026-08-18 (session — quotation cost fixes: override figures, IQ-approval undo, transport trip model, printout markup attribution)
+
+A long single-thread session, six PRs against sensitive pricing/approval scope (none through
+`orion-ship`, which correctly refuses that scope — each written directly, verified, and merged by
+Rommel after review). Two are worth a permanent record here since they are standing rules, not
+one-off bug fixes.
+
+### ⚠ RULE: the client-facing printout attributes markup to the category that earned it
+Reported on **QT-C00000006**: Fabrication subtotal printed at raw cost (₱339,560.01) while
+Mobilization & Installation silently absorbed *every* category's markup (₱1,059,137.83) — fab's
+own contingency+buffer, outsource's contingency+buffer+markup, and the 30% discount buffer on the
+whole job. Root cause: one variable, `overheadAmt`, labelled in its own comment as *"contingencies
++ buffer + markup + cutting list charge + outsource margin"* — everything lumped into one number
+and dumped onto the Mobilization & Installation row.
+
+**Rommel's rule, now built (PR #7, `fix/T-printout-markup-attribution`):**
+- Mob.'s own contingency/buffer/markup → **Mobilization**.
+- Inst.'s own contingency/buffer/markup → **Installation**.
+- **Assembly** (base + its earned share of the combined Inst./Assembly rate) → **Fabrication**.
+- **Outsource** (base + its own contingency/buffer/markup, entirely — *"this is material"*) →
+  **Fabrication**.
+- **Discount buffer** splits **50% Fabrication / 15% Mobilization / 35% Installation** — fixed
+  percentages, his figures, not proportional (a proportional-to-bucket-size version was proposed
+  first and explicitly overridden).
+
+**Scope — his words: "only for fabrication with installation only."** `na` is automatically true
+whenever `ni` is true (`na=ni||...`), so gating the whole regroup on `pNi` alone is exactly that
+case. When `pNi` is false (Fabrication-only, with or without a standalone Assembly checkbox), NONE
+of this runs — the original single-row `overheadAmt` logic is untouched, byte for byte, so every
+other quotation shape prints exactly as it always has.
+
+**Installation/Assembly split method:** they share ONE rate applied to a COMBINED base
+(`instBase+assmBase`), so splitting the resulting peso amounts in proportion to each side's share
+of that base is **exact, not an approximation** — the same % uniformly applied means every peso of
+base earns the identical markup rate.
+
+**Applies to both stages with one change, not two.** `_buildPrintBody()` is the *only*
+print-body constructor in the whole file — confirmed by listing every caller (preview, PDF for one
+option, PDF for the full option set, Drive save). It branches internally on `qStage`, and both
+`recalc()`'s and `recalcFQ()`'s `_pCalc` object literals were confirmed to carry every field this
+reads (`rates, regularBase, outsourceBase, outsourceFinal, mobBase, instBase, assmBase, dcCost`)
+under identical names. So Stage 1 and Stage 2 read from one shared formula with nothing to drift.
+
+Verified by extracting the exact shipped block (not a re-derivation) and running it against
+QT-C00000006's real stored figures: **Fabrication ₱808,078.55 + Mobilization ₱109,693.29 +
+Installation ₱561,326.00 + Site visit ₱3,500.00 = ₱1,482,597.84**, matching the grand total to the
+centavo. Also confirmed `pNi=false` returns `null` (original, unregrouped behaviour) — the
+regression-safety case for everything this does not touch.
+
+> ⚠ **A real unbalanced-paren syntax error shipped in the first patch attempt** — adding one more
+> level of ternary nesting (`miRegroup ? … : (original ternary)`) without its matching close. The
+> whole `<script>` block failed to parse, every critical function came back missing, and gate 2
+> caught it before anything was committed. Exactly what the gate exists for — fixed, re-verified,
+> then shipped.
+
+### ⚠ RULE: Admin can undo an Initial-Quotation client approval
+A user clicked *"Approve & proceed to Stage 2"* — which does not say it records the CLIENT as
+having approved — and was then told the Initial Quotation could no longer be changed. The message
+was accurate (the quotation genuinely reached the Final stage), but there was **no way back**:
+`requestUnlock` refuses while the approval stands, and unlock is the *only* thing that clears it.
+One misclick froze Stage 1 permanently.
+
+**Fix (PR #3, merged, live):** an Admin-only **"Undo client approval"** button beside the Stage 1
+actions, shown only while the Initial Quotation is marked approved. Clears both `qClientApproved`
+and `qApproved` (the gate tests both). **A reason is required**, and the action is written to the
+append-only activity log — undoing a recorded client decision must never happen quietly. Warns
+first when the Final Quotation is already locked or sent, since undoing the Initial does not recall
+it. `data-lock-exempt="1"` is load-bearing: an approved quotation IS locked, and `updateLockUI`
+disables everything inside `#s1-wrap` without that attribute, so the escape hatch would render dead
+exactly when needed — pinned by a regression check.
+
+⚠ **Scoped to Admin only, deliberately narrower than Admin+Director everywhere else in this app**
+(cost reports, approval bypass, signature re-assignment all treat the two as one tier). Raised and
+left as Rommel's call — not yet extended to Director.
+
+### Other fixes shipped this session (all merged, live)
+- **Override approval shows cost/profit for a non-open quotation** (PR #2) — the approval panel
+  now evaluates the request's own proven closed-form model (`_apprOverrideModel`, the same one the
+  phone uses) instead of blanking when the target isn't the quotation on screen.
+- **Transport cost follows the stay arrangement** (PR #4) — a "days on site changes nothing" report
+  traced to the AI prompt never saying what days meant for trip count. New Stay arrangement input
+  (Daily travel / Stay-in on site / Accommodation) with a distinct trip model per mode; rest-day
+  trips home suppressed where the leg needs a plane or ferry.
+- **QA/QC priced as its own trip** (PR #5) — the base prompt unconditionally claimed QA/QC
+  *"travels with installation team — same trip"* and summed one merged headcount; QA/QC is
+  normally a separate deployment (often the last installation day only). Fixed at the prompt and in
+  mock mode.
+- **Mobilization & Installation shows a component breakdown** (PR #6) — a note reading "27 units ×
+  ₱8,753.15, 27 assm × ₱850.00" totalled ₱259,285.05 against a shown total of ₱291,885.08;
+  Mobilization (₱31,400) and QA/QC (₱1,200) were correctly included in the total but never shown.
+  One shared function (`_miBreakdownHtml`) used by both `recalc()` and `recalcFQ()`, with a
+  reconciliation safety net — any future unexplained gap surfaces as a visible coral row instead of
+  a total that quietly stops adding up again.
+
+### Method notes
+- **A ₱27,000 gap in my own hand computation, caught before it reached Rommel.** Building the
+  printout regroup by hand first (to show the plan before coding it) omitted Assembly's own base
+  and the folded Design charge from the Fabrication bucket. Re-verified via a script, not by eye,
+  before presenting revised numbers — and said so plainly rather than quietly correcting it.
+- **A retyped number in a prior message was wrong** (₱798,041.07 stated as Fabrication's
+  pre-discount bucket; the real value was ₱637,009.56) — caught on the NEXT recompute and disclosed
+  rather than left standing. Every subsequent number in this thread was read directly off a script's
+  output, never retyped from memory.
+- **"Show me how you're going to distribute this" is a request to see the plan, not build it.**
+  Presented the full worked table with the logic before writing any code; only started the patch
+  once the 50/15/35 split and the "only for Fabrication-with-Installation" scope were confirmed.
+- **Verify the shipped code, not a re-derivation of it.** The final proof extracted the literal
+  block that landed in `index.html` and ran it in the live page against real stored figures — not a
+  fresh reimplementation that could quietly diverge from what was actually committed.
+
+---
+
 # OPEN — updated 2026-08-16 — THIS IS THE AUTHORITATIVE LIST
 
 ## Nothing is waiting on the developer. Three things are waiting on people.
