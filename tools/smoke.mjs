@@ -550,6 +550,27 @@ const PROFILES = {
       if (typeof window.reasonBoxHtml === 'function')
         check('reasonBoxHtml emits the id act() reads (rsn)',
           () => /id="rsn"/.test(window.reasonBoxHtml()), true);
+      /* Rommel, 2026-08-19: the "Client history" panel summed EVERY other quotation carrying a
+         client's name into one headline peso figure next to the request being reviewed — two
+         duplicate ~6.2M quotations became a misleading "12.4M" total right beside a ~6.2M request.
+         His direction: never combine more than one quotation's amount into a single figure again.
+         loadHistory() is inherently async (a live Supabase query), which the harness's synchronous
+         check() cannot drive end-to-end here without larger changes to shared test infrastructure
+         -- so this verifies structurally, on the function's own source, which a live DOM test would
+         ultimately be confirming anyway: the summing arithmetic is gone (no .reduce assembling a
+         combined total), while the per-row rendering that must survive (each quotation's OWN
+         individual amount, listed on its own line) is still there. A future reintroduction of any
+         combined total is exactly what this is written to catch. */
+      if (typeof window.loadHistory === 'function')
+        check('loadHistory: no combined total across quotations, only each one\'s own amount',
+          () => {
+            const src = window.loadHistory.toString();
+            return {
+              noReduceSum: !/\.reduce\(/.test(src),
+              noCombinedValVariable: !/\bvar val\s*=/.test(src),
+              perRowAmountStillRenders: /peso\(x\.total\)/.test(src)
+            };
+          }, { noReduceSum: true, noCombinedValVariable: true, perRowAmountStillRenders: true });
       return out;
     }
   }
