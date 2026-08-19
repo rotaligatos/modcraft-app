@@ -371,6 +371,50 @@ const PROFILES = {
              outsourcedUnitPriceDoubled600: true, outsourcedAmount1200: true,
              rawOutsourcePriceNeverShown: true, areaSubtotalMatchesPool: true,
              hiddenPricingStillShowsHardwareAfterIt: true });
+      /* Rommel, 2026-08-19: the auto-forwarded "Noted by" signature request (raised automatically
+         the moment someone approves "Checked by") arrived with amount 0 and no decision data on
+         Wynchelle Uy's quotations, so he could not evaluate it and rejected both. Root cause:
+         confirmSignature() fires this auto-forward from inside the CHECKED-BY SIGNER's own
+         session, "usually not open here" per that call site's own comment — so _pCalc there is
+         whatever that browser happens to have loaded, not the quotation actually being signed.
+         Fix carries the just-approved Checked-by request's OWN amount/decision forward (captured
+         correctly when the preparer raised IT with the quotation genuinely open, and still valid —
+         the quotation is locked and its total pinned between the two steps). Proves both branches
+         against the real function: a carried snapshot is used verbatim, and — proving this is a
+         genuine fix and not a lucky accident — the OLD failure mode (amount 0, decision null)
+         still reproduces exactly when nothing is carried, i.e. this isn't disguising the bug, it
+         is bypassing the browser context that caused it. */
+      if (typeof window._sendSignatureRequest === 'function')
+        check('_sendSignatureRequest: auto-forwarded Noted-by carries the Checked-by decision, not an empty local one', () => {
+          const w = window;
+          const saved = { findSig: w._findSignatory, saveReq: w.gSaveApprovalRequest, sendMsg: w.gSendMessage,
+                           pushReq: w._pushApprovalRequest, pCalc: w._pCalc, gUser: w.gUser,
+                           notifsLen: w.NOTIFS ? w.NOTIFS.length : 0 };
+          try {
+            w._findSignatory = () => ({ email: 'approver@test.com', name: 'Test Approver' });
+            w.gSaveApprovalRequest = () => {};
+            w.gSendMessage = () => {};
+            w._pushApprovalRequest = () => {};
+            w.gUser = { email: 'signer@test.com', name: 'Test Signer' };
+            w._pCalc = null;   // the real-world case: the Checked-by signer's browser has nothing relevant loaded
+            const carriedDecision = { ctx: 's1', exVat: 6175378.62, cost: 3007929.38, profit: 3167449.24, marginPct: 51.29 };
+            const withCarry = w._sendSignatureRequest('noted', true, 'QT-TEST-0099', 'Test Client', 'checker@test.com',
+                                                        { amount: 6175378.62, decision: carriedDecision });
+            const withoutCarry = w._sendSignatureRequest('noted', true, 'QT-TEST-0099', 'Test Client', 'checker@test.com');
+            return {
+              carriedAmountUsed: !!withCarry && withCarry.amount === 6175378.62,
+              carriedDecisionUsed: !!withCarry && !!withCarry.decision && withCarry.decision.exVat === 6175378.62,
+              noCarryReproducesOldFailure: !!withoutCarry && withoutCarry.amount === 0 && withoutCarry.decision === null
+            };
+          } finally {
+            w._findSignatory = saved.findSig; w.gSaveApprovalRequest = saved.saveReq; w.gSendMessage = saved.sendMsg;
+            w._pushApprovalRequest = saved.pushReq; w._pCalc = saved.pCalc; w.gUser = saved.gUser;
+            // NOTIFS.unshift PREPENDS, so the two test entries sit at the FRONT — remove exactly
+            // those from index 0 rather than truncating by length, which would keep the new
+            // entries and drop real ones instead.
+            if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
+          }
+        }, { carriedAmountUsed: true, carriedDecisionUsed: true, noCarryReproducesOldFailure: true });
       return out;
     }
   },

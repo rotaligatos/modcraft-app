@@ -17143,8 +17143,10 @@ function _preparerEmail(){
   var p=(qSignatures||{}).prepared;
   return (p&&p.email)||((gUser&&gUser.email)||'');
 }
-// auto = raised by the system after Checked by approved, not by the user pressing the button
-function _sendSignatureRequest(slot,auto,serialOverride,clientOverride,checkedSignerEmail){
+// auto = raised by the system after Checked by approved, not by the user pressing the button.
+// carried = {amount,decision} from the Checked-by request that just triggered this one — see the
+// note at the `decision:` field below for why the auto-forward case needs it.
+function _sendSignatureRequest(slot,auto,serialOverride,clientOverride,checkedSignerEmail,carried){
   var serial=serialOverride||qBaseSerial||qSerial||'—';
   var client=clientOverride||(el('cl-bizname')&&el('cl-bizname').value.trim())||(el('cl-name')&&el('cl-name').value.trim())||'—';
   var apprObj=_findSignatory(slot,_sigExcludes(slot,checkedSignerEmail));
@@ -17175,19 +17177,35 @@ function _sendSignatureRequest(slot,auto,serialOverride,clientOverride,checkedSi
     approverEmail:apprObj.email,approver:apprObj.email,
     msg:_sigLabel(slot)+' signature requested on '+serial+' for '+client+'.',
     note:'',date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
-    status:'pending',amount:(_pCalc&&_pCalc.grand)||0,ctx:(qStage===2?'fq':'s1'),
+    status:'pending',
     // Recorded now, while the quotation is open and its ex-VAT total is known. confirmSignature
     // falls back to this when the signatory signs without that quotation loaded — which is the
     // normal case, since they act from the Approvals page.
     notedRequired:(slot==='checked'?_notedRequired():undefined),
     // Same reason as submitApprovalRequest: a signatory on a phone cannot recompute anything, so
     // the figures are gathered HERE by the real engine. Signature was the one request type that
-    // built its own req object and never asked for this — so every signature reaching approve.html
-    // had a null decision and showed "open it on the laptop", for the type that carries all the
-    // real traffic. Costs nothing: the counter sweep and the override model are discount/override
-    // only, so this is a plain read of _pCalc.
-    decision:(typeof _apprDecisionContext==='function'
-      ? _apprDecisionContext('signature',{ctx:(qStage===2?'fq':'s1')}) : null)};
+    // built its own req object and never asked for this — fixed 2026-08-16 for the MANUAL request
+    // (requestSignatures — the preparer has the quotation open by definition, so _pCalc is right).
+    //
+    // The AUTO-FORWARD to Noted by is a different call site entirely: confirmSignature() runs this
+    // inside the CHECKED-BY SIGNER's session, right after they approve — and per the comment at
+    // that call site, "the quotation is usually not open here (the signatory acts from Approvals)".
+    // So _pCalc there reflects whatever THAT browser happens to have loaded, not this quotation —
+    // every Noted-by request auto-forwarded this way carried amount:0/decision:null, exactly
+    // reproducing the "no data" symptom Rommel reported (ticket 7376f5d0) for a different request
+    // type, on Wynchelle Uy's two duplicate quotations (2026-08-19) — he correctly couldn't
+    // evaluate an empty request and rejected both.
+    //
+    // Fix: the quotation is LOCKED for a signature to apply at all, and a locked total is pinned
+    // (_lockedTotalForStage) — so nothing legitimately changes between the Checked-by request being
+    // raised (with the quotation genuinely open, correct data captured) and Noted-by being raised
+    // seconds later on approval. Carry that SAME snapshot forward rather than trying to recompute
+    // it from a browser that was never going to have the right quotation loaded.
+    amount:(carried&&carried.amount!=null)?carried.amount:((_pCalc&&_pCalc.grand)||0),
+    ctx:(qStage===2?'fq':'s1'),
+    decision:(carried&&carried.decision!==undefined)?carried.decision
+      :(typeof _apprDecisionContext==='function'
+        ? _apprDecisionContext('signature',{ctx:(qStage===2?'fq':'s1')}) : null)};
   NOTIFS.unshift(Object.assign({id:NOTIFS.length+1,reqId:id},req));
   // Push only once the row is actually stored — the Edge Function reads the request back by id,
   // so firing alongside an async save would race it and land on nothing.
@@ -17316,7 +17334,13 @@ function confirmSignature(){
       // Pass who just signed Checked by: they must not also be handed Noted by, and the
       // quotation is usually not open here (the signatory acts from Approvals), so
       // qSignatures.checked cannot be relied on to say.
-      if(needs) _sendSignatureRequest('noted',true,n.serial,n.client,sig.email);
+      //
+      // Also carry n's own amount/decision forward — n IS the Checked-by request just approved,
+      // captured correctly when the preparer raised it with the quotation genuinely open. This
+      // browser (the Checked-by signer's) usually does not have that quotation loaded, so without
+      // this the auto-forwarded Noted-by request would build its figures from whatever happens to
+      // be open here instead — amount 0, decision null. See _sendSignatureRequest's own note.
+      if(needs) _sendSignatureRequest('noted',true,n.serial,n.client,sig.email,{amount:n.amount,decision:n.decision});
       else logActivity('Noted by not required on '+n.serial+' (below the company threshold).');
     }
     _updateNotifBadge();
