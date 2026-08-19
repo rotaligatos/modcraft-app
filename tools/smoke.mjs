@@ -500,6 +500,54 @@ const PROFILES = {
         }, { inputShowsValue: true, buttonShowsApproved: true, buttonIsSuccessStyled: true,
              okMessageVisible: true, okTextShowsPercent: true,
              inputCleared: true, buttonBackToRequest: true, okMessageHidden: true });
+      /* Rommel, 2026-08-19 (QT-W00000134): unlocking only ever cleared a COMPLETED signature
+         (qSignatures.checked/.noted) -- a request still sitting PENDING at that moment was left
+         completely untouched, so it stayed signable on a document that had already changed
+         underneath it, while a fresh legitimate request for the re-locked version could exist
+         at the same time -- two "Checked by" cards for one quotation. His rule: another signature
+         request must not be possible while one is still in process, unless the existing one has
+         been cancelled. Proves _cancelPendingSignaturesFor is scoped EXACTLY right: it must cancel
+         every pending SIGNATURE request on the matching serial (both Checked-by and Noted-by, if
+         both happened to be open) and leave everything else alone -- an already-actioned signature
+         (history, not to be erased), a pending request on a DIFFERENT serial, and a pending request
+         of a DIFFERENT type (e.g. unlock) all must survive untouched. */
+      if (typeof window._cancelPendingSignaturesFor === 'function')
+        check('_cancelPendingSignaturesFor: cancels pending signatures on this serial only, nothing else', () => {
+          const w = window;
+          const saved = { NOTIFS: w.NOTIFS, gSaveApprovalRequest: w.gSaveApprovalRequest,
+                           gSendMessage: w.gSendMessage, logActivity: w.logActivity,
+                           _updateNotifBadge: w._updateNotifBadge };
+          const savedCalls = [], sentMessages = [];
+          try {
+            w.gSaveApprovalRequest = (req) => { savedCalls.push(req); };
+            w.gSendMessage = (email) => { sentMessages.push(email); };
+            w.logActivity = () => {};
+            w._updateNotifBadge = () => {};
+            w.NOTIFS = [
+              { type: 'signature', status: 'pending',  serial: 'QT-TEST-0001', reqId: 'r1', sigSlot: 'checked', approverEmail: 'a@x.com' },
+              { type: 'signature', status: 'pending',  serial: 'QT-TEST-0001', reqId: 'r2', sigSlot: 'noted',   approverEmail: 'b@x.com' },
+              { type: 'signature', status: 'approved', serial: 'QT-TEST-0001', reqId: 'r3', sigSlot: 'checked', approverEmail: 'c@x.com' },
+              { type: 'signature', status: 'pending',  serial: 'QT-TEST-0002', reqId: 'r4', sigSlot: 'checked', approverEmail: 'd@x.com' },
+              { type: 'unlock',    status: 'pending',  serial: 'QT-TEST-0001', reqId: 'r5' }
+            ];
+            w._cancelPendingSignaturesFor('QT-TEST-0001', 'edgebanding is below minimum');
+            return {
+              checkedCancelled: w.NOTIFS[0].status === 'cancelled',
+              notedCancelled: w.NOTIFS[1].status === 'cancelled',
+              alreadyApprovedUntouched: w.NOTIFS[2].status === 'approved',
+              differentSerialUntouched: w.NOTIFS[3].status === 'pending',
+              differentTypeUntouched: w.NOTIFS[4].status === 'pending',
+              exactlyTwoSaved: savedCalls.length === 2,
+              exactlyTwoNotified: sentMessages.length === 2
+            };
+          } finally {
+            w.NOTIFS = saved.NOTIFS; w.gSaveApprovalRequest = saved.gSaveApprovalRequest;
+            w.gSendMessage = saved.gSendMessage; w.logActivity = saved.logActivity;
+            w._updateNotifBadge = saved._updateNotifBadge;
+          }
+        }, { checkedCancelled: true, notedCancelled: true, alreadyApprovedUntouched: true,
+             differentSerialUntouched: true, differentTypeUntouched: true,
+             exactlyTwoSaved: true, exactlyTwoNotified: true });
       return out;
     }
   },
