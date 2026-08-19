@@ -178,6 +178,33 @@ const PROFILES = {
                      remark: notes.indexOf('remarks: hinge side is the left edge') >= 0 };
           } finally { w.confirm = savedConfirm; }
         }, { rows: 1, emat: true, remark: true });
+      /* Ticket 0e65e1fd (2026-08-19): re-locking a quotation that owed a revision (unlocked, then
+         re-locked) minted a WHOLE NEW quotation (QT-W00000132, then W00000133 on a second
+         re-lock) instead of overwriting QT-W00000130 in place, per Rommel's own report and
+         confirmed in the activity log. Root cause: _applyRevisionBump() reset qSerialCommitted to
+         false, which routes the next gSaveQuotation() through the "unclaimed serial" branch —
+         asking the counter/claim service for a brand-new number and overwriting qSerial with it,
+         discarding the .R1 suffix entirely. A revision must NOT claim anything: its base serial
+         already has a row. Simulates a previously-saved, locked quotation with a revision owed
+         and drives the real function, asserting the claim flag survives untouched and the base
+         serial is unchanged (only the suffix changes). */
+      if (typeof window._applyRevisionBump === 'function' && typeof window._serialRoot === 'function')
+        check('_applyRevisionBump: revision stays on the SAME row (no new serial claimed)', () => {
+          const w = window;
+          const saved = { qSerial: w.qSerial, qSerialCommitted: w.qSerialCommitted,
+                           qRevisionPending: w.qRevisionPending, qRevisedFrom: w.qRevisedFrom };
+          try {
+            w.qSerial = 'QT-W00000130';
+            w.qSerialCommitted = true;     // already saved+locked once — this is what a real revision starts from
+            w.qRevisionPending = true;     // set by confirmUnlock() when the quotation is reopened
+            w._applyRevisionBump();
+            return { serial: w.qSerial, base: w._serialRoot(w.qSerial),
+                      committed: w.qSerialCommitted, revisedFrom: w.qRevisedFrom };
+          } finally {
+            w.qSerial = saved.qSerial; w.qSerialCommitted = saved.qSerialCommitted;
+            w.qRevisionPending = saved.qRevisionPending; w.qRevisedFrom = saved.qRevisedFrom;
+          }
+        }, { serial: 'QT-W00000130.R1', base: 'QT-W00000130', committed: true, revisedFrom: 'QT-W00000130' });
       return out;
     }
   },
