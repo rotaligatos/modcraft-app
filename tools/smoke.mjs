@@ -415,6 +415,48 @@ const PROFILES = {
             if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
           }
         }, { carriedAmountUsed: true, carriedDecisionUsed: true, noCarryReproducesOldFailure: true });
+      /* Rommel, 2026-08-19: "trying to adjust the override contingency and it seems it's not
+         working." Root cause: _readCCFFields() used `parseFloat(x)||CF.fabContingency` for the
+         three ...Contingency fields — 0 is falsy in JS, so typing 0 to zero out a rate silently
+         reverted to the global default instead, both in the live preview AND in what actually got
+         applied (_ccfUpdateProfitNow and confirmCustomCF both read through this same function) —
+         which is exactly why it would look like nothing happened at all, not like a glitch. The
+         buffer/markup fields happened to be unaffected only because their OWN fallback is also 0.
+         Drives the real DOM inputs (present in static markup, not JS-built) and the real function,
+         proving 0 now survives on all three previously-broken fields while a genuinely blank field
+         still correctly falls back to the global rate — the fix narrows to exactly the broken
+         case, it doesn't just remove the fallback altogether. */
+      if (typeof window._readCCFFields === 'function' && document.getElementById('ccf-fab'))
+        check('_readCCFFields: typing 0 for a contingency rate is respected, not silently reverted to global', () => {
+          const w = window;
+          // CF.fabContingency defaults to 0 in this bare, unauthenticated boot state (index.html's
+          // own CF literal) — 0||0 === 0 either way, which would make a fix and its absence look
+          // identical here. Forced to a distinguishable non-zero value so the test can actually
+          // tell "kept the typed 0" apart from "silently fell back to global".
+          const savedCF = { fabContingency: w.CF.fabContingency, mobContingency: w.CF.mobContingency,
+                             instContingency: w.CF.instContingency };
+          w.CF.fabContingency = 12; w.CF.mobContingency = 8; w.CF.instContingency = 15;
+          const ids = ['ccf-fab', 'ccf-fabBuf', 'ccf-mob', 'ccf-mobBuf', 'ccf-mobMk',
+                        'ccf-inst', 'ccf-instBuf', 'ccf-instMk', 'ccf-discBuf', 'ccf-matMargin'];
+          const saved = {}; ids.forEach(id => { const e = document.getElementById(id); if (e) saved[id] = e.value; });
+          try {
+            ids.forEach(id => { const e = document.getElementById(id); if (e) e.value = '0'; });
+            const allZero = w._readCCFFields();
+            document.getElementById('ccf-fab').value = '';   // blank must still fall back
+            const blankFab = w._readCCFFields();
+            return {
+              fabContingencyZeroRespected: allZero.fabContingency === 0,
+              mobContingencyZeroRespected: allZero.mobContingency === 0,
+              instContingencyZeroRespected: allZero.instContingency === 0,
+              blankStillFallsBackToGlobal: blankFab.fabContingency === 12
+            };
+          } finally {
+            ids.forEach(id => { const e = document.getElementById(id); if (e && saved[id] !== undefined) e.value = saved[id]; });
+            w.CF.fabContingency = savedCF.fabContingency; w.CF.mobContingency = savedCF.mobContingency;
+            w.CF.instContingency = savedCF.instContingency;
+          }
+        }, { fabContingencyZeroRespected: true, mobContingencyZeroRespected: true,
+             instContingencyZeroRespected: true, blankStillFallsBackToGlobal: true });
       return out;
     }
   },
