@@ -548,6 +548,52 @@ const PROFILES = {
         }, { checkedCancelled: true, notedCancelled: true, alreadyApprovedUntouched: true,
              differentSerialUntouched: true, differentTypeUntouched: true,
              exactlyTwoSaved: true, exactlyTwoNotified: true });
+      /* Rommel, 2026-08-19: "Add capability to search for the agent name." Agent was already
+         captured on every quotation (cl-agent) and already searchable on the Orders queue, but
+         never made it into the directory's own data at all -- not stored in the Quotations sheet
+         row, not in sessionQuotations, so the Project List search had nothing to match against
+         even in principle. Given it its own column (like Project Name/Source Order before it) and
+         wired into the search filter. Proves the filter end-to-end against the real render
+         function and real DOM: typing an agent's name shows only quotations assigned to that
+         agent, typing something matching nobody shows none, and clearing the search shows both --
+         so this cannot regress into "the field exists but nothing actually filters by it". */
+      if (typeof window.renderDirectoryTable === 'function' && document.getElementById('dir-search'))
+        check('renderDirectoryTable: search filter matches on agent name', () => {
+          const w = window;
+          const saved = { dirData: w.dirData, search: document.getElementById('dir-search').value };
+          const mkEntry = (id, agent) => ({
+            id, baseSerial: id, created: '2026-01-01T00:00:00Z', client: 'Client ' + id, contact: '',
+            type: 'Fabrication only', value: 1000, user: 'Test User', segment: '', status: 'Draft',
+            locked: false, stage: 'Initial', options: 1, initLockedAt: '', initApprovedAt: '',
+            finalLockedAt: '', closedAt: '', sourceOrder: '', leadSource: '', project: '', company: '',
+            jobSource: '', jobStartedAt: '', additionalFrom: '', clientApprovedAt: '', clientApproved: false,
+            updatedAt: '2026-01-01T00:00:00Z', sentAt: '', agent
+          });
+          try {
+            w.dirData = [mkEntry('QT-TEST-A001', 'Jane Reyes'), mkEntry('QT-TEST-A002', 'Mark Cruz')];
+            const search = document.getElementById('dir-search');
+            search.value = 'jane';
+            w.renderDirectoryTable();
+            const janeSearchHtml = document.getElementById('dir-table').innerHTML;
+            search.value = 'nobody matches this';
+            w.renderDirectoryTable();
+            const noMatchHtml = document.getElementById('dir-table').innerHTML;
+            search.value = '';
+            w.renderDirectoryTable();
+            const clearedHtml = document.getElementById('dir-table').innerHTML;
+            return {
+              agentSearchFindsOwnQuotation: janeSearchHtml.indexOf('QT-TEST-A001') >= 0,
+              agentSearchExcludesOtherAgent: janeSearchHtml.indexOf('QT-TEST-A002') < 0,
+              nonMatchingSearchShowsNeither: noMatchHtml.indexOf('QT-TEST-A001') < 0 && noMatchHtml.indexOf('QT-TEST-A002') < 0,
+              clearedSearchShowsBoth: clearedHtml.indexOf('QT-TEST-A001') >= 0 && clearedHtml.indexOf('QT-TEST-A002') >= 0
+            };
+          } finally {
+            w.dirData = saved.dirData;
+            document.getElementById('dir-search').value = saved.search;
+            try { w.renderDirectoryTable(); } catch (e) {}
+          }
+        }, { agentSearchFindsOwnQuotation: true, agentSearchExcludesOtherAgent: true,
+             nonMatchingSearchShowsNeither: true, clearedSearchShowsBoth: true });
       return out;
     }
   },
