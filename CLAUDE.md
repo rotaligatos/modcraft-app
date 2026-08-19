@@ -8020,7 +8020,206 @@ this is the first thing to read in the next session.**
 
 ---
 
-# OPEN — updated 2026-08-18 (session end) — THIS IS THE AUTHORITATIVE LIST
+## What was changed on 2026-08-19 (session — orion-fix tickets, serial split root cause, printout markup, three approval-flow bugs, Agent search)
+
+Nine commits, `9dcae5d`..`3e127fd`, all deployed and confirmed serving. Everything below was found
+by driving the real code, querying live data, or reading a screenshot Rommel provided — none of it
+by reading in isolation.
+
+### orion-fix: two tickets triaged, both correctly refused to sensitive scope
+Ran `/orion-fix` on two pending tickets. Both touched serials/pricing/approvals — sensitive scope
+per `orion-apps.json` — so both were marked `needs_human` with a full diagnosis rather than
+auto-fixed, exactly as the skill is designed to do. Rommel then asked directly ("check on the
+project list concern") to investigate and repair them as a normal developer request, which is a
+different authorization context from the autonomous ticket runner — everything below was written,
+reviewed and shipped directly, not through `orion-ship`.
+
+### Ticket 0e65e1fd ("Project List") + 7103608c ("App Approval") — root cause: revision re-lock minted a duplicate quotation
+Rommel: unlocking/re-locking `QT-W00000130` for revision spawned `QT-W00000132`, then
+`QT-W00000133` on a second re-lock — three quotations, one job, client Wynchelle Uy. The mobile
+approval app's "12M for what should be 6M" was two of those three duplicates appearing as separate
+approval-routed items.
+
+**Root cause:** `_applyRevisionBump()` reset `qSerialCommitted=false` after stamping the `.R1`
+suffix, which routed the next `gSaveQuotation()` through the "unclaimed serial" branch — asking the
+counter/claim service for a brand-new number and overwriting `qSerial` with it, discarding the
+`.R1` entirely and filing the revision as an unrelated second quotation instead of updating the
+existing row.
+
+**Two fixes, both live:**
+1. **`9dcae5d`** — the specific trigger: `_applyRevisionBump()` no longer resets
+   `qSerialCommitted`. A revision can only happen on an already-saved, already-locked quotation, so
+   its base serial already has a row — nothing needs claiming.
+2. **`b129a31`** — the **permanent** fix, built because Rommel pushed back on treating this as a
+   one-off ("why don't you look for a permanent solution than telling me you're doing a specific
+   correction based on what I mentioned only"): `_gSaveQuotationCore` now refuses to claim a new
+   serial whenever the base is already a *known* quotation (`_quotRowKnown`), self-healing the flag
+   instead — closing the whole CLASS of "something cleared `qSerialCommitted` incorrectly," not
+   just this one call site. Proven by stripping only the structural guard (with fix 1 still in
+   place) and confirming the exact failure reproduces through a different mechanism — the guard is
+   doing real, independent work, not restating fix 1.
+
+Both fixes proven with permanent regression checks in `tools/smoke.mjs`, each confirmed to fail on
+the pre-fix code and pass on the fix.
+
+**Manual step still owed, not done:** the 3 existing duplicate Wynchelle Uy rows
+(`QT-W00000130/132/133`) still need in-app reconciliation — keep `QT-W00000130` (the original,
+independently reproduced by `QT-W00000133`, already Checked-by signed by Allan), cancel the other
+two. Cannot be done from here: `gLoadDirData()` reads the Google Sheet, not Supabase, and there is
+no Sheets write access from this session — a Supabase-only fix would leave the Sheet showing all 3,
+which is worse than doing nothing (this exact anti-pattern is already documented earlier in this
+file from a prior session).
+
+### App Approval — two MORE distinct bugs found investigating the same ticket
+**1. Auto-forwarded "Noted by" carried no figures (`f310a0d`).** The moment someone approves
+"Checked by," the app automatically raises "Noted by" and routes it on — but that auto-forward
+(`confirmSignature()`) runs inside the CHECKED-BY SIGNER'S OWN SESSION, where the quotation is
+"usually not open" (per that call site's own pre-existing comment). The figures were being
+gathered from `_pCalc`/`_apprDecisionContext()` at that moment — whatever quotation happened to be
+loaded in THAT browser, not necessarily this one — so every auto-forwarded Noted-by request went
+out with `amount:0, decision:null`. Fixed by carrying the just-approved Checked-by request's own
+correctly-captured amount/decision forward instead of trying to recompute from the wrong browser.
+Proven both directions: a carried snapshot renders correctly, and — confirming the fix isn't
+disguising the bug — the exact old failure still reproduces when nothing is carried.
+
+**2. The phone's "Client history" panel summed multiple quotations into one misleading figure
+(`c3caade`).** When opening a request, a panel below it queried every OTHER quotation for that
+client and **added their totals together** into one headline number shown beside the request being
+reviewed — for Wynchelle Uy, two ~₱6.2M duplicates became "₱12.4M," the exact figure from the
+original report. Rommel's direction, after being offered a status-filtering fix instead: *"count
+only the specific quotation where the user made the request"* — never combine more than one
+quotation's amount into a single figure, full stop. The combined total was removed entirely; each
+previous quotation still lists on its own line with its own amount. Verified structurally (the
+`.reduce()` summing arithmetic is gone, per-row rendering survives) since driving this async
+Supabase-backed function end-to-end would need larger test-harness changes than this warranted —
+confirmed the check is genuine by literally reintroducing the old summing code and watching it fail.
+
+### Fabrication printout — markup distributed into line items, not just the total (`02c1b6c`, `38c66bb`)
+Rommel: the printed area/type/lump rows showed RAW fabrication cost — no contingency, buffer,
+discount buffer, or outsource markup — while the printed "Fabrication subtotal" already included
+all of that as one aggregate applied only at the bottom. A client manually adding the visible rows
+landed short of the printed total; the document didn't reconcile against itself.
+
+Distributes those percentages into each row so the visible amounts sum to the printed total exactly,
+in whichever format is active:
+- Reuses the SAME already-computed total for the printed row and the distribution pool — never a
+  second independent computation (exactly the Stage1/Stage2-drift class this codebase has hit
+  repeatedly).
+- The split is EXACT, not a flat blended approximation, wherever the underlying math genuinely is
+  per-area: each area's regular-vs-outsourced raw cost gets its OWN correct rate
+  (`getAreaOutsourceSubtotal`), matching `regularFabC`'s and `outsourceFinal`'s real formulas.
+  Proven with round numbers chosen so the expected split is hand-verifiable: two areas of equal
+  raw cost but opposite composition land on very different amounts (₱11,550 vs ₱7,500), not the
+  ~₱12,700/₱6,350 a flat blend would give.
+- Floating-point rounding closed by construction: every row but the last rounds normally, the last
+  absorbs whatever's left over, so the visible rows sum to the printed total to the centavo, always.
+- Extended to the itemized "Services, Materials & Hardware" mode too, **per Rommel's follow-up
+  ask "extend it for consistency"** — each service/material/hardware LINE now carries its own share,
+  and **Unit Price moves along with Amount** (not just the total), so Qty × Unit Price still visibly
+  equals Amount on every row.
+
+Refactored the shared allocation math (`_allocateProportional`, `_fabMarkupFactors`) out of the
+area-level function so type-mode's own split and the new itemized-mode split reuse the identical
+reconciliation primitive instead of three hand-written copies that could drift.
+
+### CF override: typing 0 for a contingency rate silently reverted to the global default (`c7a48df`)
+Rommel: *"trying to adjust the override contingency and it seems it's not working."* `_readCCFFields()`
+used `parseFloat(x)||CF.xContingency` for Fab/Mob/Inst contingency — `0` is falsy in JS, so a
+deliberately-entered `0` parsed correctly then got immediately discarded by the `||`, silently
+substituting the GLOBAL rate instead — in both the live preview and the actual commit, which is
+exactly why it looked like nothing was happening rather than like a visible glitch. The
+buffer/markup fields were coincidentally safe only because their own fallback is also `0`; the
+`materialMarginPct` field two lines below already used the correct `isNaN`-based pattern. Fixed
+with one explicit helper (`_ccfReadPct`) used by every field. Verified the check itself was genuine
+by reverting the fix, watching the test fail for the right reason, and restoring it.
+
+**First reported symptom turned out to be a stale-tab issue, not this bug** — Rommel's three
+attempts landed right when the fix was shipping; a browser tab already open doesn't pick up a new
+deploy mid-session. Worth remembering next time something "still doesn't work right after the fix."
+
+### Stage 1 discount widget never refreshed from saved state (`76cb178`)
+Second report, this time with screenshots: the printout correctly showed an active 5% discount
+(computed into the total, −₱1,852.17), while the live Stage 1 form showed 0% and an unapproved
+"Request" button — as if nothing had ever been approved. Root cause: Stage 1's discount widget
+(`disc-inp`/`disc-req-btn`/`disc-ok-msg`) is static markup, unlike Stage 2's equivalent card (a
+JS-templated string rebuilt from `fqDiscPct`/`fqDiscApproved` on every render, so it can never go
+stale by construction). Nothing ever pushed `qDiscPct`/`qDiscApproved` into the static Stage 1
+markup when they were set from SAVED data rather than a direct click — reopening a quotation
+(`restoreFullQuotationState`) and switching options (`restoreQuotationSnapshot`) both set the
+globals and stopped there; a third spot (`_applyApprovedRequest`'s discount branch) synced the
+badge but never the input box itself. Fixed with one shared `_syncDiscInputUI()`, matching the
+existing `syncFabContUI()` pattern already used for the same class of gap on a different field.
+Verified against the real static DOM elements, both directions (shows correctly when approved,
+clears correctly when reset).
+
+### Unlock never cancelled a pending signature request (`f55e2aa`)
+Rommel described the real sequence: requested Checked-by (Joanna), unlocked to fix an edgebanding
+issue before she acted, fixed it and re-locked (correctly raising a fresh request), then later
+found the ORIGINAL request still sitting pending (Joanna on leave), re-routed it to Allan, Allan
+signed it, Rommel signed Noted-by — only to then notice a SECOND, separate request to Joanna still
+open on the same quotation. Root cause: `clearSignaturesOnUnlock()` only ever cleared a COMPLETED
+signature (`qSignatures.checked`/`.noted`) — a request still sitting PENDING at the moment of
+unlock was left completely untouched, so it stayed re-routable and signable on a document that had
+already been superseded, while a fresh, correctly-routed request for the re-locked version could
+exist at the same time. Rommel's rule: another signature request must not be possible while one is
+already in process, unless the existing one has been cancelled by the requester or
+declined/cancelled by the recipient. Fixed: unlocking now cancels every PENDING signature request
+on that exact serial (both slots, if both happened to be open), not just the completed fields —
+the signatory currently holding it is notified so nothing silently vanishes from their queue.
+`rerouteSignature`/`confirmSignature` already refused a non-pending request with a clear message;
+no change needed there, this closes the gap one level up.
+
+⚠ **This commit's own title is wrong** — a leftover, unrelated phrase ("entering a corrected reason
+didn't help") got pasted in by mistake. The body is accurate; only the one-line title doesn't match
+its own content. Not worth rewriting history over, but flagged here so it isn't mistaken for
+describing a different fix later.
+
+### Project List: search and filter by Agent (`3e127fd`)
+Rommel: "Add capability to search for the agent name." Agent / sales rep was already captured on
+every quotation (`cl-agent`) and already searchable on the Orders queue, but had never been written
+into the Project List's own data at all — not the Quotations sheet row, not `sessionQuotations` —
+so the directory search had nothing to match against even in principle. Given a real column,
+matching how Project Name and Source Order were added before it:
+- `Quotations!A:AA` → `A:AB` (28 columns), all **15** range references + all **3** duplicated
+  header-array literals updated together (this codebase keeps three independent copies of the
+  Quotations header — `QUOT_HDR` used at tab-creation, `QUOT_HDR` used in the save path, and
+  `_syncQuotHeader`'s own `HDR` — a known, previously-bitten drift risk, not new).
+- Written on every save; read back by **both** directory loaders (`gLoadDirData` and
+  `renderDirectory`'s own independently-duplicated copy of the same parser) and by
+  `supaMigrateAll`'s historical migration reader.
+- New `agent text` column on the Supabase `quotations` table (additive migration + a partial
+  `lower(agent)` search index), wired into `supaUpsertQuotation`'s dual-write.
+- Added to the search filter (client/serial/project/type/agent) and search-box placeholder, and as
+  a toggleable, off-by-default directory column (Columns panel, header, cell, default width) —
+  a field you can search but never see would be confusing.
+
+Verified against the real render function and real DOM: searching an agent's name shows only their
+quotations, a non-matching search shows none, clearing shows both. Confirmed genuine by removing
+the match clause and watching the test fail before restoring it.
+
+**Forward-only** — no backfill was run; existing quotations show no Agent until next saved.
+
+### Method notes worth keeping
+- **"Look for a permanent solution, not a specific correction"** — Rommel's pushback on the first
+  serial fix produced a genuinely better, structurally different second fix (item 2 of `_quotRowKnown`
+  above), not just a restatement. When a fix targets one call site, ask whether the DECISION POINT
+  itself can be made to refuse the bad outcome regardless of cause.
+- **A screenshot settled two separate ambiguous reports in one look** — the discount bug was
+  correctly diagnosed only once actual screenshots showed the printout and the live form
+  disagreeing; guessing from text description alone had this session chasing the wrong quotation
+  briefly ("119" turned out not to exist).
+- **Get evidence before theorising, every time.** Every fix this session started with a direct
+  Supabase query or activity-log read against the REAL quotation named, not a guess from the
+  symptom description alone — this is what let the "12M" report resolve into two genuinely
+  different bugs (duplicate quotations, then the summing panel) rather than one wrong diagnosis.
+- **A stray tool-call mid-session pasted an unrelated commit message** — caught before it shipped by
+  reviewing `git log`/`git status` after the commit, reset, and recommitted with the correct
+  message. One did slip through with a mismatched TITLE only (the `f55e2aa` note above) — worth a
+  final read-over of the composed message before running `git commit`, not just after.
+
+---
+
+# OPEN — updated 2026-08-18 (session end) — SUPERSEDED, still accurate, read for everything not covered by the 2026-08-19 list above
 > The 2026-08-16 list below is **superseded but not stale** — every item in it is still open and
 > still accurate. Read this block first, then continue into it for everything unchanged.
 
@@ -8352,3 +8551,66 @@ above (line ~5537, "OPEN — updated 2026-08-12 (session 2)") is still the autho
 all OTHER open work** — the 4 "FIRST THING NEXT SESSION" items there (remove `qBaseSerial`;
 mobilization-reads-zero-after-unlock investigation; the two already-resolved items struck through)
 are unchanged and still pending, in that order, once the device test above confirms this is closed.
+
+---
+
+# OPEN — updated 2026-08-19 (session end) — THIS IS THE AUTHORITATIVE LIST
+> The 2026-08-18 list above is superseded but not stale — read it for anything not covered here.
+> This session did not touch the Custom Report Export, the Wufoo key, the two `needs_human`
+> tickets, or the mobilization-zero report — they are carried forward UNVERIFIED, not re-confirmed.
+
+## ⚠ FIRST THING NEXT SESSION — one manual step, in-app, cannot be done from here
+**Reconcile the 3 duplicate Wynchelle Uy quotations** (`QT-W00000130`/`132`/`133`). The bug that
+created them is fixed and verified (see the 2026-08-19 session entry above) — this is cleanup of
+data that already exists, not a code fix.
+- **Keep `QT-W00000130`** — the original, built over 3+ hours, already Checked-by signed by Allan,
+  and its content is independently reproduced (byte-identical total) by `QT-W00000133`.
+- **Cancel `QT-W00000132` and `QT-W00000133`** in-app, reason: "duplicate — revision-relock bug,
+  see QT-W00000130."
+- Then re-lock `QT-W00000130` normally — the fix means this will now correctly stamp `.R1` on the
+  SAME row instead of minting a new one.
+
+Cannot be done from this session: no Google Sheets write access, and the Project List reads the
+Sheet, not Supabase — a Supabase-only cleanup would leave all 3 still showing there.
+
+## ⚠ Still the second priority — Custom Report Export is built on fabricated data
+Not touched this session. Full scope, the 8 KPI-tile mapping, and Rommel's three build decisions
+are all recorded in the 2026-08-18 entry above (search "Custom Report Export is built on fabricated
+data") — read that in full before starting, do not re-derive it from scratch.
+
+## Still open, unverified this session — re-check before acting on any of these
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `3080d4a0` ("Dashboard")** — `needs_human`, body is just *"Im not sure if its actually
+  align with the data in the app"* — too vague to act on. Needs a specific figure or screen from
+  Rommel before anyone can investigate it.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed. Body: *"When they create an option 2, the option 2 is named under the project name which
+  makes no sense. It has no relevance on the naming."*
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced despite investigation. If it recurs, get three things before
+  touching code: which stage (1 or 2), the exact field, and whether it followed an option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures; this session did not touch either.
+
+## Confirmed done this session — do not re-raise
+- Revision re-lock minting a duplicate quotation — root cause AND the structural backstop both
+  shipped and verified (`9dcae5d`, `b129a31`).
+- Signature auto-forward carrying no decision data (`f310a0d`).
+- Phone approval "Client history" panel summing multiple quotations into one figure — Rommel's
+  explicit rule (never combine) is now enforced (`c3caade`).
+- Printout markup distribution, area/type/lump AND itemized modes (`02c1b6c`, `38c66bb`).
+- CF override contingency silently reverting to global on a typed `0` (`c7a48df`).
+- Stage 1 discount widget not refreshing from saved/restored state (`76cb178`).
+- Unlock not cancelling a pending signature request (`f55e2aa`).
+- Project List search/filter by Agent name (`3e127fd`).
+
+## Standing rules reinforced this session — do not undo
+- **A fix should close the class, not just the one call site it was found at**, when the decision
+  point can be made to refuse the bad outcome on its own — see `_quotRowKnown`'s use in
+  `_gSaveQuotationCore` as the pattern.
+- **Never combine more than one quotation's amount into a single displayed figure**, anywhere in
+  the app, phone or desktop — Rommel's explicit standing rule from the client-history panel fix.
+- **Get evidence (a direct query, a screenshot, the activity log) before theorising** — this
+  session's biggest single time-saver, repeatedly.
