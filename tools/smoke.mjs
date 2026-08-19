@@ -205,6 +205,57 @@ const PROFILES = {
             w.qRevisionPending = saved.qRevisionPending; w.qRevisedFrom = saved.qRevisedFrom;
           }
         }, { serial: 'QT-W00000130.R1', base: 'QT-W00000130', committed: true, revisedFrom: 'QT-W00000130' });
+      /* Ticket 0e65e1fd follow-up (2026-08-19): the _applyRevisionBump fix above closes the ONE
+         call site that produced the duplicate, but qSerialCommitted is a hand-managed flag any
+         future feature can clear the same wrong way. This is the structural backstop: extends the
+         "positive evidence required before writing a row" principle (_quotRowKnown, 2026-08-15)
+         one step earlier, to the CLAIM decision itself. Proves both directions against the real
+         _gSaveQuotationCore — a base serial the app already knows about must self-heal and skip
+         the claim (whatever cleared the flag), and a genuinely new one must still go through the
+         claim path untouched, so the legitimate double-claim-race guard right beside this code is
+         not broken by it. */
+      if (typeof window._gSaveQuotationCore === 'function' && typeof window._quotRowKnown === 'function')
+        check('_gSaveQuotationCore: known base serial self-heals instead of claiming a new one', () => {
+          const w = window;
+          const saved = { gToken: w.gToken, gUser: w.gUser, qSerial: w.qSerial,
+                           qSerialCommitted: w.qSerialCommitted, quotRowSeen: Object.assign({}, w._quotRowSeen),
+                           proceedSave: w._proceedSaveQuotation, claimAtomic: w._claimSerialAtomic,
+                           fallbackCheck: w._fallbackSerialCheck, serialClaimWaiters: w._serialClaimWaiters };
+          let proceedCalled = false, claimCalled = false;
+          try {
+            w.gToken = 'test-token'; w.gUser = { email: 'test@x.com', name: 'Test' };
+            w._serialClaimWaiters = null;
+            w._proceedSaveQuotation = () => { proceedCalled = true; };
+            // Stub BOTH acquisition paths: SERIAL_CLAIM_URL defaults empty in this headless page
+            // (reads localStorage, which is blank on a fresh load), so the real run takes the
+            // fallback branch, not the atomic-claim one — the test must recognise either as "a
+            // new serial was requested", or it would fail for the wrong reason.
+            w._claimSerialAtomic = () => { claimCalled = true; };
+            w._fallbackSerialCheck = () => { claimCalled = true; };
+            // Case 1: base serial already known (row exists) — must self-heal, never claim.
+            w.qSerial = 'QT-W00000900.R1';
+            w.qSerialCommitted = false;
+            w._quotRowSeen = { 'QT-W00000900': true };
+            w._gSaveQuotationCore();
+            const known = { proceedCalled, claimCalled, committed: w.qSerialCommitted };
+            // Case 2: genuinely new — no evidence anywhere — must still go through the claim path
+            // (the legitimate case _serialClaimWaiters exists to guard), never self-heal past it.
+            proceedCalled = false; claimCalled = false; w._serialClaimWaiters = null;
+            w.qSerial = 'QT-W00000901';
+            w.qSerialCommitted = false;
+            w._quotRowSeen = {};
+            w.dirData = [];
+            w._gSaveQuotationCore();
+            const unknown = { proceedCalledSync: proceedCalled, claimCalled };
+            return { known, unknown };
+          } finally {
+            w.gToken = saved.gToken; w.gUser = saved.gUser; w.qSerial = saved.qSerial;
+            w.qSerialCommitted = saved.qSerialCommitted; w._quotRowSeen = saved.quotRowSeen;
+            w._proceedSaveQuotation = saved.proceedSave; w._claimSerialAtomic = saved.claimAtomic;
+            w._fallbackSerialCheck = saved.fallbackCheck; w._serialClaimWaiters = saved.serialClaimWaiters;
+          }
+        }, { known: { proceedCalled: true, claimCalled: false, committed: true },
+             unknown: { proceedCalledSync: false, claimCalled: true } });
       return out;
     }
   },
