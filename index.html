@@ -10053,7 +10053,56 @@ function _collectAreaMatNames(area){
   }
   return names;
 }
-function buildPrintRows(mode){
+// ── Printout row markup distribution ────────────────────────────────────────────────────────
+// The visible area/type/lump rows used to show RAW fabrication cost — no contingency, buffer,
+// discount buffer or outsource markup — while the printed Fabrication subtotal already included
+// all of it as one aggregate. A client manually adding the visible rows landed short of the
+// printed total by exactly that amount. Rommel, 2026-08-19: distribute those percentages INTO
+// each row so the visible amounts sum to the printed subtotal, in whichever format is showing.
+//
+// Deliberately does NOT re-derive the fabrication total — it takes the SAME value already
+// computed for the "Fabrication subtotal" row (passed in as `pool`) and only decides how to
+// SPLIT it, so this can never disagree with the number actually printed beneath it. A second,
+// independent computation of the total is exactly the Stage1/Stage2 drift this codebase has hit
+// repeatedly; there is only ever one total, split one way.
+//
+// Split is exact where the underlying math genuinely IS per-area: each area's raw cost is
+// divided into its regular (fab-rate) and outsource (its own, different, rate) portions using
+// getAreaOutsourceSubtotal — matching regularFabC's and outsourceFinal's real formulas exactly,
+// not a blended approximation. Everything that is NOT area-attributable by nature (Assembly's
+// earned fabrication share, the cutting-list charge folded silently into fabrication per the
+// 2026-07-04 design decision, the discount buffer's fabrication share, folded design charge) has
+// no correct "true" area home — it is absorbed proportionally into the same per-area weights,
+// which is a defensible allocation choice, not a right-or-wrong computation, and keeps those
+// items exactly as silent on the client copy as they already were.
+//
+// Floating-point rounding is closed by construction, not by hoping the arithmetic lines up: every
+// row but the last is rounded normally, and the LAST row absorbs whatever is left over (pool minus
+// everything already allocated) — so the displayed rows sum to the printed total to the centavo,
+// always, regardless of how many rounding steps came before it.
+function _fabAreaAllocation(pool,pC){
+  var n=qAreas.length;
+  if(!n) return [];
+  var rates=(pC&&pC.rates)||{};
+  var regFactor=(1+(rates.fabCont||0)/100)*((pC&&pC.ni)?(1+(rates.fabBuf||0)/100):1);
+  var outFactor=(1+(rates.outCont||0)/100)*(1+(rates.outBuf||0)/100)*(1+(rates.outMarkup||0)/100);
+  var weights=[],wTotal=0;
+  for(var a=0;a<n;a++){
+    var raw=getAreaSubtotal(a);
+    var outRaw=getAreaOutsourceSubtotal(a);
+    var w=(raw-outRaw)*regFactor+outRaw*outFactor;
+    weights.push(w); wTotal+=w;
+  }
+  var out=[],running=0;
+  for(var a=0;a<n;a++){
+    if(a===n-1){ out.push(Math.round((pool-running)*100)/100); break; }
+    var share=wTotal>0?(pool*weights[a]/wTotal):(pool/n);
+    var amt=Math.round(share*100)/100;
+    out.push(amt); running+=amt;
+  }
+  return out;
+}
+function buildPrintRows(mode,pool,pC){
   var tdS='padding:7px 9px;border:1px solid #ddd;font-size:11px;vertical-align:top';
   var rows='';
   if(mode==='lump'){
@@ -10061,7 +10110,9 @@ function buildPrintRows(mode){
     var totU2=getTotU();
     var lumpNames=[];for(var a2=0;a2<qAreas.length;a2++){var ln=_collectAreaMatNames(qAreas[a2]);for(var li=0;li<ln.length;li++)if(lumpNames.indexOf(ln[li])<0)lumpNames.push(ln[li]);}
     var lumpSpec=extractSubstrateInfo(lumpNames);
-    rows+='<tr><td style="'+tdS+';font-weight:bold">All areas</td><td style="'+tdS+'">Complete fabrication package</td><td style="'+tdS+';background:#f0f0f0;text-align:center">'+lumpSpec+'</td><td style="'+tdS+';text-align:center">'+fmtUnits(totU2)+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(totVal2)+'</td></tr>';
+    // One row, the whole pool — trivial, exact by construction (nothing to split).
+    var lumpAmt=(pool!=null)?pool:totVal2;
+    rows+='<tr><td style="'+tdS+';font-weight:bold">All areas</td><td style="'+tdS+'">Complete fabrication package</td><td style="'+tdS+';background:#f0f0f0;text-align:center">'+lumpSpec+'</td><td style="'+tdS+';text-align:center">'+fmtUnits(totU2)+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(lumpAmt)+'</td></tr>';
     return rows;
   }
   if(mode==='type'){
@@ -10120,18 +10171,33 @@ function buildPrintRows(mode){
         }
       }
     }
+    // Type groups cross areas, so they carry no per-group outsource split the way an area
+    // does (outsource rows live at area/BOM-item level, not tied to a type group). Distributed
+    // by each group's share of the raw total instead — a defensible allocation, not an exact
+    // per-component split, but it still reconciles the visible rows to the printed total exactly.
+    var typeRawTotal=0; for(var t3z=0;t3z<typeOrder.length;t3z++) typeRawTotal+=typeMap[typeOrder[t3z]].cost;
+    var typeRunning=0;
     for(var t3=0;t3<typeOrder.length;t3++){
       var tn=typeOrder[t3],tm=typeMap[tn];
       var spec3=extractSubstrateInfo(typeMatNames[tn]||[]);
       var units3=(qFabMode==='services')?'—':tm.qty;
-      rows+='<tr><td style="'+tdS+';color:#888;font-style:italic">Combined</td><td style="'+tdS+';font-weight:500">'+tn+'</td><td style="'+tdS+';background:#f0f0f0;text-align:center">'+spec3+'</td><td style="'+tdS+';text-align:center">'+fmtUnits(units3)+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(tm.cost)+'</td></tr>';
+      var tAmt=tm.cost;
+      if(pool!=null){
+        if(t3===typeOrder.length-1){ tAmt=Math.round((pool-typeRunning)*100)/100; }
+        else { tAmt=Math.round((typeRawTotal>0?(pool*tm.cost/typeRawTotal):(pool/typeOrder.length))*100)/100; typeRunning+=tAmt; }
+      }
+      rows+='<tr><td style="'+tdS+';color:#888;font-style:italic">Combined</td><td style="'+tdS+';font-weight:500">'+tn+'</td><td style="'+tdS+';background:#f0f0f0;text-align:center">'+spec3+'</td><td style="'+tdS+';text-align:center">'+fmtUnits(units3)+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(tAmt)+'</td></tr>';
     }
     return rows;
   }
   // Default: by area — one row per area, all items listed in scope column
+  // Exact split (see _fabAreaAllocation): each area's own regular-vs-outsource raw cost, marked
+  // up by ITS OWN correct rate, not a blended average — so an area that is entirely outsourced
+  // doesn't wrongly pick up the fabrication rate, or vice versa.
+  var areaAlloc=(pool!=null)?_fabAreaAllocation(pool,pC):null;
   for(var a=0;a<qAreas.length;a++){
     var area=qAreas[a];
-    var areaSub=getAreaSubtotal(a);
+    var areaSub=areaAlloc?areaAlloc[a]:getAreaSubtotal(a);
     var areaQty=0;
     var scopeLines=[];
     if(qFabMode==='carcass'){
@@ -10339,7 +10405,14 @@ function _buildPrintBodyCore() {
   // qty only. Services and hardware pricing are unaffected.
   var hideMatPricing=(pCoName.indexOf('World Class')>=0);
   var isItemizedMode=(_printBreakdown==='itemized');
-  var itemRows=isItemizedMode?buildItemizedPrintRows(hideMatPricing):buildPrintRows(_printBreakdown);
+  // The ONE printed Fabrication-subtotal figure — computed exactly as it always was, nothing
+  // duplicated. Every row above it is now built to sum back up to this same number: the minimum-
+  // charge rows keep their own raw, per-family value (unchanged, still shown to explain a floor
+  // applied), so the pool handed to the area/type/lump rows is this total minus that — the two
+  // together reconstruct the printed figure exactly, with no double-count and nothing missing.
+  var fabTotalPrinted=miRegroup?miRegroup.fab:(totVal+foldedIntoFab+minChargeTotal);
+  var fabRowPool=fabTotalPrinted-minChargeTotal;
+  var itemRows=isItemizedMode?buildItemizedPrintRows(hideMatPricing):buildPrintRows(_printBreakdown,fabRowPool,pC);
   // Sync toggle button visual state (visual only — no recursion)
   syncPrintToggle(_printBreakdown);
   // Must run AFTER syncPrintToggle — that function unconditionally rewrites every mode button's
@@ -10409,7 +10482,7 @@ function _buildPrintBodyCore() {
       +'</tr></thead>'
     + '<tbody>'+itemRows
     + minChargeRows
-    + '<tr style="background:#fafaf8"><td colspan="3" style="'+tdS+';text-align:right;font-weight:bold">Fabrication subtotal</td><td style="'+tdS+';text-align:center;font-weight:bold">'+fmtUnits(totU)+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(miRegroup?miRegroup.fab:(totVal+foldedIntoFab+minChargeTotal))+'</td></tr>'
+    + '<tr style="background:#fafaf8"><td colspan="3" style="'+tdS+';text-align:right;font-weight:bold">Fabrication subtotal</td><td style="'+tdS+';text-align:center;font-weight:bold">'+fmtUnits(totU)+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(fabTotalPrinted)+'</td></tr>'
     + (miRegroup
         ? (_printMiCombined
             ? '<tr><td colspan="4" style="'+tdS+'">Mobilization &amp; Installation</td><td style="'+tdS+';text-align:right">'+fmtMoney(miRegroup.mob+miRegroup.inst)+'</td></tr>'

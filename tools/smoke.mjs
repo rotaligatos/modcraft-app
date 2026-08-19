@@ -256,6 +256,68 @@ const PROFILES = {
           }
         }, { known: { proceedCalled: true, claimCalled: false, committed: true },
              unknown: { proceedCalledSync: false, claimCalled: true } });
+      /* Rommel, 2026-08-19: the printed area/type/lump rows showed RAW fabrication cost while the
+         printed Fabrication subtotal already included contingency, buffer, discount buffer and
+         outsource markup as one aggregate — a client manually adding the visible rows landed
+         short of the printed total. _fabAreaAllocation distributes that markup into each row so
+         the visible amounts sum back to the printed total exactly.
+         Proves the split is EXACT PER COMPONENT, not a flat blended average: two areas of equal
+         raw cost but opposite composition (one pure regular-fab cost, one pure outsource) must
+         receive DIFFERENT multipliers (their own rate), not the same ratio. Case 1 uses a pool
+         that exactly equals the two areas' own correctly-marked-up weights (fabCont 10% x fabBuf
+         5% = 1.155 on the regular area, outMarkup 50% = 1.5 on the outsource area), so the
+         expected split is hand-computable and round: 11550 / 7500, not the ~12700/6350 a flat
+         blended ratio would have produced. Case 2 uses a pool that does NOT equal the natural
+         weight sum (simulating the real case where Assembly's share / discount buffer / cutting-
+         list charge add residual on top) — only the exact-sum-to-pool invariant is checked there,
+         since those extra components have no single "correct" per-area home by nature. */
+      if (typeof window._fabAreaAllocation === 'function' && typeof window.getAreaSubtotal === 'function')
+        check('_fabAreaAllocation: exact per-component split, not a flat blend; always sums to pool', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw };
+          try {
+            w.qFabMode = 'services';
+            w.qChargeMatHw = true;   // bypass the DOM-dependent Direct/Subsidiary default
+            w.qAreas = [
+              { name: 'Area A (all regular)', items: [], svcItems: [],
+                matItems: [{ name: 'Board', qty: 10, price: 1000 }], hwItems: [],
+                outsourceMaterials: [], outsourceHardware: [] },
+              { name: 'Area B (all outsource)', items: [], svcItems: [], matItems: [], hwItems: [],
+                outsourceMaterials: [{ name: 'Outsourced panel', qty: 1, price: 5000 }],
+                outsourceHardware: [] }
+            ];
+            const pC = { ni: true, rates: { fabCont: 10, fabBuf: 5, outCont: 0, outBuf: 0, outMarkup: 50 } };
+            // Area A raw 10000 x 1.155 (fabCont x fabBuf) = 11550. Area B raw 5000 x 1.5
+            // (outMarkup) = 7500. Pool set to exactly that sum so the expected split is exact.
+            const exact = w._fabAreaAllocation(19050, pC);
+            const messyPool = w._fabAreaAllocation(20000, pC);   // pool != natural weight sum
+            const round2 = n => Math.round(n * 100) / 100;
+            return {
+              exactSplit: exact.map(round2),
+              exactSums: round2(exact[0] + exact[1]) === 19050,
+              messySums: round2(messyPool[0] + messyPool[1]) === 20000,
+              singleAreaTakesWholePool: (() => {
+                const savedAreas = w.qAreas;
+                w.qAreas = [savedAreas[0]];
+                const r = w._fabAreaAllocation(500, pC);
+                w.qAreas = savedAreas;
+                return r.length === 1 && r[0] === 500;
+              })(),
+              // Proves the WIRING, not just the allocation math in isolation — buildPrintRows
+              // could pass the wrong variable, ignore `pool`, or mismatch mode/lump/area even with
+              // a perfectly correct _fabAreaAllocation underneath. Extracts the rendered money
+              // strings straight out of the HTML string buildPrintRows actually returns.
+              areaModeRowsShowMarkedUpAmounts: (() => {
+                const html = w.buildPrintRows('area', 19050, pC);
+                return /11,550\.00/.test(html) && /7,500\.00/.test(html) && !/10,000\.00/.test(html);
+              })(),
+              lumpModeShowsWholePool: /19,050\.00/.test(w.buildPrintRows('lump', 19050, pC))
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.qChargeMatHw = saved.qChargeMatHw;
+          }
+        }, { exactSplit: [11550, 7500], exactSums: true, messySums: true, singleAreaTakesWholePool: true,
+             areaModeRowsShowMarkedUpAmounts: true, lumpModeShowsWholePool: true });
       return out;
     }
   },
