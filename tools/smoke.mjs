@@ -318,6 +318,59 @@ const PROFILES = {
           }
         }, { exactSplit: [11550, 7500], exactSums: true, messySums: true, singleAreaTakesWholePool: true,
              areaModeRowsShowMarkedUpAmounts: true, lumpModeShowsWholePool: true });
+      /* Extended 2026-08-19 for consistency: the itemized "Services, Materials & Hardware" mode
+         (raw catalog line items) also now distributes markup, per line, not just per area. Proves
+         a service, a REGULAR material and an OUTSOURCED material of comparable raw cost land on
+         DIFFERENT amounts — the outsourced one doubled by a 100% outMarkup while fabCont/fabBuf
+         are zeroed out, so nothing but the outsource rate could produce that number — and that
+         Unit Price is adjusted along with Amount (qty=2 on the outsourced line: 300 raw price ->
+         600 shown, not just the extended total), so Qty x Unit Price still visibly equals Amount
+         on every row, not just in aggregate. A hardware row placed AFTER a hidden-pricing material
+         section proves the allocation index isn't corrupted by hideMatPricing skipping display
+         (li must still advance even when a material row shows "-" instead of a number). */
+      if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
+        check('buildItemizedPrintRows: markup distributed per line, unit price stays consistent with amount', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES };
+          try {
+            w.qFabMode = 'services';
+            w.qChargeMatHw = true;
+            w.SERVICES = [{ name: 'Test Service', price: 100, unit: 'pc' }];
+            w.qAreas = [{
+              name: 'Area X', items: [],
+              svcItems: [{ svcIdx: 0, qty: 2 }],
+              matItems: [{ name: 'Reg Material', qty: 1, price: 800, unit: 'pc' }],
+              hwItems: [{ name: 'Reg Hardware', qty: 1, price: 50, unit: 'pc' }],
+              outsourceMaterials: [{ name: 'Outsourced Material', qty: 2, price: 300, unit: 'pc' }],
+              outsourceHardware: []
+            }];
+            // fabCont/fabBuf zeroed -> regular items keep their raw value exactly. outMarkup 100%
+            // -> the outsourced line's weight is exactly double its raw cost. Pool set to the exact
+            // sum of the four expected weights so every allocated amount is round and hand-checkable:
+            // svc 100x2=200, mat 800x1=800, out (300x2)x2=1200, hw 50x1=50 -> pool 2250.
+            const pC = { ni: true, rates: { fabCont: 0, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 100 } };
+            const html = w.buildItemizedPrintRows(false, 2250, pC);
+            return {
+              svcAmount200: /200\.00/.test(html),
+              svcUnitPrice100: /100\.00/.test(html),
+              regMaterialUnchanged800: /800\.00/.test(html),
+              outsourcedUnitPriceDoubled600: /600\.00/.test(html),   // 300 raw -> 600, not left at 300
+              outsourcedAmount1200: /1,200\.00/.test(html),
+              rawOutsourcePriceNeverShown: !/(^|[^,.\d])300\.00/.test(html),
+              areaSubtotalMatchesPool: /2,250\.00/.test(html),
+              hiddenPricingStillShowsHardwareAfterIt: (() => {
+                const hh = w.buildItemizedPrintRows(true, 2250, pC);   // hideMatPricing=true
+                return /—/.test(hh) && /50\.00/.test(hh) && /2,250\.00/.test(hh);
+              })()
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
+            w.qChargeMatHw = saved.qChargeMatHw; w.SERVICES = saved.SERVICES;
+          }
+        }, { svcAmount200: true, svcUnitPrice100: true, regMaterialUnchanged800: true,
+             outsourcedUnitPriceDoubled600: true, outsourcedAmount1200: true,
+             rawOutsourcePriceNeverShown: true, areaSubtotalMatchesPool: true,
+             hiddenPricingStillShowsHardwareAfterIt: true });
       return out;
     }
   },

@@ -10080,27 +10080,47 @@ function _collectAreaMatNames(area){
 // row but the last is rounded normally, and the LAST row absorbs whatever is left over (pool minus
 // everything already allocated) — so the displayed rows sum to the printed total to the centavo,
 // always, regardless of how many rounding steps came before it.
-function _fabAreaAllocation(pool,pC){
-  var n=qAreas.length;
-  if(!n) return [];
+// The two rates that decide every markup-distribution split in the printout: fab contingency
+// (+ buffer, only when installation is included, matching regularFabC) for anything priced at
+// the regular fabrication rate, and outsource's own contingency+buffer+markup (matching
+// outsourceFinal) for anything sourced outside. One place computing these, so the area-level
+// split (_fabAreaAllocation) and the line-item split inside it (buildItemizedPrintRows) can never
+// quietly diverge on which rate applies to what.
+function _fabMarkupFactors(pC){
   var rates=(pC&&pC.rates)||{};
-  var regFactor=(1+(rates.fabCont||0)/100)*((pC&&pC.ni)?(1+(rates.fabBuf||0)/100):1);
-  var outFactor=(1+(rates.outCont||0)/100)*(1+(rates.outBuf||0)/100)*(1+(rates.outMarkup||0)/100);
-  var weights=[],wTotal=0;
-  for(var a=0;a<n;a++){
-    var raw=getAreaSubtotal(a);
-    var outRaw=getAreaOutsourceSubtotal(a);
-    var w=(raw-outRaw)*regFactor+outRaw*outFactor;
-    weights.push(w); wTotal+=w;
-  }
+  return {
+    reg:(1+(rates.fabCont||0)/100)*((pC&&pC.ni)?(1+(rates.fabBuf||0)/100):1),
+    out:(1+(rates.outCont||0)/100)*(1+(rates.outBuf||0)/100)*(1+(rates.outMarkup||0)/100)
+  };
+}
+// Splits `target` across `weights` proportionally; the LAST entry absorbs whatever remains after
+// every other entry is rounded, so the returned array always sums to `target` exactly regardless
+// of accumulated rounding — the one reconciliation guarantee every markup-distribution row (area,
+// type, lump, and now each individual service/material/hardware line) relies on.
+function _allocateProportional(weights,target){
+  var n=weights.length;
+  if(!n) return [];
+  var wTotal=0; for(var i=0;i<n;i++) wTotal+=weights[i];
   var out=[],running=0;
-  for(var a=0;a<n;a++){
-    if(a===n-1){ out.push(Math.round((pool-running)*100)/100); break; }
-    var share=wTotal>0?(pool*weights[a]/wTotal):(pool/n);
+  for(var i=0;i<n;i++){
+    if(i===n-1){ out.push(Math.round((target-running)*100)/100); break; }
+    var share=wTotal>0?(target*weights[i]/wTotal):(target/n);
     var amt=Math.round(share*100)/100;
     out.push(amt); running+=amt;
   }
   return out;
+}
+function _fabAreaAllocation(pool,pC){
+  var n=qAreas.length;
+  if(!n) return [];
+  var fac=_fabMarkupFactors(pC);
+  var weights=[];
+  for(var a=0;a<n;a++){
+    var raw=getAreaSubtotal(a);
+    var outRaw=getAreaOutsourceSubtotal(a);
+    weights.push((raw-outRaw)*fac.reg+outRaw*fac.out);
+  }
+  return _allocateProportional(weights,pool);
 }
 function buildPrintRows(mode,pool,pC){
   var tdS='padding:7px 9px;border:1px solid #ddd;font-size:11px;vertical-align:top';
@@ -10175,17 +10195,12 @@ function buildPrintRows(mode,pool,pC){
     // does (outsource rows live at area/BOM-item level, not tied to a type group). Distributed
     // by each group's share of the raw total instead — a defensible allocation, not an exact
     // per-component split, but it still reconciles the visible rows to the printed total exactly.
-    var typeRawTotal=0; for(var t3z=0;t3z<typeOrder.length;t3z++) typeRawTotal+=typeMap[typeOrder[t3z]].cost;
-    var typeRunning=0;
+    var typeAmts=(pool!=null)?_allocateProportional(typeOrder.map(function(k){return typeMap[k].cost;}),pool):null;
     for(var t3=0;t3<typeOrder.length;t3++){
       var tn=typeOrder[t3],tm=typeMap[tn];
       var spec3=extractSubstrateInfo(typeMatNames[tn]||[]);
       var units3=(qFabMode==='services')?'—':tm.qty;
-      var tAmt=tm.cost;
-      if(pool!=null){
-        if(t3===typeOrder.length-1){ tAmt=Math.round((pool-typeRunning)*100)/100; }
-        else { tAmt=Math.round((typeRawTotal>0?(pool*tm.cost/typeRawTotal):(pool/typeOrder.length))*100)/100; typeRunning+=tAmt; }
-      }
+      var tAmt=typeAmts?typeAmts[t3]:tm.cost;
       rows+='<tr><td style="'+tdS+';color:#888;font-style:italic">Combined</td><td style="'+tdS+';font-weight:500">'+tn+'</td><td style="'+tdS+';background:#f0f0f0;text-align:center">'+spec3+'</td><td style="'+tdS+';text-align:center">'+fmtUnits(units3)+'</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(tAmt)+'</td></tr>';
     }
     return rows;
@@ -10232,35 +10247,76 @@ function buildPrintRows(mode,pool,pC){
 // Fabrication-only quotations (see _buildPrintBody's itemizedAvailable gate). Itemizes every area's
 // services/materials/hardware line-by-line instead of collapsing them into one area total, so the
 // client sees exactly what they're being charged for. Outsourced materials/hardware are folded into
-// their matching section (same underlying cost bucket) rather than added as a 4th section, so each
-// area's printed subtotal still equals getAreaSubtotal(a) exactly.
-function buildItemizedPrintRows(hideMatPricing){
+// their matching section (same underlying cost bucket) rather than added as a 4th section.
+//
+// Rommel, 2026-08-19: extended for consistency with the area/type/lump modes — each LINE now
+// carries its share of markup too, not just the area subtotal beneath it. A material/hardware line
+// gets outsource's own rate if it came from outsourceMaterials/outsourceHardware, the regular fab
+// rate otherwise; services always get the regular rate (there is no such thing as an outsourced
+// service). Unit price is adjusted along with amount (not just amount alone), so Qty × Unit Price
+// still visibly equals Amount on every line — leaving unit price raw while only the total moved
+// would read as a mismatch, not a markup.
+//
+// Two-level allocation, both via the same _allocateProportional every other mode uses: first each
+// area gets its own exact total from _fabAreaAllocation (identical to what 'By area' mode would
+// show for the same quotation), then that area's total is sub-allocated across its own weighted
+// lines — so an area's line items always sum to that area's own subtotal, and areas always sum to
+// the printed Fabrication subtotal, transitively, with nothing hand-duplicated in between.
+function buildItemizedPrintRows(hideMatPricing,pool,pC){
   var tdS='padding:6px 9px;border:1px solid #ddd;font-size:11px;vertical-align:top';
   var rows='';
+  var areaAlloc=(pool!=null)?_fabAreaAllocation(pool,pC):null;
+  var fac=(pool!=null)?_fabMarkupFactors(pC):null;
   for(var a=0;a<qAreas.length;a++){
     var area=qAreas[a];
-    var areaSub=getAreaSubtotal(a);
+    var areaSub=areaAlloc?areaAlloc[a]:getAreaSubtotal(a);
     rows+='<tr style="background:#e8edf5"><td colspan="5" style="'+tdS+';font-weight:bold;color:#1a3c5e">'+escHtml(area.name)+'</td></tr>';
     var svcItems=area.svcItems||[];
-    var matItems=(area.matItems||[]).concat(area.outsourceMaterials||[]);
-    var hwItems=(area.hwItems||[]).concat(area.outsourceHardware||[]);
+    var matReg=area.matItems||[], matOut=area.outsourceMaterials||[];
+    var hwReg=area.hwItems||[], hwOut=area.outsourceHardware||[];
+    var matItems=matReg.concat(matOut);
+    var hwItems=hwReg.concat(hwOut);
+    // One weighted line list, built in the exact order the rows render below, so allocation
+    // index i and render index i always refer to the same line.
+    var lineWeights=[];
+    for(var i=0;i<svcItems.length;i++){
+      var raw=_svcUnitPrice(svcItems[i])*(svcItems[i].qty||0);
+      lineWeights.push(fac?raw*fac.reg:raw);
+    }
+    for(var i=0;i<matItems.length;i++){
+      var raw=(matItems[i].qty||0)*(matItems[i].price||0);
+      var isOut=i>=matReg.length;
+      lineWeights.push(fac?raw*(isOut?fac.out:fac.reg):raw);
+    }
+    for(var i=0;i<hwItems.length;i++){
+      var raw=(hwItems[i].qty||0)*(hwItems[i].price||0);
+      var isOut=i>=hwReg.length;
+      lineWeights.push(fac?raw*(isOut?fac.out:fac.reg):raw);
+    }
+    var lineAlloc=(pool!=null)?_allocateProportional(lineWeights,areaSub):null;
+    var li=0;
     if(svcItems.length){
       rows+='<tr><td colspan="5" style="'+tdS+';font-weight:600;color:#555;background:#fafafa">SERVICES</td></tr>';
       for(var i=0;i<svcItems.length;i++){
         var si=svcItems[i];
         var sv=SERVICES[si.svcIdx]||{name:'Service',price:0,unit:''};
-        var up=_svcUnitPrice(si);
-        rows+='<tr><td style="'+tdS+'">'+escHtml(sv.name)+'</td><td style="'+tdS+';text-align:center">'+(si.qty||0)+'</td><td style="'+tdS+';text-align:center">'+escHtml(sv.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up*(si.qty||0))+'</td></tr>';
+        var qty=si.qty||0;
+        var amt=lineAlloc?lineAlloc[li]:_svcUnitPrice(si)*qty; li++;
+        var up=qty>0?amt/qty:_svcUnitPrice(si);
+        rows+='<tr><td style="'+tdS+'">'+escHtml(sv.name)+'</td><td style="'+tdS+';text-align:center">'+qty+'</td><td style="'+tdS+';text-align:center">'+escHtml(sv.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(amt)+'</td></tr>';
       }
     }
     if(matItems.length){
       rows+='<tr><td colspan="5" style="'+tdS+';font-weight:600;color:#555;background:#fafafa">MATERIALS</td></tr>';
       for(var i=0;i<matItems.length;i++){
         var mi=matItems[i];
+        var qty=mi.qty||0;
+        var amt=lineAlloc?lineAlloc[li]:qty*(mi.price||0); li++;
         if(hideMatPricing){
-          rows+='<tr><td style="'+tdS+'">'+escHtml(mi.name||'')+'</td><td style="'+tdS+';text-align:center">'+(mi.qty||0)+'</td><td style="'+tdS+';text-align:center">'+escHtml(mi.unit||'')+'</td><td style="'+tdS+';text-align:right;color:#999">—</td><td style="'+tdS+';text-align:right;color:#999">—</td></tr>';
+          rows+='<tr><td style="'+tdS+'">'+escHtml(mi.name||'')+'</td><td style="'+tdS+';text-align:center">'+qty+'</td><td style="'+tdS+';text-align:center">'+escHtml(mi.unit||'')+'</td><td style="'+tdS+';text-align:right;color:#999">—</td><td style="'+tdS+';text-align:right;color:#999">—</td></tr>';
         } else {
-          rows+='<tr><td style="'+tdS+'">'+escHtml(mi.name||'')+'</td><td style="'+tdS+';text-align:center">'+(mi.qty||0)+'</td><td style="'+tdS+';text-align:center">'+escHtml(mi.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(mi.price||0)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney((mi.qty||0)*(mi.price||0))+'</td></tr>';
+          var up=qty>0?amt/qty:(mi.price||0);
+          rows+='<tr><td style="'+tdS+'">'+escHtml(mi.name||'')+'</td><td style="'+tdS+';text-align:center">'+qty+'</td><td style="'+tdS+';text-align:center">'+escHtml(mi.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(amt)+'</td></tr>';
         }
       }
     }
@@ -10268,7 +10324,10 @@ function buildItemizedPrintRows(hideMatPricing){
       rows+='<tr><td colspan="5" style="'+tdS+';font-weight:600;color:#555;background:#fafafa">HARDWARE</td></tr>';
       for(var i=0;i<hwItems.length;i++){
         var hi=hwItems[i];
-        rows+='<tr><td style="'+tdS+'">'+escHtml(hi.name||'')+'</td><td style="'+tdS+';text-align:center">'+(hi.qty||0)+'</td><td style="'+tdS+';text-align:center">'+escHtml(hi.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(hi.price||0)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney((hi.qty||0)*(hi.price||0))+'</td></tr>';
+        var qty=hi.qty||0;
+        var amt=lineAlloc?lineAlloc[li]:qty*(hi.price||0); li++;
+        var up=qty>0?amt/qty:(hi.price||0);
+        rows+='<tr><td style="'+tdS+'">'+escHtml(hi.name||'')+'</td><td style="'+tdS+';text-align:center">'+qty+'</td><td style="'+tdS+';text-align:center">'+escHtml(hi.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(amt)+'</td></tr>';
       }
     }
     if(!svcItems.length&&!matItems.length&&!hwItems.length){
@@ -10412,7 +10471,7 @@ function _buildPrintBodyCore() {
   // together reconstruct the printed figure exactly, with no double-count and nothing missing.
   var fabTotalPrinted=miRegroup?miRegroup.fab:(totVal+foldedIntoFab+minChargeTotal);
   var fabRowPool=fabTotalPrinted-minChargeTotal;
-  var itemRows=isItemizedMode?buildItemizedPrintRows(hideMatPricing):buildPrintRows(_printBreakdown,fabRowPool,pC);
+  var itemRows=isItemizedMode?buildItemizedPrintRows(hideMatPricing,fabRowPool,pC):buildPrintRows(_printBreakdown,fabRowPool,pC);
   // Sync toggle button visual state (visual only — no recursion)
   syncPrintToggle(_printBreakdown);
   // Must run AFTER syncPrintToggle — that function unconditionally rewrites every mode button's
