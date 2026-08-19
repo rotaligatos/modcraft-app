@@ -457,6 +457,49 @@ const PROFILES = {
           }
         }, { fabContingencyZeroRespected: true, mobContingencyZeroRespected: true,
              instContingencyZeroRespected: true, blankStillFallsBackToGlobal: true });
+      /* Rommel, 2026-08-19, second report on QT-W00000121: the printout correctly showed a 5%
+         discount (computed and applied for real -- discOn:true in the saved calc) while the LIVE
+         Stage 1 form showed "0" in the discount box with the amber "Request" button, as if nothing
+         had ever been approved. Root cause: Stage 1's discount widget is STATIC markup, unlike
+         Stage 2's (a JS-templated string rebuilt from fqDiscPct/fqDiscApproved on every render, so
+         it cannot go stale) -- and nothing ever pushed qDiscPct/qDiscApproved into that static
+         markup when they were set from SAVED data (reopening a quotation, switching options)
+         rather than from the user's own click on the Approve button. The underlying value and the
+         pricing were never wrong -- only the display. Proves the new shared sync function against
+         the REAL static DOM elements, both directions: an approved 5% renders the value and the
+         green Approved state, and dropping back to unapproved clears both -- so a future caller
+         that forgets to call it is the only way this can regress, not the sync logic itself. */
+      if (typeof window._syncDiscInputUI === 'function' && document.getElementById('disc-inp'))
+        check('_syncDiscInputUI: Stage 1 discount widget reflects an approved discount from SAVED state, not just a typed one', () => {
+          const w = window;
+          const saved = { qDiscPct: w.qDiscPct, qDiscApproved: w.qDiscApproved };
+          try {
+            // Simulates exactly what restoreFullQuotationState/restoreQuotationSnapshot now do:
+            // assign the globals from stored data, then sync -- never touching disc-inp directly.
+            w.qDiscPct = 5; w.qDiscApproved = true;
+            w._syncDiscInputUI();
+            const approvedState = {
+              inputShowsValue: document.getElementById('disc-inp').value === '5',
+              buttonShowsApproved: document.getElementById('disc-req-btn').textContent.indexOf('Approved') >= 0,
+              buttonIsSuccessStyled: document.getElementById('disc-req-btn').className.indexOf('btn-success') >= 0,
+              okMessageVisible: document.getElementById('disc-ok-msg').style.display === 'flex',
+              okTextShowsPercent: document.getElementById('disc-ok-txt').textContent === '5% discount approved'
+            };
+            w.qDiscPct = 0; w.qDiscApproved = false;
+            w._syncDiscInputUI();
+            const resetState = {
+              inputCleared: document.getElementById('disc-inp').value === '',
+              buttonBackToRequest: document.getElementById('disc-req-btn').textContent.indexOf('Request') >= 0,
+              okMessageHidden: document.getElementById('disc-ok-msg').style.display === 'none'
+            };
+            return Object.assign({}, approvedState, resetState);
+          } finally {
+            w.qDiscPct = saved.qDiscPct; w.qDiscApproved = saved.qDiscApproved;
+            w._syncDiscInputUI();   // put the real widget back the way it actually is
+          }
+        }, { inputShowsValue: true, buttonShowsApproved: true, buttonIsSuccessStyled: true,
+             okMessageVisible: true, okTextShowsPercent: true,
+             inputCleared: true, buttonBackToRequest: true, okMessageHidden: true });
       return out;
     }
   },
