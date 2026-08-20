@@ -8573,10 +8573,26 @@ data that already exists, not a code fix.
 Cannot be done from this session: no Google Sheets write access, and the Project List reads the
 Sheet, not Supabase — a Supabase-only cleanup would leave all 3 still showing there.
 
-## ⚠ Still the second priority — Custom Report Export is built on fabricated data
-Not touched this session. Full scope, the 8 KPI-tile mapping, and Rommel's three build decisions
-are all recorded in the 2026-08-18 entry above (search "Custom Report Export is built on fabricated
-data") — read that in full before starting, do not re-derive it from scratch.
+## ✅ CORRECTED 2026-08-20 — the "Custom Report Export is fabricated" line above was STALE, not current
+The 08-19 handoff (this section) carried the 08-18 "not started" framing forward without
+re-checking. It was already fixed: `d86e47f` ("Custom Report Export rebuilt on real data") landed
+at **08-18 22:23**, over 12 hours before the 08-19 session's first commit (`9dcae5d`, 11:15). The
+08-18 handoff commit (`29ec8a3`) was simply written 11 minutes too early, before `d86e47f` merged,
+and the "still pending" framing was never corrected afterward — same class of stale-doc mistake
+this file has warned about before (see `feedback_lead_with_the_action` / stale commit-title notes).
+
+**Verified 2026-08-20, not assumed** — `KPI_DEFS` in the shipped `index.html` (line ~2742) reads
+`_dashAllEntries()`/`_rollupJobs()`/`_isClientApprovedEntry()`/`_dashMetrics()`/`_quotAgeCount()`
+throughout; no `DEMO_USERS`/`DEMO_PROJS` reference remains inside `KPI_DEFS` or the export
+functions. **Do not re-open this as a task — it is done, per `d86e47f`.**
+
+**A genuinely separate, still-open item was found while verifying this**, explicitly called out as
+out-of-scope in the code's own comment (`index.html` ~line 2739): the **Schedule (Gantt/Calendar)
+page and the Reports page's own "User" and "Projects" tabs** (NOT the Custom Report Export) still
+read `DEMO_PROJS`/`DEMO_USERS` directly — fake project/user data — at lines ~9708, ~9719, ~12952,
+~12980, ~13320, ~13332, ~13347, and a demo-data fallback at ~22257 when `dirData` is empty. Nobody
+has asked for this yet; flagging it here so it isn't rediscovered from scratch. The comment itself
+calls it "a separate, larger cleanup outside the scope of the Custom Report Export rebuild."
 
 ## Still open, unverified this session — re-check before acting on any of these
 - **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
@@ -8614,3 +8630,23 @@ data") — read that in full before starting, do not re-derive it from scratch.
   the app, phone or desktop — Rommel's explicit standing rule from the client-history panel fix.
 - **Get evidence (a direct query, a screenshot, the activity log) before theorising** — this
   session's biggest single time-saver, repeatedly.
+
+## What was changed on 2026-08-20 (session — QT-W00000049 recovery check, docs)
+
+Rommel: *"check if qtw49 can still be recoverable, i think it was accidentally delete or was
+deleted by me."* Checked directly against Supabase (no Sheets write access this session, so no
+code/data change — investigation only).
+
+**It was never deleted from Supabase.** `quotations` still carries the row (Elevation 1, project
+"RONALD RELLERA MSRF#8841", Initial Quotation, ₱5,643.00) and `quotation_states` still carries the
+full 9.7KB saved state — a deletion cascades and would have removed both. Its `activity_log` has no
+deletion entry at all (the app has logged serial+client+value on delete since `e196559`,
+2026-08-15/16) — last real activity was 2026-08-04 (Stage 2 unlocked by approval); the only later
+touch (2026-08-08 09:26) matches the documented "Initial Locked dates restored from the activity
+log" repair, not a delete. `serial` and `base_serial` agree (`QT-W00000049` both) — no split.
+
+**Conclusion given to Rommel:** the data is safe; it's most likely missing from the **Google Sheet**
+row only (or hidden by a Project List filter), not actually destroyed. Told him: open it in the app
+by its serial — Supabase-first loading will find it fine — then Save re-files the Sheet row under
+the same serial (the 08-19 `_quotRowKnown` guard means it won't mint a new one). Could not do that
+step myself — no Sheets API access from this session.
