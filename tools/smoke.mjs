@@ -696,6 +696,71 @@ const PROFILES = {
             return w.calcWorkingMinutes('2026-08-21T08:00:00+08:00', '2026-08-24T08:00:00+08:00', 'Test Co');
           } finally { w.ordersSlaSettings = saved; }
         }, 0);
+      /* Rommel, 2026-08-21: "go with A" -- a Supabase Edge Function (sync-ph-holidays), scheduled
+         monthly via pg_cron, now overwrites PH_HOL/PH_HOL_NAMES from a live national holiday feed
+         at settings login-load time (_applyLoadedSettingsMap -> _applyPhHolidaySync), so the class
+         of gap that let Aug 21 go missing cannot recur for a NATIONAL holiday. Proves the fail-safe
+         in both directions: a genuine payload overwrites the fallback, and a missing/empty/
+         malformed one leaves PH_HOL exactly as it was -- mirroring the Edge Function's own rule
+         that a bad sync must never replace a good list with an empty one. */
+      if (typeof window._applyPhHolidaySync === 'function')
+        check('_applyPhHolidaySync: a real payload overwrites the fallback; a bad one leaves it alone', () => {
+          const w = window;
+          const saved = { PH_HOL: w.PH_HOL.slice(), PH_HOL_NAMES: Object.assign({}, w.PH_HOL_NAMES), syncedAt: w._phHolSyncedAt };
+          try {
+            w._applyPhHolidaySync({ synced: [{ date: '2026-08-21', name: 'Ninoy Aquino Day' }, { date: '2027-01-01', name: "New Year's Day" }], syncedAt: '2026-08-21T04:00:00Z' });
+            const afterReal = { count: w.PH_HOL.length, has2027: w.PH_HOL.indexOf('2027-01-01') >= 0, syncedAtSet: w._phHolSyncedAt === '2026-08-21T04:00:00Z' };
+            const beforeBad = w.PH_HOL.slice();
+            w._applyPhHolidaySync({ synced: [] });          // empty -- must not touch anything
+            w._applyPhHolidaySync(null);                     // missing -- must not touch anything
+            w._applyPhHolidaySync({ synced: 'not an array' }); // malformed -- must not touch anything
+            const afterBad = { unchanged: JSON.stringify(w.PH_HOL) === JSON.stringify(beforeBad) };
+            return Object.assign({}, afterReal, afterBad);
+          } finally {
+            w.PH_HOL = saved.PH_HOL; w.PH_HOL_NAMES = saved.PH_HOL_NAMES; w._phHolSyncedAt = saved.syncedAt;
+          }
+        }, { count: 2, has2027: true, syncedAtSet: true, unchanged: true });
+      /* Proves the wiring, not just the function in isolation -- _applyLoadedSettingsMap is the
+         real entry point (called from gLoadAppSettings' Supabase-first path), and a map that
+         simply HAS no PH_HOLIDAYS key (an older settings row, or a fresh project before the first
+         sync) must not throw or clear anything -- the fallback stays in force silently. */
+      if (typeof window._applyLoadedSettingsMap === 'function')
+        check('_applyLoadedSettingsMap: wires PH_HOLIDAYS through; absent key does not throw', () => {
+          const w = window;
+          const saved = { PH_HOL: w.PH_HOL.slice(), PH_HOL_NAMES: Object.assign({}, w.PH_HOL_NAMES) };
+          try {
+            w._applyLoadedSettingsMap({ PH_HOLIDAYS: { synced: [{ date: '2099-05-05', name: 'Test Day' }] } });
+            const wired = w.PH_HOL.length === 1 && w.PH_HOL[0] === '2099-05-05';
+            let threw = false;
+            try { w._applyLoadedSettingsMap({}); } catch (e) { threw = true; }
+            return { wired, absentKeyThrew: threw };
+          } finally { w.PH_HOL = saved.PH_HOL; w.PH_HOL_NAMES = saved.PH_HOL_NAMES; }
+        }, { wired: true, absentKeyThrew: false });
+      /* Local (regional/LGU-specific) holidays live PER COMPANY on ordersSlaSettings, deliberately
+         separate from the shared national PH_HOL -- Nager.Date (the sync source) has zero
+         subdivision data for the Philippines (every entry's counties/global fields confirm
+         national-only), so a Cebu-only special day can never come from the auto-sync and must not
+         silently apply to a Pasig-based company's timer too. Proves BOTH halves: the company that
+         has the local holiday skips it, and a different company on the same day does not. */
+      if (typeof window.calcWorkingMinutes === 'function')
+        check('calcWorkingMinutes: a local holiday is scoped to its own company, not shared', () => {
+          const w = window;
+          const saved = w.ordersSlaSettings;
+          try {
+            const sched = { 0: null, 1: { start: 8, end: 17 }, 2: { start: 8, end: 17 },
+                             3: { start: 8, end: 17 }, 4: { start: 8, end: 17 }, 5: { start: 8, end: 17 }, 6: null };
+            w.ordersSlaSettings = { companies: {
+              'Cebu Co': { excludeHolidays: true, schedule: sched, localHolidays: [{ date: '2026-08-24', name: 'Test Local Holiday' }] },
+              'Pasig Co': { excludeHolidays: true, schedule: sched, localHolidays: [] },
+            } };
+            // Mon 2026-08-24, a full 8-17 shift -- excluded for Cebu Co (its own local holiday),
+            // fully counted for Pasig Co (no local holiday of its own that day).
+            return {
+              cebuSkipsIt: w.calcWorkingMinutes('2026-08-24T08:00:00+08:00', '2026-08-24T17:00:00+08:00', 'Cebu Co'),
+              pasigDoesNotShareIt: w.calcWorkingMinutes('2026-08-24T08:00:00+08:00', '2026-08-24T17:00:00+08:00', 'Pasig Co'),
+            };
+          } finally { w.ordersSlaSettings = saved; }
+        }, { cebuSkipsIt: 0, pasigDoesNotShareIt: 540 });
       return out;
     }
   },
