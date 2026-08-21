@@ -662,6 +662,40 @@ const PROFILES = {
             if (co) co.value = saved.co;
           }
         }, { openCount: 1, openPipeline: 1500, additional: 1 });
+      /* Rommel, 2026-08-21: "check if the time counter of order actually consider holiday...
+         today is holiday" -- PH_HOL is a hand-typed, static list of fixed 2026 dates; the
+         mechanism that reads it (calcWorkingMinutes, the fabrication/installation holiday-premium
+         check, the Schedule legend) was always correct, but two REAL, fixed, annual PH holidays
+         were simply never added to the list: Ninoy Aquino Day (Aug 21) and Bonifacio Day (Nov 30).
+         Confirmed live: 2026-08-21 -- today -- was silently counted as a normal working day by
+         the order-response SLA timer. Checks both the array AND the name lookup stay in sync
+         (PH_HOL_NAMES is what the Schedule legend and the holiday-premium alert text read; adding
+         only to PH_HOL would fix the SLA timer but leave those two showing a bare "Holiday"). */
+      if (typeof window.PH_HOL !== 'undefined' && typeof window.PH_HOL_NAMES !== 'undefined')
+        check('PH_HOL includes the fixed annual holidays missing before this fix', () => ({
+          aquinoDay: window.PH_HOL.indexOf('2026-08-21') >= 0,
+          aquinoDayNamed: !!window.PH_HOL_NAMES['2026-08-21'],
+          bonifacioDay: window.PH_HOL.indexOf('2026-11-30') >= 0,
+          bonifacioDayNamed: !!window.PH_HOL_NAMES['2026-11-30'],
+        }), { aquinoDay: true, aquinoDayNamed: true, bonifacioDay: true, bonifacioDayNamed: true });
+      /* Proves the actual consumer, not just the data -- calcWorkingMinutes() must SKIP today
+         entirely (0 minutes counted) for a company with excludeHolidays on, now that today is in
+         the list. This is what the order-response timer calls; a data-only check could pass while
+         the timer still ran through the day if excludeHolidays were somehow not wired to PH_HOL. */
+      if (typeof window.calcWorkingMinutes === 'function' && typeof window.ordersSlaSettings !== 'undefined')
+        check('calcWorkingMinutes skips a whole holiday, not just labels it one', () => {
+          const w = window;
+          const saved = w.ordersSlaSettings;
+          try {
+            w.ordersSlaSettings = { companies: { 'Test Co': { excludeHolidays: true,
+              schedule: { 0: null, 1: { start: 8, end: 17 }, 2: { start: 8, end: 17 },
+                          3: { start: 8, end: 17 }, 4: { start: 8, end: 17 },
+                          5: { start: 8, end: 17 }, 6: null } } } };
+            // Fri 2026-08-21 08:00 (the holiday) through Mon 2026-08-24 08:00 -- with the holiday
+            // excluded, only Monday's window before 08:00 counts, i.e. zero elapsed minutes.
+            return w.calcWorkingMinutes('2026-08-21T08:00:00+08:00', '2026-08-24T08:00:00+08:00', 'Test Co');
+          } finally { w.ordersSlaSettings = saved; }
+        }, 0);
       return out;
     }
   },
