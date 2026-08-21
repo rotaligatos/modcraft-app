@@ -8598,9 +8598,9 @@ calls it "a separate, larger cleanup outside the scope of the Custom Report Expo
 - **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
 - **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
   team's confirmation, not more code.
-- **Ticket `3080d4a0` ("Dashboard")** — `needs_human`, body is just *"Im not sure if its actually
-  align with the data in the app"* — too vague to act on. Needs a specific figure or screen from
-  Rommel before anyone can investigate it.
+- ✅ **Ticket `3080d4a0` ("Dashboard") — RESOLVED 2026-08-21, do not re-raise.** The vague body
+  turned out to hide two real, reproducible defects once actually investigated (see the 2026-08-21
+  session below) — both shipped, merged, and confirmed live.
 - **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
   fixed. Body: *"When they create an option 2, the option 2 is named under the project name which
   makes no sense. It has no relevance on the naming."*
@@ -8650,3 +8650,86 @@ row only (or hidden by a Project List filter), not actually destroyed. Told him:
 by its serial — Supabase-first loading will find it fine — then Save re-files the Sheet row under
 the same serial (the 08-19 `_quotRowKnown` guard means it won't mint a new one). Could not do that
 step myself — no Sheets API access from this session.
+
+## What was changed on 2026-08-21 (session — dashboard grid-widget scope fix; orion-ship.mjs v2.1 gate rewrite)
+
+Ticket `3080d4a0` ("Dashboard") is the **first ticket to complete a full Scope Gate v2.1 cycle
+end to end**: diagnosed → fixed (Tier B) → correctly refused by the shipping gate → the gate fixed
+properly, using this ticket's own diff as the proof case → merged → deployed → verified live.
+
+### The dashboard fix
+Two of the three defects diagnosed 2026-08-17 (see that session above) were genuine Tier B — the
+customizable grid widgets (`_dashMetrics()`) scoped by company only, ignoring the same date-range
+control the KPI tiles above them already honoured, and counted an additional order as its own
+separate quotation while the tiles fold it into the job it came from. Both closed by a new shared
+`_dashDateFilter()` (used by both `_dashUpdateKPIs` and `_dashMetrics`) and by running
+`_dashMetrics()`'s counting loop over `_rollupJobs(all)` instead of raw entries. Reproduce-first
+checks landed in `tools/smoke.mjs`, confirmed failing on the pre-fix code and passing after;
+`node tools/verify.mjs` green throughout.
+
+PR https://github.com/rotaligatos/modcraft-app/pull/10, merge commit
+`ab6a1a9758e26c4bbba9ddd8f22f2e851a6a6487` (2026-08-21T01:33:46Z). **Verified live, not assumed:**
+the GitHub Actions Pages deploy for that commit completed successfully, and `_dashDateFilter` is
+present in the page actually served at `rotaligatos.github.io/modcraft-app/`.
+
+The third defect (the "Revisions & additions" widget's revised count, permanently 0) stays
+deliberately untouched — `e.id` on a directory-row-shaped entry is always the base serial, never
+carries the `.R` suffix that only lives inside a quotation's saved state JSON, and there is no
+Sheet/Supabase column recording it either. Fixing it needs a real decision (a new schema column
+written at revision time, or accepting the per-quotation state fetch `_dashMetrics()`'s own header
+comment explicitly avoids for performance) — not a display change. Still open, still `needs_human`.
+
+### ⚠ The push was manual, by explicit one-off instruction — and it exposed a real gate bug
+`orion-ship.mjs --dry-run` refused the fix with `[serial]` — the token appeared **only inside an
+explanatory code comment** (about why the third, untouched defect can't be fixed here; the comment
+says `qSerial` only to note where the `.R` suffix actually lives, not to touch anything about
+serial claiming or writing). Confirmed a genuine false positive, not a mistake in the fix itself —
+every changed `+`/`-` line was checked by hand first.
+
+Per the skill's own hard rule (`orion-ship.mjs` mandatory at every tier, never bypassed, never
+hand-run its git commands), the branch was left unpushed and the refusal written into the ticket.
+Rommel then explicitly instructed a one-off manual push (`git push` + `gh pr create`, not through
+the gate) after reviewing the actual diff himself — logged as such on the ticket, not silently.
+
+### The gate fixed properly — `orion-ship.mjs` §5 rewritten to classify from the diff
+This skill's tooling (`SKILL.md`, `orion-ship.mjs`, `orion-ticket.mjs`, `test-ship.mjs`) lives
+**outside** this repo, at `~/.claude/skills/orion-fix/`, deliberately — see that folder's own
+`SKILL.md` §8 ("PUBLIC REPO — confidentiality") for why, and this repo's own memory
+(`project_wufoo_key_exposed.md`) for what happens when a secret lands in this repo's history by
+mistake. Nothing from that folder is committed here; this entry is the durable record of what
+changed and why, for anyone reading this repo's history.
+
+The gate's §5 sensitive-scope scan used to test every changed line's **raw text — comments
+included** — against the whole keyword list, with no read/write distinction. Rewritten:
+- **Comments are masked out before scanning** (`maskComments()`, a small comment/string-aware
+  lexer — `//` and `/* */` bodies blanked, newlines preserved so line numbers never shift; string
+  literal contents deliberately left untouched, since a table/column name string like
+  `supa.from('quotations')` is a real signal, not noise). Doesn't need special regex-literal
+  handling — valid JS syntax structurally can't produce an unescaped `//`/`/*` inside one.
+- **A small, explicitly curated exception list** (`WRITE_ONLY_KEYWORDS`: `serial`, `quotation
+  status`, `lifecycle`, `approval`, `approve`, `locked total`, `client approved`) — keywords
+  legitimately read constantly by ordinary display/reporting code — now only trip the gate when
+  the changed line looks like an actual **write**: a real assignment, an update/upsert/insert/
+  delete-shaped call, or the line defining a function/variable named after the keyword
+  (`looksLikeWrite()`). Deliberately coarse and biased toward catching MORE, not less.
+- **Everything else stays exactly as strict as before** — the pricing formula itself (`recalc`,
+  `recalcFQ`, `pricing`, `price`, `cost factor`, `margin`, `markup`, `vat`, `discount`,
+  `commission`) and every identity/security/infra term (`pin`, `signature`, `unlock`, `rls`,
+  `policy`, `auth`, `login`, `role`, `delete`, `schema`, `supabase policy`, `deploy`, `migration`)
+  are always-hit on **any** code reference, comments aside — no relaxation, opt-in only.
+
+**New suite `test-ship.mjs`** — the file `selftest.mjs`'s own header comment had referenced since
+this runner was built but which never actually existed. **27/27 passing**, against real isolated
+temp git repos (not mocked diff strings): this exact ticket's diff reproduced byte-for-byte in an
+isolated worktree now passes, and `info.sensitiveRelaxed` names *why* — "serial", "comment" —
+proving the classifier reasoned about it correctly rather than passing by coincidence. Tier C
+regression coverage proven both ways: a bare read of `pin`/`role`/`auth`/`rls`/`signature` (no
+assignment, no write call) still refuses; a bare call to `recalcFQ()` still refuses; redefining
+`recalcFQ()` always refuses regardless of body; an assignment or `.update()` call touching
+`serial`/`client approved` still refuses. Three test-authoring bugs surfaced on the first run (a
+plural/singular token mismatch, a test string accidentally written inside a `//` comment, an
+undersized synthetic JWT) — each confirmed as a test bug, not a gate bug, before fixing it.
+
+Full detail, including the exact before/after gate output and every test case: ticket
+`3080d4a0-1265-460c-9fad-a1edb83570fb` (`status: deployed`) and its `diagnosis`/`resolution`
+fields, plus `orion-fix-actions.jsonl` on the machine that ran it for the update-by-update trail.
