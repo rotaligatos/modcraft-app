@@ -2681,8 +2681,32 @@ var CARCASS_COMPONENTS = {};
 var CABINET_TYPES = CARCASS_NAMES;
 var CABINET_BASE_COSTS = CARCASS_PRICES;
 var MOB_OPTS = [["Metro Manila",3500],["Outside Metro Manila (Luzon)",7500],["Visayas",15000],["Mindanao",18000]];
+// These two are the FALLBACK — used whenever settings.PH_HOLIDAYS hasn't loaded yet, is empty,
+// or the sync has never run for this Supabase project. A live 2026-08-21 gap (Ninoy Aquino Day
+// missing from a hand-typed list, silently counted as a normal working day by the order-response
+// SLA timer against 11 real open orders) is exactly why this can no longer be the ONLY source —
+// see _applyPhHolidaySync below, which overwrites both from a monthly-synced national holiday
+// list once available. Kept complete and correct in its own right regardless, as the safety net.
 var PH_HOL = ["2026-01-01","2026-04-02","2026-04-03","2026-04-09","2026-05-01","2026-06-12","2026-08-21","2026-08-31","2026-11-01","2026-11-30","2026-12-25","2026-12-30"];
 var PH_HOL_NAMES = {"2026-01-01":"New Year's Day","2026-04-02":"Maundy Thursday","2026-04-03":"Good Friday","2026-04-09":"Araw ng Kagitingan","2026-05-01":"Labor Day","2026-06-12":"Independence Day","2026-08-21":"Ninoy Aquino Day","2026-08-31":"National Heroes Day","2026-11-01":"All Saints Day","2026-11-30":"Bonifacio Day","2026-12-25":"Christmas Day","2026-12-30":"Rizal Day"};
+// Whether PH_HOL currently holds the auto-synced list (true) or the hardcoded fallback above
+// (false) -- shown in Settings so it's never a silent guess whether the sync is actually live.
+var _phHolSyncedAt = null;
+// Applies settings.PH_HOLIDAYS.synced (written by the sync-ph-holidays Edge Function, run monthly
+// via pg_cron) over the hardcoded fallback. FAILS SAFE, deliberately mirroring the Edge Function's
+// own rule: an empty/missing/malformed value leaves PH_HOL/PH_HOL_NAMES exactly as they were,
+// never wipes a working list down to nothing. Local (regional/LGU-specific) holidays are NOT part
+// of this -- see ordersSlaSettings.companies[co].localHolidays, which calcWorkingMinutes reads
+// separately, per company, because a Cebu-only holiday must not silently apply to WCL/MSSI too.
+function _applyPhHolidaySync(phh){
+  if(!phh||!Array.isArray(phh.synced)||!phh.synced.length) return;
+  var names={};
+  phh.synced.forEach(function(h){ if(h&&h.date) names[h.date]=h.name||'Holiday'; });
+  var dates=Object.keys(names).sort();
+  if(!dates.length) return;
+  PH_HOL=dates; PH_HOL_NAMES=names;
+  _phHolSyncedAt=phh.syncedAt||null;
+}
 
 var INDUSTRY_SUBS = {
   "Real Estate":["Developer / Subdivision","Condominium","Commercial Complex","Industrial Estate","Mixed-Use Development"],
@@ -15596,7 +15620,10 @@ function calcWorkingMinutes(fromIso, toIso, companyName) {
     var daySlot=cfg.schedule[dow];
     // Check if holiday
     var dateStr=cur.getFullYear()+'-'+('0'+(cur.getMonth()+1)).slice(-2)+'-'+('0'+cur.getDate()).slice(-2);
-    var isHol=cfg.excludeHolidays&&(PH_HOL||[]).indexOf(dateStr)>=0;
+    var isHol=cfg.excludeHolidays&&(
+      (PH_HOL||[]).indexOf(dateStr)>=0
+      || (cfg.localHolidays||[]).some(function(h){ return h&&h.date===dateStr; })
+    );
     if(!daySlot||isHol){
       // Not a work day or holiday — jump to midnight then let loop find next work day
       cur.setDate(cur.getDate()+1); cur.setHours(0,0,0,0); continue;
@@ -16780,13 +16807,32 @@ function _ensureCompanySchedule(co){
     cfg.schedule=s; cfg.excludeHolidays=false; delete cfg.days; delete cfg.startH; delete cfg.endH;
   }
   if(!cfg.schedule) cfg.schedule=_defaultDaySchedule();
+  // Regional/LGU-specific holidays (e.g. a Cebu-only special day) that do NOT belong in the
+  // national PH_HOL list -- Nager.Date (the source behind the auto-sync) has zero subdivision
+  // data for the Philippines, confirmed by reading every entry's counties/global fields, so
+  // this stays manually maintained, PER COMPANY, and lives beside the schedule it affects
+  // rather than in the shared national settings.PH_HOLIDAYS row.
+  if(!Array.isArray(cfg.localHolidays)) cfg.localHolidays=[];
 }
 
+// Transparency line for the national list — whether PH_HOL is currently the auto-synced list or
+// the hardcoded fallback (never silently one or the other with nothing said, matching the same
+// discipline the Price DB / Logistics DB freshness banners already use elsewhere in this app).
+function _phHolStatusHtml(){
+  var synced=!!_phHolSyncedAt;
+  var when=synced?fmtDT(_phHolSyncedAt):null;
+  return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:'
+    +(synced?'var(--wash-teal)':'var(--wash-amber)')+';border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px">'
+    +'<span><i class="ti '+(synced?'ti-cloud-check':'ti-alert-triangle')+'"></i> '
+    +(synced?('National PH holidays auto-synced ('+PH_HOL.length+' dates) — last updated '+escHtml(when)+'.')
+             :('Using the built-in national holiday list ('+PH_HOL.length+' dates) — the monthly auto-sync has not run yet for this session, or Supabase is not connected.'))
+    +'</span></div>';
+}
 function renderOrdersSlaSettings(){
   var ih=el('sla-default-hours'); if(ih) ih.value=ordersSlaSettings.defaultHours;
   var wu=el('sla-webhook-url'); if(wu) wu.value=ordersSlaSettings.webhookUrl||'';
   var wrap=el('sla-company-wrap'); if(!wrap) return;
-  var h='';
+  var h=_phHolStatusHtml();
   for(var i=0;i<COMPANIES.length;i++){
     var co=COMPANIES[i];
     _ensureCompanySchedule(co);
@@ -16799,6 +16845,23 @@ function renderOrdersSlaSettings(){
       +'<input type="checkbox" '+(cfg.excludeHolidays?'checked':'')+' onchange="_slaHolToggle(\''+co+'\',this.checked)">'
       +'Exclude PH holidays from timer</label>'
       +'</div>'
+      // Local (regional/LGU-specific) holidays — not part of the national auto-sync, since
+      // Nager.Date carries no subdivision data for the Philippines at all. Per company, because
+      // a Cebu-only holiday must never silently apply to a Pasig-based company's timer too.
+      +'<div style="margin-bottom:12px">'
+      +'<div style="font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Local holidays (this company only)</div>'
+      +(cfg.localHolidays.length?cfg.localHolidays.map(function(lh,li){
+        return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">'
+          +'<span style="font-family:monospace;color:var(--text2);width:88px;flex-shrink:0">'+escHtml(lh.date||'')+'</span>'
+          +'<span style="flex:1">'+escHtml(lh.name||'')+'</span>'
+          +'<button class="btn btn-danger" style="padding:2px 8px;font-size:11px" onclick="_slaLocalHolRemove(\''+co+'\','+li+')"><i class="ti ti-trash"></i></button>'
+          +'</div>';
+      }).join(''):'<div style="font-size:12px;color:var(--text2);font-style:italic">None added.</div>')
+      +'<div style="display:flex;gap:6px;margin-top:6px">'
+      +'<input type="date" id="'+cid+'-lh-date" style="width:150px;height:30px;font-size:12px">'
+      +'<input type="text" id="'+cid+'-lh-name" placeholder="e.g. Cebu Charter Day" style="flex:1;height:30px;font-size:12px">'
+      +'<button class="btn" style="font-size:12px;padding:4px 12px" onclick="_slaLocalHolAdd(\''+co+'\')"><i class="ti ti-plus"></i> Add</button>'
+      +'</div></div>'
       // Day-by-day schedule table
       +'<table style="width:100%;border-collapse:collapse;font-size:12px">'
       +'<thead><tr>'
@@ -16853,6 +16916,24 @@ function _slaDayHour(co,day,field,val){
 function _slaHolToggle(co,checked){
   _ensureCompanySchedule(co);
   ordersSlaSettings.companies[co].excludeHolidays=checked;
+}
+function _slaLocalHolAdd(co){
+  _ensureCompanySchedule(co);
+  var idx=COMPANIES.indexOf(co), cid='sla-'+idx;
+  var dEl=el(cid+'-lh-date'), nEl=el(cid+'-lh-name');
+  var date=(dEl&&dEl.value)||'', name=((nEl&&nEl.value)||'').trim();
+  if(!date){ showToast('Pick a date first.'); return; }
+  if(!name){ showToast('Give the holiday a name.'); return; }
+  var cfg=ordersSlaSettings.companies[co];
+  if(cfg.localHolidays.some(function(h){return h.date===date;})){ showToast('That date is already in the list.'); return; }
+  cfg.localHolidays.push({date:date,name:name});
+  cfg.localHolidays.sort(function(a,b){return a.date<b.date?-1:1;});
+  renderOrdersSlaSettings();
+}
+function _slaLocalHolRemove(co,idx){
+  _ensureCompanySchedule(co);
+  ordersSlaSettings.companies[co].localHolidays.splice(idx,1);
+  renderOrdersSlaSettings();
 }
 function testWebhookUrl(){
   showToast('The webhook URL is pasted into Wufoo — it is not called from this app. Submit a test Wufoo entry to verify it works.');
@@ -30974,6 +31055,9 @@ function gLoadFollowed(cb){
 function _applyLoadedSettingsMap(map){
   if(map.CONFIG){
     try{ _applyAppSettings(map.CONFIG); }catch(e){ console.warn('Bad settings JSON',e); }
+  }
+  if(map.PH_HOLIDAYS){
+    try{ _applyPhHolidaySync(map.PH_HOLIDAYS); }catch(e){ console.warn('Bad PH_HOLIDAYS',e); }
   }
   if(map.hasOwnProperty('LOGO_APP')){
     appLogoData=map.LOGO_APP||null;
