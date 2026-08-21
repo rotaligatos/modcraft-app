@@ -3720,9 +3720,11 @@ function dashEnsureLayout(){
 // Nothing here reads a quotation's state JSON: that would mean one fetch per
 // quotation, which is exactly what made the app slow before.
 function _dashMetrics(){
-  // Scoped, not all — the dashboard's company selector is applied once, in one place, so every
-  // widget built from this agrees with the KPI tiles above it.
+  // Scoped, not all — the dashboard's company selector AND date range are applied once, in one
+  // place, so every widget built from this agrees with the KPI tiles above it. (The date range
+  // used to stop at the tiles — see _dashDateFilter's own comment.)
   var all=(typeof _dashScopedEntries==='function')?_dashScopedEntries():[];
+  if(typeof _dashDateFilter==='function') all=_dashDateFilter(all);
   var m={openPipeline:0,openCount:0,wonRevenue:0,wonCount:0,avgDeal:0,
          byCompany:[],topClients:[],funnel:[],ageing:[],health:[],
          issued:0,revised:0,additional:0,awaiting:0,awaitingStale:0,
@@ -3730,10 +3732,17 @@ function _dashMetrics(){
   var now=Date.now();
   var byCo={},byClient={},statusCount={};
 
-  all.forEach(function(e){
+  // One job = one number, same as the KPI tiles (_dashUpdateKPIs -> _rollupJobs): an additional
+  // order's revenue counts in full, folded into the job it came from, rather than standing as its
+  // own separate quotation — otherwise a tile total and this widget's total differ by one for
+  // every additional order that exists (e.g. QT-W00000095, an additional order from QT-W00000058).
+  var jobs=(typeof _rollupJobs==='function')?_rollupJobs(all)
+    :all.map(function(e){return {root:e,members:e?[e]:[],revenue:parseFloat(e&&e.value)||0,extras:0};});
+  m.additional=jobs.reduce(function(s,j){return s+j.extras;},0);
+  jobs.forEach(function(j){
+    var e=j.root, v=j.revenue;
     var st=_normalizeStatusLabel(e.status||'');
     statusCount[st]=(statusCount[st]||0)+1;
-    var v=parseFloat(e.value)||0;
     var won=_isClientApprovedEntry(e);
     var dead=(st==='Declined');
     if(won){ m.wonCount++; m.wonRevenue+=v; }
@@ -3744,8 +3753,10 @@ function _dashMetrics(){
       var lk=new Date(e.finalLockedAt||e.created);
       if(!isNaN(lk)&&(now-lk.getTime())>30*864e5) m.awaitingStale++;
     }
+    // .R suffix only ever lives on qSerial inside the saved state JSON, never on this Sheet-row
+    // id — fetching state per quotation here is exactly what this function's own header comment
+    // says not to do, so this stays permanently 0 until that trade-off gets a deliberate decision.
     if(/\.R\d+$/.test(e.id||'')) m.revised++;
-    if(e.additionalFrom) m.additional++;
     // Company: the real field first, the serial prefix only as a fallback —
     // 137 older serials predate the prefix entirely.
     var co=(e.company||'').trim();
@@ -11848,6 +11859,19 @@ function _dashAllEntries(){
 // same function, and a dashboard filter leaking onto another page would be silent and wrong.
 var _dashCoHidden=0;   // counted, never quietly dropped — see the note under the team table
 function _dashCoKey(){ return (el('dash-co')||{}).value||''; }
+// Shared by the KPI tiles (_dashUpdateKPIs) and the grid widgets (_dashMetrics) so both read the
+// same date window off the same two fields — a filter defined twice is a filter that drifts.
+function _dashDateFilter(entries){
+  var fromVal=(el('dash-from')||{}).value||'';
+  var toVal=(el('dash-to')||{}).value||'';
+  if(!fromVal&&!toVal) return entries;
+  return (entries||[]).filter(function(e){
+    var d=(e.created||'').substring(0,10);
+    if(fromVal&&d<fromVal) return false;
+    if(toVal&&d>toVal) return false;
+    return true;
+  });
+}
 function _dashScopedEntries(){
   var all=_dashAllEntries(), co=_dashCoKey();
   _dashCoHidden=0;
@@ -11933,12 +11957,7 @@ function _dashUpdateKPIs(){
   // Date range filter (for total / revenue / conversion / response KPIs)
   var fromVal=(el('dash-from')||{}).value||'';
   var toVal=(el('dash-to')||{}).value||'';
-  var filtered=all.filter(function(e){
-    var d=(e.created||'').substring(0,10);
-    if(fromVal&&d<fromVal) return false;
-    if(toVal&&d>toVal) return false;
-    return true;
-  });
+  var filtered=(typeof _dashDateFilter==='function')?_dashDateFilter(all):all;
 
   // One job = one number. An additional order adds its revenue to the job it came from rather
   // than standing as another quotation in the count and another chance in the conversion rate.

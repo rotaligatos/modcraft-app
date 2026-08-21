@@ -594,6 +594,74 @@ const PROFILES = {
           }
         }, { agentSearchFindsOwnQuotation: true, agentSearchExcludesOtherAgent: true,
              nonMatchingSearchShowsNeither: true, clearedSearchShowsBoth: true });
+      /* Ticket 3080d4a0 (diagnosed 2026-08-17, actioned 2026-08-21): the date range applies to
+         the KPI tiles above the grid (_dashUpdateKPIs reads dash-from/dash-to into `filtered`)
+         but the customizable grid widgets built from _dashMetrics() scope by company only, via
+         _dashScopedEntries() -- dash-from/dash-to were never read there at all. Masked because
+         renderDashboard() defaults the range to Jan 1 -> today and nothing in real data predates
+         that window; it becomes visible, and misleading, the moment anyone narrows the range, and
+         the page starts disagreeing with itself. Proves a widget total now excludes an entry
+         outside the chosen window, same as a tile would for the same range. */
+      if (typeof window._dashMetrics === 'function' && document.getElementById('dash-from'))
+        check('_dashMetrics: respects the date range, same as the KPI tiles above it', () => {
+          const w = window;
+          const fromEl = document.getElementById('dash-from'), toEl = document.getElementById('dash-to');
+          const co = document.getElementById('dash-co');
+          const saved = { dirData: w.dirData, sessionQuotations: w.sessionQuotations,
+                           from: fromEl.value, to: toEl.value, co: co ? co.value : '' };
+          try {
+            w.dirData = [
+              { id: 'QT-TEST-D001', baseSerial: 'QT-TEST-D001', status: 'IQ Locked', value: 1000,
+                created: '2026-03-15T00:00:00Z', company: 'World Class Laminate, Inc.', client: 'In range' },
+              { id: 'QT-TEST-D002', baseSerial: 'QT-TEST-D002', status: 'IQ Locked', value: 5000,
+                created: '2026-01-01T00:00:00Z', company: 'World Class Laminate, Inc.', client: 'Out of range' }
+            ];
+            w.sessionQuotations = {};
+            if (co) co.value = '';
+            fromEl.value = '2026-03-01'; toEl.value = '2026-03-31';
+            const m = w._dashMetrics();
+            return { openCount: m.openCount, openPipeline: m.openPipeline };
+          } finally {
+            w.dirData = saved.dirData; w.sessionQuotations = saved.sessionQuotations;
+            fromEl.value = saved.from; toEl.value = saved.to;
+            if (co) co.value = saved.co;
+          }
+        }, { openCount: 1, openPipeline: 1000 });
+      /* Ticket 3080d4a0 continued: additional orders roll up into the job they came from for the
+         KPI tiles (_dashUpdateKPIs calls _rollupJobs -- "one job, one number") but were counted as
+         their own separate quotation in the grid widgets, since _dashMetrics() iterated raw
+         entries with no rollup -- so a tile count and the matching widget count differ by one
+         whenever an additional order exists (live today: QT-W00000095 is an additional order from
+         QT-W00000058). Proves a root job plus its additional order now count as ONE open
+         quotation in the widgets too, not two -- openCount is the field that actually
+         discriminates old from new here (summed revenue happens to match either way, since
+         summing each entry's own value gives the same total as summing a rolled-up job's). */
+      if (typeof window._dashMetrics === 'function' && typeof window._rollupJobs === 'function' && document.getElementById('dash-from'))
+        check('_dashMetrics: an additional order rolls up into its root job, same as the KPI tiles', () => {
+          const w = window;
+          const fromEl = document.getElementById('dash-from'), toEl = document.getElementById('dash-to');
+          const co = document.getElementById('dash-co');
+          const saved = { dirData: w.dirData, sessionQuotations: w.sessionQuotations,
+                           from: fromEl.value, to: toEl.value, co: co ? co.value : '' };
+          try {
+            w.dirData = [
+              { id: 'QT-TEST-R001', baseSerial: 'QT-TEST-R001', status: 'FQ Locked', value: 1000,
+                created: '2026-03-15T00:00:00Z', company: 'World Class Laminate, Inc.', client: 'Root job' },
+              { id: 'QT-TEST-R002', baseSerial: 'QT-TEST-R002', status: 'FQ Locked', value: 500,
+                created: '2026-03-16T00:00:00Z', company: 'World Class Laminate, Inc.', client: 'Additional order',
+                additionalFrom: 'QT-TEST-R001' }
+            ];
+            w.sessionQuotations = {};
+            if (co) co.value = '';
+            fromEl.value = ''; toEl.value = '';
+            const m = w._dashMetrics();
+            return { openCount: m.openCount, openPipeline: m.openPipeline, additional: m.additional };
+          } finally {
+            w.dirData = saved.dirData; w.sessionQuotations = saved.sessionQuotations;
+            fromEl.value = saved.from; toEl.value = saved.to;
+            if (co) co.value = saved.co;
+          }
+        }, { openCount: 1, openPipeline: 1500, additional: 1 });
       return out;
     }
   },
