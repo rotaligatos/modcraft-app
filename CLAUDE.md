@@ -8733,3 +8733,134 @@ undersized synthetic JWT) — each confirmed as a test bug, not a gate bug, befo
 Full detail, including the exact before/after gate output and every test case: ticket
 `3080d4a0-1265-460c-9fad-a1edb83570fb` (`status: deployed`) and its `diagnosis`/`resolution`
 fields, plus `orion-fix-actions.jsonl` on the machine that ran it for the update-by-update trail.
+
+## What was changed on 2026-08-21/22 (session — PH holiday gap, gate v2.1 hardened further, itemized-print material weight, cabinet-type print investigation)
+
+Four PRs merged (`#10`–`#13`), the `orion-ship.mjs` gate hardened twice more, three tickets
+touched, one real live-data mystery resolved. Everything below verified live, not assumed.
+
+### PH holiday coverage — gap found, fixed, then automated (PRs #11, #12)
+Rommel asked whether the order response-time clock respects PH holidays; 2026-08-21 (Ninoy Aquino
+Day) and Nov 30 (Bonifacio Day) were both **missing from the hardcoded `PH_HOL` array**, so every
+order in flight that day was silently accruing false SLA-breach time. Fixed immediately (PR #11).
+
+Rommel then asked whether there's a way to keep this current without relying on someone noticing a
+gap by hand. Researched `date.nager.at` (free, no-auth, correct for both missing 2026 dates, but
+**zero PH subdivision/local-holiday data** — every entry is `global:true`). Built the full
+automated answer (PR #12):
+- Edge Function **`sync-ph-holidays`** (deployed, id `1c52e6e5-0b62-4b98-a93f-61dfe9e5c080`) fetches
+  current+next year from date.nager.at, writes `settings.PH_HOLIDAYS`. Auth is the platform
+  gateway's own `verify_jwt:true` — a redundant internal service-key check was found broken
+  (wrong regardless of key correctness) and removed rather than patched, after confirming via curl
+  that the gateway check alone already correctly 401s an unauthenticated/garbage-token caller.
+- `pg_cron` + `pg_net`, monthly, service-role key stored in Supabase **Vault** (never inlined).
+- App-side: `_applyPhHolidaySync()` wired into `_applyLoadedSettingsMap()`, replacing `PH_HOL`/
+  `PH_HOL_NAMES` from the synced data; `_phHolStatusHtml()` shows sync status + last-synced date
+  in Settings.
+- **New per-company local-holiday mechanism** — `ordersSlaSettings.companies[co].localHolidays`,
+  since the national feed has no LGU/local coverage at all. Wired into `calcWorkingMinutes` on top
+  of the national list. Editable per company in Settings → Orders & SLA.
+- Verified live: 36 holidays synced across both years on first run.
+
+### Gate hardened a second time — CSS property names colliding with pricing keywords
+Shipping PR #12 hit a false refusal on `margin` — a plain `margin-bottom:12px` in the new Settings
+UI collided with the money-formula keyword. Rommel: *"why are we even talking of margin? Is this on
+the part of installation deployment?"* — clarified it was CSS spacing, unrelated to deployment. He
+chose to harden the gate rather than push around it again (*"2 — let's do it"*).
+
+Built `maskCssDeclarations()` + a curated `CSS_PROPERTY_COLLISIONS` list, layered on top of the
+2026-08-21 comment-masking. **Explicitly proven not to weaken real hits**: `marginPct`,
+`grossMargin` and similar identifiers still refuse — only a literal CSS property declaration is
+masked. `test-ship.mjs` grew 27 → **33 tests**. Re-ran the gate clean, shipped.
+
+### Itemized printout — material weight dilution (QT-W00000141) — PR #13
+Rommel flagged a live quotation whose print preview showed drastically lower unit prices than the
+live editor. **First diagnosis was wrong** — I jumped to an account-type (Subsidiary vs Direct)
+explanation without checking the actual arithmetic; Rommel corrected me directly: *"look at the
+unit price. that is why im telling you."*
+
+Re-investigated properly: `buildItemizedPrintRows()`'s proportional-split weight computation
+counted regular materials/hardware at full raw price **regardless of `_chargeMatHw()`** — the real
+gate deciding whether they're billed at all on this account. On a Subsidiary-WCLI, services-mode
+quotation where materials aren't billed, every service line's displayed unit price/amount was
+diluted ~7x by phantom weight, while the printed subtotal (computed correctly elsewhere) stayed
+right — the two numbers on the same page disagreed with each other.
+
+Fixed: regular material/hardware weight is now gated on `_chargeMatHw()`; **outsourced** items
+stay unconditional (matching `getAreaSubtotal()`'s existing rule). Reproduce-first check added to
+`tools/smoke.mjs`, proven to fail pre-fix and pass post-fix against a `git stash` of the real code.
+
+Shipping this hit a **third** gate refusal — genuinely correct this time, not a false positive
+(the diff legitimately touches `.price` inside pricing-allocation code). Told Rommel plainly this
+one was the gate doing its job; he said "push it" — pushed manually (PR #13), the intended
+human-override path for a real Tier C hit, not a bypass of the gate's logic. Rommel merged it
+himself; confirmed live via GitHub API.
+
+### Three tickets touched, all outside pricing-code changes
+- **`3080d4a0`** ("Dashboard") — closed in the prior session (2026-08-21), see the entry above.
+  First full Scope Gate v2.1 cycle end to end.
+- **`ecb9d1d4`** — diagnosis set per Rommel's exact verbatim text, status deliberately left `new`
+  per his instruction, the two Wynchelle-related tickets (`0e65e1fd`, `7103608c`) and all quotation
+  data confirmed untouched. Rommel then asked where `QT-W00000130` had gone; checked Supabase
+  directly and found it **deliberately deleted by Rommel himself** (2026-08-19T05:38:41 UTC,
+  ₱6,249,240.97) — not a bug. He confirmed; a short correction was appended (never overwrote the
+  original text) to the ticket's diagnosis field.
+- **Read-only serial-reassignment investigation** — Rommel asked, explicitly bounded
+  (*"Do NOT fix anything. Serial lifecycle is Tier C sensitive scope — supervised only. Just
+  report."*), whether a specific unlock/revise serial-reassignment issue was a regression or an
+  uncovered path. Verdict delivered, no code touched: **`confirmRevise()`** is a separate, older
+  function using `makeSerial()` directly rather than the newer claim/commit machinery — an
+  uncovered legacy path, not a regression in the fixed flow. Also reported the `confirmUnlock()`
+  async-callback mechanism that can misattribute an activity-log entry's serial. Not fixed —
+  correctly left for a supervised session, per the constraint given.
+
+### ⚠ OPEN — "By cabinet type" print mode: a real, unfixed, worse cousin of the QT-W00000141 bug
+Checking whether the itemized-mode bug's class could recur elsewhere (Rommel: *"will this not
+happen in the other quotation in the future?"*) found it already has, in a different shape, in
+**`buildPrintRows()`'s `'type'` mode services branch**. Area and Lump modes are safe — they reuse
+the canonical `getAreaSubtotal()`/`_fabAreaAllocation()`. Type mode's services branch does not:
+
+```javascript
+typeMap[key3].cost+=sv3.price*si3.qty;   // materials/hardware weight is NEVER added here at all
+```
+
+Unlike the itemized-mode bug (materials counted but diluted), here materials/hardware get **zero**
+weight in the type-level split — and `_allocateProportional()`'s own last-entry-absorbs-remainder
+mechanism then dumps the *entire* materials+hardware total onto whichever service type happens to
+render last, arbitrarily. Confirmed against a real quotation, **`QT-M00000104`** (Direct client,
+services mode, 4 services totaling ₱8,179.92 raw, 6 materials ₱32,448.24, 6 hardware ₱9,372.50,
+grand total ₱54,320.72): the last service by array order, "Handgrab Groove" (true cost ₱130.50),
+would print inflated to roughly **₱40,000+**. A dead leftover (`var isDirPr=isDirectClient();`,
+never used) suggests an earlier, incomplete attempt at this same fix.
+
+**Confirmed the fix cannot be exact the way BOM mode's is.** BOM items carry real per-cabinet
+nested `materials`/`hardware`/`services` sub-arrays (`getBOMItemUnitCost`, lines ~7193–7215) — a
+genuine stored linkage, which is *why* BOM mode's type-level split is already correct. Services
+mode has no equivalent: `svcItems[i] = {qty, price, svcIdx}` and `matItems[i]`/`hwItems[i]` are
+flat, area-level, with **no field tying a specific material to a specific service** — confirmed
+against QT-M00000104's real saved state, not assumed. `getAreaMatSubtotal`/`getAreaHwSubtotal`
+(lines ~7521–7530) are plain `qty*price` sums, nothing to defer to either.
+
+Rommel confirmed the fix must respect the existing **`qChargeMatHw`** toggle (*"there's a tick
+setting in the quotation page"*) — the same `_chargeMatHw()` gate the itemized-mode fix just used.
+
+**Three options on the table, none built yet:**
+1. Fold each area's gated materials+hardware total proportionally into that area's own
+   service-type rows (my recommendation — matches the existing design where materials show only as
+   descriptive text next to service rows via `typeMatNames`, no new visible rows). One flagged edge
+   case: an area with materials/hardware but zero services has nothing within that area to attach
+   the weight to — it would redistribute onto *other* areas' service rows via the outer
+   `_allocateProportional` call rather than being genuinely lost, but it's not exact for that area.
+2. Add explicit Materials/Hardware rows to this print mode, matching itemized mode's shape.
+3. Restrict "By cabinet type" from being offered when materials are billed in services mode.
+
+**Session ended mid-decision** — awaiting which direction to build before writing any fix code.
+
+### Also noted, not yet raised as separate items
+- `buildPrintRows()`'s type-mode services branch reads `sv3.price` directly rather than
+  `_svcUnitPrice(si3)`, so it misses the client-supplied-materials uplift (`clientMatMultFor`) that
+  every other pricing path already applies. Smaller, separate bug from the one above — flag to
+  Rommel before fixing, don't fold silently into the materials-weight fix.
+- The dead `var isDirPr=isDirectClient();` in the same branch — clean up once the real fix lands,
+  don't touch it standalone (it may be a signal of the intended-but-abandoned direction).
+fields, plus `orion-fix-actions.jsonl` on the machine that ran it for the update-by-update trail.
