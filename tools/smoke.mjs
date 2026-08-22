@@ -810,6 +810,57 @@ const PROFILES = {
             };
           } finally { w.ordersSlaSettings = saved; }
         }, { cebuSkipsIt: 0, pasigDoesNotShareIt: 540 });
+      /* Rommel, 2026-08-22: a discount request sent by an estimator on a quotation that had never
+         been saved got filed under a bare '--' placeholder in the approval_requests table --
+         confirmed live: req_1787383041132_ylrfle, serial '--', approved an hour later, still stuck
+         applied:false. Approving it then tried to write the decision into a quotation that no real
+         serial could ever resolve back to, throwing the raw browser alert "No saved state found for
+         --." straight at the approver. qDraftKey already exists specifically to identify an unsaved
+         quotation (see 2026-08-11, "A draft has no quotation number") -- the request-raising code at
+         onDiscRequest/fqOnDiscRequest/openCustomCF/fqOpenCustomCF just never consulted it before
+         filing a request. Rommel's decision: require a save first, rather than make the request
+         carry the draft key through (self-approval via PIN is untouched -- it never files a routed
+         request at all, so there's nothing to lose track of). */
+      if (typeof window._requireSavedForRequest === 'function')
+        check('_requireSavedForRequest: blocks a discount/override request before the first save', () => {
+          const w = window;
+          const saved = { qDraftKey: w.qDraftKey, toast: w.showToast };
+          let toastCalled = false;
+          w.showToast = () => { toastCalled = true; };
+          try {
+            w.qDraftKey = 'DRAFT-abc123';
+            const blockedWhileDraft = w._requireSavedForRequest() === false;
+            const toastFiredOnBlock = toastCalled;
+            toastCalled = false;
+            w.qDraftKey = '';
+            const allowedOnceSaved = w._requireSavedForRequest() === true;
+            const noToastWhenAllowed = !toastCalled;
+            return { blockedWhileDraft, toastFiredOnBlock, allowedOnceSaved, noToastWhenAllowed };
+          } finally { w.qDraftKey = saved.qDraftKey; w.showToast = saved.toast; }
+        }, { blockedWhileDraft: true, toastFiredOnBlock: true, allowedOnceSaved: true, noToastWhenAllowed: true });
+      if (typeof window.onDiscRequest === 'function' && document.getElementById('disc-inp'))
+        check('onDiscRequest: does not send a discount request before the quotation has been saved', () => {
+          const w = window;
+          const discInpEl = document.getElementById('disc-inp');
+          const saved = { qDraftKey: w.qDraftKey, currentRole: w.currentRole, openSendRequest: w.openSendRequest,
+                           discInp: discInpEl.value };
+          let sent = false;
+          w.openSendRequest = () => { sent = true; };
+          try {
+            w.currentRole = 'Staff';           // not an approver -- takes the else branch that requests
+            discInpEl.value = '5';
+            w.qDraftKey = 'DRAFT-xyz789';       // never saved
+            w.onDiscRequest();
+            const blockedBeforeSave = sent === false;
+            w.qDraftKey = '';                  // now saved
+            w.onDiscRequest();
+            const allowedAfterSave = sent === true;
+            return { blockedBeforeSave, allowedAfterSave };
+          } finally {
+            w.qDraftKey = saved.qDraftKey; w.currentRole = saved.currentRole; w.openSendRequest = saved.openSendRequest;
+            discInpEl.value = saved.discInp;
+          }
+        }, { blockedBeforeSave: true, allowedAfterSave: true });
       return out;
     }
   },
