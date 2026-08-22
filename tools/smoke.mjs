@@ -371,6 +371,55 @@ const PROFILES = {
              outsourcedUnitPriceDoubled600: true, outsourcedAmount1200: true,
              rawOutsourcePriceNeverShown: true, areaSubtotalMatchesPool: true,
              hiddenPricingStillShowsHardwareAfterIt: true });
+      /* Rommel, 2026-08-21: a real Subsidiary-account, services-mode printout (QT-W00000141) showed
+         every SERVICE line's unit price and amount at ~1/7 of its real value, while the stated Area/
+         Fabrication subtotal stayed correct -- individual rows did not sum to the subtotal printed
+         directly below them. Root cause: buildItemizedPrintRows() weighted regular materials/
+         hardware at their FULL raw price when splitting the pool proportionally, even when
+         _chargeMatHw() says this account isn't actually billed for them (the Subsidiary-WCLI rule
+         getAreaSubtotal() already applies) -- hideMatPricing only hides the DISPLAY, so the material
+         weight silently diluted every service line's share regardless. Real numbers: services
+         totalled 2,436.98 (the correct, materials-excluded pool) while material weight of 14,687.78
+         was still counted, so each service line received only 2,436.98/17,124.76 = 14.23% of its
+         true share -- a ~7.03x understatement, matching the reported ratio exactly. Proves the fix
+         both ways: with materials NOT charged, a service line gets its FULL raw share (not diluted)
+         and the whole pool still reconciles to itself; an OUTSOURCED material stays weighted
+         regardless (getAreaSubtotal()'s own "never waived for Subsidiary" rule), while the regular
+         material next to it is correctly zeroed. */
+      if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
+        check('buildItemizedPrintRows: materials not billed to this account do not dilute service line amounts', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES };
+          try {
+            w.qFabMode = 'services';
+            w.qChargeMatHw = false;   // the Subsidiary-WCLI case: materials/hardware not billed
+            w.SERVICES = [{ name: 'Test Service', price: 100, unit: 'pc' }];
+            w.qAreas = [{
+              name: 'Area X', items: [],
+              svcItems: [{ svcIdx: 0, qty: 20 }],   // raw 2000 -- the only thing that should count
+              matItems: [{ name: 'Reg Material', qty: 1, price: 12000, unit: 'pc' }],  // must weigh 0
+              hwItems: [{ name: 'Reg Hardware', qty: 1, price: 3000, unit: 'pc' }],    // must weigh 0
+              outsourceMaterials: [{ name: 'Outsourced Material', qty: 1, price: 500, unit: 'pc' }], // still counts
+              outsourceHardware: []
+            }];
+            const pC = { ni: true, rates: { fabCont: 0, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 0 } };
+            // Pool = full expected weight sum if the fix works: svc 2000 + out 500 = 2500. Under the
+            // OLD (buggy) code the pool would be split against 2000+12000+3000+500=17500 of weight,
+            // giving the service line ~228.57 instead of the full 2000 -- the exact bug reproduced.
+            const html = w.buildItemizedPrintRows(false, 2500, pC);
+            return {
+              serviceGetsFullShare: /2,000\.00/.test(html),
+              serviceUnitPriceUnchanged: /100\.00/.test(html),
+              regMaterialZeroed: /(^|[^,.\d])0\.00/.test(html.replace(/2,000\.00|100\.00|2,500\.00|500\.00/g, '')),
+              outsourcedMaterialStillCounted: /500\.00/.test(html),
+              poolStillReconciles: /2,500\.00/.test(html),
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
+            w.qChargeMatHw = saved.qChargeMatHw; w.SERVICES = saved.SERVICES;
+          }
+        }, { serviceGetsFullShare: true, serviceUnitPriceUnchanged: true, regMaterialZeroed: true,
+             outsourcedMaterialStillCounted: true, poolStillReconciles: true });
       /* Rommel, 2026-08-19: the auto-forwarded "Noted by" signature request (raised automatically
          the moment someone approves "Checked by") arrived with amount 0 and no decision data on
          Wynchelle Uy's quotations, so he could not evaluate it and rejected both. Root cause:
