@@ -8863,4 +8863,54 @@ setting in the quotation page"*) — the same `_chargeMatHw()` gate the itemized
   Rommel before fixing, don't fold silently into the materials-weight fix.
 - The dead `var isDirPr=isDirectClient();` in the same branch — clean up once the real fix lands,
   don't touch it standalone (it may be a signal of the intended-but-abandoned direction).
+
+### ⏸ PUT ON HOLD 2026-08-22 — Rommel does not see this as a problem yet, wants the full picture first
+Talked through the three options above with Rommel before writing any code. Nothing in `index.html`
+was touched this session. What came out of the conversation, in order:
+
+1. **He rejected Option 1 outright** (folding materials/hardware proportionally into service rows)
+   — his reasoning: correlating a specific material to a specific service **doesn't need to happen
+   inside the quotation at all**. That correlation genuinely exists elsewhere — on the actual
+   physical cutting list — not in this data.
+2. Confirmed the scope is **cutting-list (services) fabrication mode only**, "By cabinet type" print
+   layout only. Carcass and BOM modes are unaffected — he confirmed this himself.
+3. Confirmed **why** the link doesn't exist in services mode: a service line, a material line, and a
+   hardware line are just separately typed in by the estimator, nothing ties them together. This was
+   checked against `prodBuildSummary()` (the Designers Support cutting-list export) and confirmed —
+   it too only ever produces **totals per type** (materials total, services total, hardware total),
+   never a service→material link. Rommel: *"linkage will only be useful in the cutting list, not in
+   the quotation mode."*
+4. He then drew a distinction I hadn't made: **"By cabinet type" is meant to apply where the source
+   is a cabinet recipe** (carcass/BOM — one cabinet type inherently defines its own materials,
+   hardware, and services as a bundle) — **not** cutting-list mode, which has no cabinet concept at
+   all, just freely-entered service/material/hardware lines. The materials-charge toggle
+   (`qChargeMatHw`/`_chargeMatHw()`) is separate and intentional: Subsidiary jobs often want services
+   priced only, since they source materials themselves; the app still shows how much material is
+   needed, it just may not always be billed.
+5. Told him the CURRENT built behavior already shows materials as **names/text only** next to
+   service rows (`typeMatNames`), never as a dollar figure — matching what he described. **The actual
+   bug is that the dollar amount still leaks in anyway**: `_allocateProportional()` splits the WHOLE
+   fabrication pool (which includes materials+hardware money when charged) across weights that are
+   services-only — so even though materials show as text, their cost has nowhere to go except being
+   poured into the service rows' printed peso figures, inflating them.
+6. **Rommel's response: "it was build not to show that way in the printout except for the per line
+   item."** — i.e. materials/hardware are deliberately NOT meant to carry a dollar figure in "By
+   cabinet type" mode at all; only the separate itemized "Services, Materials & Hardware" print mode
+   itemizes materials/hardware in pesos. I proposed as the minimal fix: each service row should print
+   only its own true marked-up cost, and stop force-distributing the pool (which includes
+   materials+hardware money) across service-only weights — meaning the visible "by type" rows would
+   no longer need to sum to the full fabrication subtotal in this mode, same as the stated design
+   intent (materials/hardware were never itemized in pesos here to begin with).
+7. **Rommel put it on hold**, in his words: *"I don't want to make changes until i see the full
+   picture of what you are telling me. right now, I don't see any problem beside what I raised
+   earlier."* — i.e. beyond the one thing that started this ("will this not happen in the other
+   quotation in the future" re: the QT-W00000141 fix), he's not yet convinced this is a live problem
+   worth fixing, and wants a clearer overall picture before any change is made.
+
+**Status: genuinely undecided, nothing built, nothing shipped.** Do NOT proceed to build any of the
+three original options, or the narrower "each row shows its own true cost" direction from step 6,
+without walking Rommel through the full picture again and getting an explicit go-ahead. Next session
+should treat this as re-opening the conversation from scratch — bring a clear before/after picture
+(ideally with real numbers off a real quotation, and possibly a mockup/table rather than prose) so
+he can see the whole shape of it before deciding whether it's worth touching at all.
 fields, plus `orion-fix-actions.jsonl` on the machine that ran it for the update-by-update trail.
