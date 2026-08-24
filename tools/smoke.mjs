@@ -224,6 +224,31 @@ const PROFILES = {
             rightCandidateAccepted: w._prodIsExactFieldMatch(query, rightCandidate) === true
           };
         }, { wrongCandidateRefused: true, rightCandidateAccepted: true });
+      /* Same report, the freeze itself. _prodFindCatalogMatches calls _prodParseMaterialDescriptor
+         once per catalog item -- with 153k+ material rows, pre-fix that was ~153k x ~33 `new
+         RegExp(...)` compilations built from scratch and thrown away every single call, none of
+         which ever changes between calls -- exactly what "the browser froze for several minutes"
+         looks like. A wall-clock timing check was tried first and rejected: V8's regex compiler is
+         fast enough that even the unfixed rebuild-every-call version cleared any threshold generous
+         enough not to flake on a slow CI runner, so it silently failed to reproduce the bug at all.
+         This counts actual `new RegExp(...)` calls instead, by swapping the global constructor for
+         a counting wrapper for the duration of the check -- deterministic regardless of machine
+         speed: the fixed version builds PROD_SUBSTRATE_RE/PROD_TEXTURE_RE once at module load
+         (before this check ever runs), so calling _prodParseMaterialDescriptor afterward should
+         construct exactly zero more. */
+      if (typeof window._prodParseMaterialDescriptor === 'function')
+        check('_prodParseMaterialDescriptor: builds no new RegExp per call (the several-minute freeze)', () => {
+          const w = window;
+          const NativeRegExp = w.RegExp;
+          let constructed = 0;
+          function CountingRegExp(...args) { constructed++; return new NativeRegExp(...args); }
+          CountingRegExp.prototype = NativeRegExp.prototype;
+          w.RegExp = CountingRegExp;
+          try {
+            for (let i = 0; i < 50; i++) w._prodParseMaterialDescriptor('Light Cherry MDF 4x8 2F (18mm, Stipple)');
+            return { newRegexPerCall: constructed === 0 };
+          } finally { w.RegExp = NativeRegExp; }
+        }, { newRegexPerCall: true });
       /* Ticket 0e65e1fd (2026-08-19): re-locking a quotation that owed a revision (unlocked, then
          re-locked) minted a WHOLE NEW quotation (QT-W00000132, then W00000133 on a second
          re-lock) instead of overwriting QT-W00000130 in place, per Rommel's own report and
