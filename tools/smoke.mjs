@@ -178,6 +178,52 @@ const PROFILES = {
                      remark: notes.indexOf('remarks: hinge side is the left edge') >= 0 };
           } finally { w.confirm = savedConfirm; }
         }, { rows: 1, emat: true, remark: true });
+      /* Rommel, 2026-08-24: exported a typed cutting list ("Light Cherry MDF 4x8 2F (18mm,
+         Stipple)") into Designers Support and got "Dark Emperado/Light Gray" back instead --
+         confirmed against the live catalog that the exact SKU he typed genuinely exists there.
+         Root cause: _cutListToAnalysis's typed-label branch (no " -- SKU" separator, unlike a
+         website order) dumped the WHOLE material string into the component's `color` field --
+         substrate, board size, thickness and texture all duplicated inside it -- which then went
+         into the catalogue search as one garbled, self-duplicating query. That query happened to
+         score an unrelated colour higher than the exact match, because both shared nothing but
+         the generic word "light". Fixed to use the same field parser faces already used (colour
+         = only what's left after substrate/faces/texture/thickness are recognised and stripped),
+         so the search string stays clean. Proves the fix directly: colour no longer contains the
+         substrate/thickness/faces/texture tokens that used to ride along inside it. */
+      if (typeof window._cutListToAnalysis === 'function')
+        check('_cutListToAnalysis: a typed material label extracts colour, not the whole string duplicated', () => {
+          const w = window;
+          const cl = { origin: 'typed', grain: 'L', panels: [
+            { group: 'Cabinet 1', part: 'Drawer front', mat: 'Light Cherry MDF 4x8 2F (18mm, Stipple)',
+              th: 18, L: 595, W: 190, qty: 1, ebt: '2L 1S', emat: '', grain: 'L', svcs: [] }
+          ], hpl: [], hardware: [] };
+          const payload = w._cutListToAnalysis(cl, null);
+          const c = payload.components[0] || {};
+          return { material: c.material,
+                   colorMentionsSubstrate: /\bmdf\b/i.test(c.color || ''),
+                   colorMentionsThickness: /18\s*mm/i.test(c.color || ''),
+                   colorMentionsFaces: /\b2f\b/i.test(c.color || ''),
+                   colorMentionsLightCherry: /light\s*cherry/i.test(c.color || '') };
+        }, { material: 'MDF', colorMentionsSubstrate: false, colorMentionsThickness: false,
+             colorMentionsFaces: false, colorMentionsLightCherry: true });
+      /* Same report, second half: even with a clean search string, the catalogue matcher treated
+         being the ONLY candidate within scoring range as proof of a real match -- which is how
+         "Dark Emperado/Light Gray" (sharing just the word "light") could still win over the
+         genuine "Light Cherry" SKU if the two ever land close in score. Rommel: "Confidence level
+         should be at 100% in regards to the sku." A lone candidate is now only auto-accepted when
+         every field the query specifies (substrate/faces/texture/thickness) matches exactly and
+         every colour word in the query is present in the candidate -- not just some of them. */
+      if (typeof window._prodIsExactFieldMatch === 'function' && typeof window._prodParseMaterialDescriptor === 'function')
+        check('_prodIsExactFieldMatch: a coincidental single match ("light") is refused; the real SKU is accepted', () => {
+          const w = window;
+          const query = w._prodParseMaterialDescriptor('MDF Light Cherry (Stipple) 18mm 2F');
+          const wrongCandidate = w._prodParseMaterialDescriptor('Dark Emperado/Light Gray MDF 4x8 2F (18mm, Stipple)');
+          const rightCandidate = w._prodParseMaterialDescriptor('Light Cherry MDF 4x8 2F (18mm, Stipple)');
+          return {
+            wrongCandidateRefused: w._prodIsExactFieldMatch(query, wrongCandidate) === false,
+            rightCandidateAccepted: w._prodIsExactFieldMatch(query, rightCandidate) === true
+          };
+        }, { wrongCandidateRefused: true, rightCandidateAccepted: true });
       /* Ticket 0e65e1fd (2026-08-19): re-locking a quotation that owed a revision (unlocked, then
          re-locked) minted a WHOLE NEW quotation (QT-W00000132, then W00000133 on a second
          re-lock) instead of overwriting QT-W00000130 in place, per Rommel's own report and

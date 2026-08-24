@@ -16121,14 +16121,32 @@ function _cutListToAnalysis(cl,order){
       var mname=cut>=0?label.slice(0,cut).trim():label;
       var sku=cut>=0?label.slice(cut+3).trim():'';
       var fam=_webMatFamily(label);
-      material=fam||mname; color=fam?mname:'';
-      if(sku) notes.push('SKU '+sku);
       // The site now sends a real catalogue SKU, and the name IS the spec:
       // "Real White PB 4x8 2F (18mm, Matte)". This app already has a parser for
       // exactly that string, so read the face count off it rather than declaring
       // it unknowable — prodComputeBom's grouping key includes faces, so leaving
       // it 0 groups a 2-face board with a 1-face one and matches the wrong SKU.
       var md=(typeof _prodParseMaterialDescriptor==='function')?_prodParseMaterialDescriptor(label):null;
+      if(cut>=0){
+        // Website composite label "Finish — SKU" — the half before the dash already IS
+        // just the colour/finish name, nothing else rides along in it.
+        material=fam||mname; color=fam?mname:'';
+      } else {
+        // Rommel, 2026-08-24: a typed cutting list (entered directly in Modcraft, no
+        // website " — SKU" separator) is one whole descriptive string, e.g. "Light
+        // Cherry MDF 4x8 2F (18mm, Stipple)" — not a bare finish name. The website-label
+        // rule above would dump the WHOLE string into colour (substrate, board size,
+        // thickness and texture all duplicated inside it), which then went straight into
+        // the catalogue search as one garbled, self-duplicating query — and was why a
+        // genuine exact catalogue match ("Light Cherry MDF 4x8 2F (18mm, Stipple)", which
+        // DOES exist in the catalog) lost to an unrelated colour ("Dark Emperado/Light
+        // Gray") that only happened to share the generic word "light". Parsed with the
+        // same field parser faces already uses above: colour is only what is left after
+        // substrate/faces/texture/thickness are recognised and stripped out.
+        material=fam||(md&&md.substrate)||mname;
+        color=(md&&md.colorText)||(fam?mname:'');
+      }
+      if(sku) notes.push('SKU '+sku);
       if(md&&md.faces) faces=md.faces; else facesUnknown++;
       if(pn.matCustom) review.push('the client typed this material instead of picking it from the catalogue');
     }
@@ -35912,6 +35930,31 @@ function _prodFindCatalogMatches(query,catalogArr,maxResults){
   var close=scored.filter(function(s){return s.score>=topScore*0.6;});
   return close.slice(0,maxResults||6).map(function(s){return s.item;});
 }
+// Rommel, 2026-08-24: "Confidence level should be at 100% in regards to the sku." Being the
+// ONLY candidate within the top-60%-of-best scoring band never meant "this is the same
+// product" — only "closest available guess", which is exactly how "Light Cherry MDF 4x8 2F
+// (18mm, Stipple)" lost to "Dark Emperado/Light Gray MDF 4x8 2F (18mm, Stipple)": the two
+// happened to be the only close scores, sharing the generic word "light". A match is now
+// treated as certain only when every structured field the query actually specifies agrees
+// EXACTLY with the candidate (substrate/faces/texture/thickness), and every colour word in
+// the query is present in the candidate — not just some of them, and not merely more than
+// any rival. Anything short of that is flagged for a human to confirm, same as it already is
+// when 2+ candidates are found — a lone candidate is no longer a free pass around that check.
+function _prodIsExactFieldMatch(qDesc,cDesc){
+  if(!qDesc||!cDesc) return false;
+  if(qDesc.substrate&&qDesc.substrate!==cDesc.substrate) return false;
+  if(qDesc.faces&&cDesc.faces&&qDesc.faces!==cDesc.faces) return false;
+  if(qDesc.texture&&cDesc.texture&&qDesc.texture!==cDesc.texture) return false;
+  if(qDesc.thickness&&cDesc.thickness&&qDesc.thickness!==cDesc.thickness) return false;
+  if(qDesc.colorText){
+    var qWords=qDesc.colorText.split(' ').filter(function(w){return w.length>1;});
+    if(qWords.length){
+      var allPresent=qWords.every(function(w){return cDesc.colorText.indexOf(w)>=0;});
+      if(!allPresent) return false;
+    }
+  }
+  return true;
+}
 // Find-or-create a jargon rule (term+category -> dbItem) and persist it. Shared by every place
 // that remembers a correction (materials/hardware/services names, component color/texture/
 // material substitution, and the name-keyed faces/EBT rules below) instead of each re-implementing
@@ -36239,12 +36282,23 @@ function prodBuildSummary(result) {
     var row={aiName:aiName,name:mappedName,qty:qty,unit:unit,include:true,price:0,custom:true,
       outsource:false,mto:false,mtoLeadDays:0,texture:texture||'',
       matchCandidates:candidates.map(function(c){return c.name;}),needsReview:false,reviewNote:''};
-    if(candidates.length===1){
+    // A lone candidate is only auto-resolved when it is a genuine, near-exact match — see
+    // _prodIsExactFieldMatch. Being the only thing within scoring range of the best result is
+    // not the same claim as "this is the same product"; anything short of exact now flags for
+    // review exactly like the 2+ candidate case below, rather than silently substituting the
+    // closest available guess.
+    var exactSingle=candidates.length===1
+      &&_prodIsExactFieldMatch(_prodParseMaterialDescriptor(mappedName),
+           candidates[0].__matDesc||_prodParseMaterialDescriptor(candidates[0].name));
+    if(exactSingle){
       row.name=candidates[0].name; row.unit=candidates[0].unit||unit; row.price=candidates[0].price||0; row.custom=false;
       if(isMaterial&&candidates[0].mto){ row.mto=true; row.mtoLeadDays=_mtoDefaultLeadDays(texture); }
     } else if(candidates.length>1){
       row.needsReview=true;
       row.reviewNote=candidates.length+' possible catalog matches found for "'+aiName+'" — pick the right one.';
+    } else if(candidates.length===1){
+      row.needsReview=true;
+      row.reviewNote='Closest catalog match for "'+aiName+'" is "'+candidates[0].name+'", but it is not an exact match — confirm it or pick a different one.';
     } else {
       row.needsReview=true;
       // The old text here promised "edit the name to add it as a one-off" -- nothing ever cleared
