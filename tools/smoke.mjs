@@ -932,6 +932,59 @@ const PROFILES = {
             discInpEl.value = saved.discInp;
           }
         }, { blockedBeforeSave: true, allowedAfterSave: true });
+      /* Rommel, 2026-08-24 (QT-C00000006): the "By cabinet type" print view for Option 3 showed
+         Option 2's exact cabinet breakdown -- same 7 rows, same quantities, even a row ("Base
+         Cabinet (Shelves)") that does not exist in Option 3 at all -- while the total price
+         correctly differed. Root cause traced by driving the real load/switch/print path against
+         the quotation's own saved data (not guessed): the quotation is on Stage 2, and Stage 2
+         reads its own scope copy (fqAreas) instead of the live one -- but createNewOption() had
+         been copying fqScopeForked=true (and the stale fqAreas that goes with it) straight from
+         the option it was duplicated from. _forkFQScope()'s own guard then read that inherited
+         flag as "already forked, nothing to do" and never re-derived Stage 2 from the NEW option's
+         own later Stage-1 edits. Reproduces the real scenario: an option forked from a Stage-2
+         quotation, its Stage-1 scope edited afterward, print reads _withFQAreas -- and confirms it
+         now sees the live, edited scope instead of the stale inherited one. */
+      if (typeof window.createNewOption === 'function' && typeof window._withFQAreas === 'function')
+        check('createNewOption: new option starts un-forked, so Stage 2 keeps mirroring Stage 1 edits', () => {
+          const w = window;
+          const saved = { qFabMode: w.qFabMode, qAreas: w.qAreas, fqAreas: w.fqAreas,
+            fqScopeForked: w.fqScopeForked, qStage: w.qStage, qLocked: w.qLocked,
+            qOptionsList: w.qOptionsList, qActiveOptionId: w.qActiveOptionId };
+          try {
+            w.qFabMode = 'bom';
+            w.qAreas = [{ name: 'AREA', bomItems: [
+              { type: 'Kitchen Base Cabinet', qty: 5, materials: [], hardware: [], services: [] },
+              { type: 'Sink Cabinet', qty: 2, materials: [], hardware: [], services: [] }
+            ] }];
+            w.fqAreas = JSON.parse(JSON.stringify(w.qAreas));  // the SOURCE option's own genuine fork
+            w.fqScopeForked = true;
+            w.qStage = 2; w.qLocked = true;
+            w.qOptionsList = []; w.qActiveOptionId = 0;
+            w.recalc();
+
+            w.createNewOption();  // -> a new option, copied from the one above
+
+            // Edit the NEW option's Stage-1 scope only -- exactly what a real user does, never
+            // touching Stage 2 for this option.
+            w.qAreas = [{ name: 'AREA', bomItems: [
+              { type: 'Kitchen Base Cabinet', qty: 1, materials: [], hardware: [], services: [] }
+            ] }];
+            w.recalc();
+
+            const newOpt = w.qOptionsList.find(o => o.id === w.qActiveOptionId);
+            const printScope = w._withFQAreas(() =>
+              w.qAreas.flatMap(a => a.bomItems.map(b => ({ type: b.type, qty: b.qty }))));
+            return {
+              newOptionStartedUnforked: newOpt.snapshot.fqScopeForked === false && newOpt.snapshot.fqAreas === null,
+              printSeesLiveEditedScope: JSON.stringify(printScope) ===
+                JSON.stringify([{ type: 'Kitchen Base Cabinet', qty: 1 }])
+            };
+          } finally {
+            w.qFabMode = saved.qFabMode; w.qAreas = saved.qAreas; w.fqAreas = saved.fqAreas;
+            w.fqScopeForked = saved.fqScopeForked; w.qStage = saved.qStage; w.qLocked = saved.qLocked;
+            w.qOptionsList = saved.qOptionsList; w.qActiveOptionId = saved.qActiveOptionId;
+          }
+        }, { newOptionStartedUnforked: true, printSeesLiveEditedScope: true });
       return out;
     }
   },
