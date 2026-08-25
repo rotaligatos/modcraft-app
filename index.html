@@ -1294,6 +1294,20 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         </div>
         <div class="card-body">
           <p style="font-size:12px;color:var(--text2);margin:0 0 10px"><i class="ti ti-info-circle" style="font-size:11px"></i> Copied from the Initial Quotation. Edit for changes the client asked for — the Initial Quotation the client already has is not affected.</p>
+          <!-- Same shared state as the Initial Quotation's card (whether the client supplies
+               materials, and what they bring, is a fact about the client, not the stage) — but
+               its own row list, since Stage 2 can have its own service lines by now. See
+               renderClientMatSection(). -->
+          <div id="fq-client-mat-row" style="display:block;margin-bottom:12px">
+            <div class="alert" style="flex-direction:column;gap:8px;align-items:stretch;background:var(--wash-navy);border:.5px solid #b6d4f5">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;font-weight:500;flex-wrap:wrap">
+                <input type="checkbox" id="fq-client-mat-toggle" onchange="onClientSupplyMatToggle(this.checked)">
+                <span><i class="ti ti-package-import"></i> Client-supplied materials</span>
+                <span style="font-size:11px;font-weight:400;color:var(--muted)">— excludes materials from cost (hardware &amp; outsource still counted); services &times;<span id="fq-client-mat-mult-lbl">1.20</span></span>
+              </label>
+              <div id="fq-client-mat-body" style="display:none"></div>
+            </div>
+          </div>
           <div id="fq-items-wrap"></div>
         </div>
       </div>
@@ -7190,17 +7204,24 @@ function _clientMatSvcAll(on){
 // at-a-glance status plus a bulk All/None — it used to also list every line by name, which was
 // the exact ambiguity the per-row checkbox was built to fix: two rows sharing a name were
 // indistinguishable here, so ticking one really meant "I'm not sure which one this affects."
-function _clientMatSvcPickerHtml(){
+// isFq: true when this is being built for Stage 2's own card (already running inside
+// _withFQAreas — see _renderClientMatInto — so _quotedServiceRows() correctly counts fqAreas'
+// rows here). The All/None buttons are baked with the matching call for LATER, at click time,
+// when no swap is active — same reasoning as _hEdit elsewhere in this file: an inline handler
+// runs long after the render that emitted it, so the stage has to travel with the string.
+function _clientMatSvcPickerHtml(isFq){
   var rows=_quotedServiceRows(), mult=_cmMult();
   if(!rows.length) return '<div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Add a service to the scope of work to choose which lines the &times;'+mult.toFixed(2)+' applies to.</div>';
   var ids=rows.map(function(r){ return _svcUplId(r.item); });
   var on=0; for(var i=0;i<ids.length;i++) if(!qClientMatSvcExcl[ids[i]]) on++;
+  var allCall=isFq?'_fqEdit(function(){_clientMatSvcAll(true)})':'_clientMatSvcAll(true)';
+  var noneCall=isFq?'_fqEdit(function(){_clientMatSvcAll(false)})':'_clientMatSvcAll(false)';
   return '<div style="margin-top:10px;padding-top:9px;border-top:.5px solid var(--border)">'
     +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">'
     +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Applies the &times;'+mult.toFixed(2)+' to</span>'
     +'<span style="font-size:11px;color:'+(on===ids.length?'var(--text2)':'var(--amber)')+';font-weight:600">'+on+' of '+ids.length+' lines</span>'
-    +'<button class="btn" onclick="_clientMatSvcAll(true)" style="font-size:10px;padding:2px 7px">All</button>'
-    +'<button class="btn" onclick="_clientMatSvcAll(false)" style="font-size:10px;padding:2px 7px">None</button>'
+    +'<button class="btn" onclick="'+allCall+'" style="font-size:10px;padding:2px 7px">All</button>'
+    +'<button class="btn" onclick="'+noneCall+'" style="font-size:10px;padding:2px 7px">None</button>'
     +'</div><div style="font-size:10px;color:var(--muted)">Tick or untick the Uplift box on each service line, in the Services section below, to choose one at a time.</div>'
     +'</div>';
 }
@@ -7561,24 +7582,41 @@ function onClientSupplyMatToggle(on){
   if(qClientSupplyMat && (!qClientSupplyMatList || !qClientSupplyMatList.length)) qClientSupplyMatList.push({brand:'',type:'',color:'',size:'',thickness:'',texture:'',qty:1});
   if(typeof renderItems==='function') renderItems(); else renderClientMatSection();   // re-render so Materials sections gray out
   if(typeof recalc==='function') recalc();
+  // Whether the client supplies materials is a fact about the client, not the stage — the toggle
+  // is shared (see renderClientMatSection), so flipping it must also refresh Stage 2's own scope
+  // grid (its checkbox column and prices depend on it too) and its price.
+  if(fqAreas){
+    if(typeof renderFQItems==='function') renderFQItems();
+    if(typeof recalcFQ==='function') recalcFQ();
+  }
 }
-function renderClientMatSection(){
-  var t=el('client-mat-toggle'); if(t) t.checked=qClientSupplyMat;
-  var lbl=el('client-mat-mult-lbl'); if(lbl) lbl.textContent=(_cmMult()).toFixed(2);
-  var b=el('client-mat-body'); if(!b) return;
+// Renders the Client-supplied materials card into one set of DOM ids: '' for the Initial
+// Quotation's card, 'fq-' for the Final Quotation's own copy (2026-08-25 — the card used to be
+// Stage-1-only markup, so Stage 2 had no way to add/edit what the client supplies, or to see
+// which of ITS OWN service lines the uplift reaches, once it diverged from Stage 1's scope).
+//
+// qClientSupplyMat / qClientMatMultOverride / qClientSupplyMatList are ONE shared state — whether
+// this client supplies materials, and what they bring, does not change between the Initial and
+// Final Quotation, only which service lines the uplift reaches does. So both cards always show
+// the identical on/off state, multiplier and material list; the only per-stage part is the
+// service-line picker inside, which is rendered under isFq's matching qAreas/fqAreas scope.
+function _renderClientMatInto(idp,isFq){
+  var t=el(idp+'client-mat-toggle'); if(t) t.checked=qClientSupplyMat;
+  var lbl=el(idp+'client-mat-mult-lbl'); if(lbl) lbl.textContent=(_cmMult()).toFixed(2);
+  var b=el(idp+'client-mat-body'); if(!b) return;
   b.style.display=qClientSupplyMat?'block':'none';
   if(!qClientSupplyMat){ b.innerHTML=''; return; }
   var mult=_cmMult();
   // No apostrophes in this string — it lives inside a single-quoted JS literal.
   var h='<div style="font-size:11px;color:var(--text2);margin:2px 0 8px"><i class="ti ti-info-circle"></i> Listed for the client as excluded from the quoted material cost, so nobody assumes what they bring is already paid for. Materials you enter in the Materials section are still charged; services are multiplied by &times;'+mult.toFixed(2)+' &mdash; choose which ones below. List the materials the client will supply:</div>';
   h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"><label style="font-size:12px;color:var(--text2)">Service multiplier override (&times;):</label>'
-    +'<input type="number" step="0.01" min="1" value="'+(qClientMatMultOverride||'')+'" placeholder="'+(CF.clientMatServiceMult||1.2)+'" oninput="qClientMatMultOverride=parseFloat(this.value)||0;renderClientMatSection();if(typeof recalc===\'function\')recalc()" style="height:30px;width:90px">'
+    +'<input type="number" step="0.01" min="1" value="'+(qClientMatMultOverride||'')+'" placeholder="'+(CF.clientMatServiceMult||1.2)+'" oninput="qClientMatMultOverride=parseFloat(this.value)||0;renderClientMatSection();if(typeof recalc===\'function\')recalc();if(fqAreas&&typeof recalcFQ===\'function\')recalcFQ()" style="height:30px;width:90px">'
     +'<span style="font-size:10px;color:var(--muted)">blank = global default ('+(CF.clientMatServiceMult||1.2)+')</span></div>';
-  h+=_clientMatSvcPickerHtml();
+  h+=(isFq?_withFQAreas(function(){ return _clientMatSvcPickerHtml(true); }):_clientMatSvcPickerHtml(false));
   // One shared suggestion list, emitted OUTSIDE the grid. Inside it, it would be a grid child and
   // shift every column along by one — relying on the UA stylesheet hiding <datalist> is not worth
-  // a broken row.
-  h+='<datalist id="cm-type-dl">'+CLIENT_MAT_TYPES.map(function(tp){ return '<option value="'+escHtml(tp)+'">'; }).join('')+'</datalist>';
+  // a broken row. Own id per card so two <datalist>s with the same id can't collide in the DOM.
+  h+='<datalist id="'+idp+'cm-type-dl">'+CLIENT_MAT_TYPES.map(function(tp){ return '<option value="'+escHtml(tp)+'">'; }).join('')+'</datalist>';
   h+='<div style="overflow-x:auto"><div style="display:grid;grid-template-columns:1.2fr 1.7fr 1fr 1fr .9fr 1fr 60px 30px;gap:5px;min-width:780px;align-items:center">';
   ['Brand','Type','Color','Size','Thickness','Texture','Qty',''].forEach(function(c){ h+='<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">'+c+'</span>'; });
   for(var i=0;i<qClientSupplyMatList.length;i++){
@@ -7591,7 +7629,7 @@ function renderClientMatSection(){
     // on the next touch, saving) the wrong material. That is exactly what went wrong with the
     // service UOM dropdown.
     h+='<input value="'+(m.brand||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'brand\',this.value)" style="height:30px">'
-      +'<span><input list="cm-type-dl" value="'+escHtml(m.type||'')+'" placeholder="Type or pick…" oninput="_cmSet('+i+',\'type\',this.value)" style="height:30px;width:100%"></span>'
+      +'<span><input list="'+idp+'cm-type-dl" value="'+escHtml(m.type||'')+'" placeholder="Type or pick…" oninput="_cmSet('+i+',\'type\',this.value)" style="height:30px;width:100%"></span>'
       +'<input value="'+(m.color||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'color\',this.value)" style="height:30px">'
       +'<input value="'+(m.size||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'size\',this.value)" style="height:30px">'
       +'<input value="'+(m.thickness||'').replace(/"/g,'&quot;')+'" oninput="_cmSet('+i+',\'thickness\',this.value)" style="height:30px">'
@@ -7602,6 +7640,12 @@ function renderClientMatSection(){
   h+='</div></div>';
   h+='<button class="btn" onclick="addClientMatRow()" style="font-size:11px;padding:4px 10px;margin-top:8px"><i class="ti ti-plus"></i>Add material</button>';
   b.innerHTML=h;
+}
+function renderClientMatSection(){
+  _renderClientMatInto('',false);
+  // Only when Stage 2's own card is actually in the DOM (it always is once fq-scope-card exists —
+  // #s2-wrap is display:none, not absent) and Stage 2 has a scope to show.
+  if(fqAreas&&el('fq-client-mat-toggle')) _renderClientMatInto('fq-',true);
 }
 // ── Search-as-you-type helpers (native datalist) ──────────────────────────
 // A <datalist> holding the whole catalogue is not a search box. price_materials is ~153k rows
@@ -8809,7 +8853,7 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
       if(svcUplCol){
         var _uplId=_svcUplId(row);   // idempotent — reuses the id if this row already has one
         var _upOn=!qClientMatSvcExcl[_uplId];
-        uplCell='<span style="height:28px;display:flex;align-items:center;justify-content:center"><input type="checkbox"'+(_upOn?' checked':'')+' onchange="onClientMatSvcToggle(\''+_uplId+'\',this.checked)" title="Apply the client-supplied uplift to this line"></span>';
+        uplCell='<span style="height:28px;display:flex;align-items:center;justify-content:center"><input type="checkbox"'+(_upOn?' checked':'')+' onchange="'+_hEdit('onClientMatSvcToggle(\''+_uplId+'\',this.checked)')+'" title="Apply the client-supplied uplift to this line"></span>';
         // Same visible label as the cutting-list Services section — auto-generated from the
         // checkbox state, never editable, so it can never say something the checkbox disagrees with.
         if(_upOn) uplNote='<div style="margin:-3px 0 4px 2px;font-size:10px;color:var(--amber);font-weight:600">(Client-supplied material)</div>';
@@ -8965,7 +9009,14 @@ function renderItems(){
 }
 function renderFQItems(){
   if(!fqAreas) return;
-  return _withFQAreas(function(){ return _renderScope('fq-items-wrap','fqAreas','fq-'); });
+  var r=_withFQAreas(function(){ return _renderScope('fq-items-wrap','fqAreas','fq-'); });
+  // Outside the swap, deliberately — renderClientMatSection() does its own _withFQAreas just for
+  // the fq-card's picker; calling it while already swapped would paint Stage 1's OWN card with
+  // Stage 2's rows for the length of this call. (Any such flash is invisible in practice — the
+  // next real Stage 1 render always overwrites it before anyone sees it — but there is no reason
+  // to court it here when calling this outside the swap is free.)
+  renderClientMatSection();
+  return r;
 }
 // Live per-row amounts and area subtotals, patched in place rather than re-rendered so a focused
 // input keeps focus while you type. Reads the current qAreas, so Stage 2 gets the identical
@@ -9246,7 +9297,7 @@ function _renderScopeCore(wrap) {
           +'<input type="number" min="0.1" step="0.1" value="'+si.qty+'" oninput="'+_rndArr+'['+a+'].svcItems['+i+'].qty=parseFloat(this.value)||1;'+_hSoon()+'" style="height:34px;text-align:center">'
           +'<span style="height:34px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text2)">'+escHtml(svc.unit||'—')+'</span>'
           +'<input type="number" min="0" step="0.01" value="'+svcPrice+'" oninput="'+_rndArr+'['+a+'].svcItems['+i+'].price=parseFloat(this.value)||0;'+_hSoon()+'" style="height:34px;text-align:right;font-size:12px;padding-right:6px">'
-          +(_svcHasUpl?('<span style="height:34px;display:flex;align-items:center;justify-content:center"><input type="checkbox"'+(_upOn?' checked':'')+' onchange="onClientMatSvcToggle(\''+_uplId+'\',this.checked)" title="Apply the &times;'+_cmm.toFixed(2)+' client-supplied uplift to this line"></span>'):'')
+          +(_svcHasUpl?('<span style="height:34px;display:flex;align-items:center;justify-content:center"><input type="checkbox"'+(_upOn?' checked':'')+' onchange="'+_hEdit('onClientMatSvcToggle(\''+_uplId+'\',this.checked)')+'" title="Apply the &times;'+_cmm.toFixed(2)+' client-supplied uplift to this line"></span>'):'')
           +'<span id="'+_rndIdp+'svc-sub-'+a+'-'+i+'" style="font-size:13px;color:var(--text2);text-align:right;padding-right:4px">'+fmtMoney(_svcLineTotal(si))+'</span>'
           +'<button class="btn" onclick="'+_hEdit('removeSvcItem('+a+','+i+')')+'" style="height:34px;width:34px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
           +'</div>'

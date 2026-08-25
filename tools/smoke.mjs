@@ -1080,6 +1080,92 @@ const PROFILES = {
             w.SERVICES = saved.SERVICES;
           }
         }, { noteCount: 1 });
+      /* Rommel's team, 2026-08-25: "client supplied material is not showing on stage 2 which
+         will limit them when a material is needed to be edited." Root cause: the whole card
+         (#client-mat-row) was static markup confined inside #s1-wrap, so it simply did not exist
+         anywhere in Stage 2's DOM -- Stage 2 could edit its own scope (fqAreas) since 2026-08-05,
+         but had no way to turn the client-supplied toggle on, add/edit what the client brings, or
+         see which of ITS OWN service lines the uplift reached once it diverged from Stage 1.
+         Fixed with a mirrored #fq-client-mat-row card sharing the same qClientSupplyMat /
+         qClientMatMultOverride / qClientSupplyMatList state (a fact about the client, not the
+         stage) but rendering its picker against fqAreas via _withFQAreas, so the two cards can
+         show genuinely different line counts when the two scopes have diverged. */
+      if (typeof window.renderClientMatSection === 'function' && document.getElementById('fq-client-mat-toggle'))
+        check('renderClientMatSection: Stage 2 gets its own card, counting fqAreas lines, not qAreas', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, fqAreas: w.fqAreas, qFabMode: w.qFabMode,
+                           qClientSupplyMat: w.qClientSupplyMat, qClientMatSvcExcl: w.qClientMatSvcExcl,
+                           qClientMatMultOverride: w.qClientMatMultOverride, SERVICES: w.SERVICES };
+          try {
+            w.SERVICES = [{ name: 'Cutting MDF/PB/Plywood', price: 16.5, unit: 'lm' }];
+            // Stage 1: ONE service row. Stage 2 (already diverged, e.g. client asked to add a
+            // second cutting line for the Final Quotation): TWO. The two cards must disagree.
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [],
+                          svcItems: [{ svcIdx: 0, qty: 10, price: 16.5 }],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.fqAreas = [{ name: 'Area 1', items: [], bomItems: [],
+                          svcItems: [{ svcIdx: 0, qty: 10, price: 16.5 }, { svcIdx: 0, qty: 6, price: 16.5 }],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.qFabMode = 'services';
+            w.qClientSupplyMat = true;
+            w.qClientMatMultOverride = 1.2;
+            w.qClientMatSvcExcl = {};
+            w.renderClientMatSection();
+            const s1Body = document.getElementById('client-mat-body').innerHTML;
+            const s2Toggle = document.getElementById('fq-client-mat-toggle');
+            const s2Body = document.getElementById('fq-client-mat-body').innerHTML;
+            return {
+              s2ToggleReflectsSharedState: s2Toggle.checked === true,
+              s2CountsItsOwnTwoLines: s2Body.includes('of 2 lines'),
+              s1CountsItsOwnOneLine: s1Body.includes('of 1 lines'),
+              s2NotJustACopyOfS1: s2Body !== s1Body,
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.fqAreas = saved.fqAreas; w.qFabMode = saved.qFabMode;
+            w.qClientSupplyMat = saved.qClientSupplyMat; w.qClientMatSvcExcl = saved.qClientMatSvcExcl;
+            w.qClientMatMultOverride = saved.qClientMatMultOverride; w.SERVICES = saved.SERVICES;
+            w.renderClientMatSection();
+          }
+        }, { s2ToggleReflectsSharedState: true, s2CountsItsOwnTwoLines: true,
+             s1CountsItsOwnOneLine: true, s2NotJustACopyOfS1: true });
+      /* Same report, the other half: the Stage 2 row's own uplift checkbox (already shipped
+         2026-08-25 earlier this session) must refresh STAGE 2's grid/price when toggled, not
+         Stage 1's -- clicking it lives inside #fq-items-wrap, rendered with _rndFq=true, so its
+         onchange has to travel through _hEdit/_fqEdit like every other Stage 2 row mutator, or
+         the checkbox would silently repaint the wrong stage. Drives the REAL renderer
+         (renderFQItems -> the actual #fq-items-wrap markup), not _hEdit in isolation -- _hEdit
+         itself already worked before today, so testing it alone would pass whether or not the
+         checkbox's own onchange string was ever wrapped with it. */
+      if (typeof window.renderFQItems === 'function' && document.getElementById('fq-items-wrap'))
+        check('the Stage 2 row itself emits a checkbox wrapped for its own stage, not Stage 1', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, fqAreas: w.fqAreas, qFabMode: w.qFabMode,
+                           qClientSupplyMat: w.qClientSupplyMat, qClientMatSvcExcl: w.qClientMatSvcExcl,
+                           SERVICES: w.SERVICES };
+          try {
+            w.SERVICES = [{ name: 'Cutting MDF/PB/Plywood', price: 16.5, unit: 'lm' }];
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.fqAreas = [{ name: 'Area 1', items: [], bomItems: [],
+                          svcItems: [{ svcIdx: 0, qty: 10, price: 16.5 }],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.qFabMode = 'services';
+            w.qClientSupplyMat = true;
+            w.qClientMatSvcExcl = {};
+            w.renderFQItems();
+            const wrap = document.getElementById('fq-items-wrap').innerHTML;
+            const checkboxTag = (wrap.match(/<input type="checkbox"[^>]*onchange="[^"]*"[^>]*title="Apply[^>]*>/) || [''])[0];
+            return {
+              foundACheckbox: checkboxTag.length > 0,
+              routesThroughFqEdit: checkboxTag.includes('_fqEdit('),
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.fqAreas = saved.fqAreas; w.qFabMode = saved.qFabMode;
+            w.qClientSupplyMat = saved.qClientSupplyMat; w.qClientMatSvcExcl = saved.qClientMatSvcExcl;
+            w.SERVICES = saved.SERVICES;
+            w.renderFQItems();
+          }
+        }, { foundACheckbox: true, routesThroughFqEdit: true });
       return out;
     }
   },
