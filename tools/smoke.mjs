@@ -1019,6 +1019,67 @@ const PROFILES = {
           }
         }, { idsDiffer: true, idStableOnRepeat: true, bothUpliftedByDefault: true,
              rowAStillUplifted: true, rowBNoLongerUplifted: true });
+      /* Rommel, 2026-08-25 (follow-up): the checkbox alone didn't say which line the uplift was
+         on at a glance. "(Client-supplied material)" is now appended to the service NAME on the
+         printout -- By area mode's per-line scope text and the itemized Services/Materials/
+         Hardware table -- for whichever specific line carries it, auto-derived from
+         clientMatMultFor() so it can never disagree with the checkbox. By cabinet type mode groups
+         same-named services across areas and is deliberately left untouched (no single line to
+         attach a note to for a mixed group) -- Lump sum doesn't itemize services at all. */
+      if (typeof window.buildPrintRows === 'function' && typeof window._svcUplId === 'function')
+        check('buildPrintRows (by area): the note attaches to the uplifted line only, not its excluded twin', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qClientSupplyMat: w.qClientSupplyMat,
+                           qClientMatSvcExcl: w.qClientMatSvcExcl, qClientMatMultOverride: w.qClientMatMultOverride,
+                           SERVICES: w.SERVICES };
+          try {
+            w.SERVICES = [{ name: 'Cutting MDF/PB/Plywood', price: 16.5, unit: 'lm' }];
+            const rowA = { svcIdx: 0, qty: 10, price: 16.5 };   // client-supplied board
+            const rowB = { svcIdx: 0, qty: 5, price: 16.5 };    // company-supplied board
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [rowA, rowB],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.qFabMode = 'services';
+            w.qClientSupplyMat = true;
+            w.qClientMatMultOverride = 1.2;
+            w.qClientMatSvcExcl = {};
+            const idB = w._svcUplId(rowB);
+            w.qClientMatSvcExcl[idB] = true;   // exclude row B only
+            const html = w.buildPrintRows('area', null, null);
+            const noteCount = (html.match(/\(Client-supplied material\)/g) || []).length;
+            return { noteCount, rowAQtyPresent: html.includes('10 lm Cutting') };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.qClientSupplyMat = saved.qClientSupplyMat;
+            w.qClientMatSvcExcl = saved.qClientMatSvcExcl; w.qClientMatMultOverride = saved.qClientMatMultOverride;
+            w.SERVICES = saved.SERVICES;
+          }
+        }, { noteCount: 1, rowAQtyPresent: true });
+      if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUplId === 'function')
+        check('buildItemizedPrintRows: the note attaches to the uplifted line only, not its excluded twin', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qClientSupplyMat: w.qClientSupplyMat,
+                           qClientMatSvcExcl: w.qClientMatSvcExcl, qClientMatMultOverride: w.qClientMatMultOverride,
+                           SERVICES: w.SERVICES };
+          try {
+            w.SERVICES = [{ name: 'Cutting MDF/PB/Plywood', price: 16.5, unit: 'lm' }];
+            const rowA = { svcIdx: 0, qty: 10, price: 16.5 };
+            const rowB = { svcIdx: 0, qty: 5, price: 16.5 };
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [rowA, rowB],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.qFabMode = 'services';
+            w.qClientSupplyMat = true;
+            w.qClientMatMultOverride = 1.2;
+            w.qClientMatSvcExcl = {};
+            const idB = w._svcUplId(rowB);
+            w.qClientMatSvcExcl[idB] = true;
+            const html = w.buildItemizedPrintRows(false, null, null);
+            const noteCount = (html.match(/\(Client-supplied material\)/g) || []).length;
+            return { noteCount };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.qClientSupplyMat = saved.qClientSupplyMat;
+            w.qClientMatSvcExcl = saved.qClientMatSvcExcl; w.qClientMatMultOverride = saved.qClientMatMultOverride;
+            w.SERVICES = saved.SERVICES;
+          }
+        }, { noteCount: 1 });
       return out;
     }
   },
