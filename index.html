@@ -28761,6 +28761,23 @@ function _priceDbStaleNote(){
     +' Ask an Admin to run Settings → Price Database → <b>Sync now</b>.'
     +'</div>';
 }
+// Rommel, 2026-08-25: price_services was silently wiped from ~60 real rows to 6 generic
+// defaults — traced to this exact function. It reads all four Price DB tabs live off the Sheets
+// API and calls supaReplaceTable (DELETE all + INSERT) unconditionally on whatever came back, no
+// matter how small. Any edit ANYWHERE in the spreadsheet bumps the whole file's modifiedTime,
+// which is what wakes this sync up in the first place — so a read caught while someone is
+// actively editing a DIFFERENT tab (Cabinet Templates, in this incident) is exactly the moment
+// the Sheets API is most likely to hand back an incomplete range. Only price_materials had any
+// after-the-fact check, and even that only verifies Supabase received what THIS READ intended —
+// it does nothing if the read itself was the truncated part, which is what actually happened.
+//
+// A genuine edit can remove a handful of rows. It cannot legitimately remove most of a table in
+// one sync. So every table gets the same rule now: refuse to replace it with something under
+// half of what is already there, before a single row is deleted — not after.
+function _syncLooksSafe(incomingCount,currentCount){
+  if(currentCount==null||currentCount<10) return true;    // nothing meaningful to compare against
+  return incomingCount>=currentCount*0.5;
+}
 function supaMigratePriceDb(){
   if(_priceDbMigrationInFlight){ console.warn('[migrate] already running — wait for the "Price DB backfill done" log before running this again.'); return Promise.resolve(null); }
   if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
@@ -28774,51 +28791,63 @@ function supaMigratePriceDb(){
     priceDbGet('Services!A:C')
   ]).then(function(results){
     var matData=results[0], hwData=results[1], tplData=results[2], svcData=results[3];
-    var stats={materials:0,hardware:0,templates:0,services:0};
-    var tasks=[];
-    if(!matData.error&&matData.values){
-      var mats=matData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      stats.materials=mats.length;
-      tasks.push(supaReplaceTable('price_materials',mats));
-    }
-    if(!hwData.error&&hwData.values){
-      var hws=hwData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      stats.hardware=hws.length;
-      tasks.push(supaReplaceTable('price_hardware',hws));
-    }
-    if(!tplData.error&&tplData.values){
-      var tpls=tplData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
-      stats.templates=tpls.length;
-      tasks.push(supaReplaceTable('cabinet_templates',tpls));
-    }
-    if(!svcData.error&&svcData.values){
-      var svcs=svcData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      stats.services=svcs.length;
-      tasks.push(supaReplaceTable('price_services',svcs));
-    }
-    return Promise.all(tasks).then(function(){
-      // ⚠ supaReplaceTable DELETES then inserts in chunks. Anything that interrupts it — a closed
-      // tab, a dropped connection, a rate limit — leaves the table truncated, and the rows it did
-      // write carry a NEW timestamp. So a half-finished sync looks FRESH to _checkPriceDbFreshness
-      // and gets served to everyone: on 2026-08-12 that left 5,000 of ~145,000 materials in place,
-      // which is worse than the stale copy it replaced. Freshness is not completeness.
-      //
-      // So the sync records how many rows it should have written, and the loader refuses a mirror
-      // that does not match. Written only after the inserts resolve, so an interrupted sync leaves
-      // the OLD marker in place and the mismatch is caught on the next load.
-      return supa.from('price_materials').select('id',{count:'exact',head:true}).then(function(c){
-        var actual=(c&&typeof c.count==='number')?c.count:null;
-        if(actual!=null&&stats.materials&&actual<stats.materials){
-          console.warn('[migrate] INCOMPLETE — wrote '+actual+' of '+stats.materials+' materials. '
-            +'Not marking the mirror usable; the app will keep reading the sheet until a full sync '
-            +'succeeds.');
-          stats.incomplete=true;
-          return stats;      // marker deliberately NOT written
+    var stats={materials:0,hardware:0,templates:0,services:0,refused:[]};
+    // Parsed first, nothing written yet — table -> the rows this sync WOULD write.
+    var parsed={};
+    if(!matData.error&&matData.values) parsed.price_materials=matData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+    if(!hwData.error&&hwData.values) parsed.price_hardware=hwData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+    if(!tplData.error&&tplData.values) parsed.cabinet_templates=tplData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
+    if(!svcData.error&&svcData.values) parsed.price_services=svcData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
+    var statKeys={price_materials:'materials',price_hardware:'hardware',cabinet_templates:'templates',price_services:'services'};
+    var tableKeys=Object.keys(parsed);
+    // Current row count per table, fetched BEFORE anything is deleted — the check this whole
+    // function exists for.
+    return Promise.all(tableKeys.map(function(t){
+      return supa.from(t).select('id',{count:'exact',head:true})
+        .then(function(r){ return (r&&typeof r.count==='number')?r.count:null; },function(){ return null; });
+    })).then(function(counts){
+      var tasks=[];
+      tableKeys.forEach(function(t,i){
+        var incoming=parsed[t], currentCount=counts[i];
+        if(!_syncLooksSafe(incoming.length,currentCount)){
+          console.warn('[migrate] REFUSED to replace '+t+' — the sheet read only '+incoming.length
+            +' row(s), but Supabase currently holds '+currentCount+'. Left untouched: this looks '
+            +'like a bad read (the spreadsheet was mid-edit, or a tab got cleared by mistake), not '
+            +'a real catalogue change. Confirm the sheet is correct, then re-run.');
+          stats.refused.push({table:t,incoming:incoming.length,current:currentCount});
+          return;
         }
-        return supaUpsertSetting('PRICEDB_MATERIALS_COUNT',{count:stats.materials,at:new Date().toISOString()})
-          .then(function(){ console.log('[migrate] Price DB backfill done:',stats); return stats; },
-                function(){ console.log('[migrate] Price DB backfill done (marker not saved):',stats); return stats; });
-      },function(){ console.log('[migrate] Price DB backfill done (count unverified):',stats); return stats; });
+        stats[statKeys[t]]=incoming.length;
+        tasks.push(supaReplaceTable(t,incoming));
+      });
+      if(stats.refused.length&&typeof logActivity==='function')
+        logActivity('Price catalogue sync refused for '+stats.refused.map(function(r){
+          return r.table+' ('+r.incoming+' of '+r.current+' rows)';
+        }).join(', ')+' — looked like a bad read, not a real change. Nothing was overwritten.');
+      return Promise.all(tasks).then(function(){
+        // ⚠ supaReplaceTable DELETES then inserts in chunks. Anything that interrupts it — a closed
+        // tab, a dropped connection, a rate limit — leaves the table truncated, and the rows it did
+        // write carry a NEW timestamp. So a half-finished sync looks FRESH to _checkPriceDbFreshness
+        // and gets served to everyone: on 2026-08-12 that left 5,000 of ~145,000 materials in place,
+        // which is worse than the stale copy it replaced. Freshness is not completeness.
+        //
+        // So the sync records how many rows it should have written, and the loader refuses a mirror
+        // that does not match. Written only after the inserts resolve, so an interrupted sync leaves
+        // the OLD marker in place and the mismatch is caught on the next load.
+        return supa.from('price_materials').select('id',{count:'exact',head:true}).then(function(c){
+          var actual=(c&&typeof c.count==='number')?c.count:null;
+          if(actual!=null&&stats.materials&&actual<stats.materials){
+            console.warn('[migrate] INCOMPLETE — wrote '+actual+' of '+stats.materials+' materials. '
+              +'Not marking the mirror usable; the app will keep reading the sheet until a full sync '
+              +'succeeds.');
+            stats.incomplete=true;
+            return stats;      // marker deliberately NOT written
+          }
+          return supaUpsertSetting('PRICEDB_MATERIALS_COUNT',{count:stats.materials,at:new Date().toISOString()})
+            .then(function(){ console.log('[migrate] Price DB backfill done:',stats); return stats; },
+                  function(){ console.log('[migrate] Price DB backfill done (marker not saved):',stats); return stats; });
+        },function(){ console.log('[migrate] Price DB backfill done (count unverified):',stats); return stats; });
+      });
     });
   }).catch(function(e){
     console.warn('[migrate] Price DB backfill failed',e);

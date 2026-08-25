@@ -1166,6 +1166,42 @@ const PROFILES = {
             w.renderFQItems();
           }
         }, { foundACheckbox: true, routesThroughFqEdit: true });
+      /* Rommel, 2026-08-25: price_services was silently wiped from ~60 real rows down to 6
+         generic defaults ("Panel cutting", "Edgebanding", ...), then it happened AGAIN after he
+         restored the sheet -- traced to supaMigratePriceDb() reading the Price DB tabs live off
+         the Sheets API and calling supaReplaceTable (DELETE-all + INSERT) unconditionally on
+         whatever came back, however small. Any edit anywhere in that spreadsheet bumps the whole
+         file's modifiedTime, which is what wakes the sync up -- so a read caught while someone is
+         actively editing a DIFFERENT tab (Cabinet Templates, per his report) is exactly the moment
+         the Sheets API is most likely to hand back an incomplete range, and nothing checked the
+         READ's plausibility before it became a permanent DELETE.
+         Two things proven here: the pure guard function's own boundaries, AND that it is actually
+         WIRED into supaMigratePriceDb (not just defined and orphaned) -- the exact class of bug
+         where a fix looks shipped in a diff but the call site was never updated. */
+      if (typeof window._syncLooksSafe === 'function')
+        check('_syncLooksSafe: refuses a drastic collapse, allows a real edit or a fresh table', () => {
+          const w = window;
+          return {
+            theActualIncident: w._syncLooksSafe(6, 60) === false,
+            aRealSmallEdit: w._syncLooksSafe(58, 60) === true,        // removed 2 real duplicate rows
+            aRealBigEdit: w._syncLooksSafe(150000, 153000) === true,  // cleaned up ~2% of Materials
+            totalWipeout: w._syncLooksSafe(0, 60) === false,
+            freshEmptyTable: w._syncLooksSafe(60, 0) === true,        // nothing to compare against yet
+            smallTableNoBasis: w._syncLooksSafe(1, 5) === true,       // currentCount<10 -- not enough to judge
+            countUnknown: w._syncLooksSafe(6, null) === true,         // count query itself failed -- fail open, not closed
+          };
+        }, { theActualIncident: true, aRealSmallEdit: true, aRealBigEdit: true, totalWipeout: true,
+             freshEmptyTable: true, smallTableNoBasis: true, countUnknown: true });
+      if (typeof window.supaMigratePriceDb === 'function')
+        check('supaMigratePriceDb source actually calls the guard before replacing a table (not orphaned)', () => {
+          const src = window.supaMigratePriceDb.toString();
+          return {
+            callsGuardBeforeDecidingTasks: src.indexOf('_syncLooksSafe(') > -1,
+            // The guard has to run BEFORE supaReplaceTable, not after -- refusing after the delete
+            // already happened protects nothing.
+            guardPrecedesReplace: src.indexOf('_syncLooksSafe(') < src.indexOf('supaReplaceTable('),
+          };
+        }, { callsGuardBeforeDecidingTasks: true, guardPrecedesReplace: true });
       return out;
     }
   },
