@@ -8554,7 +8554,7 @@ are unchanged and still pending, in that order, once the device test above confi
 
 ---
 
-# OPEN — updated 2026-08-19 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-08-19 (session end) — SUPERSEDED by the 2026-08-24/25 list at the end of this file, kept for detail
 > The 2026-08-18 list above is superseded but not stale — read it for anything not covered here.
 > This session did not touch the Custom Report Export, the Wufoo key, the two `needs_human`
 > tickets, or the mobilization-zero report — they are carried forward UNVERIFIED, not re-confirmed.
@@ -8914,3 +8914,218 @@ should treat this as re-opening the conversation from scratch — bring a clear 
 (ideally with real numbers off a real quotation, and possibly a mockup/table rather than prose) so
 he can see the whole shape of it before deciding whether it's worth touching at all.
 fields, plus `orion-fix-actions.jsonl` on the machine that ran it for the update-by-update trail.
+
+## What was changed on 2026-08-24/25 (session — 4 real bugs fixed: dead-end approvals, wrong-SKU catalogue matching, a several-minute freeze, and a stale Stage-2 option breakdown)
+
+Four separate live-app reports from Rommel, each investigated by driving the real code against
+real production data (Supabase queries, then a Playwright/jsdom reproduction of the actual
+functions) rather than guessed — the "By cabinet type" materials-weight item from the top of this
+file stayed on hold throughout, untouched. All four fixes shipped, deployed, and confirmed live.
+
+### 1. A discount/override request raised before the first save threw a raw popup at the approver
+Rommel saw the app pop `alert("No saved state found for —.")` on the Orders page. Traced via a
+live Supabase query (not guessed): a discount request from `designer-ce1` (Joanna) had `serial='—'`
+— raised 26 minutes *before* she ever saved the quotation for the first time, since a quotation has
+no real serial until its first save (per the 2026-08-11 "draft has no number" architecture). The
+app already had a guard for exactly this shape in the phone-decision auto-apply loop
+(`_apprApplyRemoteDecisions`), but the DIRECT approve-button path (`doApprovalAction`,
+`_markOverrideApproved`, `confirmSignature`) had no such guard — approving one tries to write into
+a quotation identity that was never real, and `loadQuotationJson('—', …)` hits the raw alert.
+
+**Rommel's decision: require a save first**, matching how signature requests already require
+locking. New `_requireSavedForRequest()` (checks `!qDraftKey`), wired into the four request entry
+points that create a *routed* request — `onDiscRequest`, `fqOnDiscRequest`, `openCustomCF`,
+`fqOpenCustomCF` — all in their non-approver (`else`) branch only. **Self-approval via PIN is
+untouched** — that path never creates a routed `approval_requests` row, so there is nothing to lose
+track of. Shows a toast, not the raw alert, when blocked.
+
+Reproduce-first checks in `tools/smoke.mjs`, confirmed failing pre-fix / passing post-fix.
+Commit `cd279ae`.
+
+### 2. Cutting-list catalogue matching substituted the wrong SKU, and froze for several minutes
+Two independent bugs found in the same investigation, reported together: exporting a **typed**
+cutting list (Designers Support → Cutting List tab, `MCL.load()`) into Shop Drawing Analysis
+returned **"Dark Emperado/Light Gray MDF 4x8 2F (18mm, Stipple)"** for a panel Rommel had typed as
+**"Light Cherry MDF 4x8 2F (18mm, Stipple)"** — confirmed against the live catalogue that the exact
+SKU he typed genuinely exists (`price_materials`, 153,379 rows).
+
+**Root cause (wrong SKU):** `_cutListToAnalysis`'s typed-label branch (no website `" — SKU"`
+separator to split on) dumped the WHOLE material string into the component's `color` field —
+substrate, board size, thickness and texture all duplicated inside it — producing one garbled,
+self-duplicating search query ("MDF Light Cherry MDF 4x8 2F (18mm, Stipple) (stipple) 18mm 2F").
+That noise let an unrelated colour win on nothing but the shared generic word "light". Fixed to use
+the same field parser (`_prodParseMaterialDescriptor`) faces already used, so colour is only what's
+left after substrate/faces/texture/thickness are recognised and stripped — matching the
+website-composite-label branch's own logic, just applied to the no-separator case.
+
+**Confidence gate, per Rommel's explicit instruction — "Confidence level should be at 100% in
+regards to the sku":** being the *only* candidate within scoring range was previously treated as a
+confident, no-review match — which is how the wrong colour won even after the query is clean, if
+two candidates ever land close. New `_prodIsExactFieldMatch(qDesc,cDesc)`: a lone candidate is now
+only auto-accepted when every field the query specifies (substrate/faces/texture/thickness) agrees
+exactly AND every colour word in the query is present in the candidate — otherwise it's flagged for
+review, same as 2+ candidates always were.
+
+**Root cause (freeze):** `_prodParseMaterialDescriptor` runs once per catalogue item inside
+`_prodFindCatalogMatches` — with 153k+ rows, it was rebuilding ~33 `RegExp` objects **from scratch,
+on every single call**, none of which ever change between calls. Millions of regex compilations,
+synchronously, one thread — exactly "the browser froze for several minutes." Fixed by precompiling
+`PROD_SUBSTRATE_RE`/`PROD_TEXTURE_RE` once at module load and reusing them.
+
+A wall-clock timing regression check was tried first for the freeze and **rejected** — V8 compiles
+simple regexes fast enough that even the unfixed rebuild-every-call version cleared any
+CI-safe threshold, so it silently failed to reproduce the bug at all. Replaced with a check that
+counts actual `new RegExp(...)` calls via a swapped global constructor — deterministic regardless
+of machine speed. All reproduce-first checks in `tools/smoke.mjs` confirmed failing pre-fix,
+passing post-fix. Commits `169a498` (wrong-SKU fix), `b5c13b2` (freeze fix).
+
+### 3. Printout layout — Customer-Supplied Materials moved above Payment Terms
+Rommel: move it to right under the total, since it was printing after General Terms & Conditions
+and reading as an afterthought. Pure layout reorder inside `_buildPrintBodyCore()` — no pricing or
+logic touched, applies to every quotation on next print (one shared print-body builder for both
+stages, preview/PDF/Drive-save alike). Commit `c6e45ab`.
+
+### 4. A newly-created quotation option kept the SOURCE option's Stage-2 breakdown forever
+The session's deepest investigation. Rommel: on QT-C00000006 (Fortune Builders), the "By cabinet
+type" print view for **Option 3** showed **Option 2's** exact 7-row cabinet breakdown (same
+quantities, even a row — "Base Cabinet (Shelves)" — that doesn't exist in Option 3 at all) while
+the total price correctly differed between options. First reported as "no. of units the same
+between options"; re-investigated properly once Rommel clarified *"Its like the quantity or no. of
+units was just copied from option 2"* and *"I made hard refresh already but still the same."*
+
+**Method, not guesswork:** pulled the quotation's real saved `optionsList` from Supabase and drove
+the actual `printSwitchOption`/`restoreFullQuotationState`/`buildPrintRows` functions in a
+Playwright/jsdom harness against that exact data — confirming step by step that `qAreas` correctly
+switches (proven via `restoreFullQuotationState` + `printSwitchOption`), that calling
+`buildPrintRows`/`_buildPrintBodyCore` DIRECTLY gives the correct Option-3-shaped result, but that
+calling the full wrapped `_buildPrintBody()` (what `printSwitchOption` actually calls) reproduces
+the exact staleness. That isolated the fault to `_buildPrintBody`'s `qStage===2 ? _withFQAreas(fn)
+: fn()` wrapper — this quotation is on **Stage 2**, so print reads `fqAreas` (the Final Quotation's
+own scope copy), not the live `qAreas` Stage-1 form.
+
+**Root cause, confirmed directly against the saved data:** Option 3's own saved `fqAreas` was
+byte-identical to Option 2's — 7 items, same quantities — never independently forked. Traced to
+`_doCreateNewOption()`: creating a new option copies the CURRENT option's whole state via
+`captureQuotationSnapshot()`, including `fqScopeForked` — a flag meant to record "someone
+deliberately edited THIS option's Final Quotation separately from its Initial Quotation." Inherited
+wholesale onto a brand-new option, it lies: nobody has done that for the new option yet.
+`_forkFQScope()`'s own guard (`if(fqScopeForked && fqAreas) return;`) then reads the inherited flag
+as "already forked, nothing to do," and never re-derives Stage 2 from the new option's own later
+Stage-1 edits — even though `initFinalQuotation()`/`_forkFQScope()` DOES run every time Stage 2 is
+entered for a freshly-switched-to option (`restoreQuotationSnapshot` always resets
+`fqInitialized=false` on switch, specifically for this reason).
+
+**Fix:** `_doCreateNewOption()` now resets `newSnap.fqAreas=null; newSnap.fqScopeForked=false;` on
+the brand-new option, so Stage 2 keeps mirroring Stage 1 (the documented default, per
+`_forkFQScope`'s own comment) until that specific option's Stage 2 is genuinely, independently
+touched — at which point `_forkFQScope()` forks fresh from THAT option's current scope, correctly.
+
+**Data repair, this quotation only** — per Rommel's explicit "proceed with 1" (fix the printout;
+general recurrence prevention is the software fix above, which he separately asked for even though
+he said he "cannot understand" my framing of it as item 2): Supabase `quotation_states` for
+`QT-C00000006`, `optionsList[1]` (id=3)'s `snapshot.fqAreas` set to `null` and `snapshot.
+fqScopeForked` set to `false` via `jsonb_set`, verified by reading it back and confirming Option 2
+(untouched: `fqScopeForked:true`, `grand` unchanged) alongside Option 3 (corrected). **No other
+quotation was touched** — this was a single, targeted, verified UPDATE on one record.
+
+Reproduce-first check in `tools/smoke.mjs` simulates the exact real scenario (a Stage-2 quotation,
+a new option created from it, that option's Stage-1 scope edited afterward, print reads
+`_withFQAreas`) and confirms it now sees the live edited scope. Confirmed failing pre-fix, passing
+post-fix. Commit `3fd3b1d`.
+
+### Also this session, no code change
+Answered a question about the Cutting List tab (Designers Support): both paste-into-cell
+(`MCL.onCellPaste`) and "Upload filled Excel" (`MCL.uploadExcel`) already auto-grow the row count
+to match however much data comes in — the 10 starting blank rows are just a default, not a cap.
+Confirmed by reading the code; no bug, nothing shipped.
+
+### Method notes worth keeping
+- **"I found no bug when I tested this directly" was true and also incomplete, twice in one
+  investigation.** The option-switching function tested correctly in isolation; the bug only
+  reproduced once the REAL load path (`restoreFullQuotationState`, not a hand-built equivalent) was
+  driven, because the stale data lived in a field (`fqAreas`) the manual test setup never exercised
+  the same way. When a direct test says "no bug" but the user insists it's real and reproducible,
+  the next move is a MORE faithful reproduction, not a conclusion that the user is mistaken.
+- **A wall-clock timing check can silently fail to catch the exact bug it was written for.** V8's
+  regex compiler is fast enough that an unfixed 20,000-call loop cleared a 5-second threshold with
+  room to spare. Counting the actual operation (via a swapped constructor) instead of timing it is
+  the deterministic, machine-independent way to prove a fix that a naive benchmark can miss
+  entirely — confirmed by deliberately re-testing the timing version against the pre-fix code and
+  watching it pass when it should have failed.
+- **Rommel's own words settled two genuine ambiguities.** "Confidence level should be at 100%"
+  turned a vague "improve the matching" ask into a precise, implementable rule. And re-reading his
+  exact phrasing ("if there's an issue on the stage 2 breakdown it should also be corrected if move
+  to stage") after he said he didn't follow my own framing of the general-fix question is what
+  produced the right scoped fix — his instinct (fix it structurally, tied to moving into Stage 2)
+  was more precise than the two options I'd offered him.
+- **Supabase MCP truncates large query results to a file automatically** (over ~30k tokens) — the
+  file path is given in the tool result; slice it with a small Node/Python script rather than
+  re-querying with a narrower `select` when the FULL nested structure is what's actually needed for
+  a faithful reproduction (as it was here, three times, for increasingly complete option snapshots).
+- Scratch diagnostic scripts (`scratch_*.mjs`, `scratch_*.json`) were written to the repo root for
+  each reproduction and deleted immediately after use — never committed, confirmed via
+  `git status --short` before each commit.
+
+# OPEN — updated 2026-08-24/25 (session end) — THIS IS THE AUTHORITATIVE LIST
+> The 2026-08-19 list above is superseded but not stale — read it for anything not covered here.
+> This session did not touch the Custom Report Export, the Wufoo key, the two carried-forward
+> tickets, the mobilization-zero report, or the two adoption habits — all carried forward
+> UNVERIFIED, not re-confirmed. This session's own four fixes are all confirmed live.
+
+## ⏸ STILL ON HOLD — "By cabinet type" print mode, materials/hardware weight in cutting-list mode
+See the "PUT ON HOLD 2026-08-22" entry earlier in this file for the full context. Rommel does not
+yet see this as a live problem and wants a clearer overall picture (real numbers off a real
+quotation, ideally a table/mockup rather than prose) before deciding whether it is even worth
+touching. **Do not build any of the three previously-discussed options without walking him through
+it again from scratch and getting an explicit go-ahead.** This is a DIFFERENT bug from the Option
+2/3 stale-breakdown issue fixed this session (item 4 above) — do not conflate the two if either
+comes up again; they share only the "By cabinet type" print mode as a surface, not a root cause.
+
+## Confirmed done this session — do not re-raise
+- Discount/override request raised before the first save now refused with a toast, not a raw
+  browser alert (`cd279ae`).
+- Cutting-list catalogue matching: the colour-field corruption for typed (no-separator) material
+  labels, and the "only one candidate = confident" rule that let a coincidental word match win
+  (`169a498`).
+- The several-minute freeze on "Load into analysis" for a typed cutting list — precompiled
+  catalogue-matching regexes (`b5c13b2`).
+- Customer-Supplied Materials moved above Payment Terms on the printout (`c6e45ab`).
+- A newly-created quotation option inheriting its source option's stale Stage-2 (Final Quotation)
+  breakdown — software fix (`3fd3b1d`) plus a one-time data repair on QT-C00000006's Option 3.
+  **If this shape of bug is ever reported again on a DIFFERENT quotation created BEFORE this fix
+  shipped (2026-08-24/25), the same data repair pattern applies**: find the affected option's array
+  index in `quotation_states.state.optionsList`, then `jsonb_set` its `snapshot.fqAreas` to `null`
+  and `snapshot.fqScopeForked` to `false` — do NOT hand-compute a "corrected" fqAreas; letting
+  `fqAreas=null` fall through to the live `qAreas` (via `_withAreas`'s `if(!arr...)` guard) is exact
+  by construction, whereas a hand-computed copy could drift from whatever `_forkFQScope()` would
+  produce.
+
+## Still open, unverified this session — re-check before acting on any of these
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed. Body: *"When they create an option 2, the option 2 is named under the project name which
+  makes no sense. It has no relevance on the naming."*
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced despite investigation. If it recurs, get three things before
+  touching code: which stage (1 or 2), the exact field, and whether it followed an option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures; this session did not touch either.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20 while verifying the Custom Report Export
+  was already fixed — see that entry). Nobody has asked for this yet; flagged so it is not
+  rediscovered from scratch. `index.html` ~lines 9708, 9719, 12952, 12980, 13320, 13332, 13347, and
+  a demo-data fallback at ~22257 when `dirData` is empty.
+
+## Standing rules reinforced this session — do not undo
+- **Drive real functions against real production data, not a hand-built equivalent of them**, when
+  a direct test of the suspected function says "no bug" but the report is specific and repeated —
+  the Option 2/3 investigation only found the actual fault once the REAL load path
+  (`restoreFullQuotationState`) was used instead of a manually-assembled stand-in.
+- **A timing-based regression check can pass on genuinely broken code.** Count the actual operation
+  (function calls, object constructions) instead of wall-clock time wherever the fix's whole point
+  is "stop doing an expensive operation redundantly" — a fast machine or fast JIT can clear any
+  CI-safe time threshold even unfixed.
+- **When a data-repair pattern might recur, write down the reusable version of it**, not just what
+  was done to the one record — see the Option 3 fqAreas repair note above.
