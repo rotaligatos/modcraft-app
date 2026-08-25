@@ -1341,6 +1341,110 @@ const PROFILES = {
             bodyDoesTheRealWork: bodySrc.indexOf('priceDbClear(') > -1 && bodySrc.indexOf('supaReplaceTable(') > -1,
           };
         }, { entryAsksConfirmFirst: true, entryItselfHasNoDestructiveCall: true, bodyDoesTheRealWork: true });
+      /* Rommel: "Make sure nothing is left." Re-swept the whole file for every priceDbClear(
+         /supaReplaceTable( call site after the first three fixes -- four more shared the exact
+         same gap: the one-time Pending Orders and Logistics DB backfills, and the two Logistics
+         DB "Save Materials"/"Save Trucks" buttons. Lower real-world risk (Logistics DB has never
+         actually been connected; the Orders backfill is a manual one-time console command), but
+         the same class of bug, so guarded the same way rather than left as a judgement call. */
+      if (typeof window.supaMigrateLogisticsDb === 'function')
+        await (async () => {
+          const w = window;
+          const saved = { gToken: w.gToken, supa: w.supa, logDbGet: w.logDbGet, supaReplaceTable: w.supaReplaceTable,
+                           supaReady: w.supaReady, LOGISTICS_DB_ID: w.LOGISTICS_DB_ID, _logisticsDbMigrationInFlight: w._logisticsDbMigrationInFlight };
+          let destructiveCallCount = 0;
+          w.gToken = 'test-token'; w.supaReady = () => true; w.LOGISTICS_DB_ID = 'test-sheet-id';
+          w._logisticsDbMigrationInFlight = false;
+          w.supaReplaceTable = () => { destructiveCallCount++; return Promise.resolve(); };
+          const mkSheetRows = (n) => [['Name']].concat(Array.from({ length: n }, (_, i) => ['Row ' + i]));
+          try {
+            // 1) The sheet read comes back with only 3 rows; Supabase already holds 50. Refuse.
+            destructiveCallCount = 0;
+            w.logDbGet = () => Promise.resolve({ values: mkSheetRows(3) });
+            w.supa = { from: () => ({ select: () => Promise.resolve({ count: 50 }) }) };
+            await w.supaMigrateLogisticsDb();
+            const refusedWhenCollapsed = destructiveCallCount === 0;
+            // 2) A genuine full read (50 rows in, 50 already there) -- proceeds.
+            destructiveCallCount = 0;
+            w.logDbGet = () => Promise.resolve({ values: mkSheetRows(50) });
+            w.supa = { from: () => ({ select: () => Promise.resolve({ count: 50 }) }) };
+            await w.supaMigrateLogisticsDb();
+            const proceedsOnRealSync = destructiveCallCount > 0;
+            check('supaMigrateLogisticsDb: refuses a collapsed sheet read, same as the Price DB migration',
+              () => ({ refusedWhenCollapsed, proceedsOnRealSync }),
+              { refusedWhenCollapsed: true, proceedsOnRealSync: true });
+          } finally {
+            w.gToken = saved.gToken; w.supa = saved.supa; w.logDbGet = saved.logDbGet;
+            w.supaReplaceTable = saved.supaReplaceTable; w.supaReady = saved.supaReady;
+            w.LOGISTICS_DB_ID = saved.LOGISTICS_DB_ID; w._logisticsDbMigrationInFlight = saved._logisticsDbMigrationInFlight;
+          }
+        })();
+      if (typeof window._logSaveMats === 'function')
+        await (async () => {
+          const w = window;
+          const saved = { LOGISTICS_DB_ID: w.LOGISTICS_DB_ID, logisticsDb: w.logisticsDb, supa: w.supa,
+                           supaReady: w.supaReady, supaReplaceTable: w.supaReplaceTable, logDbClear: w.logDbClear,
+                           logDbUpdate: w.logDbUpdate, _logEnsureSheetTabs: w._logEnsureSheetTabs, showToast: w.showToast };
+          let destructiveCallCount = 0;
+          w.LOGISTICS_DB_ID = 'test-sheet-id'; w.supaReady = () => true; w.showToast = () => {};
+          w.logDbClear = () => { destructiveCallCount++; return Promise.resolve(); };
+          w.logDbUpdate = () => { destructiveCallCount++; return Promise.resolve({}); };
+          w.supaReplaceTable = () => { destructiveCallCount++; return Promise.resolve(); };
+          w._logEnsureSheetTabs = (needed, cb) => cb();
+          const mkMats = (n) => Array.from({ length: n }, (_, i) => ({ name: 'M' + i, boardSize: '4x8', lengthMm: 1220, widthMm: 2440, thicknessMm: 18, weightKg: 40, cbm: 0.1, notes: '' }));
+          try {
+            // 1) The working copy has 2 materials; Supabase already holds 40. Refuse.
+            destructiveCallCount = 0;
+            w.logisticsDb = { materials: mkMats(2), trucks: [] };
+            w.supa = { from: () => ({ select: () => Promise.resolve({ count: 40 }) }) };
+            await w._logSaveMats();
+            await new Promise((r) => setTimeout(r, 0));
+            const refusedWhenCollapsed = destructiveCallCount === 0;
+            // 2) A genuine save (40 in the working copy, 40 already there) -- proceeds.
+            destructiveCallCount = 0;
+            w.logisticsDb = { materials: mkMats(40), trucks: [] };
+            w.supa = { from: () => ({ select: () => Promise.resolve({ count: 40 }) }) };
+            await w._logSaveMats();
+            await new Promise((r) => setTimeout(r, 0));
+            const proceedsOnRealSave = destructiveCallCount > 0;
+            check('_logSaveMats: refuses to overwrite Logistics Materials with a suspiciously short working copy',
+              () => ({ refusedWhenCollapsed, proceedsOnRealSave }),
+              { refusedWhenCollapsed: true, proceedsOnRealSave: true });
+          } finally {
+            w.LOGISTICS_DB_ID = saved.LOGISTICS_DB_ID; w.logisticsDb = saved.logisticsDb; w.supa = saved.supa;
+            w.supaReady = saved.supaReady; w.supaReplaceTable = saved.supaReplaceTable; w.logDbClear = saved.logDbClear;
+            w.logDbUpdate = saved.logDbUpdate; w._logEnsureSheetTabs = saved._logEnsureSheetTabs; w.showToast = saved.showToast;
+          }
+        })();
+      if (typeof window.supaMigrateOrders === 'function')
+        await (async () => {
+          const w = window;
+          const saved = { gToken: w.gToken, supa: w.supa, sheetsGet: w.sheetsGet, supaReplaceTable: w.supaReplaceTable,
+                           supaReady: w.supaReady, _ordersMigrationInFlight: w._ordersMigrationInFlight };
+          let destructiveCallCount = 0;
+          w.gToken = 'test-token'; w.supaReady = () => true; w._ordersMigrationInFlight = false;
+          w.supaReplaceTable = () => { destructiveCallCount++; return Promise.resolve(); };
+          const mkOrderRows = (n) => [['ID']].concat(Array.from({ length: n }, (_, i) => ['ORD' + i]));
+          try {
+            destructiveCallCount = 0;
+            w.sheetsGet = () => Promise.resolve({ values: mkOrderRows(3) });
+            w.supa = { from: () => ({ select: () => Promise.resolve({ count: 60 }) }) };
+            await w.supaMigrateOrders();
+            const refusedWhenCollapsed = destructiveCallCount === 0;
+            destructiveCallCount = 0;
+            w.sheetsGet = () => Promise.resolve({ values: mkOrderRows(60) });
+            w.supa = { from: () => ({ select: () => Promise.resolve({ count: 60 }) }) };
+            await w.supaMigrateOrders();
+            const proceedsOnRealSync = destructiveCallCount > 0;
+            check('supaMigrateOrders: refuses a collapsed sheet read, same as the other migrations',
+              () => ({ refusedWhenCollapsed, proceedsOnRealSync }),
+              { refusedWhenCollapsed: true, proceedsOnRealSync: true });
+          } finally {
+            w.gToken = saved.gToken; w.supa = saved.supa; w.sheetsGet = saved.sheetsGet;
+            w.supaReplaceTable = saved.supaReplaceTable; w.supaReady = saved.supaReady;
+            w._ordersMigrationInFlight = saved._ordersMigrationInFlight;
+          }
+        })();
       return out;
     }
   },
