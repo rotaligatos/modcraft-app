@@ -52,7 +52,9 @@ const PROFILES = {
       'renderApprovals','gLoadDirData','updateLockUI','_computeQuotationStatus'],
     requireEl: { id: 'orpt-btn', label: 'report button' },
     stubs: [],
-    logic: () => {
+    // async: page.evaluate awaits whatever this returns, and one check below (the
+    // _saveServicesToPriceDb Promise chain) needs a real await, not a fire-and-forget.
+    logic: async () => {
       const out = [];
       const check = (label, fn, want) => {
         try { const got = fn(); out.push({ label, got, want, ok: JSON.stringify(got) === JSON.stringify(want) }); }
@@ -1202,6 +1204,67 @@ const PROFILES = {
             guardPrecedesReplace: src.indexOf('_syncLooksSafe(') < src.indexOf('supaReplaceTable('),
           };
         }, { callsGuardBeforeDecidingTasks: true, guardPrecedesReplace: true });
+      /* Same incident, the ACTUAL cause -- found only after Rommel pushed back that he had not
+         deleted anything, he had ADDED data, and it kept happening even after he restored the
+         sheet. gSaveAppSettings() (the "Save settings" button, clicked for ANY settings change --
+         cost factors, PPIC, anything) calls _saveServicesToPriceDb() unconditionally on every
+         click, which clear+rewrites BOTH the Sheet and Supabase from whatever SERVICES currently
+         holds. SERVICES starts life as a literal 6-row placeholder baked into the code, before the
+         real ~60-row catalogue has loaded -- so a Save Settings click before that load finishes
+         (or after some other bug quietly shrank SERVICES) pushed the placeholder over the real
+         catalogue in both stores at once, independent of the auto-sync path fixed above.
+         Async, so this drives the real promise chain with priceDbClear/priceDbUpdate/
+         supaReplaceTable stubbed -- proving the destructive calls are never reached when guarded
+         off, and DO fire on a genuine, correctly-sized save. */
+      if (typeof window._saveServicesToPriceDb === 'function')
+        await (async () => {
+          const w = window;
+          const saved = { gToken: w.gToken, SERVICES: w.SERVICES, dbServices: w.dbServices,
+                           priceDbClear: w.priceDbClear, priceDbUpdate: w.priceDbUpdate,
+                           supaReplaceTable: w.supaReplaceTable, showToast: w.showToast };
+          let destructiveCallCount = 0;
+          w.priceDbClear = () => { destructiveCallCount++; return Promise.resolve(); };
+          w.priceDbUpdate = () => { destructiveCallCount++; return Promise.resolve(); };
+          w.supaReplaceTable = () => { destructiveCallCount++; return Promise.resolve(); };
+          w.showToast = () => {};
+          w.gToken = 'test-token';
+          const placeholder = [
+            { name: 'Panel cutting', unit: 'lm', price: 35 }, { name: 'Edgebanding', unit: 'lm', price: 55 },
+            { name: 'Boring/drilling', unit: 'hole', price: 12 }, { name: 'Sanding', unit: 'sqm', price: 85 },
+            { name: 'Assembly labor', unit: 'carcass', price: 850 }, { name: 'Installation labor', unit: 'carcass', price: 1200 }
+          ];
+          const realCatalogue = Array.from({ length: 60 }, (_, i) => ({ name: 'Real service ' + i, unit: 'lm', price: 100 + i }));
+          try {
+            // 1) Catalogue never loaded this session (dbServices empty) -- SERVICES is still the
+            //    startup placeholder. Must refuse without touching either store.
+            destructiveCallCount = 0;
+            w.dbServices = [];
+            w.SERVICES = placeholder.slice();
+            await w._saveServicesToPriceDb();
+            const refusedWhenNeverLoaded = destructiveCallCount === 0;
+            // 2) Catalogue DID load (60 real rows known-good), but SERVICES has since collapsed to
+            //    the same 6-row placeholder -- the exact live incident. Must refuse.
+            destructiveCallCount = 0;
+            w.dbServices = realCatalogue.slice();
+            w.SERVICES = placeholder.slice();
+            await w._saveServicesToPriceDb();
+            const refusedWhenCollapsed = destructiveCallCount === 0;
+            // 3) A genuine, correctly-sized save (editing a couple of real rows) -- must proceed.
+            destructiveCallCount = 0;
+            w.dbServices = realCatalogue.slice();
+            w.SERVICES = realCatalogue.slice();
+            w.SERVICES[0] = { name: 'Real service 0 (repriced)', unit: 'lm', price: 999 };
+            await w._saveServicesToPriceDb();
+            const proceedsOnRealSave = destructiveCallCount > 0;
+            check('_saveServicesToPriceDb: refuses to overwrite the catalogue with an unloaded or collapsed SERVICES array',
+              () => ({ refusedWhenNeverLoaded, refusedWhenCollapsed, proceedsOnRealSave }),
+              { refusedWhenNeverLoaded: true, refusedWhenCollapsed: true, proceedsOnRealSave: true });
+          } finally {
+            w.gToken = saved.gToken; w.SERVICES = saved.SERVICES; w.dbServices = saved.dbServices;
+            w.priceDbClear = saved.priceDbClear; w.priceDbUpdate = saved.priceDbUpdate;
+            w.supaReplaceTable = saved.supaReplaceTable; w.showToast = saved.showToast;
+          }
+        })();
       return out;
     }
   },
