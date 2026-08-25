@@ -18154,35 +18154,50 @@ function _carcassSetTplField(idx,field,val,cabinetName){
 }
 // Rewrites the WHOLE CabinetTemplates sheet (+ the cabinet_templates Supabase
 // table) from the in-memory dbTemplates array — same clear-then-rewrite
-// pattern as _saveServicesToPriceDb. Safe because dbTemplates is always
-// loaded in full by loadPriceDatabase() before any of this UI is usable, so
-// there's no partial-table risk. Explicit button, not tied to the global
-// "Save settings" action, so a half-loaded dbTemplates can't silently wipe
-// other cabinet types' rows.
+// pattern as _saveServicesToPriceDb. A past comment here claimed this was safe
+// because dbTemplates is always loaded in full before this UI is reachable —
+// that may well be true today, but it is an assumption about the REST of the
+// app staying exactly as it is, not a structural guarantee, and the Services
+// incident (2026-08-25) was caused by exactly that kind of unverified "should
+// be safe" claim elsewhere. Costs one cheap Supabase count query to close it
+// properly instead of trusting it.
 function _carcassSaveTplToDb(cabinetName){
   if(!gToken){showToast('Sign in first.');return;}
   if(!dbTemplates.length){showToast('No template data loaded to save.');return;}
   var domId=_carcassDomId(cabinetName);
   var btn=document.querySelector('#carcass-detail-'+domId+' button.btn-primary');
   if(btn){btn.disabled=true;btn.innerHTML='<i class="ti ti-loader"></i> Saving…';}
-  var rows=[['Cabinet','Category','Name','Unit','Qty','Price']].concat(dbTemplates.map(function(t){
-    return [t.cabinet,t.category,t.name,t.unit,t.qty,t.price];
-  }));
-  priceDbClear('CabinetTemplates!A:Z')
-    .then(function(){ return priceDbUpdate('CabinetTemplates!A1',rows); })
-    .then(function(res){
-      if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
-      supaReplaceTable('cabinet_templates',dbTemplates.map(function(t){
-        return {cabinet:t.cabinet,category:t.category,name:t.name,unit:t.unit,qty:t.qty,price:t.price};
-      }));
-      showToast('Template changes saved to Price DB.');
-    })
-    .catch(function(e){
-      showToast('Save failed — '+(e&&e.message?e.message:'check connection'));
-    })
-    .then(function(){
-      if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-device-floppy"></i> Save changes to Price DB';}
-    });
+  function resetBtn(){ if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-device-floppy"></i> Save changes to Price DB';} }
+  var countCheck=(typeof supaReady==='function'&&supaReady())
+    ? supa.from('cabinet_templates').select('id',{count:'exact',head:true})
+        .then(function(r){ return (r&&typeof r.count==='number')?r.count:null; },function(){ return null; })
+    : Promise.resolve(null);
+  countCheck.then(function(currentCount){
+    if(!_syncLooksSafe(dbTemplates.length,currentCount)){
+      console.warn('[pricedb] Cabinet Templates save REFUSED — dbTemplates holds '+dbTemplates.length
+        +' row(s), Supabase currently has '+currentCount+'. Left untouched.');
+      showToast('Not saved — only '+dbTemplates.length+' template row(s) are loaded, far fewer than '
+        +'the '+currentCount+' expected. Reload the page and try again.');
+      resetBtn();
+      return;
+    }
+    var rows=[['Cabinet','Category','Name','Unit','Qty','Price']].concat(dbTemplates.map(function(t){
+      return [t.cabinet,t.category,t.name,t.unit,t.qty,t.price];
+    }));
+    priceDbClear('CabinetTemplates!A:Z')
+      .then(function(){ return priceDbUpdate('CabinetTemplates!A1',rows); })
+      .then(function(res){
+        if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
+        supaReplaceTable('cabinet_templates',dbTemplates.map(function(t){
+          return {cabinet:t.cabinet,category:t.category,name:t.name,unit:t.unit,qty:t.qty,price:t.price};
+        }));
+        showToast('Template changes saved to Price DB.');
+      })
+      .catch(function(e){
+        showToast('Save failed — '+(e&&e.message?e.message:'check connection'));
+      })
+      .then(resetBtn);
+  });
 }
 function toggleCarcassDetail(cabinetName){
   var id=_carcassDomId(cabinetName);
@@ -30245,8 +30260,22 @@ var INIT_TEMPLATES = [
   ["Wall Cladding","services","Assembly labor","carcass",1,850]
 ];
 
+// Unlike every other Price DB write path, replacing Services and Cabinet Templates with the
+// small built-in defaults is exactly what this button is FOR — a size-collapse guard would
+// refuse its own intended purpose. What it never had was any confirmation at all: one click, no
+// "are you sure," and the real catalogue (whatever is in it) is gone. Fixed with an explicit
+// warning instead (2026-08-25).
 function initPriceDB() {
   if(!gToken){alert('Please sign in first.');return;}
+  _confirm('This replaces your CURRENT Services and Cabinet Templates catalogues with a small '
+    +'set of generic starter defaults (about '+INIT_SERVICES.length+' services, '+INIT_TEMPLATES.length
+    +' template rows) — in both the Google Sheet and the database. Materials and Hardware are left '
+    +'alone. This is meant for a brand-new, empty Price Database, not a live one.\n\n'
+    +'If you already have real services and cabinet templates entered, they will be OVERWRITTEN. '
+    +'Continue only if you mean to reset both back to the starter defaults.',
+    _initPriceDBConfirmed);
+}
+function _initPriceDBConfirmed() {
   var dbBody=el('db-settings-body');
   if(dbBody){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Initializing database sheets…</div>';}
   // Get existing sheets
@@ -30586,7 +30615,26 @@ function importPriceDbExcel(targetSheet, skipRows, colMap) {
               .then(function(res){ if(res.error) throw new Error(res.error.message||'Could not create sheet'); });
           })
           .then(function(){
-            // Step 2: CLEAR, then write header + data rows.
+            // Step 2: sanity-check the file BEFORE touching anything. The wrong file picked, or
+            // an export that only partly finished, would otherwise silently replace the real
+            // catalogue with whatever that file happened to hold — no different from a bad Sheets
+            // read doing the same thing (2026-08-25). Same rule as everywhere else in Price DB:
+            // refuse when the incoming count is under half of what is already there.
+            var _tbl=targetSheet==='Materials'?'price_materials':targetSheet==='Hardware'?'price_hardware':targetSheet==='Services'?'price_services':null;
+            var countCheck=(_tbl&&typeof supaReady==='function'&&supaReady())
+              ? supa.from(_tbl).select('id',{count:'exact',head:true})
+                  .then(function(r){ return (r&&typeof r.count==='number')?r.count:null; },function(){ return null; })
+              : Promise.resolve(null);
+            return countCheck.then(function(currentCount){
+              if(!_syncLooksSafe(rows.length,currentCount))
+                throw new Error('Not imported — this file has only '+rows.length+' row(s), far fewer '
+                  +'than the '+currentCount+' already in '+targetSheet+'. If this is really meant to '
+                  +'replace most of the catalogue, double-check the file first, or ask your developer '
+                  +'to confirm the import.');
+            });
+          })
+          .then(function(){
+            // Step 3: CLEAR, then write header + data rows.
             //
             // The clear is not optional. A PUT to <tab>!A:C only overwrites the cells the new
             // values cover — it does not truncate — so importing 6 rows over a 143-row sheet

@@ -1265,6 +1265,82 @@ const PROFILES = {
             w.supaReplaceTable = saved.supaReplaceTable; w.showToast = saved.showToast;
           }
         })();
+      /* Rommel, 2026-08-25 (audit follow-up): asked for the FULL list of every place this pattern
+         appears, not just the one that bit him. Two more genuinely dangerous ones, both fixed the
+         same way as _saveServicesToPriceDb -- a pre-flight Supabase count check before any
+         destructive write. Cabinet Templates' own "Save changes to Price DB" button previously
+         refused only when dbTemplates was COMPLETELY empty, not when it was merely incomplete (a
+         dropped connection mid-load, say) -- the exact same gap Services had, just for a table he
+         was actively editing that day. */
+      if (typeof window._carcassSaveTplToDb === 'function')
+        await (async () => {
+          const w = window;
+          const saved = { gToken: w.gToken, dbTemplates: w.dbTemplates, supa: w.supa,
+                           priceDbClear: w.priceDbClear, priceDbUpdate: w.priceDbUpdate,
+                           supaReplaceTable: w.supaReplaceTable, showToast: w.showToast, supaReady: w.supaReady };
+          let destructiveCallCount = 0;
+          w.priceDbClear = () => { destructiveCallCount++; return Promise.resolve(); };
+          w.priceDbUpdate = () => { destructiveCallCount++; return Promise.resolve(); };
+          w.supaReplaceTable = () => { destructiveCallCount++; return Promise.resolve(); };
+          w.showToast = () => {};
+          w.gToken = 'test-token';
+          w.supaReady = () => true;
+          const mkTemplateRows = (n) => Array.from({ length: n }, (_, i) =>
+            ({ cabinet: 'Kitchen Base Cabinet', category: 'materials', name: 'Row ' + i, unit: 'pc', qty: 1, price: 10 }));
+          const fakeSupaFrom = (currentCount) => ({
+            select: () => Promise.resolve({ count: currentCount })
+          });
+          try {
+            // 1) dbTemplates has only 20 rows loaded; Supabase already holds 230 -- a partial
+            //    load, not a real edit. Must refuse.
+            destructiveCallCount = 0;
+            w.dbTemplates = mkTemplateRows(20);
+            w.supa = { from: () => fakeSupaFrom(230) };
+            await w._carcassSaveTplToDb('Kitchen Base Cabinet');
+            const refusedWhenIncomplete = destructiveCallCount === 0;
+            // 2) A genuine save with the full 230 rows loaded -- must proceed.
+            destructiveCallCount = 0;
+            w.dbTemplates = mkTemplateRows(230);
+            w.supa = { from: () => fakeSupaFrom(230) };
+            await w._carcassSaveTplToDb('Kitchen Base Cabinet');
+            const proceedsOnRealSave = destructiveCallCount > 0;
+            check('_carcassSaveTplToDb: refuses to overwrite Cabinet Templates with a partially-loaded dbTemplates',
+              () => ({ refusedWhenIncomplete, proceedsOnRealSave }),
+              { refusedWhenIncomplete: true, proceedsOnRealSave: true });
+          } finally {
+            w.gToken = saved.gToken; w.dbTemplates = saved.dbTemplates; w.supa = saved.supa;
+            w.priceDbClear = saved.priceDbClear; w.priceDbUpdate = saved.priceDbUpdate;
+            w.supaReplaceTable = saved.supaReplaceTable; w.showToast = saved.showToast; w.supaReady = saved.supaReady;
+          }
+        })();
+      /* The Excel import path (Materials/Hardware/Services "Import Excel") is driven by a real
+         <input type=file> + FileReader + XLSX parse, which is impractical to simulate headlessly
+         end to end. Verified structurally instead, same as supaMigratePriceDb above: the guard is
+         actually CALLED, and it runs BEFORE the destructive clear -- proving it is wired into the
+         real path, not just defined and orphaned nearby. */
+      if (typeof window.importPriceDbExcel === 'function')
+        check('importPriceDbExcel source calls the guard before clearing the sheet (not orphaned)', () => {
+          const src = window.importPriceDbExcel.toString();
+          const guardIdx = src.indexOf('_syncLooksSafe(');
+          const clearIdx = src.indexOf('priceDbClear(');
+          return { callsGuard: guardIdx > -1, guardPrecedesClear: guardIdx > -1 && guardIdx < clearIdx };
+        }, { callsGuard: true, guardPrecedesClear: true });
+      /* "Initialize with defaults" is different in kind -- replacing the live catalogue with a
+         small starter set is its actual PURPOSE, so a size-collapse guard would refuse its own
+         job. What it never had was any confirmation before wiping Services + Cabinet Templates.
+         Verified structurally: the public entry point must ask _confirm() before anything
+         destructive can run, and the destructive body must live in a SEPARATE function that only
+         _confirm's own callback can reach -- not something a stray direct call could bypass. */
+      if (typeof window.initPriceDB === 'function' && typeof window._initPriceDBConfirmed === 'function')
+        check('initPriceDB requires confirmation before touching anything; the destructive body is separate', () => {
+          const entrySrc = window.initPriceDB.toString();
+          const bodySrc = window._initPriceDBConfirmed.toString();
+          return {
+            entryAsksConfirmFirst: entrySrc.indexOf('_confirm(') > -1,
+            entryItselfHasNoDestructiveCall: entrySrc.indexOf('priceDbClear(') === -1 && entrySrc.indexOf('supaReplaceTable(') === -1,
+            bodyDoesTheRealWork: bodySrc.indexOf('priceDbClear(') > -1 && bodySrc.indexOf('supaReplaceTable(') > -1,
+          };
+        }, { entryAsksConfirmFirst: true, entryItselfHasNoDestructiveCall: true, bodyDoesTheRealWork: true });
       return out;
     }
   },
