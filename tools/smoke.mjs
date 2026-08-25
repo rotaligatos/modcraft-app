@@ -985,6 +985,40 @@ const PROFILES = {
             w.qOptionsList = saved.qOptionsList; w.qActiveOptionId = saved.qActiveOptionId;
           }
         }, { newOptionStartedUnforked: true, printSeesLiveEditedScope: true });
+      /* Rommel, 2026-08-25: the client-supplied-materials uplift can be excluded per service, but
+         the exclusion was keyed by service NAME (qClientMatSvcExcl, lowercased). A quotation can
+         carry two rows of the SAME service -- e.g. two Edgebanding lines, one for a client-supplied
+         board and one for a company-supplied board on top of it -- and only one should carry the
+         uplift. Keying by name collapsed both into one shared decision: ticking "Edgebanding" off
+         turned it off on BOTH rows. Fixed by keying the exclusion by a per-line id (_svcUplId,
+         lazily assigned and stored on the item itself, so it survives save/option-snapshot for
+         free via the existing whole-array JSON clone). Reproduces the exact scenario: two svcItems
+         rows sharing the name "Edgebanding", one excluded and one not. */
+      if (typeof window.clientMatMultFor === 'function' && typeof window._svcUplId === 'function')
+        check('clientMatMultFor: two same-named service rows can be independently excluded', () => {
+          const w = window;
+          const saved = { qClientSupplyMat: w.qClientSupplyMat, qClientMatSvcExcl: w.qClientMatSvcExcl,
+                           qClientMatMultOverride: w.qClientMatMultOverride };
+          try {
+            w.qClientSupplyMat = true;
+            w.qClientMatMultOverride = 1.2;   // deterministic multiplier, independent of CF defaults
+            w.qClientMatSvcExcl = {};
+            const rowA = { name: 'Edgebanding', qty: 10, price: 15 };   // client-supplied EBT
+            const rowB = { name: 'Edgebanding', qty: 5, price: 15 };    // company-supplied EBT
+            const idA = w._svcUplId(rowA), idB = w._svcUplId(rowB);
+            const idsDiffer = idA !== idB && !!idA && !!idB;
+            const idStableOnRepeat = w._svcUplId(rowA) === idA;
+            const bothUpliftedByDefault = w.clientMatMultFor(rowA) === 1.2 && w.clientMatMultFor(rowB) === 1.2;
+            w.qClientMatSvcExcl[idB] = true;   // exclude ONLY row B
+            const rowAStillUplifted = w.clientMatMultFor(rowA) === 1.2;
+            const rowBNoLongerUplifted = w.clientMatMultFor(rowB) === 1;
+            return { idsDiffer, idStableOnRepeat, bothUpliftedByDefault, rowAStillUplifted, rowBNoLongerUplifted };
+          } finally {
+            w.qClientSupplyMat = saved.qClientSupplyMat; w.qClientMatSvcExcl = saved.qClientMatSvcExcl;
+            w.qClientMatMultOverride = saved.qClientMatMultOverride;
+          }
+        }, { idsDiffer: true, idStableOnRepeat: true, bothUpliftedByDefault: true,
+             rowAStillUplifted: true, rowBNoLongerUplifted: true });
       return out;
     }
   },

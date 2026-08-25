@@ -7119,15 +7119,18 @@ function clientMatMult(){
   return (m>0)?m:1;
 }
 // The uplift used to hit EVERY service in the quotation. Some genuinely carry the extra risk of
-// working someone else's board and some do not, so it can now be turned off per service.
+// working someone else's board and some do not, so it can now be turned off per LINE ITEM.
 //
 // EXCLUSIONS are stored, not inclusions. That way the default — an empty list — means every
-// service is uplifted, which is exactly the behaviour that existed before, and a service added
+// line is uplifted, which is exactly the behaviour that existed before, and a line added
 // later is uplifted automatically rather than silently escaping the uplift because nobody
 // remembered to tick it. Under-charging quietly is the failure that matters here.
 //
-// Keyed by service NAME, so the decision holds wherever that service appears — every area, and
-// BOM rows too, which carry a name rather than a catalogue index.
+// Keyed by a per-LINE id (2026-08-25), not by service name. A quotation can carry two rows of
+// the same service — e.g. two Edgebanding lines, one for a client-supplied board and one for a
+// company-supplied board on top of it — and only one of them should carry the uplift. Keying by
+// name collapsed both rows into one shared decision; keying by line lets each row be toggled on
+// its own. For any service that only ever appears once, this behaves exactly as before.
 var qClientMatSvcExcl={};
 function _svcNameOf(si){
   if(!si) return '';
@@ -7135,66 +7138,89 @@ function _svcNameOf(si){
   var s=SERVICES[si.svcIdx];
   return s?(s.name||''):'';
 }
-function _svcKey(nm){ return String(nm||'').trim().toLowerCase(); }
-// Distinct services actually in this quotation, in both modes — the picker lists what is really
-// being quoted rather than the whole catalogue, so it stays short and relevant.
-function _quotedServiceNames(){
-  var seen={}, out=[];
-  function add(nm){ var k=_svcKey(nm); if(!k||seen[k]) return; seen[k]=1; out.push(nm); }
+// Lazily assigns a stable id to a service-bearing line item (svcItems row or a BOM cabinet's
+// services row) and returns it. Assigned once, then reused for the life of the item — it rides
+// along automatically wherever qAreas is serialized (save, option snapshot, Stage 2 fork), since
+// it's just another field on the object. A row saved before this shipped has no id yet; it gets
+// one the first time anything here touches it, starting from "included" (the safe default).
+var _uplIdSeq=0;
+function _svcUplId(item){
+  if(!item||typeof item!=='object') return '';
+  if(!item._upl) item._upl='u'+(++_uplIdSeq)+'r'+Math.random().toString(36).slice(2,8);
+  return item._upl;
+}
+// Every service-bearing line item actually in this quotation, in both modes, with a label for
+// the picker. Not deduplicated by name — each row is its own entry, which is the whole point.
+function _quotedServiceRows(){
+  var out=[];
   for(var a=0;a<qAreas.length;a++){
     var ar=qAreas[a]; if(!ar) continue;
-    (ar.svcItems||[]).forEach(function(si){ add(_svcNameOf(si)); });
-    (ar.bomItems||[]).forEach(function(bi){ (bi.services||[]).forEach(function(r){ add(r.name); }); });
+    var areaName=ar.name||('Area '+(a+1));
+    (ar.svcItems||[]).forEach(function(si){
+      out.push({item:si, label:areaName+' — '+(_svcNameOf(si)||'(service)'), qty:si.qty});
+    });
+    (ar.bomItems||[]).forEach(function(bi){
+      var cabName=(typeof _lineClientName==='function'?_lineClientName(bi):'')||bi.type||'Cabinet';
+      (bi.services||[]).forEach(function(r){
+        out.push({item:r, label:areaName+' — '+cabName+' — '+(r.name||'(service)'), qty:r.qty});
+      });
+    });
   }
   return out;
 }
-function onClientMatSvcToggle(nm,on){
-  var k=_svcKey(nm);
-  if(on) delete qClientMatSvcExcl[k]; else qClientMatSvcExcl[k]=true;
+function onClientMatSvcToggle(uplId,on){
+  if(!uplId) return;
+  if(on) delete qClientMatSvcExcl[uplId]; else qClientMatSvcExcl[uplId]=true;
   renderClientMatSection();
   if(typeof renderItems==='function') renderItems();   // the per-line figures change
   if(typeof recalc==='function') recalc();
 }
 function _clientMatSvcAll(on){
-  var names=_quotedServiceNames();
-  for(var i=0;i<names.length;i++){
-    var k=_svcKey(names[i]);
-    if(on) delete qClientMatSvcExcl[k]; else qClientMatSvcExcl[k]=true;
+  var rows=_quotedServiceRows();
+  for(var i=0;i<rows.length;i++){
+    var id=_svcUplId(rows[i].item);
+    if(on) delete qClientMatSvcExcl[id]; else qClientMatSvcExcl[id]=true;
   }
   renderClientMatSection();
   if(typeof renderItems==='function') renderItems();
   if(typeof recalc==='function') recalc();
 }
 function _clientMatSvcPickerHtml(){
-  var names=_quotedServiceNames(), mult=_cmMult();
-  if(!names.length) return '<div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Add a service to the scope of work to choose which ones the &times;'+mult.toFixed(2)+' applies to.</div>';
-  var on=0; for(var i=0;i<names.length;i++) if(!qClientMatSvcExcl[_svcKey(names[i])]) on++;
+  var rows=_quotedServiceRows(), mult=_cmMult();
+  if(!rows.length) return '<div style="font-size:11px;color:var(--muted);margin:8px 0 4px">Add a service to the scope of work to choose which lines the &times;'+mult.toFixed(2)+' applies to.</div>';
+  var ids=rows.map(function(r){ return _svcUplId(r.item); });
+  var on=0; for(var i=0;i<ids.length;i++) if(!qClientMatSvcExcl[ids[i]]) on++;
   var h='<div style="margin-top:10px;padding-top:9px;border-top:.5px solid var(--border)">'
     +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px">'
     +'<span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Apply the &times;'+mult.toFixed(2)+' to</span>'
-    +'<span style="font-size:11px;color:'+(on===names.length?'var(--text2)':'var(--amber)')+';font-weight:600">'+on+' of '+names.length+' services</span>'
+    +'<span style="font-size:11px;color:'+(on===ids.length?'var(--text2)':'var(--amber)')+';font-weight:600">'+on+' of '+ids.length+' lines</span>'
     +'<button class="btn" onclick="_clientMatSvcAll(true)" style="font-size:10px;padding:2px 7px">All</button>'
     +'<button class="btn" onclick="_clientMatSvcAll(false)" style="font-size:10px;padding:2px 7px">None</button>'
     +'</div><div style="display:flex;flex-direction:column;gap:2px;max-height:170px;overflow-y:auto">';
-  for(var j=0;j<names.length;j++){
-    var checked=!qClientMatSvcExcl[_svcKey(names[j])];
+  for(var j=0;j<rows.length;j++){
+    var id=ids[j];
+    var checked=!qClientMatSvcExcl[id];
     h+='<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer'+(checked?'':';color:var(--muted)')+'">'
-      +'<input type="checkbox"'+(checked?' checked':'')+' onchange="onClientMatSvcToggle(\''+String(names[j]).replace(/'/g,"\\'")+'\',this.checked)">'
-      +escHtml(names[j])+(checked?'':' <span style="font-size:10px">— no uplift</span>')+'</label>';
+      +'<input type="checkbox"'+(checked?' checked':'')+' onchange="onClientMatSvcToggle(\''+id+'\',this.checked)">'
+      +escHtml(rows[j].label)+' <span style="font-size:10px;color:var(--muted)">qty '+(typeof fmtUnits==='function'?fmtUnits(rows[j].qty):(rows[j].qty||0))+'</span>'
+      +(checked?'':' <span style="font-size:10px">— no uplift</span>')+'</label>';
   }
   return h+'</div></div>';
 }
-function clientMatMultFor(nameOrItem){
+// item must be the actual line-item object (svcItems row or a BOM services row) — the exclusion
+// is per-line now, not per-name, so a bare service name can no longer be checked against it.
+function clientMatMultFor(item){
   if(!qClientSupplyMat) return 1;
-  var nm=(typeof nameOrItem==='string')?nameOrItem:_svcNameOf(nameOrItem);
-  if(nm&&qClientMatSvcExcl[_svcKey(nm)]) return 1;   // this service opted out
+  if(!item||typeof item!=='object') return clientMatMult();   // no line to check exclusion against — default included
+  var id=_svcUplId(item);
+  if(qClientMatSvcExcl[id]) return 1;   // this line opted out
   return clientMatMult();
 }
 function getBOMItemUnitCost(bItem) {
   var c=0, i;
   // services get the client-supplied uplift
   var svc=bItem.services||[];
-  for(i=0;i<svc.length;i++) c+=(parseFloat(svc[i].qty)||0)*(parseFloat(svc[i].price)||0)*clientMatMultFor(svc[i].name);
+  for(i=0;i<svc.length;i++) c+=(parseFloat(svc[i].qty)||0)*(parseFloat(svc[i].price)||0)*clientMatMultFor(svc[i]);
   // hardware + outsource always counted (not excluded by client-supplied)
   // Outsource is always charged — an externally-bought item is a real cost to us either way.
   var outs=(bItem.outsourceMaterials||[]).concat(bItem.outsourceHardware||[]);
@@ -7502,7 +7528,7 @@ function _discRawBases(){
       var bis=ar.bomItems||[];
       for(var i=0;i<bis.length;i++){
         var bi=bis[i], q=(parseFloat(bi.qty)||1), r;
-        (bi.services||[]).forEach(function(r){ b.services+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*clientMatMultFor(r.name)*q; });
+        (bi.services||[]).forEach(function(r){ b.services+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*clientMatMultFor(r)*q; });
         (bi.hardware||[]).forEach(function(r){ b.hardware+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*q; });
         (bi.materials||[]).forEach(function(r){ addMat(r.name,(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*q); });
       }
@@ -7838,7 +7864,7 @@ function _minChargeTopUps(){
       (ar.bomItems||[]).forEach(function(bi){
         var q=(bi.qty===0)?0:(parseFloat(bi.qty)||1);
         (bi.services||[]).forEach(function(r){
-          add(r.name,(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*clientMatMultFor(r.name)*q);
+          add(r.name,(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*clientMatMultFor(r)*q);
         });
       });
     }
@@ -18626,9 +18652,11 @@ function computeServiceCosts(s) {
 // treated as cost (unchanged, conservative default) rather than guess.
 function _fabServiceMarginTotal(){
   var margin=0;
-  function addLine(svc,qty){
+  // rowItem is the actual svcItems/BOM-services row — the uplift exclusion is per-LINE now, so
+  // svc (the matched catalogue entry, used for price/cost) is not enough to check it against.
+  function addLine(svc,qty,rowItem){
     if(!svc) return;
-    var mult=clientMatMultFor(svc.name);
+    var mult=clientMatMultFor(rowItem);
     var cc=computeServiceCosts(svc);
     // opCost>0 as well as capacity: a service with capacity set but no cost breakdown entered
     // computes opCost 0, and crediting its whole price as margin would overstate profit.
@@ -18639,7 +18667,7 @@ function _fabServiceMarginTotal(){
       var svcItems=qAreas[a].svcItems||[];
       for(var i=0;i<svcItems.length;i++){
         var si=svcItems[i];
-        addLine(SERVICES[si.svcIdx],si.qty);
+        addLine(SERVICES[si.svcIdx],si.qty,si);
       }
     }
   } else if(qFabMode==='bom'){
@@ -18652,7 +18680,7 @@ function _fabServiceMarginTotal(){
           var nameLC=(row.name||'').trim().toLowerCase();
           var matched=null;
           for(var k=0;k<SERVICES.length;k++){ if((SERVICES[k].name||'').trim().toLowerCase()===nameLC){matched=SERVICES[k];break;} }
-          addLine(matched,row.qty);
+          addLine(matched,row.qty,row);
         }
       }
     }
