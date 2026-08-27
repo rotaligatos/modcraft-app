@@ -1087,25 +1087,77 @@ const PROFILES = {
          reaching the client. Rather than hardcoding "print only for postformed services", every
          service line now carries its own notePrint toggle (undefined/true = show, false = hide),
          so it works the same regardless of which service the note belongs to. Default is "show"
-         so every note typed before this toggle existed keeps printing exactly as it always has --
-         this check proves both halves: an explicit false is hidden, and an untouched (undefined)
-         note from before this feature still prints. */
+         so every note typed before this toggle existed keeps printing exactly as it always has. */
+      if (typeof window._svcNoteInline === 'function')
+        check('_svcNoteInline: shows an unescaped, parenthesised note unless notePrint is false', () => {
+          const w = window;
+          const shown = w._svcNoteInline({ note: 'exclusions apply' });
+          const hidden = w._svcNoteInline({ note: 'internal only', notePrint: false });
+          const empty = w._svcNoteInline({ note: '', notePrint: true });
+          return { shown, hidden, empty };
+        }, { shown: ' (exclusions apply)', hidden: '', empty: '' });
+      /* Rommel's team, 2026-08-27 (follow-up): "the note should be placed inside the line of each
+         service, enclosed in parenthesis" -- not in a separate ADDITIONAL NOTES section a scroll
+         away from the line it describes. 'area' and 'itemized' print modes now show the note
+         inline via _svcNoteInline; _svcNotesPrintHtml() only still carries per-service notes as a
+         fallback for 'type'/'lump' modes (no single line to attach one to there), gated by its new
+         includeLineNotes argument -- legacy per-AREA notes (predating the per-service note field)
+         always show regardless, since they never had a line to attach to either way. */
+      if (typeof window.buildPrintRows === 'function')
+        check('buildPrintRows (by area): the note prints inline on its own service line', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, SERVICES: w.SERVICES };
+          try {
+            w.SERVICES = [{ name: 'Edgebanding', price: 15, unit: 'lm' }];
+            const noted = { svcIdx: 0, qty: 10, price: 15, note: 'runs along the countertop edge' };
+            const silenced = { svcIdx: 0, qty: 5, price: 15, note: 'HIDDEN-NOTE-TEXT', notePrint: false };
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [noted, silenced],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.qFabMode = 'services';
+            const html = w.buildPrintRows('area', null, null);
+            return { notedInline: html.includes('(runs along the countertop edge)'), hiddenAbsent: !html.includes('HIDDEN-NOTE-TEXT') };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.SERVICES = saved.SERVICES;
+          }
+        }, { notedInline: true, hiddenAbsent: true });
+      if (typeof window.buildItemizedPrintRows === 'function')
+        check('buildItemizedPrintRows: the note prints inline on its own service line', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, SERVICES: w.SERVICES };
+          try {
+            w.SERVICES = [{ name: 'Edgebanding', price: 15, unit: 'lm' }];
+            const noted = { svcIdx: 0, qty: 10, price: 15, note: 'runs along the countertop edge' };
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [noted],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            w.qFabMode = 'services';
+            const html = w.buildItemizedPrintRows(false, null, null);
+            return { notedInline: html.includes('(runs along the countertop edge)') };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.SERVICES = saved.SERVICES;
+          }
+        }, { notedInline: true });
       if (typeof window._svcNotesPrintHtml === 'function')
-        check('_svcNotesPrintHtml: notePrint=false hides a note; undefined (legacy) still prints', () => {
+        check('_svcNotesPrintHtml: line notes only in the type/lump fallback (includeLineNotes); legacy area note always shows', () => {
           const w = window;
           const saved = { qAreas: w.qAreas, SERVICES: w.SERVICES };
           try {
             w.SERVICES = [{ name: 'Edgebanding', price: 15, unit: 'lm' }];
-            const shown = { svcIdx: 0, qty: 10, price: 15, note: 'VISIBLE-NOTE-TEXT' };            // notePrint undefined -> legacy default
+            const shown = { svcIdx: 0, qty: 10, price: 15, note: 'VISIBLE-NOTE-TEXT' };
             const hidden = { svcIdx: 0, qty: 5, price: 15, note: 'HIDDEN-NOTE-TEXT', notePrint: false };
-            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [shown, hidden],
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [shown, hidden], svcNote: 'LEGACY-AREA-NOTE',
                           matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
-            const html = w._svcNotesPrintHtml();
-            return { shownPresent: html.includes('VISIBLE-NOTE-TEXT'), hiddenAbsent: !html.includes('HIDDEN-NOTE-TEXT') };
+            const withLines = w._svcNotesPrintHtml(true);
+            const withoutLines = w._svcNotesPrintHtml(false);
+            return {
+              withLinesShownPresent: withLines.includes('VISIBLE-NOTE-TEXT'),
+              withLinesHiddenAbsent: !withLines.includes('HIDDEN-NOTE-TEXT'),
+              withoutLinesSvcNotesAbsent: !withoutLines.includes('VISIBLE-NOTE-TEXT') && !withoutLines.includes('HIDDEN-NOTE-TEXT'),
+              legacyAlwaysPresent: withLines.includes('LEGACY-AREA-NOTE') && withoutLines.includes('LEGACY-AREA-NOTE'),
+            };
           } finally {
             w.qAreas = saved.qAreas; w.SERVICES = saved.SERVICES;
           }
-        }, { shownPresent: true, hiddenAbsent: true });
+        }, { withLinesShownPresent: true, withLinesHiddenAbsent: true, withoutLinesSvcNotesAbsent: true, legacyAlwaysPresent: true });
       /* Rommel's team, 2026-08-25: "client supplied material is not showing on stage 2 which
          will limit them when a material is needed to be edited." Root cause: the whole card
          (#client-mat-row) was static markup confined inside #s1-wrap, so it simply did not exist
