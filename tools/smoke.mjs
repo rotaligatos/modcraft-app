@@ -1691,6 +1691,14 @@ const PROFILES = {
             cancelRunsAfterMutate: cancelIdx > mutateIdx,
           };
         }, { fqBranchClearsState: true, s1BranchClearsState: true, cancelCallPresent: true, cancelRunsAfterMutate: true });
+      // Rommel, 2026-08-27: "add kg uom on the outsource" -- an outsourced material bought by
+      // weight (e.g. a sheet good priced per kg rather than per piece) had no matching unit in the
+      // dropdown. Local to renderOutsourceSection's own uopts list, so it can't affect BOM mode's
+      // separate free-text unit list, which has its own copy of the same options.
+      if (typeof window.renderOutsourceSection === 'function')
+        check('renderOutsourceSection: the unit dropdown offers kg', () => ({
+          hasKgOption: window.renderOutsourceSection.toString().indexOf('value="kg"') > -1,
+        }), { hasKgOption: true });
       return out;
     }
   },
