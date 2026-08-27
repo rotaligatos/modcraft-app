@@ -1521,6 +1521,50 @@ const PROFILES = {
             w._ordersMigrationInFlight = saved._ordersMigrationInFlight;
           }
         })();
+      /* Rommel, 2026-08-27 -- reported on QT-C00000006: "cannot unlock or be edited, says already
+         approved by the client, but in reality it's not". Root cause, confirmed against the real
+         activity log: _iqApprovedEditBlocked's gate is qClientApproved||qApproved (both flags,
+         either one blocks). doApprove()/confirmOptionApprove() set BOTH together when staff pick a
+         winning option to move to Stage 2 -- an internal action, not necessarily a client sign-off,
+         but the two are deliberately coupled today (see the comment on var qClientApproved).
+         Unlocking is supposed to reverse that coupling -- but THREE separate unlock code paths only
+         ever cleared qClientApproved, never qApproved, so the gate kept firing on every later
+         attempt regardless of how the unlock was approved. Confirmed on the real timeline: Allan
+         approved an unlock from his phone (_persistApprovedFieldToQuotation's background path,
+         clears neither flag on a SAVED STATE), and Stephanie was refused three more times by
+         requestUnlock() until Rommel used the Admin-only "Undo client approval" as a workaround
+         (the only one of the four paths that clears both). Fixed by clearing qApproved/approved
+         alongside qClientApproved/clientApproved in all three unlock paths that were missing it. */
+      if (typeof window.confirmUnlock === 'function') {
+        const src = window.confirmUnlock.toString();
+        // Isolate the Stage 1 (non-fq) branch -- it's the `else` after the `if(modalCtx==='fq')` block.
+        const s1Branch = src.slice(src.indexOf('} else {'));
+        check('confirmUnlock: Stage 1 unlock clears qApproved too, not only qClientApproved', () => ({
+          clearsClientApproved: /qClientApproved\s*=\s*false/.test(s1Branch),
+          clearsApproved: /qApproved\s*=\s*false/.test(s1Branch),
+        }), { clearsClientApproved: true, clearsApproved: true });
+      }
+      if (typeof window._applyApprovedRequest === 'function') {
+        const src = window._applyApprovedRequest.toString();
+        // Isolate the unlock type's Stage 1 (non-fq) branch -- the `else` following `if(ctx==='fq'){...}`
+        // inside the `if(type==='unlock')` block.
+        const unlockBlock = src.slice(src.indexOf("type==='unlock'"));
+        const s1Branch = unlockBlock.slice(unlockBlock.indexOf('} else {'), unlockBlock.indexOf("if(type==='reactivate'"));
+        check('_applyApprovedRequest: an unlock applied to the OPEN quotation clears qApproved too', () => ({
+          clearsClientApproved: /qClientApproved\s*=\s*false/.test(s1Branch),
+          clearsApproved: /qApproved\s*=\s*false/.test(s1Branch),
+        }), { clearsClientApproved: true, clearsApproved: true });
+      }
+      if (typeof window._persistApprovedFieldToQuotation === 'function') {
+        const src = window._persistApprovedFieldToQuotation.toString();
+        // Isolate the unlock mutate's Stage 1 (non-fq) branch -- the ternary's `:` alternative.
+        const unlockBlock = src.slice(src.indexOf("type==='unlock'"), src.indexOf("if(!mutate)"));
+        const s1Branch = unlockBlock.slice(unlockBlock.indexOf(':function(s){'));
+        check('_persistApprovedFieldToQuotation: an unlock applied to a quotation NOT open clears both flags on the saved state', () => ({
+          clearsClientApproved: /s\.clientApproved\s*=\s*false/.test(s1Branch),
+          clearsApproved: /s\.approved\s*=\s*false/.test(s1Branch),
+        }), { clearsClientApproved: true, clearsApproved: true });
+      }
       return out;
     }
   },
