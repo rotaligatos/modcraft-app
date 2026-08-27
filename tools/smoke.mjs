@@ -670,6 +670,77 @@ const PROFILES = {
         }, { checkedCancelled: true, notedCancelled: true, alreadyApprovedUntouched: true,
              differentSerialUntouched: true, differentTypeUntouched: true,
              exactlyTwoSaved: true, exactlyTwoNotified: true });
+      /* Rommel, 2026-08-27, QT-C00000006: the Option 2 pill at the top of the page kept showing
+         the PRE-override total after a cost-factor override was applied and correctly took effect
+         everywhere else on the page. qOptionsList[i].grand (what the pill renders) was only ever
+         written at switch/approve/lock time -- a direct-apply price change (an override, a self-
+         approved discount, toggling VAT) ran recalc() and updated the real total immediately, but
+         none of those call sites touched the cached figure. Proves _syncActiveOptionGrand() updates
+         the active option's cached grand from whatever _pCalc currently holds, leaves an INACTIVE
+         option's cached grand untouched (only the one on screen should move), and no-ops cleanly
+         when no option is active. */
+      if (typeof window._syncActiveOptionGrand === 'function')
+        check('_syncActiveOptionGrand: refreshes the ACTIVE option\'s cached total, not the others', () => {
+          const w = window;
+          const saved = { qActiveOptionId: w.qActiveOptionId, qOptionsList: w.qOptionsList, _pCalc: w._pCalc };
+          try {
+            w.qOptionsList = [{ id: 2, grand: 602541.59 }, { id: 3, grand: 1020865.69 }];
+            w.qActiveOptionId = 2;
+            w._pCalc = { grand: 899999.12 };   // the override just applied moved the real total
+            w._syncActiveOptionGrand();
+            const activeUpdated = w.qOptionsList[0].grand === 899999.12;
+            const inactiveUntouched = w.qOptionsList[1].grand === 1020865.69;
+            w.qActiveOptionId = 0;   // no option active -- must not throw or touch anything
+            let noopOk = true;
+            try { w._syncActiveOptionGrand(); } catch (e) { noopOk = false; }
+            return { activeUpdated, inactiveUntouched, noopOk };
+          } finally {
+            w.qActiveOptionId = saved.qActiveOptionId; w.qOptionsList = saved.qOptionsList; w._pCalc = saved._pCalc;
+          }
+        }, { activeUpdated: true, inactiveUntouched: true, noopOk: true });
+      if (typeof window._recalcCore === 'function' && typeof window._recalcFQCore === 'function')
+        check('_recalcCore and _recalcFQCore both call _syncActiveOptionGrand after pricing (not orphaned)', () => {
+          const src1 = window._recalcCore.toString(), src2 = window._recalcFQCore.toString();
+          return {
+            stage1Wired: src1.indexOf('_syncActiveOptionGrand(') > -1,
+            stage1AfterPCalc: src1.indexOf('_pCalc={') < src1.indexOf('_syncActiveOptionGrand('),
+            stage2Wired: src2.indexOf('_syncActiveOptionGrand(') > -1,
+            stage2AfterPCalc: src2.indexOf('_pCalc={') < src2.indexOf('_syncActiveOptionGrand('),
+          };
+        }, { stage1Wired: true, stage1AfterPCalc: true, stage2Wired: true, stage2AfterPCalc: true });
+      /* Rommel, 2026-08-27, same quotation: the bottom running-total bar read "FINAL QUOTATION —
+         GRAND TOTAL" while the page visibly showed Stage 1 (the "Approve & proceed to Stage 2"
+         button, the Stage 1 admin breakdown) with a correct number. Root cause: restoreFullQuotation
+         State() sets qStage=state.stage directly and never syncs the DOM to match it -- goStage() is
+         the ONLY function that toggles s1-wrap/s2-wrap and the s1btn/s2btn active classes, and it is
+         never called during a restore. recalc() runs unconditionally regardless of qStage (it only
+         ever prices Stage 1's own scope), so a quotation saved while qStage was 2 rendered Stage 1's
+         real, correct content into the DEFAULT-visible s1-wrap -- while qStage stayed 2, and
+         _qTotalBar()'s caption reads qStage directly. Source-checked (not functionally driven --
+         constructing a full fake state risks tripping unrelated Drive/Supabase code paths this
+         function also runs): the new sync block must exist, must NOT call initFinalQuotation()
+         (fqAreas is already restored from state above it -- re-deriving from Stage 1 would clobber
+         fqBondIns/fqInstRegion/etc. with Stage 1's CURRENT values), and must run before the function
+         returns. */
+      if (typeof window.restoreFullQuotationState === 'function')
+        check('restoreFullQuotationState: syncs the visible stage to qStage on every restore', () => {
+          const src = window.restoreFullQuotationState.toString();
+          const stageAssignIdx = src.indexOf('qStage=state.stage');
+          // Pre-existing comments in this function already discuss initFinalQuotation() in prose
+          // (e.g. "Safe to re-run: initFinalQuotation() never touches fqLocked...") -- a plain
+          // substring search would false-positive on those. A real call reads
+          // "initFinalQuotation();" back to back; none of the prose does.
+          return {
+            stageAssignPresent: stageAssignIdx > -1,
+            togglesS1Wrap: src.indexOf("el('s1-wrap')") > -1,
+            togglesS2Wrap: src.indexOf("el('s2-wrap')") > -1,
+            togglesTabClasses: src.indexOf("el('s1btn')") > -1 && src.indexOf("el('s2btn')") > -1,
+            neverCallsInitFinalQuotation: src.indexOf('initFinalQuotation();') === -1,
+            refreshesBarAtEnd: src.lastIndexOf('_qTotalBar()') > stageAssignIdx,
+            realDomHooksExist: !!document.getElementById('s1-wrap') && !!document.getElementById('s1btn'),
+          };
+        }, { stageAssignPresent: true, togglesS1Wrap: true, togglesS2Wrap: true, togglesTabClasses: true,
+             neverCallsInitFinalQuotation: true, refreshesBarAtEnd: true, realDomHooksExist: true });
       /* Rommel, 2026-08-19: "Add capability to search for the agent name." Agent was already
          captured on every quotation (cl-agent) and already searchable on the Orders queue, but
          never made it into the directory's own data at all -- not stored in the Quotations sheet
