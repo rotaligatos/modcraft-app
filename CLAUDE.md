@@ -9066,6 +9066,156 @@ Confirmed by reading the code; no bug, nothing shipped.
   each reproduction and deleted immediately after use — never committed, confirmed via
   `git status --short` before each commit.
 
+## What was changed on 2026-08-25 (session — client-supplied-materials refinements, then a real Price DB catalogue-collapse incident and a full guard audit)
+
+Two unrelated threads. The first was quick, iterative UI refinement on a feature from a prior
+session. The second started as "check this printout" and became the biggest single-session
+correctness sweep this file has recorded — a live data-loss incident, root-caused twice (the
+first theory was wrong), fixed, then generalised across every place in the app with the same
+shape of risk. Eight commits: `ea3b925`, `955295d`, `9da5d02`, `43e139d`, `d06f62b`, `0428f8a`,
+`aeb789d`, `0103b47`.
+
+### Client-supplied-materials — per-line control, not per-name (`ea3b925`, `955295d`, `9da5d02`, `43e139d`)
+Team's report: two service lines using the same catalogue name (e.g. two Edgebanding rows — one
+for a client-supplied board, one for a company-supplied board on top of it) could only be
+toggled together, because the "apply the uplift" exclusion was keyed by **service name**
+(`qClientMatSvcExcl`, lowercased name). Ticking one row off silently turned it off for both.
+
+1. **Exclusion re-keyed to a per-line id** (`ea3b925`) — `_svcUplId(item)` lazily assigns a stable
+   id to the actual line-item object (a `svcItems` row or a BOM cabinet's own service row) and
+   `qClientMatSvcExcl` is now keyed by that id, not by name. The id rides along for free through
+   save/option-snapshot, since `qAreas` is serialized wholesale via `JSON.parse(JSON.stringify())`
+   — no new persistence code needed. A quotation with only one row per service name behaves
+   exactly as before; the difference only shows up with duplicate-named rows. Reproduced the old
+   bug first (confirmed excluding "Edgebanding" by name knocked both rows to `×1`), then verified
+   the fix separates them.
+2. **The control moved onto each row itself** (`955295d`) — Rommel's direct feedback: with two
+   identical-looking rows, the *summary card's* per-name checklist couldn't tell them apart either
+   (it listed each unique NAME once, same ambiguity one level up). Fixed by putting a checkbox
+   directly on each service row (cutting-list mode's Services grid, and BOM-mode cabinet service
+   rows), gated on `qClientSupplyMat`. Found and fixed a **pre-existing, unrelated gap** while
+   touching BOM rows: the displayed Amount there never reflected the uplift at all (raw
+   `qty×price`), even though the real cost calculation always applied it — now consistent with
+   cutting-list mode. The summary card above is simplified to a status line + All/None, since the
+   per-row list it used to show is now redundant and was the exact ambiguity being fixed.
+3. **"(Client-supplied material)" label** (`9da5d02`) — Rommel's follow-up: the checkbox alone
+   doesn't say which line carries the uplift at a glance. Auto-generated text (never editable, so
+   it can't disagree with the checkbox) appended beneath the row on screen, and to the service
+   name on the printout — **By area** mode and the itemized **Services, Materials & Hardware**
+   view, both of which print each line separately. Deliberately NOT added to **By cabinet type**
+   (groups same-named services across areas — no single line to attach a note to for a mixed
+   group) or **Lump sum** (doesn't itemize services at all).
+4. **Stage 2 had no card at all** (`43e139d`) — team's report: "client supplied material is not
+   showing on stage 2." The whole card (toggle, material list, multiplier, picker) was static
+   markup confined inside `#s1-wrap` — it never existed anywhere in Stage 2's DOM, even though
+   Stage 2 has had its own editable scope since 2026-08-05. Fixed with a mirrored `#fq-client-mat-row`
+   card sharing the same underlying state (`qClientSupplyMat`/`qClientMatMultOverride`/
+   `qClientSupplyMatList` — a fact about the client, not the stage) but rendering its own picker
+   under `_withFQAreas()`, so the two cards can correctly show different line counts once the two
+   scopes diverge. Also fixed a bug this surfaced: the per-row checkbox on a *Stage 2* line was
+   silently refreshing Stage 1's screen instead of Stage 2's when clicked (its `onchange` wasn't
+   wrapped through the `_hEdit`/`_fqEdit` mechanism every other Stage 2 row mutator already uses).
+
+### ⚠ Investigated, NOT resolved — itemized print showing one merged "Service" line
+Screenshot: `QT-W00000136.R1`'s "Services, Materials & Hardware" print view showed **one** row
+("Service", qty 21, ₱895, amount ₱18,795) where the saved state has **two** real rows (19×₱895 +
+2×₱1,790 = ₱20,585 — matching the printed Grand Total exactly, which is what made this suspicious
+rather than a pricing bug). Drove `buildItemizedPrintRows` directly against this exact quotation's
+real saved data (both the simple no-pool path and the real proportional-allocation path
+`_buildPrintBodyCore` actually uses) and it **correctly produces two separate rows** summing to
+₱20,585 — the function is not at fault for this data. Most likely explanation, not confirmed: the
+Preview modal wasn't regenerated after the second HPL line was added (stale render), or a cached
+browser build. **Session was paused here at the user's request before it could be confirmed either
+way** — see the OPEN list below.
+
+### The Price DB incident — two distinct root causes, both closed structurally
+Reported as "my data in settings under PPIC and Cost Breakdown Services is missing." First finding:
+**PPIC → Services Capacity and Cost Breakdown → Services are the same screen** (the sub-tab moved
+under PPIC in an earlier session) — one symptom, not two.
+
+**Then the real finding: `price_services` had collapsed from ~60 real rows to 6 hardcoded generic
+defaults** ("Panel cutting" ₱35, "Edgebanding" ₱55, "Boring/drilling" ₱12, "Sanding" ₱85, "Assembly
+labor" ₱850, "Installation labor" ₱1200), confirmed via Supabase — all 6 rows shared one write
+timestamp, one bulk overwrite.
+
+**First root-cause theory (`d06f62b`) — WRONG, but the fix built from it was still worth keeping.**
+Theorised the background auto-sync (`supaMigratePriceDb()`, triggered whenever the Price DB Sheet's
+Drive `modifiedTime` looks newer than the mirror) read the Sheet while it was mid-edit and got a
+truncated range back. Built `_syncLooksSafe(incomingCount,currentCount)` — refuses to replace a
+table with fewer than half of its current row count — and wired it into every `supaReplaceTable(...)`
+call inside `supaMigratePriceDb()`, across all four Price DB tables (previously only
+`price_materials` had any post-write completeness check at all).
+
+⚠ **Rommel corrected this diagnosis directly: "Its not normal, i did not delete anything. I added
+new data in the google sheet."** That ruled out a bad-read-while-editing theory for what actually
+happened, and sent the investigation to the real cause.
+
+**Second, confirmed root cause (`0428f8a`) — `_saveServicesToPriceDb()`, called on EVERY "Save
+settings" click, regardless of what was actually being saved.** It clear+rewrites both the Sheet
+and Supabase's `price_services` from whatever the in-browser `SERVICES` array currently holds.
+`SERVICES` is declared with a **6-row startup placeholder** (`var SERVICES=[{name:"Panel
+cutting",...}, ...]`, matching the mystery data exactly) that only gets replaced once the real
+catalogue finishes loading from Supabase/Sheets. A "Save settings" click before that load
+completed pushed the placeholder over the real catalogue, in both stores, at once — explaining why
+restoring the Sheet from version history and reopening the app reproduced the exact same collapse.
+`_saveHardwareToPriceDb()` already had an equivalent guard (only writes if hardware was actually
+edited this session); Services never got the same protection. Fixed with two checks before any
+write: refuse outright if `dbServices` (last known-good loaded count) is empty — the catalogue
+never loaded this session, `SERVICES` cannot be trusted at all — and reuse `_syncLooksSafe()` to
+refuse if `SERVICES` has collapsed relative to what was last known loaded.
+
+**Rommel then asked for the full list, not just the one that bit him** ("this is the weakest
+link... which will later on become a problem if not properly solved"). Re-grepped the whole file
+for every `priceDbClear(`/`supaReplaceTable(` call site — found roughly ten more, categorised by
+actual risk (not assumed):
+
+| Site | Risk | Action |
+|---|---|---|
+| Cabinet Templates' own "Save changes to Price DB" button (`_carcassSaveTplToDb`) | Same shape as the incident — only refused when *completely* empty, not merely incomplete; the exact table Rommel was editing that day | **Fixed** (`aeb789d`) — same pre-flight count check |
+| "Import Excel" (Materials/Hardware/Services) | Wrong file picked, or an incomplete export, replaces the whole table with no size check at all | **Fixed** (`aeb789d`) — same guard before the clear |
+| "Initialize with defaults" | Different in kind — shrinking to a small starter set IS its purpose, so a size guard would refuse its own job. Had **zero confirmation** at all | **Fixed** (`aeb789d`) — split into a thin entry point that always calls `_confirm()` first, and `_initPriceDBConfirmed()` holding the real destructive work; verified structurally that the entry point contains no destructive call itself |
+| Normalize service units, dedupe Services/Materials, 3 named one-time Materials cleanups | Self-bounded by construction — each can only remove a small, computed, or explicitly-named set of rows, never "most of the table" | Left alone — mathematically cannot cause this failure |
+| `supaMigrateLogisticsDb`, `_logSaveMats`/`_logSaveTrucks`, `supaMigrateOrders` | Same unconditional-replace shape, but lower real-world risk (Logistics DB has never actually been connected on this account; Orders backfill is a manual one-time console command) | **Fixed anyway** (`0103b47`), after "make sure nothing is left" — same guard, not left as a judgement call |
+| `_saveHardwareToPriceDb` | Already correctly guarded (dirty-flag + non-empty) | Untouched — this was the pattern everything else was modelled on |
+
+Final re-grep after all four commits confirmed every one of the ~14 sites in the file is now either
+guarded by `_syncLooksSafe`, self-bounded by construction, or a deliberate reset with its own
+confirmation. Nothing left unaccounted for.
+
+Every fix has a regression check in `tools/smoke.mjs` that **reproduces the real failure against
+the pre-fix code** (via `git stash` on `index.html` only) before confirming the guard blocks it —
+not just asserted against the fixed code. Two of the checks (Excel import, `supaMigratePriceDb`
+wiring) are structural source-inspection checks rather than full runtime drives, because a real
+`<input type=file>` + FileReader + XLSX parse isn't practical to simulate headlessly — verified
+instead that the guard call is actually present and precedes the destructive call, the same
+"wired, not orphaned" proof used elsewhere in this test suite.
+
+### ⚠ A repeated mistake this session, worth remembering
+**The commit TITLE was wrong on the first attempt for both `d06f62b` and the fix that became
+`0428f8a`** — a stale, unrelated title copy-pasted from earlier in the conversation instead of a
+fresh one, THREE times in a row for the second one before it was caught and corrected via
+`git commit --amend` (safe here only because neither had been pushed yet at the point of
+amending — `d06f62b` was already pushed by the time its wrong title was noticed, so it stays
+wrong in history; the diff and body text are correct either way). **Write the commit title as a
+first, separate, deliberate step — write it to a file and read it back before running `git commit`
+— rather than composing it inline as part of a larger heredoc**, which is what let a stale phrase
+slip through unnoticed multiple times.
+
+### Method notes worth keeping
+- **A user's correction to your own diagnosis is data, not friction.** "I did not delete anything,
+  I added data" invalidated the first (plausible, partially-fixed-anyway) theory and pointed
+  straight at the real one once taken seriously instead of argued with.
+- **Match the exact mystery data against the codebase, not just the mechanism.** The six recovered
+  row names/prices were an EXACT match for a specific `var` declaration once grepped for — that is
+  what turned "probably a race condition somewhere" into a confirmed, fixable root cause.
+- **"Does this fix eliminate the problem?" deserves an honest audit, not reassurance.** The first
+  answer ("yes, the one path is closed") was true but incomplete; the user's push-back ("this is
+  the weakest link") was the right call, and a full re-grep found real, still-open exposure on the
+  exact feature he'd just used.
+- **A reproduce-first check on a destructive-write guard is worth the extra harness work.** Every
+  guard in this session was proven to fail on the unfixed code before being trusted on the fixed
+  code — including via a genuine `git stash` round-trip on the real file, not a hypothetical.
+
 # OPEN — updated 2026-08-24/25 (session end) — THIS IS THE AUTHORITATIVE LIST
 > The 2026-08-19 list above is superseded but not stale — read it for anything not covered here.
 > This session did not touch the Custom Report Export, the Wufoo key, the two carried-forward
@@ -9129,3 +9279,73 @@ comes up again; they share only the "By cabinet type" print mode as a surface, n
   CI-safe time threshold even unfixed.
 - **When a data-repair pattern might recur, write down the reusable version of it**, not just what
   was done to the one record — see the Option 3 fqAreas repair note above.
+
+# OPEN — updated 2026-08-25 (session end) — THIS IS THE AUTHORITATIVE LIST
+> The 2026-08-24/25 list above is superseded but not stale — read it for anything not covered here
+> (the "By cabinet type" materials-weight item is still on hold exactly as documented there; this
+> session did not touch it). This session's own eight commits are all confirmed deployed and live.
+
+## ⚠ FIRST THING NEXT SESSION — the one item this session left genuinely unresolved
+**Itemized print showing one merged "Service" line on `QT-W00000136.R1`.** Full detail in this
+session's own entry above ("Investigated, NOT resolved"). What's confirmed: `buildItemizedPrintRows`
+is NOT the cause — driven directly against this exact quotation's real saved data (two rows, 19×₱895
++ 2×₱1,790), through the real proportional-allocation path, it correctly produces two rows summing to
+the ₱20,585 Grand Total already shown. What's NOT confirmed: why the actual print preview showed
+only one. Two untested hypotheses, in order of likelihood — (1) the Preview modal wasn't regenerated
+after the second HPL line was added (ask whoever printed it whether they reopened the preview after
+that edit), (2) a stale cached browser build. **Ask for a fresh screenshot after a hard refresh /
+reopened preview before doing anything else** — if it still shows one line, that disproves both
+hypotheses and this needs a real live repro, not another direct-function test.
+
+## Confirmed done this session — do not re-raise
+- Client-supplied-materials uplift exclusion moved from per-service-name to per-line-item, with the
+  control on each row itself and an auto-generated "(Client-supplied material)" label, on screen and
+  on two of the four print modes (`ea3b925`, `955295d`, `9da5d02`).
+- Stage 2 (Final Quotation) now has its own Client-supplied materials card, sharing state with Stage
+  1 but counting its own scope's rows (`43e139d`).
+- **The Price DB catalogue-collapse incident, root-caused twice and closed structurally across every
+  write path in the app** — `_syncLooksSafe()` now guards all ~14 places that clear-and-rewrite a
+  Price DB or Logistics DB table, with the sole deliberate exception of "Initialize with defaults"
+  (which now requires explicit confirmation instead) and the six self-bounded cleanup functions
+  (mathematically cannot cause this failure). Commits `d06f62b`, `0428f8a`, `aeb789d`, `0103b47`.
+  **If a Price DB table (Services, Hardware, Materials, Cabinet Templates) ever looks like it lost
+  most of its rows again, the FIRST thing to check is the browser console for a `[pricedb]` or
+  `[migrate]` `REFUSED` warning** — the guard logs exactly which table, how many rows it tried to
+  write, and how many were already there, before anything is fixed by hand.
+
+## Still open, unverified this session — re-check before acting on any of these
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed. Body: *"When they create an option 2, the option 2 is named under the project name which
+  makes no sense. It has no relevance on the naming."*
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced despite investigation. If it recurs, get three things before
+  touching code: which stage (1 or 2), the exact field, and whether it followed an option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures; this session did not touch either.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet; flagged so
+  it is not rediscovered from scratch. `index.html` ~lines 9708, 9719, 12952, 12980, 13320, 13332,
+  13347, and a demo-data fallback at ~22257 when `dirData` is empty.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request (2026-08-22 session); do not build anything here without walking him
+  through it again from scratch first.
+
+## Standing rules reinforced this session — do not undo
+- **`_syncLooksSafe(incomingCount, currentCount)` is the one shared rule for every destructive
+  Price/Logistics DB write in this app.** Any NEW function that clears and rewrites one of these
+  tables must call it before the clear, not invent its own empty-check. Refuses when the incoming
+  count is under half of what is already there (and `currentCount<10` or `null` always passes, so it
+  never blocks a legitimate first-time setup or an unrelated network hiccup on the check itself).
+- **A user's correction to your own diagnosis is data, not friction** — see the method notes in this
+  session's own entry above. The first Price DB theory was plausible and wrong; the fix built from it
+  was kept anyway because it was still correct, just not sufficient on its own.
+- **Write a commit title as its own deliberate step, checked before running `git commit`** — this
+  session reused a stale title from earlier in the conversation three times in a row on one commit
+  before catching it. Write it to a file, read the first line back, THEN commit.
+- **Every destructive-write guard shipped this session was proven to fail on the pre-fix code**
+  (via `git stash` on `index.html` only, confirmed, then restored) before being trusted on the fix.
+  Keep doing this for anything touching data-loss risk — asserting a check "should" catch something
+  is not the same as watching it actually catch the real failure.
