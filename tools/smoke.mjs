@@ -1636,6 +1636,61 @@ const PROFILES = {
           clearsApproved: /s\.approved\s*=\s*false/.test(s1Branch),
         }), { clearsClientApproved: true, clearsApproved: true });
       }
+      /* Rommel, 2026-08-27, follow-up on QT-C00000006: "if the user requests a signature and no
+         one acted on it, and needs to edit and requests unlock, should the [signature] request be
+         invalidated?" Yes -- matching his own 2026-08-19 rule (QT-W00000134) that a pending
+         signature must not survive an unlock, since it would sign a document that has since
+         changed. clearSignaturesOnUnlock() already did this for the direct-PIN unlock path
+         (confirmUnlock); this was missing from the other two unlock paths -- the approved-request
+         path applied to the OPEN quotation, and the one applied to a SAVED STATE (the quotation
+         not open anywhere, e.g. approved from a phone) -- so most real unlocks (the majority go
+         through the request/approval route, not the PIN) left a stale pending signature sitting
+         there, signable against content that no longer matches it. */
+      if (typeof window._applyApprovedRequest === 'function' && typeof window.clearSignaturesOnUnlock === 'function')
+        check('_applyApprovedRequest: an unlock approved on the OPEN quotation cancels a pending signature too', () => {
+          const w = window;
+          const saved = { qBaseSerial: w.qBaseSerial, qSerial: w.qSerial, qSignatures: w.qSignatures,
+                           NOTIFS: w.NOTIFS, gSaveApprovalRequest: w.gSaveApprovalRequest, gSendMessage: w.gSendMessage,
+                           logActivity: w.logActivity, showToast: w.showToast, _updateNotifBadge: w._updateNotifBadge,
+                           qClientApproved: w.qClientApproved, qApproved: w.qApproved,
+                           qActiveOptionId: w.qActiveOptionId, qOptionsList: w.qOptionsList };
+          try {
+            w.gSaveApprovalRequest = () => {}; w.gSendMessage = () => {}; w.logActivity = () => {};
+            w.showToast = () => {}; w._updateNotifBadge = () => {};
+            w.qBaseSerial = 'QT-TEST-SIG01'; w.qSerial = 'QT-TEST-SIG01';
+            w.qActiveOptionId = 0; w.qOptionsList = [];
+            w.qSignatures = { checked: { name: 'Joanna' } };   // a COMPLETED signature on the open quotation
+            w.NOTIFS = [{ type: 'signature', status: 'pending', serial: 'QT-TEST-SIG01', reqId: 'sig1',
+                          sigSlot: 'noted', approverEmail: 'x@y.com' }];
+            w._applyApprovedRequest({ type: 'unlock', ctx: 's1', serial: 'QT-TEST-SIG01', by: 'Allan Lagsao' });
+            return {
+              completedSignatureCleared: !w.qSignatures.checked,
+              pendingSignatureCancelled: w.NOTIFS[0].status === 'cancelled',
+            };
+          } finally { Object.keys(saved).forEach(k => { w[k] = saved[k]; }); }
+        }, { completedSignatureCleared: true, pendingSignatureCancelled: true });
+      if (typeof window._clearSignaturesInState === 'function')
+        check('_clearSignaturesInState: clears completed signatures on a SAVED state object, never throws on a bare one', () => {
+          const w = window;
+          const s1 = { signatures: { checked: { name: 'Joanna' }, noted: { name: 'Rommel' } } };
+          w._clearSignaturesInState(s1);
+          let noThrowOnEmpty = true;
+          try { w._clearSignaturesInState({}); w._clearSignaturesInState(null); } catch (e) { noThrowOnEmpty = false; }
+          return { bothCleared: !s1.signatures.checked && !s1.signatures.noted, noThrowOnEmpty };
+        }, { bothCleared: true, noThrowOnEmpty: true });
+      if (typeof window._persistApprovedFieldToQuotation === 'function')
+        check('_persistApprovedFieldToQuotation: the unlock mutate clears saved signatures, and cancels pending ones after mutate runs (not orphaned)', () => {
+          const src = window._persistApprovedFieldToQuotation.toString();
+          const unlockBlock = src.slice(src.indexOf("type==='unlock'"), src.indexOf("if(!mutate)"));
+          const mutateIdx = src.indexOf('mutate(state)');
+          const cancelIdx = src.indexOf('_cancelPendingSignaturesFor(');
+          return {
+            fqBranchClearsState: /_clearSignaturesInState\(s\)/.test(unlockBlock.slice(0, unlockBlock.indexOf(':function(s){'))),
+            s1BranchClearsState: /_clearSignaturesInState\(s\)/.test(unlockBlock.slice(unlockBlock.indexOf(':function(s){'))),
+            cancelCallPresent: cancelIdx > -1,
+            cancelRunsAfterMutate: cancelIdx > mutateIdx,
+          };
+        }, { fqBranchClearsState: true, s1BranchClearsState: true, cancelCallPresent: true, cancelRunsAfterMutate: true });
       return out;
     }
   },

@@ -14389,6 +14389,14 @@ function _applyApprovedRequest(notif){
       fqLocked=false; fqSentStatus=''; fqSentAt='';
       _thawRatesVisible('unlock approved');
       fqClientApproved=false; fqClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
+      // Same rule confirmUnlock() already applies -- a signature signs the document as it stood
+      // at that moment, so a request still sitting PENDING when the quotation gets unlocked must
+      // be invalidated, not left waiting to be signed against content that has since changed.
+      // This path (unlock approved while the quotation is open on screen) never did this, and it
+      // is one of the three ways a quotation gets unlocked, so most real unlocks skipped it.
+      // Rommel, 2026-08-27: "should the request... be invalidated" -- yes, matching his own rule
+      // from 2026-08-19 on QT-W00000134.
+      if(typeof clearSignaturesOnUnlock==='function') clearSignaturesOnUnlock('Final quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+')');
       logActivity('Final quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+').');
       if(typeof updateFQLockUI==='function') updateFQLockUI();
       if(typeof updateFQSentStatus==='function') updateFQSentStatus();
@@ -14407,6 +14415,9 @@ function _applyApprovedRequest(notif){
       // _iqApprovedEditBlocked kept refusing after this unlock too (QT-C00000006, 2026-08-27).
       qClientApproved=false; qClientApprovedAt=''; // re-editing after unlock invalidates any prior client sign-off
       qApproved=false; qInitApprovedAt='';
+      // Same rule as the fq branch above — a pending signature request must not survive an
+      // unlock that came through the approved-request route.
+      if(typeof clearSignaturesOnUnlock==='function') clearSignaturesOnUnlock('Quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+')');
       logActivity('Quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+').');
       if(typeof updateLockUI==='function') updateLockUI();
       if(typeof updateSentStatus==='function') updateSentStatus();
@@ -14510,7 +14521,8 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
   else if(type==='unlock') mutate=ctx==='fq'
     // revisionPending: the same revision the on-screen path now owes, carried on the saved state
     // so it survives to whenever the quotation is next opened and re-locked.
-    ?function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqSentAt=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; s.revisionPending=true; }
+    ?function(s){ s.fqLocked=false; s.fqSentStatus=''; s.fqSentAt=''; s.fqClientApproved=false; s.fqClientApprovedAt=''; s.revisionPending=true;
+      _clearSignaturesInState(s); }
     // _iqApprovedEditBlocked's gate is clientApproved||approved -- this used to clear neither,
     // so an unlock approved from another session (e.g. a phone) never actually reopened Stage 1:
     // requestUnlock() kept refusing "already approved by the client" on every later attempt,
@@ -14519,7 +14531,7 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
     // more times until Rommel used the Admin-only "Undo client approval" as a workaround.
     :function(s){ s.locked=false; s.sentStatus=''; s.sentAt=''; s.revisionPending=true;
       s.clientApproved=false; s.clientApprovedAt=''; s.approved=false; s.initApprovedAt='';
-      _unlockActiveOptionInState(s); };
+      _unlockActiveOptionInState(s); _clearSignaturesInState(s); };
   if(!mutate){ if(callback) callback(false); return; }
 
   // Supabase-first, Sheets-fallback — the same convention loadQuotationJson() uses everywhere
@@ -14537,6 +14549,12 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
       if(callback) callback(false); return;
     }
     try{ mutate(state); }catch(e){ console.warn('[approval] mutate failed for '+serial,e); if(callback) callback(false); return; }
+    // The PENDING-request half of clearSignaturesOnUnlock — operates on NOTIFS/the Approvals
+    // backend, not the state object just mutated above, so it runs regardless of which unlock
+    // branch (fq or s1) fired. Third of the three unlock paths to carry this; the other two
+    // (confirmUnlock, _applyApprovedRequest) already do.
+    if(type==='unlock'&&typeof _cancelPendingSignaturesFor==='function')
+      _cancelPendingSignaturesFor(serial,'Quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+')');
     var json=JSON.stringify(state);
     if(json.length>QSTATE_CHUNK*QSTATE_COLS){
       console.warn('[approval] patched state too large to save for '+serial);
@@ -21638,6 +21656,20 @@ function _unlockActiveOptionInState(s){
     for(var i=0;i<s.optionsList.length;i++){
       if(s.optionsList[i]&&s.optionsList[i].id===id){ s.optionsList[i].locked=false; break; }
     }
+  }catch(e){}
+}
+// clearSignaturesOnUnlock()'s COMPLETED-signature half, for a SAVED state — an unlock applied
+// while the quotation is not open in any browser (e.g. approved from a phone). A signature signs
+// the document as it stood at that moment, so it must not survive an unlock regardless of which
+// of the three unlock paths carried it out. This is the state-mutation half only; the PENDING-
+// request half (_cancelPendingSignaturesFor) is called separately in _persistApprovedFieldToQuotation
+// right after mutate succeeds, since it operates on NOTIFS/the Approvals backend, not the state
+// object, and needs no "is the quotation open" check either way.
+// Rommel, 2026-08-27, on QT-C00000006: two of the three ways a quotation gets unlocked never
+// invalidated a pending signature request left over from before the edit — this is the second.
+function _clearSignaturesInState(s){
+  try{
+    if(s&&s.signatures){ delete s.signatures.checked; delete s.signatures.noted; }
   }catch(e){}
 }
 function requestUnlock() {
