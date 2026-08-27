@@ -1082,6 +1082,30 @@ const PROFILES = {
             w.SERVICES = saved.SERVICES;
           }
         }, { noteCount: 1 });
+      /* Rommel's team, 2026-08-27: a per-service note (e.g. on a Postformed Filler line) always
+         printed once non-empty -- there was no way to type an internal-only note without it
+         reaching the client. Rather than hardcoding "print only for postformed services", every
+         service line now carries its own notePrint toggle (undefined/true = show, false = hide),
+         so it works the same regardless of which service the note belongs to. Default is "show"
+         so every note typed before this toggle existed keeps printing exactly as it always has --
+         this check proves both halves: an explicit false is hidden, and an untouched (undefined)
+         note from before this feature still prints. */
+      if (typeof window._svcNotesPrintHtml === 'function')
+        check('_svcNotesPrintHtml: notePrint=false hides a note; undefined (legacy) still prints', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, SERVICES: w.SERVICES };
+          try {
+            w.SERVICES = [{ name: 'Edgebanding', price: 15, unit: 'lm' }];
+            const shown = { svcIdx: 0, qty: 10, price: 15, note: 'VISIBLE-NOTE-TEXT' };            // notePrint undefined -> legacy default
+            const hidden = { svcIdx: 0, qty: 5, price: 15, note: 'HIDDEN-NOTE-TEXT', notePrint: false };
+            w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [shown, hidden],
+                          matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            const html = w._svcNotesPrintHtml();
+            return { shownPresent: html.includes('VISIBLE-NOTE-TEXT'), hiddenAbsent: !html.includes('HIDDEN-NOTE-TEXT') };
+          } finally {
+            w.qAreas = saved.qAreas; w.SERVICES = saved.SERVICES;
+          }
+        }, { shownPresent: true, hiddenAbsent: true });
       /* Rommel's team, 2026-08-25: "client supplied material is not showing on stage 2 which
          will limit them when a material is needed to be edited." Root cause: the whole card
          (#client-mat-row) was static markup confined inside #s1-wrap, so it simply did not exist
