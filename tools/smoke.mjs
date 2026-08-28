@@ -1699,6 +1699,32 @@ const PROFILES = {
         check('renderOutsourceSection: the unit dropdown offers kg', () => ({
           hasKgOption: window.renderOutsourceSection.toString().indexOf('value="kg"') > -1,
         }), { hasKgOption: true });
+      /* Rommel's team, 2026-08-27: every PDF the client actually receives (Share -> Download PDF,
+         native share, Email, and the per-option export) comes out with the app's CURRENT theme's
+         background baked in -- black, in dark mode -- "that is why they don't use the black theme
+         of the app." Root cause: _capturePrintCanvas() builds an off-screen div to snapshot, and
+         that div's own background/text were set to var(--card)/var(--text) -- since the div lives
+         in the same document as the app, those resolve to whatever theme is CURRENTLY active, not
+         a fixed color. The printed CONTENT itself (bodyHtml, built by _buildPrintBody) has never
+         used var() -- verified during the 2026-08 dark-mode work -- so this wrapper, added later
+         for the SnapDOM capture, was the one piece never covered by that check. Source-checked
+         (not functionally driven -- SnapDOM/html2canvas/html2pdf are all real network-loaded
+         libraries this harness doesn't stub, and driving the real capture would need a live
+         browser): the wrapper's own inline style, and the color handed to SnapDOM, must both be
+         fixed light values with no var(--...) anywhere in either. */
+      if (typeof window._capturePrintCanvas === 'function')
+        check('_capturePrintCanvas: the capture wrapper is pinned to fixed light colors, never the live theme', () => {
+          const src = window._capturePrintCanvas.toString();
+          const wrapStyleLine = src.slice(src.indexOf('wrap.style.cssText='), src.indexOf('wrap.innerHTML'));
+          const snapdomCallLine = src.slice(src.indexOf('snapdom.toCanvas('), src.indexOf('.then(function(canvas)'));
+          return {
+            wrapStyleHasNoThemeVar: wrapStyleLine.indexOf('var(--') === -1,
+            wrapStyleSetsFixedBackground: /background:#fff/.test(wrapStyleLine),
+            snapdomBackgroundHasNoThemeVar: snapdomCallLine.indexOf('var(--') === -1,
+            snapdomBackgroundIsFixed: /backgroundColor:'#fff/.test(snapdomCallLine),
+          };
+        }, { wrapStyleHasNoThemeVar: true, wrapStyleSetsFixedBackground: true,
+             snapdomBackgroundHasNoThemeVar: true, snapdomBackgroundIsFixed: true });
       return out;
     }
   },
