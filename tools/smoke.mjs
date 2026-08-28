@@ -1782,6 +1782,134 @@ const PROFILES = {
             w.liveClients = saved.liveClients; w._onQuotationCompanyMightChange = saved._onQuotationCompanyMightChange;
           }
         }, { checkRunsWhenTypeStored: true, noCheckWhenNoType: true });
+      /* Pause button (2026-08-28): freezes the SLA clock while waiting on the client, needs an
+         approver, and once approved the linked quotation (if any) is not editable until Resume.
+         Current pause state is DERIVED from the last entry in one JSON history array -- never a
+         separate flag -- so it cannot drift out of step with the fact it is supposed to reflect. */
+      if (typeof window._orderPauseState === 'function')
+        check('_orderPauseState: derives paused/pending purely from the LAST history entry', () => {
+          const w = window;
+          const notPaused = w._orderPauseState({ pauseHistory: [] });
+          const pending = w._orderPauseState({ pauseHistory: [{ status: 'pending' }] });
+          const paused = w._orderPauseState({ pauseHistory: [{ status: 'approved', approvedAt: '2026-08-28T01:00:00Z' }] });
+          const resumedIsNotPaused = w._orderPauseState({ pauseHistory: [
+            { status: 'approved', approvedAt: '2026-08-28T01:00:00Z', resumedAt: '2026-08-28T02:00:00Z' } ] });
+          const rejectedIsNotPaused = w._orderPauseState({ pauseHistory: [{ status: 'rejected' }] });
+          return {
+            emptyHistory: [notPaused.paused, notPaused.pending],
+            pendingEntry: [pending.paused, pending.pending],
+            approvedOpenEntry: [paused.paused, paused.pending],
+            approvedThenResumed: [resumedIsNotPaused.paused, resumedIsNotPaused.pending],
+            rejectedEntry: [rejectedIsNotPaused.paused, rejectedIsNotPaused.pending],
+          };
+        }, { emptyHistory: [false, false], pendingEntry: [false, true], approvedOpenEntry: [true, false],
+             approvedThenResumed: [false, false], rejectedEntry: [false, false] });
+      if (typeof window._orderElapsedWorkingMinutes === 'function' && typeof window.calcWorkingMinutes === 'function')
+        check('_orderElapsedWorkingMinutes: subtracts an approved pause window, up to "now" if still open', () => {
+          const w = window;
+          const savedSla = w.ordersSlaSettings, savedUser = w.currentUserCompany;
+          try {
+            const sched = { 0: null, 1: { start: 8, end: 17 }, 2: { start: 8, end: 17 },
+                             3: { start: 8, end: 17 }, 4: { start: 8, end: 17 }, 5: { start: 8, end: 17 }, 6: null };
+            w.ordersSlaSettings = { companies: { 'Test Co': { excludeHolidays: true, schedule: sched, localHolidays: [] } } };
+            w.currentUserCompany = 'Test Co';
+            // Mon 2026-08-24, 08:00-17:00 = 540 working minutes with nothing excluded.
+            const noPause = w._orderElapsedWorkingMinutes(
+              { receivedAt: '2026-08-24T08:00:00+08:00', sourceCompany: 'Test Co', pauseHistory: [] },
+              '2026-08-24T17:00:00+08:00');
+            // Same window, but paused 10:00-12:00 (120 min) -- 540 - 120 = 420.
+            const closedPause = w._orderElapsedWorkingMinutes({ receivedAt: '2026-08-24T08:00:00+08:00', sourceCompany: 'Test Co',
+              pauseHistory: [{ status: 'approved', approvedAt: '2026-08-24T10:00:00+08:00', resumedAt: '2026-08-24T12:00:00+08:00' }] },
+              '2026-08-24T17:00:00+08:00');
+            // Paused at 10:00, never resumed -- excluded all the way to "now" (17:00), so only
+            // 08:00-10:00 (120 min) counts.
+            const stillPaused = w._orderElapsedWorkingMinutes({ receivedAt: '2026-08-24T08:00:00+08:00', sourceCompany: 'Test Co',
+              pauseHistory: [{ status: 'approved', approvedAt: '2026-08-24T10:00:00+08:00' }] },
+              '2026-08-24T17:00:00+08:00');
+            // A REJECTED entry never happened -- it must not be excluded from anything.
+            const rejectedNoOp = w._orderElapsedWorkingMinutes({ receivedAt: '2026-08-24T08:00:00+08:00', sourceCompany: 'Test Co',
+              pauseHistory: [{ status: 'rejected', approvedAt: '2026-08-24T10:00:00+08:00' }] },
+              '2026-08-24T17:00:00+08:00');
+            return { noPause, closedPause, stillPaused, rejectedNoOp };
+          } finally { w.ordersSlaSettings = savedSla; w.currentUserCompany = savedUser; }
+        }, { noPause: 540, closedPause: 420, stillPaused: 120, rejectedNoOp: 540 });
+      /* Rommel, 2026-08-28: "the quotation should not be editable until the resume has been press."
+         _lockGateOk already blocks locking on a missing project size / carcass count; an approved
+         pause has to refuse it too, EVEN when both of those are otherwise satisfied, or a paused
+         quotation could still be locked and sent while the team is waiting on the client. */
+      if (typeof window._lockGateOk === 'function' && typeof window._qOrderPaused === 'function')
+        check('_lockGateOk: refuses to lock while an order-pause is active, independent of the other gates', () => {
+          const w = window;
+          const saved = { size: w.qProjectSize, carcass: w.qCarcassUnitCount, paused: w.qOrderPausedInfo };
+          try {
+            w.qProjectSize = 10; w.qCarcassUnitCount = 10; // satisfy the other two gates
+            w.qOrderPausedInfo = null;
+            const okWhenClear = w._lockGateOk();
+            w.qOrderPausedInfo = { active: true, orderId: '999', reason: 'test' };
+            const blockedWhenPaused = w._lockGateOk();
+            const pausedIsDetected = w._qOrderPaused();
+            w.qOrderPausedInfo = { active: false };
+            const notBlockedWhenInactiveFlag = w._lockGateOk();
+            return { okWhenClear, blockedWhenPaused, pausedIsDetected, notBlockedWhenInactiveFlag };
+          } finally { w.qProjectSize = saved.size; w.qCarcassUnitCount = saved.carcass; w.qOrderPausedInfo = saved.paused; }
+        }, { okWhenClear: true, blockedWhenPaused: false, pausedIsDetected: true, notBlockedWhenInactiveFlag: true });
+      /* Stage 1's field-disable sweep is the one PROVEN "not editable" mechanism in this file
+         (qLocked/viewOnly already drive it) -- a pause has to join that same condition rather than
+         inventing a second, unverified one. Source-checked because updateLockUI touches a large
+         live DOM tree this harness does not construct. */
+      if (typeof window.updateLockUI === 'function')
+        check('updateLockUI: the field-disable sweep also triggers while an order-pause is active',
+          () => /locked\s*=\s*qLocked\s*\|\|\s*viewOnly\s*\|\|\s*_qOrderPaused\(\)/.test(window.updateLockUI.toString()), true);
+      /* order_pause is order-scoped, not quotation-scoped -- the two normal apply paths
+         (_applyApprovedRequest / _persistApprovedFieldToQuotation) have no case for it and must not
+         silently no-op through them; it needs its OWN branch, on both approve AND reject, since the
+         order's own pending entry has to be closed out either way. */
+      if (typeof window.doApprovalAction === 'function')
+        check('doApprovalAction: order_pause routes to its own decision handler on approve and reject', () => {
+          const src = window.doApprovalAction.toString();
+          return {
+            hasOrderPauseBranch: /n\.type\s*===\s*'order_pause'/.test(src),
+            callsDecisionHandler: /_applyOrderPauseDecision\(n,action,byName,actionReason\)/.test(src),
+            coversBothOutcomes: /action\s*===\s*'approved'\s*\|\|\s*action\s*===\s*'rejected'/.test(src),
+          };
+        }, { hasOrderPauseBranch: true, callsDecisionHandler: true, coversBothOutcomes: true });
+      /* This app has already lost sigSlot, to_email, decision and applied this same way -- a field
+         present in the request payload but missing from ANY of these four places is silently
+         dropped the first time an approver acts. orderId is what _applyOrderPauseDecision needs to
+         find the order at all, so it has to be listed in every one of the four. */
+      if (typeof window._apprMergeWithKnown === 'function' && typeof window.supaUpsertApprovalRequest === 'function'
+          && typeof window.gLoadApprovalRequests === 'function' && typeof window._mergeApprovalReqsIntoNotifs === 'function')
+        check('order_pause\'s orderId survives all four propagation points (the sigSlot/decision trap)', () => {
+          return {
+            mergeWithKnownKeys: /'orderId'/.test(window._apprMergeWithKnown.toString()),
+            supabasePayload: /orderId\s*:\s*\(?req\.orderId/.test(window.supaUpsertApprovalRequest.toString()),
+            supabaseReadMapping: /orderId\s*:\s*p\.orderId/.test(window.gLoadApprovalRequests.toString()),
+            notifsPush: /orderId\s*:\s*req\.orderId/.test(window._mergeApprovalReqsIntoNotifs.toString()),
+          };
+        }, { mergeWithKnownKeys: true, supabasePayload: true, supabaseReadMapping: true, notifsPush: true });
+      /* Any user can request a pause on any order, so routing must go by the ORDER's own company,
+         not whichever company the requester happens to be signed in under. */
+      if (typeof window.findApproverForAction === 'function')
+        check('findApproverForAction: an explicit company override wins over currentUserCompany', () => {
+          const w = window;
+          const saved = { users: w.sheetUsers, routing: w.APPR_ROUTING, co: w.currentUserCompany };
+          try {
+            w.currentUserCompany = 'World Class Laminate, Inc.';
+            w.sheetUsers = [
+              { email: 'wcl.mgr@test.com', name: 'WCL Manager', pos: 'Manager', active: true },
+              { email: 'cebu.mgr@test.com', name: 'Cebu Manager', pos: 'Manager', active: true },
+            ];
+            w.APPR_ROUTING = { 'Cebu World Laminate, Inc.': { order_pause: 'cebu.mgr@test.com' } };
+            const routed = w.findApproverForAction('order_pause', {}, 'Cebu World Laminate, Inc.');
+            return { routedToOrderCompany: routed && routed.email === 'cebu.mgr@test.com' };
+          } finally { w.sheetUsers = saved.users; w.APPR_ROUTING = saved.routing; w.currentUserCompany = saved.co; }
+        }, { routedToOrderCompany: true });
+      if (typeof window.renderApprovalRoutingSettings === 'function')
+        check('renderApprovalRoutingSettings: Pause Order is a configurable routing action',
+          () => /key\s*:\s*'order_pause'/.test(window.renderApprovalRoutingSettings.toString()), true);
+      if (typeof window.ORDERS_COLS !== 'undefined')
+        check('ORDERS_COLS: Pause History is the last column, appended not inserted',
+          () => window.ORDERS_COLS[window.ORDERS_COLS.length - 1], 'Pause History');
       return out;
     }
   },

@@ -720,6 +720,14 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         <div><span style="font-weight:600;color:var(--amber-ink)"><i class="ti ti-archive"></i> This quotation is archived</span><span id="reactivation-date" style="font-size:12px;color:var(--text2);margin-left:10px"></span><br><span style="font-size:12px;color:var(--text2)">Reactivating will set it back to Draft so work can resume.</span></div>
         <div id="reactivation-actions"></div>
       </div>
+      <!-- Shown on BOTH stages -- the pause blocks editing everywhere, not just Stage 1's field
+           sweep, so the reason needs to be visible regardless of which tab is open. -->
+      <div id="order-pause-banner" style="display:none;background:var(--wash-amber);border:1.5px solid var(--amber);border-radius:10px;padding:16px 20px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div><span style="font-weight:600;color:var(--amber-ink)"><i class="ti ti-player-pause-filled"></i> This quotation is paused</span>
+          <span id="order-pause-meta" style="font-size:12px;color:var(--text2);margin-left:10px"></span><br>
+          <span id="order-pause-reason" style="font-size:12px;color:var(--text2)"></span></div>
+        <button class="btn btn-primary" id="order-pause-resume-btn" onclick="resumeOrderPause(qOrderPausedInfo&&qOrderPausedInfo.orderId)"><i class="ti ti-player-play"></i> Resume</button>
+      </div>
       <div class="card" id="client-card">
         <div class="card-head" style="display:flex;align-items:center;justify-content:space-between"><h3><i class="ti ti-user"></i>Client information</h3><span id="q-order-badge-card" style="display:none;background:var(--wash-sky);color:var(--ink6);border:1px solid #b3d8f7;border-radius:6px;font-size:12px;padding:3px 10px;font-weight:600"></span></div>
         <div class="card-body">
@@ -2055,6 +2063,31 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
   </div>
 </div>
 
+<!-- PAUSE ORDER — freezes the SLA response clock while waiting on the client. Needs an approver,
+     same as every other request; the button on the order card stays "Pending" until decided, and
+     the order only ever SHOWS Paused once approved — a Manager can still reject it. -->
+<div class="overlay" id="ov-order-pause">
+  <div class="modal">
+    <div class="modal-head">
+      <h3><i class="ti ti-player-pause"></i> Request: pause this order</h3>
+      <button class="modal-close" onclick="closeModal('ov-order-pause')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-info-circle"></i> Pausing stops the SLA response clock while you wait on the client. It needs approval, and once approved the linked quotation (if any) cannot be edited until you press Resume.</div>
+      <div id="opause-details" style="background:var(--card2);border:.5px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:13px"></div>
+      <label class="fld">Reason for pausing</label>
+      <textarea id="opause-reason" class="reason-box" rows="2" style="width:100%;border:.5px solid var(--border);border-radius:6px;padding:8px 10px;font-size:12px;font-family:inherit;resize:vertical;box-sizing:border-box" placeholder="e.g. Waiting on the client's material specs — they said they'd send by Friday…"></textarea>
+      <p id="opause-reason-err" class="reason-err" style="color:var(--coral);font-size:12px;display:none;margin-top:4px">Please state a reason before sending — the approver is being asked to judge this.</p>
+      <div data-ev="opause"></div>
+      <div id="opause-route" style="font-size:12px;color:var(--text2);margin:10px 0 14px;padding:8px 12px;background:var(--card2);border-radius:7px;display:flex;align-items:center;gap:6px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="closeModal('ov-order-pause')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitOrderPauseRequest()"><i class="ti ti-send"></i> Send request</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="overlay" id="ov-vat">
   <div class="modal">
     <div class="modal-head"><h3>Non-VAT approval required</h3><button class="modal-close" onclick="closeModal('ov-vat')">×</button></div>
@@ -3232,6 +3265,10 @@ var qSignatures = {};   // { prepared:{name,email,role,img,at}, checked:{...}, n
 // The .Rn suffix is only STAMPED when it is locked again, so a draft in progress
 // never displays a revision number for a version no client has seen.
 var qRevisionPending = false;
+// Set once an order-pause request against this quotation's linked order is APPROVED (never on a
+// merely-pending request) — {active:true, orderId, reason, approvedBy, approvedAt}, or null. Read
+// by updateLockUI/updateFQLockUI/_lockGateOk to block editing until Resume is pressed on the order.
+var qOrderPausedInfo = null;
 var qOptionsList = [];      // [{id, label, snapshot, status:'active'|'approved'|'archived', grand}]
 // -- qBaseSerial is DERIVED, never stored ------------------------------------------------
 // It used to be a second copy of the quotation number, kept in step by hand in eleven places.
@@ -3853,8 +3890,8 @@ function _dashMetrics(){
     if((o.kind||'')==='sitevisit') return;              // site visits are SLA-exempt
     if(!o.receivedAt){ noReceived++; return; }
     if(st==='done') return;
-    var mins=(typeof calcWorkingMinutes==='function')
-      ? calcWorkingMinutes(o.receivedAt,new Date().toISOString(),o.sourceCompany||'')
+    var mins=(typeof _orderElapsedWorkingMinutes==='function')
+      ? _orderElapsedWorkingMinutes(o,new Date().toISOString())
       : (Date.now()-new Date(o.receivedAt).getTime())/60000;
     if(mins!=null&&mins>slaH*60) m.slaBreach++;
   });
@@ -4973,13 +5010,16 @@ function _canonCompany(co){
     if(String(COMPANIES[j]).toLowerCase().indexOf(want)>=0) return COMPANIES[j];
   return co||'';
 }
-function findApproverForAction(type, data) {
+// coOverride: routes by a company OTHER than the current user's own — needed for order_pause,
+// since any user can request a pause on an order that may belong to a different company than
+// theirs, and routing must go to that COMPANY's approver, not whoever happens to be signed in.
+function findApproverForAction(type, data, coOverride) {
   if(type==='discount'&&data&&(parseFloat(data.discPct)||0)>(CF.discountEscalationThreshold||10)){
     var esc=findEscalatedDiscountApprover();
     if(esc) return esc;
     // No Director/Admin at all — fall through to normal routing below rather than block the request
   }
-  var co = _canonCompany(currentUserCompany||'');
+  var co = _canonCompany(coOverride||currentUserCompany||'');
   // Check APPR_ROUTING for this company + action type
   var routeEmail = APPR_ROUTING[co] && APPR_ROUTING[co][type];
   if(routeEmail) {
@@ -6219,6 +6259,7 @@ function initQuotation() {
   // inherited the old "Revised from:" line on its printout, and an owed revision
   // would have stamped .R1 onto a brand-new serial.
   qRevisedFrom=''; qRevisionPending=false; qSignatures={}; qSigBaseTotal=null; qAdditionalFrom='';
+  qOrderPausedInfo=null;
   var _bR=el('banner-revised'); if(_bR){ _bR.style.display='none'; _bR.textContent=''; }
   // Baseline the change log against the empty quotation, so building it up is
   // recorded as additions rather than compared against the previous quotation.
@@ -8756,13 +8797,17 @@ function renderProjectSizeNote(){
 // and have drifted apart repeatedly; this gate is not going to be the next one.
 var PROJECT_SIZE_GATE_MSG='Set the project size (no. of components) before locking';
 var CARCASS_COUNT_GATE_MSG='Enter the carcass / unit count before locking';
+var ORDER_PAUSE_GATE_MSG='This quotation is paused — resume the linked order before locking';
+function _qOrderPaused(){ return !!(qOrderPausedInfo&&qOrderPausedInfo.active); }
 // Two things must be known before a quotation can be issued, for the same reason: everything
 // downstream is priced off them, and both are cheaper to ask for now than to discover missing on
 // a locked quotation later. The carcass count joined this on 2026-08-10, after the getTotU()
-// fallback billed 1,112 linear metres as 1,112 cabinets to install.
-function _lockGateOk(){ return _projectSizeGateOk()&&_carcassCountGateOk(); }
+// fallback billed 1,112 linear metres as 1,112 cabinets to install. An approved order pause joined
+// 2026-08-28 -- Rommel: "the quotation should not be editable until the resume has been press."
+function _lockGateOk(){ return _projectSizeGateOk()&&_carcassCountGateOk()&&!_qOrderPaused(); }
 function _projectSizeGateOk(){ return projectSizeValue()>0; }
 function _lockGateReason(){
+  if(_qOrderPaused()) return ORDER_PAUSE_GATE_MSG;
   if(!_projectSizeGateOk()) return PROJECT_SIZE_GATE_MSG;
   if(!_carcassCountGateOk()) return CARCASS_COUNT_GATE_MSG;
   return '';
@@ -8770,6 +8815,12 @@ function _lockGateReason(){
 // fromStage2: both cards live inside #s1-wrap, so on Stage 2 they are hidden and
 // scrolling to one would do nothing at all. Go to Stage 1 first.
 function _lockGateFail(fromStage2){
+  if(_qOrderPaused()){
+    showToast('This quotation is paused — go to Orders and press Resume before locking.');
+    var _pb=el('order-pause-banner');
+    if(_pb) _pb.scrollIntoView({behavior:'smooth',block:'center'});
+    return;
+  }
   var needSize=!_projectSizeGateOk();
   var cardId=needSize?'project-size-card':'carcass-count-card';
   var inputId=needSize?'project-size':'carcass-unit-count';
@@ -12387,8 +12438,8 @@ function _dashUpdateKPIs(){
     if(teamCo && pre!==teamCo) return;
     var key=String(q.user||'').trim().toLowerCase();
     if(!byUser[key]) return;
-    var mins=(typeof calcWorkingMinutes==='function')
-      ? calcWorkingMinutes(o.receivedAt,o.sentAt,o.sourceCompany||'')
+    var mins=(typeof _orderElapsedWorkingMinutes==='function')
+      ? _orderElapsedWorkingMinutes(o,o.sentAt)
       : (new Date(o.sentAt)-new Date(o.receivedAt))/60000;
     if(mins>=0){ byUser[key].respMins.push(mins); byUser[key].answered++; }
   });
@@ -12434,8 +12485,8 @@ function _dashUpdateKPIs(){
     var ck=_orderCompanyKey(o);
     if(teamCo==='none'){ if(ck!=='') return; }
     else if(teamCo){ if(ck!==teamCo) return; }
-    var age=(typeof calcWorkingMinutes==='function')
-      ? calcWorkingMinutes(o.receivedAt,nowIsoUnclaimed,o.sourceCompany||'')
+    var age=(typeof _orderElapsedWorkingMinutes==='function')
+      ? _orderElapsedWorkingMinutes(o,nowIsoUnclaimed)
       : (new Date(nowIsoUnclaimed)-new Date(o.receivedAt))/60000;
     if(age==null||age<0) return;
     unclaimedCount++; unclaimedMinsTotal+=age;
@@ -12538,6 +12589,277 @@ function _orderCompanyKey(o){
   if(co.indexOf('world class')>=0) return 'W';
   return '';
 }
+// ── Pause the SLA clock while waiting on the client ──────────────────────────────────────────
+// Rommel, 2026-08-28: the response clock keeps running while an order is genuinely stuck waiting
+// for the client to send missing info, so the timer misrepresents how long the team actually took.
+// Pausing needs an approver (to avoid abuse — anyone could otherwise stop their own clock at will)
+// and, once approved, the linked quotation must stop being editable until Resume is pressed —
+// Resume itself needs no approval, but is logged either way, same as every other change in this app.
+//
+// One JSON column on the order (Sheets col AJ / Supabase pause_history), an array of pause
+// EPISODES rather than a separate "is it paused" flag — a flag would be a second copy of a fact
+// this array already holds, and this app has repeatedly hit the class of bug where two copies of
+// one fact drift apart. Current state is always DERIVED from the last entry.
+function _parsePauseHistory(v){
+  if(Array.isArray(v)) return v;
+  if(!v) return [];
+  try{ var p=JSON.parse(v); return Array.isArray(p)?p:[]; }catch(e){ return []; }
+}
+// {paused, pending, entry, history} — entry is the live episode (approved-not-yet-resumed, or
+// pending-not-yet-decided), whichever the last entry in the history actually is.
+function _orderPauseState(o){
+  var h=(o&&o.pauseHistory)||[];
+  var last=h.length?h[h.length-1]:null;
+  var paused =!!(last&&last.status==='approved'&&!last.resumedAt);
+  var pending=!!(last&&last.status==='pending');
+  return {paused:paused,pending:pending,entry:(paused||pending)?last:null,history:h};
+}
+// Wraps calcWorkingMinutes, subtracting every APPROVED pause window from the elapsed time. Every
+// place that measures an order's own age (Orders page, Dashboard order-queue widget, Team
+// performance) reads an order's elapsed time the same way, so this is the one place that knows
+// about pausing — none of those callers need to change their own logic, only which function they
+// call. A window that is still open (not yet resumed) is excluded up to `toIso` itself.
+function _orderElapsedWorkingMinutes(o,toIso){
+  if(!o||!o.receivedAt||!toIso) return null;
+  var co=o.sourceCompany||(typeof currentUserCompany!=='undefined'?currentUserCompany:'');
+  var total=calcWorkingMinutes(o.receivedAt,toIso,co);
+  if(total===null) return null;
+  var h=(o.pauseHistory||[]).filter(function(e){return e&&e.status==='approved'&&e.approvedAt;});
+  for(var i=0;i<h.length;i++){
+    var e=h[i];
+    var winEnd=e.resumedAt||toIso;
+    // A pause resumed after `toIso` (measuring a past moment) must not exclude past that moment.
+    if(Date.parse(winEnd)>Date.parse(toIso)) winEnd=toIso;
+    var excl=calcWorkingMinutes(e.approvedAt,winEnd,co);
+    if(excl) total-=excl;
+  }
+  return Math.max(0,total);
+}
+// Writes the order's pause history to both stores and updates the in-memory copy. Always re-scans
+// the Sheet for the row by ID rather than trusting a cached _row — _persistApprovedFieldToQuotation
+// already learned this lesson: a write to the wrong row would silently corrupt an unrelated order,
+// and this can run from an approver's browser that never loaded this order at all.
+function _saveOrderPauseHistory(orderId,history,cb){
+  var i; for(i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId) break;
+  if(i<pendingOrders.length) pendingOrders[i].pauseHistory=history;
+  var json=JSON.stringify(history);
+  var supaJob = (typeof supaReady==='function'&&supaReady())
+    ? supa.from('pending_orders').update({pause_history:history}).eq('id',orderId)
+        .then(function(r){ if(r&&r.error) console.warn('[order-pause] supabase update failed',r.error.message||r.error); })
+        .catch(function(e){ console.warn('[order-pause] supabase update threw',e); })
+    : Promise.resolve();
+  var sheetJob = gToken
+    ? sheetsGet('Pending Orders!A:A').then(function(d){
+        var vals=(d&&d.values)||[]; var rowIdx=-1;
+        for(var r=1;r<vals.length;r++){ if(vals[r][0]===orderId){ rowIdx=r+1; break; } }
+        if(rowIdx<0) return; // no Sheets row (Supabase-only order) — Supabase write above already covers it
+        return sheetsUpdate('Pending Orders!AJ'+rowIdx,[[json]]);
+      }).catch(function(e){ console.warn('[order-pause] sheets update failed',e); })
+    : Promise.resolve();
+  Promise.all([supaJob,sheetJob]).then(function(){ if(cb) cb(true); }).catch(function(){ if(cb) cb(false); });
+}
+// ── Pause request modal ───────────────────────────────────────────────────────────────────
+var _opauseCtx={orderId:''};
+function openOrderPauseRequest(orderId){
+  var o=null; for(var i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId){o=pendingOrders[i];break;}
+  if(!o){ showToast('Order not found.'); return; }
+  var st=_orderPauseState(o);
+  if(st.paused){ showToast('This order is already paused.'); return; }
+  if(st.pending){ showToast('A pause request for this order is already pending.'); return; }
+  _opauseCtx={orderId:orderId};
+  var det='<div style="display:flex;gap:18px;flex-wrap:wrap">'
+    +'<div><div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Order</div>'
+    +'<div style="font-weight:500;font-family:monospace;font-size:12px">#'+escHtml(orderId)+'</div></div>'
+    +'<div><div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Client</div>'
+    +'<div style="font-weight:500">'+escHtml(o.clientName||'—')+'</div></div>'
+    +(o.quotSerial&&!/^DRAFT-/.test(o.quotSerial)
+      ?('<div><div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Linked quotation</div>'
+        +'<div style="font-weight:500;font-family:monospace;font-size:12px">'+escHtml(o.quotSerial)+' — will be locked once approved</div></div>')
+      :'')
+    +'</div>';
+  var detEl=el('opause-details'); if(detEl) detEl.innerHTML=det;
+  var apprObj=findApproverForAction('order_pause',{},_orderCompanyKey(o));
+  var routeEl=el('opause-route');
+  if(routeEl){
+    routeEl.innerHTML=(!apprObj||!apprObj.email)
+      ? '<span style="color:var(--coral)"><i class="ti ti-alert-triangle"></i> No approver configured for this company — Admin will be notified.</span>'
+      : '<i class="ti ti-arrow-right" style="color:var(--navy);font-size:14px"></i><span>This request will be routed to: <b>'+escHtml(apprObj.name)+'</b></span>';
+  }
+  var noteEl=el('opause-reason'); if(noteEl) noteEl.value='';
+  var errEl=el('opause-reason-err'); if(errEl) errEl.style.display='none';
+  _evidenceReset('opause');
+  openModal('ov-order-pause');
+}
+function submitOrderPauseRequest(){
+  var orderId=_opauseCtx.orderId;
+  var o=null; for(var i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId){o=pendingOrders[i];break;}
+  if(!o){ showToast('Order not found.'); closeModal('ov-order-pause'); return; }
+  if(!_reasonGate('opause-reason','opause-reason-err')) return;
+  var reason=_reasonOf('opause-reason');
+  var st=_orderPauseState(o);
+  if(st.paused||st.pending){ showToast('This order already has a pause in progress.'); closeModal('ov-order-pause'); return; }
+
+  var apprObj=findApproverForAction('order_pause',{},_orderCompanyKey(o));
+  if(!apprObj||!apprObj.email){
+    var admin=sheetUsers.find(function(u){return u.pos==='Admin'&&u.active;});
+    if(admin) gSendMessage(admin.email,admin.name,
+      'No designated approver is configured for order-pause requests in '+(o.sourceCompany||'—')
+        +'. A request from '+((gUser&&gUser.name)||'')+' for order #'+orderId+' is pending. '
+        +'Please assign one in Settings → Approval Routing.',
+      'urgent','no_approver:order_pause',function(){});
+    showToast('No approver found — Admin has been notified to configure routing.');
+    closeModal('ov-order-pause'); return;
+  }
+
+  var reqId='req_'+Date.now()+'_'+Math.random().toString(36).substr(2,6);
+  var who=(gUser&&gUser.name)||currentRole;
+  var quotSer=(o.quotSerial&&!/^DRAFT-/.test(o.quotSerial))?o.quotSerial:'';
+  gSendMessage(apprObj.email,apprObj.name,
+    who+' is requesting your approval — Pause order #'+orderId+' for '+(o.clientName||'—')
+      +(quotSer?(' ('+quotSer+')'):'')+'. Reason: '+reason+'.',
+    'normal','approval_request:order_pause:'+orderId,function(){});
+
+  var req={
+    id:reqId,type:'order_pause',status:'pending',serial:quotSer,client:o.clientName||'—',
+    from:who,fromEmail:(gUser&&gUser.email)||'',
+    company:o.sourceCompany||currentUserCompany,msg:'Pause requested for order #'+orderId+'. Reason: '+reason,
+    note:reason,date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
+    approver:apprObj.name,approverEmail:apprObj.email,
+    amount:0,reqDisc:0,cfValues:null,ctx:'s1',by:'',actionDate:'',
+    // What the approve-side branch keys off -- a pause is order-scoped, not quotation-scoped, so
+    // this rides alongside serial (which is only ever set when a real quotation is linked).
+    orderId:orderId,
+    // No engine result to carry -- _apprApplyRemoteDecisions already skips anything with no
+    // decision, so this type is inert on the phone-approval poll by construction, not by a special case.
+    decision:null
+  };
+  NOTIFS.unshift({id:NOTIFS.length+1,reqId:reqId,type:'order_pause',from:req.from,fromEmail:req.fromEmail,
+    client:req.client,serial:quotSer,amount:0,reqDisc:0,msg:req.msg,note:req.note,
+    date:req.date,status:'pending',company:req.company,approverEmail:apprObj.email,cfValues:null,ctx:'s1',by:'',
+    orderId:orderId,decision:null,applied:false});
+  _updateNotifBadge();
+  closeModal('ov-order-pause');
+
+  // The order's own pending entry -- shown only as "pause requested", never as Paused, matching
+  // Rommel's rule that the card must not say Paused until a Manager actually approves it.
+  var newEntry={reqId:reqId,status:'pending',requestedBy:who,requestedByEmail:(gUser&&gUser.email)||'',
+    requestedAt:new Date().toISOString(),reason:reason};
+  var history=(o.pauseHistory||[]).concat([newEntry]);
+  _saveOrderPauseHistory(orderId,history,function(){ if(typeof renderOrders==='function'&&el('orders-wrap')) renderOrders(); });
+
+  _evidenceCommit('opause',quotSer||'',function(att){
+    logActivity('Pause request raised for order #'+orderId+' by '+who+'.'+_reasonSuffix(reason), quotSer||'', att);
+  });
+
+  gSaveApprovalRequest(req,function(ok){
+    if(ok) showToast('Request sent to '+apprObj.name+'. They will see it in their Approvals page.');
+    else   showToast('⚠ Request could not be saved — check your Sheets access. Contact Admin.');
+  });
+}
+// ── Approve / reject a pause request ──────────────────────────────────────────────────────
+// Approve and reject share how the order's own pending entry gets closed out; only Approve also
+// touches a linked quotation, since nothing was ever locked while the request merely sat pending.
+function _applyOrderPauseDecision(n,action,byName,actionReason){
+  var orderId=n.orderId; if(!orderId) return;
+  var quotSer=n.serial||''; // captured at REQUEST time from the order's own quotSerial
+  function withOrder(cb){
+    var i; for(i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId) break;
+    if(i<pendingOrders.length){ cb(pendingOrders[i].pauseHistory||[]); return; }
+    // Not loaded in THIS browser (the approver may never have opened Orders) -- pull it fresh
+    // rather than guessing at an empty history, which would silently discard the pending entry
+    // this decision is supposed to close out.
+    gLoadPendingOrders(function(){
+      var j; for(j=0;j<pendingOrders.length;j++) if(pendingOrders[j].id===orderId) break;
+      cb(j<pendingOrders.length?(pendingOrders[j].pauseHistory||[]):[]);
+    });
+  }
+  withOrder(function(history){
+    history=history.slice();
+    var idx=-1;
+    for(var k=history.length-1;k>=0;k--){ if(history[k]&&history[k].reqId===n.reqId){ idx=k; break; } }
+    if(idx<0){ console.warn('[order-pause] could not find the pending entry for order #'+orderId+' / '+n.reqId); return; }
+    var entry=history[idx];
+    if(action==='approved'){
+      entry.status='approved'; entry.approvedBy=byName; entry.approvedByEmail=(gUser&&gUser.email)||''; entry.approvedAt=new Date().toISOString();
+    } else {
+      entry.status='rejected'; entry.rejectedBy=byName; entry.rejectedByEmail=(gUser&&gUser.email)||''; entry.rejectedAt=new Date().toISOString();
+    }
+    _saveOrderPauseHistory(orderId,history,function(){ if(typeof renderOrders==='function'&&el('orders-wrap')) renderOrders(); });
+    logActivity('Order #'+orderId+' pause request '+action+' by '+byName+'.'+_reasonSuffix(actionReason), quotSer||'');
+    if(action==='approved'&&quotSer) _lockQuotationForPause(quotSer,entry,orderId,byName);
+  });
+}
+// Locks the linked quotation, regardless of whether it happens to be open in this browser -- same
+// reasoning _persistApprovedFieldToQuotation is built on: an approval must land somewhere durable,
+// not only in whichever session happened to click Approve.
+function _lockQuotationForPause(serial,entry,orderId,byName){
+  var isOpen=((qBaseSerial||qSerial)===serial);
+  if(isOpen){
+    qOrderPausedInfo={active:true,orderId:orderId,reason:entry.reason||'',approvedBy:entry.approvedBy||byName,approvedAt:entry.approvedAt};
+    if(typeof updateLockUI==='function') updateLockUI();
+    if(typeof updateFQLockUI==='function') updateFQLockUI();
+  }
+  if(!gToken) return;
+  loadQuotationJson(serial,function(state){
+    if(!state) return;
+    state.orderPaused={active:true,orderId:orderId,reason:entry.reason||'',approvedBy:entry.approvedBy||byName,approvedAt:entry.approvedAt};
+    var json=JSON.stringify(state);
+    if(json.length>QSTATE_CHUNK*QSTATE_COLS){ console.warn('[order-pause] patched state too large to save for '+serial); return; }
+    var row=_qstateRow(serial,json);
+    sheetsGet('Quotation State!A:A').then(function(d){
+      var vals=(d&&d.values)||[]; var rowIdx=-1;
+      for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
+      if(rowIdx>0) return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]);
+      return sheetsAppend('Quotation State!A:K',[row]).then(function(){ delete _qStateRowCache[serial]; });
+    }).then(function(){
+      try{ supaUpsertState(serial,state); }catch(e){}
+      logActivity('Quotation locked — order #'+orderId+' paused (approved by '+(entry.approvedBy||byName)+').'+_reasonSuffix(entry.reason), serial);
+    }).catch(function(e){ console.warn('[order-pause] failed to persist pause lock for '+serial,e); });
+  });
+}
+// ── Resume -- no approval needed, but always logged (Rommel: "resume must also be logged") ──
+function resumeOrderPause(orderId){
+  if(!orderId){ showToast('No order to resume.'); return; }
+  var o=null; for(var i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId){o=pendingOrders[i];break;}
+  if(!o){ showToast('Order not found.'); return; }
+  var st=_orderPauseState(o);
+  if(!st.paused){ showToast('This order is not currently paused.'); return; }
+  if(!confirm('Resume order #'+orderId+(o.clientName?' ('+o.clientName+')':'')+'?\n\nThis restarts the SLA response clock and, if linked, unlocks its quotation for editing again.')) return;
+  var who=(gUser&&gUser.name)||currentRole;
+  var history=(o.pauseHistory||[]).slice();
+  history[history.length-1]=Object.assign({},history[history.length-1],
+    {resumedBy:who,resumedByEmail:(gUser&&gUser.email)||'',resumedAt:new Date().toISOString()});
+  var quotSer=(o.quotSerial&&!/^DRAFT-/.test(o.quotSerial))?o.quotSerial:'';
+  _saveOrderPauseHistory(orderId,history,function(){ if(typeof renderOrders==='function'&&el('orders-wrap')) renderOrders(); });
+  logActivity('Order #'+orderId+' pause resumed by '+who+'.', quotSer||'');
+  if(quotSer) _clearOrderPauseOnQuotation(quotSer,who,orderId);
+  showToast('Order #'+orderId+' resumed.');
+}
+function _clearOrderPauseOnQuotation(serial,who,orderId){
+  var isOpen=((qBaseSerial||qSerial)===serial);
+  if(isOpen){
+    qOrderPausedInfo=null;
+    if(typeof updateLockUI==='function') updateLockUI();
+    if(typeof updateFQLockUI==='function') updateFQLockUI();
+  }
+  if(!gToken) return;
+  loadQuotationJson(serial,function(state){
+    if(!state||!state.orderPaused||!state.orderPaused.active) return; // nothing to clear
+    state.orderPaused={active:false};
+    var json=JSON.stringify(state);
+    if(json.length>QSTATE_CHUNK*QSTATE_COLS){ console.warn('[order-pause] patched state too large to save for '+serial); return; }
+    var row=_qstateRow(serial,json);
+    sheetsGet('Quotation State!A:A').then(function(d){
+      var vals=(d&&d.values)||[]; var rowIdx=-1;
+      for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
+      if(rowIdx>0) return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]);
+      return sheetsAppend('Quotation State!A:K',[row]).then(function(){ delete _qStateRowCache[serial]; });
+    }).then(function(){
+      try{ supaUpsertState(serial,state); }catch(e){}
+      logActivity('Quotation unlocked — order #'+orderId+' pause resumed by '+who+'.', serial);
+    }).catch(function(e){ console.warn('[order-pause] failed to clear pause lock for '+serial,e); });
+  });
+}
 
 // Order queue overview — the half of the picture Team performance cannot show.
 //
@@ -12605,13 +12927,13 @@ function _renderOrderQueueCard(teamCo, allQuots){
 
     if(st==='Done'){
       if(!o.sentAt){ noTime++; return; }
-      var m=calcWorkingMinutes(o.receivedAt,o.sentAt,o.sourceCompany||'');
+      var m=_orderElapsedWorkingMinutes(o,o.sentAt);
       if(m===null){ noTime++; return; }
       answered++;
       if(m>=slaMins) lateAnswered++;
       return;
     }
-    var age=calcWorkingMinutes(o.receivedAt,nowIso,o.sourceCompany||'');
+    var age=_orderElapsedWorkingMinutes(o,nowIso);
     if(age===null){ noTime++; return; }
     openAges.push(age);
     if(age>=slaMins) overdue++;
@@ -13803,7 +14125,7 @@ function _reportTeamStats(){
     if(!q) return;
     var key=String(q.user||'').trim().toLowerCase();
     if(!byUser[key]) return;
-    var mins=(typeof calcWorkingMinutes==='function')?calcWorkingMinutes(o.receivedAt,o.sentAt,o.sourceCompany||''):(new Date(o.sentAt)-new Date(o.receivedAt))/60000;
+    var mins=(typeof _orderElapsedWorkingMinutes==='function')?_orderElapsedWorkingMinutes(o,o.sentAt):(new Date(o.sentAt)-new Date(o.receivedAt))/60000;
     if(mins>=0) byUser[key].respMins.push(mins);
   });
   all.forEach(function(e){
@@ -14892,7 +15214,7 @@ function _apprMergeWithKnown(req){
     // approver acts. That is how sigSlot was lost, and how to_email came back null.
     var base=NOTIFS[i], out={}, keys=['type','sigSlot','notedRequired','serial','client','company',
       'from','fromEmail','approverEmail','approver','msg','note','date','status','amount',
-      'reqDisc','counterDisc','cfValues','ctx','by','decision','applied','actionReason'];
+      'reqDisc','counterDisc','cfValues','ctx','by','decision','applied','actionReason','orderId'];
     for(var k=0;k<keys.length;k++){
       var v=base[keys[k]];
       if(v!==undefined&&v!==null&&v!=='') out[keys[k]]=v;
@@ -14974,7 +15296,7 @@ function _mergeApprovalReqsIntoNotifs(reqs){
         // Carried, not dropped: this push is a fixed field list, and anything missing from it is
         // lost on every reload. sigSlot decides which signature the request is for.
         sigSlot:_apprSigSlot(req),notedRequired:req.notedRequired,
-        decision:req.decision||null,applied:!!req.applied,
+        decision:req.decision||null,applied:!!req.applied,orderId:req.orderId||'',
         ctx:req.ctx||'s1',by:req.by||''});
     }
   }
@@ -14991,7 +15313,7 @@ function gLoadApprovalRequests(cb){
           note:row.note,counterDisc:row.counter_disc,status:row.status,by:row.actioned_by,
           from:p.from,msg:p.msg,amount:p.amount||0,reqDisc:p.reqDisc||0,cfValues:p.cfValues||null,
           ctx:p.ctx||'s1',date:p.date,sigSlot:p.sigSlot||null,notedRequired:p.notedRequired,
-          decision:p.decision||null,applied:!!p.applied,actionReason:p.actionReason||''};
+          decision:p.decision||null,applied:!!p.applied,actionReason:p.actionReason||'',orderId:p.orderId||''};
       });
       _mergeApprovalReqsIntoNotifs(reqs);
       if(cb)cb();
@@ -15141,7 +15463,7 @@ function _apprNeedsMyAction(n){
 var APPR_TYPE_LABELS={nonvat:'Non-VAT',discount:'Discount',holiday:'Holiday Premium',
   premium:'Holiday Premium',client_update:'Client Update',unlock:'Unlock',override:'CF Override',
   reactivate:'Reactivation',revision:'Revision',signature:'Signature',
-  accommodation:'Accommodation'};
+  accommodation:'Accommodation',order_pause:'Pause Order'};
 var APPR_TYPE_COLORS={nonvat:'coral',revision:'navy',client_update:'teal',signature:'navy'};
 function _apprTypeLabel(t){
   var s=String(t||'');
@@ -15489,7 +15811,7 @@ function doApprovalAction(idx, action) {
       company:n.company,msg:n.msg,note:n.note||'',date:n.date,
       approver:n.approverEmail||'',approverEmail:n.approverEmail||'',
       amount:n.amount||0,reqDisc:n.reqDisc||0,counterDisc:counterDisc,
-      cfValues:n.cfValues||null,
+      cfValues:n.cfValues||null,orderId:n.orderId||'',
       ctx:n.ctx||'s1',by:byName,actionDate:new Date().toISOString(),overrodeRouting:!!_may.override,
       actionReason:actionReason};
     var row=[key,JSON.stringify(updReq),new Date().toISOString()];
@@ -15520,8 +15842,13 @@ function doApprovalAction(idx, action) {
             +(counterDisc?counterDisc+'% ':'')+'counter" to apply it to the quotation, or Decline.':''),
       action==='countered'?'urgent':'normal','approval_result:'+n.type+':'+n.serial,function(){});
   }
-  // If approved → apply the change to the quotation form (if open)
-  if(action==='approved'){
+  // order_pause is order-scoped, not quotation-scoped -- neither of the two normal apply paths
+  // has (or should have) a case for it, so it gets its own branch rather than silently no-op'ing
+  // through them. Runs on reject too: the order's own pending entry has to be closed out either way.
+  if(n.type==='order_pause'){
+    if(action==='approved'||action==='rejected') _applyOrderPauseDecision(n,action,byName,actionReason);
+  } else if(action==='approved'){
+    // If approved → apply the change to the quotation form (if open)
     _applyApprovedRequest(n); // immediate in-memory update, only if this happens to be the open quotation
     _persistApprovedFieldToQuotation(n,function(ok){
       if(!ok) showToast('⚠ Approved, but could not confirm it saved into the quotation — check '+n.serial+' directly.');
@@ -15556,7 +15883,10 @@ var ORDERS_COLS = ['ID','Received At','Client Name','Company Name','Contact Numb
   'Agent Name','Attachment 1','Attachment 2','Status','Quotation Serial','Sent At','Source Company',
   // AB..AI — the website order form. Appended, never inserted: _setOrderStatus
   // writes Status/Quotation Serial/Sent At by column letter (X:Z).
-  'Order Kind','Address','Project Name','Delivery','Segment','Lead Source','Target Date','Notes'];
+  'Order Kind','Address','Project Name','Delivery','Segment','Lead Source','Target Date','Notes',
+  // AJ — the Pause button's approved/rejected/resumed history, one JSON array. Appended here too,
+  // for the same reason: _setOrderStatus writes by column letter and must not shift.
+  'Pause History'];
 
 // Which form produced this order. Wufoo is the default so existing rows keep working.
 // `channel` is what a person actually scans for once two intake routes are live:
@@ -15698,6 +16028,7 @@ function gLoadPendingOrders(cb) {
           leadSource: r.lead_source||'',
           targetDate: r.target_date||'',
           notes:      r.notes||'',
+          pauseHistory: Array.isArray(r.pause_history)?r.pause_history:[],
           _row: null, // no Sheets row for a Supabase-sourced order — see _setOrderStatus, already handles this correctly
           _raw: null
         };
@@ -15725,7 +16056,7 @@ function gLoadPendingOrders(cb) {
 var ordersFromSheetsOnly=false;   // true while the queue is the Sheet's partial view
 function _gLoadPendingOrdersFromSheets(cb) {
   ordersFromSheetsOnly=true;
-  sheetsGet('Pending Orders!A:AI').then(function(d){
+  sheetsGet('Pending Orders!A:AJ').then(function(d){
     pendingOrders=[];
     if(d&&d.values&&d.values.length>1){
       var rows=d.values;
@@ -15767,6 +16098,7 @@ function _gLoadPendingOrdersFromSheets(cb) {
           leadSource: r[32]||'',
           targetDate: r[33]||'',
           notes:      r[34]||'',
+          pauseHistory: _parsePauseHistory(r[35]),
           _row: i+1,
           _raw: r
         });
@@ -15792,7 +16124,7 @@ function supaMigrateOrders(){
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
   _ordersMigrationInFlight=true;
   console.log('[migrate] backfilling Pending Orders into Supabase from the current Sheets data…');
-  return sheetsGet('Pending Orders!A:AI').then(function(d){
+  return sheetsGet('Pending Orders!A:AJ').then(function(d){
     var stats={orders:0};
     var rows=(d&&!d.error&&d.values)||[];
     var out=[];
@@ -15804,7 +16136,7 @@ function supaMigrateOrders(){
         board_substrate:r[10]||'', haspe_flow:r[11]||'', edging:r[12]||'', boring:r[13]||'', cutting:r[14]||'', lipping:r[15]||'',
         hg_included:r[16]||'', hg_groove:r[17]||'', hg_installation:r[18]||'', hg_by:r[19]||'', agent_name:r[20]||'',
         attachment_1:r[21]||'', attachment_2:r[22]||'', status:r[23]||'Pending', quotation_serial:r[24]||'', sent_at:r[25]||null,
-        source_company:r[26]||''
+        source_company:r[26]||'', pause_history:_parsePauseHistory(r[35])
       });
     }
     stats.orders=out.length;
@@ -16096,8 +16428,12 @@ function renderOrders(){
     // A site visit is a request to attend, not a quotation turnaround — it is not
     // measured against the order SLA and shows no timer at all.
     var _kind=orderKind(o), _onSla=ORDER_KINDS[_kind].sla;
-    var _noClock=(_finished&&!o.sentAt)||!_onSla;
-    var elapsed=_finished?calcWorkingMinutes(o.receivedAt,o.sentAt||o.receivedAt,o.sourceCompany||currentUserCompany):calcWorkingMinutes(o.receivedAt,now,o.sourceCompany||currentUserCompany);
+    var _pst=_orderPauseState(o);
+    // Paused counts as no-clock too -- the SLA number itself already excludes the paused window
+    // via _orderElapsedWorkingMinutes, but the coloured "nearing/overdue" urgency reads oddly on a
+    // job that is, right now, not the team's to answer.
+    var _noClock=(_finished&&!o.sentAt)||!_onSla||_pst.paused;
+    var elapsed=_finished?_orderElapsedWorkingMinutes(o,o.sentAt||o.receivedAt):_orderElapsedWorkingMinutes(o,now);
     var slaHours=ordersSlaSettings.defaultHours;
     var slaMins=slaHours*60;
     var pct=elapsed!==null?Math.min(100,Math.round(elapsed/slaMins*100)):0;
@@ -16144,6 +16480,11 @@ function renderOrders(){
     var reqBadge=o.reqType==='Revision'
       ?'<span class="pill" style="background:var(--wash-violet);color:var(--ink36);font-size:10px">Revision</span>'
       :'<span class="pill" style="background:var(--wash-sky);color:var(--ink37);font-size:10px">New</span>';
+    // Only ever says Paused once a Manager has actually approved it -- a Manager can still reject
+    // a pending request, so a "pending" state must not read as though the clock has already stopped.
+    var pauseBadge=_pst.paused
+      ?'<span class="pill pill-amber" title="Approved by '+escHtml(_pst.entry.approvedBy||'—')+'"><i class="ti ti-player-pause-filled"></i> Paused</span>'
+      :(_pst.pending?'<span class="pill pill-muted"><i class="ti ti-clock"></i> Pause requested</span>':'');
     var attachHtml='';
     // A website order can carry up to ten files. attachment_1/2 are only the
     // first two, mirrored for Wufoo and for older rows — rendering just those
@@ -16181,7 +16522,7 @@ function renderOrders(){
       +'<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap">'
       +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
       +'<span style="font-weight:600;font-size:13px;color:var(--navy)">'+(o.id?'#'+o.id:'–')+'</span>'
-      +statusBadge+kindBadge+reqBadge
+      +statusBadge+kindBadge+reqBadge+pauseBadge
       +'<span style="font-size:11px;color:var(--text2)">Received: '+fmtDT(o.receivedAt)+'</span>'
       +'</div>'
       // Timer
@@ -16223,6 +16564,11 @@ function renderOrders(){
       +'<button class="btn" onclick="viewOrderDetail(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-eye"></i> View</button>'
       +(_kind==='Cutting List'?'<button class="btn" onclick="openOrderCuttingList(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-list-details"></i> Cutting list</button>':'')
       +(!_finished?'<button class="btn btn-primary" onclick="exportOrderToQuotation(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-file-plus"></i> Export to Quotation</button>':'')
+      // Pause needs an approver (all users can request it); Resume needs none, but is always
+      // logged. Not offered on a finished order or one with no SLA clock to freeze in the first place.
+      +(!_finished&&_onSla&&_pst.paused?'<button class="btn btn-primary" onclick="resumeOrderPause(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-player-play"></i> Resume</button>':'')
+      +(!_finished&&_onSla&&_pst.pending?'<button class="btn" disabled style="font-size:12px;opacity:.6"><i class="ti ti-clock"></i> Pause pending</button>':'')
+      +(!_finished&&_onSla&&!_pst.paused&&!_pst.pending?'<button class="btn" onclick="openOrderPauseRequest(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-player-pause"></i> Pause</button>':'')
       +(!_finished?'<button class="btn" onclick="cancelOrder(\''+escHtml(o.id)+'\')" style="font-size:12px;color:var(--coral);border-color:var(--coral)"><i class="ti ti-ban"></i> Cancel</button>':'')
       +((o.status==='Cancelled'||o.status==='Archived')?'<button class="btn" onclick="reopenOrder(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-rotate"></i> Reopen</button>':'')
       +(currentRole==='Admin'?'<button class="btn" onclick="deleteOrder(\''+escHtml(o.id)+'\')" style="font-size:12px;color:var(--coral);border-color:var(--coral)" title="Remove this order permanently"><i class="ti ti-trash"></i></button>':'')
@@ -17048,7 +17394,7 @@ function ensurePendingOrdersTab(cb){
     if(d&&!d.error){if(cb)cb();return;}
     sheetsCreateTab('Pending Orders').then(function(){
       var header=[ORDERS_COLS];
-      sheetsAppend('Pending Orders!A:AI',header).then(function(){if(cb)cb();});
+      sheetsAppend('Pending Orders!A:AJ',header).then(function(){if(cb)cb();});
     });
   }).catch(function(){if(cb)cb();});
 }
@@ -21486,7 +21832,7 @@ function updateSentStatus() {
 }
 function updateLockUI() {
   var viewOnly=isViewOnly();
-  var locked=qLocked||viewOnly;
+  var locked=qLocked||viewOnly||_qOrderPaused();
   var lbtn=el("lock-btn");
   var sbtn=el("send-btn");
   var cbtn=el("cancel-s1-btn");
@@ -21533,6 +21879,7 @@ function updateLockUI() {
     b.disabled=locked;
   });
   _updateReactivationBanner();
+  if(typeof renderOrderPauseBanner==='function') renderOrderPauseBanner();
   // Shown only while this is still a draft, so it disappears the moment the quotation is locked
   // rather than relying on the sweep above to disable it.
   try{ _updateDiscardBtn(); }catch(e){}
@@ -21549,6 +21896,22 @@ function _qIsArchived(){
     if(dirData[i].id===ser||dirData[i].baseSerial===ser) return dirData[i].status==='Archived';
   }
   return false;
+}
+// Shown on both stages -- the pause blocks locking on both, so the reason needs to be visible
+// regardless of which one is open. Deliberately separate from _updateReactivationBanner: the two
+// can never both be true at once (a paused quotation is live work, not an archived one), but they
+// are unrelated facts and keeping them as two functions is what stopped one page from silently
+// deciding a third thing about the other.
+function renderOrderPauseBanner(){
+  var banner=el('order-pause-banner'); if(!banner) return;
+  var paused=_qOrderPaused();
+  banner.style.display=paused?'flex':'none';
+  if(!paused) return;
+  var info=qOrderPausedInfo;
+  var metaEl=el('order-pause-meta');
+  if(metaEl) metaEl.textContent='Order #'+(info.orderId||'—')+(info.approvedBy?(' · approved by '+info.approvedBy):'')+(info.approvedAt?(' · '+fmtDT(info.approvedAt)):'');
+  var reasonEl=el('order-pause-reason');
+  if(reasonEl) reasonEl.textContent=info.reason?('Reason: '+info.reason):'No reason was given.';
 }
 function _updateReactivationBanner(){
   var banner=el('reactivation-banner'); if(!banner) return;
@@ -21811,6 +22174,7 @@ function updateFQLockUI() {
   }
   _updateFQLockGate();   // must have the last word — the branch above re-enables the button
   updateFQClientApproveUI();
+  if(typeof renderOrderPauseBanner==='function') renderOrderPauseBanner();
   try{ _qTotalBar(); }catch(e){}
 }
 // Shown only once Stage 2 is locked — a Manager/Encoder/whoever clicks this ONLY after the
@@ -26526,7 +26890,7 @@ function supaUpsertApprovalRequest(req){
     // completed. Only ever overwrite it with something real: partial saves (doApprovalAction,
     // _markOverrideApproved) send just the changed fields, and both stores replace the payload
     // wholesale, so an unguarded write would blank it on the first approval action.
-    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null),decision:(req.decision||null),applied:!!req.applied,overrodeRouting:!!req.overrodeRouting,actionReason:(req.actionReason||null)},
+    payload:{msg:req.msg||null,amount:req.amount||0,reqDisc:req.reqDisc||0,cfValues:req.cfValues||null,ctx:req.ctx||null,date:req.date||null,from:req.from||null,sigSlot:req.sigSlot||null,notedRequired:(req.notedRequired!=null?req.notedRequired:null),decision:(req.decision||null),applied:!!req.applied,overrodeRouting:!!req.overrodeRouting,actionReason:(req.actionReason||null),orderId:(req.orderId||null)},
     status:req.status||'pending',
     actioned_by:req.by||null
   };
@@ -32307,6 +32671,11 @@ function getFullQuotationState(){
     // survive a save or a draft reopened tomorrow would lock without its revision.
     revisedFrom:qRevisedFrom, revisionPending:qRevisionPending, additionalFrom:qAdditionalFrom,
     signatures:JSON.parse(JSON.stringify(qSignatures||{})), sigBaseTotal:qSigBaseTotal,
+    // Round-tripped so an ordinary save (an Admin override, or anything else that can still touch
+    // a paused quotation) never drops the pause -- the approval that set it lives in Sheets/Supabase
+    // independently via _lockQuotationForPause, but this is what a normal save must not overwrite
+    // with a stale "not paused" if it happens to run first.
+    orderPaused:qOrderPausedInfo?JSON.parse(JSON.stringify(qOrderPausedInfo)):{active:false},
     instWorkers:qInstWorkers, instDays:qInstDays,
     instRegion:qInstRegion, mobTransport:qMobTransport, mobAccom:qMobAccom, mobCalc:qMobCalc,
     boardLayout:qBoardLayout?JSON.parse(JSON.stringify(qBoardLayout)):null,
@@ -32594,6 +32963,7 @@ function restoreFullQuotationState(state){
   qRevisionPending=!!state.revisionPending;
   qSignatures=state.signatures?JSON.parse(JSON.stringify(state.signatures)):{};
   qSigBaseTotal=(state.sigBaseTotal!=null)?state.sigBaseTotal:null;
+  qOrderPausedInfo=(state.orderPaused&&state.orderPaused.active)?JSON.parse(JSON.stringify(state.orderPaused)):null;
   // Baseline AFTER the restore and its recalc have run, or the first save would
   // report every line in the quotation as newly added.
   setTimeout(_auditBaseline,0);
@@ -38509,6 +38879,8 @@ function renderApprovalRoutingSettings(){
     {key:'premium',      label:'Holiday/Weekend Premium'},
     {key:'unlock',       label:'Unlock Quotation'},
     {key:'accommodation',label:'Accommodation Exception'},
+    {key:'order_pause',  label:'Pause Order (SLA freeze)',
+     hint:'Routed by the ORDER’s own company, not the requester’s — any user can request this'},
     {key:'checked',      label:'Signature — Checked by'},
     // Used only when the preparer IS the Checked by. Without it that request is refused, because
     // routing it to the preparer dead-ends: the Approvals page offers the requester Withdraw and

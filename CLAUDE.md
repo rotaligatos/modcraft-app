@@ -9280,7 +9280,173 @@ comes up again; they share only the "By cabinet type" print mode as a surface, n
 - **When a data-repair pattern might recur, write down the reusable version of it**, not just what
   was done to the one record — see the Option 3 fqAreas repair note above.
 
-# OPEN — updated 2026-08-25 (session end) — THIS IS THE AUTHORITATIVE LIST
+## What was changed on 2026-08-28/29 (session — six quick fixes, then the Pause Order feature)
+
+Seven commits total. The first six were small, independent reports worked one at a time; the
+seventh is a full new approval-gated feature on Orders.
+
+### 1. Options bar showed a stale total, and the wrong stage's DOM after a reload (`cc81070`)
+Reported on QT-C00000006 as "the override doesn't reflect, and the total shown is different from
+what's on the quotation" — turned out to be nothing to do with the override itself and everything
+to do with **Option 2 vs Option 3 under Stage 1** (Rommel corrected an initial Stage-2 misdiagnosis:
+*"What stage 2? theres no stage 2 yet."*). Two separate causes:
+- `restoreFullQuotationState()` set `qStage` from the saved state with a bare assignment and never
+  synced it to the actual visible DOM (`s1-wrap`/`s2-wrap` display, tab active classes) — reopening a
+  quotation could leave the wrong stage's markup showing.
+- `qOptionsList[i].grand` (the cached total shown on each option's pill) was only ever written at a
+  handful of call sites (`doApprove`, `confirmOptionApprove`, `switchToOption`) — a direct price
+  change (like an override) never refreshed it, so the pill kept showing whatever total was cached
+  from the last time one of those specific actions ran.
+Fixed: `restoreFullQuotationState` now explicitly syncs the DOM to `qStage` on every restore, and a
+new `_syncActiveOptionGrand()` (called from both `_recalcCore` and `_recalcFQCore`) keeps the ACTIVE
+option's pill total live on every recalculation, not just a few named actions.
+
+### 2. Downloaded/shared PDFs came out with the app's dark theme baked in (`1e3ce0a`)
+`_capturePrintCanvas()`'s off-screen capture wrapper used `background:var(--card);color:var(--text)`
+— a live theme token — instead of a fixed colour, so a user on dark mode got a black-background PDF.
+Pinned to `#fff`/`#000` explicitly, matching how every other print builder in this file is required
+to hold zero `var(--` references (see "Known remaining areas to watch").
+
+### 3. Outsource unit dropdown had no `kg` option (`30e7e74`)
+One-line UI request — `kg` added to `renderOutsourceSection()`'s unit `<option>` list alongside the
+existing `hr`.
+
+### 4. An approved unlock left a pending signature request standing (`f96f1f5`)
+`clearSignaturesOnUnlock()` (which cancels a PENDING signature request on unlock) was only ever
+called from the direct-PIN unlock path (`confirmUnlock`). The two approval-request-driven unlock
+paths — `_applyApprovedRequest` (on-screen) and `_persistApprovedFieldToQuotation` (background,
+serial-targeted) — never called it, so an unlock approved through routing (the majority of real
+unlocks, per the 2026-08-15 measurement: 53 of 71) left a stale pending signature request sitting on
+a quotation that had just been reopened for editing. Fixed in both.
+
+### 5. Cutting-list "Long/Short" headers renamed to "Length/Width" (`0d3acf0`)
+Confirmed safe first: `_webEbtToModcraft(code,L,W)` already auto-detects which of L/W is the bigger
+number for edge-banding purposes (`longIsLength=(+L||0)>=(+W||0)`), independent of which column a
+number was typed into — so the rename is display-only and changes no banding calculation.
+
+### 6. `clSelectClient()` could silently move a quotation to a different billed company (`8c6afff`)
+Picking a saved client from the search dropdown set `cl-type`/`cl-company-sel` from the client's
+stored account type, then directly re-baselined `_lastAcceptedClType`/`_lastAcceptedClCompanySel` —
+bypassing `_onQuotationCompanyMightChange()`, the safety check every OTHER path that can change a
+quotation's billed company already goes through (a manual dropdown change, for instance). Confirmed
+live on **QT-M00000129**: billed as World Class Laminate, Inc. since the moment its client was
+picked, while its serial stayed on the "M" (Module Systems) numbering series — no confirmation
+dialog, no reassignment, nothing logged, and the printout (which reads the CURRENT company at print
+time) showed the correct company while the on-screen serial and the Project List row did not.
+
+`clSelectClient()` now calls `_onQuotationCompanyMightChange()` — the exact same function the
+dropdown's own `onchange` calls — so a client whose stored type differs from the serial's current
+prefix now gets the same confirm-and-reassign flow as every other path.
+
+**The QT-M00000129 data fix went through two attempts.** The first was a direct Supabase-only
+reassignment (no Sheets write access in that session) — Rommel caught this immediately as wrong
+("why renumbered if the issue is just the letter of the serial number? ... i dont remember doing
+this in the attached file") because it split the two stores: Supabase showed the new number, the
+Google Sheet (which the Project List actually reads) still showed the old one untouched, and
+"Settings → Check Project List" does not detect this class of split at all. The Supabase-side change
+was fully reverted (verified via SQL: serial, base_serial, and the state JSON's own `serial`/
+`baseSerial`/`prevSerials` all restored to their exact pre-edit values), leaving the CODE fix in
+place but the actual reassignment undone. Rommel then reassigned it correctly himself, in-app, by
+re-picking the client from the search box — which now correctly triggered the confirmation dialog
+and moved the quotation to a new "W" serial with both stores updating together in one action, exactly
+as the fix was meant to make possible. Confirmed by Rommel: *"done, and it change now to a different
+number."*
+
+### 7. Pause Order — freezes the SLA clock while waiting on the client
+Rommel's full spec, given directly: *"Resume does not need approval only the pause. however, resume
+must also be logged. ... just to add if pause was requested and approved then the quotation should
+not be editable until the resume has been press. all users can pause and approver will route the
+same as the others with approver requirement. however, routing can also be set up in the setting.
+once the pause has been approved only will show that it was pause since the request can be rejected
+by the manager."*
+
+**Data model** — one JSON column (Sheets col **AJ = "Pause History"**, Supabase
+`pending_orders.pause_history jsonb`), an ARRAY of pause episodes rather than a separate "is it
+paused" flag: `{reqId, requestedBy/At, reason, status:'pending'|'approved'|'rejected',
+approvedBy/By Email/At, rejectedBy/At, resumedBy/ByEmail/At}`. Current state is always DERIVED from
+the LAST entry (`_orderPauseState(o)` → `{paused, pending, entry, history}`) — a second, separately-
+maintained "active" flag is exactly the class of two-copies-of-one-fact bug this codebase has
+repeatedly hit, so there is deliberately only one.
+
+**The clock itself** — `_orderElapsedWorkingMinutes(o, toIso)` wraps the existing
+`calcWorkingMinutes()`, subtracting every APPROVED pause window (an unresumed pause excludes up to
+`toIso` itself). Applied everywhere an order's elapsed time was ever computed — not just the Orders
+page card, but the Dashboard order-queue widget and Team performance's response-time analytics too
+(7 call sites total) — so pausing behaves consistently across the whole app rather than only on the
+one screen that happened to prompt the request.
+
+**Requesting** — a new "Pause" button on the order card opens `ov-order-pause` (reason required,
+evidence attach optional — reusing the existing `_reasonGate`/`_evidenceCommit` machinery this
+session's earlier `reason-box`/evidence work built), routed through `findApproverForAction('order_pause',
+{}, coOverride)` — `findApproverForAction` gained an optional 3rd parameter so routing can be by the
+ORDER's own company rather than the requester's, since any user can pause any order regardless of
+which company they're signed in under. **The card shows nothing beyond "Pause requested" while it's
+only pending** — the prominent status pill only ever says "Paused" once a Manager/Director/Admin has
+actually approved it, matching Rommel's rule that a pending request can still be rejected.
+
+**Approving** — `doApprovalAction()` routes `order_pause` to its own `_applyOrderPauseDecision(n,
+action, byName, actionReason)` on BOTH approve and reject (not just approve, like every other type)
+since the order's own pending history entry has to be closed out either way. On approve, if the order
+has a linked quotation, `_lockQuotationForPause()` writes `state.orderPaused={active:true,...}` into
+that quotation's SAVED state (Sheets + Supabase, regardless of whether it's open in the approver's own
+browser — mirroring `_persistApprovedFieldToQuotation`'s own established pattern for exactly this
+reason) and, if it happens to be open, live-applies it immediately.
+
+**Not editable while paused** — `_qOrderPaused()` reads the new `qOrderPausedInfo` global (restored
+from `state.orderPaused` on load); `_lockGateOk()` (the ALREADY-shared gate both stages' Lock buttons
+already go through for the project-size/carcass-count checks) now also refuses while paused, and
+Stage 1's existing, proven field-disable sweep (`updateLockUI`'s `locked=qLocked||viewOnly||...`)
+was extended with the same condition. A visible amber banner (shared across both stages, showing who
+approved it, when, and why) offers a Resume button directly.
+> ⚠ **Known, deliberate scope limit**: Stage 2 (`s2-wrap`) has no equivalent field-by-field disable
+> sweep anywhere in this file — that is a PRE-EXISTING characteristic of Stage 2, not something this
+> feature introduced or was asked to fix. Locking/sending Stage 2 IS blocked (same shared
+> `_lockGateOk()`), and the banner shows on both stages, but Stage 2's individual input fields are not
+> hard-disabled the way Stage 1's are. Flag this to Rommel if full parity is ever wanted — it is a
+> separate, larger piece of work unrelated to this feature.
+
+**Resuming** — no approval gate (any user), always logged, matching Rommel's explicit exception:
+*"Resume does not need approval only the pause. however, resume must also be logged."*
+`resumeOrderPause(orderId)` stamps the last history entry's `resumedBy/At`, clears the linked
+quotation's `orderPaused` state (same durable, regardless-of-open-browser pattern as approving), and
+logs on both the order and the quotation.
+
+**Settings → Approval Routing** gained a new row, `{key:'order_pause', label:'Pause Order (SLA
+freeze)'}` — uses the same `approvers` (Manager/Director/Admin) list every other authority-decision
+row uses, not the open-to-anyone `signatoryPool`, matching Rommel: *"approver will route the same as
+the others with approver requirement."* `APPR_ROUTING`'s persistence is fully generic (the whole
+object round-trips through `_collectAppSettings`/`_applyAppSettings`), so no separate save/load code
+was needed for the new key.
+
+> ⚠ **The propagation trap, again — fixed in all 4 places before it could bite.** This file has lost
+> `sigSlot`, `to_email`, `decision`, and `applied` this exact way before: a field present on the
+> request payload but missing from any of `_apprMergeWithKnown`'s key list, `supaUpsertApprovalRequest`'s
+> payload object, `gLoadApprovalRequests`'s Supabase-read mapping, or `_mergeApprovalReqsIntoNotifs`'s
+> NOTIFS-push field list gets silently dropped the moment ANY partial save happens (which is every
+> approve/reject). `orderId` — the ONLY thing that lets `_applyOrderPauseDecision` find the order at
+> all — was added to all four before shipping, verified by source-inspection tests, and also added to
+> `doApprovalAction`'s own inline `updReq` object as a fifth defensive measure. **Any future field
+> added to an approval request must be checked against all four (five, counting `doApprovalAction`'s
+> own partial-save object) or it will be silently lost the first time someone acts on it.**
+
+**Verified**: every new/modified function covered by a `tools/smoke.mjs` check (12 new checks — 3
+functional for the pure logic, 9 source-inspection for the Sheets/Supabase-heavy orchestration
+functions, matching this file's own established pattern for that class of function). Confirmed via
+`git stash push -- index.html` that 6 of the 9 source-inspection checks genuinely FAIL against the
+pre-fix code (the other 3 reference brand-new functions and are correctly skipped, not falsely
+passed, since they're guarded by `typeof window.X==='function'`), then confirmed all pass again after
+restoring. `node tools/verify.mjs` (collision checker + both HTML files' smoke gates) green throughout.
+
+### Still owed, not built this session
+- **Phone (`approve.html`) support for order_pause** — deliberately out of scope. The request carries
+  `decision:null` on purpose so the phone's existing `_apprApplyRemoteDecisions` background-apply loop
+  already skips it cleanly (that loop already refuses to touch anything with no decision context) —
+  but nobody can actually SEE or act on a pause request from the phone app's own UI yet. Low risk to
+  leave as-is (order-pause approvals will simply wait for a laptop), but worth building if pause
+  requests turn out to be time-sensitive in practice.
+- **Stage 2 field-level lock parity** — see the scope-limit note above.
+
+# OPEN — updated 2026-08-25 (session end) — SUPERSEDED by the 2026-08-28/29 list at the end of this file, kept for detail
 > The 2026-08-24/25 list above is superseded but not stale — read it for anything not covered here
 > (the "By cabinet type" materials-weight item is still on hold exactly as documented there; this
 > session did not touch it). This session's own eight commits are all confirmed deployed and live.
@@ -9349,3 +9515,77 @@ hypotheses and this needs a real live repro, not another direct-function test.
   (via `git stash` on `index.html` only, confirmed, then restored) before being trusted on the fix.
   Keep doing this for anything touching data-loss risk — asserting a check "should" catch something
   is not the same as watching it actually catch the real failure.
+
+# OPEN — updated 2026-08-28/29 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+> This session's seven commits are all built, tested, and merged; deploy/live-verification is
+> the next step (see below).
+
+## ⚠ FIRST THING NEXT SESSION
+Confirm the deploy landed and Pause Order actually works end to end in the live app — this session
+verified everything through `tools/verify.mjs` (collision checker + both headless smoke gates) but
+did **not** drive the feature through a real browser against live Sheets/Supabase. Specifically:
+1. Poll the live GitHub Pages URL for a string only the new build carries (e.g. `openOrderPauseRequest`)
+   to confirm the deploy actually landed, not just that `git push` succeeded.
+2. Have someone request a pause on a real order, approve it as a Manager, and confirm: the order
+   card shows "Paused" (not before), the linked quotation (if any) shows the amber banner and refuses
+   to lock, and Resume clears both.
+3. Confirm the new `pause_history` column shows up correctly in a fresh `gLoadPendingOrders()` read —
+   this session applied the Supabase migration directly but the Sheets side (`Pending Orders!AJ`) is
+   created lazily by `_saveOrderPauseHistory`'s own write, so the FIRST real pause request is also the
+   first real test of that column ever being written for real.
+
+## Confirmed done this session — do not re-raise
+- Options bar stale total + qStage/DOM desync on quotation restore (`cc81070`).
+- PDF/Share downloads no longer inherit the app's dark theme (`1e3ce0a`).
+- `kg` unit option on the Outsource dropdown (`30e7e74`).
+- An approved unlock (via either approval-request path, not just the direct-PIN path) now cancels a
+  still-pending signature request on that quotation (`f96f1f5`).
+- Cutting-list headers renamed Long/Short → Length/Width, confirmed cosmetic-only (`0d3acf0`).
+- `clSelectClient()` now runs the same company-mismatch safety check a manual dropdown change does
+  (`8c6afff`); QT-M00000129 itself correctly reassigned to a new "W" serial by Rommel in-app,
+  confirmed working.
+- **Pause Order** — full feature, described in full in this session's own entry above. Approval
+  routing, SLA-clock exclusion (applied everywhere elapsed time is computed, not just one screen),
+  quotation lock while paused, unconditional-but-logged resume, and the 4-place (5, counting
+  `doApprovalAction`) propagation-trap fix for `orderId` on the request payload.
+
+## Still open, unverified this session — re-check before acting on any of these
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed.
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced. Need: which stage, the exact field, whether it followed an
+  option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request; do not build without walking him through it again from scratch.
+- **`QT-W00000136.R1` itemized-print merged-line report** — from the 2026-08-25 session, unresolved.
+  Ask for a fresh screenshot after a hard refresh before doing anything else.
+
+## New this session, lower priority
+- **Phone (`approve.html`) support for order_pause** — not built, deliberately (see this session's
+  entry above). Order-pause approvals wait for a laptop for now; revisit if that turns out to matter.
+- **Stage 2 field-level lock parity while paused** — Stage 2 has no field-by-field disable sweep at
+  all today (a pre-existing gap, not introduced by this feature); locking Stage 2 IS blocked while
+  paused, but individual Stage 2 inputs are not hard-disabled. Flag to Rommel if full parity matters.
+
+## Standing rules reinforced this session
+- **The propagation trap (`sigSlot`/`to_email`/`decision`/`applied`, now `orderId`) has a fixed
+  checklist: `_apprMergeWithKnown`'s key list, `supaUpsertApprovalRequest`'s payload,
+  `gLoadApprovalRequests`'s Supabase-read mapping, `_mergeApprovalReqsIntoNotifs`'s NOTIFS-push field
+  list, and `doApprovalAction`'s own inline `updReq` object. Any new field added to an approval
+  request must be checked against all five or it is silently lost the first time someone acts on it.**
+- **A data-repair split between Google Sheets and Supabase is worse than doing nothing, and
+  "Check Project List" does not catch every shape of it.** The QT-M00000129 near-miss is a second,
+  independent instance of a pattern this file has already documented repeatedly (see the 2026-08-09/
+  2026-08-15 serial-split sessions) — before making a one-off data correction in only one store,
+  confirm the OTHER store (especially whichever one the Project List / relevant UI actually reads)
+  either doesn't need the same change or gets it too, in the same action.
+- **When a user corrects your diagnosis ("what stage 2? there's no stage 2 yet"), the correction is
+  the fact — re-investigate from there rather than defending the original theory.**
