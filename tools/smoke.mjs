@@ -1725,6 +1725,27 @@ const PROFILES = {
           };
         }, { wrapStyleHasNoThemeVar: true, wrapStyleSetsFixedBackground: true,
              snapdomBackgroundHasNoThemeVar: true, snapdomBackgroundIsFixed: true });
+      /* Rommel, 2026-08-28: "change the long and short header of the cutting to length and width,
+         the usual." Checked the underlying logic first -- _webEbtToModcraft already auto-detects
+         whichever of the two numbers is bigger and treats THAT as the long edge
+         (longIsLength=(+L||0)>=(+W||0)), so it never mattered which column a value landed in. The
+         internal field names (blankPanel's L/W) and the Excel template header (XL_PANEL_HDR) were
+         already "Length (mm)"/"Width (mm)" -- only this on-screen table header still said
+         "Long"/"Short", inconsistent with everything else. Renaming it is a pure label fix, not a
+         behaviour change -- this check proves the on-screen header now reads the usual way and
+         nothing that decides banding was touched (still finds the auto-detect line verbatim). */
+      if (typeof window.MCL === 'object' && typeof window.MCL.build === 'function' && typeof window._webEbtToModcraft === 'function')
+        check('MCL cutting-list panel table: header reads Length/Width, banding still auto-detects the bigger number', () => {
+          const html = window.MCL.build();
+          const ebtSrc = window._webEbtToModcraft.toString();
+          return {
+            headerSaysLength: html.indexOf('Length (mm)') > -1,
+            headerSaysWidth: html.indexOf('Width (mm)') > -1,
+            headerNoLongerSaysLongShort: html.indexOf('Long (mm)') === -1 && html.indexOf('Short (mm)') === -1,
+            bandingStillAutoDetectsMagnitude: ebtSrc.indexOf('longIsLength=(+L||0)>=(+W||0)') > -1,
+          };
+        }, { headerSaysLength: true, headerSaysWidth: true, headerNoLongerSaysLongShort: true,
+             bandingStillAutoDetectsMagnitude: true });
       return out;
     }
   },
