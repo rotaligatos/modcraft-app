@@ -1746,6 +1746,42 @@ const PROFILES = {
           };
         }, { headerSaysLength: true, headerSaysWidth: true, headerNoLongerSaysLongShort: true,
              bandingStillAutoDetectsMagnitude: true });
+      /* Rommel, 2026-08-28 (QT-M00000129): picking a saved client whose stored account type
+         differs from the creator's own company silently changed the quotation's BILLED company
+         (cl-type, cl-company-sel) without ever running the mismatch check a manual account-type
+         change already goes through -- and worse, it re-baselined _lastAccepted* right there, so
+         the normal check could never catch the drift later either. The serial then stayed on the
+         OLD company's numbering series forever while the quotation billed as a different one, with
+         no warning, no confirmation, and nothing logged. Confirmed live: QT-M00000129 (an "M" /
+         Module Systems serial) had silently been billing as World Class Laminate, Inc. since the
+         moment its client was picked from the search dropdown -- manually corrected to
+         QT-W00000174 as a one-off repair; this check proves the CAUSE is closed, not just that one
+         instance. clSelectClient must now route through _onQuotationCompanyMightChange() -- the
+         same function the dropdown's own onchange calls -- instead of silently re-baselining. */
+      if (typeof window.clSelectClient === 'function' && typeof window._onQuotationCompanyMightChange === 'function')
+        check('clSelectClient: picking a saved client runs the same company-mismatch check a manual type change does', () => {
+          const w = window;
+          const saved = { liveClients: w.liveClients, _onQuotationCompanyMightChange: w._onQuotationCompanyMightChange };
+          try {
+            let checkCalls = 0;
+            w._onQuotationCompanyMightChange = () => { checkCalls++; };
+            w.liveClients = [{ id: 999001, name: 'Test Client', bizname: '', contact: '', email: '',
+                               address: '', city: '', type: 'Subsidiary', segment: '' }];
+            w.clSelectClient(999001);
+            // A client with no stored type must not even attempt the check -- nothing to run it on.
+            checkCalls = 0;
+            w.liveClients = [{ id: 999002, name: 'Test Client 2', bizname: '', contact: '', email: '',
+                               address: '', city: '', type: '', segment: '' }];
+            w.clSelectClient(999002);
+            const noCheckWhenNoType = checkCalls === 0;
+            w.liveClients = [{ id: 999001, name: 'Test Client', bizname: '', contact: '', email: '',
+                               address: '', city: '', type: 'Subsidiary', segment: '' }];
+            w.clSelectClient(999001);
+            return { checkRunsWhenTypeStored: checkCalls === 1, noCheckWhenNoType };
+          } finally {
+            w.liveClients = saved.liveClients; w._onQuotationCompanyMightChange = saved._onQuotationCompanyMightChange;
+          }
+        }, { checkRunsWhenTypeStored: true, noCheckWhenNoType: true });
       return out;
     }
   },
