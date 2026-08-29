@@ -32076,8 +32076,38 @@ function _auditLineDiff(pl,nl,money,tag){
   }
   return lp;
 }
+// Rommel, 2026-08-29: "what if the user start working on the quotation without resuming the
+// timer. what will happen?" -- correctly identified as a real gap. The field-disable sweep
+// (Stage 1) and the Lock-button gate (both stages) are the VISIBLE prevention, but neither is
+// the actual enforcement point: a browser tab left open from BEFORE the pause was approved never
+// learns about it until it reloads, and Stage 2 has no field-disable sweep at all (pre-existing,
+// see the scope-limit note where qOrderPausedInfo is declared). gSaveQuotation() is the one
+// function every real persist funnels through regardless of which of the ~20 call sites or which
+// stage triggered it (confirmed: saveDraftS1, doLockOnly's send flows, undo-approval, etc. all
+// route here; only saveQuotationToDrive -- a separate Drive-artifact writer, not the quotation
+// STATE -- does not), so it is the one guaranteed place to refuse it. Same principle as the
+// locked-total guard already in this file: refuse the write, log it loudly, tell the user why.
+//
+// Does NOT close the cross-session race where the pause was approved in a DIFFERENT browser
+// while this one already had the quotation open, mid-edit, and this browser's own
+// qOrderPausedInfo was never refreshed to know about it -- that would need a live server check
+// on every save (or a periodic poll pushing the state in), which is a real cost/complexity
+// tradeoff left for a deliberate follow-up rather than added silently here.
 function gSaveQuotation(opts){
   if(!gToken||!gUser) return;
+  if(typeof _qOrderPaused==='function'&&_qOrderPaused()){
+    var _poWho=(qOrderPausedInfo&&qOrderPausedInfo.approvedBy)||'an approver';
+    var _poOrder=(qOrderPausedInfo&&qOrderPausedInfo.orderId)||'?';
+    console.warn('[order-pause] save refused -- quotation is paused (order #'+_poOrder+')');
+    try{ logActivity('Save refused — this quotation is paused (approved by '+_poWho+'). Press Resume on order #'+_poOrder+' to continue editing.'); }catch(e){}
+    showToast('This quotation is paused — press Resume on the linked order before saving.');
+    // Re-syncs the UI too, not just the toast -- if this tab's own pause flag was somehow stale
+    // (set but the DOM sweep never re-ran), a refused save is also the moment to correct it.
+    if(typeof renderOrderPauseBanner==='function') try{ renderOrderPauseBanner(); }catch(e2){}
+    if(typeof updateLockUI==='function') try{ updateLockUI(); }catch(e3){}
+    if(typeof updateFQLockUI==='function') try{ updateFQLockUI(); }catch(e4){}
+    return;
+  }
   _auditDiffAndLog();
   opts=opts||{};
   if(opts.checkConflict && qLoadedSavedAt && qSerialCommitted){

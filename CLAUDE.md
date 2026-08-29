@@ -9521,6 +9521,36 @@ hypotheses and this needs a real live repro, not another direct-function test.
 > This session's seven commits are all built, tested, and merged; deploy/live-verification is
 > the next step (see below).
 
+## Addendum, same day — the save function itself now enforces the pause too
+Rommel asked directly: *"what if the user start working on the quotation without resuming the
+timer. what will happen? this probably a gap."* Correct — the shipped version only PREVENTED
+editing at the UI layer (Stage 1's field-disable sweep, both stages' Lock-button gate), never at
+the actual persistence layer. Two real holes: **Stage 2 has no field-disable sweep at all**
+(pre-existing, documented at ship time), so its fields stayed fully editable and saveable while
+paused; and **a browser tab already open before the pause was approved** never picked up the
+change until it reloaded, so its Save Draft button stayed live too.
+
+Fixed at the one place that actually matters: `gSaveQuotation()` is the single funnel every real
+persist to Quotation State goes through — traced all ~22 call sites (Stage 1's own Save Draft, every
+lock/send flow, undo-approval, close/cancel, revision approval) and confirmed none of them bypass
+it; only `saveQuotationToDrive()` (a separate Drive-artifact writer, not the quotation state) does
+not. It now refuses outright while `_qOrderPaused()` is true, logs the refusal loudly on the
+quotation's own activity log, toasts the user, and re-syncs the lock UI/banner in the same tab —
+regardless of which stage or which of those 22 triggers attempted it.
+
+**Reproduced first**: stashed `index.html` only, confirmed the identical scenario the user
+described actually went through and saved on the pre-fix code (`coreCalled:true` against a paused
+quotation), then confirmed the fix blocks it while a normal, unpaused save is untouched.
+
+> ⚠ **Still open, deliberately not built**: the guard checks THIS BROWSER's own in-memory
+> `qOrderPausedInfo`, which is correct and sufficient for every case above — but it does not close
+> the narrower cross-session race where the pause was approved in a DIFFERENT session while this
+> one already had the quotation open mid-edit and was never refreshed. Closing that fully would need
+> either a live server check on every save (real latency cost on every save, not just paused ones)
+> or extending the existing 60s approval poll to also refresh `qOrderPausedInfo` for whichever
+> quotation is currently open. Left as a genuine design tradeoff for Rommel to weigh in on, not
+> built silently — flag it if it ever actually bites in practice.
+
 ## ⚠ FIRST THING NEXT SESSION
 Confirm the deploy landed and Pause Order actually works end to end in the live app — this session
 verified everything through `tools/verify.mjs` (collision checker + both headless smoke gates) but

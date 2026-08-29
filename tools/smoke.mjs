@@ -1910,6 +1910,38 @@ const PROFILES = {
       if (typeof window.ORDERS_COLS !== 'undefined')
         check('ORDERS_COLS: Pause History is the last column, appended not inserted',
           () => window.ORDERS_COLS[window.ORDERS_COLS.length - 1], 'Pause History');
+      /* Rommel, 2026-08-29: "what if the user start working on the quotation without resuming the
+         timer. what will happen?" -- correctly caught as a real gap. Field-disable sweeps and the
+         lock gate are UI-level prevention, not enforcement -- a stale open tab or Stage 2 (no
+         field-disable sweep at all) could still reach the save function directly. gSaveQuotation()
+         is the one true funnel every real persist goes through, so it is the one place this can be
+         closed completely. Proves the refusal happens BEFORE any side effect (neither the audit
+         diff nor the actual core save runs), and that an ordinary save is completely unaffected once
+         the pause is cleared -- a broken guard that blocked EVERY save would be worse than the gap. */
+      if (typeof window.gSaveQuotation === 'function' && typeof window._qOrderPaused === 'function')
+        check('gSaveQuotation: refuses to persist while an order-pause is active, on either stage', () => {
+          const w = window;
+          const saved = { gToken: w.gToken, gUser: w.gUser, paused: w.qOrderPausedInfo,
+                           core: w._gSaveQuotationCore, audit: w._auditDiffAndLog };
+          let coreCalled = false, auditCalled = false;
+          try {
+            w.gToken = 'test-token'; w.gUser = { email: 'test@x.com', name: 'Test' };
+            w._gSaveQuotationCore = () => { coreCalled = true; };
+            w._auditDiffAndLog = () => { auditCalled = true; };
+            w.qOrderPausedInfo = { active: true, orderId: '999', reason: 'test', approvedBy: 'Test Mgr' };
+            w.gSaveQuotation();
+            const refusedCleanly = { coreCalled, auditCalled };
+            coreCalled = false; auditCalled = false;
+            w.qOrderPausedInfo = null;
+            w.gSaveQuotation();
+            const normalSaveStillWorks = { coreCalled, auditCalled };
+            return { refusedCleanly, normalSaveStillWorks };
+          } finally {
+            w.gToken = saved.gToken; w.gUser = saved.gUser; w.qOrderPausedInfo = saved.paused;
+            w._gSaveQuotationCore = saved.core; w._auditDiffAndLog = saved.audit;
+          }
+        }, { refusedCleanly: { coreCalled: false, auditCalled: false },
+             normalSaveStillWorks: { coreCalled: true, auditCalled: true } });
       return out;
     }
   },
