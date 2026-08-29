@@ -12678,7 +12678,15 @@ function openOrderPauseRequest(orderId){
       :'')
     +'</div>';
   var detEl=el('opause-details'); if(detEl) detEl.innerHTML=det;
-  var apprObj=findApproverForAction('order_pause',{},_orderCompanyKey(o));
+  // _orderCompanyKey(o) returns a single-letter code ('C'/'M'/'W', used for serial-prefix-style
+  // matching elsewhere in Orders) -- NOT a full company name. APPR_ROUTING and _canonCompany both
+  // key on the FULL name, so a single letter never matched anything and silently fell through to
+  // "no routing configured", landing on the Admin regardless of what was actually set in Settings.
+  // Confirmed live 2026-08-29: Jhover's pause request went to Rommel instead of the Allan he had
+  // explicitly assigned. findApproverForAction runs the raw company through _canonCompany itself,
+  // so the order's own stored company string is passed straight through -- same as every other
+  // company-routed lookup in this file.
+  var apprObj=findApproverForAction('order_pause',{},o.sourceCompany);
   var routeEl=el('opause-route');
   if(routeEl){
     routeEl.innerHTML=(!apprObj||!apprObj.email)
@@ -12699,7 +12707,7 @@ function submitOrderPauseRequest(){
   var st=_orderPauseState(o);
   if(st.paused||st.pending){ showToast('This order already has a pause in progress.'); closeModal('ov-order-pause'); return; }
 
-  var apprObj=findApproverForAction('order_pause',{},_orderCompanyKey(o));
+  var apprObj=findApproverForAction('order_pause',{},o.sourceCompany); // see openOrderPauseRequest for why not _orderCompanyKey(o)
   if(!apprObj||!apprObj.email){
     var admin=sheetUsers.find(function(u){return u.pos==='Admin'&&u.active;});
     if(admin) gSendMessage(admin.email,admin.name,
@@ -12858,6 +12866,39 @@ function _clearOrderPauseOnQuotation(serial,who,orderId){
       try{ supaUpsertState(serial,state); }catch(e){}
       logActivity('Quotation unlocked — order #'+orderId+' pause resumed by '+who+'.', serial);
     }).catch(function(e){ console.warn('[order-pause] failed to clear pause lock for '+serial,e); });
+  });
+}
+// ── Closes the "stale open tab" residual gap ──────────────────────────────────────────────
+// gSaveQuotation()'s pause guard only ever checks what THIS BROWSER already believes
+// (qOrderPausedInfo) -- correct for every case except one: a tab that already had the quotation
+// open before a pause or resume happened in a DIFFERENT session never gets told, because nothing
+// pushes that change to it. Rides the existing 60s approval poll (and its on-demand triggers --
+// tab refocus, opening the notification panel) rather than adding a network round-trip to every
+// single save, which was the other, heavier option. Rommel, 2026-08-29: "lets do the piggyback."
+//
+// Re-reads the CURRENTLY OPEN quotation's own saved state -- the authoritative record
+// _lockQuotationForPause/_clearOrderPauseOnQuotation write to -- rather than trying to infer
+// pause status from approval-request rows, which are a record of DECISIONS, not of the order's
+// current state (an order can be paused, resumed, and paused again; only the saved state, not any
+// one request, says which is true right now).
+function _refreshOpenQuotationPauseState(){
+  var serial=qBaseSerial||qSerial;
+  if(!serial||/^DRAFT-/.test(serial)||!gToken) return;
+  loadQuotationJson(serial,function(state){
+    if(!state) return;
+    var serverPaused=!!(state.orderPaused&&state.orderPaused.active);
+    var localPaused=_qOrderPaused();
+    if(serverPaused===localPaused) return; // the common case -- nothing to reconcile
+    if(serverPaused){
+      qOrderPausedInfo=JSON.parse(JSON.stringify(state.orderPaused));
+      showToast('This quotation was just paused — editing is locked until Resume is pressed.');
+    } else {
+      qOrderPausedInfo=null;
+      showToast('This quotation was resumed — editing is unlocked again.');
+    }
+    if(typeof updateLockUI==='function') try{ updateLockUI(); }catch(e){}
+    if(typeof updateFQLockUI==='function') try{ updateFQLockUI(); }catch(e2){}
+    if(typeof renderOrderPauseBanner==='function') try{ renderOrderPauseBanner(); }catch(e3){}
   });
 }
 
@@ -27403,6 +27444,13 @@ function gShowApp(){
       // on a machine that has the engine and Sheets access. Without this the request reads
       // "approved" while the quotation keeps its old price.
       try{ _apprApplyRemoteDecisions(); }catch(e){ console.warn('[approval] apply pass failed',e); }
+      // Same reasoning, for the one thing gSaveQuotation()'s pause guard cannot see on its own: a
+      // browser that already had this quotation open before a pause/resume happened in a DIFFERENT
+      // session never learns about it until something re-reads the quotation from scratch. Rommel,
+      // 2026-08-29: "lets do the piggyback" -- this rides the same 60s cadence (and the same
+      // on-demand triggers: tab refocus, notif panel open) rather than adding a network round-trip
+      // to every save.
+      try{ _refreshOpenQuotationPauseState(); }catch(e2){ console.warn('[order-pause] refresh pass failed',e2); }
       // ── Approver side: ring bell when new requests arrive ──────────────
       var newPending=NOTIFS.filter(function(n){return n.status==='pending';}).length;
       _updateNotifBadge();

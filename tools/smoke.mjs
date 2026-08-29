@@ -1907,6 +1907,54 @@ const PROFILES = {
       if (typeof window.renderApprovalRoutingSettings === 'function')
         check('renderApprovalRoutingSettings: Pause Order is a configurable routing action',
           () => /key\s*:\s*'order_pause'/.test(window.renderApprovalRoutingSettings.toString()), true);
+      /* Rommel, 2026-08-29: "Jhover tried the pause and the approval went to me instead of allan,
+         which I designated in the setting already." Root cause: _orderCompanyKey(o) returns a
+         single-letter code ('C'/'M'/'W', built for serial-prefix-style matching elsewhere) -- not a
+         full company name -- but findApproverForAction's coOverride and APPR_ROUTING are both keyed
+         by the FULL name, so a bare letter never matched anything and silently fell through to the
+         no-routing fallback (first active Manager/Director/Admin), landing on the Admin every time
+         regardless of what Settings actually said. Both request functions must pass the order's raw
+         sourceCompany straight through -- findApproverForAction already runs it through
+         _canonCompany itself, same as every other company-routed lookup in this file. */
+      if (typeof window.openOrderPauseRequest === 'function' && typeof window.submitOrderPauseRequest === 'function')
+        check('order-pause routing uses the order\'s raw company, never the letter-code helper', () => {
+          const openSrc = window.openOrderPauseRequest.toString();
+          const submitSrc = window.submitOrderPauseRequest.toString();
+          return {
+            openUsesRawCompany: /findApproverForAction\('order_pause',\{\},o\.sourceCompany\)/.test(openSrc),
+            submitUsesRawCompany: /findApproverForAction\('order_pause',\{\},o\.sourceCompany\)/.test(submitSrc),
+            openAvoidsLetterCode: !/findApproverForAction\('order_pause',\{\},_orderCompanyKey/.test(openSrc),
+            submitAvoidsLetterCode: !/findApproverForAction\('order_pause',\{\},_orderCompanyKey/.test(submitSrc),
+          };
+        }, { openUsesRawCompany: true, submitUsesRawCompany: true, openAvoidsLetterCode: true, submitAvoidsLetterCode: true });
+      /* Proves the actual failure mode end to end, not just the call-site pattern: a real order
+         object carrying a full company name, routed through the exact call shape the two functions
+         above use, must resolve to the DESIGNATED approver -- not fall through to "no routing" just
+         because a single-letter code was passed instead of the name findApproverForAction expects. */
+      if (typeof window.findApproverForAction === 'function')
+        check('order-pause routing: a real order\'s sourceCompany resolves to the designated approver (not the Admin fallback)', () => {
+          const w = window;
+          const saved = { users: w.sheetUsers, routing: w.APPR_ROUTING, co: w.currentUserCompany };
+          try {
+            w.currentUserCompany = 'World Class Laminate, Inc.'; // the REQUESTER's company -- must not be used
+            // Admin listed FIRST deliberately: the no-routing fallback picks the first active
+            // Manager/Director/Admin in array order, so this is what makes the buggy path
+            // demonstrably land on someone OTHER than the routed approver, rather than coincidentally
+            // matching him anyway because he happened to be first in the list either way.
+            w.sheetUsers = [
+              { email: 'admin@test.com', name: 'Admin Fallback', pos: 'Admin', active: true },
+              { email: 'allan@test.com', name: 'Allan', pos: 'Manager', active: true },
+            ];
+            w.APPR_ROUTING = { 'World Class Laminate, Inc.': { order_pause: 'allan@test.com' } };
+            const order = { id: '9001', sourceCompany: 'World Class Laminate, Inc.' };
+            const viaCorrectArg = w.findApproverForAction('order_pause', {}, order.sourceCompany);
+            const viaLetterCodeBug = w.findApproverForAction('order_pause', {}, w._orderCompanyKey ? w._orderCompanyKey(order) : 'W');
+            return {
+              correctArgRoutesToAllan: viaCorrectArg && viaCorrectArg.email === 'allan@test.com',
+              letterCodeBugFellThroughToAdmin: viaLetterCodeBug && viaLetterCodeBug.email === 'admin@test.com',
+            };
+          } finally { w.sheetUsers = saved.users; w.APPR_ROUTING = saved.routing; w.currentUserCompany = saved.co; }
+        }, { correctArgRoutesToAllan: true, letterCodeBugFellThroughToAdmin: true });
       if (typeof window.ORDERS_COLS !== 'undefined')
         check('ORDERS_COLS: Pause History is the last column, appended not inserted',
           () => window.ORDERS_COLS[window.ORDERS_COLS.length - 1], 'Pause History');
@@ -1942,6 +1990,55 @@ const PROFILES = {
           }
         }, { refusedCleanly: { coreCalled: false, auditCalled: false },
              normalSaveStillWorks: { coreCalled: true, auditCalled: true } });
+      /* The one gap gSaveQuotation's guard cannot see on its own: a browser that already had the
+         quotation open BEFORE a pause/resume happened in a different session never learns about it
+         until something re-reads the quotation from scratch. Rommel, 2026-08-29: "lets do the
+         piggyback" -- rides the existing 60s approval poll rather than adding a round-trip to every
+         save. Proves both directions (a server-side pause this tab did not know about gets picked
+         up; a server-side resume this tab did not know about gets picked up too) and the common
+         no-op case (nothing changed -> no unnecessary toast/re-render). */
+      if (typeof window._refreshOpenQuotationPauseState === 'function' && typeof window._qOrderPaused === 'function')
+        check('_refreshOpenQuotationPauseState: reconciles a stale tab against the server, both directions', () => {
+          const w = window;
+          const saved = { gToken: w.gToken, qSerial: w.qSerial, qBaseSerial: w.qBaseSerial,
+                           paused: w.qOrderPausedInfo, loadFn: w.loadQuotationJson,
+                           updateLockUI: w.updateLockUI, updateFQLockUI: w.updateFQLockUI };
+          let uiRefreshed = 0;
+          try {
+            w.gToken = 'test-token';
+            w.qSerial = 'QT-W00000900'; w.qBaseSerial = 'QT-W00000900';
+            w.updateLockUI = () => { uiRefreshed++; };
+            w.updateFQLockUI = () => { uiRefreshed++; };
+            // Case 1: tab believes NOT paused, server says it IS -- must pick it up.
+            w.qOrderPausedInfo = null;
+            w.loadQuotationJson = (serial, cb) => cb({ orderPaused: { active: true, orderId: '77', reason: 'test' } });
+            uiRefreshed = 0;
+            w._refreshOpenQuotationPauseState();
+            const pickedUpServerPause = { paused: w._qOrderPaused(), uiRefreshed: uiRefreshed > 0 };
+            // Case 2: tab believes paused, server says it's been resumed -- must clear it.
+            w.qOrderPausedInfo = { active: true, orderId: '77' };
+            w.loadQuotationJson = (serial, cb) => cb({ orderPaused: { active: false } });
+            uiRefreshed = 0;
+            w._refreshOpenQuotationPauseState();
+            const pickedUpServerResume = { paused: w._qOrderPaused(), uiRefreshed: uiRefreshed > 0 };
+            // Case 3: nothing actually changed -- must not needlessly re-render.
+            w.qOrderPausedInfo = null;
+            w.loadQuotationJson = (serial, cb) => cb({ orderPaused: { active: false } });
+            uiRefreshed = 0;
+            w._refreshOpenQuotationPauseState();
+            const noOpWhenUnchanged = uiRefreshed === 0;
+            return { pickedUpServerPause, pickedUpServerResume, noOpWhenUnchanged };
+          } finally {
+            w.gToken = saved.gToken; w.qSerial = saved.qSerial; w.qBaseSerial = saved.qBaseSerial;
+            w.qOrderPausedInfo = saved.paused; w.loadQuotationJson = saved.loadFn;
+            w.updateLockUI = saved.updateLockUI; w.updateFQLockUI = saved.updateFQLockUI;
+          }
+        }, { pickedUpServerPause: { paused: true, uiRefreshed: true },
+             pickedUpServerResume: { paused: false, uiRefreshed: true },
+             noOpWhenUnchanged: true });
+      if (typeof window._pollApprovalsNow === 'function')
+        check('_pollApprovalsNow: the pause-reconcile pass is wired into the same poll as everything else',
+          () => /_refreshOpenQuotationPauseState\(\)/.test(window._pollApprovalsNow.toString()), true);
       return out;
     }
   },

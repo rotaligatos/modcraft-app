@@ -9551,6 +9551,30 @@ quotation), then confirmed the fix blocks it while a normal, unpaused save is un
 > quotation is currently open. Left as a genuine design tradeoff for Rommel to weigh in on, not
 > built silently — flag it if it ever actually bites in practice.
 
+## Addendum, same day — piggyback poll + a real routing bug found while lining it up
+Rommel: *"lets do the piggyback."* Built: `_refreshOpenQuotationPauseState()`, wired into the same
+60s approval poll (`_pollApprovalsNow`) everything else already rides — re-reads the CURRENTLY
+OPEN quotation's own saved state (the authoritative record, not an inference from approval-request
+rows) and reconciles `qOrderPausedInfo` if it disagrees, either direction (a pause OR a resume this
+tab didn't know about), re-syncing the lock UI/banner and toasting. No-ops when nothing changed, so
+it costs one lightweight read per open quotation per poll cycle, not per save.
+
+**While lining this up, Rommel reported a real bug**: *"Jhover tried the pause and the approval
+went to me instead of allan, which I designated in the setting already."* Root cause, found and
+fixed immediately: both `openOrderPauseRequest`/`submitOrderPauseRequest` routed via
+`findApproverForAction('order_pause',{},_orderCompanyKey(o))` — but `_orderCompanyKey(o)` returns
+a single-letter code (`'C'`/`'M'`/`'W'`, built for serial-prefix-style matching elsewhere in
+Orders), never a full company name. `APPR_ROUTING` and `_canonCompany` are both keyed on the FULL
+name, so a bare letter never matched anything and silently fell through to "no routing configured"
+— first active Manager/Director/Admin, landing on the Admin (Rommel) every single time regardless
+of what Settings actually said. Fixed by passing `o.sourceCompany` directly — `findApproverForAction`
+already runs it through `_canonCompany` itself, the same as every other company-routed lookup in
+this file.
+
+Both fixes verified with `git stash push -- index.html`: the routing test genuinely failed against
+this morning's shipped code (call-site check false), the piggyback tests exercise both directions
+plus the no-op case. `node tools/verify.mjs` green throughout.
+
 ## ⚠ FIRST THING NEXT SESSION
 Confirm the deploy landed and Pause Order actually works end to end in the live app — this session
 verified everything through `tools/verify.mjs` (collision checker + both headless smoke gates) but
