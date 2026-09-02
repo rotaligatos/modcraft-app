@@ -493,6 +493,62 @@ const PROFILES = {
           }
         }, { serviceGetsFullShare: true, serviceUnitPriceUnchanged: true, regMaterialZeroed: true,
              outsourcedMaterialStillCounted: true, poolStillReconciles: true });
+      /* Rommel, 2026-09-02, QT-W00000183: two outsourced hardware baskets printed at ₱18,269.94 and
+         ₱16,991.58 -- roughly 2.7x their real marked-up cost of ₱6,806.84 and ₱6,330.56. Root cause
+         was one level UP from the previous fix above: even with regular materials/hardware correctly
+         zero-weighted for an unbilled account, buildItemizedPrintRows still RESCALED every line
+         (_allocateProportional(lineWeights,areaSub)) to force the area's WHOLE pool onto them -- and
+         that pool includes assembly, a share of installation's own markup, the discount buffer and
+         the cutting-list charge, none of which is any one line's own cost. With regular hardware
+         correctly excluded, services + the two outsourced items were the ONLY nonzero-weight lines
+         left, so ALL of that unrelated overhead landed on just those two categories. Rommel: "if
+         there's no unit to multiply don't distribute to other cost" -- a zero-weight line must
+         contribute zero, full stop, never hand its "share" of the pool to whoever is left standing.
+         Proves each line now shows its own TRUE value (no rescale), the leftover that has no
+         per-unit home prints as its own row (mirroring the minimum-charge row's own treatment), and
+         the area subtotal still reconciles exactly -- so the total never moves, only how it is
+         explained per line. */
+      if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
+        check('buildItemizedPrintRows: overhead with no line to attach to gets its own row, not a rescale', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES };
+          try {
+            w.qFabMode = 'services';
+            w.qChargeMatHw = false;   // Subsidiary account -- regular materials/hardware not billed
+            w.SERVICES = [{ name: 'Test Service', price: 100, unit: 'pc' }];
+            w.qAreas = [{
+              name: 'Area X', items: [],
+              svcItems: [{ svcIdx: 0, qty: 10 }],                                       // raw 1000
+              matItems: [], hwItems: [{ name: 'Reg Hardware', qty: 1, price: 5000, unit: 'pc' }], // must weigh 0
+              outsourceMaterials: [],
+              outsourceHardware: [{ name: 'Outsourced Basket', qty: 1, price: 2000, unit: 'pc' }] // raw 2000
+            }];
+            // reg factor = 1.10 (10% fabCont, fabBuf 0), out factor = 1.20 (20% outMarkup, rest 0).
+            // True line total = 1000*1.10 + 2000*1.20 = 1100 + 2400 = 3500. Pool 6000 simulates the
+            // area owing assembly/installation-share/discount-buffer overhead of 2500 beyond that --
+            // under the OLD code this 2500 would be smeared across the two nonzero lines instead of
+            // getting its own row, inflating both by the same ~1.714x factor (6000/3500).
+            const pC = { ni: true, rates: { fabCont: 10, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 20 } };
+            const html = w.buildItemizedPrintRows(false, 6000, pC);
+            return {
+              serviceShowsTrueValue: /1,100\.00/.test(html),
+              serviceUnitPriceCorrect: /110\.00/.test(html),
+              outsourceShowsTrueValue: /2,400\.00/.test(html),
+              regHardwareStillZeroed: /(^|[^,.\d])0\.00/.test(html.replace(/1,100\.00|110\.00|2,400\.00|6,000\.00|2,500\.00/g, '')),
+              overheadRowPrinted: /2,500\.00/.test(html) && /Production overhead/.test(html),
+              // The one thing that must NOT reappear: neither line inflated by the pool/trueTotal
+              // ratio the old rescale would have produced (1,885.71 and 3,428.57 respectively).
+              oldInflatedServiceAbsent: !/1,885\.71/.test(html),
+              oldInflatedOutsourceAbsent: !/3,428\.57/.test(html),
+              areaSubtotalStillReconciles: /6,000\.00/.test(html)
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
+            w.qChargeMatHw = saved.qChargeMatHw; w.SERVICES = saved.SERVICES;
+          }
+        }, { serviceShowsTrueValue: true, serviceUnitPriceCorrect: true, outsourceShowsTrueValue: true,
+             regHardwareStillZeroed: true, overheadRowPrinted: true, oldInflatedServiceAbsent: true,
+             oldInflatedOutsourceAbsent: true, areaSubtotalStillReconciles: true });
       /* Rommel, 2026-08-19: the auto-forwarded "Noted by" signature request (raised automatically
          the moment someone approves "Checked by") arrived with amount 0 and no decision data on
          Wynchelle Uy's quotations, so he could not evaluate it and rejected both. Root cause:
@@ -753,7 +809,16 @@ const PROFILES = {
       if (typeof window.renderDirectoryTable === 'function' && document.getElementById('dir-search'))
         check('renderDirectoryTable: search filter matches on agent name', () => {
           const w = window;
-          const saved = { dirData: w.dirData, search: document.getElementById('dir-search').value };
+          // dirShowArchived forced true for the duration of this check: a fixed past date here
+          // would eventually age past the 30-day-no-update archive rule (added in a LATER session
+          // than this test) and get silently hidden by that gate before the search filter it is
+          // actually testing ever runs -- exactly what happened to the original 2026-01-01 fixture
+          // once enough real time passed. Forcing archived-visible decouples this test from
+          // whatever "today" happens to be, permanently, rather than swapping in a new date that
+          // would just go stale again later.
+          const saved = { dirData: w.dirData, search: document.getElementById('dir-search').value,
+                           dirShowArchived: w.dirShowArchived };
+          w.dirShowArchived = true;
           const mkEntry = (id, agent) => ({
             id, baseSerial: id, created: '2026-01-01T00:00:00Z', client: 'Client ' + id, contact: '',
             type: 'Fabrication only', value: 1000, user: 'Test User', segment: '', status: 'Draft',
@@ -782,6 +847,7 @@ const PROFILES = {
             };
           } finally {
             w.dirData = saved.dirData;
+            w.dirShowArchived = saved.dirShowArchived;
             document.getElementById('dir-search').value = saved.search;
             try { w.renderDirectoryTable(); } catch (e) {}
           }

@@ -9575,6 +9575,62 @@ Both fixes verified with `git stash push -- index.html`: the routing test genuin
 this morning's shipped code (call-site check false), the piggyback tests exercise both directions
 plus the no-op case. `node tools/verify.mjs` green throughout.
 
+## Addendum, next day — outsource pricing investigated on QT-W00000183, and a real printout bug found
+Rommel: *"it seems like the outsource price is somehow bloated."* Two rounds of investigation,
+because the first one was looking at the wrong number.
+
+**Round 1 — the internal Outsource line (₱15,320.34) is correct.** Pulled the real saved state:
+raw outsourced hardware ₱11,580.00, marked up by the exact Settings → Cost Factors Outsource rates
+(5% contingency, 5% buffer, 20% markup, compounded not added) = ₱15,320.34, matching the stored
+`pCalc.outsourceFinal` to the centavo. No bug there — just a bigger number than a flat 20% would
+suggest, since it compounds. Told Rommel this and asked whether the RATE itself needed changing.
+
+**Round 2 — Rommel clarified he meant the actual printout, and showed a screenshot.** The
+"Services, Materials & Hardware" itemized print view showed the same two outsourced baskets at
+**₱18,269.94 and ₱16,991.58** — not ₱15,320.34 combined, ₱35,261.52 combined, more than DOUBLE.
+Root cause, traced through `buildItemizedPrintRows()`: regular (non-outsourced) hardware is
+correctly weighted at ZERO for this Subsidiary account (materials/hardware not billed) — but the
+function then RESCALED every remaining line (`_allocateProportional(lineWeights,areaSub)`) to force
+the area's WHOLE pool onto them. That pool includes Assembly, a share of Installation's own markup,
+the standing 30% discount buffer, and the cutting-list charge — none of which is any one line's own
+cost. With regular hardware correctly zeroed, services and the two outsourced baskets were the ONLY
+nonzero-weight lines left, so 100% of that unrelated overhead (≈₱48,558 on this quotation) landed
+on just those two categories, inflating each ~2.7x.
+
+Rommel's fix, stated in his own words and built exactly as given: *"if there's no unit to multiply
+don't distribute to other cost"* — a zero-weight line contributes zero, full stop; it must never
+hand its "share" of the pool to whichever lines are still standing. And when he restated it a
+second way (*"you multiply the % with zero then what is supposed the answer be"*), that confirmed
+the fix was understood correctly before any more code was written.
+
+**The fix**: each line (`buildItemizedPrintRows`) now shows its own TRUE marked-up value directly —
+`raw × fac.reg` for services and billed regular items, `raw × fac.out` for outsourced items, zero
+for excluded regular materials/hardware — **never rescaled** to soak up the area's pool. Whatever
+the pool exceeds that true line total by (assembly, installation's markup share, the discount
+buffer, cutting-list charge — anything with no per-unit home) now prints as **its own row**,
+labeled "Production overhead — assembly, mobilization/installation share, contingency & buffer",
+`qty: —`, exactly mirroring how the Minimum Charge row already gets its own line rather than being
+folded into something else. The area subtotal is unchanged and still reconciles exactly (true line
+total + leftover = the same pool as before) — only how it's explained per line changed, never the
+total.
+
+Confirmed both existing itemized-print regression tests (2026-08-19, 2026-08-21) still pass
+unchanged — both construct pools that already exactly equal the sum of expected weights, so there
+was never a leftover to distribute in those cases and the new behaviour is identical to the old for
+them. New test constructed to match QT-W00000183's actual shape (a zero-weighted excluded hardware
+line alongside nonzero services + outsource, with the pool deliberately larger than their sum) —
+confirmed it fails on this morning's shipped code (reproducing the exact 2.7x-style inflation
+class) and passes on the fix.
+
+**Also found and fixed in passing, unrelated**: the 2026-08-19 "search filter matches on agent
+name" test had started failing — not from today's change (confirmed via `git stash`, it already
+failed on the untouched committed code). Its mock quotations used a fixed `2026-01-01` date, which
+has now aged past the 30-day-no-update archive rule (added in a LATER session than this test), so
+they were being silently hidden by that gate before the search logic it's actually testing ever ran.
+Fixed by forcing `dirShowArchived=true` for the duration of that one check, decoupling it from
+whatever "today" happens to be permanently, rather than swapping in a new date that would just go
+stale again eventually.
+
 ## ⚠ FIRST THING NEXT SESSION
 Confirm the deploy landed and Pause Order actually works end to end in the live app — this session
 verified everything through `tools/verify.mjs` (collision checker + both headless smoke gates) but
