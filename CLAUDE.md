@@ -9516,7 +9516,7 @@ hypotheses and this needs a real live repro, not another direct-function test.
   Keep doing this for anything touching data-loss risk — asserting a check "should" catch something
   is not the same as watching it actually catch the real failure.
 
-# OPEN — updated 2026-08-28/29 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-08-28/29 (session end) — SUPERSEDED by the 2026-09-03 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 > This session's seven commits are all built, tested, and merged; deploy/live-verification is
 > the next step (see below).
@@ -9725,3 +9725,148 @@ did **not** drive the feature through a real browser against live Sheets/Supabas
   either doesn't need the same change or gets it too, in the same action.
 - **When a user corrects your diagnosis ("what stage 2? there's no stage 2 yet"), the correction is
   the fact — re-investigate from there rather than defending the original theory.**
+
+## What was changed on 2026-09-03 (session — itemized printout: fold discount buffer invisibly, Assembly gets its own line, minimum charge moves into Services, and a staff-only "reveal hidden costs" toggle)
+
+Continuation of the 2026-09-02 outsource-pricing investigation (see the addendum above this
+entry). After the outsource rescale bug was fixed, the itemized printout's leftover row —
+whatever of an area's pool has no per-line home (the discount buffer's Fabrication share, the
+cutting-list charge's own markup, a small minimum-charge residual) — printed unconditionally under
+the label "Production overhead." Rommel flagged it, then gave a precise, four-part instruction for
+what should happen instead, and was explicit that nothing should change until it was agreed:
+*"It should not be shown. in the printout in the first place. again this is something to be
+presented to the client... don't make changes until we align."*
+
+### The investigation that preceded the fix
+Before touching any code, walked through the real formula with Rommel to settle exactly what the
+leftover consists of and why. Two of my own claims were wrong along the way and corrected on the
+spot: I first said materials/hardware get NO markup in the real pricing engine — traced
+`_recalcCore()`'s actual chain (`fabBase` already includes billed materials+hardware;
+`regularBase = fabBase − outsourceBase + clCost`; ONE `fac.reg` factor applied to the whole
+`regularBase`) and found they get the IDENTICAL markup rate as services, corrected myself to
+Rommel directly. Rommel then confirmed his own recollection of the discount buffer's split (50%
+Fabrication / 15% Mobilization / 35% Installation, from the 2026-08-18 session) was exactly right,
+narrowing the actual open question to just Fabrication's 50% share plus the cutting-list charge and
+a small min-charge residual — nothing else needed re-deriving.
+
+### The four-part instruction, built exactly as given
+*"Yes at least for this view, better to fold this in the fabrication subtotal without appearing as
+its own explanatory. Except for the Asembly wherein it will have it own line under fabrication.
+Also the minimum charge should be move in the services. Lastly, since these cost are hidden, give
+me a capability to have some kind of clickable that i can see what was hidden in the printview. it
+works like when you want to temporarily view the password."* Scoped explicitly to the itemized
+"Services, Materials & Hardware" print mode only — the other three modes (area/type/lump) are
+untouched.
+
+1. **The leftover is now hidden from the client copy by default.** `buildItemizedPrintRows`'s
+   per-area leftover row (still computed exactly as it was — nothing about the total ever moves,
+   only whether the explanation is shown) is gated on a new `_printRevealHidden` flag, default
+   `false`. Off, the row simply does not print — the area subtotal below it silently includes the
+   amount, exactly as it always has for the parts of it that never had a row at all before this
+   week's fix (that gap is deliberate and pre-existing, not new).
+2. **Assembly gets its own explicit line under Fabrication.** `_buildPrintBodyCore()` already
+   computes Assembly's true value (`assemblyTrueAmt = pAssmBase + _assmShare`, its earned share of
+   the combined Installation/Assembly markup rate) beside `miRegroup` for the printout-attribution
+   work shipped 2026-08-18 — that exact figure is now passed straight into
+   `buildItemizedPrintRows(pool, pC, assemblyTrueAmt)` as a third parameter, so the two formulas
+   cannot drift apart. Rendered as its own small "ASSEMBLY" section + row, on the last area only
+   (Assembly is a whole-quotation figure, not per-area — the same simplification the minimum-charge
+   row already used), and subtracted from the leftover calculation so it's never double-counted.
+3. **Minimum charge moved from its own standalone section into SERVICES.** For area/type/lump print
+   modes, minimum-charge rows are completely unchanged — still their own standalone block between
+   the areas and the Fabrication subtotal. For itemized mode specifically, `_buildPrintBodyCore()`
+   now skips building that standalone block (`!isItemizedMode` gate added to the existing
+   condition) and hands the full pool (materials+hardware+services+min-charge+assembly) down to
+   `buildItemizedPrintRows`, which renders each minimum-charge row directly inside the SERVICES
+   section — genuinely a per-service-family floor (Cutting/Edgebanding/Grooving), so that's where
+   it belongs.
+4. **"Reveal hidden costs (internal only)"** — a new checkbox in the print toolbar
+   (`pb-reveal-hidden-row`/`pb-reveal-hidden`), modeled directly on the existing "Show Mobilization
+   & Installation separately" toggle pattern (`_printMiCombined`/`setPrintMiCombined`). Off by
+   default, only shown when itemized mode is active (`revealRow.style.display=isItemizedMode?
+   'flex':'none'`, wired right after the existing `itemizedBtn` visibility line so it can't get
+   clobbered by `syncPrintToggle`'s unconditional style rewrite). Ticking it sets
+   `_printRevealHidden=true` and reopens the preview — exactly the "temporarily view the password"
+   behavior Rommel asked for: an internal, staff-only lens onto the printout, meant to be switched
+   back off before the document is actually sent.
+
+### Verified, reproduce-first
+Six new/updated checks in `tools/smoke.mjs`, all confirmed to FAIL against the pre-fix code via
+`git stash push -- index.html` before being confirmed to pass on the fix (the standing rule for
+every change this session): the leftover row genuinely disappears when the toggle is off (and the
+subtotal is unaffected either way); Assembly renders its own heading+row and the service line beside
+it is untouched; minimum-charge rows land inside a single SERVICES heading with no second "MINIMUM
+CHARGE" heading created; and the toggle's DOM-visibility wiring is tied to the same `isItemizedMode`
+flag the itemized-mode gate itself uses (source-inspection, since driving the full
+`_buildPrintBodyCore` DOM integration path needs a much larger fixture than this suite otherwise
+builds for print-body tests).
+
+One real bug caught in this pass, not by the user: `buildItemizedPrintRows`'s new
+`minChargeRowsHere` computation read `pC.minCharge` unconditionally (`isLastArea && pC.minCharge &&
+...`), which threw on the two existing tests that call the function with `pC=null` (a pre-existing,
+legitimate calling convention used by tests that only care about the note-inline behavior, mirroring
+`buildPrintRows(mode, null, null)` elsewhere in the suite). Fixed with a null-safe
+`isLastArea && pC && pC.minCharge && ...` — a real robustness fix to the function's own parameter
+handling, not a test workaround.
+
+`node tools/verify.mjs` green (collision checker + both HTML files' headless smoke gates) before
+shipping.
+
+## What to say to the team
+The itemized print preview's Fabrication subtotal still adds up to the exact same figure it always
+has — nothing about a client's total price changes. What changed is what's SHOWN: Assembly now
+prints as its own line, minimum-charge floors sit inside the Services list instead of their own
+block, and the small residual that used to print as "Production overhead" no longer shows on the
+client-facing document at all by default. If you need to see that hidden figure for your own
+checking, tick "Reveal hidden costs (internal only)" in the print toolbar — remember to untick it
+before actually sending the document to a client.
+
+# OPEN — updated 2026-09-03 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+> This session's fix is built, fully reproduce-first tested, and passing `verify.mjs` — commit,
+> push and live-deployment confirmation are the very next step (see below).
+
+## Confirmed done this session — do not re-raise
+- The itemized print mode's leftover ("Production overhead") row is now hidden from the client copy
+  by default, behind a staff-only "Reveal hidden costs (internal only)" toggle.
+- Assembly now prints as its own explicit line under Fabrication in itemized mode.
+- Minimum charge rows now render inside the SERVICES section in itemized mode (area/type/lump modes
+  unchanged, still their own standalone block).
+- A null-safety bug in `buildItemizedPrintRows`'s new minimum-charge lookup (`pC.minCharge` thrown
+  on a null `pC`) found and fixed while wiring up the new tests, before it could reach production.
+
+## Still open, unverified this session — re-check before acting on any of these
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed.
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced. Need: which stage, the exact field, whether it followed an
+  option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request; do not build without walking him through it again from scratch.
+- **`QT-W00000136.R1` itemized-print merged-line report** — from the 2026-08-25 session, unresolved.
+  Ask for a fresh screenshot after a hard refresh before doing anything else.
+- **Phone (`approve.html`) support for order_pause** — still not built, deliberately (see the
+  2026-08-28/29 session). Order-pause approvals wait for a laptop for now.
+- **Stage 2 field-level lock parity while paused** — Stage 2 still has no field-by-field disable
+  sweep at all (pre-existing gap); locking Stage 2 IS blocked while paused, individual inputs are not
+  hard-disabled.
+
+## Standing rules reinforced this session
+- **"Don't make changes until we align" is a hard stop, not a formality** — Rommel gave this
+  instruction mid-conversation specifically because an earlier explanation of mine could have been
+  read as already deciding the fix; the actual four-part instruction that followed was materially
+  more precise than anything I would have built from the first description alone.
+- **Correct yourself out loud the moment you find you were wrong**, even mid-explanation — the
+  materials/hardware markup claim was corrected to Rommel directly as soon as tracing the real
+  formula disproved it, rather than quietly building around the mistake.
+- **A function accepting `pC=null` as a legitimate test-calling-convention must stay null-safe
+  everywhere new code touches `pC`** — this bit `buildItemizedPrintRows` the moment a new,
+  unconditional `pC.minCharge` read was added; caught by the existing note-inline tests failing,
+  not by a new test written for this specific case.

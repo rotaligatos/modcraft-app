@@ -506,14 +506,20 @@ const PROFILES = {
          per-unit home prints as its own row (mirroring the minimum-charge row's own treatment), and
          the area subtotal still reconciles exactly -- so the total never moves, only how it is
          explained per line. */
+      /* 2026-09-02 follow-up: Rommel — "if it should not be shown in the printout in the first place
+         ... give me a capability to have some kind of clickable that i can see what was hidden."
+         The leftover row is now hidden from the client copy by default and only appears when the
+         internal-only "Reveal hidden costs" toggle (_printRevealHidden) is on, under a new label —
+         so this check must arm that toggle to see the row at all, and match the new label text. */
       if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
         check('buildItemizedPrintRows: overhead with no line to attach to gets its own row, not a rescale', () => {
           const w = window;
-          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES };
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES, reveal: w._printRevealHidden };
           try {
             w.qFabMode = 'services';
             w.qChargeMatHw = false;   // Subsidiary account -- regular materials/hardware not billed
             w.SERVICES = [{ name: 'Test Service', price: 100, unit: 'pc' }];
+            w._printRevealHidden = true; // staff-only toggle: without it the leftover row is hidden entirely
             w.qAreas = [{
               name: 'Area X', items: [],
               svcItems: [{ svcIdx: 0, qty: 10 }],                                       // raw 1000
@@ -533,7 +539,7 @@ const PROFILES = {
               serviceUnitPriceCorrect: /110\.00/.test(html),
               outsourceShowsTrueValue: /2,400\.00/.test(html),
               regHardwareStillZeroed: /(^|[^,.\d])0\.00/.test(html.replace(/1,100\.00|110\.00|2,400\.00|6,000\.00|2,500\.00/g, '')),
-              overheadRowPrinted: /2,500\.00/.test(html) && /Production overhead/.test(html),
+              overheadRowPrinted: /2,500\.00/.test(html) && /Hidden from the client copy/.test(html),
               // The one thing that must NOT reappear: neither line inflated by the pool/trueTotal
               // ratio the old rescale would have produced (1,885.71 and 3,428.57 respectively).
               oldInflatedServiceAbsent: !/1,885\.71/.test(html),
@@ -543,10 +549,138 @@ const PROFILES = {
           } finally {
             w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
             w.qChargeMatHw = saved.qChargeMatHw; w.SERVICES = saved.SERVICES;
+            w._printRevealHidden = saved.reveal;
           }
         }, { serviceShowsTrueValue: true, serviceUnitPriceCorrect: true, outsourceShowsTrueValue: true,
              regHardwareStillZeroed: true, overheadRowPrinted: true, oldInflatedServiceAbsent: true,
              oldInflatedOutsourceAbsent: true, areaSubtotalStillReconciles: true });
+      /* 2026-09-02: the leftover row must be genuinely HIDDEN by default (not just given a new
+         label) -- Rommel: "It should not be shown. in the print out in the first place. again this
+         is something to be presented to the client." Proves the exact same scenario as the check
+         above renders NO leftover row at all when the toggle is off, while the area subtotal (which
+         still silently includes that amount) is untouched -- the total the client sees never moves,
+         only whether the breakdown explaining it is visible. */
+      if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
+        check('buildItemizedPrintRows: hidden-cost leftover is invisible to the client by default', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES, reveal: w._printRevealHidden };
+          try {
+            w.qFabMode = 'services';
+            w.qChargeMatHw = false;
+            w.SERVICES = [{ name: 'Test Service', price: 100, unit: 'pc' }];
+            w._printRevealHidden = false;
+            w.qAreas = [{
+              name: 'Area X', items: [],
+              svcItems: [{ svcIdx: 0, qty: 10 }],
+              matItems: [], hwItems: [{ name: 'Reg Hardware', qty: 1, price: 5000, unit: 'pc' }],
+              outsourceMaterials: [],
+              outsourceHardware: [{ name: 'Outsourced Basket', qty: 1, price: 2000, unit: 'pc' }]
+            }];
+            const pC = { ni: true, rates: { fabCont: 10, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 20 } };
+            const html = w.buildItemizedPrintRows(6000, pC);
+            return {
+              noLeakedLabel: !/Hidden from the client copy/.test(html) && !/Production overhead/.test(html),
+              noLeakedAmount: !/2,500\.00/.test(html),
+              subtotalStillReconciles: /6,000\.00/.test(html)
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
+            w.qChargeMatHw = saved.qChargeMatHw; w.SERVICES = saved.SERVICES;
+            w._printRevealHidden = saved.reveal;
+          }
+        }, { noLeakedLabel: true, noLeakedAmount: true, subtotalStillReconciles: true });
+      /* Rommel, 2026-09-03: "Except for the Asembly wherein it will have it own line under
+         fabrication." Assembly's own true value (base + its earned share of Installation's
+         combined markup, computed once in _buildPrintBodyCore and handed down so the two formulas
+         cannot drift) must render as its own explicit section/line -- not folded silently into the
+         hidden leftover the way the discount-buffer share is. Proves the section header, the row,
+         and full reconciliation (service + assembly = the whole pool, no leftover row needed). */
+      if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
+        check('buildItemizedPrintRows: Assembly gets its own explicit line under Fabrication', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES, reveal: w._printRevealHidden };
+          try {
+            w.qFabMode = 'services';
+            w.qChargeMatHw = true;
+            w.SERVICES = [{ name: 'Test Service', price: 100, unit: 'pc' }];
+            w._printRevealHidden = false; // must show regardless -- Assembly is never the hidden kind
+            w.qAreas = [{
+              name: 'Area X', items: [],
+              svcItems: [{ svcIdx: 0, qty: 10 }],  // raw 1000, factor 1 (no rates below)
+              matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: []
+            }];
+            const pC = { ni: true, rates: { fabCont: 0, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 0 } };
+            // Pool = service (1000) + assembly (5000), exactly -- no leftover to worry about.
+            const html = w.buildItemizedPrintRows(6000, pC, 5000);
+            return {
+              hasAssemblyHeading: /ASSEMBLY/.test(html),
+              assemblyRowPresent: /Assembly[\s\S]*?5,000\.00/.test(html),
+              serviceLineUnaffected: /1,000\.00/.test(html),
+              noHiddenLeftoverNeeded: !/Hidden from the client copy/.test(html),
+              subtotalReconciles: /6,000\.00/.test(html)
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
+            w.qChargeMatHw = saved.qChargeMatHw; w.SERVICES = saved.SERVICES;
+            w._printRevealHidden = saved.reveal;
+          }
+        }, { hasAssemblyHeading: true, assemblyRowPresent: true, serviceLineUnaffected: true,
+             noHiddenLeftoverNeeded: true, subtotalReconciles: true });
+      /* Rommel, 2026-09-03: "the minimum charge should be moved in the services." It is a
+         per-service-family floor (Cutting/Edgebanding/Grooving), so in the itemized print mode
+         specifically it belongs inside the SERVICES section rather than its own standalone block
+         between the areas and the Fabrication subtotal (which is exactly where By area/type/lump
+         still show it, unaffected). Proves the row renders, no second/separate heading is created
+         for it, and it still counts toward the area subtotal. */
+      if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
+        check('buildItemizedPrintRows: minimum charge rows render inside SERVICES, not their own section', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw, SERVICES: w.SERVICES, reveal: w._printRevealHidden };
+          try {
+            w.qFabMode = 'services';
+            w.qChargeMatHw = true;
+            w.SERVICES = [{ name: 'Test Service', price: 100, unit: 'pc' }];
+            w._printRevealHidden = false;
+            w.qAreas = [{
+              name: 'Area X', items: [],
+              svcItems: [{ svcIdx: 0, qty: 5 }],  // raw 500
+              matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: []
+            }];
+            const pC = {
+              ni: true, rates: { fabCont: 0, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 0 },
+              minCharge: { total: 300, rows: [{ name: 'Cutting (minimum charge)', floor: 800, topUp: 300 }] }
+            };
+            // Pool = service (500) + min-charge topup (300), exactly.
+            const html = w.buildItemizedPrintRows(800, pC);
+            const servicesHeadingCount = (html.match(/>SERVICES</g) || []).length;
+            return {
+              exactlyOneServicesHeading: servicesHeadingCount,
+              noSeparateMinChargeHeading: !/>MINIMUM CHARGE</.test(html),
+              minChargeRowPresent: /Minimum charge — Cutting/.test(html) && /300\.00/.test(html),
+              floorShown: /800\.00/.test(html) || /minimum.*800\.00/i.test(html),
+              subtotalReconciles: /800\.00/.test(html)
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
+            w.qChargeMatHw = saved.qChargeMatHw; w.SERVICES = saved.SERVICES;
+            w._printRevealHidden = saved.reveal;
+          }
+        }, { exactlyOneServicesHeading: 1, noSeparateMinChargeHeading: true, minChargeRowPresent: true,
+             floorShown: true, subtotalReconciles: true });
+      /* Rommel, 2026-09-03: "give me a capability to have some kind of clickable that i can see
+         what was hidden in the printview... it works like when you want to temporarily view the
+         password." The checkbox that arms _printRevealHidden must only ever be offered on the one
+         print mode it applies to (itemized) -- source-inspection, since driving the full DOM/
+         _buildPrintBodyCore integration path needs a whole quotation+DOM fixture this suite does
+         not otherwise build for print-body tests. */
+      if (typeof window._buildPrintBodyCore === 'function')
+        check('_buildPrintBodyCore: the reveal-hidden-costs toggle only shows in itemized mode', () => {
+          const src = window._buildPrintBodyCore.toString();
+          return {
+            revealRowGatedOnItemizedMode: /revealRow\.style\.display\s*=\s*isItemizedMode\s*\?\s*'flex'\s*:\s*'none'/.test(src),
+            usesSharedIsItemizedModeFlag: /var\s+isItemizedMode\s*=\s*\(_printBreakdown===['"]itemized['"]\)/.test(src),
+          };
+        }, { revealRowGatedOnItemizedMode: true, usesSharedIsItemizedModeFlag: true });
       /* Rommel, 2026-08-19: the auto-forwarded "Noted by" signature request (raised automatically
          the moment someone approves "Checked by") arrived with amount 0 and no decision data on
          Wynchelle Uy's quotations, so he could not evaluate it and rejected both. Root cause:
@@ -2030,9 +2164,16 @@ const PROFILES = {
          (not just bypassed) so it cannot silently resurface: the function no longer even accepts
          the parameter, and a real material line with a real price is confirmed to print that price
          unconditionally, the same as hardware always has. */
+      /* 2026-09-02 follow-up: buildItemizedPrintRows gained a third parameter (assemblyTrueAmt, for
+         the Assembly-gets-its-own-line requirement below) -- 3 is correct now, not a regression of
+         the hideMatPricing removal. What this check actually guards against is hideMatPricing coming
+         BACK as a parameter; confirmed the function's source has no parameter named that. */
       if (typeof window.buildItemizedPrintRows === 'function')
-        check('buildItemizedPrintRows: the hideMatPricing parameter is gone, not just unused',
-          () => window.buildItemizedPrintRows.length, 2);
+        check('buildItemizedPrintRows: the hideMatPricing parameter is gone, not just unused', () => {
+          const src = window.buildItemizedPrintRows.toString();
+          const sig = src.slice(0, src.indexOf(')') + 1);
+          return { paramCount: window.buildItemizedPrintRows.length, noHideMatPricingParam: !/hideMatPricing/.test(sig) };
+        }, { paramCount: 3, noHideMatPricingParam: true });
       /* Rommel, 2026-08-29: "what if the user start working on the quotation without resuming the
          timer. what will happen?" -- correctly caught as a real gap. Field-disable sweeps and the
          lock gate are UI-level prevention, not enforcement -- a stale open tab or Stage 2 (no

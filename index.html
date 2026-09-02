@@ -2463,6 +2463,9 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
       <label id="pb-lbl-lump" onclick="setPrintBreakdown('lump')" style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);background:var(--card);color:var(--text1);transition:all .15s"><i class="ti ti-sum"></i>Lump sum</label>
       <label id="pb-lbl-itemized" onclick="setPrintBreakdown('itemized')" style="display:none;align-items:center;gap:5px;font-size:12px;cursor:pointer;padding:4px 12px;border-radius:20px;border:1.5px solid var(--border);background:var(--card);color:var(--text1);transition:all .15s"><i class="ti ti-list-details"></i>Services, Materials &amp; Hardware</label>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;margin-left:8px;padding:4px 10px;border-radius:20px;border:1.5px solid var(--border);background:var(--card)"><input type="checkbox" id="pb-mi-split" onchange="setPrintMiCombined(!this.checked)" style="margin:0">Show Mobilization &amp; Installation separately</label>
+      <!-- Itemized mode only -- hidden costs (discount buffer share, cutting-list charge markup)
+           only exist as a concept there; shown/hidden in step with pb-lbl-itemized's own visibility. -->
+      <label id="pb-reveal-hidden-row" style="display:none;align-items:center;gap:5px;font-size:12px;cursor:pointer;margin-left:8px;padding:4px 10px;border-radius:20px;border:1.5px solid var(--amber);background:var(--wash-amber)"><input type="checkbox" id="pb-reveal-hidden" onchange="setPrintRevealHidden(this.checked)" style="margin:0"><i class="ti ti-eye"></i>Reveal hidden costs (internal only)</label>
       <span style="margin-left:8px;font-size:11px;color:var(--text2);font-style:italic" id="pb-hint">Showing all items grouped by area</span>
       <div style="margin-left:auto;display:flex;gap:6px">
         <button class="btn" onclick="printQuotation()" style="font-size:12px;padding:4px 12px;background:var(--navy);color:var(--on-accent);border-color:var(--navy)"><i class="ti ti-printer"></i>Print / Save PDF</button>
@@ -10257,6 +10260,18 @@ var _printBreakdown='area';
 // preference, not a pricing one -- the grand total is identical either way.
 var _printMiCombined=true;
 function setPrintMiCombined(v){ _printMiCombined=!!v; openPrint(); }
+// Internal-only, off by default. The itemized print view deliberately does not disclose the
+// discount buffer / contingency / cutting-list-charge markup that has no per-item home (Rommel,
+// 2026-09-03: "since these cost are hidden, give me a capability... it works like when you want to
+// temporarily view the password"). Same mechanism as _printMiCombined above -- a plain toggle that
+// re-renders the SAME print body -- so switching it on can reveal that residual in the preview,
+// and switching it back off before actually sending removes it again, same as the Mob & Install
+// split toggle already works. It is not scrubbed from the DOM automatically, so leaving it on and
+// then printing/saving the PDF WOULD carry it onto that copy -- exactly like leaving the Mob &
+// Install toggle on does for that section; there is nothing special protecting this one beyond the
+// default being off.
+var _printRevealHidden=false;
+function setPrintRevealHidden(v){ _printRevealHidden=!!v; openPrint(); }
 function syncPrintToggle(mode){
   var modes=['area','type','lump','itemized'];
   var hints={area:'Showing all items grouped by area / location',type:'Showing total cost grouped by cabinet type',lump:'Showing a single combined total only',itemized:'Showing services, materials and hardware itemized per area'};
@@ -10533,13 +10548,21 @@ function buildPrintRows(mode,pool,pC){
 // show for the same quotation), then that area's total is sub-allocated across its own weighted
 // lines — so an area's line items always sum to that area's own subtotal, and areas always sum to
 // the printed Fabrication subtotal, transitively, with nothing hand-duplicated in between.
-function buildItemizedPrintRows(pool,pC){
+// assemblyTrueAmt: Assembly's own true value (base + its earned share of the combined Inst./
+// Assembly markup) -- only ever nonzero when Fab+Install folds Assembly into this same pool
+// (_buildPrintBodyCore computes it beside miRegroup, since that is the only place _assmShare
+// already exists; passed in rather than recomputed here so the two formulas cannot drift apart).
+// Placed on the LAST area only, same simplification the minimum-charge rows already use below --
+// Assembly and the minimum charge are both whole-quotation figures, not truly area-specific, and
+// with the one real area this quotation-of-the-day has, the distinction is moot in practice.
+function buildItemizedPrintRows(pool,pC,assemblyTrueAmt){
   var tdS='padding:6px 9px;border:1px solid #ddd;font-size:11px;vertical-align:top';
   var rows='';
   var areaAlloc=(pool!=null)?_fabAreaAllocation(pool,pC):null;
   var fac=(pool!=null)?_fabMarkupFactors(pC):null;
   for(var a=0;a<qAreas.length;a++){
     var area=qAreas[a];
+    var isLastArea=(a===qAreas.length-1);
     var areaSub=areaAlloc?areaAlloc[a]:getAreaSubtotal(a);
     rows+='<tr style="background:#e8edf5"><td colspan="5" style="'+tdS+';font-weight:bold;color:#1a3c5e">'+escHtml(area.name)+'</td></tr>';
     var svcItems=area.svcItems||[];
@@ -10590,7 +10613,15 @@ function buildItemizedPrintRows(pool,pC){
       for(var _t=0;_t<lineAlloc.length;_t++) trueLineTotal+=lineAlloc[_t];
     }
     var li=0;
-    if(svcItems.length){
+    // Minimum charge is a whole-quotation figure (one topup per SERVICE family, not per area), so
+    // it is shown once, on the last area, same simplification Assembly below uses. Rommel,
+    // 2026-09-03: "the minimum charge should be moved in the services" -- it is genuinely a
+    // service-family floor (Cutting/Edgebanding/Grooving), so it belongs inside the SERVICES
+    // section rather than as its own standalone block between the areas and the Fabrication
+    // subtotal.
+    var minChargeRowsHere=(isLastArea&&pC&&pC.minCharge&&pC.minCharge.total>0)?(pC.minCharge.rows||[]):[];
+    var minChargeTotalHere=0; for(var _m=0;_m<minChargeRowsHere.length;_m++) minChargeTotalHere+=minChargeRowsHere[_m].topUp||0;
+    if(svcItems.length||minChargeRowsHere.length){
       rows+='<tr><td colspan="5" style="'+tdS+';font-weight:600;color:#555;background:#fafafa">SERVICES</td></tr>';
       for(var i=0;i<svcItems.length;i++){
         var si=svcItems[i];
@@ -10602,6 +10633,14 @@ function buildItemizedPrintRows(pool,pC){
         // silent when the toggle is off (clientMatMultFor's own gate).
         var svName=sv.name+(clientMatMultFor(si)!==1?' (Client-supplied material)':'')+_svcNoteInline(si);
         rows+='<tr><td style="'+tdS+'">'+escHtml(svName)+'</td><td style="'+tdS+';text-align:center">'+qty+'</td><td style="'+tdS+';text-align:center">'+escHtml(sv.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(amt)+'</td></tr>';
+      }
+      for(var _mr=0;_mr<minChargeRowsHere.length;_mr++){
+        var _r=minChargeRowsHere[_mr];
+        var _fam=String(_r.name||'').replace(/\s*\(minimum charge\)\s*/i,' ').replace(/\s+/g,' ').trim();
+        rows+='<tr><td colspan="3" style="'+tdS+'">Minimum charge — '+escHtml(_fam)
+          +' <span style="color:#666">(minimum '+fmtMoney(_r.floor)+')</span></td>'
+          +'<td style="'+tdS+';text-align:center">—</td>'
+          +'<td style="'+tdS+';text-align:right">'+fmtMoney(_r.topUp)+'</td></tr>';
       }
     }
     if(matItems.length){
@@ -10632,20 +10671,35 @@ function buildItemizedPrintRows(pool,pC){
         rows+='<tr><td style="'+tdS+'">'+escHtml(hi.name||'')+'</td><td style="'+tdS+';text-align:center">'+qty+'</td><td style="'+tdS+';text-align:center">'+escHtml(hi.unit||'')+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(up)+'</td><td style="'+tdS+';text-align:right">'+fmtMoney(amt)+'</td></tr>';
       }
     }
-    if(!svcItems.length&&!matItems.length&&!hwItems.length){
+    // Assembly is a whole-quotation figure too (assmCarcass comes from the quotation's overall
+    // installed-unit count, not a per-area one) -- shown once, on the last area, same as minimum
+    // charge above. Rommel, 2026-09-03: "it will have its own line under fabrication", so it gets
+    // its own small section rather than folding into SERVICES/MATERIALS/HARDWARE, which are real
+    // catalogue categories and Assembly is not one.
+    var assemblyHere=isLastArea?(assemblyTrueAmt||0):0;
+    if(assemblyHere>0.004){
+      rows+='<tr><td colspan="5" style="'+tdS+';font-weight:600;color:#555;background:#fafafa">ASSEMBLY</td></tr>';
+      rows+='<tr><td style="'+tdS+'">Assembly</td><td style="'+tdS+';text-align:center">—</td><td style="'+tdS+';text-align:center">—</td><td style="'+tdS+';text-align:right">—</td><td style="'+tdS+';text-align:right">'+fmtMoney(assemblyHere)+'</td></tr>';
+    }
+    if(!svcItems.length&&!matItems.length&&!hwItems.length&&!minChargeRowsHere.length&&!(assemblyHere>0.004)){
       rows+='<tr><td colspan="5" style="'+tdS+';color:#999;font-style:italic">No items in this area</td></tr>';
     }
-    // Whatever the area's pool exceeds the sum of its own true line values by -- assembly, the
-    // share of installation's markup attributed to it, the discount buffer, the cutting-list
-    // charge -- has no per-unit line to attach to. Printed as its own row, no unit, same treatment
-    // the minimum-charge row already gets, rather than forced onto lines that did not earn it.
-    // areaSub - trueLineTotal, so the area subtotal below still reconciles exactly.
+    // Whatever the area's pool STILL exceeds the sum of its own true line values by -- after
+    // Assembly and the minimum charge are already accounted for above -- is the discount buffer's
+    // Fabrication-side share, the cutting-list charge's own markup, and a small residual from the
+    // minimum charge's own markup share. None of these is client-facing: Rommel, 2026-09-03,
+    // "since these cost are hidden, give me a capability... it works like when you want to
+    // temporarily view the password." So it prints only while _printRevealHidden is on (an
+    // internal-only toggle beside "Show Mobilization & Installation separately" -- default OFF,
+    // meaning the client-facing document never shows it unless someone deliberately switches it on,
+    // and switches it back off before actually sending). Off, the area subtotal below simply does
+    // not equal the sum of the visible rows above it -- a deliberate, accepted gap, not a bug.
     if(pool!=null){
-      var areaLeftover=Math.round((areaSub-trueLineTotal)*100)/100;
-      if(areaLeftover>0.004){
-        rows+='<tr><td colspan="3" style="'+tdS+'">Production overhead — assembly, mobilization/installation share, contingency &amp; buffer</td>'
+      var areaLeftover=Math.round((areaSub-trueLineTotal-minChargeTotalHere-assemblyHere)*100)/100;
+      if(areaLeftover>0.004&&typeof _printRevealHidden!=='undefined'&&_printRevealHidden){
+        rows+='<tr style="background:#fff7e6"><td colspan="3" style="'+tdS+';color:#92400e">🔓 Hidden from the client copy — discount buffer share, cutting-list charge markup</td>'
           +'<td style="'+tdS+';text-align:center">—</td>'
-          +'<td style="'+tdS+';text-align:right">'+fmtMoney(areaLeftover)+'</td></tr>';
+          +'<td style="'+tdS+';text-align:right;color:#92400e">'+fmtMoney(areaLeftover)+'</td></tr>';
       }
     }
     rows+='<tr style="background:#fafaf8"><td colspan="4" style="'+tdS+';text-align:right;font-weight:bold">'+escHtml(area.name)+' subtotal</td><td style="'+tdS+';text-align:right;font-weight:bold">'+fmtMoney(areaSub)+'</td></tr>';
@@ -10706,6 +10760,12 @@ function _buildPrintBodyCore() {
   // (Fabrication-only + a standalone Assembly checkbox, or no Assembly at all), none of this
   // runs and every row below falls through to the untouched, original behaviour.
   var miRegroup=null;
+  // Assembly's own TRUE value (base + its earned share of the combined Inst./Assembly markup) --
+  // computed here, once, alongside _assmShare, and handed to buildItemizedPrintRows so it can give
+  // Assembly its own line under Fabrication rather than leaving it as part of an unexplained
+  // leftover. Zero outside the pNi case: Assembly already prints as its own untouched summary row
+  // (see the miRegroup?...:... branch further below) when there is no installation to fold it into.
+  var assemblyTrueAmt=0;
   if(pNi){
     var _r=pC.rates||{};
     var _pc=function(v){return 1+(Number(v)||0)/100;};
@@ -10722,6 +10782,7 @@ function _buildPrintBodyCore() {
     var _rInst=_instAssmBase>0?pInstBase/_instAssmBase:1, _rAssm=1-_rInst;
     var _assmShare=(_instContAmt+_instBufAmt+_instMkAmt)*_rAssm;
     var _instBucket=pInstBase+(_instContAmt+_instBufAmt+_instMkAmt)*_rInst;
+    assemblyTrueAmt=pAssmBase+_assmShare;
     // dcCost follows the SAME fold flag the existing Fabrication-subtotal row already uses --
     // folded, it is counted once here; not folded, it keeps printing as its own separate row
     // below (unchanged), so it is deliberately left out of the bucket in that case.
@@ -10746,17 +10807,6 @@ function _buildPrintBodyCore() {
   // include it in the subtotal so the column reconciles. The client is told a
   // minimum applies and what it is, which is a term of the quotation, not an
   // internal figure.
-  var minChargeRows='', minChargeTotal=0;
-  if(pC.minCharge&&pC.minCharge.total>0&&(pC.minCharge.rows||[]).length){
-    minChargeTotal=pC.minCharge.total;
-    minChargeRows=pC.minCharge.rows.map(function(r){
-      var fam=String(r.name||'').replace(/\s*\(minimum charge\)\s*/i,' ').replace(/\s+/g,' ').trim();
-      return '<tr><td colspan="3" style="'+tdS+'">Minimum charge — '+escHtml(fam)
-        +' <span style="color:#666">(minimum '+fmtMoney(r.floor)+')</span></td>'
-        +'<td style="'+tdS+';text-align:center">—</td>'
-        +'<td style="'+tdS+';text-align:right">'+fmtMoney(r.topUp)+'</td></tr>';
-    }).join('');
-  }
   var thS='background:#f5c518;font-weight:bold;padding:7px 9px;border:1px solid #ccc;text-align:center;font-size:11px';
   var pType=el("cl-type")?el("cl-type").value:"Direct";
   var pCoName=getCompanyName(pType);
@@ -10782,20 +10832,40 @@ function _buildPrintBodyCore() {
   // overrode a deliberate per-quotation choice. Removed 2026-09-03; materials now print exactly
   // like hardware always has: whatever the line actually computed to.
   var isItemizedMode=(_printBreakdown==='itemized');
+  // By area/type/lump: the minimum-charge rows print as their own standalone block between the
+  // areas and the Fabrication subtotal, exactly as before -- unaffected by anything below.
+  //
+  // Itemized ("Services, Materials & Hardware"): moved INSIDE buildItemizedPrintRows itself
+  // (Rommel, 2026-09-03: "the minimum charge should be moved in the services" -- it is genuinely a
+  // per-service-family floor, so it belongs in the SERVICES section), so it must NOT also render
+  // here or it would print twice and the total would be double-subtracted from the pool.
+  var minChargeRows='', minChargeTotal=0;
+  if(!isItemizedMode&&pC.minCharge&&pC.minCharge.total>0&&(pC.minCharge.rows||[]).length){
+    minChargeTotal=pC.minCharge.total;
+    minChargeRows=pC.minCharge.rows.map(function(r){
+      var fam=String(r.name||'').replace(/\s*\(minimum charge\)\s*/i,' ').replace(/\s+/g,' ').trim();
+      return '<tr><td colspan="3" style="'+tdS+'">Minimum charge — '+escHtml(fam)
+        +' <span style="color:#666">(minimum '+fmtMoney(r.floor)+')</span></td>'
+        +'<td style="'+tdS+';text-align:center">—</td>'
+        +'<td style="'+tdS+';text-align:right">'+fmtMoney(r.topUp)+'</td></tr>';
+    }).join('');
+  }
   // The ONE printed Fabrication-subtotal figure — computed exactly as it always was, nothing
-  // duplicated. Every row above it is now built to sum back up to this same number: the minimum-
-  // charge rows keep their own raw, per-family value (unchanged, still shown to explain a floor
-  // applied), so the pool handed to the area/type/lump rows is this total minus that — the two
-  // together reconstruct the printed figure exactly, with no double-count and nothing missing.
+  // duplicated. For area/type/lump, the minimum-charge rows keep their own raw, per-family value
+  // (shown separately, see above), so the pool handed to those rows is this total minus that. For
+  // itemized mode, minChargeTotal is 0 (computed inside buildItemizedPrintRows instead), so the
+  // FULL pool — including the minimum charge and, via assemblyTrueAmt, Assembly — is handed down,
+  // and that function accounts for both explicitly.
   var fabTotalPrinted=miRegroup?miRegroup.fab:(totVal+foldedIntoFab+minChargeTotal);
   var fabRowPool=fabTotalPrinted-minChargeTotal;
-  var itemRows=isItemizedMode?buildItemizedPrintRows(fabRowPool,pC):buildPrintRows(_printBreakdown,fabRowPool,pC);
+  var itemRows=isItemizedMode?buildItemizedPrintRows(fabRowPool,pC,assemblyTrueAmt):buildPrintRows(_printBreakdown,fabRowPool,pC);
   // Sync toggle button visual state (visual only — no recursion)
   syncPrintToggle(_printBreakdown);
   // Must run AFTER syncPrintToggle — that function unconditionally rewrites every mode button's
   // full style.cssText (including "display:flex" for whichever isn't the active one), which would
   // otherwise clobber the display:none set here for a quotation where this mode isn't offered.
   var itemizedBtn=el('pb-lbl-itemized'); if(itemizedBtn) itemizedBtn.style.display=itemizedAvailable?'flex':'none';
+  var revealRow=el('pb-reveal-hidden-row'); if(revealRow) revealRow.style.display=isItemizedMode?'flex':'none';
   // Moved earlier than its original spot (previously right before the header) so it is
   // ready for the Project Name row below. Same computation, same optTag markup, used twice.
   var optLabel=''; var optTag='';
