@@ -9631,6 +9631,32 @@ Fixed by forcing `dirShowArchived=true` for the duration of that one check, deco
 whatever "today" happens to be permanently, rather than swapping in a new date that would just go
 stale again eventually.
 
+## Addendum, same day — materials on the printout now follow the same rule as hardware
+Rommel, testing the printout right after the outsource fix: ticked "Charge materials & hardware"
+and hardware correctly started showing real prices, but materials stayed at "—". Investigated
+before touching anything — this was two unrelated mechanisms colliding, not a bug in the toggle:
+`hideMatPricing = (pCoName.indexOf('World Class')>=0)` blanket-hid material unit price/amount on
+ANY World Class Laminate quotation, completely independent of whether materials are actually being
+charged. That rule predates the per-quotation charge toggle (2026-07-16 vs 2026-08-06) — it was a
+company-wide guess at what should be hidden, made before there was a real, deliberate per-quotation
+answer to that question.
+
+Confirmed for Rommel first that the underlying charge was never affected by this — `hideMatPricing`
+only ever swapped the DISPLAYED cells for "—"; the real `amt` still fed into the area subtotal and
+grand total either way. Once confirmed, his call: *"make materials follow the same rule as
+hardware. The old rule was made prior to the improvement of manually hiding the materials and
+hardware."*
+
+Removed `hideMatPricing` entirely — not bypassed, the parameter no longer exists on
+`buildItemizedPrintRows()` at all, so it cannot silently resurface. Materials now render exactly
+like hardware always has: whichever amount the line actually computed to (zero when
+`_chargeMatHw()` says this account isn't billed for it, the real marked-up value otherwise).
+Verified: `buildItemizedPrintRows.length===2` (was 3), a materials line with a real price shows
+that price unconditionally, and all affected 2026-08-19/21 regression tests updated to the new
+2-argument call signature and re-confirmed passing. Every changed test proven to fail against the
+pre-fix code first (the old 3-arg function silently misreads a 2-arg call, shifting every
+parameter) before shipping.
+
 ## ⚠ FIRST THING NEXT SESSION
 Confirm the deploy landed and Pause Order actually works end to end in the live app — this session
 verified everything through `tools/verify.mjs` (collision checker + both headless smoke gates) but

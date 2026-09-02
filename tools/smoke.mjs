@@ -398,9 +398,10 @@ const PROFILES = {
          are zeroed out, so nothing but the outsource rate could produce that number — and that
          Unit Price is adjusted along with Amount (qty=2 on the outsourced line: 300 raw price ->
          600 shown, not just the extended total), so Qty x Unit Price still visibly equals Amount
-         on every row, not just in aggregate. A hardware row placed AFTER a hidden-pricing material
-         section proves the allocation index isn't corrupted by hideMatPricing skipping display
-         (li must still advance even when a material row shows "-" instead of a number). */
+         on every row, not just in aggregate.
+         (The hideMatPricing parameter this test used to also exercise here was removed 2026-09-03
+         — see the buildItemizedPrintRows signature change note further down — materials now print
+         unconditionally, same as hardware always has.) */
       if (typeof window.buildItemizedPrintRows === 'function' && typeof window._svcUnitPrice === 'function')
         check('buildItemizedPrintRows: markup distributed per line, unit price stays consistent with amount', () => {
           const w = window;
@@ -422,7 +423,7 @@ const PROFILES = {
             // sum of the four expected weights so every allocated amount is round and hand-checkable:
             // svc 100x2=200, mat 800x1=800, out (300x2)x2=1200, hw 50x1=50 -> pool 2250.
             const pC = { ni: true, rates: { fabCont: 0, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 100 } };
-            const html = w.buildItemizedPrintRows(false, 2250, pC);
+            const html = w.buildItemizedPrintRows(2250, pC);
             return {
               svcAmount200: /200\.00/.test(html),
               svcUnitPrice100: /100\.00/.test(html),
@@ -431,10 +432,7 @@ const PROFILES = {
               outsourcedAmount1200: /1,200\.00/.test(html),
               rawOutsourcePriceNeverShown: !/(^|[^,.\d])300\.00/.test(html),
               areaSubtotalMatchesPool: /2,250\.00/.test(html),
-              hiddenPricingStillShowsHardwareAfterIt: (() => {
-                const hh = w.buildItemizedPrintRows(true, 2250, pC);   // hideMatPricing=true
-                return /—/.test(hh) && /50\.00/.test(hh) && /2,250\.00/.test(hh);
-              })()
+              materialPriceIsShownNotHidden: /800\.00/.test(html) && !/—/.test(html)
             };
           } finally {
             w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode;
@@ -443,7 +441,7 @@ const PROFILES = {
         }, { svcAmount200: true, svcUnitPrice100: true, regMaterialUnchanged800: true,
              outsourcedUnitPriceDoubled600: true, outsourcedAmount1200: true,
              rawOutsourcePriceNeverShown: true, areaSubtotalMatchesPool: true,
-             hiddenPricingStillShowsHardwareAfterIt: true });
+             materialPriceIsShownNotHidden: true });
       /* Rommel, 2026-08-21: a real Subsidiary-account, services-mode printout (QT-W00000141) showed
          every SERVICE line's unit price and amount at ~1/7 of its real value, while the stated Area/
          Fabrication subtotal stayed correct -- individual rows did not sum to the subtotal printed
@@ -479,7 +477,7 @@ const PROFILES = {
             // Pool = full expected weight sum if the fix works: svc 2000 + out 500 = 2500. Under the
             // OLD (buggy) code the pool would be split against 2000+12000+3000+500=17500 of weight,
             // giving the service line ~228.57 instead of the full 2000 -- the exact bug reproduced.
-            const html = w.buildItemizedPrintRows(false, 2500, pC);
+            const html = w.buildItemizedPrintRows(2500, pC);
             return {
               serviceGetsFullShare: /2,000\.00/.test(html),
               serviceUnitPriceUnchanged: /100\.00/.test(html),
@@ -529,7 +527,7 @@ const PROFILES = {
             // under the OLD code this 2500 would be smeared across the two nonzero lines instead of
             // getting its own row, inflating both by the same ~1.714x factor (6000/3500).
             const pC = { ni: true, rates: { fabCont: 10, fabBuf: 0, outCont: 0, outBuf: 0, outMarkup: 20 } };
-            const html = w.buildItemizedPrintRows(false, 6000, pC);
+            const html = w.buildItemizedPrintRows(6000, pC);
             return {
               serviceShowsTrueValue: /1,100\.00/.test(html),
               serviceUnitPriceCorrect: /110\.00/.test(html),
@@ -1210,7 +1208,7 @@ const PROFILES = {
             w.qClientMatSvcExcl = {};
             const idB = w._svcUplId(rowB);
             w.qClientMatSvcExcl[idB] = true;
-            const html = w.buildItemizedPrintRows(false, null, null);
+            const html = w.buildItemizedPrintRows(null, null);
             const noteCount = (html.match(/\(Client-supplied material\)/g) || []).length;
             return { noteCount };
           } finally {
@@ -1267,7 +1265,7 @@ const PROFILES = {
             w.qAreas = [{ name: 'Area 1', items: [], bomItems: [], svcItems: [noted],
                           matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
             w.qFabMode = 'services';
-            const html = w.buildItemizedPrintRows(false, null, null);
+            const html = w.buildItemizedPrintRows(null, null);
             return { notedInline: html.includes('(runs along the countertop edge)') };
           } finally {
             w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.SERVICES = saved.SERVICES;
@@ -2024,6 +2022,17 @@ const PROFILES = {
       if (typeof window.ORDERS_COLS !== 'undefined')
         check('ORDERS_COLS: Pause History is the last column, appended not inserted',
           () => window.ORDERS_COLS[window.ORDERS_COLS.length - 1], 'Pause History');
+      /* Rommel, 2026-09-03: "make materials follow the same rule as hardware. The old rule was made
+         prior to the improvement of manually hiding the materials and hardware." The old rule
+         (hideMatPricing) blanket-hid material unit price/amount for any World Class Laminate
+         quotation, independent of whether materials were actually being charged -- a leftover from
+         before the per-quotation charge-materials-and-hardware toggle existed. Removed entirely
+         (not just bypassed) so it cannot silently resurface: the function no longer even accepts
+         the parameter, and a real material line with a real price is confirmed to print that price
+         unconditionally, the same as hardware always has. */
+      if (typeof window.buildItemizedPrintRows === 'function')
+        check('buildItemizedPrintRows: the hideMatPricing parameter is gone, not just unused',
+          () => window.buildItemizedPrintRows.length, 2);
       /* Rommel, 2026-08-29: "what if the user start working on the quotation without resuming the
          timer. what will happen?" -- correctly caught as a real gap. Field-disable sweeps and the
          lock gate are UI-level prevention, not enforcement -- a stale open tab or Stage 2 (no
