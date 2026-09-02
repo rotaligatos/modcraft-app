@@ -681,6 +681,46 @@ const PROFILES = {
             usesSharedIsItemizedModeFlag: /var\s+isItemizedMode\s*=\s*\(_printBreakdown===['"]itemized['"]\)/.test(src),
           };
         }, { revealRowGatedOnItemizedMode: true, usesSharedIsItemizedModeFlag: true });
+      /* Rommel, 2026-09-03 (follow-up, same session): screenshot showed "535.05" printed in the
+         "Unit Price" column of both the Fabrication subtotal and GRAND TOTAL rows in itemized
+         mode -- a raw unit count (fmtUnits(totU), meaningful as "No. of Units" in area/type/lump
+         mode's 4th column) reused in the SAME cell position under itemized mode's differently-
+         labeled "Unit Price" header. A quantity with no per-unit price meaning, printed under a
+         price header, reads as a bogus figure. Both rows must blank that cell in itemized mode,
+         same as every other itemized-mode summary line (Assembly, minimum charge) already does. */
+      if (typeof window._buildPrintBodyCore === 'function')
+        check('_buildPrintBodyCore: Fabrication subtotal + GRAND TOTAL blank the unit-count cell in itemized mode', () => {
+          const src = window._buildPrintBodyCore.toString();
+          const fabRowMatch = /Fabrication subtotal<\/td><td[^>]*>'\+\(isItemizedMode\?'—':fmtUnits\(totU\)\)\+'/.test(src);
+          const grandRowMatch = /GRAND TOTAL'[\s\S]{0,140}?<td[^>]*>'\+\(isItemizedMode\?'—':fmtUnits\(totU\)\)\+'/.test(src);
+          // Neither row may fall back to the old unconditional fmtUnits(totU) call anywhere in
+          // their own cell -- would silently reprint the bogus figure whenever isItemizedMode.
+          const noUnconditionalFabCall = !/Fabrication subtotal<\/td><td[^>]*>'\+fmtUnits\(totU\)\+'/.test(src);
+          const noUnconditionalGrandCall = !/GRAND TOTAL'[\s\S]{0,140}?<td[^>]*>'\+fmtUnits\(totU\)\+'/.test(src);
+          return { fabRowMatch, grandRowMatch, noUnconditionalFabCall, noUnconditionalGrandCall };
+        }, { fabRowMatch: true, grandRowMatch: true, noUnconditionalFabCall: true, noUnconditionalGrandCall: true });
+      /* Rommel, 2026-09-03 (follow-up): "why so big... im referring to the size of the black thing
+         for revealing hidden cost" -- the toggle was styled with a filled amber background/border,
+         far heavier than its sibling "Show Mobilization & Installation separately" checkbox right
+         beside it, which uses a plain neutral pill (var(--border)/var(--card)). Restyled to match
+         exactly, so a staff-only convenience toggle doesn't visually outweigh the rest of the print
+         toolbar. */
+      check('print toolbar: the reveal-hidden-costs checkbox matches its neighbor\'s discreet styling, not an amber-filled pill', () => {
+        const revealEl = document.getElementById('pb-reveal-hidden-row');
+        const siblingEl = document.getElementById('pb-mi-split'); // the checkbox INPUT; its <label> parent is the styled pill
+        const revealStyle = revealEl ? revealEl.getAttribute('style') || '' : '';
+        const siblingStyle = siblingEl && siblingEl.parentElement ? siblingEl.parentElement.getAttribute('style') || '' : '';
+        return {
+          bothExist: !!revealEl && !!siblingEl,
+          noAmberBorder: !/border:\s*1\.5px solid var\(--amber\)/.test(revealStyle),
+          noAmberFill: !/background:\s*var\(--wash-amber\)/.test(revealStyle),
+          // Same border/background TOKENS as its sibling -- not necessarily byte-identical (the
+          // sibling has no margin-left/color, the reveal toggle keeps its display:none/flex logic),
+          // just proving it no longer stands out as a differently-weighted, filled pill.
+          sameBorderToken: /border:1\.5px solid var\(--border\)/.test(revealStyle) === /border:1\.5px solid var\(--border\)/.test(siblingStyle) && /border:1\.5px solid var\(--border\)/.test(siblingStyle),
+          sameBackgroundToken: /background:var\(--card\)/.test(revealStyle) === /background:var\(--card\)/.test(siblingStyle) && /background:var\(--card\)/.test(siblingStyle),
+        };
+      }, { bothExist: true, noAmberBorder: true, noAmberFill: true, sameBorderToken: true, sameBackgroundToken: true });
       /* Rommel, 2026-08-19: the auto-forwarded "Noted by" signature request (raised automatically
          the moment someone approves "Checked by") arrived with amount 0 and no decision data on
          Wynchelle Uy's quotations, so he could not evaluate it and rejected both. Root cause:

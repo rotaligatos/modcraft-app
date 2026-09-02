@@ -9870,3 +9870,33 @@ before actually sending the document to a client.
   everywhere new code touches `pC`** — this bit `buildItemizedPrintRows` the moment a new,
   unconditional `pC.minCharge` read was added; caught by the existing note-inline tests failing,
   not by a new test written for this specific case.
+
+### Same-day follow-up — two things a screenshot caught that the tests didn't
+Rommel, immediately after the fix above shipped: a screenshot of the reveal toggle ("why so big...
+im referring to the size of the black thing for revealing hidden cost") and one of the itemized
+table showing an unexplained **"535.05"** printed under the "Unit Price" header, on both the
+Fabrication subtotal and GRAND TOTAL rows.
+
+1. **The 535.05** — `totU` (a raw unit/component count, `fmtUnits(totU)`) was being printed in the
+   SAME table-cell position for every print mode's Fabrication-subtotal and GRAND TOTAL rows. In
+   area/type/lump mode that column is legitimately labeled "No. of Units," so it belongs there. In
+   itemized mode the identical cell position sits under a **"Unit Price"** header — a bare
+   quantity with no per-unit price meaning, printed under a price header, reads as a bogus figure.
+   Both rows now blank that cell (`isItemizedMode?'—':fmtUnits(totU)`) in itemized mode only, the
+   same treatment every other itemized-mode summary line (Assembly, minimum charge) already gives
+   a cell with nothing meaningful to show.
+2. **The toggle styling** — shipped with a filled amber background/border (`var(--amber)`/
+   `var(--wash-amber)`), rendering as a heavy, high-contrast pill next to its sibling "Show
+   Mobilization & Installation separately" checkbox, which uses a plain neutral pill
+   (`var(--border)`/`var(--card)`). Restyled to match exactly — a staff-only convenience toggle
+   should not visually outweigh the rest of the print toolbar.
+
+Two new checks in `tools/smoke.mjs`, both confirmed to FAIL against the just-shipped `d4e7065` code
+via `git stash push -- index.html` before passing on the fix. `node tools/verify.mjs` green.
+
+**Worth remembering**: neither of these was caught by the earlier round's own tests, because both
+tests checked the CONTENT of the new features (does the leftover hide, does the toggle exist) but
+never checked the surrounding rows' unrelated cells, or compared the new element's visual weight
+against its neighbor. A feature can be functionally correct and still need a second look from a
+screenshot — the six tests written for the first round proved the LOGIC was right; they said
+nothing about how it actually looked or what else shared the same row.
