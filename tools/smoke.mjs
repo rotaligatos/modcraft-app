@@ -2342,12 +2342,17 @@ const PROFILES = {
          Fabrication line showed the RAW pre-markup figure while the contingency/buffer that
          actually gets charged only ever appeared as separate deltas in the admin-only box. Fixed
          by making the line itself show the MARKED-UP total, with an optional per-bucket breakdown
-         ("materials + fabcontingency + fab. buffer =", his own words) behind a toggle. Drives the
-         real recalc() end to end (not a reimplementation of the formula) against a Fabrication-
-         only quotation (ni=false), so Fab. buffer must NOT apply even though a nonzero rate is set. */
+         ("materials + fabcontingency + fab. buffer =", his own words) behind a toggle. Then, same
+         day: "the material part should be shown under the material part so the comparison can
+         easily understand" -- moved from one combined block after Fabrication into each area's
+         OWN Materials/Hardware/Services section, directly under the raw line items it explains.
+         Drives the real recalc() end to end (not a reimplementation of the formula) against a
+         Fabrication-only quotation (ni=false), so Fab. buffer must NOT apply even though a
+         nonzero rate is set, and against a SECOND area to prove each area gets its own buildup
+         from its own raw amount, not one blended figure. */
       if (typeof window.recalc === 'function' && typeof window.toggleFabBreakdown === 'function'
           && typeof window._fabBucketRaw === 'function')
-        check('_fabBucketRaw + Fabrication line: marked-up total, and the breakdown reconciles to it', () => {
+        check('_fabBucketRaw + Fabrication breakdown: marked-up total, placed inline under each area\'s own Materials/Hardware/Services', () => {
           const w = window;
           const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw,
                            fabContingency: w.CF.fabContingency, fabBuffer: w.CF.fabBuffer,
@@ -2362,29 +2367,51 @@ const PROFILES = {
             w.qChargeMatHw = null;
             w.qCustomCFApproved = false;
             w.CF.fabContingency = 10; w.CF.fabBuffer = 5;   // buffer set but must be ignored (ni=false)
-            w.qAreas = [{ name: 'Area 1',
-              matItems: [{ name: 'Board', qty: 1, unit: 'pc', price: 200 }],
-              hwItems: [{ name: 'Hinge', qty: 1, unit: 'pc', price: 50 }],
-              svcItems: [{ svcIdx: 0, qty: 1 }],
-              outsourceMaterials: [], outsourceHardware: [] }];
+            w.qAreas = [
+              { name: 'Area 1',
+                matItems: [{ name: 'Board', qty: 1, unit: 'pc', price: 200 }],
+                hwItems: [{ name: 'Hinge', qty: 1, unit: 'pc', price: 50 }],
+                svcItems: [{ svcIdx: 0, qty: 1 }],
+                outsourceMaterials: [], outsourceHardware: [] },
+              { name: 'Area 2',   // a SECOND area with its own, different materials amount
+                matItems: [{ name: 'Panel', qty: 1, unit: 'pc', price: 1000 }],
+                hwItems: [], svcItems: [], outsourceMaterials: [], outsourceHardware: [] }
+            ];
             const svc0Price = (w.SERVICES && w.SERVICES[0] && w.SERVICES[0].price) || 0;
             w._fabBreakdownOpen = false;
             w.recalc();
             const collapsedHtml = document.getElementById('sum-lines').innerHTML;
-            const markedUp = (200 + 50 + svc0Price) * 1.10;   // 10% contingency, no buffer (ni=false)
+            const markedUp = (200 + 50 + svc0Price + 1000) * 1.10;   // 10% contingency, no buffer (ni=false)
             const collapsedShowsMarkedUp = collapsedHtml.indexOf(w.fmtMoney(markedUp)) > -1;
             const noBufferWhenCollapsed = collapsedHtml.indexOf('Fab. buffer') === -1;
+            // Collapsed by default: nothing but the raw line items and the flat total.
+            const nothingInlineWhenCollapsed = collapsedHtml.indexOf('Fab. contingency') === -1;
 
             w.toggleFabBreakdown();   // opens it (calls recalc() itself)
             const openHtml = document.getElementById('sum-lines').innerHTML;
-            const materialsLine = openHtml.indexOf(w.fmtMoney(200 * 1.10)) > -1;   // Materials = 200
-            const hardwareLine = openHtml.indexOf(w.fmtMoney(50 * 1.10)) > -1;     // Hardware = 50
+            // Area 1's Materials breakdown must sit BETWEEN this area's own Materials header and
+            // its Hardware header -- i.e. genuinely under THAT area's materials, not appended
+            // somewhere else after the whole quotation's Fabrication line.
+            const area1MatIdx = openHtml.indexOf('>Materials<');
+            const area1HwIdx = openHtml.indexOf('>Hardware<');
+            const area1MatBreakdownIdx = openHtml.indexOf(w.fmtMoney(200 * 1.10));
+            const area1BreakdownBetweenItsOwnHeaders = area1MatBreakdownIdx > area1MatIdx && area1MatBreakdownIdx < area1HwIdx;
+            const hardwareLine = openHtml.indexOf(w.fmtMoney(50 * 1.10)) > -1;     // Hardware = 50 -> 55
+            // Area 2's OWN 1000-raw materials breakdown appears, distinct from Area 1's 200-raw one
+            // -- proving each area is split from its own amount, not one combined 1200 total.
+            const area2OwnBreakdown = openHtml.indexOf(w.fmtMoney(1000 * 1.10)) > -1;
+            const noCombinedBlendedBreakdown = openHtml.indexOf(w.fmtMoney(1200 * 1.10)) === -1;
             const noBufferRowInBreakdown = openHtml.indexOf('Fab. buffer') === -1;   // still ni=false
+            // The old standalone block after "Fabrication" must be gone for this mode -- only one
+            // occurrence of the marked-up Materials figure (Area 1's), not a second repeated copy.
+            const noDuplicateStandaloneBlock = openHtml.split(w.fmtMoney(200 * 1.10)).length - 1 === 1;
 
             const raw = w._fabBucketRaw();
-            const rawSumsToFabBase = Math.abs((raw.materials + raw.hardware + raw.services + raw.other) - (200 + 50 + svc0Price)) < 0.01;
+            const rawSumsToFabBase = Math.abs((raw.materials + raw.hardware + raw.services + raw.other) - (200 + 50 + svc0Price + 1000)) < 0.01;
 
-            return { collapsedShowsMarkedUp, noBufferWhenCollapsed, materialsLine, hardwareLine, noBufferRowInBreakdown, rawSumsToFabBase };
+            return { collapsedShowsMarkedUp, noBufferWhenCollapsed, nothingInlineWhenCollapsed,
+                     area1BreakdownBetweenItsOwnHeaders, hardwareLine, area2OwnBreakdown,
+                     noCombinedBlendedBreakdown, noBufferRowInBreakdown, noDuplicateStandaloneBlock, rawSumsToFabBase };
           } finally {
             w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.qChargeMatHw = saved.qChargeMatHw;
             w.CF.fabContingency = saved.fabContingency; w.CF.fabBuffer = saved.fabBuffer;
@@ -2394,8 +2421,10 @@ const PROFILES = {
               document.getElementById('cl-type').value = saved.clType; w.onClientTypeChange();
             }
           }
-        }, { collapsedShowsMarkedUp: true, noBufferWhenCollapsed: true, materialsLine: true,
-             hardwareLine: true, noBufferRowInBreakdown: true, rawSumsToFabBase: true });
+        }, { collapsedShowsMarkedUp: true, noBufferWhenCollapsed: true, nothingInlineWhenCollapsed: true,
+             area1BreakdownBetweenItsOwnHeaders: true, hardwareLine: true, area2OwnBreakdown: true,
+             noCombinedBlendedBreakdown: true, noBufferRowInBreakdown: true, noDuplicateStandaloneBlock: true,
+             rawSumsToFabBase: true });
       /* Pause button (2026-08-28): freezes the SLA clock while waiting on the client, needs an
          approver, and once approved the linked quotation (if any) is not editable until Resume.
          Current pause state is DERIVED from the last entry in one JSON history array -- never a
