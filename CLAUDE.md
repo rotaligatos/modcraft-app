@@ -10086,3 +10086,60 @@ files' headless smoke gates) green throughout.
 True 2D nesting + a visual board-cut layout diagram — item 4 of the original survey, explicitly
 the largest remaining piece (the packer is a 1D shelf heuristic with no piece coordinates
 retained at all), flagged from the start as needing its own scoping session. Not started.
+
+## What was changed on 2026-09-08 (session 4 — true 2D nesting + a visual cut-layout diagram)
+
+Closes out the last item of the cut-optimizer survey (item 4). Scoped with the user before
+building, since `guillotinePackBoards`'s own comment explicitly protects its decision logic
+("do not change this path's behavior, the 7/1/4-board result depends on it staying exactly
+as-is"). Agreed direction: **add coordinates, keep the algorithm as-is** — record where each
+piece already-decided lands, never let that bookkeeping influence which shelf/board/orientation
+gets chosen. Diagram location: the "Bill of Materials — boards needed" table, reached from
+Designers Support's Cutting List tab via "Load into analysis" (where the board-count numbers
+already show today).
+
+### What was built
+- **`guillotinePackBoards` now returns `layout`** — `[[{x,y,w,h,rotated}, ...], ...]`, one array
+  per board, in the order pieces were placed. Added purely as bookkeeping alongside the existing
+  three-step decision logic (shelf reuse → new shelf on an open board → new board): before each
+  mutation of `lenUsed`/`widthUsed`, the piece's rectangle is computed from the CURRENT state and
+  pushed to that board's `layout` array. No condition, no accumulator the decision logic reads was
+  touched — board counts and utilization % cannot move because of this.
+- **`prodComputeBom` carries `boardW`/`boardH`/`layout` through onto each BOM row**, alongside
+  the existing aggregate fields.
+- **`prodState.expandedLayout`** — `{bomRowIndex: true}`, which rows' diagrams are open; reset in
+  `prodClearFile`/`prodFilesSelected` alongside the other per-analysis state.
+- **`prodToggleBomLayout(idx)`** — toggles a row's expanded state, re-renders the page (matches
+  every other Designers Support toggle; opening a diagram is an occasional click, not a
+  per-keystroke path).
+- **`_prodCutLayoutSvg(bm)`** — one `<svg viewBox="0 0 boardW boardH">` per board, each piece
+  drawn to scale as a coloured `<rect>` labelled with its L×W (rotated pieces marked ⟳). Pieces
+  are drawn in the SAME raw board-mm units as the `viewBox` — the `<svg>`'s own width/height vs
+  viewBox ratio is what does the screen scaling, not the rects themselves.
+- **"View cut layout" toggle** added to each BOM row (only shown when `bm.layout` has pieces),
+  expanding into a row of per-board diagrams below it.
+
+### ⚠ A real bug caught by looking at the render, not by the numbers
+First version multiplied every piece's `x`/`y`/`w`/`h` by the display `scale` factor a SECOND
+time on top of the SVG's own `viewBox` scaling — every rect shrank to a sliver in one corner of
+an otherwise-blank board. The aggregate numbers (`boardsNeeded`, `utilization`) stayed correct
+throughout, because neither reads `_prodCutLayoutSvg` at all — nothing numeric would ever have
+caught this. Only found by rendering it into a real page and taking a screenshot: 5 test pieces
+(3× 600×400, 2× 900×300) packed into 2 shelves showed as an unreadable sliver first, then —
+after removing the double-multiplication so rects draw in raw mm units matching the viewBox —
+correctly as two clean columns at 42.3% utilization, with labels reading exactly `600×400` and
+`900×300`, confirmed by both a screenshot and reading the rendered `<text>` node contents.
+
+### Verified, reproduce-first
+Three new checks in `tools/smoke.mjs`, all confirmed to FAIL against the pre-fix code via
+`git stash push -- index.html` before passing on the fix: `guillotinePackBoards`'s shelf-reuse
+placement (a piece landing in an already-open shelf records `x=shelf.xStart`,
+`y=shelf.lenUsed`-before-the-piece-was-added) and new-shelf placement (a new shelf's `xStart`
+equals the board's `widthUsed` at the moment it opened, not a fixed offset); `prodComputeBom`
+carrying `boardW`/`boardH`/`layout` through onto each row. `node tools/verify.mjs` (collision
+checker + both HTML files' headless smoke gates) green throughout.
+
+### Closes out the cut-optimizer survey
+All four items from the 2026-09-08 survey are now shipped: grain-aware rotation, edge-banding
+grouped by tape colour, non-boring services costed, and this. Nothing queued from that spec
+remains open.
