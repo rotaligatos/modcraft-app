@@ -2425,6 +2425,52 @@ const PROFILES = {
              area1BreakdownBetweenItsOwnHeaders: true, hardwareLine: true, area2OwnBreakdown: true,
              noCombinedBlendedBreakdown: true, noBufferRowInBreakdown: true, noDuplicateStandaloneBlock: true,
              rawSumsToFabBase: true });
+      /* Rommel, 2026-09-08 (Option 2): typed 0 into the Discount box after Option 1 had 27%
+         requested, but Option 2 kept showing 27% again after switching away and back. onDiscInput()
+         reset the Approved badge on every keystroke but never wrote the typed number into qDiscPct
+         -- the ONLY thing captureQuotationSnapshot() (run on every option switch) actually saves.
+         So a "cleared" box was pure UI noise: switching options re-captured the OLD qDiscPct, and
+         switching back re-displayed it via _syncDiscInputUI(). Drives the real onDiscInput() against
+         the real input element, not a hand-set global, so the DOM parsing path is genuinely covered. */
+      if (typeof window.onDiscInput === 'function' && typeof window.captureQuotationSnapshot === 'function')
+        check('onDiscInput: the typed value becomes qDiscPct immediately, so it survives an option switch', () => {
+          const w = window;
+          const inp = document.getElementById('disc-inp');
+          const saved = { qDiscPct: w.qDiscPct, qDiscApproved: w.qDiscApproved, inpValue: inp.value };
+          try {
+            w.qDiscPct = 27; w.qDiscApproved = true;
+            inp.value = '0';
+            w.onDiscInput();
+            const clearedLive = w.qDiscPct === 0 && w.qDiscApproved === false;
+            const snap = w.captureQuotationSnapshot();
+            const capturedAsZero = snap.discPct === 0;
+
+            inp.value = '15';
+            w.onDiscInput();
+            const typedValueTracked = w.qDiscPct === 15 && w.qDiscApproved === false;
+
+            return { clearedLive, capturedAsZero, typedValueTracked };
+          } finally {
+            w.qDiscPct = saved.qDiscPct; w.qDiscApproved = saved.qDiscApproved; inp.value = saved.inpValue;
+          }
+        }, { clearedLive: true, capturedAsZero: true, typedValueTracked: true });
+      // Stage 2's Pricing adjustments card is JS-templated (renderFQCards); only present once
+      // Stage 2 has been rendered at least once. Guarded the same way every other function-
+      // existence check in this suite is -- skip cleanly rather than fail on a harness setup gap.
+      if (typeof window.fqOnDiscInput === 'function' && document.getElementById('fq-disc-inp'))
+        check('fqOnDiscInput: same fix, Stage 2 -- the typed value becomes fqDiscPct immediately', () => {
+          const w = window;
+          const inp = document.getElementById('fq-disc-inp');
+          const saved = { fqDiscPct: w.fqDiscPct, fqDiscApproved: w.fqDiscApproved, inpValue: inp.value };
+          try {
+            w.fqDiscPct = 27; w.fqDiscApproved = true;
+            inp.value = '0';
+            w.fqOnDiscInput();
+            return { clearedLive: w.fqDiscPct === 0 && w.fqDiscApproved === false };
+          } finally {
+            w.fqDiscPct = saved.fqDiscPct; w.fqDiscApproved = saved.fqDiscApproved; inp.value = saved.inpValue;
+          }
+        }, { clearedLive: true });
       /* Pause button (2026-08-28): freezes the SLA clock while waiting on the client, needs an
          approver, and once approved the linked quotation (if any) is not editable until Resume.
          Current pause state is DERIVED from the last entry in one JSON history array -- never a
