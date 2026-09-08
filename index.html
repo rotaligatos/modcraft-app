@@ -16800,7 +16800,7 @@ function _cutListToAnalysis(cl,order){
     if(!shortSub||!shortFin) continue;
     builds[shortFin+' on '+shortSub+' · '+(hr.faces||'')]={sub:hr.sub,fin:hr.fin,faces:hr.faces==='2F'?2:1};
   }
-  var comps=[], warn=[], facesUnknown=0, holes=[];
+  var comps=[], warn=[], facesUnknown=0, holes=[], extraSvcs=[];
   for(var p=0;p<panels.length;p++){
     var pn=panels[p];
     var notes=[], review=[];
@@ -16869,16 +16869,17 @@ function _cutListToAnalysis(cl,order){
     if(pn.emat) notes.push('edge tape: '+pn.emat);
     var edgeTape=String(pn.emat||'').trim();
     if(pn.remark) notes.push('remarks: '+pn.remark);
-    // Per-piece services. Grooving has a field of its own; the rest carry no
-    // deterministic quantity on this path, so they become notes and flags, not guesses.
+    // Per-piece services. Boring is priced per hole, handled below. Grooving/Routing/Manual
+    // Edgebanding are all priced per LINEAR METRE in the catalog, and the picked string is
+    // already the exact catalog SKU (svcOptions() lists real SERVICES names, not a generic
+    // 4-item fallback) -- so the only missing piece is the run length, which the form's chip now
+    // asks for the same way it already asks for a hole count (MCL.setLm). A service picked with
+    // no run length given genuinely has no quantity here, so it stays a flag, not a guess.
     var grooving='';
     var svcs=pn.svcs||[];
     for(var v=0;v<svcs.length;v++){
       var sv=String(svcs[v]||'').trim(); if(!sv) continue;
-      if(/groov/i.test(sv)){
-        grooving=sv;
-        review.push('grooving is one word on the form but three prices in the catalogue (3mm melamine / compact laminate / router) — pick the right one');
-      } else if(/bor/i.test(sv)){
+      if(/bor/i.test(sv)){
         // prodComputeServices prices boring PER HOLE and drops the service entirely
         // at qty 0, so a boring request without a count does not arrive vague — it
         // disappears. The form now asks, and sends it on the chip as "... x 4 holes".
@@ -16894,6 +16895,16 @@ function _cutListToAnalysis(cl,order){
           // Left blank on the form, so the count really is unknown. Say so rather
           // than invent one, or the service silently prices at zero.
           review.push('"'+sv+'" arrived without a hole count - boring is priced per hole, so add it to the hole schedule');
+        }
+      } else if(/groov|\brout|manual\s*edge/i.test(sv)&&!/min(imum)?\s*charge/i.test(sv)){
+        var lmMatch=sv.match(/[x×]\s*([\d.]+)\s*lm\b/i);
+        var svcName=String(sv).replace(/\s*[x×]\s*[\d.]+\s*lm\b.*$/i,'').trim();
+        if(/groov/i.test(svcName)) grooving=svcName;   // component-level trace, unchanged shape
+        if(lmMatch&&(+lmMatch[1]>0)){
+          extraSvcs.push({service:svcName,qty:+lmMatch[1],unit:'lm',
+            notes:String(pn.part||'')+(pn.group?' - '+pn.group:'')});
+        } else {
+          review.push('"'+svcName+'" arrived without a run length - it is priced per linear metre, so add the lm figure');
         }
       } else {
         notes.push('service: '+sv);
@@ -16963,7 +16974,7 @@ function _cutListToAnalysis(cl,order){
   return {summary:head, _integrity:{ok:mismatch.length===0, mismatch:mismatch,
             declared:{rows:t.rows,pieces:t.pieces}, parsed:{rows:gotRows,pieces:gotPieces}},
     projectName:(order&&(order.projectName||order.clientName))||'',
-    components:comps, hardware:hardware, holeSchedule:holes, carcassCount:0,
+    components:comps, hardware:hardware, holeSchedule:holes, extraServices:extraSvcs, carcassCount:0,
     _warnings:warn};
 }
 
@@ -33988,8 +33999,20 @@ var MCL=(function(){
     return names.length?names:SVC;
   }
   var HOLES_RE=/\s*[x×]\s*\d+\s*holes?\s*$/i;
-  function svcBase(s){ return String(s).replace(HOLES_RE,'').trim(); }
+  // Grooving/Routing/Manual Edgebanding all price per linear metre in the catalog, same as
+  // Boring prices per hole -- and a service picked here already IS the exact catalog SKU (see
+  // svcOptions(), which lists real SERVICES names, not a generic 4-item fallback), so the only
+  // missing piece is the RUN LENGTH, exactly the same gap the holes count closed for Boring.
+  var LM_RE=/\s*[x×]\s*[\d.]+\s*lm\s*$/i;
+  function svcBase(s){ return String(s).replace(HOLES_RE,'').replace(LM_RE,'').trim(); }
   function svcHoles(s){ var m=String(s).match(/[x×]\s*(\d+)\s*holes?\s*$/i); return m?m[1]:''; }
+  function svcLm(s){ var m=String(s).match(/[x×]\s*([\d.]+)\s*lm\s*$/i); return m?m[1]:''; }
+  // Boring is priced per hole (already handled above); a "(minimum charge)"/"(min charge)" entry
+  // is a flat "lot" floor rule, not something a run length applies to -- everything else that
+  // names grooving, routing or manual edgebanding needs the same lm prompt Boring already gets.
+  function svcNeedsLm(sv){
+    return !/\bbor/i.test(sv) && !/min(imum)?\s*charge/i.test(sv) && /groov|\brout|manual\s*edge/i.test(sv);
+  }
 
   function svcCell(p,i){
     var h='<div style="display:flex;flex-wrap:wrap;gap:3px;align-items:center">';
@@ -34006,6 +34029,14 @@ var MCL=(function(){
           +' title="holes — priced per hole" style="width:44px;font-size:11px;padding:0 3px;'
           +'border:.5px solid var(--border);border-radius:4px;font-family:inherit"'
           +' oninput="MCL.setHoles('+i+','+s+',this.value)"> holes'
+          +' <a href="#" style="color:var(--coral);text-decoration:none" title="Remove"'
+          +' onclick="MCL.removeSvc('+i+','+s+');return false">×</a></span>';
+      } else if(svcNeedsLm(sv)){
+        h+='<span style="'+chip+'">'+esc(svcBase(sv))
+          +' <input type="number" min="0" step="0.1" value="'+esc(svcLm(sv))+'" placeholder="?"'
+          +' title="linear metres — priced per lm" style="width:50px;font-size:11px;padding:0 3px;'
+          +'border:.5px solid var(--border);border-radius:4px;font-family:inherit"'
+          +' oninput="MCL.setLm('+i+','+s+',this.value)"> lm'
           +' <a href="#" style="color:var(--coral);text-decoration:none" title="Remove"'
           +' onclick="MCL.removeSvc('+i+','+s+');return false">×</a></span>';
       } else {
@@ -34404,6 +34435,14 @@ var MCL=(function(){
       var base=svcBase(S.panels[i].svcs[s]);
       var n=parseInt(v,10);
       S.panels[i].svcs[s]=(n>0)?(base+' × '+n+' holes'):base;
+    },
+    // Rewrites the chip in place with the same "no re-render while typing" treatment setHoles
+    // uses — see svcNeedsLm above for which services this applies to (grooving/routing/manual
+    // edgebanding, all priced per linear metre in the catalog).
+    setLm:function(i,s,v){
+      var base=svcBase(S.panels[i].svcs[s]);
+      var n=parseFloat(v);
+      S.panels[i].svcs[s]=(n>0)?(base+' × '+n+' lm'):base;
     },
     addHpl:function(){ S.hpl.push({sub:'',fin:'',faces:'2F'}); rerender(); },
     removeHpl:function(i){ S.hpl.splice(i,1); rerender(); },
@@ -35955,7 +35994,7 @@ function callClaudeProduction(){
         prodState.phase='review'; prodState.analyzing=false; renderProductionPage();
       } else {
         var r=JSON.parse(JSON.stringify(PROD_MOCK_RESULT));
-        r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
+        r._services=prodComputeServices(r.components||[],r.holeSchedule||[],r.extraServices||[]);
         r._bom=prodComputeBom(r.components||[]);
         prodState.result=r; prodState.analyzing=false; renderProductionPage();
       }
@@ -36326,11 +36365,12 @@ function prodLoadStructuredList(payload,fileName){
     components:(((payload&&payload.components)||[]).map(_prodNormalizeComponent)),
     hardware:(payload&&payload.hardware)||[],
     holeSchedule:(payload&&payload.holeSchedule)||[],
+    extraServices:(payload&&payload.extraServices)||[],
     carcassCount:(payload&&payload.carcassCount)||0,
     _structured:true   // nothing was analyzed here — the banner says so
   };
   r._bom=prodComputeBom(r.components);
-  r._services=prodComputeServices(r.components,r.holeSchedule);
+  r._services=prodComputeServices(r.components,r.holeSchedule,r.extraServices);
   prodState.file=null;
   prodState.fileName=fileName||'structured cutting list';
   prodState.fileType='cutting-list';
@@ -36426,7 +36466,7 @@ function prodApproveElevation(){
     prodState.analyzing=true; renderProductionPage();
     setTimeout(function(){
       var r=JSON.parse(JSON.stringify(PROD_MOCK_RESULT));
-      r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
+      r._services=prodComputeServices(r.components||[],r.holeSchedule||[],r.extraServices||[]);
       r._bom=prodComputeBom(r.components||[]);
       r.carcassCount=er.carcassCount||er.units.length;
       prodState.result=r; prodState.phase='cutting-list';
@@ -37035,7 +37075,7 @@ function _prodComponentFieldCorrected(idx,field,newVal){
     if(c.name&&newVal) _prodSaveJargonRule(c.name,field,String(newVal));
     c[field]=newVal;
     c.needsReview=false;
-    r._services=prodComputeServices(r.components,r.holeSchedule||[]);
+    r._services=prodComputeServices(r.components,r.holeSchedule||[],r.extraServices||[]);
     // prodComputeBom's grouping key is material+color+texture+thickness+faces (see its own
     // comment) and its piece list is built only from length/width/qty — ebt/grooving never enter
     // either, so re-running the full guillotine packing simulation for every material group on an
@@ -37053,7 +37093,7 @@ function _prodComponentFieldCorrected(idx,field,newVal){
   c[field]=newVal;
   if(snapKey in c) c[snapKey]=newVal; // keep snapshot current so a 2nd edit compares against the latest value, not the stale original
   c.needsReview=false;
-  r._services=prodComputeServices(r.components,r.holeSchedule||[]);
+  r._services=prodComputeServices(r.components,r.holeSchedule||[],r.extraServices||[]);
   r._bom=prodComputeBom(r.components);
   renderProductionPage();
 }
@@ -37073,7 +37113,7 @@ function prodParseResponse(text,stopReason){
   try{
     var r=JSON.parse(json);
     r.components=_prodApplyComponentJargon(r.components||[]);
-    r._services=prodComputeServices(r.components||[],r.holeSchedule||[]);
+    r._services=prodComputeServices(r.components||[],r.holeSchedule||[],r.extraServices||[]);
     r._bom=prodComputeBom(r.components||[]);
     if(stopReason==='max_tokens') r._truncated=true;
     _prodFlagIncompleteExtraction(r);
@@ -37084,7 +37124,7 @@ function prodParseResponse(text,stopReason){
       var r2=JSON.parse(repaired);
       r2._truncated=true;
       r2.components=_prodApplyComponentJargon(r2.components||[]);
-      r2._services=prodComputeServices(r2.components||[],r2.holeSchedule||[]);
+      r2._services=prodComputeServices(r2.components||[],r2.holeSchedule||[],r2.extraServices||[]);
       r2._bom=prodComputeBom(r2.components||[]);
       _prodFlagIncompleteExtraction(r2);
       return r2;
@@ -37128,9 +37168,25 @@ var EBT_CODE_MAP={
 // "loud, never short" rule the rest of this pipeline follows -- see prodBuildSummary, which
 // deliberately does NOT turn 'Unspecified' into a material row (nothing to search/name), so an
 // AI extraction or manual list that never names a tape colour behaves exactly as before this.
-function prodComputeServices(comps,holes){
+// extraServices: grooving/routing/manual-edgebanding chips that arrived with an explicit lm
+// figure (MCL.setLm — see svcNeedsLm) — [{service,qty,unit,notes}], one entry per component/row
+// that carried a run length. Grouped here by exact service name (the picked string already IS
+// the catalog SKU, so this is a plain sum, never a fuzzy match) into extraServicesByName, the
+// same shape prodBuildSummary already expects from svcConcepts below. A chip left with no lm
+// figure never reaches this array at all (see _cutListToAnalysis) -- it stays a flagged
+// review note instead, exactly the "loud, never short" rule the rest of this pipeline follows.
+function prodComputeServices(comps,holes,extraServices){
   var cutLM=0; var ebtLM=0;
   var byTape={}; var tapeOrder=[];
+  var extraByName={}; var extraOrder=[];
+  var extraList=extraServices||[];
+  for(var e=0;e<extraList.length;e++){
+    var es=extraList[e]; var esName=String((es&&es.service)||'').trim(); if(!esName) continue;
+    var esQty=+((es&&es.qty)||0); if(!(esQty>0)) continue;
+    if(extraByName[esName]===undefined){ extraByName[esName]=0; extraOrder.push(esName); }
+    extraByName[esName]+=esQty;
+  }
+  var extraServicesByName=extraOrder.map(function(n){ return {service:n,qty:Math.round(extraByName[n]*100)/100,unit:'lm'}; });
   var waste=1+(prodSettings.ebtWastage||0)/100;
   for(var i=0;i<comps.length;i++){
     var c=comps[i];
@@ -37161,7 +37217,7 @@ function prodComputeServices(comps,holes){
   var totalHoles=0;
   for(var h=0;h<holes.length;h++) totalHoles+=(holes[h].qty||0);
   return {cuttingLM:Math.round(cutLM*100)/100,edgebandingLM:Math.round(ebtLM*100)/100,
-    edgebandingByTape:edgebandingByTape,holeCount:totalHoles};
+    edgebandingByTape:edgebandingByTape,holeCount:totalHoles,extraServicesByName:extraServicesByName};
 }
 
 // Guillotine (panel-saw) shelf-packing board simulation — replaces the old flat
@@ -37473,6 +37529,26 @@ function prodBuildSummary(result) {
         svcIdx:SERVICES.length?0:-1,qty:Math.round(cpt.qty*100)/100,unit:(SERVICES[0]&&SERVICES[0].unit)||'',
         include:true,needsReview:true,
         reviewNote:'No matching service found in your catalog for "'+cpt.label+'" — pick the right one from the dropdown.'});
+    }
+  }
+  // Grooving/Routing/Manual Edgebanding chips that carried an explicit run length
+  // (prodComputeServices.extraServicesByName). Unlike svcConcepts above, these are EXACT-NAME
+  // lookups, not fuzzy keyword matches — the picked chip string already IS the catalog SKU (see
+  // svcOptions()/svcNeedsLm in the MCL cutting-list tab), so a match is either exact or the SKU
+  // has since been renamed/removed, in which case it's flagged rather than guessed at.
+  var extraSvcRows=((result._services||{}).extraServicesByName)||[];
+  for(var es2=0;es2<extraSvcRows.length;es2++){
+    var esr=extraSvcRows[es2]; if(!(esr.qty>0)) continue;
+    var esIdx=-1;
+    for(var x2=0;x2<SERVICES.length;x2++){ if(SERVICES[x2].name===esr.service){ esIdx=x2; break; } }
+    if(esIdx>=0){
+      svcs.push({aiName:esr.service,name:SERVICES[esIdx].name,
+        svcIdx:esIdx,qty:esr.qty,unit:SERVICES[esIdx].unit,include:true,needsReview:false});
+    } else {
+      svcs.push({aiName:esr.service,name:esr.service,
+        svcIdx:SERVICES.length?0:-1,qty:esr.qty,unit:'lm',
+        include:true,needsReview:true,
+        reviewNote:'"'+esr.service+'" was picked from the catalog but no longer matches a service by that exact name — pick the right one from the dropdown.'});
     }
   }
   // Resolve the HPL lamination service requests collected during the materials loop above — same

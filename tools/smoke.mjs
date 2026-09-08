@@ -391,6 +391,70 @@ const PROFILES = {
             if (w.prodState) w.prodState.summary = saved.summary;
           }
         }, { whiteRowQty: 2.5, blackRowQty: 1.2, noUnspecifiedRow: true });
+      /* 2026-09-08 (3): Grooving/Routing/Manual Edgebanding all had a per-component field but no
+         quantity math -- they became review-flag placeholder notes with no costed quantity, the
+         same gap Boring had before it got a hole-count chip. All three price per LINEAR METRE in
+         the catalog, and the MCL picker already offers the exact catalog SKU name (svcOptions()
+         lists real SERVICES, not a generic fallback), so the only missing piece was the run
+         length -- MCL.setLm asks for it the same way setHoles already asks for a hole count.
+         prodComputeServices groups those chips by EXACT service name (a plain sum, never fuzzy --
+         the picked string already IS the SKU) into extraServicesByName. A chip with no lm figure
+         never reaches this array at all (see _cutListToAnalysis) -- it stays a flagged review
+         note, never silently priced at zero. */
+      if (typeof window.prodComputeServices === 'function')
+        check('prodComputeServices: extraServices groups by exact service name into extraServicesByName', () => {
+          const w = window;
+          const extraServices = [
+            { service: 'Router Grooving (8-12mm)', qty: 3, unit: 'lm', notes: 'a' },
+            { service: 'Router Grooving (8-12mm)', qty: 2, unit: 'lm', notes: 'b' },
+            { service: 'Manual Edgebanding EVA', qty: 5, unit: 'lm', notes: 'c' },
+            { service: '', qty: 4, unit: 'lm', notes: 'd' },   // no name -> dropped
+            { service: 'Grooving 3mm (melamine)', qty: 0, unit: 'lm', notes: 'e' }  // qty 0 -> dropped
+          ];
+          const svc = w.prodComputeServices([], [], extraServices);
+          const byName = {};
+          svc.extraServicesByName.forEach(g => { byName[g.service] = g.qty; });
+          return {
+            routerGroovingSummed: byName['Router Grooving (8-12mm)'],
+            manualEdgebandingKept: byName['Manual Edgebanding EVA'],
+            emptyNameDropped: byName[''] === undefined,
+            entryCount: svc.extraServicesByName.length
+          };
+        }, { routerGroovingSummed: 5, manualEdgebandingKept: 5, emptyNameDropped: true, entryCount: 2 });
+      /* Same fix, the wiring: prodBuildSummary must turn each extraServicesByName entry into a
+         service row via an EXACT-NAME catalog lookup (never fuzzy -- the picked string already IS
+         the SKU), and flag (not silently drop) an entry whose SKU no longer matches any catalog
+         service by that exact name -- e.g. renamed or removed since the chip was picked. */
+      if (typeof window.prodBuildSummary === 'function')
+        check('prodBuildSummary: extraServicesByName becomes exact-match service rows, unmatched ones flagged', () => {
+          const w = window;
+          const saved = { SERVICES: w.SERVICES, summary: w.prodState && w.prodState.summary };
+          try {
+            w.SERVICES = [{ name: 'Router Grooving (8-12mm)', unit: 'lm', price: 65 }];
+            const result = {
+              summary: 'test', components: [], hardware: [], carcassCount: 0, _bom: [],
+              _services: {
+                cuttingLM: 0, holeCount: 0, edgebandingLM: 0, edgebandingByTape: [],
+                extraServicesByName: [
+                  { service: 'Router Grooving (8-12mm)', qty: 5, unit: 'lm' },
+                  { service: 'Grooving (renamed away)', qty: 2, unit: 'lm' }
+                ]
+              }
+            };
+            w.prodBuildSummary(result);
+            const svcs = (w.prodState.summary && w.prodState.summary.services) || [];
+            const matched = svcs.find(s => s.name === 'Router Grooving (8-12mm)');
+            const unmatched = svcs.find(s => s.aiName === 'Grooving (renamed away)');
+            return {
+              matchedQty: matched ? matched.qty : null,
+              matchedNotFlagged: matched ? matched.needsReview === false : null,
+              unmatchedFlagged: unmatched ? unmatched.needsReview === true : null
+            };
+          } finally {
+            w.SERVICES = saved.SERVICES;
+            if (w.prodState) w.prodState.summary = saved.summary;
+          }
+        }, { matchedQty: 5, matchedNotFlagged: true, unmatchedFlagged: true });
       /* Ticket 0e65e1fd (2026-08-19): re-locking a quotation that owed a revision (unlocked, then
          re-locked) minted a WHOLE NEW quotation (QT-W00000132, then W00000133 on a second
          re-lock) instead of overwriting QT-W00000130 in place, per Rommel's own report and
