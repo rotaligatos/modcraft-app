@@ -9900,3 +9900,76 @@ never checked the surrounding rows' unrelated cells, or compared the new element
 against its neighbor. A feature can be functionally correct and still need a second look from a
 screenshot — the six tests written for the first round proved the LOGIC was right; they said
 nothing about how it actually looked or what else shared the same row.
+
+## What was changed on 2026-09-08 (session — a full "cutting list → cut optimizer" spec surveyed, then grain-aware rotation shipped)
+
+User asked for a large, fully-specified cutting-list/cut-optimizer feature (kerf-aware machine-
+specific nesting, grain rotation rules, board counts, cutting LM, per-tape-colour edge banding,
+visual cut layouts, a full services summary, all flowing into the quotation). Given the size and
+that this touches production pricing code real staff use daily, investigated the existing
+implementation first rather than building blind — this project's standing rule to align before
+large changes.
+
+### Survey verdict — most of the spec already exists
+An Explore agent read the actual code (not just grepped for it). Summary, against the user's own
+7-part ask:
+- **Structured cutting-list entry** (Designers Support → Cutting List tab, `MCL` namespace) already
+  has the exact 12-column schema requested — cabinet/part/material/thickness/length/width/qty/
+  edges/edge-tape/grain/services/remarks — with paste-and-grow rows and Excel import/export.
+- **Board counting with kerf** (`guillotinePackBoards()`, shipped 2026-07-07, validated against a
+  real cutting list) already does real kerf-aware guillotine shelf-packing, not a flat area
+  estimate, with a Panel Saw/CNC machine-type toggle that flips whether rotation is allowed
+  (`prodComputeBom()`'s `allowRotate`).
+- **Edge-banding LM math** (`_webEbtToModcraft`, `EBT_CODE_MAP`) already converts edge codes
+  correctly, orientation-aware (a piece typed sideways still bands right).
+- **BOM grouping** (`prodComputeBom`) already groups by material/color/texture/thickness/faces/HPL,
+  catalog-matches everything, and gates export until every ambiguous row is resolved
+  (`prodReflectToQuotation`).
+
+Genuine gaps found, in priority order the user picked from:
+1. **Grain captured everywhere, used nowhere** — every layer (MCL row, `_cutListToAnalysis`, the AI
+   extraction schema, the review table, Excel export) stores `grain: 'length'|'width'|'none'`, but
+   neither `guillotinePackBoards()` nor `prodComputeBom()`'s grouping key ever read it. **Shipped
+   this session — see below.**
+2. Edge banding is one job-wide scalar LM total, no per-tape-color/type split — not built.
+3. Non-boring services (grooving/routing/manual edgebanding) become review-flag notes, never a
+   costed quantity — not built.
+4. No true 2D nesting (the packer is a 1D shelf/strip heuristic, self-documented as a stub) and no
+   visual board layout at all (the packer doesn't even retain piece coordinates) — flagged as the
+   largest remaining piece, needing its own scoping session; not built.
+
+### Grain-aware rotation shipped
+Root cause: `guillotinePackBoards(pieces, boardW, boardH, kerf, allowRotate)` decided whether to
+try a piece's 90°-rotated orientation purely from the machine-type flag — a CNC/nesting router can
+approach a panel from any angle, but it cannot spin the wood grain itself, so a grain-restricted
+piece was being freely rotated in CNC mode with zero regard for its own `grain` field.
+
+Fix: each piece can now carry `grain:'length'|'width'|'none'`. A `grainLocked` piece
+(`grain==='length'||grain==='width'`) never gets the rotated orientation considered, regardless of
+`allowRotate` — only `grain==='none'`/unset pieces use the machine's own rotation capability. The
+Panel Saw path (`allowRotate=false`) is completely unaffected — it already never rotates anything.
+
+`prodComputeBom()`'s grouping key deliberately does **not** include grain — two pieces of the same
+material/color/thickness/faces share the same physical board stock regardless of which way their
+grain runs; they just get oriented differently on it. Grain rides through as a per-piece property
+(`groups[key].pieces.push({length,width,grain:c.grain||'none'})`) into the shared group's single
+packing call, not as a second grouping axis that would fragment one material into extra fake board
+groups.
+
+Two new reproduce-first checks in `tools/smoke.mjs`, both confirmed to FAIL against the pre-fix
+code via `git stash push -- index.html` before passing on the fix:
+- `guillotinePackBoards`: an 80×150 piece that only fits a 100×200 board when rotated is refused
+  (reported oversized) when grain-locked even with `allowRotate=true`, packs fine when grain-free,
+  and the Panel Saw path (`allowRotate=false`) still never rotates regardless of grain.
+- `prodComputeBom`: two components identical except for grain land in ONE bom group (not two,
+  proving grain isn't in the key), and within that shared group's single packing run the
+  grain-locked piece is still reported oversized while the grain-free piece of the identical size
+  packs via rotation — proving each piece's own grain reached `guillotinePackBoards` intact rather
+  than being dropped at the group boundary.
+
+`node tools/verify.mjs` (collision checker + both HTML files' headless smoke gates) green.
+
+### Still open — offered, not started, per user's own priority order
+Edge-banding-by-tape-color, non-boring-service quantities, and true 2D nesting + visual layout were
+all surveyed and scoped in the investigation above but not built — the user chose grain-aware
+rotation as the first, smallest, safest fix and the others remain queued in that order.

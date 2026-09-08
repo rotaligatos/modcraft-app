@@ -251,6 +251,73 @@ const PROFILES = {
             return { newRegexPerCall: constructed === 0 };
           } finally { w.RegExp = NativeRegExp; }
         }, { newRegexPerCall: true });
+      /* 2026-09-08: grain direction was captured at every layer of the Designers Support pipeline
+         (the MCL cutting-list grid, _cutListToAnalysis, the AI extraction schema, the review table)
+         but used NOWHERE in any computation -- guillotinePackBoards() decided whether to try a
+         piece rotated purely from the machine-type flag (allowRotate), with zero regard for
+         whether the piece's own grain direction would forbid that rotation. A CNC/nesting router
+         can approach a panel from any angle, but it cannot spin the wood grain itself -- grain is a
+         property of the MATERIAL, not the machine, so a piece with a declared grain direction must
+         never be rotated even when the machine-level flag allows it. Only grain==='none'/falsy
+         pieces are free to use the machine's own rotation capability.
+         Proves both directions with a piece (80x150) that only fits a 100x200 board when rotated:
+         grain-locked ('length') refuses the rotation and is reported oversized even in CNC mode;
+         a grain-free piece of the identical size, same call, packs fine via rotation. Also proves
+         the pre-existing Panel Saw behaviour (never rotates anything, any grain) is untouched. */
+      if (typeof window.guillotinePackBoards === 'function')
+        check('guillotinePackBoards: grain-locked pieces are never rotated, even on CNC', () => {
+          const w = window;
+          const boardW = 100, boardH = 200, kerf = 0;
+          // 80x150 fits a 100x200 board ONLY when rotated to 150x80.
+          const grainLocked = w.guillotinePackBoards(
+            [{ length: 80, width: 150, grain: 'length' }], boardW, boardH, kerf, true);
+          const grainFree = w.guillotinePackBoards(
+            [{ length: 80, width: 150, grain: 'none' }], boardW, boardH, kerf, true);
+          const panelSaw = w.guillotinePackBoards(
+            [{ length: 80, width: 150, grain: 'none' }], boardW, boardH, kerf, false);
+          return {
+            grainLockedRefusesRotationSoOversized: grainLocked.oversizedCount === 1,
+            grainFreePacksViaRotation: grainFree.oversizedCount === 0 && grainFree.boardsNeeded === 1,
+            panelSawStillNeverRotates: panelSaw.oversizedCount === 1
+          };
+        }, { grainLockedRefusesRotationSoOversized: true, grainFreePacksViaRotation: true,
+             panelSawStillNeverRotates: true });
+      /* Same fix, the wiring: prodComputeBom groups components by material/color/texture/thickness/
+         faces/HPL -- deliberately NOT by grain, since two pieces of the same physical board stock
+         just get oriented differently on it, they don't need a separate board-count entry. This
+         proves grain is carried through PER PIECE into the shared group's packing call rather than
+         being dropped at the group boundary: two same-material/color/thickness components differing
+         ONLY in grain still land in ONE bom group (not split into two), and within that one packing
+         run the grain-locked piece is reported oversized while the grain-free piece of the identical
+         size packs via rotation -- which could only happen if each piece's own grain reached
+         guillotinePackBoards intact. */
+      if (typeof window.prodComputeBom === 'function')
+        check('prodComputeBom: grain rides per-piece into the shared group, not into the grouping key', () => {
+          const w = window;
+          const saved = { boardSizes: w.prodSettings.boardSizes, kerf: w.prodSettings.kerf,
+                           machineType: w.prodSettings.machineType };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 100, h: 200 }] }];
+            w.prodSettings.kerf = 0;
+            w.prodSettings.machineType = 'cnc';
+            const comps = [
+              { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
+                length: 80, width: 150, qty: 1, grain: 'length' },
+              { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
+                length: 80, width: 150, qty: 1, grain: 'none' }
+            ];
+            const bom = w.prodComputeBom(comps);
+            return {
+              oneGroupNotTwo: bom.length === 1,
+              grainLockedPieceStillOversizedInSharedGroup: bom.length === 1 && bom[0].oversizedCount === 1,
+              grainFreePieceStillPacksInSharedGroup: bom.length === 1 && bom[0].boardsNeeded === 1
+            };
+          } finally {
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.kerf = saved.kerf;
+            w.prodSettings.machineType = saved.machineType;
+          }
+        }, { oneGroupNotTwo: true, grainLockedPieceStillOversizedInSharedGroup: true,
+             grainFreePieceStillPacksInSharedGroup: true });
       /* Ticket 0e65e1fd (2026-08-19): re-locking a quotation that owed a revision (unlocked, then
          re-locked) minted a WHOLE NEW quotation (QT-W00000132, then W00000133 on a second
          re-lock) instead of overwriting QT-W00000130 in place, per Rommel's own report and
