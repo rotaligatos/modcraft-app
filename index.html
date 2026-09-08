@@ -4322,7 +4322,8 @@ var prodState = {
   result: null,
   summary: null,
   phase: 'upload',
-  elevationResult: null
+  elevationResult: null,
+  expandedLayout: {}   // {bomRowIndex: true} -- which BOM rows' cut-layout diagrams are open
 };
 var prodTab = 'drawing'; // 'drawing' | 'mobility'
 var mobilityState = {
@@ -35974,11 +35975,13 @@ function prodHandleFiles(files){
   if(['pdf','xlsx','xls'].indexOf(ext)<0){alert('Please upload a PDF or Excel (.xlsx/.xls) file.');return;}
   prodState.file=f; prodState.fileName=f.name; prodState.result=null;
   prodState.elevationResult=null; prodState.phase='upload'; prodState.summary=null;
+  prodState.expandedLayout={};
   renderProductionPage();
 }
 function prodClearFile(){
   prodState.file=null; prodState.fileName=''; prodState.result=null;
   prodState.elevationResult=null; prodState.phase='upload'; prodState.summary=null;
+  prodState.expandedLayout={};
   renderProductionPage();
 }
 
@@ -37249,6 +37252,15 @@ function prodComputeServices(comps,holes,extraServices){
 // prodComputeBom below — pieces of different grain from the same
 // material/color/thickness still share the same physical board, they just
 // get oriented differently on it.
+// layout tracking (2026-09-08): every board also carries `layout`, an array of placed piece
+// rectangles {x,y,w,h,rotated} -- x runs along boardW (the axis shelves stack on, tracked by
+// widthUsed/shelf.xStart below), y runs along boardH (the axis pieces line up on within one
+// shelf, tracked by shelf.lenUsed). This is bookkeeping ONLY: it records where each already-
+// decided piece landed, it never feeds back into which shelf/board/orientation gets chosen --
+// the decision logic below (the three numbered steps) is byte-for-byte the same as the version
+// validated against samplesofcuttinglist/MARGARITA.xls (7/1/4-board result), so board counts and
+// utilization cannot move because of this. This is what makes a real cut-layout diagram possible
+// -- see prodComputeBom/_prodCutLayoutSvg for where it's consumed.
 function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
   var items=pieces.slice().sort(function(a,b){ return b.width-a.width; });
   var oversized=0,usedArea=0,totalArea=0,boards=[];
@@ -37277,7 +37289,9 @@ function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
       }
     }
     if(choice){
-      boards[choice.board].shelves[choice.shelf].lenUsed+=(choice.o.length+kerf); usedArea+=p.length*p.width;
+      var shC=boards[choice.board].shelves[choice.shelf];
+      boards[choice.board].layout.push({x:shC.xStart,y:shC.lenUsed,w:choice.o.width,h:choice.o.length,rotated:choice.o!==p});
+      shC.lenUsed+=(choice.o.length+kerf); usedArea+=p.length*p.width;
       continue;
     }
     // 2. No existing shelf fits — open a new shelf (rip-cut strip) on whichever open board (and
@@ -37290,13 +37304,16 @@ function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
       }
     }
     if(choice){
-      boards[choice.board].shelves.push({height:choice.o.width+kerf,lenUsed:choice.o.length+kerf});
+      var xsC=boards[choice.board].widthUsed;
+      boards[choice.board].shelves.push({height:choice.o.width+kerf,lenUsed:choice.o.length+kerf,xStart:xsC});
+      boards[choice.board].layout.push({x:xsC,y:0,w:choice.o.width,h:choice.o.length,rotated:choice.o!==p});
       boards[choice.board].widthUsed+=choice.o.width+kerf; usedArea+=p.length*p.width;
       continue;
     }
     // 3. No open board has width budget left — start a new board (first allowed orientation).
     var o3=orientations[0];
-    boards.push({widthUsed:o3.width+kerf,shelves:[{height:o3.width+kerf,lenUsed:o3.length+kerf}]});
+    boards.push({widthUsed:o3.width+kerf,shelves:[{height:o3.width+kerf,lenUsed:o3.length+kerf,xStart:0}],
+      layout:[{x:0,y:0,w:o3.width,h:o3.length,rotated:o3!==p}]});
     usedArea+=p.length*p.width;
   }
   var boardArea=boardW*boardH;
@@ -37304,7 +37321,8 @@ function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
     boardsNeeded:boards.length,
     utilization: boards.length? usedArea/(boards.length*boardArea) : 0,
     oversizedCount:oversized,
-    totalPieceArea:totalArea
+    totalPieceArea:totalArea,
+    layout:boards.map(function(bd){ return bd.layout; })   // [ [ {x,y,w,h,rotated}, ... ], ... ] one array per board
   };
 }
 
@@ -37350,7 +37368,8 @@ function prodComputeBom(comps){
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
-      oversizedCount:sim.oversizedCount
+      oversizedCount:sim.oversizedCount,
+      boardW:boardW,boardH:boardH,layout:sim.layout   // per-board placed-piece rectangles — see _prodCutLayoutSvg
     });
   }
   return bom;
@@ -37798,6 +37817,54 @@ function _prodServiceRowCorrected(idx,newVal){
   var slot=el('prod-summary-wrap'); if(slot) slot.innerHTML=prodBuildSummaryHtml();
 }
 
+// Cut-layout diagram — visual companion to the board-count table above it. Consumes the
+// per-piece placement guillotinePackBoards now records (see its own comment) with NO packing
+// math of its own: it just draws the rectangles already decided. A full page re-render is fine
+// here (matches every other Designers Support toggle) since opening a diagram is an occasional
+// click, not a per-keystroke path.
+function prodToggleBomLayout(idx){
+  prodState.expandedLayout[idx]=!prodState.expandedLayout[idx];
+  renderProductionPage();
+}
+// One SVG per board in bm.layout, each piece drawn to scale with its L×W labeled and rotated
+// pieces marked (⟳) so the diagram visibly explains why an oversized-looking piece still fit.
+// Kerf is not drawn as its own line (it's a cut allowance, not a physical gap worth rendering at
+// this scale) -- pieces are drawn edge-to-edge from their recorded x/y/w/h.
+function _prodCutLayoutSvg(bm){
+  var boardW=bm.boardW,boardH=bm.boardH;
+  var maxPx=280; // longest board dimension on screen, in px -- boards print landscape-ish either way
+  var scale=maxPx/Math.max(boardW,boardH);
+  var pw=Math.round(boardW*scale),ph=Math.round(boardH*scale);
+  // The <svg> width/height (pw/ph) vs its viewBox (raw board mm) is what does the screen scaling
+  // -- rects/text below are drawn in the SAME raw mm units as the viewBox, never re-multiplied by
+  // `scale`. A first version multiplied both, shrinking every piece to a sliver in one corner;
+  // caught only by actually looking at the rendered SVG, not by the numbers (boardsNeeded/
+  // utilization were correct throughout, since neither reads this function at all).
+  var fontSize=Math.max(10,Math.round(Math.min(boardW,boardH)*0.018));
+  var strokeW=Math.max(1,Math.round(fontSize*0.15));
+  var h='<div style="display:flex;flex-wrap:wrap;gap:16px">';
+  for(var bi=0;bi<bm.layout.length;bi++){
+    var pieces=bm.layout[bi];
+    var usedMm2=0; for(var pi=0;pi<pieces.length;pi++) usedMm2+=pieces[pi].w*pieces[pi].h;
+    var utilPct=Math.round(usedMm2/(boardW*boardH)*1000)/10;
+    var rects='';
+    for(var p2=0;p2<pieces.length;p2++){
+      var pc=pieces[p2];
+      var hue=(p2*47)%360; // deterministic per-index color, just to visually separate adjacent pieces
+      rects+='<rect x="'+pc.x+'" y="'+pc.y+'" width="'+pc.w+'" height="'+pc.h+'" fill="hsl('+hue+',55%,80%)" stroke="#5a4a3a" stroke-width="'+strokeW+'"></rect>';
+      if(pc.w>fontSize*4&&pc.h>fontSize*1.5){
+        rects+='<text x="'+(pc.x+pc.w/2)+'" y="'+(pc.y+pc.h/2+fontSize*0.3)+'" font-size="'+fontSize+'" text-anchor="middle" fill="#3a2f22">'+Math.round(pc.h)+'×'+Math.round(pc.w)+(pc.rotated?' ⟳':'')+'</text>';
+      }
+    }
+    h+='<div style="text-align:center">'
+      +'<div style="font-size:11px;font-weight:600;margin-bottom:3px">Board '+(bi+1)+' of '+bm.layout.length+' <span style="font-weight:400;color:var(--text2)">('+utilPct+'% used)</span></div>'
+      +'<svg width="'+pw+'" height="'+ph+'" viewBox="0 0 '+boardW+' '+boardH+'" style="background:#fff;border:2px solid #8a7a63;display:block">'+rects+'</svg>'
+      +'</div>';
+  }
+  h+='</div>';
+  return h;
+}
+
 function prodBuildResultHtml(result){
   if(result.error){
     return '<div class="alert alert-error"><i class="ti ti-alert-circle"></i><div><b>Analysis failed:</b><br><pre style="font-size:11px;white-space:pre-wrap;margin-top:4px">'+escHtml(result.error)+'</pre></div></div>';
@@ -37900,6 +37967,8 @@ function prodBuildResultHtml(result){
   for(var b=0;b<bom.length;b++){
     var bm=bom[b];
     var utilColor=bm.utilizationPct>=70?'var(--good,#16a34a)':(bm.utilizationPct>=50?'var(--warn,#d97706)':'var(--bad,#dc2626)');
+    var hasLayout=bm.layout&&bm.layout.length;
+    var isOpen=!!prodState.expandedLayout[b];
     bomRows+='<tr>'
       +'<td>'+escHtml(bm.material)+'</td>'
       +'<td>'+escHtml(bm.color)+'</td>'
@@ -37909,8 +37978,13 @@ function prodBuildResultHtml(result){
       +'<td style="font-size:11px;color:var(--text2)">'+bm.boardSize+'</td>'
       +'<td style="text-align:right;font-weight:600">'+bm.boardsNeeded+'</td>'
       +'<td style="text-align:right;color:'+utilColor+'">'+(bm.utilizationPct||0)+'%</td>'
-      +'<td style="font-size:10px;color:var(--text2)">'+escHtml(bm.areas||'')+(bm.oversizedCount?' <span style="color:var(--bad,#dc2626);font-weight:600">⚠ '+bm.oversizedCount+' piece(s) too big for this board</span>':'')+'</td>'
+      +'<td style="font-size:10px;color:var(--text2)">'+escHtml(bm.areas||'')+(bm.oversizedCount?' <span style="color:var(--bad,#dc2626);font-weight:600">⚠ '+bm.oversizedCount+' piece(s) too big for this board</span>':'')
+      +(hasLayout?' <a href="#" onclick="prodToggleBomLayout('+b+');return false" style="color:var(--navy);white-space:nowrap">'+(isOpen?'Hide cut layout':'View cut layout')+' <i class="ti ti-chevron-'+(isOpen?'up':'down')+'" style="font-size:10px"></i></a>':'')
+      +'</td>'
       +'</tr>';
+    if(hasLayout&&isOpen){
+      bomRows+='<tr><td colspan="9" style="background:var(--bg2);padding:10px">'+_prodCutLayoutSvg(bm)+'</td></tr>';
+    }
   }
   var bomHtml='<div class="card" style="margin-bottom:14px">'
     +'<div class="card-head"><h3><i class="ti ti-layout-board"></i>Bill of Materials — boards needed</h3></div>'

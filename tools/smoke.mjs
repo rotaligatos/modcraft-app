@@ -318,6 +318,78 @@ const PROFILES = {
           }
         }, { oneGroupNotTwo: true, grainLockedPieceStillOversizedInSharedGroup: true,
              grainFreePieceStillPacksInSharedGroup: true });
+      /* 2026-09-08 (4): true 2D nesting + a visual cut-layout diagram. guillotinePackBoards now
+         records where each piece actually lands (x,y,w,h,rotated) alongside the SAME decision
+         logic already validated against samplesofcuttinglist/MARGARITA.xls -- this proves the
+         bookkeeping is exact, not just "some coordinates appear". Piece A (80w x 50h) opens board
+         0's only shelf at (0,0); piece B (60w x 40h) fits inside that same shelf (its height 80
+         still fits, and there's still 50 of the 100 boardH left), so it must land at
+         (x=shelf.xStart=0, y=shelf.lenUsed BEFORE B was added=50) -- exactly the shelf-reuse
+         (step 1) branch, proven by driving the real function, not by re-deriving coordinates from
+         the algorithm's own comments. */
+      if (typeof window.guillotinePackBoards === 'function')
+        check('guillotinePackBoards: layout records the exact rectangle each piece was placed at (shelf reuse)', () => {
+          const w = window;
+          const res = w.guillotinePackBoards(
+            [ { length: 50, width: 80 }, { length: 40, width: 60 } ],
+            200, 100, 0, false);
+          const board0 = (res.layout && res.layout[0]) || [];
+          const a = board0.find(p => p.w === 80 && p.h === 50);
+          const b = board0.find(p => p.w === 60 && p.h === 40);
+          return {
+            oneBoardUsed: res.boardsNeeded === 1,
+            layoutHasOneBoardArray: (res.layout || []).length === 1,
+            pieceAAtOrigin: !!a && a.x === 0 && a.y === 0 && a.rotated === false,
+            pieceBReusesTheSameShelfAfterA: !!b && b.x === 0 && b.y === 50 && b.rotated === false
+          };
+        }, { oneBoardUsed: true, layoutHasOneBoardArray: true, pieceAAtOrigin: true,
+             pieceBReusesTheSameShelfAfterA: true });
+      /* Same fix: the "open a new shelf on the same board" branch (step 2) must record the new
+         shelf's xStart as the board's widthUsed AT THE MOMENT it was opened, not a fixed offset --
+         piece C (60w x 45h) does not fit piece A's shelf (rem=50-40=10 < 45), so it must open its
+         own shelf starting exactly where A's shelf's width budget ended (x=80). */
+      if (typeof window.guillotinePackBoards === 'function')
+        check("guillotinePackBoards: layout records a new shelf starting where the previous one's width ended (step 2)", () => {
+          const w = window;
+          const res = w.guillotinePackBoards(
+            [ { length: 40, width: 80 }, { length: 45, width: 60 } ],
+            200, 50, 0, false);
+          const board0 = (res.layout && res.layout[0]) || [];
+          const a = board0.find(p => p.w === 80);
+          const c = board0.find(p => p.w === 60);
+          return {
+            oneBoardUsed: res.boardsNeeded === 1,
+            pieceAAtOrigin: !!a && a.x === 0 && a.y === 0,
+            pieceCStartsAtPreviousShelfsWidthBudget: !!c && c.x === 80 && c.y === 0
+          };
+        }, { oneBoardUsed: true, pieceAAtOrigin: true, pieceCStartsAtPreviousShelfsWidthBudget: true });
+      /* Same fix, the wiring: prodComputeBom must carry boardW/boardH/layout through onto each BOM
+         row (this is what _prodCutLayoutSvg actually reads to draw the diagram) -- proves the
+         wiring, not just that guillotinePackBoards itself works in isolation. */
+      if (typeof window.prodComputeBom === 'function')
+        check('prodComputeBom: each BOM row carries boardW/boardH/layout through from the packer', () => {
+          const w = window;
+          const saved = { boardSizes: w.prodSettings.boardSizes, kerf: w.prodSettings.kerf,
+                           machineType: w.prodSettings.machineType };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 100, h: 200 }] }];
+            w.prodSettings.kerf = 0;
+            w.prodSettings.machineType = 'panelsaw';
+            const bom = w.prodComputeBom([
+              { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
+                length: 50, width: 40, qty: 1 }
+            ]);
+            const row = bom[0];
+            return {
+              boardWCarried: row && row.boardW === 100,
+              boardHCarried: row && row.boardH === 200,
+              layoutIsOneBoardWithOnePiece: row && row.layout && row.layout.length === 1 && row.layout[0].length === 1
+            };
+          } finally {
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.kerf = saved.kerf;
+            w.prodSettings.machineType = saved.machineType;
+          }
+        }, { boardWCarried: true, boardHCarried: true, layoutIsOneBoardWithOnePiece: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same
