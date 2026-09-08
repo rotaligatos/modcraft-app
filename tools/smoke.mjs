@@ -318,6 +318,79 @@ const PROFILES = {
           }
         }, { oneGroupNotTwo: true, grainLockedPieceStillOversizedInSharedGroup: true,
              grainFreePieceStillPacksInSharedGroup: true });
+      /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
+         which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
+         order, not just a combined figure. prodComputeServices now also groups the exact same
+         per-piece LM math by c.edgeTape, additive only: the sum of every group must always equal
+         the unchanged scalar edgebandingLM (nothing that already reads that total -- the labor
+         SERVICE quantity, unaffected by colour -- can be affected). A piece with no tape named
+         lands in the 'Unspecified' bucket rather than being silently dropped, matching this whole
+         pipeline's "loud, never short" rule. */
+      if (typeof window.prodComputeServices === 'function')
+        check('prodComputeServices: edgebandingLM groups by tape colour, and the groups sum to the same total', () => {
+          const w = window;
+          const saved = { ebtWastage: w.prodSettings.ebtWastage };
+          try {
+            w.prodSettings.ebtWastage = 0;
+            // ebt '1l' -> long-side-only banding (lc=1,sc=0); each piece's length is 1000mm = 1.0 LM.
+            const comps = [
+              { length: 1000, width: 500, qty: 1, ebt: '1l', edgeTape: 'White PVC' },
+              { length: 1000, width: 500, qty: 1, ebt: '1l', edgeTape: 'Black PVC' },
+              { length: 1000, width: 500, qty: 1, ebt: '1l', edgeTape: '' }  // no tape named
+            ];
+            const svc = w.prodComputeServices(comps, []);
+            const byTape = {};
+            svc.edgebandingByTape.forEach(g => { byTape[g.tape] = g.lm; });
+            const sumOfGroups = svc.edgebandingByTape.reduce((s, g) => s + g.lm, 0);
+            return {
+              whiteGroup: byTape['White PVC'],
+              blackGroup: byTape['Black PVC'],
+              unnamedFallsToUnspecified: byTape['Unspecified'],
+              groupsSumToTheSameTotal: Math.round(sumOfGroups * 100) / 100 === svc.edgebandingLM,
+              totalUnchanged: svc.edgebandingLM
+            };
+          } finally { w.prodSettings.ebtWastage = saved.ebtWastage; }
+        }, { whiteGroup: 1, blackGroup: 1, unnamedFallsToUnspecified: 1,
+             groupsSumToTheSameTotal: true, totalUnchanged: 3 });
+      /* Same fix, the wiring: prodBuildSummary must turn each NAMED tape group into its own
+         MATERIAL row (this app already prices edge tape as a material, not a service -- see the
+         "isTapeLike" hardware-bucket handling a few lines below this insertion point) so the
+         tape's own cost finally reaches the quotation, broken out by colour. Proves the 'Unspecified'
+         bucket gets NO row (nothing to search the catalogue for -- a garbage line would only ever
+         flag red for no reason) so an AI extraction or manual list that never names a tape colour
+         behaves exactly as it did before edgeTape existed. */
+      if (typeof window.prodBuildSummary === 'function')
+        check('prodBuildSummary: one material row per named edge-tape colour, none for Unspecified', () => {
+          const w = window;
+          const saved = { dbMaterials: w.dbMaterials, summary: w.prodState && w.prodState.summary };
+          try {
+            w.dbMaterials = [];
+            const result = {
+              summary: 'test', components: [], hardware: [], carcassCount: 0, _bom: [],
+              _services: {
+                cuttingLM: 0, holeCount: 0, edgebandingLM: 8.7,
+                edgebandingByTape: [
+                  { tape: 'White PVC', lm: 2.5 },
+                  { tape: 'Black PVC', lm: 1.2 },
+                  { tape: 'Unspecified', lm: 5 }
+                ]
+              }
+            };
+            w.prodBuildSummary(result);
+            const mats = (w.prodState.summary && w.prodState.summary.materials) || [];
+            const white = mats.find(m => m.name === 'White PVC' || m.aiName === 'White PVC');
+            const black = mats.find(m => m.name === 'Black PVC' || m.aiName === 'Black PVC');
+            const unspecified = mats.find(m => (m.name || '').indexOf('Unspecified') >= 0 || (m.aiName || '').indexOf('Unspecified') >= 0);
+            return {
+              whiteRowQty: white ? white.qty : null,
+              blackRowQty: black ? black.qty : null,
+              noUnspecifiedRow: !unspecified
+            };
+          } finally {
+            w.dbMaterials = saved.dbMaterials;
+            if (w.prodState) w.prodState.summary = saved.summary;
+          }
+        }, { whiteRowQty: 2.5, blackRowQty: 1.2, noUnspecifiedRow: true });
       /* Ticket 0e65e1fd (2026-08-19): re-locking a quotation that owed a revision (unlocked, then
          re-locked) minted a WHOLE NEW quotation (QT-W00000132, then W00000133 on a second
          re-lock) instead of overwriting QT-W00000130 in place, per Rommel's own report and

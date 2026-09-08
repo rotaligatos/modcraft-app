@@ -9973,3 +9973,50 @@ code via `git stash push -- index.html` before passing on the fix:
 Edge-banding-by-tape-color, non-boring-service quantities, and true 2D nesting + visual layout were
 all surveyed and scoped in the investigation above but not built — the user chose grain-aware
 rotation as the first, smallest, safest fix and the others remain queued in that order.
+
+## What was changed on 2026-09-08 (session 2 — edge-banding grouped by tape colour, wired into the quotation as materials)
+
+Continuation of the same session, item 2 of the queued gap list. Edge banding was priced as ONE
+combined linear-metre total regardless of which tape colour/type it was for — purchasing had no
+way to know how much of EACH colour to order, and (a real gap the investigation surfaced) the tape
+itself was never costed as a material on the Designers Support path at all, only its LABOR was
+ever priced as a service quantity.
+
+### What was built
+- **`edgeTape` field added end to end**: `_prodNormalizeComponent` (the shared component shape),
+  `_cutListToAnalysis` (MCL/website cutting-list path, sourced from the existing `emat` — edge tape
+  — form field, previously only ever pushed into a free-text note), and the AI shop-drawing
+  extraction schema (`PROD_CUTTING_LIST_TOOL`'s strict `input_schema` + the human-readable prompt
+  text), so a drawing that visibly distinguishes the tape colour can report it too. A reviewed
+  component's tape is also now editable inline (a "Tape:" field beside the existing EBT field),
+  wired through the same `_prodComponentFieldCorrected` recompute path EBT/faces/grooving edits
+  already use.
+- **`prodComputeServices` now groups the SAME per-piece linear-metre math by `c.edgeTape`**,
+  returning a new `edgebandingByTape:[{tape,lm}]` alongside the unchanged `edgebandingLM` scalar.
+  Purely additive — the sum of every group always equals the existing total exactly, so nothing
+  that already reads that scalar (the labor SERVICE quantity, which is priced the same regardless
+  of colour) is affected. A piece with no tape named lands in an `'Unspecified'` bucket rather than
+  being dropped, matching this pipeline's "loud, never short" rule.
+- **`prodBuildSummary` turns each NAMED tape group into its own MATERIAL row** (via the existing
+  `catalogMatchRow` helper — edge tape is already priced as a material in this catalogue, not a
+  service, per the pre-existing "isTapeLike" hardware-bucket handling a few lines below this
+  insertion point) — this is what actually gets the tape's own cost into the quotation, broken out
+  by colour, closing the gap the survey found ("the tape itself is never costed there"). The
+  `'Unspecified'` bucket deliberately gets **no** row — there's nothing to search the catalogue for,
+  and a garbage line would only ever flag red for no reason — so an AI extraction or manual list
+  that never names a tape colour (true of every one before `edgeTape` existed) behaves exactly as
+  it always has.
+
+### Verified, reproduce-first
+Two new checks in `tools/smoke.mjs`, both confirmed to FAIL against the pre-fix code via
+`git stash push -- index.html` before passing on the fix: `prodComputeServices` groups a 3-piece
+list (two named tapes + one unnamed) into the correct per-colour totals that sum exactly to the
+unchanged scalar total; `prodBuildSummary` produces one material row per named tape at the correct
+qty and none for `'Unspecified'`. `node tools/verify.mjs` (collision checker + both HTML files'
+headless smoke gates) green.
+
+### Still open — the last two items from the original survey, not started
+Non-boring service quantities (grooving/routing/manual-edgebanding become review-flag notes with
+no deterministic costed quantity — the survey's item 3), and true 2D nesting + a visual board-cut
+layout diagram (the packer is a 1D shelf heuristic with no piece coordinates at all — item 4, the
+largest remaining piece, flagged as needing its own scoping session).
