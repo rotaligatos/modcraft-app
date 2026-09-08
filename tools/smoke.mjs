@@ -2296,6 +2296,48 @@ const PROFILES = {
             w.liveClients = saved.liveClients; w._onQuotationCompanyMightChange = saved._onQuotationCompanyMightChange;
           }
         }, { checkRunsWhenTypeStored: true, noCheckWhenNoType: true });
+      /* Reported live on QT-C00000015 (2026-09-08): "Charge materials & hardware" ticked ON, the
+         quotation form still showed "No charge — subsidiary" and blanked every material/hardware
+         amount. renderItems()'s services-mode block declared `var isDirect=isDirectClient()` and
+         used THAT for the pill/Amount column/subtotal -- a raw Direct-vs-Subsidiary check that
+         predates _chargeMatHw() (the 2026-08-06 per-quotation override) and never got updated when
+         it shipped. getAreaSubtotal/getAreaMatSubtotal/getAreaHwSubtotal already price off
+         _chargeMatHw(), so this was purely a DISPLAY bug -- and it fired for ANY Subsidiary company
+         at ANY charge setting, not just WCLI's not-charged-by-default case: even Cebu World
+         Laminate, whose default is charged=true with no override needed, showed "No charge" and no
+         amount, exactly reproducing the report. Drives the real renderItems() against a real
+         Subsidiary/CWLI account (via the real onClientTypeChange(), not a hand-faked dropdown --
+         cl-company-sel does not exist until that runs) with one material and one hardware row. */
+      if (typeof window.renderItems === 'function' && typeof window.onClientTypeChange === 'function'
+          && typeof window._chargeMatHw === 'function')
+        check('renderItems: materials/hardware display follows _chargeMatHw(), not the bare account type', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw,
+                           clType: document.getElementById('cl-type') && document.getElementById('cl-type').value };
+          try {
+            document.getElementById('cl-type').value = 'Subsidiary';
+            w.onClientTypeChange();
+            const sel = document.getElementById('cl-company-sel');
+            sel.value = 'Cebu World Laminate, Inc.';
+            w.qFabMode = 'services';
+            w.qChargeMatHw = null;   // no override -- CWLI's own default is charged=true
+            w.qAreas = [{ name: 'Area 1',
+              matItems: [{ name: 'Test Board', qty: 2, unit: 'pc', price: 100 }],
+              hwItems: [{ name: 'Test Hinge', qty: 5, unit: 'pc', price: 10 }],
+              svcItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+            const defaultIsCharged = w._chargeMatHw() === true;
+            w.renderItems();
+            const html = document.getElementById('items-wrap').innerHTML;
+            return {
+              defaultIsCharged,
+              noChargePillShown: html.indexOf('No charge') > -1,
+              materialAmountShown: html.indexOf('200.00') > -1
+            };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.qChargeMatHw = saved.qChargeMatHw;
+            if (saved.clType !== undefined) { document.getElementById('cl-type').value = saved.clType; w.onClientTypeChange(); }
+          }
+        }, { defaultIsCharged: true, noChargePillShown: false, materialAmountShown: true });
       /* Pause button (2026-08-28): freezes the SLA clock while waiting on the client, needs an
          approver, and once approved the linked quotation (if any) is not editable until Resume.
          Current pause state is DERIVED from the last entry in one JSON history array -- never a
