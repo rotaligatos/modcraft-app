@@ -2338,6 +2338,64 @@ const PROFILES = {
             if (saved.clType !== undefined) { document.getElementById('cl-type').value = saved.clType; w.onClientTypeChange(); }
           }
         }, { defaultIsCharged: true, noChargePillShown: false, materialAmountShown: true });
+      /* Rommel, 2026-09-08: "could you show how we arrive in the cost in the summary" -- the
+         Fabrication line showed the RAW pre-markup figure while the contingency/buffer that
+         actually gets charged only ever appeared as separate deltas in the admin-only box. Fixed
+         by making the line itself show the MARKED-UP total, with an optional per-bucket breakdown
+         ("materials + fabcontingency + fab. buffer =", his own words) behind a toggle. Drives the
+         real recalc() end to end (not a reimplementation of the formula) against a Fabrication-
+         only quotation (ni=false), so Fab. buffer must NOT apply even though a nonzero rate is set. */
+      if (typeof window.recalc === 'function' && typeof window.toggleFabBreakdown === 'function'
+          && typeof window._fabBucketRaw === 'function')
+        check('_fabBucketRaw + Fabrication line: marked-up total, and the breakdown reconciles to it', () => {
+          const w = window;
+          const saved = { qAreas: w.qAreas, qFabMode: w.qFabMode, qChargeMatHw: w.qChargeMatHw,
+                           fabContingency: w.CF.fabContingency, fabBuffer: w.CF.fabBuffer,
+                           qCustomCFApproved: w.qCustomCFApproved, fabBreakdownOpen: w._fabBreakdownOpen,
+                           clService: document.getElementById('cl-service').value,
+                           clType: document.getElementById('cl-type') && document.getElementById('cl-type').value };
+          try {
+            document.getElementById('cl-type').value = 'Direct';
+            if (typeof w.onClientTypeChange === 'function') w.onClientTypeChange();
+            document.getElementById('cl-service').value = 'Fabrication only';   // ni=false -- buffer must not apply
+            w.qFabMode = 'services';
+            w.qChargeMatHw = null;
+            w.qCustomCFApproved = false;
+            w.CF.fabContingency = 10; w.CF.fabBuffer = 5;   // buffer set but must be ignored (ni=false)
+            w.qAreas = [{ name: 'Area 1',
+              matItems: [{ name: 'Board', qty: 1, unit: 'pc', price: 200 }],
+              hwItems: [{ name: 'Hinge', qty: 1, unit: 'pc', price: 50 }],
+              svcItems: [{ svcIdx: 0, qty: 1 }],
+              outsourceMaterials: [], outsourceHardware: [] }];
+            const svc0Price = (w.SERVICES && w.SERVICES[0] && w.SERVICES[0].price) || 0;
+            w._fabBreakdownOpen = false;
+            w.recalc();
+            const collapsedHtml = document.getElementById('sum-lines').innerHTML;
+            const markedUp = (200 + 50 + svc0Price) * 1.10;   // 10% contingency, no buffer (ni=false)
+            const collapsedShowsMarkedUp = collapsedHtml.indexOf(w.fmtMoney(markedUp)) > -1;
+            const noBufferWhenCollapsed = collapsedHtml.indexOf('Fab. buffer') === -1;
+
+            w.toggleFabBreakdown();   // opens it (calls recalc() itself)
+            const openHtml = document.getElementById('sum-lines').innerHTML;
+            const materialsLine = openHtml.indexOf(w.fmtMoney(200 * 1.10)) > -1;   // Materials = 200
+            const hardwareLine = openHtml.indexOf(w.fmtMoney(50 * 1.10)) > -1;     // Hardware = 50
+            const noBufferRowInBreakdown = openHtml.indexOf('Fab. buffer') === -1;   // still ni=false
+
+            const raw = w._fabBucketRaw();
+            const rawSumsToFabBase = Math.abs((raw.materials + raw.hardware + raw.services + raw.other) - (200 + 50 + svc0Price)) < 0.01;
+
+            return { collapsedShowsMarkedUp, noBufferWhenCollapsed, materialsLine, hardwareLine, noBufferRowInBreakdown, rawSumsToFabBase };
+          } finally {
+            w.qAreas = saved.qAreas; w.qFabMode = saved.qFabMode; w.qChargeMatHw = saved.qChargeMatHw;
+            w.CF.fabContingency = saved.fabContingency; w.CF.fabBuffer = saved.fabBuffer;
+            w.qCustomCFApproved = saved.qCustomCFApproved; w._fabBreakdownOpen = saved.fabBreakdownOpen;
+            document.getElementById('cl-service').value = saved.clService;
+            if (saved.clType !== undefined && typeof w.onClientTypeChange === 'function') {
+              document.getElementById('cl-type').value = saved.clType; w.onClientTypeChange();
+            }
+          }
+        }, { collapsedShowsMarkedUp: true, noBufferWhenCollapsed: true, materialsLine: true,
+             hardwareLine: true, noBufferRowInBreakdown: true, rawSumsToFabBase: true });
       /* Pause button (2026-08-28): freezes the SLA clock while waiting on the client, needs an
          approver, and once approved the linked quotation (if any) is not editable until Resume.
          Current pause state is DERIVED from the last entry in one JSON history array -- never a

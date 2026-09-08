@@ -9450,6 +9450,115 @@ function recalcFQSoon(){
   },120);
 }
 
+// Whether the estimator has expanded the Fabrication line into its Materials/Hardware/Services
+// breakdown. One shared flag for both stages (like every other print/summary toggle in this
+// file) -- collapsed by default so the summary does not grow permanently for everyone.
+var _fabBreakdownOpen=false;
+function toggleFabBreakdown(){
+  _fabBreakdownOpen=!_fabBreakdownOpen;
+  if(typeof recalc==='function') recalc();
+  if(fqAreas&&typeof recalcFQ==='function') recalcFQ();
+}
+// Raw fabrication cost split into MATERIALS / HARDWARE / SERVICES, before contingency/buffer,
+// excluding outsource (already its own line) and the cutting-list charge (also its own line).
+// Reads the CURRENT qAreas/qFabMode globals directly -- correct in both stages, because
+// _recalcFQCore already points qAreas at fqAreas for the duration of its own run, the same way
+// _miBreakdownHtml and _fabAreaAllocation already rely on.
+//
+// BOM and cutting-list mode mirror getBOMItemUnitCost/getAreaSubtotal's OWN gating exactly
+// (materials/hardware only when _chargeMatHw() is true) rather than reusing _discRawBases --
+// that function predates the 2026-08-06 charge-toggle fix and still counts BOM materials/
+// hardware unconditionally, which would make these buckets NOT sum to fabBase-outsourceBase.
+//
+// Carcass mode has no per-item materials/hardware/services rows at all -- the price is one lump
+// per cabinet type -- so it is decomposed from that type's own cabinet_templates rows, scaled to
+// the ACTUAL billed amount for that type (_carcassUnitPrice, which already accounts for the
+// charge toggle). A type with no template, or a BOM item priced only via the CABINET_BASE_COSTS
+// fallback, contributes its full amount to "other" rather than being silently folded into one of
+// the three named buckets -- flag, don't guess, same rule the drawing pipeline uses.
+function _fabBucketRaw(){
+  var out={materials:0,hardware:0,services:0,other:0};
+  var chargeMH=_chargeMatHw();
+  if(qFabMode==='carcass'){
+    var src=_carcassTemplateSource();
+    var byCab={};
+    for(var t=0;t<src.length;t++){ var row=src[t]; if(!row||!row.cabinet) continue; (byCab[row.cabinet]=byCab[row.cabinet]||[]).push(row); }
+    for(var a=0;a<qAreas.length;a++){
+      var items=qAreas[a].items||[];
+      for(var i=0;i<items.length;i++){
+        var type=items[i].type, qty=items[i].qty||0;
+        if(!type||!qty) continue;
+        var billed=_carcassUnitPrice(type)*qty;   // what this cabinet actually contributes to fabBase
+        if(billed<=0) continue;
+        var rows=byCab[type];
+        if(!rows||!rows.length){ out.other+=billed; continue; }
+        var w={materials:0,hardware:0,services:0};
+        for(var r=0;r<rows.length;r++){
+          var rw=rows[r], line=(parseFloat(rw.qty)||0)*(parseFloat(rw.price)||0);
+          if(rw.category==='materials') w.materials+=line;
+          else if(rw.category==='hardware') w.hardware+=line;
+          else if(rw.category==='services') w.services+=line;
+        }
+        if(!chargeMH){ w.materials=0; w.hardware=0; }   // _carcassUnitPrice already dropped these
+        var wSum=w.materials+w.hardware+w.services;
+        if(wSum<=0){ out.other+=billed; continue; }
+        out.materials+=billed*w.materials/wSum;
+        out.hardware+=billed*w.hardware/wSum;
+        out.services+=billed*w.services/wSum;
+      }
+    }
+  } else if(qFabMode==='bom'){
+    for(var a2=0;a2<qAreas.length;a2++){
+      var bis=qAreas[a2].bomItems||[];
+      for(var bi2=0;bi2<bis.length;bi2++){
+        var bi=bis[bi2], q=(parseFloat(bi.qty)||1);
+        var mat=0,hw=0,svc=0,outsUnit=0;
+        (bi.services||[]).forEach(function(r){ svc+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0)*clientMatMultFor(r); });
+        if(chargeMH){
+          (bi.hardware||[]).forEach(function(r){ hw+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0); });
+          (bi.materials||[]).forEach(function(r){ mat+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0); });
+        }
+        (bi.outsourceMaterials||[]).concat(bi.outsourceHardware||[]).forEach(function(r){ outsUnit+=(parseFloat(r.qty)||0)*(parseFloat(r.price)||0); });
+        var unit=getBOMItemUnitCost(bi);   // the real, authoritative per-unit cost (includes outsource)
+        var leftover=unit-outsUnit-mat-hw-svc;   // only ever nonzero via the CABINET_BASE_COSTS fallback
+        out.materials+=mat*q; out.hardware+=hw*q; out.services+=svc*q;
+        if(leftover>0.005) out.other+=leftover*q;
+      }
+    }
+  } else {   // cutting-list / services mode
+    for(var a3=0;a3<qAreas.length;a3++){
+      (qAreas[a3].svcItems||[]).forEach(function(si){ out.services+=_svcLineTotal(si); });
+      if(chargeMH){
+        out.materials+=getAreaMatSubtotal(a3);
+        out.hardware+=getAreaHwSubtotal(a3);
+      }
+    }
+  }
+  return out;
+}
+// Materials/Hardware/Services, each carried through its OWN "+ Fab. contingency + Fab. buffer ="
+// buildup rather than one blended figure -- Rommel, 2026-09-08: "individually, separating
+// materials, hardware and services... materials + fabcontingency + fab. buffer =". Buffer only
+// applies when Installation is included, matching regularFabC's own formula exactly.
+function _fabBreakdownHtml(raw,cf,fabBuf,ni){
+  var contF=1+(cf||0)/100, bufF=ni?(1+(fabBuf||0)/100):1;
+  var order=[['materials','Materials'],['hardware','Hardware'],['services','Services'],['other','Other — no cost breakdown available']];
+  var h='';
+  order.forEach(function(pair){
+    var key=pair[0], label=pair[1], rawAmt=raw[key]||0;
+    if(rawAmt<=0.005) return;
+    var afterCont=rawAmt*contF, final=afterCont*bufF;
+    var contDelta=afterCont-rawAmt, bufDelta=final-afterCont;
+    h+='<div style="padding:4px 0 6px 20px;border-bottom:.5px solid var(--border)">'
+      +'<div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--text2)">'+label+'</span><span>'+fmtMoney(rawAmt)+'</span></div>';
+    if(contDelta>0.005) h+='<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);padding-left:8px"><span>+ Fab. contingency ('+cf+'%)</span><span>+'+fmtMoney(contDelta)+'</span></div>';
+    if(bufDelta>0.005) h+='<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);padding-left:8px"><span>+ Fab. buffer ('+fabBuf+'%)</span><span>+'+fmtMoney(bufDelta)+'</span></div>';
+    if(contDelta>0.005||bufDelta>0.005) h+='<div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600;padding-left:8px"><span>= '+label+' total</span><span>'+fmtMoney(final)+'</span></div>';
+    h+='</div>';
+  });
+  return h;
+}
+
 // One row per real charge inside "Mobilization & Installation", shared by Stage 1 (recalc)
 // and Stage 2 (recalcFQ) so a component hidden in one stage cannot happen without the other
 // agreeing to hide it too.
@@ -9778,17 +9887,28 @@ function _recalcCore(fast) {
   // A site-visit-only request has nothing fabricated, so a "Fabrication ₱0.00"
   // row is noise — on the estimator's screen and on the client's copy alike.
   var _svOnlyNoFab=(qSiteVisit.enabled&&qSiteVisit.onlyRequest&&(fabBase-outsourceBase)<=0);
+  var _fabRaw=_svOnlyNoFab?null:_fabBucketRaw();
+  var _fabContF=1+cf/100, _fabBufF=ni?(1+fabBuf/100):1;
+  var _fabMarked=_fabRaw?(fabBase-outsourceBase)*_fabContF*_fabBufF:0;
   lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px">'
     +(_svOnlyNoFab?'':'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:500">'
     // Say WHAT this figure covers. When materials and hardware are not billed it is labour and
     // services only, and it sits directly beneath line items showing the full cabinet price --
     // without a note the two look like a mistake, which is exactly how it was reported.
     // Applied to BOTH stages: recalc and recalcFQ are hand-duplicated and drift otherwise.
+    //
+    // Shows the MARKED-UP total (raw x contingency x buffer), not the raw pre-markup figure this
+    // line used to show -- that mismatch between what this said and what was actually charged is
+    // the whole reason the breakdown toggle exists. "How is this built?" expands the same figure
+    // into Materials/Hardware/Services, each carried through its own contingency/buffer buildup.
     +'<span><i class="ti ti-armchair" style="font-size:11px;color:var(--text2)"></i> Fabrication'
     +(_chargeMatHw()?''
       : '<span style="font-weight:400;color:var(--text2);font-size:11px"> — services &amp; labour only, materials and hardware not billed</span>')
+    +' <a href="javascript:void(0)" onclick="toggleFabBreakdown()" style="font-size:10.5px;font-weight:400;color:var(--sky);text-decoration:none;margin-left:4px">'
+    +(_fabBreakdownOpen?'Hide breakdown':'How is this built?')+'</a>'
     +'</span>'
-    +'<span>'+fmtMoney(fabBase-outsourceBase)+'</span></div>');
+    +'<span>'+fmtMoney(_fabMarked)+'</span></div>'
+    +(_fabBreakdownOpen&&_fabRaw?_fabBreakdownHtml(_fabRaw,cf,fabBuf,ni):''));
   // Minimum charges, named individually. A silent top-up folded into Fabrication would leave the
   // estimator unable to explain the figure to a client who adds up the line items themselves.
   if(_minCh&&_minCh.rows&&_minCh.rows.length){
@@ -24875,17 +24995,31 @@ function _recalcFQCore() {
   // A site-visit-only request has nothing fabricated, so a "Fabrication ₱0.00"
   // row is noise — on the estimator's screen and on the client's copy alike.
   var _svOnlyNoFab=(qSiteVisit.enabled&&qSiteVisit.onlyRequest&&(fabBase-outsourceBase)<=0);
+  // fqFabBasis==='cutting' means fabBase IS a single typed figure (fqFabCostOverride) with no
+  // underlying per-item scope at all -- there is nothing to decompose into buckets, so the
+  // breakdown toggle is not offered for that basis (see _recalcFQCore).
+  var _fabRaw=(_svOnlyNoFab||fqFabBasis==='cutting')?null:_fabBucketRaw();
+  var _fabContF=1+cf/100, _fabBufF=ni?(1+fabBuf/100):1;
+  var _fabMarked=(fabBase-outsourceBase)*_fabContF*_fabBufF;
   lines+='<div style="border-top:.5px solid var(--border);margin-top:6px;padding-top:2px">'
     +(_svOnlyNoFab?'':'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;font-weight:500">'
     // Say WHAT this figure covers. When materials and hardware are not billed it is labour and
     // services only, and it sits directly beneath line items showing the full cabinet price --
     // without a note the two look like a mistake, which is exactly how it was reported.
     // Applied to BOTH stages: recalc and recalcFQ are hand-duplicated and drift otherwise.
+    //
+    // Shows the MARKED-UP total (raw x contingency x buffer), not the raw pre-markup figure this
+    // line used to show. "How is this built?" expands it into Materials/Hardware/Services, each
+    // carried through its own contingency/buffer buildup -- hidden when there is no per-item
+    // scope to decompose (fqFabBasis==='cutting').
     +'<span><i class="ti ti-armchair" style="font-size:11px;color:var(--text2)"></i> Fabrication'
     +(_chargeMatHw()?''
       : '<span style="font-weight:400;color:var(--text2);font-size:11px"> — services &amp; labour only, materials and hardware not billed</span>')
+    +(_fabRaw?(' <a href="javascript:void(0)" onclick="toggleFabBreakdown()" style="font-size:10.5px;font-weight:400;color:var(--sky);text-decoration:none;margin-left:4px">'
+      +(_fabBreakdownOpen?'Hide breakdown':'How is this built?')+'</a>'):'')
     +'</span>'
-    +'<span>'+fmtMoney(fabBase-outsourceBase)+'</span></div>');
+    +'<span>'+fmtMoney(_fabMarked)+'</span></div>'
+    +(_fabBreakdownOpen&&_fabRaw?_fabBreakdownHtml(_fabRaw,cf,fabBuf,ni):''));
   // Outsource — single line (own contingency/buffer/markup rates, admin-only breakdown below)
   if(outsourceBase>0){
     lines+='<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0 4px 10px;border-top:.5px solid var(--border)">'
