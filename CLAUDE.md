@@ -10020,3 +10020,69 @@ Non-boring service quantities (grooving/routing/manual-edgebanding become review
 no deterministic costed quantity — the survey's item 3), and true 2D nesting + a visual board-cut
 layout diagram (the packer is a 1D shelf heuristic with no piece coordinates at all — item 4, the
 largest remaining piece, flagged as needing its own scoping session).
+
+## What was changed on 2026-09-08 (session 3 — non-boring services get real costed quantities)
+
+Continuation of the same session, item 3 of the queued gap list — "proceed on the non-boring."
+Grooving, Routing and Manual Edgebanding became review-flag placeholder notes with no
+deterministic quantity, the same gap Boring had before it got a hole-count chip
+(shipped an earlier session — see the historical record). Investigation confirmed all three price
+per **linear metre** in the real catalog (`Grooving 3mm (melamine)` ₱15, `Grooving 3mm (compact
+laminate)` ₱20, `Router Grooving (8-12mm)` ₱65, `Sliding Door Grooving (8-12mm)` ₱65, `Manual
+Edgebanding EVA` ₱40, `Manual Edgebanding EVA Transparent` ₱53 — all `lm`, except a
+`(minimum charge)` entry which is a `lot`-priced flat floor rule, not something a run length
+applies to), and that the MCL picker's `svcOptions()` already returns the exact catalog SKU names
+(not a generic fallback), so the only missing piece was the run length — the exact same gap the
+hole count closed for Boring. A stale review message on grooving specifically (*"grooving is one
+word on the form but three prices in the catalogue — pick the right one"*) was itself found to be
+wrong/stale, since the picked chip string is already the specific SKU.
+
+### What was built
+- **`svcNeedsLm(sv)`/`svcLm(s)` added alongside the existing `svcHoles`/`HOLES_RE`** in the MCL
+  IIFE — matches any picked chip naming grooving, routing or manual edgebanding, excluding Boring
+  (handled separately, per hole) and any `(minimum charge)`/`(min charge)` entry (a flat lot floor,
+  not an lm quantity).
+- **`svcCell(p,i)` gained a new branch** rendering an inline number input (`MCL.setLm`) for any
+  chip `svcNeedsLm` matches, mirroring the existing hole-count input's exact styling/behavior.
+- **`MCL.setLm(i,s,v)` added beside the existing `setHoles`** — rewrites the chip in place as
+  `"<service> × N lm"`, same "no re-render while typing" treatment.
+- **`_cutListToAnalysis`'s per-piece services loop rewritten**: the old grooving-only branch (with
+  its stale 3-price review message) removed; a new branch matches grooving/routing/manual-edgebanding
+  chips, parses the `× N lm` suffix, and pushes `{service,qty,unit:'lm',notes}` into a new
+  job-level `extraServices` array — added alongside the existing `holeSchedule` in both the
+  function's local state and its returned payload. A chip picked with **no** run length given
+  stays a flagged review note (*"… arrived without a run length — it is priced per linear metre, so
+  add the lm figure"*) rather than silently pricing at zero.
+- **`prodComputeServices(comps,holes,extraServices)` gained a third parameter** — groups
+  `extraServices` by **EXACT service name** (a plain sum, never fuzzy keyword matching — the picked
+  string already IS the catalog SKU, unlike the AI-extraction path's `svcConcepts` keyword search)
+  into a new `extraServicesByName:[{service,qty,unit:'lm'}]`, additive alongside the existing
+  `cuttingLM`/`edgebandingLM`/`edgebandingByTape`/`holeCount` fields. **All 6 remaining call sites**
+  of `prodComputeServices` across the file updated to pass the third argument through
+  (`r.extraServices||[]`), so the AI-extraction path, the structured-list (non-AI) path, and every
+  re-render-on-field-correction call site all carry it consistently.
+- **`prodLoadStructuredList` carries `extraServices` through** from the payload into `prodState.result`,
+  the shared non-AI entry point a website order or the MCL cutting-list tab feeds.
+- **`prodBuildSummary` turns each `extraServicesByName` entry into a service row via exact-name
+  lookup** against the live `SERVICES` catalog — a match becomes a clean, non-flagged row; no match
+  (the SKU has since been renamed/removed) becomes a flagged row naming the exact string, so it can
+  be picked from the dropdown rather than silently vanishing.
+
+Deliberately scoped to the MCL/`_cutListToAnalysis` (typed cutting-list) path only, matching how
+the Boring fix was also MCL-specific — the AI shop-drawing extraction schema's separate `grooving`
+field, which already has its own different, more-informative per-component review-flag treatment,
+was **not** touched.
+
+### Verified, reproduce-first
+Two new checks in `tools/smoke.mjs`, both confirmed to FAIL against the pre-fix code via
+`git stash push -- index.html` before passing on the fix: `prodComputeServices` correctly groups a
+5-entry `extraServices` array (two same-name entries summed, one different-name entry kept
+separate, a blank-name entry dropped, a zero-qty entry dropped) into `extraServicesByName`;
+`prodBuildSummary` turns a matching entry into a clean service row at the right qty and a
+non-matching entry into a flagged row. `node tools/verify.mjs` (collision checker + both HTML
+files' headless smoke gates) green throughout.
+
+### Still open
+True 2D nesting + a visual board-cut layout diagram — item 4 of the original survey, explicitly
+the largest remaining piece (the packer is a 1D shelf heuristic with no piece coordinates
+retained at all), flagged from the start as needing its own scoping session. Not started.
