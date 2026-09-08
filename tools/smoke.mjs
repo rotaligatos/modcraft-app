@@ -2471,6 +2471,84 @@ const PROFILES = {
             w.fqDiscPct = saved.fqDiscPct; w.fqDiscApproved = saved.fqDiscApproved; inp.value = saved.inpValue;
           }
         }, { clearedLive: true });
+      /* Rommel, 2026-09-08: picked "Hamilton 1x22mm PVC Edgeband" from the catalogue and the row
+         showed unit "pc" -- a real, wrong stored unit on a live Price DB row (edge tape is always
+         sold by the linear metre). The app already has a rule for identifying edge tape by name
+         (_isEdgeTapeName, used by the discount-scope Edgeband bucket); nothing applied it to what
+         a PICKED SKU displays as its unit. Drives the real onMatSearch/onMatSel/onBOMItemSearch
+         against a mocked catalogue row carrying the exact wrong unit, and confirms a non-edge-tape
+         pick is completely unaffected (no false override). */
+      if (typeof window._forceEdgeTapeUnit === 'function' && typeof window._isEdgeTapeName === 'function')
+        check('_forceEdgeTapeUnit: edge-tape names always end up "lm", everything else is untouched', () => {
+          const w = window;
+          const edgeRow = { unit: 'pc' };
+          w._forceEdgeTapeUnit(edgeRow, 'Hamilton 1x22mm PVC Edgeband');
+          const plainRow = { unit: 'pc' };
+          w._forceEdgeTapeUnit(plainRow, 'Totoro 2F 4x8 PB 18mm (Stipple)');
+          const noRow = w._forceEdgeTapeUnit(null, 'Edgeband');   // must not throw on a missing row
+          return { edgeTapeForcedToLm: edgeRow.unit === 'lm', plainMaterialUntouched: plainRow.unit === 'pc', noThrowOnNullRow: noRow === undefined };
+        }, { edgeTapeForcedToLm: true, plainMaterialUntouched: true, noThrowOnNullRow: true });
+      if (typeof window.onMatSearch === 'function' && typeof window.getMatSource === 'function')
+        check('onMatSearch: a picked edge-tape SKU with a wrong catalogue unit ("pc") is corrected to lm', () => {
+          const w = window;
+          const inp = { value: '' };
+          const saved = { qAreas: w.qAreas, dbMaterials: w.dbMaterials, matSrcCache: w._matSrcCache, qFabMode: w.qFabMode };
+          try {
+            w._matSrcCache = null;   // getMatSource() caches by length -- force it to rebuild against the mock
+            w.qFabMode = 'services';   // getAreaSubtotal()/recalc() branch on this -- default 'carcass' expects qAreas[a].items
+            w.dbMaterials = [
+              { name: 'Hamilton 1x22mm PVC Edgeband', unit: 'pc', price: 16 },   // real live row, wrong unit
+              { name: 'Totoro 2F 4x8 PB 18mm (Stipple)', unit: 'sheet', price: 1850 }
+            ];
+            w.qAreas = [{ name: 'Area 1', matItems: [{ name: '', qty: 1, unit: 'pc', price: 0 }], hwItems: [], svcItems: [] }];
+            inp.value = 'Hamilton 1x22mm PVC Edgeband';
+            w.onMatSearch(inp, 0, 0);
+            const edgeTapeCorrected = w.qAreas[0].matItems[0].unit === 'lm';
+
+            w.qAreas[0].matItems[0] = { name: '', qty: 1, unit: 'pc', price: 0 };
+            inp.value = 'Totoro 2F 4x8 PB 18mm (Stipple)';
+            w.onMatSearch(inp, 0, 0);
+            const plainMaterialKeepsCatalogueUnit = w.qAreas[0].matItems[0].unit === 'sheet';
+
+            // No catalogue match at all -- still forced, since the NAME alone is the rule.
+            w.qAreas[0].matItems[0] = { name: '', qty: 1, unit: 'pc', price: 0 };
+            inp.value = 'Some Custom Edge Tape, hand-typed';
+            w.onMatSearch(inp, 0, 0);
+            const customTypedEdgeTapeForced = w.qAreas[0].matItems[0].unit === 'lm';
+
+            return { edgeTapeCorrected, plainMaterialKeepsCatalogueUnit, customTypedEdgeTapeForced };
+          } finally {
+            w.qAreas = saved.qAreas; w.dbMaterials = saved.dbMaterials; w._matSrcCache = saved.matSrcCache; w.qFabMode = saved.qFabMode;
+          }
+        }, { edgeTapeCorrected: true, plainMaterialKeepsCatalogueUnit: true, customTypedEdgeTapeForced: true });
+      if (typeof window.onBOMItemSearch === 'function')
+        check('onBOMItemSearch: edge-tape materials get lm; hardware rows are never forced (edge tape is a material)', () => {
+          const w = window;
+          const inp = { value: '', style: {} };
+          const saved = { qAreas: w.qAreas, dbMaterials: w.dbMaterials, dbHardware: w.dbHardware, matSrcCache: w._matSrcCache, hwSrcCache: w._hwSrcCache, qFabMode: w.qFabMode };
+          try {
+            w._matSrcCache = null; w._hwSrcCache = null;
+            w.qFabMode = 'bom';   // getAreaSubtotal()/recalc() branch on this -- default 'carcass' expects qAreas[a].items
+            w.dbMaterials = [{ name: 'Hamilton 1x22mm PVC Edgeband', unit: 'pc', price: 16 }];
+            w.dbHardware = [{ name: 'Edgeband Trimmer Blade', unit: 'pc', price: 250 }];   // name matches, but it's HARDWARE
+            w.qAreas = [{ name: 'Area 1', bomItems: [{ type: 'Kitchen Base Cabinet', qty: 1,
+              materials: [{ name: '', qty: 1, unit: 'pc', price: 0 }],
+              hardware: [{ name: '', qty: 1, unit: 'pc', price: 0 }], services: [] }] }];
+
+            inp.value = 'Hamilton 1x22mm PVC Edgeband';
+            w.onBOMItemSearch(inp, 0, 0, 'materials', 0);
+            const materialForced = w.qAreas[0].bomItems[0].materials[0].unit === 'lm';
+
+            inp.value = 'Edgeband Trimmer Blade';
+            w.onBOMItemSearch(inp, 0, 0, 'hardware', 0);
+            const hardwareNotForced = w.qAreas[0].bomItems[0].hardware[0].unit === 'pc';
+
+            return { materialForced, hardwareNotForced };
+          } finally {
+            w.qAreas = saved.qAreas; w.dbMaterials = saved.dbMaterials; w.dbHardware = saved.dbHardware;
+            w._matSrcCache = saved.matSrcCache; w._hwSrcCache = saved.hwSrcCache; w.qFabMode = saved.qFabMode;
+          }
+        }, { materialForced: true, hardwareNotForced: true });
       /* Pause button (2026-08-28): freezes the SLA clock while waiting on the client, needs an
          approver, and once approved the linked quotation (if any) is not editable until Resume.
          Current pause state is DERIVED from the last entry in one JSON history array -- never a
