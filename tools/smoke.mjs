@@ -461,6 +461,44 @@ const PROFILES = {
             w.prodSettings.machineType = saved.machineType;
           }
         }, { kerfCarried: true, shelvesIsOneBoardWithOneShelf: true, shelfWidthMatchesThePiece: true });
+      /* Rommel, 2026-09-09: typed a real cutting list, clicked "Load into analysis", and reported
+         "there's nothing here but just the cutting list" -- the Bill of Materials WAS there, just
+         below a full "Upload file for analysis" card (file picker, drag-and-drop zone, an Analyze
+         button) plus a "No Claude API key configured" warning, neither of which applies once a
+         typed-list result already exists. Drives the REAL click path -- MCL.load() is exactly what
+         the "Load into analysis" button's onclick calls, not a hand-built equivalent -- and checks
+         the rendered #prod-wrap, not just prodState. A first version of the fix added its own
+         header duplicating the "New analysis" button prodBuildResultHtml's own actHtml already
+         renders at the top -- caught by reading the rendered HTML (newAnalysisButtonCount), not
+         just the pass/fail of "is the upload card gone", and removed. */
+      if (window.MCL && typeof window.MCL.load === 'function' && typeof window.MCL.set === 'function')
+        check('renderProductionPage: a loaded cutting-list result shows immediately, no upload card or API-key warning, no duplicate controls', () => {
+          const w = window;
+          const savedProdTab = w.prodTab;
+          const savedPanels = w.MCL.state().panels.slice();
+          try {
+            w.setProdTab('cutlist');
+            w.MCL.set(0, 'mat', 'PB White');
+            w.MCL.set(0, 'L', 700);
+            w.MCL.set(0, 'W', 550);
+            w.MCL.set(0, 'qty', 4);
+            w.renderProductionPage();
+            w.MCL.load();   // the exact function the real "Load into analysis" button's onclick calls
+            const html = document.getElementById('prod-wrap').innerHTML;
+            return {
+              tabSwitchedToDrawing: w.prodTab === 'drawing',
+              noUploadCard: !html.includes('Upload file for analysis'),
+              noApiKeyWarning: !html.includes('No Claude API key configured'),
+              hasBomHeading: html.includes('Bill of Materials'),
+              exactlyOneNewAnalysisButton: (html.match(/New analysis/g) || []).length === 1
+            };
+          } finally {
+            w.prodTab = savedProdTab;
+            w.MCL.state().panels = savedPanels;
+            if (typeof w.prodClearFile === 'function') w.prodClearFile();
+          }
+        }, { tabSwitchedToDrawing: true, noUploadCard: true, noApiKeyWarning: true,
+             hasBomHeading: true, exactlyOneNewAnalysisButton: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same
