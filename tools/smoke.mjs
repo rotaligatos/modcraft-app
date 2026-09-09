@@ -390,6 +390,77 @@ const PROFILES = {
             w.prodSettings.machineType = saved.machineType;
           }
         }, { boardWCarried: true, boardHCarried: true, layoutIsOneBoardWithOnePiece: true });
+      /* 2026-09-09: a real cut sequence (rip/crosscut instructions + total saw-travel length),
+         not just a visual diagram. guillotinePackBoards now also returns `shelves` -- the SAME
+         internal shelf geometry (xStart, cut width) the packer already used to decide placement,
+         exposed rather than re-derived, so this can never disagree with what layout actually
+         records. Reusing the exact fixture from the shelf-reuse test above: piece A (80w×50h)
+         opens the only shelf, piece B (60w×40h) reuses it -- one shelf, its cut width is A's own
+         width (80, the value the shelf was created with), never B's narrower one. */
+      if (typeof window.guillotinePackBoards === 'function')
+        check('guillotinePackBoards: shelves records the exact rip-cut-strip geometry it decided (xStart, cut width)', () => {
+          const w = window;
+          const res = w.guillotinePackBoards(
+            [ { length: 50, width: 80 }, { length: 40, width: 60 } ],
+            200, 100, 0, false);
+          const shelves0 = (res.shelves && res.shelves[0]) || [];
+          return {
+            oneShelfNotTwo: shelves0.length === 1,
+            shelfStartsAtBoardEdge: shelves0[0] && shelves0[0].xStart === 0,
+            shelfWidthIsTheFirstPieceThatOpenedIt: shelves0[0] && shelves0[0].width === 80
+          };
+        }, { oneShelfNotTwo: true, shelfStartsAtBoardEdge: true, shelfWidthIsTheFirstPieceThatOpenedIt: true });
+      /* Rommel gave a real reference cut sheet (2026-09-09): 10 pcs of 100(L)x20(W)mm from one
+         1220x2440mm board, kerf 3mm, one shelf -> "Rip cut (20mm wide strip): 2440mm = 2.440 m" +
+         "Crosscuts (9 cuts @ 20mm): 180mm = 0.180 m" = "Total Saw Cutting Length: 2.620 m". This
+         drives the real prodComputeBom -> _prodCutSequence chain against that EXACT scenario and
+         checks it reproduces those exact figures -- not a hand-picked toy case, the literal numbers
+         he was shown as the target. */
+      if (typeof window.prodComputeBom === 'function' && typeof window._prodCutSequence === 'function')
+        check('_prodCutSequence: reproduces the real reference cut sheet exactly (10 pcs 100x20mm, 1220x2440 board, kerf 3mm)', () => {
+          const w = window;
+          const comps = [];
+          for (let i = 0; i < 10; i++) comps.push({ material: 'PB', color: '', texture: '',
+            thickness: 18, faces: 1, length: 100, width: 20, qty: 1, grain: 'none' });
+          const bom = w.prodComputeBom(comps);
+          const bm = bom[0];
+          const seq = w._prodCutSequence(bm, 0);
+          return {
+            oneBoardOneShelf: bm.boardsNeeded === 1 && seq.ripCount === 1,
+            ripLengthMatches: seq.ripLenMm === 2440,
+            crosscutCountMatches: seq.crosscutCount === 9,
+            crosscutLengthMatches: seq.crosscutLenMm === 180,
+            totalMatches2620mm: seq.totalLenMm === 2620
+          };
+        }, { oneBoardOneShelf: true, ripLengthMatches: true, crosscutCountMatches: true,
+             crosscutLengthMatches: true, totalMatches2620mm: true });
+      /* The wiring: prodComputeBom must carry shelves/kerf through onto each BOM row (what
+         _prodCutSequence/_prodCutSheetHtml actually read) -- same pattern as the boardW/boardH/
+         layout wiring test above, for the fields added this session. */
+      if (typeof window.prodComputeBom === 'function')
+        check('prodComputeBom: each BOM row carries shelves/kerf through from the packer', () => {
+          const w = window;
+          const saved = { boardSizes: w.prodSettings.boardSizes, kerf: w.prodSettings.kerf,
+                           machineType: w.prodSettings.machineType };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 100, h: 200 }] }];
+            w.prodSettings.kerf = 5;
+            w.prodSettings.machineType = 'panelsaw';
+            const bom = w.prodComputeBom([
+              { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
+                length: 50, width: 40, qty: 1 }
+            ]);
+            const row = bom[0];
+            return {
+              kerfCarried: row && row.kerf === 5,
+              shelvesIsOneBoardWithOneShelf: row && row.shelves && row.shelves.length === 1 && row.shelves[0].length === 1,
+              shelfWidthMatchesThePiece: row && row.shelves[0][0].width === 40
+            };
+          } finally {
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.kerf = saved.kerf;
+            w.prodSettings.machineType = saved.machineType;
+          }
+        }, { kerfCarried: true, shelvesIsOneBoardWithOneShelf: true, shelfWidthMatchesThePiece: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same

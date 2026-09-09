@@ -37552,7 +37552,15 @@ function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
     utilization: boards.length? usedArea/(boards.length*boardArea) : 0,
     oversizedCount:oversized,
     totalPieceArea:totalArea,
-    layout:boards.map(function(bd){ return bd.layout; })   // [ [ {x,y,w,h,rotated}, ... ], ... ] one array per board
+    layout:boards.map(function(bd){ return bd.layout; }),   // [ [ {x,y,w,h,rotated}, ... ], ... ] one array per board
+    // shelves (2026-09-09): bd.shelves already exists internally as the exact rip-cut-strip
+    // geometry the packer used to decide placement (see the comment above -- "ships them onto
+    // shelves (rip-cut strips)"). Exposing it, alongside the already-shipped `layout`, is what
+    // makes a REAL cut sequence possible rather than a guessed one -- see _prodCutSequence, which
+    // reads only this and layout, never re-derives shelf boundaries by inference. height carries
+    // the kerf reserved when the shelf was opened (a capacity check, not a physical dimension);
+    // subtracting it gives the strip's actual cut width.
+    shelves:boards.map(function(bd){ return bd.shelves.map(function(s){ return {xStart:s.xStart,width:s.height-kerf}; }); })
   };
 }
 
@@ -37599,7 +37607,8 @@ function prodComputeBom(comps){
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
       oversizedCount:sim.oversizedCount,
-      boardW:boardW,boardH:boardH,layout:sim.layout   // per-board placed-piece rectangles — see _prodCutLayoutSvg
+      boardW:boardW,boardH:boardH,layout:sim.layout,   // per-board placed-piece rectangles — see _prodCutLayoutSvg
+      shelves:sim.shelves,kerf:kerf   // per-board rip-cut-strip geometry — see _prodCutSequence
     });
   }
   return bom;
@@ -38056,12 +38065,43 @@ function prodToggleBomLayout(idx){
   prodState.expandedLayout[idx]=!prodState.expandedLayout[idx];
   renderProductionPage();
 }
-// One SVG per board in bm.layout, each piece drawn to scale with its L×W labeled and rotated
-// pieces marked (⟳) so the diagram visibly explains why an oversized-looking piece still fit.
-// Kerf is not drawn as its own line (it's a cut allowance, not a physical gap worth rendering at
-// this scale) -- pieces are drawn edge-to-edge from their recorded x/y/w/h.
-function _prodCutLayoutSvg(bm){
-  var boardW=bm.boardW,boardH=bm.boardH;
+// Real cutting instructions for ONE board, derived from the packer's own shelf geometry --
+// never guessed. A shelf IS a rip-cut strip by construction (see guillotinePackBoards's own
+// comment, "ships them onto shelves (rip-cut strips)"), so this reads off the convention the
+// packer already encodes rather than inventing one.
+//
+// Verified against a real reference cut sheet (Rommel, 2026-09-09): 10 pcs of 100x20mm from one
+// 1220x2440mm board, one shelf --> rip cut 2440mm (2.440m) + 9 crosscuts @ 20mm (0.180m) =
+// 2.620m total, matching exactly. The two rules that reproduce it:
+//   - RIP cuts: one per shelf (each strip is separated from whatever remains to its right,
+//     including the case where "the rest" is scrap after the last shelf), full board length.
+//   - CROSSCUTS: (pieces_in_shelf - 1) per shelf -- the last piece's trailing edge is the strip's
+//     own end, already the board boundary, so it needs no separating cut -- each cut spans the
+//     strip's own width (not the board length).
+function _prodCutSequence(bm,boardIndex){
+  var boardH=bm.boardH;
+  var shelvesRaw=(bm.shelves&&bm.shelves[boardIndex])||[];
+  var pieces=(bm.layout&&bm.layout[boardIndex])||[];
+  var shelves=shelvesRaw.slice().sort(function(a,b){ return a.xStart-b.xStart; }).map(function(s){
+    var sp=pieces.filter(function(p){ return p.x===s.xStart; }).sort(function(a,b){ return a.y-b.y; });
+    return {xStart:s.xStart,width:s.width,pieces:sp};
+  });
+  var ripCount=shelves.length, ripLenMm=ripCount*boardH;
+  var crosscutCount=0, crosscutLenMm=0;
+  for(var i=0;i<shelves.length;i++){
+    var n=shelves[i].pieces.length-1; if(n<0) n=0;
+    crosscutCount+=n; crosscutLenMm+=n*shelves[i].width;
+  }
+  return {
+    shelves:shelves, ripCount:ripCount, ripLenMm:ripLenMm, crosscutCount:crosscutCount,
+    crosscutLenMm:crosscutLenMm, totalLenMm:ripLenMm+crosscutLenMm
+  };
+}
+// Piece-placement diagram for ONE board -- each piece drawn to scale with its L×W labeled and
+// rotated pieces marked (⟳) so the diagram visibly explains why an oversized-looking piece still
+// fit. Kerf is not drawn as its own line (it's a cut allowance, not a physical gap worth rendering
+// at this scale) -- pieces are drawn edge-to-edge from their recorded x/y/w/h.
+function _prodBoardSvg(pieces,boardW,boardH){
   var maxPx=280; // longest board dimension on screen, in px -- boards print landscape-ish either way
   var scale=maxPx/Math.max(boardW,boardH);
   var pw=Math.round(boardW*scale),ph=Math.round(boardH*scale);
@@ -38072,26 +38112,70 @@ function _prodCutLayoutSvg(bm){
   // utilization were correct throughout, since neither reads this function at all).
   var fontSize=Math.max(10,Math.round(Math.min(boardW,boardH)*0.018));
   var strokeW=Math.max(1,Math.round(fontSize*0.15));
-  var h='<div style="display:flex;flex-wrap:wrap;gap:16px">';
+  var rects='';
+  for(var p2=0;p2<pieces.length;p2++){
+    var pc=pieces[p2];
+    var hue=(p2*47)%360; // deterministic per-index color, just to visually separate adjacent pieces
+    rects+='<rect x="'+pc.x+'" y="'+pc.y+'" width="'+pc.w+'" height="'+pc.h+'" fill="hsl('+hue+',55%,80%)" stroke="#5a4a3a" stroke-width="'+strokeW+'"></rect>';
+    if(pc.w>fontSize*4&&pc.h>fontSize*1.5){
+      rects+='<text x="'+(pc.x+pc.w/2)+'" y="'+(pc.y+pc.h/2+fontSize*0.3)+'" font-size="'+fontSize+'" text-anchor="middle" fill="#3a2f22">'+Math.round(pc.h)+'×'+Math.round(pc.w)+(pc.rotated?' ⟳':'')+'</text>';
+    }
+  }
+  return '<svg width="'+pw+'" height="'+ph+'" viewBox="0 0 '+boardW+' '+boardH+'" style="background:#fff;border:2px solid #8a7a63;display:block;margin:0 auto">'+rects+'</svg>';
+}
+// A real cut sheet -- one card per board: numbered rip/crosscut instructions, the total saw
+// travel (cutting length) the math they add up to, board-utilization stats, and the piece-
+// placement diagram. Rommel, 2026-09-09: "this will be dependent on the cutting list data" --
+// every figure here is computed live from _prodCutSequence/the packer's own recorded geometry,
+// nothing is templated. See _prodCutSequence's own comment for the rip/crosscut rule and how it
+// was verified against a real reference cut sheet.
+function _prodCutSheetHtml(bm){
+  var boardW=bm.boardW,boardH=bm.boardH,boardAreaMm2=boardW*boardH;
+  var h='';
   for(var bi=0;bi<bm.layout.length;bi++){
     var pieces=bm.layout[bi];
     var usedMm2=0; for(var pi=0;pi<pieces.length;pi++) usedMm2+=pieces[pi].w*pieces[pi].h;
-    var utilPct=Math.round(usedMm2/(boardW*boardH)*1000)/10;
-    var rects='';
-    for(var p2=0;p2<pieces.length;p2++){
-      var pc=pieces[p2];
-      var hue=(p2*47)%360; // deterministic per-index color, just to visually separate adjacent pieces
-      rects+='<rect x="'+pc.x+'" y="'+pc.y+'" width="'+pc.w+'" height="'+pc.h+'" fill="hsl('+hue+',55%,80%)" stroke="#5a4a3a" stroke-width="'+strokeW+'"></rect>';
-      if(pc.w>fontSize*4&&pc.h>fontSize*1.5){
-        rects+='<text x="'+(pc.x+pc.w/2)+'" y="'+(pc.y+pc.h/2+fontSize*0.3)+'" font-size="'+fontSize+'" text-anchor="middle" fill="#3a2f22">'+Math.round(pc.h)+'×'+Math.round(pc.w)+(pc.rotated?' ⟳':'')+'</text>';
-      }
+    var utilPct=Math.round(usedMm2/boardAreaMm2*1000)/10;
+    var wastePct=Math.round((1000-utilPct*10))/10;
+    var seq=_prodCutSequence(bm,bi);
+    var stepN=1, steps='';
+    for(var si=0;si<seq.shelves.length;si++){
+      var sh=seq.shelves[si];
+      steps+='<li>Rip cut a '+Math.round(sh.width)+'mm wide strip from the board (length = '+boardH+'mm).</li>';
+      var lens=sh.pieces.map(function(p){ return Math.round(p.h)+'mm'; });
+      var lensTxt=lens.length>6?(lens.slice(0,6).join(', ')+', +'+(lens.length-6)+' more'):lens.join(', ');
+      var nCross=sh.pieces.length-1; if(nCross<0) nCross=0;
+      steps+='<li>Crosscut the '+Math.round(sh.width)+'mm strip into '+sh.pieces.length+' pcs ('+(lensTxt||'—')+')'
+        +(nCross?' — '+nCross+' crosscut'+(nCross===1?'':'s'):'')+'.</li>';
     }
-    h+='<div style="text-align:center">'
-      +'<div style="font-size:11px;font-weight:600;margin-bottom:3px">Board '+(bi+1)+' of '+bm.layout.length+' <span style="font-weight:400;color:var(--text2)">('+utilPct+'% used)</span></div>'
-      +'<svg width="'+pw+'" height="'+ph+'" viewBox="0 0 '+boardW+' '+boardH+'" style="background:#fff;border:2px solid #8a7a63;display:block">'+rects+'</svg>'
+    var ripM=(seq.ripLenMm/1000).toFixed(3), crossM=(seq.crosscutLenMm/1000).toFixed(3), totalM=(seq.totalLenMm/1000).toFixed(3);
+    var usedM2=(usedMm2/1e6).toFixed(3), offcutM2=((boardAreaMm2-usedMm2)/1e6).toFixed(3), boardM2=(boardAreaMm2/1e6).toFixed(3);
+    h+='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px;background:var(--card)">'
+      +'<div style="font-size:12px;font-weight:700;margin-bottom:8px">Board '+(bi+1)+' of '+bm.layout.length+' <span style="font-weight:400;color:var(--text2)">— '+boardW+'×'+boardH+'mm, kerf '+(bm.kerf||prodSettings.kerf||3)+'mm, '+(prodSettings.machineType==='cnc'?'grain rotation allowed':'grain rotation not allowed')+'</span></div>'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:10px">'
+      +'<div>'
+        +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);margin-bottom:4px">Cutting sequence</div>'
+        +'<ol style="font-size:11px;margin:0 0 8px 16px;padding:0;line-height:1.5">'+steps+'</ol>'
+        +'<table style="font-size:11px;width:100%;border-collapse:collapse">'
+          +'<tr><td>Rip cut'+(seq.ripCount===1?'':'s')+' ('+seq.ripCount+')</td><td style="text-align:right">'+ripM+' m</td></tr>'
+          +'<tr><td>Crosscut'+(seq.crosscutCount===1?'':'s')+' ('+seq.crosscutCount+')</td><td style="text-align:right">'+crossM+' m</td></tr>'
+          +'<tr style="font-weight:700;border-top:1px solid var(--border)"><td style="padding-top:3px">Total cutting length</td><td style="text-align:right;padding-top:3px">'+totalM+' m</td></tr>'
+        +'</table>'
+      +'</div>'
+      +'<div>'
+        +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);margin-bottom:4px">Board utilization</div>'
+        +'<table style="font-size:11px;width:100%;border-collapse:collapse">'
+          +'<tr><td>Used area ('+pieces.length+' pcs)</td><td style="text-align:right">'+usedM2+' m²</td></tr>'
+          +'<tr><td>Remaining offcut</td><td style="text-align:right">'+offcutM2+' m²</td></tr>'
+          +'<tr><td>Board area</td><td style="text-align:right">'+boardM2+' m²</td></tr>'
+          +'<tr style="font-weight:700"><td>Utilization</td><td style="text-align:right;color:'+(utilPct>=70?'var(--good,#16a34a)':(utilPct>=50?'var(--warn,#d97706)':'var(--bad,#dc2626)'))+'">'+utilPct+'%</td></tr>'
+          +'<tr><td>Waste</td><td style="text-align:right;color:var(--text2)">'+wastePct+'%</td></tr>'
+        +'</table>'
+      +'</div>'
+      +'</div>'
+      +_prodBoardSvg(pieces,boardW,boardH)
       +'</div>';
   }
-  h+='</div>';
   return h;
 }
 
@@ -38213,7 +38297,7 @@ function prodBuildResultHtml(result){
       +'</td>'
       +'</tr>';
     if(hasLayout&&isOpen){
-      bomRows+='<tr><td colspan="9" style="background:var(--bg2);padding:10px">'+_prodCutLayoutSvg(bm)+'</td></tr>';
+      bomRows+='<tr><td colspan="9" style="background:var(--bg2);padding:10px">'+_prodCutSheetHtml(bm)+'</td></tr>';
     }
   }
   var bomHtml='<div class="card" style="margin-bottom:14px">'
