@@ -591,6 +591,71 @@ const PROFILES = {
         }, { oldPerUnitLineGone: true, oldInstallCostRowGone: true, hasRealTotalDailyCost: true,
              hasRealBaseRate: true, hasDailyCostBuildupStep: true, hasMinimumFloorMention: true,
              hasAssemblySeparateNote: true });
+      /* Finding #4 of the installation-cost audit (2026-09-13): the zone add-on math (breakfast
+         add-on for out-of-town zones, extra QA/QC days beyond the 1 already in the base rate, a
+         flat per-diem/accommodation surcharge) was hand-written 3 separate times -- the real
+         engine (_instCalcForZone), the Settings -> Zone Add-ons editor's live preview
+         (_zaRefreshEffect), and the "?" rate build-up popup (openInstDetail). This was not just a
+         future-drift risk -- it had ALREADY drifted: both previews defaulted an unset qaqcDays to
+         1 (showing no extra QA/QC charge), while the real engine defaults a non-base zone to 2,
+         so any zone nobody had explicitly configured was silently charging a real extra QA/QC day
+         neither preview ever showed. Consolidated into one _instZoneAddon(zoneKey,cap), which all
+         three now call -- they cannot disagree again because there is only one implementation left.
+         Reproduced live before fixing: zone z2 with qaqcDays never set showed 0 extra in both
+         previews while _instCalcForZone('z2',...) charged 3729.92 (base + the hidden 2-day QA/QC
+         add-on). This drives the three REAL functions (not a hand re-derivation of the old
+         formula) and confirms they now agree exactly. */
+      if (typeof window._instZoneAddon === 'function' && typeof window._instCalcForZone === 'function'
+          && typeof window._zaRefreshEffect === 'function' && typeof window.openInstDetail === 'function')
+        check('Zone add-on math: the real engine and both Settings previews agree, no unset-qaqcDays discrepancy', () => {
+          const w = window;
+          const saved = { zoneAddons: JSON.parse(JSON.stringify(w.INST_COST.zoneAddons || {})),
+                           qInstRegion: w.qInstRegion, qInstRegionManual: w.qInstRegionManual };
+          // za-eff-z2 has no static counterpart (only rendered when the Zone Add-ons editor is
+          // open), so a fresh element is safe there. ov-inst-detail-body DOES already exist in the
+          // static markup (the modal's own body div) -- openInstDetail() writes into THAT one via
+          // getElementById, so the popup result must be read back the same way, not from a
+          // same-id lookalike (the exact test-harness mistake caught and fixed in finding #3's
+          // Computation Ref check just above).
+          const effEl = document.createElement('div'); effEl.id = 'za-eff-z2';
+          document.body.appendChild(effEl);
+          const popupSavedHtml = (document.getElementById('ov-inst-detail-body') || {}).innerHTML;
+          try {
+            w.INST_COST.zoneAddons = w.INST_COST.zoneAddons || {};
+            delete w.INST_COST.zoneAddons.z2; // genuinely unset -- the exact state that drifted
+
+            const cap = w._ppicCapacity();
+            const addon = w._instZoneAddon('z2', cap);
+            const realFullRate = w._instCalcForZone('z2', null);
+            const r2 = n => Math.round(n * 100) / 100;
+
+            w._zaRefreshEffect('z2');
+            const previewHtml = effEl.innerHTML;
+
+            w.qInstRegion = 'z2';
+            w.openInstDetail();
+            const popupHtml = document.getElementById('ov-inst-detail-body').innerHTML;
+            const fmtFullRate = realFullRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+            return {
+              sharedFnDefaultsNonBaseZoneToTwoDays: addon.qaqcDays === 2,
+              qaqcExtraIsGenuinelyNonzero: addon.qaqcExtraAddon > 0,
+              engineIncludesTheSameAddon: Math.abs((w._instCalc().total / cap + addon.total) - realFullRate) < 0.01,
+              previewNowShowsTheQaqcLine: previewHtml.includes('QA/QC'),
+              popupShowsTheRealTwoDayDefault: popupHtml.includes('2d total'),
+              popupFullRateMatchesEngineExactly: popupHtml.includes(fmtFullRate)
+            };
+          } finally {
+            w.INST_COST.zoneAddons = saved.zoneAddons;
+            w.qInstRegion = saved.qInstRegion; w.qInstRegionManual = saved.qInstRegionManual;
+            var _pb = document.getElementById('ov-inst-detail-body');
+            if (_pb) _pb.innerHTML = popupSavedHtml || '';
+            if (typeof w.closeModal === 'function') w.closeModal('ov-inst-detail');
+            effEl.remove();
+          }
+        }, { sharedFnDefaultsNonBaseZoneToTwoDays: true, qaqcExtraIsGenuinelyNonzero: true,
+             engineIncludesTheSameAddon: true, previewNowShowsTheQaqcLine: true,
+             popupShowsTheRealTwoDayDefault: true, popupFullRateMatchesEngineExactly: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same

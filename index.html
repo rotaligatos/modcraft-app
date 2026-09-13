@@ -3633,18 +3633,40 @@ function _zaQdChange(zk, val){
   INST_COST.zoneAddons[zk].qaqcDays=v;
   _zaRefreshEffect(zk);
 }
+// Zone add-on math -- shared by the real engine (_instCalcForZone) and both display-only
+// previews (_zaRefreshEffect here, and openInstDetail's "?" popup) so they cannot silently
+// disagree the way they were found to (2026-09-13, finding #4 of the installation-cost audit):
+// both previews defaulted an UNSET qaqcDays to 1 (showing "no extra QA/QC charge"), while the
+// real engine below defaults an unset NON-base zone to 2 -- so any zone nobody had ever visited
+// Settings to configure was silently charging one real extra QA/QC day that neither preview ever
+// showed. Confirmed live before fixing: zone z2 with no qaqcDays set showed a 0 QA/QC add-on in
+// both previews while the real _instCalcForZone('z2',...) charged for it (full rate 3729.92 vs a
+// base+flat-addon-only figure with no QA/QC extra).
+function _instZoneAddon(zoneKey,cap){
+  var za=(INST_COST.zoneAddons||{})[zoneKey]||{};
+  var isBaseZone=(zoneKey==='z1'||zoneKey==='cebuA');
+  var zoneFlat=(parseFloat(za.perDiem)||0)+(parseFloat(za.accommodation)||0);
+  var breakAddon=0;
+  if(INST_COST.breakfastOutOfTownOnly&&!isBaseZone&&cap>0){
+    breakAddon=_instSumArr(INST_COST.breakfast)/cap;
+  }
+  var qaqcDays=parseFloat(za.qaqcDays!=null?za.qaqcDays:(isBaseZone?1:2));
+  var qaqcExtraAddon=0;
+  if(cap>0&&qaqcDays>1){
+    qaqcExtraAddon=_instSumArr(INST_COST.instQaqc||[])*(qaqcDays-1)/cap;
+  }
+  return {zoneFlat:zoneFlat,breakAddon:breakAddon,qaqcExtraAddon:qaqcExtraAddon,
+          qaqcDays:qaqcDays,isBaseZone:isBaseZone,total:zoneFlat+breakAddon+qaqcExtraAddon};
+}
 function _zaRefreshEffect(zk){
-  var row=(INST_COST.zoneAddons||{})[zk]||{};
-  var addon=(parseFloat(row.perDiem)||0)+(parseFloat(row.accommodation)||0);
-  var qdays=parseFloat(row.qaqcDays!=null?row.qaqcDays:1)||1;
-  var cap=_ppicCapacity(); var qaqcDaily=_instSumArr(INST_COST.instQaqc||[]);
-  var qaqcExtra=(cap>0&&qdays>1)?qaqcDaily*(qdays-1)/cap:0;
-  var total=addon+qaqcExtra;
+  var cap=_ppicCapacity();
+  var a=_instZoneAddon(zk,cap);
   var eff=document.getElementById('za-eff-'+zk);
   if(!eff) return;
-  if(total>0){
-    var s='+₱'+Math.round(addon).toLocaleString()+' flat';
-    if(qaqcExtra>0) s+='<br><span style="font-size:10px;color:var(--ink11)">+₱'+Math.round(qaqcExtra).toLocaleString()+' QA/QC</span>';
+  if(a.total>0){
+    var s='+₱'+Math.round(a.zoneFlat).toLocaleString()+' flat';
+    if(a.qaqcExtraAddon>0) s+='<br><span style="font-size:10px;color:var(--ink11)">+₱'+Math.round(a.qaqcExtraAddon).toLocaleString()+' QA/QC</span>';
+    if(a.breakAddon>0) s+='<br><span style="font-size:10px;color:var(--ink11)">+₱'+Math.round(a.breakAddon).toLocaleString()+' breakfast</span>';
     eff.innerHTML=s; eff.style.color='#d97706';
   } else { eff.textContent='no add-on'; eff.style.color='var(--text2)'; }
 }
@@ -5545,13 +5567,15 @@ function openInstDetail(){
   var zone=INST_ZONES.filter(function(z){return z.key===qInstRegion;})[0]||{label:qInstRegion};
   var c=_instCalc();
   var cap=_ppicCapacity();
-  var zoneAddonFlat=(function(){var za=(INST_COST.zoneAddons||{})[qInstRegion]||{};return (parseFloat(za.perDiem)||0)+(parseFloat(za.accommodation)||0);})();
-  var isBaseZone=(qInstRegion==='z1'||qInstRegion==='cebuA');
-  var breakExtra=(!isBaseZone&&INST_COST.breakfastOutOfTownOnly&&cap>0)?_instSumArr(INST_COST.breakfast)/cap:0;
-  var qaDays=parseFloat(((INST_COST.zoneAddons||{})[qInstRegion]||{}).qaqcDays)||1;
-  var qaExtra=(!isBaseZone&&cap>0&&qaDays>1)?_instSumArr(INST_COST.instQaqc||[])*(qaDays-1)/cap:0;
+  // Same shared _instZoneAddon() the real engine uses (see its own comment, near
+  // _zaRefreshEffect) -- this popup used to hand-derive the identical math a second time, and
+  // its qaqcDays default (1) silently disagreed with the real engine's (2 for non-base zones),
+  // understating the "QA/QC extra days" line for any zone nobody had explicitly configured.
+  var _za=_instZoneAddon(qInstRegion,cap);
+  var zoneAddonFlat=_za.zoneFlat, isBaseZone=_za.isBaseZone, breakExtra=_za.breakAddon,
+      qaDays=_za.qaqcDays, qaExtra=_za.qaqcExtraAddon;
   var baseRate=cap>0?c.total/cap:0;
-  var fullRate=baseRate+zoneAddonFlat+breakExtra+qaExtra;
+  var fullRate=baseRate+_za.total;
   var row=function(lbl,val,sub,color){
     return '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:4px 0;border-bottom:.5px solid #f0f0f0">'
       +'<span style="font-size:12px;color:var(--text2)">'+lbl+(sub?'<br><span style="font-size:10px;opacity:.7">'+sub+'</span>':'')+'</span>'
@@ -20147,22 +20171,9 @@ function _instCalcForZone(zoneKey, cabinetType) {
   var baseRate  = cap > 0 ? base.total / cap : 0;
   // Zone add-on is a FLAT per-unit surcharge (rough out-of-town effort judgment) —
   // NOT manpower-based, NOT divided by capacity, NOT amplified by contingency/margin.
-  // Added AFTER the base rate is computed.
-  var za        = (INST_COST.zoneAddons||{})[zoneKey] || {perDiem:0, accommodation:0};
-  var zoneAddon = (parseFloat(za.perDiem)||0) + (parseFloat(za.accommodation)||0);
-  var isBaseZone = (zoneKey==='z1'||zoneKey==='cebuA');
-  // Breakfast: excluded from base rate; add per-unit for out-of-town zones
-  var breakAddon = 0;
-  if(INST_COST.breakfastOutOfTownOnly && !isBaseZone && cap > 0){
-    breakAddon = _instSumArr(INST_COST.breakfast) / cap;
-  }
-  // QA/QC: base rate already includes 1 day; add extra days for out-of-town zones
-  var qaqcDays = parseFloat((za.qaqcDays != null ? za.qaqcDays : (isBaseZone ? 1 : 2)));
-  var qaqcExtraAddon = 0;
-  if(cap > 0 && qaqcDays > 1){
-    qaqcExtraAddon = _instSumArr(INST_COST.instQaqc||[]) * (qaqcDays - 1) / cap;
-  }
-  return baseRate + zoneAddon + breakAddon + qaqcExtraAddon;
+  // Added AFTER the base rate is computed. See _instZoneAddon's own comment (Settings ->
+  // Zone Add-ons editor, above) for why this is the one and only place this math is written.
+  return baseRate + _instZoneAddon(zoneKey, cap).total;
 }
 function _instRefreshSummary() {
   var c = _instCalc();
