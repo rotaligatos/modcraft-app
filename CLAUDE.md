@@ -9821,7 +9821,7 @@ client-facing document at all by default. If you need to see that hidden figure 
 checking, tick "Reveal hidden costs (internal only)" in the print toolbar — remember to untick it
 before actually sending the document to a client.
 
-# OPEN — updated 2026-09-03 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-09-03 (session end) — SUPERSEDED by the 2026-09-13 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 > This session's fix is built, fully reproduce-first tested, and passing `verify.mjs` — commit,
 > push and live-deployment confirmation are the very next step (see below).
@@ -10143,3 +10143,264 @@ checker + both HTML files' headless smoke gates) green throughout.
 All four items from the 2026-09-08 survey are now shipped: grain-aware rotation, edge-banding
 grouped by tape colour, non-boring services costed, and this. Nothing queued from that spec
 remains open.
+
+## What was changed on 2026-09-09 (session — real cutting instructions on the cut-layout diagram, then a UX bug it surfaced)
+
+Rommel: *"still i don't see the cut layout"*, then a screenshot of a polished "PANEL SAW CUTTING
+LAYOUT" reference sheet, then *"its a cut optimizer."* Two rounds: first proving the existing
+2026-09-08 diagram genuinely worked and was just easy to miss, then — once the real ask (a full
+production cut sheet, not a piece-placement picture) was clear — building it for real, then a
+second, unrelated UX bug this same investigation surfaced.
+
+### Round 1 — the diagram was real, just collapsed and easy to miss
+Drove the exact click path twice (Cutting List tab → type data → "Load into analysis") with zero
+JS errors and the "View cut layout" link correctly rendering both times. Confirmed via `curl`
+against the live GitHub Pages URL that the 2026-09-08 code was genuinely deployed. This established
+the code worked; the gap was between "colored boxes on a board" (what existed) and a real
+production cut sheet (what the reference image showed).
+
+### Round 2 — the real formula, derived and verified against Rommel's own reference numbers
+Worked out the rip/crosscut math by reading `guillotinePackBoards`'s own shelf model (already a
+rip-cut-strip abstraction by construction — its own comment says "ships them onto shelves (rip-cut
+strips)") and verified the derived formula reproduces the reference sheet's own figures EXACTLY
+before writing any new code: 10 pieces of 100×20mm from one 1220×2440mm board, kerf 3mm, one
+shelf → 1 rip cut (2440mm = 2.440m) + 9 crosscuts (20mm each = 0.180m) = **2.620m total**, matching
+the reference to the millimetre.
+
+- **`guillotinePackBoards` now also returns `shelves`** per board (`{xStart, width}` — the exact
+  rip-cut-strip geometry the packer already used to decide placement, exposed rather than
+  re-derived) alongside the existing `layout`. Additive bookkeeping only, same caution as the
+  `layout` field itself (2026-09-08) — the packer's own placement DECISIONS are untouched.
+- **New `_prodCutSequence(bm, boardIndex)`** derives, from that geometry alone: **rip cuts** = one
+  per shelf (each strip is separated from whatever remains to its right), full board length;
+  **crosscuts** = (pieces_in_shelf − 1) per shelf (the last piece's trailing edge is the strip's
+  own end, already the board boundary, so no separating cut is needed there), each spanning the
+  strip's own width.
+- **New `_prodCutSheetHtml(bm)`** replaces the old bare-diagram function: per board, a numbered
+  cutting-sequence list, a rip/crosscut length table, a board-utilization stats table (used area,
+  remaining offcut, utilization %, waste %), then the existing piece-placement diagram
+  (`_prodBoardSvg`, unchanged drawing logic, just factored out of the old combined function).
+
+Screenshot-verified the actual render (not just the numbers) before shipping — this file's own
+2026-09-08 entry documents exactly this class of bug (a numerically-correct diagram that renders
+as an unreadable sliver), so the same discipline applied here.
+
+Two reproduce-first checks in `tools/smoke.mjs`: `guillotinePackBoards` returns the shelf's exact
+cut width (the value the FIRST piece opened it with, not a later narrower piece sharing the same
+shelf); `_prodCutSequence` reproduces the reference sheet's exact figures (2440/180/2620mm) against
+the real chain (`prodComputeBom` → `_prodCutSequence`), not a hand-picked toy case. Both confirmed
+genuinely failing against the pre-fix code via `git stash` before passing on the fix.
+`node tools/verify.mjs` green.
+
+### A UX bug found while re-verifying — the results were hidden behind an irrelevant upload form
+Same session, Rommel reported it again after the rip/crosscut feature shipped: still couldn't find
+the results. Root cause, traced this time by driving the FULL click path end to end (not just the
+underlying functions): after "Load into analysis," `renderProductionPage()` unconditionally opened
+with a "No Claude API key configured" warning and a complete "Upload file for analysis" card (file
+picker, drag-and-drop zone, an "Analyze with AI" button) — both entirely irrelevant once a typed
+cutting-list result already exists, since nothing was uploaded and no AI call is pending. That
+reads exactly like "you're back at square one," which is precisely what was reported; the real
+Bill of Materials was rendering the whole time, just below all of that.
+
+Added an early return — same shape as the pre-existing `phase==='review'` early return just above
+it — so once a result exists, it renders directly with nothing to scroll past. `resultHtml` already
+opens with its own "Cutting list loaded." banner (naming the source) and an Export Excel / Reflect
+to quotation / New analysis button row, so nothing extra needed adding.
+
+**A first draft of this fix added its own header duplicating that same "New analysis" button** —
+caught by reading the rendered HTML directly (`newAnalysisButtonCount`), not by eyeballing a
+screenshot alone, and removed before shipping. The lesson already documented elsewhere in this
+file ("look at rendered output, don't just assert on it") cuts both ways — sometimes the render
+itself reveals a redundancy a pass/fail check alone would have missed.
+
+Reproduce-first check in `tools/smoke.mjs` drives `MCL.load()` — the exact function the real "Load
+into analysis" button's `onclick` calls, not a hand-built equivalent — then reads the rendered
+`#prod-wrap`: no upload card, no API-key warning, the Bill of Materials heading present, and
+exactly one "New analysis" button (not two). Confirmed genuinely failing against the pre-fix code
+via `git stash` (the upload card and warning WERE present, matching the reported symptom exactly)
+before passing on the fix. `node tools/verify.mjs` green throughout both fixes.
+
+## What was changed on 2026-09-13 (session — installation-cost computation audited: 4 findings, all fixed)
+
+Rommel: *"I need to double check how we compute for the installation charge... Could you check the
+actual computation of installation in the system. Is there any hard coded cost or redundancy."*
+A full trace of the real chain (`_recalcCore`/`_recalcFQCore` → `getInstCostByType` →
+`_instCalcForZone` → `_instCalc`/`_ppicCapacity`), explained to him in plain language first, then
+audited for hardcoded values and duplicated logic. Four real findings, all fixed, all deployed —
+plus one real false alarm caught and corrected before it could mislead anyone.
+
+### Finding #1 — a whole Settings field was dead: `CF.installCostPerUnit`
+Grep-confirmed every reference to it (Settings → Cost Factors input "Installation cost / carcass",
+default ₱1,200; Excel import/export mapping; two documentation/preview spots) and confirmed the
+real pricing engine never reads it — the real per-unit installation rate comes entirely from the
+PPIC/Cost Breakdown capacity model (fully-loaded daily cost ÷ cabinets/day), a newer mechanism that
+replaced this flat per-carcass field at some point without the field itself ever being removed.
+Also checked and confirmed clean before touching anything: not referenced by the per-quotation
+Custom Cost Factor override (the 9-field override list has no such key), not referenced by the
+mobile approval app, not referenced by Cost Report/margin calculations; Settings save/load merges
+`CF` as a whole object, so removal needed no persistence-layer change.
+
+Removed: the default value, the Settings input (card retitled "Assembly charge per carcass," its
+stale caption corrected, grid narrowed 3→2 columns), its Excel import/export mapping (an old
+downloaded template still carrying the removed header is now silently ignored on import, not
+resurrected), and two now-fully-orphaned Stage 2 variables that only ever read it —
+`s1InstRate`/`instRate` inside `renderFQCards()` (computed, never referenced again — confirmed by
+grep before removing), and the `fqInstRateOverride` global (declared + reset on init, but with no
+UI input anywhere that could ever set it, unlike its sibling `fqAssmRateOverride`, which is
+genuinely wired to a real input and left untouched).
+
+**Verified end to end, not just by grep**: a real quotation (carcass mode, Fabrication with
+Installation, 5 units) driven through `recalc()` AND `recalcFQ()` before and after the removal
+produced **byte-identical** `grand`/`instBase`/`assmBase` on both stages
+(65570.97103030303 / 19016.25984848485 / 4250, and 62434.97103030303 / 19016.25984848485 / 4250) —
+direct proof the field never affected pricing. Settings UI, Excel import safety, and Assembly's own
+field all confirmed unaffected.
+
+### Finding #2 — a dead Stage 2 override variable, resolved as a side effect of #1
+`fqInstRateOverride` (see above) became fully orphaned the moment `s1InstRate`/`instRate` were
+removed, since that was its only reader. Nothing left to do — closed automatically by #1's fix.
+
+### Finding #3 — the page meant to explain installation described the wrong formula
+Reports → Computation Ref → "Installation Computation" is the built-in audit/reference page an
+Admin/Director/Manager would actually consult to answer "how is installation computed" — and it
+was wrong. It described a fictional "Install cost × qty units" per-unit layer (sourced from the
+now-removed `CF.installCostPerUnit`) added to a labor base before contingency, then contingency
+applied to that fictional combined figure — none of which exists in the real engine.
+
+Rewritten to pull every figure straight out of **`_instCalc()`'s own return object** — the SAME
+function `_instCalcForZone()`/`getInstCostByType()` actually call — rather than hand-picking a few
+CF fields and re-deriving the formula's shape from memory, so the page cannot silently drift from
+reality again. Five steps now, matching the real chain: Daily Cost Buildup → Per-Unit Rate (÷
+capacity) → Per-Cabinet-Type & Total Labor Cost (including the 3-unit minimum floor and
+cutting-list mode's lack of per-type data) → Installation Base + Assembly (kept explicitly
+separate) → Margin Chain. A second stale reference to the removed field, in the separate "Cost
+Factors (current values)" list further up the same page, was found and fixed too while verifying.
+
+Verified by reading the actual rendered text (not just asserting numbers match): the fictional
+per-unit line and the old "Install cost / unit" row are both gone, the real total-daily-cost and
+base-rate figures (pulled from a live `_instCalc()` call) appear verbatim, the corrected step names
+render. One test-harness bug caught and fixed: `#compref-wrap` already exists in the page's static
+markup, so a first draft of the test that created a SEPARATE element with the same id and read from
+its own reference always read empty — fixed to read back through `getElementById` the same way the
+real render target resolves.
+
+### Finding #4 — the zone add-on math had ALREADY drifted, not just a future risk
+The zone add-on math (breakfast add-on for out-of-town zones, extra QA/QC days beyond the 1 already
+in the base rate, a flat per-diem/accommodation surcharge) was hand-written three separate times:
+the real engine (`_instCalcForZone`), the Settings → Zone Add-ons editor's live preview
+(`_zaRefreshEffect`), and the "?" per-unit rate build-up popup (`openInstDetail`). Reproduced live
+BEFORE touching anything: for a zone whose `qaqcDays` had never been explicitly set, both display
+previews defaulted to 1 day (showing "no add-on"), while the real engine defaults an unset
+**non-base** zone to 2 days and genuinely charges for it — a live quotation for that zone would
+silently include a QA/QC surcharge neither settings screen ever revealed.
+
+New **`_instZoneAddon(zoneKey, cap)`** is now the one and only place this math lives, returning
+`{zoneFlat, breakAddon, qaqcExtraAddon, qaqcDays, isBaseZone, total}`. All three call sites now call
+it — `_instCalcForZone` simply adds `.total` to its base rate; `_zaRefreshEffect` reads the shared
+result and now ALSO shows the breakfast add-on line it had been missing entirely; `openInstDetail`
+keeps its existing local variable names so the rest of its rendering needed no changes.
+
+Verified by driving the three REAL functions (not a hand re-derivation of the old formula) against
+a zone with `qaqcDays` deliberately unset: the shared function correctly defaults to 2 days, the
+Settings preview now shows the QA/QC line, the "?" popup now shows "2d total" and its displayed
+full rate matches `_instCalcForZone`'s output to the centavo. Same test-harness lesson as finding
+#3 hit again: `#ov-inst-detail-body` already exists in the static markup (the modal's own body
+div), so the popup's result had to be read back via `getElementById`, not a same-id lookalike.
+
+### ⚠ A real false alarm, caught and corrected mid-session — worth remembering
+While explaining redundancy risks, flagged a Price DB catalog entry "Installation labor"
+(₱1,200/carcass) as a potential double-charge risk if ever manually added to a quotation alongside
+the dedicated Installation charge. **This was wrong**, and Rommel's own screenshot of his real,
+live Price Database (66 real services, no such entry) proved it in one look.
+
+Root cause of the false alarm: `SERVICES` is declared with a hardcoded 6-item **startup
+placeholder** (`var SERVICES = [{name:"Panel cutting",...}, ..., {name:"Installation labor",
+unit:"carcass", price:1200}]`) that exists only so the app has something to show before the real
+Price DB loads — `_syncServicesFromDb()` **completely replaces** `SERVICES` the moment real data
+arrives (`if(!dbServices.length) return; SERVICES = dbServices.map(...)`). Testing `index.html`
+locally with no login meant `dbServices` stayed empty the whole session, so `SERVICES` never
+advanced past that placeholder — meaning the "finding" was purely an artifact of the offline test
+environment, never a fact about Rommel's live catalog. The identical mistake was nearly repeated a
+second time for "Assembly labor" (found in `INIT_TEMPLATES`, which follows the exact same
+`dbTemplates.length ? dbTemplates : INIT_TEMPLATES...` fallback pattern everywhere it's read) —
+caught and retracted BEFORE Rommel had to correct it a second time, by checking the fallback
+mechanism directly rather than repeating the same offline-test assumption.
+
+**Standing lesson, worth keeping**: `SERVICES`/`dbServices`/`dbTemplates`/`INIT_TEMPLATES` all
+follow this same "real data replaces placeholder wholesale, once connected" pattern. Any
+observation about the CONTENT of a catalog (not its mechanism) made by testing `index.html` offline
+must be treated as describing the fallback seed, never the user's live data — the only way to
+confirm a real catalog's actual contents is to ask the user to look at their own logged-in screen,
+or to query the live database directly.
+
+### Verified, all four findings
+Each finding has its own permanent reproduce-first check in `tools/smoke.mjs`, each confirmed
+genuinely failing against the pre-fix code via `git stash` before passing on the fix (finding #2
+needed none, being a pure side effect). `node tools/verify.mjs` green throughout every step;
+deployed and confirmed live on GitHub Pages after each of the three commits
+(`4a53aef`, `bc07f86`, `ecce563`).
+
+# OPEN — updated 2026-09-13 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+
+## Confirmed done this session — do not re-raise
+- The cut-optimizer survey's last item (true 2D nesting + a visual cut-layout diagram) — fully
+  shipped 2026-09-08, then upgraded 2026-09-09 into a real production cut sheet: numbered
+  rip/crosscut cutting instructions, cutting-length totals, board-utilization stats, verified
+  against a real reference cut sheet's exact figures (2.620m total).
+- A loaded cutting list's results now render immediately after "Load into analysis" — no more
+  irrelevant "Upload file for analysis" card or "No Claude API key" warning sitting on top of them.
+- **The installation-cost audit, all 4 findings** — dead `CF.installCostPerUnit` field removed
+  (with its dead Stage 2 override variable as a side effect), the Reports → Computation Ref
+  documentation page rewritten to read the real formula's own live output, and the zone add-on math
+  (breakfast/QA-QC/per-diem surcharges) consolidated from 3 hand-written copies into 1 shared
+  function — closing a genuinely live discrepancy (an unconfigured zone's QA/QC surcharge was
+  silently charged but never shown in either Settings preview).
+- The "Installation labor" / "Assembly labor" Price DB catalog concern raised mid-audit — **fully
+  retracted, confirmed a false alarm** caused by testing offline with no live database connection.
+  Nothing to fix; do not re-raise.
+
+## Still open, unverified this session — re-check before acting on any of these
+(carried forward unchanged from 2026-09-03 — none of this session's work touched any of these)
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed.
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced. Need: which stage, the exact field, whether it followed an
+  option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request; do not build without walking him through it again from scratch.
+- **`QT-W00000136.R1` itemized-print merged-line report** — from the 2026-08-25 session, unresolved.
+  Ask for a fresh screenshot after a hard refresh before doing anything else.
+- **Phone (`approve.html`) support for order_pause** — still not built, deliberately (see the
+  2026-08-28/29 session). Order-pause approvals wait for a laptop for now.
+- **Stage 2 field-level lock parity while paused** — Stage 2 still has no field-by-field disable
+  sweep at all (pre-existing gap); locking Stage 2 IS blocked while paused, individual inputs are not
+  hard-disabled.
+
+## Standing rules reinforced this session
+- **Offline testing (`index.html` with no login) only ever exercises fallback/seed data** —
+  `SERVICES`, `dbTemplates`/`INIT_TEMPLATES`, and anything else gated on
+  `if(!dbX.length) return;` before a wholesale replace. Never report a catalog CONTENT finding
+  (a specific name/price existing or not) from an offline test — only mechanism findings (how the
+  fallback works) are trustworthy from that environment. Content questions need either the user's
+  own live screen or a direct database query.
+- **When a "confident number, actually wrong" bug is found, prove it live BEFORE fixing, not just
+  after** — finding #4's discrepancy was reproduced against the OLD functions first (a genuinely
+  unconfigured zone showing 0 in both previews while the real engine charged for it), which is what
+  turned "these three could theoretically drift" into a concrete, provable defect worth fixing now
+  rather than filing as a someday cleanup.
+- **A settings/documentation page that describes a formula must read the real function's own live
+  return value, never hand-picked fields re-assembled from memory** — this is what makes finding
+  #3's fix durable rather than a second chance to drift; the same principle should apply to any
+  future "explain how X is computed" page in this app.
+- **Correct yourself the moment you find you were wrong, before the user has to catch it a second
+  time** — the "Assembly labor" false alarm was caught by checking the actual fallback mechanism
+  directly, the moment the same category of claim was about to be repeated, rather than waiting for
+  Rommel's screenshot to disprove it again.
