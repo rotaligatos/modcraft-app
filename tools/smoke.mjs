@@ -499,6 +499,58 @@ const PROFILES = {
           }
         }, { tabSwitchedToDrawing: true, noUploadCard: true, noApiKeyWarning: true,
              hasBomHeading: true, exactlyOneNewAnalysisButton: true });
+      /* Rommel, 2026-09-13: audited "how is installation computed" and found CF.installCostPerUnit
+         (Settings -> Cost Factors, default P1200) was dead -- grep-confirmed the real engine
+         (_recalcCore/_recalcFQCore/getInstCostByType/_instCalc) never reads it; the real per-unit
+         installation rate comes entirely from the PPIC/Cost Breakdown capacity model. Removed the
+         field, its Settings input, its Excel import/export mapping, and the now-fully-orphaned
+         Stage 2 preview variables that only ever read it (s1InstRate/instRate inside
+         renderFQCards, and fqInstRateOverride -- which had no UI input anywhere that could ever
+         set it). This check is the permanent guard: confirms the field genuinely cannot exist on
+         CF, confirms a real quotation's installation/assembly charge is unaffected (proven against
+         a captured before-removal baseline: grand 65570.97103030303, instBase 19016.25984848485,
+         assmBase 4250, identical on both stages, down to the float), and confirms importing an
+         OLD Excel template that still carries the removed header is silently ignored rather than
+         resurrecting the dead field. */
+      if (typeof window.recalc === 'function' && typeof window.recalcFQ === 'function')
+        check('CF.installCostPerUnit is gone, and installation/assembly pricing is unaffected', () => {
+          const w = window;
+          const saved = { qFabMode: w.qFabMode, qAreas: w.qAreas, qStage: w.qStage,
+                           clService: document.getElementById('cl-service') ? document.getElementById('cl-service').value : null };
+          try {
+            const fieldGone = !('installCostPerUnit' in w.CF);
+            const overrideGone = typeof w.fqInstRateOverride === 'undefined';
+
+            w.initQuotation();
+            if (document.getElementById('cl-service')) document.getElementById('cl-service').value = 'Fabrication with Installation';
+            w.qFabMode = 'carcass';
+            w.qAreas = [{ name: 'Area 1', items: [{ type: 'Kitchen Base Cabinet', qty: 5 }],
+              matItems: [], hwItems: [], svcItems: [], bomItems: [],
+              outsourceMaterials: [], outsourceHardware: [] }];
+            w.recalc();
+            const s1 = w._pCalc;
+            w.qStage = 2;
+            w.recalcFQ();
+            const s2 = w._pCalc;
+
+            // Old template still carries the removed header -- must be silently ignored, not
+            // resurrect the field or overwrite Assembly's real value.
+            w.importCFData([['Factor', 'Value'], ['Installation Cost Per Carcass', 999],
+                             ['Assembly Cost Per Carcass', 850]]);
+            const oldTemplateIgnoredSafely = !('installCostPerUnit' in w.CF) && w.CF.assemblyCostPerUnit === 850;
+
+            const r2 = n => Math.round(n * 100) / 100;
+            return {
+              fieldGone, overrideGone, oldTemplateIgnoredSafely,
+              stage1: [r2(s1.grand), r2(s1.instBase), r2(s1.assmBase)],
+              stage2: [r2(s2.grand), r2(s2.instBase), r2(s2.assmBase)]
+            };
+          } finally {
+            w.qFabMode = saved.qFabMode; w.qAreas = saved.qAreas; w.qStage = saved.qStage;
+            if (document.getElementById('cl-service') && saved.clService != null) document.getElementById('cl-service').value = saved.clService;
+          }
+        }, { fieldGone: true, overrideGone: true, oldTemplateIgnoredSafely: true,
+             stage1: [65570.97, 19016.26, 4250], stage2: [62434.97, 19016.26, 4250] });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same
