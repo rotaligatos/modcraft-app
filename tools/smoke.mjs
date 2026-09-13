@@ -551,6 +551,46 @@ const PROFILES = {
           }
         }, { fieldGone: true, overrideGone: true, oldTemplateIgnoredSafely: true,
              stage1: [65570.97, 19016.26, 4250], stage2: [62434.97, 19016.26, 4250] });
+      /* Rommel, 2026-09-13 (finding #3 of the installation-cost audit): Reports -> Computation Ref
+         -> "Installation Computation" described a formula that never matched reality -- a fictional
+         "Install cost x qty" per-unit layer (sourced from the CF.installCostPerUnit field removed
+         in finding #1), contingency applied in the wrong place, no mention of the minimum-unit
+         floor, per-type complexity, or zone add-ons. Rewritten to read every figure straight out of
+         _instCalc()'s own return object -- the SAME function the real engine calls -- so this page
+         cannot silently drift from reality the way the old one did. Drives the real renderCompRef()
+         and checks the actual rendered text: the fictional per-unit line and the old "Install cost /
+         unit" row (in the separate Cost Factors list further up the same page) are both gone, the
+         real total-daily-cost and base-rate figures (read from a live _instCalc() call, not
+         hand-typed expectations) appear verbatim, and the corrected step names/wording are present. */
+      if (typeof window.renderCompRef === 'function' && typeof window._instCalc === 'function')
+        check('Computation Ref: Installation Computation section describes the real formula, not the old fictional one', () => {
+          const w = window;
+          const ic = w._instCalc();
+          const fmt = v => '₱' + v.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          // #compref-wrap already exists in the static markup (Reports -> Computation Ref, hidden
+          // until that tab is opened) -- renderCompRef() writes into THAT element via el(id), so
+          // the result must be read back the same way (getElementById), not via a separately
+          // created node sharing the id, which a first pass here wrongly did and always read empty.
+          const savedHtml = (document.getElementById('compref-wrap') || {}).innerHTML;
+          try {
+            w.renderCompRef();
+            const html = document.getElementById('compref-wrap').innerHTML;
+            return {
+              oldPerUnitLineGone: !html.includes('Per-unit subtotal'),
+              oldInstallCostRowGone: !html.includes('Install cost / unit'),
+              hasRealTotalDailyCost: html.includes(fmt(ic.total)),
+              hasRealBaseRate: html.includes(fmt(ic.priceUnit)),
+              hasDailyCostBuildupStep: html.includes('Daily Cost Buildup'),
+              hasMinimumFloorMention: html.includes('floors to the flat generic rate'),
+              hasAssemblySeparateNote: html.includes('never a per-unit add-on to installation')
+            };
+          } finally {
+            var _cr = document.getElementById('compref-wrap');
+            if (_cr) _cr.innerHTML = savedHtml || '';
+          }
+        }, { oldPerUnitLineGone: true, oldInstallCostRowGone: true, hasRealTotalDailyCost: true,
+             hasRealBaseRate: true, hasDailyCostBuildupStep: true, hasMinimumFloorMention: true,
+             hasAssemblySeparateNote: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same
