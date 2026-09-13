@@ -656,6 +656,50 @@ const PROFILES = {
         }, { sharedFnDefaultsNonBaseZoneToTwoDays: true, qaqcExtraIsGenuinelyNonzero: true,
              engineIncludesTheSameAddon: true, previewNowShowsTheQaqcLine: true,
              popupShowsTheRealTwoDayDefault: true, popupFullRateMatchesEngineExactly: true });
+      /* 2026-09-13 follow-up audit (same bug shape as finding #4, one level lower severity): the
+         real engine's Assembly rate is a 3-level fallback chain -- per-quotation override, then
+         global CF, then a hardcoded 850 -- var assmRate=aCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850
+         (index.html:9753, :24958). The Computation Ref doc page (renderCompRef, the SAME page
+         finding #3 rewrote to stop hand-deriving formulas) re-derived this one value by hand
+         anyway: var apu=CF.assemblyCostPerUnit||0 -- a DIFFERENT final fallback (0, not 850).
+         CF.assemblyCostPerUnit defaults to 850 at declaration (line 2972) and stays populated
+         unless someone deliberately zeroes it in Settings, so this fires far less often than the
+         per-zone qaqcDays gap did -- but it is the identical class of drift: a display-only page
+         disagreeing with the real charge. Reproduced: with CF.assemblyCostPerUnit set to 0, the
+         page's own Assembly line showed "850.00 x 5 = 0.00" against the real engine's 850x5=4250
+         (assmRate falls back through to the hardcoded 850 the same way this doc page's OWN
+         fallback should, but didn't). Fixed by matching the doc page's fallback to 850, closing
+         the drift the same way _instZoneAddon closed it for zone add-ons -- this page still reads
+         plain CF.x (not aCF.x) everywhere else, deliberately: it explains the global default
+         formula, not one specific quotation's approved override. */
+      if (typeof window.renderCompRef === 'function')
+        check('Computation Ref: Assembly line uses the same 850 fallback the real engine does, not 0', () => {
+          const w = window;
+          const savedApu = w.CF.assemblyCostPerUnit;
+          const savedHtml = (document.getElementById('compref-wrap') || {}).innerHTML;
+          try {
+            w.CF.assemblyCostPerUnit = 0; // the exact unset-like state that drifted
+            w.renderCompRef();
+            const html = document.getElementById('compref-wrap').innerHTML;
+            // A whole-page substring check for "850.00" is a real false-positive risk here --
+            // an unrelated, genuinely correct "₱850.00 / carcass" display exists elsewhere on
+            // this same page (from a different fallback chain), so it must scope to the specific
+            // "Assembly:" line itself, not just search the whole rendered page for the number.
+            const idx = html.indexOf('Assembly:');
+            const assemblyLine = html.slice(idx, idx + 120);
+            // NOTE: "850.00" itself ends in the substring "0.00" (the tens digit is 0), so
+            // checking !includes('0.00') is self-defeating -- it fails on the CORRECT value too.
+            // Must check for the peso-prefixed zero specifically, not a bare "0.00" substring.
+            return {
+              assemblyLineShowsTheRealFallback: assemblyLine.includes('850.00'),
+              assemblyLineDoesNotShowZero: !assemblyLine.includes('₱0.00')
+            };
+          } finally {
+            w.CF.assemblyCostPerUnit = savedApu;
+            const _cr = document.getElementById('compref-wrap');
+            if (_cr) _cr.innerHTML = savedHtml || '';
+          }
+        }, { assemblyLineShowsTheRealFallback: true, assemblyLineDoesNotShowZero: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same
