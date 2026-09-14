@@ -8056,25 +8056,48 @@ function getHwSource(){
 // which copy came first differed between catalogues, so it behaved differently
 // for different people. Preferring the row that actually carries a unit (then a
 // non-zero price) makes the app immune to those rows whether or not the sheet is
-// ever cleaned. Exits early on a fully-populated match, so the common case still
-// costs the same single pass as before.
-function lookupInSource(src,name){
-  if(!name) return null;
-  var nl=String(name).trim().toLowerCase(), best=null;
+// ever cleaned.
+//
+// Used to be a LINEAR SCAN over src on every single call. renderBOMSection calls
+// this once per material/hardware row while rendering (index.html, the "amber =
+// not in the catalogue" check) -- a real quotation (QT-C00000016: 93 BOM cabinets,
+// 294 nested material rows) triggers ~300 calls against the ~150k-row materials
+// catalogue in ONE render pass, with zero yield point anywhere between a Project
+// List click and the finished render. That's tens of millions of string
+// comparisons on the main thread in one synchronous stack -- the actual cause of
+// a real "Page Unresponsive" freeze (reported 2026-09-14). Indexed once per
+// distinct src array instead, via a WeakMap keyed on the array's own object
+// identity -- it can never go stale: dbMaterials/dbHardware are only ever
+// REPLACED wholesale on a genuine catalog reload (never mutated in place), so a
+// reload is a new array object, the WeakMap misses, and the index rebuilds from
+// the fresh data automatically. `rank=(hasUnit?2:0)+(hasPrice?1:0)` is a numeric
+// restatement of the exact same tie-break the old scan used (unit strictly
+// outranks price; price only breaks a tie within the same unit status) --
+// order-independent, so building it once over the whole array picks the
+// identical winner per name the old early-exit scan would have found.
+var _lookupIdxCache=(typeof WeakMap!=='undefined')?new WeakMap():null;
+function _lookupIndexFor(src){
+  if(_lookupIdxCache){
+    var cached=_lookupIdxCache.get(src);
+    if(cached) return cached;
+  }
+  var idx=Object.create(null), ranks=Object.create(null);
   for(var k=0;k<src.length;k++){
     var it=src[k];
-    if(!it.name||String(it.name).trim().toLowerCase()!==nl) continue;
+    if(!it.name) continue;
+    var nl=String(it.name).trim().toLowerCase();
     var hasUnit=!!(it.unit&&String(it.unit).trim());
     var hasPrice=(parseFloat(it.price)||0)>0;
-    if(hasUnit&&hasPrice) return it;            // nothing can beat this
-    if(!best) best=it;
-    else{
-      var bU=!!(best.unit&&String(best.unit).trim());
-      var bP=(parseFloat(best.price)||0)>0;
-      if((hasUnit&&!bU)||(hasUnit===bU&&hasPrice&&!bP)) best=it;
-    }
+    var rank=(hasUnit?2:0)+(hasPrice?1:0);
+    if(!(nl in idx)||rank>ranks[nl]){ idx[nl]=it; ranks[nl]=rank; }
   }
-  return best;
+  if(_lookupIdxCache) _lookupIdxCache.set(src,idx);
+  return idx;
+}
+function lookupInSource(src,name){
+  if(!name) return null;
+  var nl=String(name).trim().toLowerCase();
+  return _lookupIndexFor(src)[nl]||null;
 }
 function addMatItem(a){
   if(!qAreas[a].matItems) qAreas[a].matItems=[];

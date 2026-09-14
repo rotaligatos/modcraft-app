@@ -700,6 +700,58 @@ const PROFILES = {
             if (_cr) _cr.innerHTML = savedHtml || '';
           }
         }, { assemblyLineShowsTheRealFallback: true, assemblyLineDoesNotShowZero: true });
+      /* 2026-09-14: real user-reported "Page Unresponsive" freeze while opening a large quotation
+         (QT-C00000016: 93 BOM cabinets, 294 nested material rows). Traced to renderBOMSection
+         calling lookupInSource() once per material/hardware row during render -- and
+         lookupInSource was a LINEAR SCAN over the whole materials catalogue (~150k rows) on every
+         single call, with zero yield point anywhere in the click-to-render chain. ~300 rows x a
+         150k-row scan is tens of millions of string comparisons in one synchronous main-thread
+         stack. Fixed by indexing the catalogue array once (WeakMap keyed on the array's own
+         identity, so it can never disagree with a real reload -- a reload replaces the array
+         object outright, the WeakMap misses, and the index rebuilds from the new data) instead of
+         rescanning per call.
+         Per this codebase's own established rule (2026-08-24/25: "a wall-clock timing regression
+         check was tried first for the freeze and REJECTED -- V8 compiles ... fast enough to clear
+         any CI-safe threshold"), this does NOT time it -- it counts the actual per-row comparison
+         operations by swapping String.prototype.toLowerCase() and drives the REAL lookupInSource(),
+         not a hand re-derivation of the old scan. A synthetic 500-row array proves: the first call
+         against it does real work (the index build), the SECOND call against the SAME array (a
+         different query name) does NOT re-touch every row -- the exact mechanism the freeze was
+         made of. Also proves the fix preserves the function's own documented "best of duplicates"
+         tie-break (unit strictly outranks price) unchanged. */
+      if (typeof window.lookupInSource === 'function')
+        check('lookupInSource: indexes the catalogue once per array instead of re-scanning on every call', () => {
+          const w = window;
+          const src = [];
+          for (let i = 0; i < 500; i++) src.push({ name: 'Item ' + i, unit: 'pc', price: 10 });
+          // The exact duplicate-name shape the function's own header comment documents: same
+          // name twice, one with a populated unit+price, one blank -- and a second pair proving
+          // unit strictly outranks price on a tie (not just "more fields wins").
+          src.push({ name: 'Dup Item', unit: '', price: 0 });
+          src.push({ name: 'Dup Item', unit: 'pc', price: 10 });
+          src.push({ name: 'Tie Item', unit: 'pc', price: 0 });
+          src.push({ name: 'Tie Item', unit: '', price: 5 });
+          let toLowerCalls = 0;
+          const origToLower = String.prototype.toLowerCase;
+          // eslint-disable-next-line no-extend-native
+          String.prototype.toLowerCase = function () { toLowerCalls++; return origToLower.call(this); };
+          try {
+            const winnerDup = w.lookupInSource(src, 'Dup Item');
+            const winnerTie = w.lookupInSource(src, 'tie item'); // case/whitespace-insensitive too
+            w.lookupInSource(src, 'Item 250'); // forces the index to actually build against this array
+            toLowerCalls = 0;
+            w.lookupInSource(src, 'Item 100'); // SECOND call, same array, different name
+            return {
+              preferredDuplicateWithUnitAndPrice: !!winnerDup && winnerDup.price === 10 && winnerDup.unit === 'pc',
+              unitOutranksPriceOnATie: !!winnerTie && winnerTie.unit === 'pc',
+              missingNameReturnsNull: w.lookupInSource(src, 'Nonexistent Thing') === null,
+              secondCallDoesNotRescanEveryRow: toLowerCalls < src.length
+            };
+          } finally {
+            String.prototype.toLowerCase = origToLower;
+          }
+        }, { preferredDuplicateWithUnitAndPrice: true, unitOutranksPriceOnATie: true,
+             missingNameReturnsNull: true, secondCallDoesNotRescanEveryRow: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same
