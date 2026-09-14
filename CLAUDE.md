@@ -10340,7 +10340,94 @@ needed none, being a pure side effect). `node tools/verify.mjs` green throughout
 deployed and confirmed live on GitHub Pages after each of the three commits
 (`4a53aef`, `bc07f86`, `ecce563`).
 
-# OPEN — updated 2026-09-13 (session end) — THIS IS THE AUTHORITATIVE LIST
+## What was changed on 2026-09-14 (session — Assembly's own audit follow-up, then a real "Page Unresponsive" freeze root-caused and fixed)
+
+Two unrelated fixes, both deployed and confirmed live. The first continued the 2026-09-13
+installation-cost audit at the user's explicit request; the second was a fresh report investigated
+from a screenshot, not assumed.
+
+### Follow-up to finding #4 — Assembly had the same drift shape, one severity level down (`a39980d`)
+Asked to go deeper on the same audit class (a formula hand-duplicated between the real engine and a
+display-only preview, silently disagreeing on some default), a background agent checked Assembly,
+Mobilization, and Bond & Insurance. **Mobilization and Bond & Insurance are clean** — both already
+share one computation function between engine and display, confirmed by tracing both, nothing to
+drift. **Assembly had it**: the real engine's rate is a 3-level fallback
+(`aCF.assemblyCostPerUnit||CF.assemblyCostPerUnit||850`, index.html:9753/:24958), but the
+Computation Ref documentation page (the SAME page finding #3 rewrote to stop hand-deriving
+formulas) re-derived this ONE value by hand anyway, with a different final fallback:
+`CF.assemblyCostPerUnit||0`.
+
+Lower real-world severity than finding #4 — `CF.assemblyCostPerUnit` defaults to 850 at declaration
+and stays populated unless someone deliberately zeroes it in Settings — but the identical drift
+shape. Reproduced before fixing: with `CF.assemblyCostPerUnit=0`, the page's own "Assembly:" line
+showed **₱0.00 × units**, while the real engine still charges **850 × units**. Fixed by matching
+the doc page's fallback to 850. Two of my own test bugs caught and corrected in the process: a first
+version checked for `"850.00"` anywhere on the whole rendered page, which passed even on the
+UNFIXED code because a different, genuinely-correct "₱850.00 / carcass" line exists elsewhere on
+the same page; and a second version's "does not show zero" check used a bare `"0.00"` substring
+test, which is self-defeating since `"850.00"` itself ends in `"0.00"`. Both caught by driving the
+real page and reading the actual rendered HTML rather than trusting the assertion's own logic.
+
+### ⚠ A real "Page Unresponsive" freeze, root-caused and fixed — measured, not estimated (`63df71c`)
+Reported with a screenshot: Chrome's own "Page Unresponsive" dialog while opening a quotation from
+the Project List (`QT-C00000016` — Hilton Hotel, visible in the screenshot as "Loading quotation…").
+Checked against live data before any code was read: this is **the single largest quotation in the
+entire database** — 610,759 characters of saved state (next-largest is 404,252; median across all
+287 quotations is 40,255; only 1 other exceeds 500KB). 27 areas, 93 BOM cabinets, 294 nested
+material rows + 505 nested hardware rows, 3 options each ~135KB (options alone account for ~2/3 of
+the total size, since each carries a full duplicate of the areas tree), 204 activity-log entries.
+Confirmed the screenshot IS this exact record mid-load, not a hypothetical.
+
+A background agent traced the full click-to-render call chain
+(`openQuotationFromDir`→`loadQuotationJson`→`restoreFullQuotationState`→`renderItems`/`recalc`) and
+confirmed **zero yield point anywhere** — one continuous synchronous main-thread stack regardless
+of quotation size, with the only `setTimeout` in the whole path scheduled AFTER the work, not a
+break within it. `recalc()`'s own O(areas×items) loops were ruled out as the cause (low thousands of
+arithmetic iterations, tens of milliseconds at most) — the real hot spot, confirmed by direct code
+read: `renderBOMSection()` calls `lookupInSource(db, row.name)` **once per material/hardware row**
+during render (the "amber = not in the catalogue" flag), and `lookupInSource()` (a linear scan with
+per-row `.trim().toLowerCase()` normalization) rescanned the **entire ~150k-row materials
+catalogue from scratch on every single call**. 294 material rows × a ~150k-row scan each is tens of
+millions of string comparisons in one blocking stack.
+
+**Measured directly** (not estimated): a synthetic reproduction matching this quotation's real shape
+(300 rows against a 150k-row catalogue) took **~71 seconds per render pass** on the unfixed code —
+and a SECOND pass over the same data was just as slow (~69s) because nothing was ever cached, so
+every subsequent edit re-paid the full cost, matching "sometimes it freezes" rather than "freezes
+once at open." Fixed by indexing the catalogue once per distinct array — a `WeakMap` keyed on the
+array's own object identity, so it can never disagree with a real reload: `dbMaterials`/`dbHardware`
+are only ever REPLACED wholesale (never mutated in place) on a genuine catalog reload, so a reload
+is automatically a new array object, the WeakMap misses, and the index rebuilds from the fresh data
+with no separate invalidation logic needed. The tie-break (`rank=(hasUnit?2:0)+(hasPrice?1:0)`) is a
+numeric restatement of the function's own documented "best of duplicates" rule (unit strictly
+outranks price, price only breaks a tie within the same unit status) — order-independent, proven to
+pick the identical winner the old early-exit scan would have found. **Post-fix, measured**: 795ms to
+build the index once, then **0.8ms** on every subsequent call against the same array — roughly a
+90,000× improvement on the case that actually matters (every re-render after the first).
+
+Per this codebase's own established rule against wall-clock timing checks in committed tests
+(2026-08-24/25: a fast machine can clear any CI-safe threshold even on genuinely unfixed code), the
+committed regression test does not time it — it counts the actual per-row `toLowerCase()` calls via
+a swapped prototype method, driving the real `lookupInSource()` directly. Confirmed genuinely
+failing against the pre-fix code (via `git stash`) before confirmed passing on the fix; the
+correctness-preserving assertions (duplicate-name tie-break, missing-name handling) pass on BOTH
+sides, proving the fix changes performance only, not behavior. `node tools/verify.mjs` green
+throughout; both fixes confirmed served live on GitHub Pages.
+
+### Method notes worth keeping
+- **A user-reported freeze is worth grounding in real data before reading any code** — querying the
+  actual quotation's size and shape first (largest in the database, by a wide margin) turned "the
+  app is slow" into a specific, falsifiable hypothesis before a single line of `index.html` was read.
+- **When a performance fix claims a mechanism, MEASURE it, don't just reason about it.** The ~71s
+  pre-fix / 0.8ms post-fix numbers came from actually running the code, not from counting loop
+  iterations on paper — and the first attempt at a synthetic pre-fix run legitimately timed out past
+  60 seconds, which was itself strong independent confirmation of severity before the exact number
+  came back.
+- **A substring-based test assertion needs its own scrutiny** — `"850.00"` and `"0.00"` both bit a
+  supposedly-defensive test in the same session; check what ELSE on a page could satisfy a loose
+  string match before trusting a check that passes.
+
+# OPEN — updated 2026-09-13 (session end) — SUPERSEDED by the 2026-09-14 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
 ## Confirmed done this session — do not re-raise
@@ -10404,3 +10491,68 @@ deployed and confirmed live on GitHub Pages after each of the three commits
   time** — the "Assembly labor" false alarm was caught by checking the actual fallback mechanism
   directly, the moment the same category of claim was about to be repeated, rather than waiting for
   Rommel's screenshot to disprove it again.
+
+# OPEN — updated 2026-09-14 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+
+## Confirmed done this session — do not re-raise
+- **The BOM catalogue-lookup freeze — the actual cause of a real "Page Unresponsive" report.**
+  `lookupInSource()` linear-scanned the ~150k-row materials catalogue on every call;
+  `renderBOMSection()` called it once per material/hardware row. Measured ~71 seconds per render
+  pass pre-fix (never improving on repeat passes — nothing was cached), 0.8ms post-fix. If a large
+  BOM-mode quotation still freezes after this, it is a DIFFERENT cause — check for a NEW O(catalogue)
+  scan introduced since, not this one recurring.
+- Assembly's Computation Ref documentation line now matches the real engine's `||850` fallback,
+  closing the same drift shape as finding #4 one severity level down (only fires if
+  `CF.assemblyCostPerUnit` is explicitly zeroed in Settings).
+- Confirmed clean, no action needed: Mobilization and Bond & Insurance do not share this bug shape
+  with the real engine — both already read from one shared computation function.
+
+## Still open, unverified this session — re-check before acting on any of these
+(carried forward unchanged from 2026-09-13 — none of this session's work touched any of these)
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed.
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced. Need: which stage, the exact field, whether it followed an
+  option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request; do not build without walking him through it again from scratch.
+- **`QT-W00000136.R1` itemized-print merged-line report** — from the 2026-08-25 session, unresolved.
+  Ask for a fresh screenshot after a hard refresh before doing anything else.
+- **Phone (`approve.html`) support for order_pause** — still not built, deliberately (see the
+  2026-08-28/29 session). Order-pause approvals wait for a laptop for now.
+- **Stage 2 field-level lock parity while paused** — Stage 2 still has no field-by-field disable
+  sweep at all (pre-existing gap); locking Stage 2 IS blocked while paused, individual inputs are not
+  hard-disabled.
+
+## New this session — worth watching, not yet a confirmed problem
+- **`lookupInSource` is called from ~12 sites** (BOM search dropdowns, outsource rows, catalog-match
+  flags, the stale-DB banner) — only the `renderBOMSection` render-time call (line ~8992) was proven
+  to be the actual freeze on THIS quotation. The others share the same fix automatically (same
+  function, same cache), but if a DIFFERENT freeze is ever reported, don't assume it's this same
+  call site — check which one actually fires in the reported scenario before re-diagnosing.
+- **The WeakMap cache assumes `dbMaterials`/`dbHardware` are only ever REPLACED, never mutated in
+  place.** If a future change starts pushing/splicing rows into those arrays directly instead of
+  reassigning them wholesale, the cache would go stale (same array identity, new content, WeakMap
+  still returns the old index). Grep for `dbMaterials.push`/`dbMaterials.splice` etc. before making
+  that kind of change, or add a version counter to the cache key.
+
+## Standing rules reinforced this session
+- **Ground a performance report in real data before reading any code.** Querying the actual
+  quotation's size/shape against the whole database's distribution (largest by a wide margin, not
+  just "large") turned a vague "sometimes it freezes" into a specific, falsifiable target before
+  touching `index.html`.
+- **Measure a performance fix, don't just reason about complexity.** ~71s → 0.8ms came from actually
+  running the code before AND after, including one synthetic run that itself timed out past 60
+  seconds — independent confirmation of severity before the exact number came back.
+- **A loose substring assertion in a test is a liability, not a safety net.** Two separate test bugs
+  in one session (`"850.00"` matching an unrelated correct line elsewhere on the page;
+  `"0.00"` matching inside `"850.00"` itself) were both caught by driving the real page and reading
+  actual rendered output — never trust a string-match check without seeing what it matched.
