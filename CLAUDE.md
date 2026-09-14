@@ -10492,6 +10492,71 @@ throughout; both fixes confirmed served live on GitHub Pages.
   directly, the moment the same category of claim was about to be repeated, rather than waiting for
   Rommel's screenshot to disprove it again.
 
+### Follow-up, same day — "not as fast as mentioned, but better" (`21e4ba6`)
+Rommel reported the freeze fix as real but incomplete — exactly right. Rather than trust the earlier
+synthetic estimate, pulled `QT-C00000016`'s ACTUAL saved state from Supabase and drove
+`restoreFullQuotationState()` against it directly (not a hand-built approximation), timed
+end-to-end.
+
+**A second, larger hot spot in the exact same render pass**: `_dlOptions()` — the search-ranking
+function built for the per-keystroke typing path (documented cost ~70-130ms/call, an acceptable
+price once per character typed) — is ALSO called once per BOM row at RENDER time
+(`renderBOMSection`, building each row's `<datalist>` from its own already-set name). On the real
+quotation that's 799 rows but only **31 distinct names**, so ~768 of those calls were re-scoring
+the whole catalogue for a query already computed moments earlier. Memoized by
+(src identity, query, max) — a pure function of its own inputs, verified: `_dlIndex(src)` is itself
+stable/cached and the ranking has no randomness, so this changes nothing about what a user sees,
+only how often it's recomputed. Same reproduce-first discipline as the first fix — one test bug
+caught and fixed along the way: the measurement window originally spanned a second, legitimately
+different query alongside the cached repeat call, so its real work inflated the count and made the
+test fail even AFTER the fix. Narrowing the window to end before the third call fixed it.
+
+**Measured end-to-end with both fixes applied, against the real Supabase state (not synthetic)**:
+`restoreFullQuotationState()` on `QT-C00000016` now completes in **~2.3 seconds** — down from a
+run that didn't even finish inside 60 seconds pre-fix. Well under the multi-second continuous-block
+threshold that triggers "Page Unresponsive," but still perceptible, matching exactly what was
+reported.
+
+**Traced the remaining ~2.3s with real stack-capture instrumentation, not guessing further:**
+- `recalc()` fires 8 times during one restore, not once. Traced with `new Error().stack` on every
+  call: `qGoStep`, `onServiceChange` ×3, `onFabModeChange`, and **`_renderScopeCore` ×2** — the
+  scope-render function itself unconditionally calls `recalc()` at its own end (line ~9510), so
+  EVERY `renderItems();recalc();` pair anywhere in this file (a pattern used at dozens of call
+  sites) silently recalculates twice. **Investigated whether to fix this — did NOT.** `_renderScope`
+  has an early return (`if(!wrap) return;`) when its target DOM element doesn't exist yet, which
+  would silently skip the internal recalc — meaning the external, seemingly-redundant `recalc()`
+  call is a genuine safety net for that edge case, not dead code. Removing it broadly across dozens
+  of call sites in a production pricing app, for a ~100ms saving out of 2.3s, was judged not worth
+  the regression risk without dedicating its own careful, single-purpose session to it.
+- The remaining large chunk (500ms-1.8s across different runs, misleadingly attributed to whichever
+  function — `_navScrollActiveIntoView` in naive profiling — happens to be the next one to touch a
+  layout-dependent DOM property) is **deferred browser layout/reflow**, confirmed by forcing
+  incremental layout at each of 204 `innerHTML` writes during the restore instead of letting the
+  cost accumulate and land wherever it lands: forcing it earlier and in smaller pieces measured only
+  ~89ms total and dropped the overall time further. This is genuine DOM-rendering cost for laying
+  out ~800 rows of CSS-grid markup across 27 areas/93 BOM cabinets — real content volume, not an
+  algorithmic bug the same way the catalogue scans were. **Not fixed this session** — the real next
+  step would be progressive/chunked rendering (render the first N areas immediately, the rest via
+  `requestIdleCallback`/`setTimeout` slices) or virtualizing the scope list, both genuine
+  architectural changes deserving their own dedicated, carefully-tested session rather than a
+  same-day addendum to two already-shipped algorithmic fixes.
+
+### Method notes, this follow-up
+- **"Better but not as fast as mentioned" was accurate feedback, not a complaint to smooth over** —
+  it correctly meant a second real bottleneck existed, found only by driving the REAL saved data
+  end-to-end rather than trusting an isolated synthetic benchmark of the first fix alone.
+- **A function that looks trivial (a `querySelector` + a `scrollTo`) can still measure as the
+  slowest thing in a trace, for a reason that has NOTHING to do with its own code** — reading any
+  layout-dependent DOM property (`.offsetLeft`, `.scrollWidth`, `.clientWidth`, etc.) forces the
+  browser to synchronously flush whatever layout work it had been deferring. Naive wall-clock
+  wrapping attributes that flush to whichever function happens to touch layout first, which is
+  frequently the WRONG culprit. Confirm with a forced-layout-at-the-write-site experiment before
+  believing the naive attribution.
+- **Not every measured cost is a bug to fix.** The `renderItems→recalc` internal call is deliberate
+  and load-bearing (a defensive fallback for a real edge case); the remaining layout cost is real
+  content volume, not a mistake. Knowing when to STOP and report rather than keep patching is as
+  important as the fixes themselves in a production pricing app.
+
 # OPEN — updated 2026-09-14 (session end) — THIS IS THE AUTHORITATIVE LIST
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
@@ -10502,11 +10567,34 @@ throughout; both fixes confirmed served live on GitHub Pages.
   pass pre-fix (never improving on repeat passes — nothing was cached), 0.8ms post-fix. If a large
   BOM-mode quotation still freezes after this, it is a DIFFERENT cause — check for a NEW O(catalogue)
   scan introduced since, not this one recurring.
+- **`_dlOptions()` re-scoring the whole catalogue per row at render time — the second, larger cost
+  in the same render pass.** Only 31 distinct names across 799 rows on the real quotation; memoized
+  by (src,query,max). Measured end-to-end against QT-C00000016's real Supabase state: full
+  `restoreFullQuotationState()` now completes in **~2.3 seconds** (down from a run that didn't
+  finish inside 60s pre-fix). Both fixes are cumulative; if a fresh report names a DIFFERENT large
+  quotation still freezing hard (multi-second continuous block, "Page Unresponsive"), that is
+  either the remaining layout-cost item below (see "known limitation"), or a genuinely new cause —
+  check before assuming either of these two recurred.
 - Assembly's Computation Ref documentation line now matches the real engine's `||850` fallback,
   closing the same drift shape as finding #4 one severity level down (only fires if
   `CF.assemblyCostPerUnit` is explicitly zeroed in Settings).
 - Confirmed clean, no action needed: Mobilization and Bond & Insurance do not share this bug shape
   with the real engine — both already read from one shared computation function.
+
+## Known limitation — not a bug, deliberately not built this session
+**A quotation this large (27 areas, ~800 material/hardware rows) still takes ~2.3 real seconds to
+open**, down from a multi-minute freeze but not instant. Traced precisely: ~2/3 of that remaining
+time is genuine browser layout/reflow cost for the sheer volume of CSS-grid DOM being laid out —
+not a fixable algorithmic bug, real content. The other ~500ms is `recalc()` firing 8 times per
+restore (traced via call-stack capture) — `renderItems()` itself unconditionally calls `recalc()`
+as a defensive fallback for when its target DOM element doesn't exist yet, so most external
+`renderItems();recalc();` pairs (a pattern at dozens of call sites across this file) ARE
+double-computing, but removing that safety net broadly was judged too risky for the ~100ms it would
+save, in a production pricing app, without its own dedicated session. **If this is ever revisited:
+the real next step is progressive/chunked rendering or virtualizing the scope list — a genuine
+architectural change, not a cache-and-index fix like the two above.** Do not attempt a sweeping
+removal of `renderItems();recalc();` pairs without first confirming, per call site, that the target
+DOM element is guaranteed to already exist at that point.
 
 ## Still open, unverified this session — re-check before acting on any of these
 (carried forward unchanged from 2026-09-13 — none of this session's work touched any of these)
@@ -10538,11 +10626,16 @@ throughout; both fixes confirmed served live on GitHub Pages.
   to be the actual freeze on THIS quotation. The others share the same fix automatically (same
   function, same cache), but if a DIFFERENT freeze is ever reported, don't assume it's this same
   call site — check which one actually fires in the reported scenario before re-diagnosing.
-- **The WeakMap cache assumes `dbMaterials`/`dbHardware` are only ever REPLACED, never mutated in
-  place.** If a future change starts pushing/splicing rows into those arrays directly instead of
-  reassigning them wholesale, the cache would go stale (same array identity, new content, WeakMap
-  still returns the old index). Grep for `dbMaterials.push`/`dbMaterials.splice` etc. before making
-  that kind of change, or add a version counter to the cache key.
+- **Both WeakMap caches (`lookupInSource`'s and `_dlOptions`' new one) assume `dbMaterials`/
+  `dbHardware` are only ever REPLACED, never mutated in place.** If a future change starts
+  pushing/splicing rows into those arrays directly instead of reassigning them wholesale, either
+  cache would go stale (same array identity, new content, WeakMap still returns the old index).
+  Grep for `dbMaterials.push`/`dbMaterials.splice` etc. before making that kind of change, or add a
+  version counter to the cache key.
+- **`_dlOptions`' memo cache is unbounded per src array** for the life of the session — bounded in
+  practice by however many distinct (query,max) pairs are ever asked, matching this file's existing
+  `_matSrcCache`/`_lookupIdxCache` style. Not expected to matter, but worth knowing if memory ever
+  becomes a concern in a very long-running tab.
 
 ## Standing rules reinforced this session
 - **Ground a performance report in real data before reading any code.** Querying the actual
