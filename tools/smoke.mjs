@@ -752,6 +752,42 @@ const PROFILES = {
           }
         }, { preferredDuplicateWithUnitAndPrice: true, unitOutranksPriceOnATie: true,
              missingNameReturnsNull: true, secondCallDoesNotRescanEveryRow: true });
+      /* 2026-09-14 follow-up: fixing lookupInSource's O(catalogue)-per-call scan made
+         QT-C00000016 "better but not as fast as mentioned" -- a second, LARGER hot spot in the
+         same render pass. _dlOptions() (built for the per-keystroke typing path, ~70-130ms/call
+         by its own design comment) is ALSO called once per BOM material/hardware row at RENDER
+         TIME (renderBOMSection, building each row's <datalist> from its own already-set name) --
+         on the real quotation that's 799 rows but only 31 DISTINCT names, so ~768 of those 799
+         calls were re-scoring the whole catalogue for a query already computed moments earlier.
+         Memoized by (src identity, query, max) -- a pure function of its own inputs, so this
+         changes nothing about the output, only how often it's recomputed. Same "count the real
+         operation, not wall-clock" rule as lookupInSource's own test: swaps String.prototype.indexOf
+         (the scoring loop's own per-row, per-word comparison) rather than timing it. */
+      if (typeof window._dlOptions === 'function')
+        check('_dlOptions: memoizes identical (src,query) results instead of rescoring the whole catalogue every render', () => {
+          const w = window;
+          const src = [];
+          for (let i = 0; i < 500; i++) src.push({ name: 'Real White MDF 4x8 Item ' + i, unit: 'sheet', price: 500 });
+          let indexOfCalls = 0;
+          const origIndexOf = String.prototype.indexOf;
+          // eslint-disable-next-line no-extend-native
+          String.prototype.indexOf = function (...args) { indexOfCalls++; return origIndexOf.apply(this, args); };
+          try {
+            const html1 = w._dlOptions(src, 'Real White MDF 4x8 Item 250', 60); // first call: real work
+            indexOfCalls = 0;
+            const html2 = w._dlOptions(src, 'Real White MDF 4x8 Item 250', 60); // SAME query, same src
+            const countAfterCachedRepeat = indexOfCalls; // measured BEFORE the next call, not across it
+            const html3 = w._dlOptions(src, 'Real White MDF 4x8 Item 100', 60); // DIFFERENT query -- must still compute correctly
+            return {
+              secondIdenticalCallSkipsRescoring: countAfterCachedRepeat < src.length,
+              resultsAreConsistent: html1 === html2,
+              differentQueryStillComputesCorrectly: html3.includes('Real White MDF 4x8 Item 100') && !html3.includes('Item 250')
+            };
+          } finally {
+            String.prototype.indexOf = origIndexOf;
+          }
+        }, { secondIdenticalCallSkipsRescoring: true, resultsAreConsistent: true,
+             differentQueryStillComputesCorrectly: true });
       /* 2026-09-08 (2): edge banding is priced by ONE combined linear-metre total regardless of
          which tape colour/type it's for -- purchasing needs to know how much of EACH colour to
          order, not just a combined figure. prodComputeServices now also groups the exact same

@@ -7812,9 +7812,28 @@ function _dlIndex(src){
   if(_dlIdx) _dlIdx.set(src,idx);
   return idx;
 }
+// Built for the per-keystroke typing path (~70-130ms/call, see the comment above _dlIndex) --
+// acceptable paid once per character typed. renderBOMSection ALSO calls this once per existing
+// row at RENDER time (index.html, building each row's <datalist> from its OWN already-set
+// name) -- on a real quotation (QT-C00000016: 799 material/hardware rows, only 31 DISTINCT
+// names) that is 799 full re-scores of the catalogue per render, most of them for a name
+// already computed moments earlier for a different row. This is a pure function of
+// (src,query,max) -- _dlIndex(src) is itself stable/cached and the ranking has no randomness --
+// so memoizing by (src identity, query, max) changes nothing about the result, only how often
+// it's recomputed. Same WeakMap-by-identity pattern as lookupInSource's own fix (2026-09-14):
+// a genuine catalogue reload replaces src outright, so the cache can never disagree with fresh
+// data. Unbounded per-src cache, matching this file's existing _matSrcCache/_lookupIdxCache
+// style -- bounded in practice by however many distinct queries a session ever asks.
+var _dlOptCache=(typeof WeakMap!=='undefined')?new WeakMap():null;
 function _dlOptions(src,query,max){
   max=max||DL_MAX;
   var q=(query||'').trim().toLowerCase();
+  var cacheKey=q+'|'+max;
+  var perSrc=null;
+  if(_dlOptCache){
+    perSrc=_dlOptCache.get(src);
+    if(perSrc&&Object.prototype.hasOwnProperty.call(perSrc,cacheKey)) return perSrc[cacheKey];
+  }
   var words=_dlTokens(q);
   var ix=_dlIndex(src), lc=ix.lc, nm=ix.nm, N=lc.length, out='', k, w;
 
@@ -7825,19 +7844,22 @@ function _dlOptions(src,query,max){
       if(q&&lc[k].indexOf(q)<0) continue;
       out+='<option value="'+escHtml(nm[k])+'">';
     }
-    return out;
+  } else {
+    var mIdx=[],mScore=[],s,ok;
+    for(k=0;k<N;k++){
+      s=lc[k]; ok=true;
+      for(w=0;w<words.length;w++){ if(s.indexOf(words[w])<0){ ok=false; break; } }
+      if(!ok) continue;
+      mIdx.push(k); mScore.push(_dlScore(s,q,words));
+    }
+    var order=mIdx.map(function(_,i){return i;});
+    if(order.length>max) order.sort(function(a,b){return mScore[b]-mScore[a];});
+    for(k=0;k<order.length&&k<max;k++) out+='<option value="'+escHtml(nm[mIdx[order[k]]])+'">';
   }
-
-  var mIdx=[],mScore=[],s,ok;
-  for(k=0;k<N;k++){
-    s=lc[k]; ok=true;
-    for(w=0;w<words.length;w++){ if(s.indexOf(words[w])<0){ ok=false; break; } }
-    if(!ok) continue;
-    mIdx.push(k); mScore.push(_dlScore(s,q,words));
+  if(_dlOptCache){
+    if(!perSrc){ perSrc=Object.create(null); _dlOptCache.set(src,perSrc); }
+    perSrc[cacheKey]=out;
   }
-  var order=mIdx.map(function(_,i){return i;});
-  if(order.length>max) order.sort(function(a,b){return mScore[b]-mScore[a];});
-  for(k=0;k<order.length&&k<max;k++) out+='<option value="'+escHtml(nm[mIdx[order[k]]])+'">';
   return out;
 }
 function _refillDatalist(dlId,src,query,max){
