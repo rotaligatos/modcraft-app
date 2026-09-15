@@ -10952,14 +10952,23 @@ card ever briefly show "On" right after clicking, even if a later visit reverts 
 - Every signature/unlock/discount/override/premium request now carries which option was active
   when it was raised, shown on the Approvals page, the bell panel, the on-quotation signature bar,
   and the phone app (`approve.html`).
-
-## ⚠ Needs Rommel's answer before it can be fixed — do not guess a fix without this
-- **Push notifications: `push_subscriptions` is completely empty, for everyone.** RLS, the Edge
-  Function, and the VAPID key are all confirmed fine. The failure is somewhere in `enablePush()`'s
-  client-side chain and cannot be pinned down further without either of: (1) the exact alert/error
-  text shown when "Turn on notifications" is clicked, or (2) whether the card ever shows "On"
-  right after clicking, even briefly, before a later visit reverts. Ask for one of these before
-  touching this again.
+- **Push notifications, follow-up (`3f51b03`).** Rommel's answer to the two diagnostic questions —
+  "no error no pop up... i just notice it that i need to again click to turn it on" — confirmed
+  neither failure nor success ever fires, matching a silent HANG in `reg.pushManager.subscribe(...)`
+  (the OS-level push-registration handshake, a known real-world Android failure mode under battery/
+  data-saver restrictions or a flaky network), not a rejection. Cannot fix the underlying OS/network
+  unreliability from here, but a hang can never again look like silence: `_withTimeout()` (a real
+  `Promise.race` against `PUSH_TIMEOUT_MS`, 20s) now turns it into a clear, actionable message and
+  re-enables the button instead of leaving it dead. Verified genuinely, not just structurally — a
+  real never-resolving promise raced against the timeout actually rejected (~121ms vs a 100ms test
+  timeout), and the full `enablePush()` flow was driven end-to-end with a simulated real-world hang
+  (permission granted, service worker resolves, subscribe never settles) confirming both the status
+  text and the button reset fire correctly. **Still needs Rommel's own device to confirm this
+  resolves the actual symptom** — the underlying flakiness this works around cannot be reproduced
+  from here, so this closes the "silent forever" failure mode but may not be the last word if his
+  device's push registration is failing for a reason a timeout alone can't route around (e.g. it
+  genuinely never succeeds even given unlimited time). If it recurs, the NEW status text will name
+  what actually happened instead of nothing.
 
 ## Still open, unverified this session — re-check before acting on any of these
 (carried forward unchanged from 2026-09-15 — none of this session's work touched any of these)
