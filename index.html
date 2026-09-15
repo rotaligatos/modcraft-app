@@ -10284,6 +10284,21 @@ function _isClientApprovedEntry(e){
   // This is not the old rank fallback: "In Final Quotation" and below still do not count.
   return st==='FQ Approved';
 }
+// "Approve & proceed to Stage 2" ALSO permanently records that the CLIENT approved this Initial
+// Quotation — feeding win-rate/revenue KPIs Rommel has called critical to track. The button's own
+// label never said so, and it happened silently on every click with no separate confirmation —
+// Stephanie reported exactly this: "the quotation automatically shows approved by client which
+// she claims she did not push." Confirmed in the real activity log (2026-09-11, QT-M00000147):
+// "Client approved the Initial Quotation." was logged in the SAME synchronous call as "Quotation
+// approved — Stage 2 unlocked", both from one click of this one button.
+//
+// Fixed by making the side effect explicit rather than silent — a plain confirm, using the
+// generic _confirm() modal already used elsewhere in this file, naming exactly what will be
+// recorded. Deliberately does NOT add a way to advance to Stage 2 WITHOUT recording client
+// approval (that would undermine the very KPI tracking this exists for, per Rommel's own stated
+// requirement in _recordStage1ClientApproval's comment) — it only makes sure nobody is ever
+// surprised by it again. Skipped entirely once approval is already on record (qClientApproved),
+// so re-clicking an already-approved quotation never re-asks a question already answered.
 function doApprove() {
   if(qCancelled){ showToast('This quotation was cancelled — the client declined to proceed.'); return; }
   if(!qLocked){
@@ -10292,6 +10307,12 @@ function doApprove() {
   }
   var name=(el("cl-name")?el("cl-name").value:"")+(el("cl-bizname")?el("cl-bizname").value:"");
   if(!name.trim()){alert("Please fill in the client or business name first.");return;}
+  if(qClientApproved){ _doApproveProceed(); return; }
+  _confirm('This will record that the CLIENT has approved this Initial Quotation, and unlock Stage 2.\n\n'
+    +'This is tracked for win-rate and revenue reporting — has the client actually approved?',
+    _doApproveProceed);
+}
+function _doApproveProceed() {
   // If multiple active options exist, ask which one was approved
   var activeOpts=qOptionsList.filter(function(o){return o.status==='active';});
   if(activeOpts.length>1){
@@ -13276,6 +13297,52 @@ function _refreshOpenQuotationPauseState(){
     if(typeof updateLockUI==='function') try{ updateLockUI(); }catch(e){}
     if(typeof updateFQLockUI==='function') try{ updateFQLockUI(); }catch(e2){}
     if(typeof renderOrderPauseBanner==='function') try{ renderOrderPauseBanner(); }catch(e3){}
+  });
+}
+
+// Same shape of race as order-pause above, for the lock flag itself: an unlock approved by
+// someone else (from the Approvals page or the phone) is applied correctly and durably to
+// Sheets/Supabase by _persistApprovedFieldToQuotation() REGARDLESS of who approves it -- but
+// nothing ever told an already-open tab that happened. That tab's qLocked stays true, and its
+// very next ordinary save (gSaveQuotation writes locked:qLocked unconditionally on every save)
+// silently clobbers the just-applied unlock back to true, with no new "Quotation locked." log
+// line, since it's a side effect of a routine save, not an explicit re-lock. Confirmed live on
+// QT-M00000142 (2026-09-15): Allan's approved unlock genuinely wrote locked=false at that
+// moment, but the FINAL stored state read locked=true with no re-lock ever logged in between --
+// exactly this race, not an identity-based bug (it "works when Rommel does it" only because he
+// typically unlocks from the SAME tab that has the quotation open, so there's no second stale
+// tab to clash with).
+//
+// Deliberately narrow, matching _refreshOpenQuotationPauseState's own philosophy: syncs only the
+// fields an unlock (Stage 1 or Stage 2) actually resets, never a wholesale state reload -- a full
+// restoreFullQuotationState() here would also discard whatever the user is mid-typing.
+function _refreshOpenQuotationLockState(){
+  var serial=qBaseSerial||qSerial;
+  if(!serial||/^DRAFT-/.test(serial)||!gToken) return;
+  loadQuotationJson(serial,function(state){
+    if(!state) return;
+    var changed=false;
+    if(!!state.locked!==!!qLocked){
+      qLocked=!!state.locked;
+      qSentStatus=state.sentStatus||'';
+      qRevisionPending=!!state.revisionPending;
+      qClientApproved=!!state.clientApproved; qClientApprovedAt=state.clientApprovedAt||'';
+      qApproved=!!state.approved; qInitApprovedAt=state.initApprovedAt||'';
+      changed=true;
+      showToast(qLocked?'This quotation was just locked elsewhere.':'This quotation was just unlocked elsewhere — you can edit it again.');
+    }
+    if(!!state.fqLocked!==!!fqLocked){
+      fqLocked=!!state.fqLocked;
+      fqSentStatus=state.fqSentStatus||'';
+      fqClientApproved=!!state.fqClientApproved; fqClientApprovedAt=state.fqClientApprovedAt||'';
+      changed=true;
+      showToast(fqLocked?'The Final Quotation was just locked elsewhere.':'The Final Quotation was just unlocked elsewhere — you can edit it again.');
+    }
+    if(!changed) return;
+    if(typeof updateLockUI==='function') try{ updateLockUI(); }catch(e){}
+    if(typeof updateFQLockUI==='function') try{ updateFQLockUI(); }catch(e2){}
+    if(typeof updateSentStatus==='function') try{ updateSentStatus(); }catch(e3){}
+    if(typeof _updateQStatusBadge==='function') try{ _updateQStatusBadge(); }catch(e4){}
   });
 }
 
@@ -18433,7 +18500,16 @@ function rerouteSignature(idx){
     (n.from||'A colleague')+' is requesting your signature — '+_sigLabel(slot)+' on '+n.serial+' for '+n.client
       +'. Open the Approvals tab and enter your PIN to sign.','normal',
     'signature_request:'+slot+':'+n.serial,function(){});
-  logActivity(_sigLabel(slot)+' signature on '+n.serial+' re-routed from '+was+' to '+found.name+'.');
+  // n.serial is the request's OWN target quotation, not necessarily whatever's open in THIS
+  // browser -- re-routing is usually done from the Approvals page, often while a completely
+  // different quotation (or a draft) is open. logActivity(action) with no explicit serial
+  // defaults to qSerial||qDraftKey||'' (whatever's currently open), so every re-route was being
+  // logged onto the wrong quotation's history -- confirmed live 2026-09-15: two re-routes for
+  // QT-M00000145/QT-M00000155 were filed under an unrelated serial and a draft key instead.
+  // Passing n.serial explicitly is the same fix this class of bug has needed every time it's
+  // been found elsewhere (sigSlot/to_email/decision/applied/orderId -- see this file's own
+  // history of the "propagation trap").
+  logActivity(_sigLabel(slot)+' signature on '+n.serial+' re-routed from '+was+' to '+found.name+'.',n.serial);
   showToast('✓ Re-routed to '+found.name);
   _updateNotifBadge();
   renderApprovals();
@@ -27863,6 +27939,10 @@ function gShowApp(){
       // on-demand triggers: tab refocus, notif panel open) rather than adding a network round-trip
       // to every save.
       try{ _refreshOpenQuotationPauseState(); }catch(e2){ console.warn('[order-pause] refresh pass failed',e2); }
+      // Same reasoning again, for the lock flag itself -- see _refreshOpenQuotationLockState's
+      // own comment for the exact race this closes (2026-09-15, reported: "when someone unlocked
+      // the quotation except from me, its not unlocked").
+      try{ _refreshOpenQuotationLockState(); }catch(e2b){ console.warn('[lock] refresh pass failed',e2b); }
       // ── Approver side: ring bell when new requests arrive ──────────────
       var newPending=NOTIFS.filter(function(n){return n.status==='pending';}).length;
       _updateNotifBadge();

@@ -1439,6 +1439,62 @@ const PROFILES = {
             if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
           }
         }, { carriedAmountUsed: true, carriedDecisionUsed: true, noCarryReproducesOldFailure: true });
+      /* 2026-09-15: Rommel reported "whenever I reroute for signature, the signature doesn't
+         appear" -- traced with real activity-log data to TWO distinct causes. The functional one
+         (Cebu World Laminate's Noted-by fallback left blank in Settings, so the auto-escalation
+         after Checked-by has nowhere to go) is a configuration gap, not a bug -- Rommel fixed it
+         directly in Settings. This is the SECOND, genuinely code cause found alongside it: two
+         re-routes logged live on 2026-09-15 landed under the WRONG serial -- one under an
+         unrelated quotation ("QT-M00000153" in the serial column, but the action text itself said
+         "...on QT-M00000145 re-routed..."), one under a bare draft key ("DRAFT-3a57d2", action
+         text said "...on QT-M00000155..."). rerouteSignature()'s own logActivity() call passed
+         only the action string, no explicit serial -- and logActivity(action) with no second
+         argument defaults to qSerial||qDraftKey||'' (whatever's open in THIS browser), which is
+         essentially never the actual target when re-routing is done from the Approvals page. Same
+         "propagation trap" class this file has hit repeatedly (sigSlot/to_email/decision/applied/
+         orderId) -- fixed by passing n.serial (the request's own target) explicitly, the same fix
+         every prior instance needed. Drives the real function with a fake NOTIFS entry and a
+         DIFFERENT quotation "open" in this browser, proving the log lands on the request's real
+         target and not on whatever happens to be on screen. */
+      if (typeof window.rerouteSignature === 'function')
+        check('rerouteSignature: logs against the request\'s own target quotation, not whatever is open here', () => {
+          const w = window;
+          const saved = { NOTIFS: w.NOTIFS, findSig: w._findSignatory, saveReq: w.gSaveApprovalRequest,
+                           sendMsg: w.gSendMessage, logActivity: w.logActivity, gUser: w.gUser,
+                           currentRole: w.currentRole, qSerial: w.qSerial, qDraftKey: w.qDraftKey,
+                           updateBadge: w._updateNotifBadge, renderAppr: w.renderApprovals };
+          try {
+            w.gUser = { email: 'admin@test.com', name: 'Test Admin' };
+            w.currentRole = 'Admin';
+            // A DIFFERENT quotation is the one "open" in this browser -- exactly the real-world
+            // shape (re-routing is done from the Approvals page, not from the target quotation).
+            w.qSerial = 'QT-OPEN-ELSEWHERE'; w.qDraftKey = '';
+            w.NOTIFS = [{ type: 'signature', status: 'pending', sigSlot: 'checked',
+                          serial: 'QT-TARGET-0042', client: 'Test Client', company: 'World Class Laminate, Inc.',
+                          fromEmail: 'requester@test.com', approverEmail: 'old-approver@test.com' }];
+            w._findSignatory = () => ({ email: 'new-approver@test.com', name: 'New Approver' });
+            w.gSaveApprovalRequest = () => {};
+            w.gSendMessage = () => {};
+            w._updateNotifBadge = () => {};
+            w.renderApprovals = () => {};
+            const calls = [];
+            w.logActivity = function (action, serial) { calls.push({ action, serial }); };
+            w.rerouteSignature(0);
+            const call = calls[0];
+            return {
+              loggedOnce: calls.length === 1,
+              loggedAgainstTheRealTarget: !!call && call.serial === 'QT-TARGET-0042',
+              notAgainstWhateverWasOpen: !!call && call.serial !== 'QT-OPEN-ELSEWHERE',
+              messageNamesTheRealTarget: !!call && call.action.indexOf('QT-TARGET-0042') >= 0
+            };
+          } finally {
+            w.NOTIFS = saved.NOTIFS; w._findSignatory = saved.findSig; w.gSaveApprovalRequest = saved.saveReq;
+            w.gSendMessage = saved.sendMsg; w.logActivity = saved.logActivity; w.gUser = saved.gUser;
+            w.currentRole = saved.currentRole; w.qSerial = saved.qSerial; w.qDraftKey = saved.qDraftKey;
+            w._updateNotifBadge = saved.updateBadge; w.renderApprovals = saved.renderAppr;
+          }
+        }, { loggedOnce: true, loggedAgainstTheRealTarget: true, notAgainstWhateverWasOpen: true,
+             messageNamesTheRealTarget: true });
       /* Rommel, 2026-08-19: "trying to adjust the override contingency and it seems it's not
          working." Root cause: _readCCFFields() used `parseFloat(x)||CF.fabContingency` for the
          three ...Contingency fields — 0 is falsy in JS, so typing 0 to zero out a rate silently
@@ -2603,6 +2659,68 @@ const PROFILES = {
             cancelRunsAfterMutate: cancelIdx > mutateIdx,
           };
         }, { fqBranchClearsState: true, s1BranchClearsState: true, cancelCallPresent: true, cancelRunsAfterMutate: true });
+      /* 2026-09-15: Rommel reported Stephanie "always encountered that the quotation automatically
+         show that a quotation has been approved by the client which she claims she did not push."
+         Confirmed against the real activity log, down to the millisecond (QT-M00000147,
+         2026-09-11): "Client approved the Initial Quotation." logged at 01:44:35.033396 and
+         "Quotation approved — Stage 2 unlocked" at 01:44:35.040231 -- both from ONE click of the
+         single button labelled "Approve & proceed to Stage 2", which never said it also recorded
+         client approval. Distinct from the 2026-08-27 fix above: that fix made UNLOCK correctly
+         REVERSE the qApproved/qClientApproved coupling; this fix does not touch the coupling
+         itself (still deliberately together, per qClientApproved's own comment) -- it makes the
+         moment they get SET an explicit, confirmed one instead of a silent side effect of an
+         ambiguously-worded button. Proves: the confirm names what it will record; declining it
+         (the real _confirm modal's onOk simply never getting called, the same as clicking
+         Cancel) leaves NOTHING recorded, not even qApproved; confirming proceeds with the exact
+         same full approval as before; and re-approving an already-approved quotation skips the
+         question entirely rather than re-asking something already on record. */
+      if (typeof window.doApprove === 'function' && typeof window._doApproveProceed === 'function')
+        check('doApprove: confirms before recording client approval, and skips re-asking once already approved', () => {
+          const w = window;
+          const saved = { qCancelled: w.qCancelled, qLocked: w.qLocked, qApproved: w.qApproved,
+                           qClientApproved: w.qClientApproved, qClientApprovedAt: w.qClientApprovedAt,
+                           qOptionsList: w.qOptionsList, qActiveOptionId: w.qActiveOptionId, _pCalc: w._pCalc,
+                           _confirm: w._confirm, gSaveQuotation: w.gSaveQuotation, updateLockUI: w.updateLockUI,
+                           goStage: w.goStage, logActivity: w.logActivity,
+                           clName: el('cl-name') ? el('cl-name').value : null,
+                           clBiz: el('cl-bizname') ? el('cl-bizname').value : null };
+          try {
+            w.qCancelled = false; w.qLocked = true; w.qOptionsList = []; w.qActiveOptionId = 0;
+            w._pCalc = { grand: 1000 };
+            if (el('cl-name')) el('cl-name').value = 'Test Client';
+            if (el('cl-bizname')) el('cl-bizname').value = '';
+            w.gSaveQuotation = () => {}; w.updateLockUI = () => {}; w.goStage = () => {};
+            w.logActivity = () => {};
+
+            let confirmMsg = null;
+            w.qApproved = false; w.qClientApproved = false; w.qClientApprovedAt = '';
+            w._confirm = (msg) => { confirmMsg = msg; };   // capture only -- never call onOk: simulates Cancel
+            w.doApprove();
+            const declinedRecordsNothing = { qApproved: w.qApproved, qClientApproved: w.qClientApproved };
+            const namesWhatItRecords = !!confirmMsg && /client/i.test(confirmMsg) && /approv/i.test(confirmMsg);
+
+            w.qApproved = false; w.qClientApproved = false; w.qClientApprovedAt = '';
+            w._confirm = (msg, onOk) => { onOk(); };   // simulates clicking Yes
+            w.doApprove();
+            const confirmingRecordsApproval = { qApproved: w.qApproved, qClientApproved: w.qClientApproved };
+
+            let askedAgain = false;
+            w._confirm = () => { askedAgain = true; };
+            w.doApprove();   // qClientApproved is already true from the previous step
+            const skipsWhenAlreadyApproved = !askedAgain;
+
+            return { declinedRecordsNothing, namesWhatItRecords, confirmingRecordsApproval, skipsWhenAlreadyApproved };
+          } finally {
+            w.qCancelled = saved.qCancelled; w.qLocked = saved.qLocked; w.qApproved = saved.qApproved;
+            w.qClientApproved = saved.qClientApproved; w.qClientApprovedAt = saved.qClientApprovedAt;
+            w.qOptionsList = saved.qOptionsList; w.qActiveOptionId = saved.qActiveOptionId; w._pCalc = saved._pCalc;
+            w._confirm = saved._confirm; w.gSaveQuotation = saved.gSaveQuotation; w.updateLockUI = saved.updateLockUI;
+            w.goStage = saved.goStage; w.logActivity = saved.logActivity;
+            if (el('cl-name') && saved.clName !== null) el('cl-name').value = saved.clName;
+            if (el('cl-bizname') && saved.clBiz !== null) el('cl-bizname').value = saved.clBiz;
+          }
+        }, { declinedRecordsNothing: { qApproved: false, qClientApproved: false }, namesWhatItRecords: true,
+             confirmingRecordsApproval: { qApproved: true, qClientApproved: true }, skipsWhenAlreadyApproved: true });
       // Rommel, 2026-08-27: "add kg uom on the outsource" -- an outsourced material bought by
       // weight (e.g. a sheet good priced per kg rather than per piece) had no matching unit in the
       // dropdown. Local to renderOutsourceSection's own uopts list, so it can't affect BOM mode's
@@ -3222,6 +3340,84 @@ const PROFILES = {
       if (typeof window._pollApprovalsNow === 'function')
         check('_pollApprovalsNow: the pause-reconcile pass is wired into the same poll as everything else',
           () => /_refreshOpenQuotationPauseState\(\)/.test(window._pollApprovalsNow.toString()), true);
+      /* 2026-09-15: Rommel reported "when someone unlocked the quotation except from me, its not
+         unlocked." Confirmed against real activity-log data (QT-M00000142): Allan approved an
+         unlock and _persistApprovedFieldToQuotation genuinely wrote locked=false to Sheets/
+         Supabase at that moment -- the write itself was never broken, and there is no
+         identity-based gate anywhere in that path. The gap is exactly the same shape as the
+         order-pause race above: nothing ever told Stephanie's ALREADY-OPEN tab that the unlock
+         happened, so its qLocked stayed true, and its very next ordinary save (gSaveQuotation
+         writes locked:qLocked unconditionally on every save) silently clobbered the just-applied
+         unlock back to true -- with no new "Quotation locked." log line, since that is a side
+         effect of a routine save, not an explicit re-lock. "Works when Rommel does it" only
+         because he typically unlocks from the SAME tab that has the quotation open, so there is
+         no second stale tab to clash with.
+         Fixed the identical way the pause race was fixed: a narrow, deliberately non-wholesale
+         reconciliation piggybacked on the same 60s poll. Proves both directions (a server-side
+         unlock this tab did not know about is picked up; a server-side lock this tab did not know
+         about is picked up too), the no-op case, and that it covers BOTH stages (qLocked and
+         fqLocked are independent flags with their own hand-duplicated Stage 1/Stage 2 logic
+         throughout this file -- checked per this file's own standing rule to always verify both
+         stages, not just the one that was reported). */
+      if (typeof window._refreshOpenQuotationLockState === 'function')
+        check('_refreshOpenQuotationLockState: reconciles a stale tab\'s lock flags against the server, both stages', () => {
+          const w = window;
+          const saved = { gToken: w.gToken, qSerial: w.qSerial, qBaseSerial: w.qBaseSerial,
+                           qLocked: w.qLocked, fqLocked: w.fqLocked, qSentStatus: w.qSentStatus,
+                           qClientApproved: w.qClientApproved, loadFn: w.loadQuotationJson,
+                           updateLockUI: w.updateLockUI, updateFQLockUI: w.updateFQLockUI,
+                           updateSentStatus: w.updateSentStatus, updateBadge: w._updateQStatusBadge };
+          let uiRefreshed = 0;
+          try {
+            w.gToken = 'test-token';
+            w.qSerial = 'QT-W00000901'; w.qBaseSerial = 'QT-W00000901';
+            w.updateLockUI = () => { uiRefreshed++; };
+            w.updateFQLockUI = () => { uiRefreshed++; };
+            w.updateSentStatus = () => { uiRefreshed++; };
+            w._updateQStatusBadge = () => { uiRefreshed++; };
+            // Case 1: THE reported bug -- this tab still thinks it's locked, someone else's
+            // approved unlock already wrote locked=false (and the fields it resets) server-side.
+            w.qLocked = true; w.qSentStatus = 'Shared via Viber'; w.qClientApproved = true;
+            w.loadQuotationJson = (serial, cb) => cb({ locked: false, sentStatus: '', revisionPending: true,
+              clientApproved: false, clientApprovedAt: '', approved: false, initApprovedAt: '' });
+            uiRefreshed = 0;
+            w._refreshOpenQuotationLockState();
+            const pickedUpStaleUnlock = { locked: w.qLocked, sentStatus: w.qSentStatus,
+              clientApproved: w.qClientApproved, uiRefreshed: uiRefreshed > 0 };
+            // Case 2: the reverse -- server says locked, this tab still thinks it's unlocked.
+            w.qLocked = false;
+            w.loadQuotationJson = (serial, cb) => cb({ locked: true });
+            uiRefreshed = 0;
+            w._refreshOpenQuotationLockState();
+            const pickedUpServerLock = { locked: w.qLocked, uiRefreshed: uiRefreshed > 0 };
+            // Case 3: nothing changed -- must not needlessly re-render.
+            w.qLocked = true;
+            w.loadQuotationJson = (serial, cb) => cb({ locked: true });
+            uiRefreshed = 0;
+            w._refreshOpenQuotationLockState();
+            const noOpWhenUnchanged = uiRefreshed === 0;
+            // Case 4: Stage 2's OWN flag, independent of Stage 1's -- an FQ unlock elsewhere must
+            // be picked up even while qLocked itself is unchanged.
+            w.qLocked = true; w.fqLocked = true;
+            w.loadQuotationJson = (serial, cb) => cb({ locked: true, fqLocked: false });
+            uiRefreshed = 0;
+            w._refreshOpenQuotationLockState();
+            const pickedUpFQUnlock = { fqLocked: w.fqLocked, qLockedUntouched: w.qLocked === true, uiRefreshed: uiRefreshed > 0 };
+            return { pickedUpStaleUnlock, pickedUpServerLock, noOpWhenUnchanged, pickedUpFQUnlock };
+          } finally {
+            w.gToken = saved.gToken; w.qSerial = saved.qSerial; w.qBaseSerial = saved.qBaseSerial;
+            w.qLocked = saved.qLocked; w.fqLocked = saved.fqLocked; w.qSentStatus = saved.qSentStatus;
+            w.qClientApproved = saved.qClientApproved; w.loadQuotationJson = saved.loadFn;
+            w.updateLockUI = saved.updateLockUI; w.updateFQLockUI = saved.updateFQLockUI;
+            w.updateSentStatus = saved.updateSentStatus; w._updateQStatusBadge = saved.updateBadge;
+          }
+        }, { pickedUpStaleUnlock: { locked: false, sentStatus: '', clientApproved: false, uiRefreshed: true },
+             pickedUpServerLock: { locked: true, uiRefreshed: true },
+             noOpWhenUnchanged: true,
+             pickedUpFQUnlock: { fqLocked: false, qLockedUntouched: true, uiRefreshed: true } });
+      if (typeof window._pollApprovalsNow === 'function')
+        check('_pollApprovalsNow: the lock-reconcile pass is wired into the same poll as everything else',
+          () => /_refreshOpenQuotationLockState\(\)/.test(window._pollApprovalsNow.toString()), true);
       return out;
     }
   },
