@@ -1439,6 +1439,149 @@ const PROFILES = {
             if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
           }
         }, { carriedAmountUsed: true, carriedDecisionUsed: true, noCarryReproducesOldFailure: true });
+      /* 2026-09-16: Rommel reported "I am somehow blinded on what option am I signing or
+         unlocking since it doesnt show what option it is" -- a quotation's lock state genuinely
+         IS per-option (captureQuotationSnapshot carries `locked` inside each option's own
+         snapshot; qOptionsList[i].locked is maintained directly), and a signature attests to
+         whichever option's pricing was active when it was requested -- but no approval request of
+         ANY type ever recorded which option that was. Added optionId/optionLabel, captured once at
+         request-creation time via the new _apprOptionContext() (reusing getDisplaySerial's own
+         qActiveOptionId/qOptionsList lookup rather than inventing a second one), and threaded
+         through every one of this file's own documented "propagation trap" gates: the payload at
+         creation (_sendSignatureRequest, submitApprovalRequest -- BOTH its req object and its
+         separate NOTIFS.unshift push), _apprMergeWithKnown's hardcoded key list,
+         supaUpsertApprovalRequest's hardcoded payload object, gLoadApprovalRequests' Supabase-row
+         mapping, _mergeApprovalReqsIntoNotifs' two hardcoded field lists, and THREE separate
+         direct-Supabase-write sites that bypass gSaveApprovalRequest's merge entirely
+         (doApprovalAction's updReq, and -- found while fixing this, not in the original report --
+         acceptCounter's own updReq, the same bypass shape doApprovalAction had). Displayed via one
+         shared badge (_apprOptBadge) on _apprQuotLink, which both the Approvals page and the bell
+         panel already call -- one fix, both surfaces -- and on the on-quotation signature bar's
+         own pending pill, which is the "also in the app Modcraft signature" half of the report.
+         This check drives the REAL creation functions (not hand-built request objects) with a
+         real multi-option qOptionsList, proving the label survives a real _apprMergeWithKnown pass
+         (simulating what a reload does) and renders correctly via the real display helpers. */
+      if (typeof window._apprOptionContext === 'function')
+        check('_apprOptionContext: labels the active option, or nothing when there is none', () => {
+          const w = window;
+          const saved = { qActiveOptionId: w.qActiveOptionId, qOptionsList: w.qOptionsList };
+          try {
+            w.qOptionsList = [{ id: 1, label: 'Option 1' }, { id: 2, label: 'Option 2' }];
+            w.qActiveOptionId = 2;
+            const withOption = w._apprOptionContext();
+            w.qActiveOptionId = 0;
+            const noOption = w._apprOptionContext();
+            w.qActiveOptionId = 5; w.qOptionsList = [];   // stale id, no matching option -- still labels sensibly
+            const missingFromList = w._apprOptionContext();
+            return {
+              withOption: { optionId: withOption.optionId, optionLabel: withOption.optionLabel },
+              noOption: { optionId: noOption.optionId, optionLabel: noOption.optionLabel },
+              missingFromList: { optionId: missingFromList.optionId, optionLabel: missingFromList.optionLabel }
+            };
+          } finally { w.qActiveOptionId = saved.qActiveOptionId; w.qOptionsList = saved.qOptionsList; }
+        }, { withOption: { optionId: 2, optionLabel: 'Option 2' }, noOption: { optionId: 0, optionLabel: '' },
+             missingFromList: { optionId: 5, optionLabel: 'Option 5' } });
+      if (typeof window._sendSignatureRequest === 'function' && typeof window._apprMergeWithKnown === 'function'
+          && typeof window._apprQuotLink === 'function')
+        check('_sendSignatureRequest: carries option context all the way through a merge pass and into the shared display helper', () => {
+          const w = window;
+          const saved = { findSig: w._findSignatory, saveReq: w.gSaveApprovalRequest, sendMsg: w.gSendMessage,
+                           pushReq: w._pushApprovalRequest, pCalc: w._pCalc, gUser: w.gUser,
+                           qActiveOptionId: w.qActiveOptionId, qOptionsList: w.qOptionsList,
+                           notifsLen: w.NOTIFS ? w.NOTIFS.length : 0 };
+          try {
+            w._findSignatory = () => ({ email: 'approver@test.com', name: 'Test Approver' });
+            w.gSaveApprovalRequest = () => {};
+            w.gSendMessage = () => {};
+            w._pushApprovalRequest = () => {};
+            w.gUser = { email: 'signer@test.com', name: 'Test Signer' };
+            w.qOptionsList = [{ id: 3, label: 'Option 3' }];
+            w.qActiveOptionId = 3;
+            const req = w._sendSignatureRequest('checked', false, 'QT-TEST-0100', 'Test Client');
+            const capturedOnCreation = { optionId: req && req.optionId, optionLabel: req && req.optionLabel };
+            // Simulate a reload: an incoming Supabase row (fresh optionId/optionLabel) merges over
+            // the in-memory NOTIFS entry _sendSignatureRequest just created.
+            const merged = w._apprMergeWithKnown({ id: req.id, status: 'pending' });
+            const survivesMerge = { optionId: merged.optionId, optionLabel: merged.optionLabel };
+            const badgeHtml = w._apprQuotLink(req, 12);
+            return {
+              capturedOnCreation, survivesMerge,
+              badgeShowsTheOption: badgeHtml.indexOf('Option 3') > -1
+            };
+          } finally {
+            w._findSignatory = saved.findSig; w.gSaveApprovalRequest = saved.saveReq; w.gSendMessage = saved.sendMsg;
+            w._pushApprovalRequest = saved.pushReq; w._pCalc = saved.pCalc; w.gUser = saved.gUser;
+            w.qActiveOptionId = saved.qActiveOptionId; w.qOptionsList = saved.qOptionsList;
+            if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
+          }
+        }, { capturedOnCreation: { optionId: 3, optionLabel: 'Option 3' },
+             survivesMerge: { optionId: 3, optionLabel: 'Option 3' }, badgeShowsTheOption: true });
+      if (typeof window._apprQuotLink === 'function')
+        check('_apprQuotLink: no stray badge on a request with no option context (the common single-option case)', () => {
+          const w = window;
+          // NOTE: _apprQuotLink's own serial styling legitimately uses color:var(--pill-navy) --
+          // a loose `indexOf('pill-navy')` check would match that CSS reference too, not just the
+          // option badge's actual class attribute. Check for the badge's own opening tag instead.
+          const html = w._apprQuotLink({ client: 'Test Client', serial: 'QT-TEST-0101', optionLabel: '' }, 12);
+          return { noOptionPillRendered: html.indexOf('class="pill pill-navy"') === -1 };
+        }, { noOptionPillRendered: true });
+      if (typeof window.submitApprovalRequest === 'function' && typeof window._sreqCtx === 'object')
+        check('submitApprovalRequest (unlock): carries option context too, not just signature requests', () => {
+          const w = window;
+          const saved = { sreqCtx: w._sreqCtx, reasonGate: w._reasonGate, findApproverForAction: w.findApproverForAction,
+                           findApprover: w.findApprover, gSendMessage: w.gSendMessage, gUser: w.gUser,
+                           currentUserCompany: w.currentUserCompany, _pCalc: w._pCalc,
+                           qActiveOptionId: w.qActiveOptionId, qOptionsList: w.qOptionsList,
+                           notifsLen: w.NOTIFS ? w.NOTIFS.length : 0 };
+          try {
+            w._reasonGate = () => true;   // bypass the reason-box requirement -- not what this test is about
+            w.findApproverForAction = () => ({ name: 'Test Approver', email: 'approver@test.com' });
+            w.gSendMessage = () => {};
+            w.gUser = { email: 'requester@test.com', name: 'Test Requester' };
+            w._pCalc = { grand: 5000 };
+            w.qOptionsList = [{ id: 7, label: 'Option 7' }];
+            w.qActiveOptionId = 7;
+            w._sreqCtx = { type: 'unlock', data: { ctx: 's1' } };
+            w.submitApprovalRequest();
+            const created = w.NOTIFS[0];
+            return { optionId: created && created.optionId, optionLabel: created && created.optionLabel };
+          } finally {
+            w._sreqCtx = saved.sreqCtx; w._reasonGate = saved.reasonGate; w.findApproverForAction = saved.findApproverForAction;
+            w.findApprover = saved.findApprover; w.gSendMessage = saved.gSendMessage; w.gUser = saved.gUser;
+            w.currentUserCompany = saved.currentUserCompany; w._pCalc = saved._pCalc;
+            w.qActiveOptionId = saved.qActiveOptionId; w.qOptionsList = saved.qOptionsList;
+            if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
+          }
+        }, { optionId: 7, optionLabel: 'Option 7' });
+      if (typeof window.renderSignatureBar === 'function' && typeof window._sigPendingFor === 'function')
+        check('renderSignatureBar: the pending pill shows which option the signature was requested against', () => {
+          const w = window;
+          // #sig-bar already exists in the static markup (hidden until the quotation is locked) --
+          // renderSignatureBar() writes into THAT one via el()/getElementById, so the result must
+          // be read back the same way, not from a same-id lookalike created just for this test
+          // (the exact mistake this file's own Computation Ref test was written to avoid).
+          const realBar = document.getElementById('sig-bar');
+          const savedHtml = realBar ? realBar.innerHTML : null;
+          const savedDisplay = realBar ? realBar.style.display : null;
+          const saved = { qLocked: w.qLocked, fqLocked: w.fqLocked, qStage: w.qStage, sigPendingFor: w._sigPendingFor,
+                           sigState: w._sigState, sigOf: w._sigOf, renderSigTopPill: w._renderSigTopPill };
+          try {
+            w.qLocked = true; w.qStage = 1;
+            w._renderSigTopPill = () => {};
+            w._sigState = () => ({ checked: false, noted: false, needNoted: false, complete: false, exVat: 0, threshold: 0 });
+            w._sigOf = () => null;
+            w._sigPendingFor = (slot) => slot === 'checked'
+              ? { approverEmail: 'joanna@test.com', optionLabel: 'Option 2' } : null;
+            w.renderSignatureBar();
+            const bar = document.getElementById('sig-bar');
+            return { showsTheOption: !!bar && bar.innerHTML.indexOf('Option 2') > -1 };
+          } finally {
+            w.qLocked = saved.qLocked; w.fqLocked = saved.fqLocked; w.qStage = saved.qStage;
+            w._sigPendingFor = saved.sigPendingFor; w._sigState = saved.sigState; w._sigOf = saved.sigOf;
+            w._renderSigTopPill = saved.renderSigTopPill;
+            if (realBar) { realBar.innerHTML = savedHtml || ''; realBar.style.display = savedDisplay || 'none'; }
+          }
+        }, { showsTheOption: true });
       /* 2026-09-15: Rommel reported "whenever I reroute for signature, the signature doesn't
          appear" -- traced with real activity-log data to TWO distinct causes. The functional one
          (Cebu World Laminate's Noted-by fallback left blank in Settings, so the auto-escalation
@@ -3489,6 +3632,26 @@ const PROFILES = {
               perRowAmountStillRenders: /peso\(x\.total\)/.test(src)
             };
           }, { noReduceSum: true, noCombinedValVariable: true, perRowAmountStillRenders: true });
+      /* 2026-09-16: same report as index.html's own fix ("I am somehow blinded on what option am
+         I signing or unlocking since it doesnt show what option it is") -- this is the screen
+         Rommel actually uses most for approvals, so it needs the same fix, not just the desktop
+         Approvals page. optionLabel now rides on the request's own payload column
+         (supaUpsertApprovalRequest in index.html), so this page can read it directly with no new
+         plumbing. Both loadList()'s row template and render()'s detail card are inherently async
+         (a live Supabase query) -- verified structurally on the function's own source, same
+         pattern as loadHistory just above: confirms the badge markup is actually built from
+         `payload.optionLabel`, not hand-typed static text that would look right here and do
+         nothing on a real request. */
+      if (typeof window.loadList === 'function')
+        check('loadList: each request row shows which option it was raised against', () => {
+          const src = window.loadList.toString();
+          return { readsOptionLabel: /x\.payload&&x\.payload\.optionLabel/.test(src) || /x\.payload\s*&&\s*x\.payload\.optionLabel/.test(src) };
+        }, { readsOptionLabel: true });
+      if (typeof window.render === 'function')
+        check('render: the request detail card shows which option it was raised against', () => {
+          const src = window.render.toString();
+          return { readsOptionLabel: /REQ\.payload&&REQ\.payload\.optionLabel/.test(src) || /REQ\.payload\s*&&\s*REQ\.payload\.optionLabel/.test(src) };
+        }, { readsOptionLabel: true });
       return out;
     }
   }
