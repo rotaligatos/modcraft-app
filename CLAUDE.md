@@ -10649,3 +10649,195 @@ DOM element is guaranteed to already exist at that point.
   in one session (`"850.00"` matching an unrelated correct line elsewhere on the page;
   `"0.00"` matching inside `"850.00"` itself) were both caught by driving the real page and reading
   actual rendered output — never trust a string-match check without seeing what it matched.
+
+## What was changed on 2026-09-15 (session — three real bugs, all investigated against live data before any code was touched)
+
+Rommel reported three separate concerns in one message: signature re-routes not appearing, an
+unlock by anyone other than him "not taking," and Stephanie's quotations repeatedly showing
+Client Approved when she says she never pushed it. Asked to investigate first, all three were
+confirmed and root-caused against real Supabase/activity-log data before any fix was proposed —
+then all three fixed, tested reproduce-first, and shipped (`c02716e`).
+
+### Investigation method — evidence before theory, on all three
+Rather than reason from the code alone, each report was chased through the append-only activity
+log and live `quotation_states`/`settings` tables first:
+- Pulled Stephanie's real quotations and found two (`QT-M00000142`, `QT-M00000147`) where
+  `state.clientApproved` and `state.initApprovedAt` matched to the millisecond — proving they came
+  from ONE synchronous call, not two separate actions.
+- Searched `activity_log` for `%rerout%` and found two re-routes from that same day logged under
+  the WRONG serial — proof, not theory.
+- Cross-checked `QT-M00000142`'s stored `locked` value against its own log: two separate
+  "Unlock approved... applied to this quotation" entries (Rommel, then Allan), yet `locked:"true"`
+  persists today with NO re-lock ever logged in between — and signatures were being signed on it
+  in the following minutes, which only makes sense on a document that's genuinely still locked.
+
+### 1. Signature re-route logged against the wrong quotation (`rerouteSignature`)
+`logActivity(action)` was called with no explicit `serial` argument, so it defaulted to
+`qSerial||qDraftKey||''` — whatever happens to be open in the acting browser, not the request's
+own target. Confirmed live: two re-routes on 2026-09-15 were filed under an unrelated serial and a
+bare draft key. Same "propagation trap" class this file has hit repeatedly
+(sigSlot/to_email/decision/applied/orderId) — fixed by passing the request's own `n.serial`
+explicitly, same fix every prior instance needed.
+
+**The functional half of "the signature doesn't appear" was NOT a code bug at all** — Cebu World
+Laminate's Noted-by signature fallback (`notedAlt`) was blank in Settings → Approval Routing,
+while CWL's PRIMARY Noted-by is Rommel himself. Every time he re-routed Checked-by to himself on a
+CWL quotation, the automatic Noted-by escalation had nowhere to go (he's excluded from noting a
+document he already checked) and refused outright — confirmed twice in the log, verbatim:
+*"Rommel Taligatos cannot note this — they either prepared it or already signed Checked by for
+Cebu World Laminate, Inc. and no fallback is set."* **Rommel fixed this himself directly in
+Settings**, assigning Michael Delos Reyes as CWL's `notedAlt`. ⚠ **Michael has no signature image
+uploaded yet** — confirmed via `settings` (`SIG_michael...` key absent) — the routing is correct
+but unusable until one is uploaded (Settings → Users, or Michael's own avatar menu). Flag this if
+CWL's Noted-by is ever reported stuck again.
+
+I initially suggested Kathleen Joyce Tiu (Director) as the alternative, generalizing from the
+Director/Admin authority-equivalence rule — **Rommel corrected this**: that rule applies to
+*decisions* (discount, CF override, unlock bypass), not to signatures, which this app deliberately
+keeps open to ANY active user because a signature names who actually reviewed the document, not
+who holds seniority. Worth remembering for any future signature-routing suggestion.
+
+### 2. Unlock by someone other than Rommel doesn't durably take effect
+Confirmed on `QT-M00000142`: Allan's approved unlock genuinely wrote `locked=false` to
+Sheets/Supabase at that moment via `_persistApprovedFieldToQuotation` — the write itself was never
+broken, and a dedicated investigation found **no identity-based gate anywhere** in the unlock
+chain (not a permissions bug). The real cause: nothing ever told an already-open tab (the
+requester's own, sitting on the locked quotation) that the unlock happened server-side. Its
+`qLocked` stayed `true`, and its very next ORDINARY save — `_gSaveQuotationCore()` writes
+`locked:qLocked` unconditionally on every save — silently clobbered the just-applied unlock back
+to `true`, with no new "Quotation locked." log line, since it's a side effect of a routine save,
+not an explicit re-lock. "Works when Rommel does it" only because he typically unlocks from the
+SAME tab that has the quotation open, so there's no second stale tab to clash with — not because
+of who he is.
+
+Fixed the identical way this EXACT race was already fixed for order-pause (2026-08-29, "lets do
+the piggyback"): `_refreshOpenQuotationLockState()`, a narrow, deliberately non-wholesale
+reconciliation piggybacked on the same 60s approval poll — syncs only the fields an unlock
+actually resets (`locked`/`fqLocked`, `sentStatus`/`fqSentStatus`, `revisionPending`,
+`clientApproved`/`fqClientApproved` + their timestamps, `approved`/`initApprovedAt`), never a full
+`restoreFullQuotationState()` reload, which would discard whatever the user is mid-typing. Covers
+BOTH stages independently (`qLocked` and `fqLocked` are separate, hand-duplicated flags throughout
+this file — checked per the standing rule to always verify both stages, not just the one
+reported). Verified both directions (a stale "still locked" tab picks up a real unlock; the rarer
+reverse also works) plus the no-op case, matching the exact test shape already proven for pause.
+
+> ⚠ **Residual, accepted risk, same as pause's own known limitation**: this closes the gap on the
+> SAME ~60s cadence as everything else on this poll — a save landing in the few seconds between an
+> out-of-band unlock and the next poll tick could still theoretically clobber it once more. Not
+> hardened further this session (a save-time guard would need a network read before every single
+> save, which is a real latency/risk tradeoff this file has previously flagged as not worth it
+> without confirmed need). If a fresh report shows this exact race recurring within seconds rather
+> than minutes/hours, that's the signal to revisit.
+
+### 3. "Approve & proceed to Stage 2" silently recorded client approval
+Confirmed in the real log down to the millisecond (`QT-M00000147`, 2026-09-11):
+`"Client approved the Initial Quotation."` at `01:44:35.033396` and
+`"Quotation approved — Stage 2 unlocked"` at `01:44:35.040231` — both from ONE click of the single
+button labelled **"Approve & proceed to Stage 2"**, which never says it also records client
+approval. Stage 2 has its own clearly-labelled "Client Approve" button for the real thing; Stage
+1's conflates two different events into one click with no confirmation — exactly matching
+Stephanie's report that she "did not push" a client approval.
+
+This coupling was already known and deliberate — `qClientApproved`'s own declaration comment says
+*"these happen together today, but the KPI question is 'did the client approve', and that
+deserves its own recorded fact,"* and a 2026-08-27 fix (QT-C00000006) explicitly preserved this
+coupling while fixing the UNLOCK side of it. **This fix does not decouple the two flags** —
+`qApproved`/`qClientApproved` still get set together, exactly as before, and there is still no way
+to reach Stage 2 without recording client approval (removing that would undermine the win-rate/
+revenue KPI tracking Rommel has called critical). It only makes the moment explicit: `doApprove()`
+now runs the existing generic `_confirm()` modal, naming exactly what will be recorded, before
+`_doApproveProceed()` (the renamed original body) runs. Declining leaves nothing recorded, not
+even `qApproved`. Re-clicking an already-approved quotation (`qClientApproved` already true) skips
+the question entirely — never re-asks something already on record. Same fix applies to the
+multi-option path (`confirmOptionApprove`) automatically, since it only runs downstream of this
+same confirmation gate (via `openOptionApproveModal`, itself only reachable from
+`_doApproveProceed`).
+
+### Verified, all three
+`tools/smoke.mjs` gained one check per fix. #1 (re-route) and #3 (approve-confirm) confirmed
+genuinely failing/absent against the pre-fix code via `git stash` before confirmed passing on the
+fix. #2 introduces a genuinely new function with nothing to fail against pre-fix, matching the
+same gated-existence convention already established for `_lookupIndexFor`/`_dlOptCache` the day
+before. `node tools/verify.mjs` green throughout; confirmed served live on GitHub Pages
+(`c02716e`).
+
+### Method notes worth keeping
+- **The activity log settled all three reports on its own, before any code was read.** Append-only
+  and detailed enough that a millisecond-level timestamp match proved two log lines came from one
+  synchronous call, and a missing re-lock entry proved an unlock never durably applied. Reach for
+  it first on any "the app did something I didn't ask for" report.
+- **A live routing-table screenshot can immediately confirm or refute a code-level hypothesis.**
+  Rommel's screenshot of Settings → Approval Routing showing "— Default routing —" for CWL's
+  Noted-by fallback matched the SQL query's `notedAlt: ""` exactly — cross-checking a live UI
+  against a live query is worth doing when both are cheap.
+- **Not every reported symptom is a bug in the same file.** Bug #1's FUNCTIONAL cause was a
+  Settings configuration gap (something only Rommel could fix), separate from a genuine but
+  secondary code bug (the mislogged serial) found alongside it while investigating. Report both,
+  clearly separated, rather than only the one that happens to be code.
+- **A generalization from a previously-agreed rule can still be wrong in a new context.** The
+  Director/Admin authority-equivalence rule (agreed for approval decisions) does not extend to
+  signature-slot eligibility (agreed separately, and deliberately, to be open to any active user).
+  Rommel's correction here was right, and cheap to accept — don't argue a generalization that was
+  never actually agreed for the new case.
+- **When a comment says "these happen together TODAY,"** that is a flag that the current coupling
+  is a known compromise, not a design to defend — but also not licence to unilaterally decouple it.
+  The safe middle ground here was making the moment of coupling explicit and confirmed, not
+  removing the coupling itself.
+
+# OPEN — updated 2026-09-15 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+
+## Confirmed done this session — do not re-raise
+- Signature re-route now logs against the request's own target quotation, never whatever happens
+  to be open in the acting browser.
+- CWL's Noted-by signature fallback configured (Michael Delos Reyes) — **but he has no signature
+  image uploaded yet; this fallback is not actually usable until one is added.**
+- An unlock approved by anyone (not just Rommel) now reconciles into an already-open stale tab
+  within the same ~60s cadence as the rest of the approval poll, for both Stage 1 and Stage 2.
+- "Approve & proceed to Stage 2" now explicitly confirms before recording client approval, instead
+  of doing it silently as an unlabelled side effect. The underlying qApproved/qClientApproved
+  coupling is unchanged and deliberate.
+
+## Still open, unverified this session — re-check before acting on any of these
+(carried forward unchanged from 2026-09-14 — none of this session's work touched any of these)
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed.
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced. Need: which stage, the exact field, whether it followed an
+  option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures — and note item #3 above may have suppressed some
+  PAST approvals people didn't realize they were making; don't read a dip as regression without
+  checking whether it's actually the fix working as intended.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request; do not build without walking him through it again from scratch.
+- **`QT-W00000136.R1` itemized-print merged-line report** — from the 2026-08-25 session, unresolved.
+- **Phone (`approve.html`) support for order_pause** — still not built, deliberately.
+- **Stage 2 field-level lock parity while paused** — Stage 2 still has no field-by-field disable
+  sweep at all (pre-existing gap).
+
+## New this session — worth watching
+- **Michael Delos Reyes needs a signature image uploaded** before CWL's Noted-by fallback is
+  genuinely usable — the routing is correct, the person can't yet sign.
+- **The unlock-reconciliation fix has a ~60s residual window**, same as pause's own accepted
+  limitation — see the "Residual, accepted risk" note above. Watch for a report where the race
+  happens within seconds rather than minutes.
+- **`qApproved`/`qClientApproved` remain deliberately coupled** — do not attempt to decouple them
+  without a real conversation with Rommel about whether Stage 1 needs its own separate "advance
+  without client sign-off yet" path. This session made the coupling explicit and confirmed; it did
+  not remove it.
+
+## Standing rules reinforced this session
+- **Investigate with real data before writing a line of code**, especially when three unrelated-
+  sounding reports arrive together — the activity log and a few targeted SQL queries settled all
+  three before any hypothesis needed testing against the code.
+- **A live screenshot of a settings page is worth cross-checking against a live query** — cheap,
+  fast, and it turns "I think this config is empty" into "confirmed, here's the exact key."
+- **A rule agreed for one category does not automatically transfer to a different category**, even
+  when both sound like "who has authority here" — accept the correction cheaply rather than
+  defending the generalization.
