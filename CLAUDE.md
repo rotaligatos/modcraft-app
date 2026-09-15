@@ -10784,7 +10784,7 @@ before. `node tools/verify.mjs` green throughout; confirmed served live on GitHu
   The safe middle ground here was making the moment of coupling explicit and confirmed, not
   removing the coupling itself.
 
-# OPEN — updated 2026-09-15 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-09-15 (session end) — SUPERSEDED by the 2026-09-16 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
 ## Confirmed done this session — do not re-raise
@@ -10841,3 +10841,158 @@ before. `node tools/verify.mjs` green throughout; confirmed served live on GitHu
 - **A rule agreed for one category does not automatically transfer to a different category**, even
   when both sound like "who has authority here" — accept the correction cheaply rather than
   defending the generalization.
+
+## What was changed on 2026-09-16 (session — which option am I signing/unlocking, shown everywhere; push notifications investigated, not yet resolved)
+
+Rommel raised three things: he can't tell which OPTION a pending signature/unlock request applies
+to (on the Approvals page, and he wants it on the on-quotation signature bar too), and he has to
+keep re-subscribing to push notifications despite doing it "multiple times." The first was
+investigated, mapped precisely, and fixed across every surface including the phone app. The
+second was investigated as far as server-side evidence allows — genuinely unresolved, needs a
+couple of specific answers from him before it can be fixed.
+
+### Which option — fixed everywhere (`b6b6088`)
+Confirmed from the code, not assumed: a quotation's lock state genuinely IS per-option
+(`captureQuotationSnapshot` carries `locked` inside each option's own snapshot;
+`qOptionsList[i].locked` is maintained directly), and a signature attests to whichever option's
+pricing was active when it was requested — but no approval request of ANY type had ever recorded
+which option that was. `req.serial` is always the BASE serial by design (the option suffix is
+display-only, never carried by `qSerial` itself since the 2026-08-15 `qBaseSerial` removal), so
+there was structurally nothing to read this from after the fact.
+
+Added `optionId`/`optionLabel`, captured ONCE at request-creation time via a new shared
+`_apprOptionContext()` (reuses `getDisplaySerial`'s own `qActiveOptionId`/`qOptionsList` lookup
+rather than inventing a second one). Before touching any code, dispatched a full investigation to
+map every one of this file's own documented "propagation trap" gates — a field added to a request
+object has been silently dropped four times before (`sigSlot`, `to_email`, `decision`, `applied`,
+`orderId`) unless added to ALL of them at once. Found and fixed all of them:
+- the payload at creation (`_sendSignatureRequest`, `submitApprovalRequest` — both its `req` object
+  and its separate `NOTIFS.unshift` push)
+- `_apprMergeWithKnown`'s hardcoded key list
+- `supaUpsertApprovalRequest`'s hardcoded payload object
+- `gLoadApprovalRequests`' Supabase-row mapping
+- `_mergeApprovalReqsIntoNotifs`' two hardcoded field lists
+- **THREE** separate direct-Supabase-write sites that bypass `gSaveApprovalRequest`'s merge
+  entirely: `doApprovalAction`'s `updReq` (the one the investigation named), and — found while
+  fixing it, not in the original mapping — `acceptCounter`'s own `updReq`, the exact same bypass
+  shape. `_markOverrideApproved`'s own partial update was checked and found already safe, since it
+  goes through `gSaveApprovalRequest` (and therefore the merge) rather than writing directly.
+
+Displayed via one shared badge (`_apprOptBadge`) on `_apprQuotLink`, which both the Approvals page
+and the bell notification panel already call — one fix, both surfaces. Added to the on-quotation
+**signature bar**'s own pending pill too (the "also in the app Modcraft signature" half of the
+ask) — e.g. "🕐 Checked by — awaiting joanna@... (Option 2)". Also added to **`approve.html`** (the
+phone app) — Rommel's most-used approval surface — in both the request list and the request detail
+card, reading the same `optionLabel` now written to the request's own `payload` column, no new
+plumbing needed there.
+
+**Two test bugs caught before shipping**, both instructive: a loose `indexOf('pill-navy')` check
+matched an UNRELATED `color:var(--pill-navy)` CSS reference already on the same line (fixed by
+checking for the literal `class="pill pill-navy"` opening tag instead); and a decoy `#sig-bar`
+element created just for the test was never the one `renderSignatureBar()` actually writes to,
+since the real one already exists in static markup — same exact mistake this file's own
+Computation Ref test was written to avoid, made again and caught again.
+
+Reproduce-first throughout: `index.html`'s tests drive the real creation functions (not hand-built
+request objects) with a genuine multi-option `qOptionsList`, confirmed failing against the pre-fix
+code via `git stash` before confirmed passing. `approve.html`'s tests are source-inspection style,
+matching this file's own established pattern for that page's inherently-async Supabase-driven
+functions. `node tools/verify.mjs` green throughout; both files confirmed served live on GitHub
+Pages.
+
+### Push notifications — investigated, genuinely unresolved
+Rommel: "I need to keep on subscribing every time though i already subscribed multiple times."
+
+**Confirmed, not guessed**: `push_subscriptions` is **completely empty** — zero rows, for ANY
+user, not just Rommel — despite this file's own history recording 5 real subscriptions existing as
+of 2026-08-17. So every subscribe attempt since has failed to persist, for everyone.
+
+**Ruled out, with evidence, not assumption:**
+- **RLS is not the blocker.** Impersonated Rommel's exact session (`set local role authenticated;
+  set local request.jwt.claims = '{"email":"rommel.taligatos@...","sub":"..."}'`) and ran the real
+  INSERT the app performs — it succeeded cleanly (rolled back, not left in the table). `WITH CHECK
+  (btrim(lower(user_email)) = app_current_email())` passes for a matching, correctly-cased email.
+- **The Edge Function (`send-approval-push`) is deployed and ACTIVE** (version 3) — not an
+  infra-level outage.
+- **`VAPID_PUBLIC_KEY`** (approve.html:149) is structurally well-formed (correct length/prefix for
+  a P-256 base64url key) — not an obviously malformed key.
+- **Other Supabase writes from the SAME phone app clearly succeed** (signatures, approvals — the
+  activity log has extensive real "...from a phone" entries) — so the phone's `supa` client's auth
+  is not broadly broken; whatever fails is specific to this one flow.
+
+**Genuinely undetermined from here**: `enablePush()`'s whole chain (`Notification.requestPermission`
+→ `_swInit`/service-worker registration → `reg.pushManager.subscribe(...)` → the Supabase upsert)
+has exactly one top-level `.catch()`, so ANY failure anywhere in it — including the Supabase write
+itself failing — surfaces as an `alert(...)`. Since the table is empty, something in this chain has
+never once completed successfully, for anyone, but there is no way to tell WHICH step without
+either reproducing it live or asking the person who's seen it fail. **Not fixed — needs two
+specific answers from Rommel before a real fix can be targeted**: (1) does an alert/error message
+actually pop up when "Turn on notifications" is clicked, and if so what does it say; (2) does the
+card ever briefly show "On" right after clicking, even if a later visit reverts to asking again.
+
+### Method notes
+- **A full investigation before touching a "propagation trap" fix paid for itself again** — the
+  map found not one but the SAME dangerous bypass shape at TWO call sites (`doApprovalAction` and
+  `acceptCounter`), and the second one was never named in the original ask or the investigation's
+  own instructions — only found by re-reading the surrounding code once the first was located.
+- **"Completely empty, for everyone" is a much stronger and more useful fact than "empty for one
+  user."** It ruled out an account-specific permissions issue in one query and pointed straight at
+  either a systemic recent break or a client-side failure — and directly impersonating the exact
+  RLS check that would explain it (rather than reading the policy and reasoning about it) is what
+  closed off the most likely suspect in one step.
+- **Know when investigation has reached its actual limit.** Every server-side avenue that could be
+  checked without the user's own device was checked; the honest answer past that point is "here is
+  exactly what's ruled out, here is the one client-side question that would resolve it" — not a
+  guessed fix shipped on faith.
+
+# OPEN — updated 2026-09-16 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+
+## Confirmed done this session — do not re-raise
+- Every signature/unlock/discount/override/premium request now carries which option was active
+  when it was raised, shown on the Approvals page, the bell panel, the on-quotation signature bar,
+  and the phone app (`approve.html`).
+
+## ⚠ Needs Rommel's answer before it can be fixed — do not guess a fix without this
+- **Push notifications: `push_subscriptions` is completely empty, for everyone.** RLS, the Edge
+  Function, and the VAPID key are all confirmed fine. The failure is somewhere in `enablePush()`'s
+  client-side chain and cannot be pinned down further without either of: (1) the exact alert/error
+  text shown when "Turn on notifications" is clicked, or (2) whether the card ever shows "On"
+  right after clicking, even briefly, before a later visit reverts. Ask for one of these before
+  touching this again.
+
+## Still open, unverified this session — re-check before acting on any of these
+(carried forward unchanged from 2026-09-15 — none of this session's work touched any of these)
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged or
+  fixed.
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request.
+- **`QT-W00000136.R1` itemized-print merged-line report** — from the 2026-08-25 session, unresolved.
+- **Phone (`approve.html`) support for order_pause** — still not built, deliberately.
+- **Stage 2 field-level lock parity while paused** — Stage 2 still has no field-by-field disable
+  sweep at all (pre-existing gap).
+- **Michael Delos Reyes needs a signature image uploaded** before CWL's Noted-by fallback is
+  genuinely usable.
+- **The unlock-reconciliation fix has a ~60s residual window** — watch for a race happening within
+  seconds rather than minutes.
+- **`qApproved`/`qClientApproved` remain deliberately coupled** — do not decouple without a real
+  conversation with Rommel first.
+
+## Standing rules reinforced this session
+- **Map every propagation gate BEFORE writing a fix that adds a field to an approval request.**
+  This class of bug has now bitten six times (`sigSlot`, `to_email`, `decision`, `applied`,
+  `orderId`, and today the investigation itself found a SECOND direct-write bypass site
+  — `acceptCounter` — that a full map, not a partial one, was needed to catch.
+- **"Completely empty, for everyone" is worth establishing explicitly before diagnosing a
+  per-user report** — it changes the whole shape of the investigation.
+- **When server-side evidence has been exhausted, say so plainly and name the exact next
+  question** — don't ship a guessed fix for a client-side failure that can't be reproduced.
