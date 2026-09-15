@@ -453,15 +453,47 @@ function refreshPushState(){
     });
   });
 }
+// Rommel, 2026-09-16: "I need to keep on subscribing every time though i already subscribed
+// multiple times." Confirmed live: push_subscriptions is completely empty for EVERYONE, no
+// error/popup was ever seen on any attempt, and the card never once showed "On" -- ruling out
+// RLS, the Edge Function, and a malformed VAPID key one at a time. That combination (no failure
+// AND no success, ever) means the ORIGINAL code's single .catch() never fired at all -- consistent
+// with reg.pushManager.subscribe(...) itself silently HANGING rather than rejecting, which is a
+// known real-world failure mode for the OS-level push-registration handshake (FCM on Android)
+// under battery/data-saver restrictions or a flaky network. Cannot fix that underlying OS/network
+// unreliability from here, but a hang must never again look identical to "nothing happened":
+// PUSH_TIMEOUT_MS is a module-level var (not a hardcoded literal) specifically so a test can
+// override it to something tiny and exercise the real watchdog without waiting 20 real seconds.
+var PUSH_TIMEOUT_MS=20000;
+function _withTimeout(p,ms,label){
+  var timer;
+  var timeout=new Promise(function(_,reject){
+    timer=setTimeout(function(){ reject(new Error(label+' timed out')); },ms);
+  });
+  return Promise.race([p,timeout]).finally(function(){ clearTimeout(timer); });
+}
+function _pushStatus(msg,isErr){
+  var m=el('push-msg');
+  if(m){ m.innerHTML=msg; return; }
+  var c=el('push-card');
+  if(c) c.innerHTML='<div class="lbl">Notifications</div><div class="muted"'
+    +(isErr?' style="color:var(--coral)"':'')+'>'+msg+'</div>';
+}
+function _pushResetButtons(){
+  ['push-on','push-on2'].forEach(function(id){ var b=el(id); if(b) b.disabled=false; });
+}
 function enablePush(){
   if(!pushSupported()) return;
+  _pushStatus('Requesting permission…');
   Notification.requestPermission().then(function(p){
-    if(p!=='granted'){ alert('Notifications were not allowed, so nothing will be sent to this device.'); return; }
-    return _swInit().then(function(reg){
+    if(p!=='granted'){ _pushResetButtons(); alert('Notifications were not allowed, so nothing will be sent to this device.'); return; }
+    _pushStatus('Registering this device with your browser…');
+    return _withTimeout(_swInit().then(function(reg){
       if(!reg) throw new Error('no service worker');
       return reg.pushManager.subscribe({userVisibleOnly:true,
         applicationServerKey:_urlB64ToUint8(VAPID_PUBLIC_KEY)});
-    }).then(function(sub){
+    }),PUSH_TIMEOUT_MS,'Device registration').then(function(sub){
+      _pushStatus('Saving…');
       var j=sub.toJSON();
       // One row per endpoint. Upserting on endpoint means re-subscribing the same device
       // replaces its row instead of accumulating duplicates that would each get a copy.
@@ -471,12 +503,17 @@ function enablePush(){
         user_agent:(navigator.userAgent||'').slice(0,300)
       },{onConflict:'endpoint'});
     }).then(function(r){
-      if(r&&r.error){ alert('Could not save this device. '+r.error.message); return; }
-      var c=el('push-card');
-      if(c) c.innerHTML='<div class="lbl">Notifications</div>'
-        +'<div class="muted"><span style="color:var(--teal)">On</span> — this device will be alerted.</div>';
+      if(r&&r.error){ _pushResetButtons(); _pushStatus('Could not save this device — try again.',true); alert('Could not save this device. '+r.error.message); return; }
+      _pushStatus('<span style="color:var(--teal)">On</span> — this device will be alerted.');
     });
-  }).catch(function(e){ console.warn('[push] enable failed',e); alert('Could not turn on notifications. '+e); });
+  }).catch(function(e){
+    console.warn('[push] enable failed',e);
+    _pushResetButtons();
+    var timedOut=/timed out/.test(String((e&&e.message)||e));
+    _pushStatus(timedOut
+      ? 'This is taking too long — your device or network may be blocking background notifications right now (common with battery saver or data saver turned on). Try again, or check this browser’s notification permission for this site.'
+      : 'Could not turn on notifications. '+e, true);
+  });
 }
 
 function boot(){

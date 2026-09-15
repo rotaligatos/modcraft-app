@@ -3652,6 +3652,41 @@ const PROFILES = {
           const src = window.render.toString();
           return { readsOptionLabel: /REQ\.payload&&REQ\.payload\.optionLabel/.test(src) || /REQ\.payload\s*&&\s*REQ\.payload\.optionLabel/.test(src) };
         }, { readsOptionLabel: true });
+      /* 2026-09-16: Rommel -- "I need to keep on subscribing every time though i already
+         subscribed multiple times." Confirmed live: push_subscriptions is completely empty for
+         EVERYONE, no error/popup was ever seen on any attempt, and the card never once showed
+         "On". That combination (no failure AND no success, ever) means the original code's single
+         .catch() never fired at all -- consistent with reg.pushManager.subscribe(...) itself
+         silently HANGING (a known real-world failure mode for the OS-level push-registration
+         handshake under battery/data-saver restrictions or a flaky network), not rejecting.
+         _withTimeout is the mechanism that turns a hang into a visible, actionable failure instead
+         of a silent, indefinite one -- proven directly and live here (a promise that genuinely
+         never resolves, raced against a real but tiny timeout), which is the part that matters:
+         no amount of source-reading proves a race condition actually races correctly -- but THIS
+         profile's own check() is synchronous (`const got = fn()`, no await, confirmed by reading
+         it directly rather than assuming), so a check returning a Promise here silently resolves
+         to `{}` via JSON.stringify on the unresolved Promise object -- a false pass waiting to
+         happen, not a real one. Verified structurally instead, matching this file's own existing,
+         deliberate choice for this page's harder-to-fully-drive async functions -- including
+         whether enablePush() is actually WIRED to use it, not just present unused. */
+      if (typeof window._withTimeout === 'function')
+        check('_withTimeout: races the real promise against a real timeout and rejects with the step name', () => {
+          const src = window._withTimeout.toString();
+          return {
+            usesPromiseRace: /Promise\.race/.test(src),
+            rejectsOnTimeout: /reject\(new Error\(label/.test(src),
+            clearsTheTimer: /clearTimeout\(timer\)/.test(src)
+          };
+        }, { usesPromiseRace: true, rejectsOnTimeout: true, clearsTheTimer: true });
+      if (typeof window.enablePush === 'function')
+        check('enablePush: the subscribe step is wired through the timeout watchdog, and a timeout resets the button rather than leaving it dead', () => {
+          const src = window.enablePush.toString();
+          return {
+            subscribeWrappedInTimeout: /_withTimeout\(_swInit\(\)/.test(src) && /PUSH_TIMEOUT_MS/.test(src),
+            catchResetsButtons: /\.catch\(function\(e\)\{[\s\S]*_pushResetButtons\(\)/.test(src),
+            timeoutGetsItsOwnMessage: /timedOut/.test(src) && /background notifications/.test(src)
+          };
+        }, { subscribeWrappedInTimeout: true, catchResetsButtons: true, timeoutGetsItsOwnMessage: true });
       return out;
     }
   }
