@@ -3113,6 +3113,47 @@ const PROFILES = {
             w.qDiscPct = saved.qDiscPct; w.qDiscApproved = saved.qDiscApproved; inp.value = saved.inpValue;
           }
         }, { clearedLive: true, capturedAsZero: true, typedValueTracked: true });
+      /* Rommel, 2026-09-16: "It shows Approved already but printout still doesn't reflect it" --
+         a 10%-off-Materials-only discount, approved, on a Subsidiary quotation where materials
+         billing is switched off (getAreaSubtotal prices them at P0.00). discOn:!!(qDiscApproved&&dA)
+         in _recalcCore is correctly false when the scoped base is zero -- 10% of nothing is nothing
+         -- but nothing on screen said so; the button just read "Approved" with no total movement and
+         no explanation. renderDiscScope() now appends a warning whenever _pCalc says exactly that
+         shape (approved, scoped, zero effect), and _recalcCore re-runs it after every Stage 1 recalc
+         so it can never go stale. Drives the real renderDiscScope() against a real _pCalc object,
+         not a hand-derived approximation of when it should fire. */
+      if (typeof window.renderDiscScope === 'function' && document.getElementById('disc-scope-note'))
+        check('renderDiscScope: warns when an approved, scoped discount has zero effect; silent otherwise', () => {
+          const w = window;
+          const saved = { qDiscApproved: w.qDiscApproved, qDiscPct: w.qDiscPct, qDiscScope: w.qDiscScope, qFabMode: w.qFabMode, _pCalc: w._pCalc };
+          try {
+            w.qFabMode = 'services';   // carcass mode hides the scope block entirely -- not this case
+            w.qDiscApproved = true; w.qDiscPct = 10;
+            w.qDiscScope = { materials: true, edgeband: false, hardware: false, services: false, installation: false };
+
+            // Scoped to Materials, approved, but the pricing run found zero materials cost to discount.
+            w._pCalc = { stage: 1, discScoped: true, discOn: false };
+            w.renderDiscScope();
+            const warnsOnZeroEffect = document.getElementById('disc-scope-note').innerHTML.indexOf('no effect') >= 0;
+
+            // Same scope, but this time the pricing run found real cost to discount -- silent.
+            w._pCalc = { stage: 1, discScoped: true, discOn: true };
+            w.renderDiscScope();
+            const silentWhenItWorks = document.getElementById('disc-scope-note').innerHTML.indexOf('no effect') < 0;
+
+            // Nothing ticked -- scope is off entirely, so there's nothing to warn about either way.
+            w.qDiscScope = { materials: false, edgeband: false, hardware: false, services: false, installation: false };
+            w._pCalc = { stage: 1, discScoped: false, discOn: false };
+            w.renderDiscScope();
+            const silentWhenUnscoped = document.getElementById('disc-scope-note').innerHTML.indexOf('no effect') < 0;
+
+            return { warnsOnZeroEffect, silentWhenItWorks, silentWhenUnscoped };
+          } finally {
+            w.qDiscApproved = saved.qDiscApproved; w.qDiscPct = saved.qDiscPct; w.qDiscScope = saved.qDiscScope;
+            w.qFabMode = saved.qFabMode; w._pCalc = saved._pCalc;
+            w.renderDiscScope();
+          }
+        }, { warnsOnZeroEffect: true, silentWhenItWorks: true, silentWhenUnscoped: true });
       // Stage 2's Pricing adjustments card is JS-templated (renderFQCards); only present once
       // Stage 2 has been rendered at least once. Guarded the same way every other function-
       // existence check in this suite is -- skip cleanly rather than fail on a harness setup gap.
