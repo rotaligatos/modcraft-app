@@ -3327,6 +3327,34 @@ const PROFILES = {
       if (typeof window.updateLockUI === 'function')
         check('updateLockUI: the field-disable sweep also triggers while an order-pause is active',
           () => /locked\s*=\s*qLocked\s*\|\|\s*viewOnly\s*\|\|\s*_qOrderPaused\(\)/.test(window.updateLockUI.toString()), true);
+      /* Rommel, 2026-09-17: the legacy "Revise" button (confirmRevise -- mints a whole NEW,
+         unrelated serial, distinct from the normal unlock-based .R revision system which stays on
+         the same row) was only ever shown ONCE, right when qApproved first became true, and never
+         hidden again anywhere else in the file. So unlocking afterward correctly cleared qApproved
+         (which is exactly the state where openRevise()'s own guard STOPS refusing and lets it
+         through) while the button stayed visible from the earlier moment -- reachable precisely
+         when clicking it is dangerous. Reproduced live on QT-C00000015 (Johndurf): a stray click
+         silently forked the whole quotation onto QT-M00000160, carrying the client, scope and
+         job-start time over untouched, with nothing logged. Source-checked, same as the order-pause
+         sweep above -- updateLockUI touches a large live DOM tree this harness does not construct,
+         and driving it end to end would need the whole quotation page's markup wired up first. */
+      if (typeof window.updateLockUI === 'function')
+        check('updateLockUI: revise-btn is re-synced to _iqClientApproved() on every render, not set-once', () => {
+          const src = window.updateLockUI.toString();
+          return {
+            readsCurrentApprovalState: /_iqClientApproved\(\)/.test(src) && /revise-btn/.test(src),
+            hidesWhenNotApproved: /rbtn\.style\.display\s*=\s*\(_iqClientApproved\(\)[^)]*\)\s*\?\s*"inline-flex"\s*:\s*"none"/.test(src),
+          };
+        }, { readsCurrentApprovalState: true, hidesWhenNotApproved: true });
+      /* confirmRevise() minted a new serial with nothing written to the activity log -- the ONLY
+         state-changing action in this file that didn't. That silence is precisely why the QT-M00000160
+         duplicate looked like an unexplained mystery: there was nothing in the log, on either
+         serial, saying what had actually happened. */
+      if (typeof window.confirmRevise === 'function')
+        check('confirmRevise: now logs against the ORIGINAL serial before minting the new one', () => {
+          const src = window.confirmRevise.toString();
+          return /logActivity\([^)]*,\s*old\)/.test(src);
+        }, true);
       /* order_pause is order-scoped, not quotation-scoped -- the two normal apply paths
          (_applyApprovedRequest / _persistApprovedFieldToQuotation) have no case for it and must not
          silently no-op through them; it needs its OWN branch, on both approve AND reject, since the
