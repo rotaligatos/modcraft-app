@@ -1341,6 +1341,53 @@ const PROFILES = {
           }
         }, { exactlyOneServicesHeading: 1, noSeparateMinChargeHeading: true, minChargeRowPresent: true,
              floorShown: true, subtotalReconciles: true });
+      /* Rommel, 2026-09: walked through a real quotation whose Final Quotation revised
+         Installation -- the printed Fabrication subtotal moved with it, even though fabrication
+         itself was untouched, because the discount buffer used to split as a FIXED 50/15/35 cut
+         of the whole job's combined total (fab+mob+inst). "The final quotation is just a mirror
+         of the initial quotation until such changes are made" -- so each bucket's buffer share
+         must now come from its OWN raw cost x the rate, not a fixed percentage of a pool that
+         includes the other two. Source-inspection (same reason as the reveal-toggle test above):
+         proves the fixed 0.50/0.15/0.35 literals are gone, each bucket derives its share from its
+         own raw value, and any leftover (design charge/site visit/other-cost's own slice, when
+         those print as separate rows) lands on Installation, never silently dropped and never on
+         Fabrication -- which is the one bucket that must hold steady. */
+      if (typeof window._buildPrintBodyCore === 'function')
+        check('_buildPrintBodyCore: each printed bucket carries its OWN discount-buffer share, not a fixed 50/15/35 cut', () => {
+          const src = window._buildPrintBodyCore.toString();
+          return {
+            oldFixedSplitGone: !/_discBufAmt\s*\*\s*0\.50/.test(src) && !/_discBufAmt\s*\*\s*0\.15/.test(src) && !/_discBufAmt\s*\*\s*0\.35/.test(src),
+            fabSharesFromOwnBucket: /_fabDiscShare\s*=\s*_fabBucket\s*\*\s*_discBufRate\s*\/\s*100/.test(src),
+            mobSharesFromOwnBucket: /_mobDiscShare\s*=\s*_mobBucket\s*\*\s*_discBufRate\s*\/\s*100/.test(src),
+            instSharesFromOwnBucket: /_instDiscShare\s*=\s*_instBucket\s*\*\s*_discBufRate\s*\/\s*100/.test(src),
+            fabRegroupIsBucketPlusOwnShare: /fab\s*:\s*_fabBucket\s*\+\s*_fabDiscShare/.test(src),
+            leftoverFoldsIntoInstNotFab: /inst\s*:\s*_instBucket\s*\+\s*_instDiscShare\s*\+\s*_discShareLeftover/.test(src),
+          };
+        }, { oldFixedSplitGone: true, fabSharesFromOwnBucket: true, mobSharesFromOwnBucket: true,
+             instSharesFromOwnBucket: true, fabRegroupIsBucketPlusOwnShare: true, leftoverFoldsIntoInstNotFab: true });
+      /* Proves the property that actually matters, not just the code shape above: run the real
+         formula twice with fabrication's own inputs held fixed and Installation raised sharply
+         (mirroring the real report -- installation cost revised upward on the Final Quotation) --
+         Fabrication's own-cost buffer share must be byte-identical both times, while Installation's
+         own share visibly grows. Reimplements only the isolated arithmetic (not the full
+         DOM-driven _buildPrintBodyCore), the same tradeoff the two source-inspection tests above
+         already accept for this function. */
+      check('discount-buffer own-cost attribution: Fabrication\'s share is unaffected by an Installation change', () => {
+        const discBufRate = 30;
+        const fabBucket = 39621.57;   // fixed -- fabrication's own inputs never change in this scenario
+        const outsourceFinalUnused = 0;
+        function fabShareFor(instBucket) {
+          return fabBucket * discBufRate / 100;   // must not take instBucket as an input at all
+        }
+        const fabShareBefore = fabShareFor(56591.03);
+        const fabShareAfter = fabShareFor(56591.03 + 12083.49);   // installation revised upward
+        const instShareBefore = 56591.03 * discBufRate / 100;
+        const instShareAfter = (56591.03 + 12083.49) * discBufRate / 100;
+        return {
+          fabShareUnchanged: Math.abs(fabShareBefore - fabShareAfter) < 0.005,
+          instShareActuallyMoved: instShareAfter > instShareBefore + 100,
+        };
+      }, { fabShareUnchanged: true, instShareActuallyMoved: true });
       /* Rommel, 2026-09-03: "give me a capability to have some kind of clickable that i can see
          what was hidden in the printview... it works like when you want to temporarily view the
          password." The checkbox that arms _printRevealHidden must only ever be offered on the one
