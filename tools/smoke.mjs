@@ -551,6 +551,63 @@ const PROFILES = {
           }
         }, { fieldGone: true, overrideGone: true, oldTemplateIgnoredSafely: true,
              stage1: [65570.97, 19016.26, 4250], stage2: [62434.97, 19016.26, 4250] });
+      /* Rommel, 2026-09-21 (QT-W00000183): the client already approved the Initial Quotation, and a
+         Settings-wide change made afterward (installation team reduced) shifted what the Final
+         Quotation computed for Mobilization & Installation -- fabrication itself never moved (that
+         was already proven identical, same session), but he does not want ANY of it drifting for
+         THIS specific, already-approved job. Explicitly not a general rule -- a genuine cost change
+         must still reach a quotation that has not been sent yet. fqMirrorStage1, per-quotation, off
+         by default: when on, recalcFQ() does not run _recalcFQCore() at all -- it runs Stage 1's OWN
+         recalc() (Stage 1's own scope, Stage 1's own frozen rates) and relabels the result stage:2.
+         "Final = Initial" holds because Stage 2 IS Stage 1's result here, not because two formulas
+         coincidentally agree -- proven by giving fqAreas a DIFFERENT scope than qAreas and confirming
+         the mirrored total ignores it entirely, using only qAreas. The default-off case is checked
+         too, confirming existing quotations (no flag set) keep running their own independent Stage 2
+         formula exactly as before -- this is additive, not a replacement of the normal path. */
+      if (typeof window.recalc === 'function' && typeof window.recalcFQ === 'function')
+        check('fqMirrorStage1: Final Quotation becomes Stage 1\'s own result, ignoring fqAreas entirely', () => {
+          const w = window;
+          const saved = { qFabMode: w.qFabMode, qAreas: w.qAreas, fqAreas: w.fqAreas, qStage: w.qStage,
+                           fqMirrorStage1: w.fqMirrorStage1,
+                           clService: document.getElementById('cl-service') ? document.getElementById('cl-service').value : null };
+          try {
+            w.initQuotation();
+            if (document.getElementById('cl-service')) document.getElementById('cl-service').value = 'Fabrication with Installation';
+            w.qFabMode = 'carcass';
+            w.qAreas = [{ name: 'Area 1', items: [{ type: 'Kitchen Base Cabinet', qty: 5 }],
+              matItems: [], hwItems: [], svcItems: [], bomItems: [],
+              outsourceMaterials: [], outsourceHardware: [] }];
+            w.recalc();
+            const stage1Grand = w._pCalc.grand;
+
+            // A deliberately DIFFERENT Stage 2 scope -- if the mirror is genuinely ignoring
+            // fqAreas, this must have zero effect on the mirrored result below.
+            w.fqAreas = [{ name: 'Area 1', items: [{ type: 'Kitchen Base Cabinet', qty: 50 }],
+              matItems: [], hwItems: [], svcItems: [], bomItems: [],
+              outsourceMaterials: [], outsourceHardware: [] }];
+            w.qStage = 2;
+
+            w.fqMirrorStage1 = false;
+            w.recalcFQ();
+            const defaultOffDiffers = Math.abs(w._pCalc.grand - stage1Grand) > 0.01; // 50 units != 5 units — must NOT match
+
+            w.fqMirrorStage1 = true;
+            w.recalcFQ();
+            const mirrored = w._pCalc;
+
+            return {
+              defaultOffStillRunsItsOwnFormula: defaultOffDiffers,
+              mirroredStageIsTwo: mirrored.stage,
+              mirroredGrandMatchesStage1Exactly: Math.abs(mirrored.grand - stage1Grand) < 0.0001,
+              ignoredTheDifferentFqAreas: true // the equality above IS the proof — fqAreas had 10x the qty
+            };
+          } finally {
+            w.qFabMode = saved.qFabMode; w.qAreas = saved.qAreas; w.fqAreas = saved.fqAreas;
+            w.qStage = saved.qStage; w.fqMirrorStage1 = saved.fqMirrorStage1;
+            if (document.getElementById('cl-service') && saved.clService != null) document.getElementById('cl-service').value = saved.clService;
+          }
+        }, { defaultOffStillRunsItsOwnFormula: true, mirroredStageIsTwo: 2,
+             mirroredGrandMatchesStage1Exactly: true, ignoredTheDifferentFqAreas: true });
       /* Rommel, 2026-09-13 (finding #3 of the installation-cost audit): Reports -> Computation Ref
          -> "Installation Computation" described a formula that never matched reality -- a fictional
          "Install cost x qty" per-unit layer (sourced from the CF.installCostPerUnit field removed

@@ -1294,6 +1294,8 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
       </div>
       <!-- Fabrication Cost Basis card — populated by renderFQFabBasisCard() -->
       <div id="fq-fab-basis-wrap" style="margin-bottom:6px"></div>
+      <!-- Shown only once the client has approved the Initial Quotation — populated by renderFQMirrorToggle() -->
+      <div id="fq-mirror-wrap" style="margin-bottom:6px;display:none"></div>
       <!-- Stage 2's own scope of work. Starts as an exact copy of Stage 1 and is edited here for
            client-requested changes; Stage 1 is never touched. Rendered by renderFQItems(). -->
       <div id="fq-scope-card" class="card" style="margin-bottom:6px">
@@ -4541,6 +4543,16 @@ var fqFabCostOverride = 0;        // fabrication cost when fqFabBasis === 'cutti
 // True once this quotation's own saved fabrication basis has been loaded — stops
 // initFinalQuotation() resetting it back to 'initial' (see fqApprovalsFromSave).
 var fqBasisFromSave = false;
+// Rommel, 2026-09-21 (QT-W00000183): the client already approved the Initial Quotation, and a
+// Settings-wide change made afterward (fewer installation personnel) shifted what Stage 2 computes
+// for Mobilization & Installation, even though Stage 2's own scope never changed. He does not want
+// this to happen for THAT specific, already-approved job -- and explicitly NOT as a general rule
+// for every quotation (a genuine cost change should still reach a quotation that has not been sent
+// yet). Per-quotation, off by default, persisted like fqFabBasis above -- when on, Stage 2 stops
+// running its own formula altogether and instead becomes Stage 1's own live result (computed with
+// Stage 1's frozen rates, same as its own printout), so "Final = Initial" holds by construction
+// rather than by a parallel formula that could drift again later. See recalcFQ().
+var fqMirrorStage1 = false;
 var modalCtx = 's1';  // 's1' = Stage 1, 'fq' = Final Quotation
 // ── Google Auth & Sheets config ──────────────────────────────────────────
 var GOOG_CLIENT_ID='605710112392-vgvmr9e66b8himis6ka118cdq5er6393.apps.googleusercontent.com';
@@ -6398,7 +6410,7 @@ function initQuotation() {
   // Reset Final Quotation state for fresh start
   fqLocked=false; fqSentStatus=''; fqSentAt=''; fqInitialized=false; fqApprovalsFromSave=false;
   fqClientApproved=false; fqClientApprovedAt='';
-  fqPreviewed=false; fqFabBasis='own'; fqFabCostOverride=0; fqBasisFromSave=false;
+  fqPreviewed=false; fqFabBasis='own'; fqFabCostOverride=0; fqBasisFromSave=false; fqMirrorStage1=false;
   fqAreas=null; fqScopeForked=false;   // a new quotation has no Stage 2 scope until it reaches Stage 2
   var fqw=el('fq-cards-wrap'); if(fqw) fqw.innerHTML='';
   var fqiw=el('fq-items-wrap'); if(fqiw) fqiw.innerHTML='';
@@ -24936,6 +24948,28 @@ function renderFQFabBasisCard() {
     +'</div>'
     +'</div></div>';
   wrap.innerHTML=h;
+  renderFQMirrorToggle();
+}
+// Only offered once the client has approved the Initial Quotation — the exact situation this
+// solves. Nothing about the shared pricing formula changes (see recalcFQ()'s fqMirrorStage1
+// branch); this is a per-quotation choice, off by default, invisible/irrelevant until an
+// Initial Quotation has actually been approved.
+function renderFQMirrorToggle() {
+  var w=el('fq-mirror-wrap'); if(!w) return;
+  if(!qClientApproved){ w.style.display='none'; w.innerHTML=''; return; }
+  w.style.display='block';
+  w.innerHTML='<div class="card"><div class="card-body">'
+    +'<label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">'
+    +'<input type="checkbox" '+(fqMirrorStage1?'checked':'')+' onchange="setFQMirrorStage1(this.checked)" style="margin-top:2px">'
+    +'<div><div style="font-weight:600;font-size:13px">Keep this Final Quotation identical to the approved Initial Quotation</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-top:2px">The client already approved the Initial Quotation. With this on, the Final Quotation always shows exactly what was approved — a Settings change made afterward (rates, cost factors, installation team) can no longer silently reprice this specific job. Turn it off, or edit its scope of work below, if this job genuinely needs a revised price.</div></div>'
+    +'</label></div></div>';
+}
+function setFQMirrorStage1(on) {
+  fqMirrorStage1=!!on;
+  recalcFQ();
+  renderFQFabBasisCard();
+  if(typeof renderFQItems==='function') renderFQItems();
 }
 function updateFQUploadCardVisibility() {
   var show=(fqFabBasis==='cutting');
@@ -25103,6 +25137,19 @@ function checkFQSchedule() {
 // the global qAreas, so the swap is all it takes: the whole Stage 2 chain follows Stage 2's
 // scope, and Stage 1 keeps its own.
 function recalcFQ(){
+  // fqMirrorStage1: this quotation's Final Quotation does not run its own formula at all —
+  // it becomes Stage 1's own live result (Stage 1's own scope, Stage 1's own frozen rates,
+  // recalc() itself — the exact function that already produces Stage 1's approved printout).
+  // "Final = Initial" then holds because it IS Initial, not because two independent
+  // computations happened to land on the same number. Deliberately does NOT wrap in
+  // _withFQAreas — recalc() must see Stage 1's real qAreas, not fqAreas. See the fqMirrorStage1
+  // declaration above for why this exists and why it is opt-in per quotation, not a global rule.
+  if(fqMirrorStage1){
+    _withFrozenRates(function(){ return _recalcCore(true); });
+    if(_pCalc) _pCalc=Object.assign({},_pCalc,{stage:2});
+    try{ _sigCheckCostChanged(); }catch(e){ console.warn('[sig] cost check failed',e); }
+    return _pCalc;
+  }
   var _r=_withFQAreas(function(){
     return _withFrozenRates(function(){ return _recalcFQCore(); });
   });
@@ -33412,7 +33459,7 @@ function getFullQuotationState(){
     // The Stage 2 fabrication basis was never saved, so a manually entered cutting-list
     // cost was silently lost on reopen — and, worse, the globals leaked between
     // quotations (see fqInitialized in restoreFullQuotationState).
-    fqFabBasis:fqFabBasis, fqFabCostOverride:fqFabCostOverride,
+    fqFabBasis:fqFabBasis, fqFabCostOverride:fqFabCostOverride, fqMirrorStage1:!!fqMirrorStage1,
     // Stage 2's own scope. Saved in full — it is what the Final Quotation is priced from, so
     // losing it would silently reprice the job back to the Initial Quotation's scope.
     fqAreas:fqAreas?JSON.parse(JSON.stringify(fqAreas)):null, fqScopeForked:fqScopeForked,
@@ -33607,6 +33654,7 @@ function restoreFullQuotationState(state){
   } else {
     fqFabBasis='own'; fqFabCostOverride=0; fqBasisFromSave=false;
   }
+  fqMirrorStage1=!!state.fqMirrorStage1;
   // Stage 2's own scope. A quotation saved before this existed has none — it forks from Stage 1
   // the next time Stage 2 is opened, which reproduces exactly what it priced at before.
   fqAreas = state.fqAreas ? JSON.parse(JSON.stringify(state.fqAreas)) : null;
