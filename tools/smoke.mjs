@@ -2968,6 +2968,107 @@ const PROFILES = {
           }
         }, { declinedRecordsNothing: { qApproved: false, qClientApproved: false }, namesWhatItRecords: true,
              confirmingRecordsApproval: { qApproved: true, qClientApproved: true }, skipsWhenAlreadyApproved: true });
+      /* Rommel, 2026-09-21: reported the quotation "suddenly locked" while he was "just typing" --
+         traced through the activity log to a genuine, complete lock (rates frozen, revision bumped,
+         "Quotation locked." logged) 15 seconds after an unlock. The Lock button had no confirmation
+         at all -- a single stray click did everything instantly, with nothing to catch it, even
+         though it freezes pricing and clears any signatures already collected. Same
+         confirm-before-a-consequential-action pattern as doApprove() above. Proves: the gates
+         (qLocked/qCancelled/_lockGateOk) still run BEFORE the confirm even opens, so a lock that
+         would be refused anyway never shows the dialog; declining leaves qLocked untouched;
+         confirming runs the exact same lock sequence as before. */
+      if (typeof window.doLockOnly === 'function' && typeof window._doLockOnlyConfirmed === 'function')
+        check('doLockOnly: confirms before locking, and the gates still run before the dialog opens', () => {
+          const w = window;
+          const saved = { qLocked: w.qLocked, qCancelled: w.qCancelled, qRevisionPending: w.qRevisionPending,
+                           _lockGateOk: w._lockGateOk, _lockGateFail: w._lockGateFail, _confirm: w._confirm,
+                           _applyRevisionBump: w._applyRevisionBump, _stampPreparedBySignature: w._stampPreparedBySignature,
+                           _freezeRates: w._freezeRates, _captureLockedTotal: w._captureLockedTotal,
+                           gSaveQuotation: w.gSaveQuotation, updateLockUI: w.updateLockUI, updateSentStatus: w.updateSentStatus,
+                           saveQuotationToDrive: w.saveQuotationToDrive, renderOptionBar: w.renderOptionBar,
+                           logActivity: w.logActivity, qActiveOptionId: w.qActiveOptionId, qOptionsList: w.qOptionsList };
+          try {
+            w._applyRevisionBump = () => {}; w._stampPreparedBySignature = () => {};
+            w._freezeRates = () => {}; w._captureLockedTotal = () => {};
+            w.gSaveQuotation = () => {}; w.updateLockUI = () => {}; w.updateSentStatus = () => {};
+            w.saveQuotationToDrive = () => {}; w.renderOptionBar = () => {}; w.logActivity = () => {};
+            w.qActiveOptionId = 0; w.qOptionsList = []; w.qRevisionPending = false;
+
+            // A refused gate must never even open the confirm dialog.
+            w.qLocked = false; w.qCancelled = false;
+            let gateFailShown = false;
+            w._lockGateOk = () => false; w._lockGateFail = () => { gateFailShown = true; };
+            let confirmOpenedOnRefusedGate = false;
+            w._confirm = () => { confirmOpenedOnRefusedGate = true; };
+            w.doLockOnly();
+            const gateBlocksBeforeAnyDialog = gateFailShown && !confirmOpenedOnRefusedGate;
+
+            w._lockGateOk = () => true;
+            let confirmMsg = null;
+            w._confirm = (msg) => { confirmMsg = msg; };   // capture only -- never call onOk: simulates Cancel
+            w.doLockOnly();
+            const decliningLeavesItUnlocked = w.qLocked === false;
+            const namesWhatItDoes = !!confirmMsg && /lock/i.test(confirmMsg) && /freeze|frozen/i.test(confirmMsg);
+
+            w._confirm = (msg, onOk) => { onOk(); };   // simulates clicking Yes
+            w.doLockOnly();
+            const confirmingActuallyLocks = w.qLocked === true;
+
+            return { gateBlocksBeforeAnyDialog, decliningLeavesItUnlocked, namesWhatItDoes, confirmingActuallyLocks };
+          } finally {
+            w.qLocked = saved.qLocked; w.qCancelled = saved.qCancelled; w.qRevisionPending = saved.qRevisionPending;
+            w._lockGateOk = saved._lockGateOk; w._lockGateFail = saved._lockGateFail; w._confirm = saved._confirm;
+            w._applyRevisionBump = saved._applyRevisionBump; w._stampPreparedBySignature = saved._stampPreparedBySignature;
+            w._freezeRates = saved._freezeRates; w._captureLockedTotal = saved._captureLockedTotal;
+            w.gSaveQuotation = saved.gSaveQuotation; w.updateLockUI = saved.updateLockUI; w.updateSentStatus = saved.updateSentStatus;
+            w.saveQuotationToDrive = saved.saveQuotationToDrive; w.renderOptionBar = saved.renderOptionBar;
+            w.logActivity = saved.logActivity; w.qActiveOptionId = saved.qActiveOptionId; w.qOptionsList = saved.qOptionsList;
+          }
+        }, { gateBlocksBeforeAnyDialog: true, decliningLeavesItUnlocked: true, namesWhatItDoes: true, confirmingActuallyLocks: true });
+      /* Rommel, 2026-09-21: "I don't have ways to edit the names of client in the edit directory" --
+         confirmed: openClientModal() rendered every field ("Contact name", "Business name", ...) as
+         plain read-only text, with Delete as the only action. A typo ("Johndurf" for "Johndorf")
+         had no fix short of a database edit -- exactly the Sheets/Supabase-split risk this session
+         already hit once on a different quotation. Scoped deliberately to the safe, pure
+         record-keeping fields (name/business name/contact/email/address/notes) -- Account Category
+         and Segment are left untouched here since those can carry pricing/billing implications
+         elsewhere, and "correct the name without affecting anything else" was the explicit ask.
+         Proves the edit form is pre-filled from the real client object, and that saving calls the
+         SAME gSaveClient() the rest of the app already uses (the one function that dual-writes
+         Sheets+Supabase) -- not a new, separate write path that could drift from it. */
+      if (typeof window.startEditClient === 'function' && typeof window.submitEditClient === 'function')
+        check('startEditClient/submitEditClient: a client\'s name can be corrected through the real save path', () => {
+          const w = window;
+          const saved = { liveClients: w.liveClients, gSaveClient: w.gSaveClient, logActivity: w.logActivity,
+                           renderClients: w.renderClients, showToast: w.showToast, _cmEditingId: w._cmEditingId };
+          try {
+            w.liveClients = [{ id: 501, name: 'Johndurf Property Ventures', bizname: 'Johndurf Property Ventures',
+                                contact: '0917', email: 'a@b.com', address: 'Cebu', type: 'Direct',
+                                segment: 'Commercial', segmentGroup: 'B2B', notes: '', txns: [] }];
+            let savedClient = null;
+            w.gSaveClient = (c) => { savedClient = c; };
+            w.logActivity = () => {}; w.renderClients = () => {}; w.showToast = () => {};
+
+            w.startEditClient(501);
+            const prefilledCorrectly = el('cme-name') && el('cme-name').value === 'Johndurf Property Ventures';
+
+            if (el('cme-name')) el('cme-name').value = 'Johndorf Property Ventures';
+            if (el('cme-biz')) el('cme-biz').value = 'Johndorf Property Ventures';
+            w.submitEditClient(501);
+
+            return {
+              prefilledCorrectly,
+              wentThroughTheRealSaveFunction: !!savedClient,
+              nameActuallyCorrected: !!savedClient && savedClient.name === 'Johndorf Property Ventures' && savedClient.bizname === 'Johndorf Property Ventures',
+              accountCategoryUntouched: !!savedClient && savedClient.type === 'Direct',
+              segmentUntouched: !!savedClient && savedClient.segment === 'Commercial' && savedClient.segmentGroup === 'B2B',
+            };
+          } finally {
+            w.liveClients = saved.liveClients; w.gSaveClient = saved.gSaveClient; w.logActivity = saved.logActivity;
+            w.renderClients = saved.renderClients; w.showToast = saved.showToast; w._cmEditingId = saved._cmEditingId;
+          }
+        }, { prefilledCorrectly: true, wentThroughTheRealSaveFunction: true, nameActuallyCorrected: true,
+             accountCategoryUntouched: true, segmentUntouched: true });
       // Rommel, 2026-08-27: "add kg uom on the outsource" -- an outsourced material bought by
       // weight (e.g. a sheet good priced per kg rather than per piece) had no matching unit in the
       // dropdown. Local to renderOutsourceSection's own uopts list, so it can't affect BOM mode's
