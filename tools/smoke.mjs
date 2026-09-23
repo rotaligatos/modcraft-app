@@ -294,11 +294,12 @@ const PROFILES = {
       if (typeof window.prodComputeBom === 'function')
         check('prodComputeBom: grain rides per-piece into the shared group, not into the grouping key', () => {
           const w = window;
-          const saved = { boardSizes: w.prodSettings.boardSizes, kerf: w.prodSettings.kerf,
+          const saved = { boardSizes: w.prodSettings.boardSizes,
+                           machineKerfs: JSON.parse(JSON.stringify(w.prodSettings.machines)),
                            machineType: w.prodSettings.machineType };
           try {
             w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 100, h: 200 }] }];
-            w.prodSettings.kerf = 0;
+            w.prodSettings.machines.cnc.kerf = 0;
             w.prodSettings.machineType = 'cnc';
             const comps = [
               { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
@@ -313,7 +314,7 @@ const PROFILES = {
               grainFreePieceStillPacksInSharedGroup: bom.length === 1 && bom[0].boardsNeeded === 1
             };
           } finally {
-            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.kerf = saved.kerf;
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.machines = saved.machineKerfs;
             w.prodSettings.machineType = saved.machineType;
           }
         }, { oneGroupNotTwo: true, grainLockedPieceStillOversizedInSharedGroup: true,
@@ -369,11 +370,12 @@ const PROFILES = {
       if (typeof window.prodComputeBom === 'function')
         check('prodComputeBom: each BOM row carries boardW/boardH/layout through from the packer', () => {
           const w = window;
-          const saved = { boardSizes: w.prodSettings.boardSizes, kerf: w.prodSettings.kerf,
+          const saved = { boardSizes: w.prodSettings.boardSizes,
+                           machineKerfs: JSON.parse(JSON.stringify(w.prodSettings.machines)),
                            machineType: w.prodSettings.machineType };
           try {
             w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 100, h: 200 }] }];
-            w.prodSettings.kerf = 0;
+            w.prodSettings.machines.panelsaw.kerf = 0;
             w.prodSettings.machineType = 'panelsaw';
             const bom = w.prodComputeBom([
               { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
@@ -386,7 +388,7 @@ const PROFILES = {
               layoutIsOneBoardWithOnePiece: row && row.layout && row.layout.length === 1 && row.layout[0].length === 1
             };
           } finally {
-            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.kerf = saved.kerf;
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.machines = saved.machineKerfs;
             w.prodSettings.machineType = saved.machineType;
           }
         }, { boardWCarried: true, boardHCarried: true, layoutIsOneBoardWithOnePiece: true });
@@ -440,11 +442,14 @@ const PROFILES = {
       if (typeof window.prodComputeBom === 'function')
         check('prodComputeBom: each BOM row carries shelves/kerf through from the packer', () => {
           const w = window;
-          const saved = { boardSizes: w.prodSettings.boardSizes, kerf: w.prodSettings.kerf,
+          const saved = { boardSizes: w.prodSettings.boardSizes,
+                           machineKerfs: JSON.parse(JSON.stringify(w.prodSettings.machines)),
                            machineType: w.prodSettings.machineType };
           try {
             w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 100, h: 200 }] }];
-            w.prodSettings.kerf = 5;
+            /* Kerf is per-machine now -- set the machine's, not a global, or the packer reads
+               the real 3mm and the shelf-width assertion below silently shifts. */
+            w.prodSettings.machines.panelsaw.kerf = 5;
             w.prodSettings.machineType = 'panelsaw';
             const bom = w.prodComputeBom([
               { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
@@ -457,10 +462,175 @@ const PROFILES = {
               shelfWidthMatchesThePiece: row && row.shelves[0][0].width === 40
             };
           } finally {
-            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.kerf = saved.kerf;
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.machines = saved.machineKerfs;
             w.prodSettings.machineType = saved.machineType;
           }
         }, { kerfCarried: true, shelvesIsOneBoardWithOneShelf: true, shelfWidthMatchesThePiece: true });
+      /* Rommel, 2026-09-22: "the nesting and cnc is just a flexibility in case I made some
+         upgrade" -- so a machine had to become a real thing carrying its OWN kerf, not one global
+         kerf shared by every machine. This pins the part that decides money: a machine resolves
+         its own kerf, and an UNKNOWN machine falls back to the Panel Saw rather than a 0mm kerf,
+         which would quietly under-count boards on every material. */
+      if (typeof window.prodMachine === 'function')
+        check('prodMachine: every machine carries its own kerf; an unknown key falls back to Panel Saw, never a 0mm kerf', () => {
+          const w = window;
+          const saved = JSON.parse(JSON.stringify(w.prodSettings.machines));
+          const savedType = w.prodSettings.machineType;
+          try {
+            w.prodSettings.machines.panelsaw.kerf = 3;
+            w.prodSettings.machines.cnc.kerf = 8;
+            w.prodSettings.machineType = 'panelsaw';
+            const sawKerf = w.prodKerf();
+            w.prodSettings.machineType = 'cnc';
+            const cncKerf = w.prodKerf();
+            w.prodSettings.machineType = 'a-machine-that-does-not-exist';
+            const unknown = w.prodMachine();
+            return {
+              panelSawUsesItsOwnKerf: sawKerf === 3,
+              cncUsesItsOwnKerf: cncKerf === 8,
+              unknownFallsBackToPanelSaw: unknown.key === 'panelsaw',
+              unknownKerfIsNotZero: unknown.kerf === 3,
+              panelSawDoesNotRotate: w.prodMachine('panelsaw').allowRotate === false,
+              cncRotates: w.prodMachine('cnc').allowRotate === true
+            };
+          } finally {
+            w.prodSettings.machines = saved; w.prodSettings.machineType = savedType;
+          }
+        }, { panelSawUsesItsOwnKerf: true, cncUsesItsOwnKerf: true, unknownFallsBackToPanelSaw: true,
+             unknownKerfIsNotZero: true, panelSawDoesNotRotate: true, cncRotates: true });
+
+      /* The kerf a board was packed at must be STAMPED on the row, not re-read from the live
+         setting when a report renders -- otherwise switching machine after an analysis relabels
+         an old cut sheet with a kerf it was never packed at, and the printed cut lengths stop
+         matching the stated kerf with nothing to show for it. */
+      if (typeof window.prodComputeBom === 'function')
+        check('prodComputeBom: the selected machine drives the pack AND is stamped on the row', () => {
+          const w = window;
+          const saved = { boardSizes: w.prodSettings.boardSizes,
+                          machines: JSON.parse(JSON.stringify(w.prodSettings.machines)),
+                          machineType: w.prodSettings.machineType };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 100, h: 200 }] }];
+            w.prodSettings.machines.panelsaw.kerf = 4;
+            w.prodSettings.machines.cnc.kerf = 9;
+            const comp = [{ material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
+                            length: 50, width: 40, qty: 1 }];
+            w.prodSettings.machineType = 'panelsaw';
+            const sawRow = w.prodComputeBom(comp)[0];
+            w.prodSettings.machineType = 'cnc';
+            const cncRow = w.prodComputeBom(comp)[0];
+            return {
+              sawRowKerf: !!sawRow && sawRow.kerf === 4,
+              cncRowKerf: !!cncRow && cncRow.kerf === 9,
+              sawRowNamesItsMachine: !!sawRow && sawRow.machineKey === 'panelsaw' && !!sawRow.machineLabel,
+              cncRowNamesItsMachine: !!cncRow && cncRow.machineKey === 'cnc',
+              rotationStampedPerRow: !!sawRow && !!cncRow && sawRow.allowRotate === false && cncRow.allowRotate === true
+            };
+          } finally {
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.machines = saved.machines;
+            w.prodSettings.machineType = saved.machineType;
+          }
+        }, { sawRowKerf: true, cncRowKerf: true, sawRowNamesItsMachine: true,
+             cncRowNamesItsMachine: true, rotationStampedPerRow: true });
+
+      /* saveProductionSettings must NOT write a `kerf` key back. loadProdSettings migrates any
+         bare `kerf` it finds into machines.panelsaw.kerf -- so resurrecting the key here would let
+         the next page load overwrite the machines table with a stale global, undoing every kerf
+         set per machine. Nor may it reset machineType, which the Cutting List page now owns.
+         Reads the function's own source; calling it needs the whole Settings DOM present. */
+      if (typeof window.saveProductionSettings === 'function')
+        check('saveProductionSettings: writes back neither a global kerf nor machineType (both would clobber newer values)', () => {
+          const src = window.saveProductionSettings.toString();
+          return {
+            noGlobalKerfAssignment: !/prodSettings\s*\.\s*kerf\s*=/.test(src),
+            noMachineTypeAssignment: !/prodSettings\s*\.\s*machineType\s*=/.test(src)
+          };
+        }, { noGlobalKerfAssignment: true, noMachineTypeAssignment: true });
+
+      /* Found 2026-09-22 by LOOKING at the rendered layout, not by any number: labels were sized
+         as a fraction of the BOARD (min(boardW,boardH)*0.018), so on a 1220x2440 sheet drawn 280px
+         tall they came out at ~2.5 real px -- geometrically perfect and completely illegible. The
+         geometry tests all passed throughout. Pins the property that actually matters: a label's
+         ON-SCREEN size, derived through the same scale the viewBox applies, on any board size. */
+      if (typeof window._prodBoardSvg === 'function')
+        check('_prodBoardSvg: piece labels are legible on screen whatever the board size', () => {
+          const px = (bw, bh) => {
+            const svg = window._prodBoardSvg(
+              [{ x: 0, y: 0, w: Math.round(bw * 0.45), h: Math.round(bh * 0.28), rotated: false }], bw, bh);
+            const wAttr = +(svg.match(/<svg width="(\d+)"/) || [])[1];
+            const hAttr = +(svg.match(/height="(\d+)" viewBox/) || [])[1];
+            const font = +(svg.match(/font-size="(\d+)"/) || [])[1];
+            if (!font) return null;                       // label suppressed -- caller decides
+            const scale = Math.max(wAttr, hAttr) / Math.max(bw, bh);
+            return font * scale;                          // the size a person actually sees
+          };
+          const sheet = px(1220, 2440), small = px(600, 900), wide = px(1830, 2440);
+          const legible = v => v !== null && v >= 9 && v <= 16;
+          return {
+            fullSheetLabelLegible: legible(sheet),
+            smallBoardLabelLegible: legible(small),
+            wideSheetLabelLegible: legible(wide),
+            // The old board-proportional rule produced wildly different on-screen sizes per board;
+            // deriving from the screen makes them agree.
+            consistentAcrossBoardSizes: [sheet, small, wide].every(v => v !== null)
+              && (Math.max(sheet, small, wide) - Math.min(sheet, small, wide)) < 2
+          };
+        }, { fullSheetLabelLegible: true, smallBoardLabelLegible: true,
+             wideSheetLabelLegible: true, consistentAcrossBoardSizes: true });
+
+      /* Rommel, 2026-09-22: "it should produce 1st the cutting layout ... After showing this, a
+         summary of how many boards are needed, how many edgebands are need and also the
+         equivalent services". The layout used to be collapsed inside a Bill of Materials row and
+         opened only on click. Checks real rendered output: the layout card exists, comes BEFORE
+         the boards table, and is open without anyone clicking. */
+      if (typeof window.prodBuildResultHtml === 'function' && typeof window.prodComputeBom === 'function')
+        check('prodBuildResultHtml: the cutting layout renders first, open by default, ahead of the boards table', () => {
+          const w = window;
+          const saved = { boardSizes: w.prodSettings.boardSizes, result: w.prodState.result,
+                          expanded: w.prodState.expandedLayout };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 1220, h: 2440 }] }];
+            w.prodState.expandedLayout = {};
+            const comps = [{ area: 'A', name: 'Side', material: 'TestMat', color: 'White',
+                             texture: '', thickness: 18, length: 600, width: 400, qty: 4,
+                             faces: 2, ebt: '1l', edgeTape: 'White PVC', grain: 'none' }];
+            const res = { components: comps, hardware: [], holeSchedule: [], summary: '' };
+            res._bom = w.prodComputeBom(comps);
+            res._services = w.prodComputeServices(comps, [], []);
+            w.prodState.result = res;
+            const html = w.prodBuildResultHtml(res);
+            const iLayout = html.indexOf('Cutting layout');
+            const iBom = html.indexOf('Bill of Materials');
+            return {
+              layoutCardRendered: iLayout >= 0,
+              layoutComesBeforeBoardsTable: iLayout >= 0 && iBom >= 0 && iLayout < iBom,
+              openWithoutClicking: html.indexOf('Board 1 of') >= 0
+            };
+          } finally {
+            w.prodSettings.boardSizes = saved.boardSizes; w.prodState.result = saved.result;
+            w.prodState.expandedLayout = saved.expanded;
+          }
+        }, { layoutCardRendered: true, layoutComesBeforeBoardsTable: true, openWithoutClicking: true });
+
+      /* "how many edgebands are need" -- the per-tape split and the per-lm services were already
+         computed for the quotation but appeared nowhere in the Services summary, so the only way
+         to see how much of EACH tape to buy was the reflect panel further down the page. */
+      if (typeof window._prodSvcDetailHtml === 'function')
+        check('_prodSvcDetailHtml: shows edge banding per tape and the per-lm services, including the unnamed-tape bucket', () => {
+          const html = window._prodSvcDetailHtml({
+            edgebandingByTape: [{ tape: 'White PVC', lm: 12.5 }, { tape: 'Unspecified', lm: 3 }],
+            extraServicesByName: [{ service: 'Grooving 3mm (melamine)', qty: 8, unit: 'lm' }]
+          });
+          return {
+            namesEachTape: html.indexOf('White PVC') >= 0,
+            showsItsLength: html.indexOf('12.5 lm') >= 0,
+            surfacesTheUnnamedBucket: html.indexOf('Unspecified') >= 0,
+            listsPerLmServices: html.indexOf('Grooving 3mm (melamine)') >= 0 && html.indexOf('8 lm') >= 0,
+            emptyWhenNothingToShow: window._prodSvcDetailHtml({}) === ''
+          };
+        }, { namesEachTape: true, showsItsLength: true, surfacesTheUnnamedBucket: true,
+             listsPerLmServices: true, emptyWhenNothingToShow: true });
+
       /* Rommel, 2026-09-09: typed a real cutting list, clicked "Load into analysis", and reported
          "there's nothing here but just the cutting list" -- the Bill of Materials WAS there, just
          below a full "Upload file for analysis" card (file picker, drag-and-drop zone, an Analyze

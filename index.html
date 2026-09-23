@@ -4298,11 +4298,18 @@ var companyLogos = {};   // keyed by company name — one logo per company
 // ── Production / Fabrication AI ──────────────────────────────────────────
 var prodSettings = {
   claudeKey: '',
-  kerf: 3,
-  // 'panelsaw' = guillotine, grain locked along piece.length, no rotation (validated against
-  // real cutting lists). 'cnc' = nesting router — can rotate pieces to pack tighter; modeled as
-  // a simpler stubbed version of the same shelf algorithm with rotation allowed, not true 2D
-  // bin-packing yet (see project_board_layout_cutting_simulation memory — sharpen later).
+  // Cutting machines. Each carries its OWN kerf — a router bit never removes the same width as a
+  // saw blade, and the board count follows directly from it, so one shared kerf would quietly
+  // mis-count boards the moment a second machine is used. allowRotate lets the packer turn a
+  // piece 90° to fit; a grain-locked piece is never rotated regardless (see guillotinePackBoards).
+  // Panel Saw is the only machine owned today and is the one validated against real cutting lists;
+  // the other two exist so an upgrade needs no code change. Their kerf figures are PLACEHOLDERS —
+  // set the real one in Settings → Designers Support when a machine actually arrives.
+  machines: {
+    panelsaw: {label:'Panel Saw',      kerf:3, allowRotate:false, owned:true},
+    nesting:  {label:'Nesting Router', kerf:6, allowRotate:true,  owned:false},
+    cnc:      {label:'CNC Router',     kerf:6, allowRotate:true,  owned:false}
+  },
   machineType: 'panelsaw',
   ebtWastage: 5,
   ebtLegend: [
@@ -4466,6 +4473,17 @@ function loadProdSettings(){
           needsSave=true;
         }
       }
+      // Migrate: the single global kerf became a per-machine kerf (one blade width can't stand in
+      // for every machine). An old save carries a bare `kerf` and no `machines` — adopt that value
+      // as the Panel Saw's (the only machine that existed then) and drop the old key so nothing
+      // can read a second, drifting copy of the same fact.
+      if(typeof prodSettings.kerf==='number'){
+        if(!prodSettings.machines) prodSettings.machines={};
+        if(!prodSettings.machines.panelsaw) prodSettings.machines.panelsaw={label:'Panel Saw',kerf:3,allowRotate:false,owned:true};
+        prodSettings.machines.panelsaw.kerf=prodSettings.kerf;
+        delete prodSettings.kerf;
+        needsSave=true;
+      }
       // Migrate: ensure cabinetRules exists
       if(!prodSettings.cabinetRules){
         prodSettings.cabinetRules={ebtDeduct:true,ebtThickness:0.5,components:[
@@ -4491,6 +4509,57 @@ function prodSaveEbtCond(inp,i){
 }
 function saveProdSettings(){
   try{localStorage.setItem('mc_prod',JSON.stringify(prodSettings));}catch(e){}
+}
+// The ONE place a machine's kerf/rotation is resolved. Everything that packs boards, prints a cut
+// sheet or tells the AI the kerf reads through here, so a machine can never be described with one
+// kerf and simulated with another. Falls back to Panel Saw for an unknown/missing key rather than
+// guessing a kerf — an unknown machine silently packing at 0mm would under-count boards.
+function prodMachine(key){
+  var ms=prodSettings.machines||{};
+  var k=key||prodSettings.machineType||'panelsaw';
+  var m=ms[k];
+  if(!m){ k='panelsaw'; m=ms.panelsaw; }
+  if(!m) m={label:'Panel Saw',kerf:3,allowRotate:false,owned:true};
+  return {key:k, label:m.label||k, kerf:(m.kerf==null?3:(+m.kerf||0)),
+          allowRotate:!!m.allowRotate, owned:m.owned!==false};
+}
+function prodKerf(){ return prodMachine().kerf; }
+// "Panel Saw · 3mm kerf" — used wherever a report has to say what it simulated.
+function prodMachineLabel(key){ var m=prodMachine(key); return m.label+' · '+m.kerf+'mm kerf'; }
+// Settings → Designers Support: define each machine's kerf. Saves on change (same pattern as the
+// EBT conditions) so a kerf can never be typed, left unsaved, and then silently simulated at the
+// old value by the next analysis.
+function _prodMachineTableHtml(){
+  var keys=prodMachineKeys();
+  var th='style="text-align:left;font-size:11px;color:var(--text2);font-weight:600;padding:4px 6px"';
+  var h='<table style="width:100%;border-collapse:collapse">'
+    +'<tr><th '+th+'>Machine</th><th '+th+' >Kerf (mm)</th><th '+th+'>Piece rotation</th><th '+th+'>Status</th></tr>';
+  for(var i=0;i<keys.length;i++){
+    var k=keys[i], m=prodMachine(k);
+    h+='<tr style="border-top:1px solid var(--border)">'
+      +'<td style="padding:5px 6px;font-weight:600">'+escHtml(m.label)+'</td>'
+      +'<td style="padding:5px 6px"><input type="number" value="'+m.kerf+'" min="0" max="20" step="0.5" '
+        +'onchange="_prodSetMachineKerf(\''+k+'\',this.value)" style="height:30px;font-size:12px;width:80px"></td>'
+      +'<td style="padding:5px 6px;font-size:11px;color:var(--text2)">'+(m.allowRotate?'Allowed — packs tighter':'Not allowed — guillotine')+'</td>'
+      +'<td style="padding:5px 6px">'+(m.owned
+        ? '<span class="pill pill-teal" style="font-size:10px">In use</span>'
+        : '<span class="pill" style="font-size:10px">Not owned — kerf is a placeholder</span>')+'</td>'
+      +'</tr>';
+  }
+  return h+'</table>';
+}
+function _prodSetMachineKerf(key,val){
+  var ms=prodSettings.machines; if(!ms||!ms[key]) return;
+  var n=parseFloat(val); if(isNaN(n)||n<0) return;
+  ms[key].kerf=n;
+  saveProdSettings();
+}
+function prodMachineKeys(){
+  var ms=prodSettings.machines||{}, out=[];
+  // Stable order: the owned machine first, then the rest as declared.
+  for(var k in ms) if(ms[k]&&ms[k].owned!==false) out.push(k);
+  for(var k2 in ms) if(ms[k2]&&ms[k2].owned===false) out.push(k2);
+  return out.length?out:['panelsaw'];
 }
 loadProdSettings();
 var qBondIns = {
@@ -34151,18 +34220,15 @@ function renderProductionSettings() {
        +(prodSettings.claudeKey?'<i class="ti ti-circle-check" style="color:var(--teal)"></i> API key configured (managed by Admin)':'<i class="ti ti-alert-circle" style="color:var(--coral)"></i> Not configured — contact your Admin')
        +'</div>')
     +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
-    +'<div><label class="fld">Kerf size (mm)</label>'
-    +'<input type="number" id="prod-kerf" value="'+prodSettings.kerf+'" min="0" max="10" step="0.5" style="height:32px;font-size:12px"></div>'
     +'<div><label class="fld">EBT wastage allowance (%)</label>'
     +'<input type="number" id="prod-ebt-waste" value="'+prodSettings.ebtWastage+'" min="0" max="50" style="height:32px;font-size:12px"></div>'
-    +'<div style="grid-column:1/-1;margin-top:8px"><label class="fld">Cutting machine (board-count simulation)</label>'
-    +'<select id="prod-machine-type" style="height:32px;font-size:12px">'
-    +'<option value="panelsaw"'+(prodSettings.machineType!=='cnc'?' selected':'')+'>Panel Saw (guillotine — no rotation, grain locked)</option>'
-    +'<option value="cnc"'+(prodSettings.machineType==='cnc'?' selected':'')+'>CNC / Nesting Router (rotation allowed — tighter packing)</option>'
-    +'</select>'
-    +'<div style="font-size:11px;color:var(--text2);margin-top:3px">Drives the boards-needed simulation on the Bill of Materials report. Panel Saw is validated against real cutting lists; CNC is a simpler first-pass estimate.</div>'
     +'</div>'
-    +'</div>'
+    // Machines and their kerf. Which machine a JOB uses is picked on the Cutting List page — this
+    // table only defines what each machine is, so there is one source of truth for a kerf.
+    +'<div class="dvdr" style="margin-top:14px"><span>Cutting machines</span></div>'
+    +'<p style="font-size:11px;color:var(--text2);margin-bottom:8px">Each machine has its own kerf — the board count follows directly from it. '
+    +'Pick which machine a job uses on <b>Designers Support → Cutting List</b>; this table just defines them.</p>'
+    +_prodMachineTableHtml()
     // EBT legend
     +'<div class="dvdr" style="margin-top:14px"><span>EBT code legend</span></div>'
     +'<p style="font-size:11px;color:var(--text2);margin-bottom:10px">Reference codes used in cutting lists and the cut optimizer. Add conditions or notes to each code as needed.</p>'
@@ -34264,9 +34330,11 @@ function _prodLoadMappingAudit(){
 
 function saveProductionSettings() {
   var isAdmin=(currentRole==='Admin');
-  var kerf=parseFloat((el('prod-kerf')||{}).value)||3;
   var waste=parseFloat((el('prod-ebt-waste')||{}).value)||5;
-  var machineType=(el('prod-machine-type')||{}).value||'panelsaw';
+  // Kerf is per-machine and saves itself from the machines table (_prodSetMachineKerf); the
+  // machine a job uses is picked on the Cutting List page. Neither is re-read here — writing a
+  // `kerf` key back would resurrect the migrated-away global and let loadProdSettings overwrite
+  // the machine table with it on the next load.
   // EBT legend — only conditions are editable; code+desc are fixed
   var ebt=[];
   var ebtBase=prodSettings.ebtLegend||[];
@@ -34300,8 +34368,6 @@ function saveProductionSettings() {
         .catch(function(){alert('Warning: Failed to save API key to Google Sheets. Check your connection.');});
     }
   }
-  prodSettings.kerf=kerf;
-  prodSettings.machineType=machineType;
   prodSettings.ebtWastage=waste;
   prodSettings.ebtLegend=ebt;
   prodSettings.cabinetRules=cr;
@@ -34699,6 +34765,19 @@ var MCL=(function(){
     return h+'</div>';
   }
 
+  // Machine options, each showing its own kerf so the number driving the board count is never
+  // hidden behind a name — especially for the two machines that aren't owned yet and carry
+  // placeholder kerfs.
+  function machineOpts(){
+    var keys=prodMachineKeys(), cur=prodMachine().key, h='';
+    for(var i=0;i<keys.length;i++){
+      var m=prodMachine(keys[i]);
+      h+='<option value="'+keys[i]+'"'+(keys[i]===cur?' selected':'')+'>'
+        +esc(m.label)+' · '+m.kerf+'mm'+(m.owned?'':' (not owned)')+'</option>';
+    }
+    return h;
+  }
+
   // ── Build the tab ───────────────────────────────────────────────────────
   function build(){
     var th='style="text-align:left;font-size:11px;color:var(--text2);font-weight:600;padding:4px 5px;white-space:nowrap"';
@@ -34716,6 +34795,11 @@ var MCL=(function(){
       +'<select onchange="MCL.setGroupBy(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
       +'<option value="cabinet"'+(S.groupBy==='cabinet'?' selected':'')+'>Cabinet</option>'
       +'<option value="area"'+(S.groupBy==='area'?' selected':'')+'>Area</option></select></label>'
+      // Which machine cuts THIS job — it sets the kerf and whether pieces may be rotated, so it
+      // decides the board count. Kerf per machine is defined in Settings → Designers Support.
+      +'<label style="font-size:11px;color:var(--text2)" title="Sets the kerf and rotation used to lay out the boards">Machine'
+      +'<select onchange="MCL.setMachine(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
+      +machineOpts()+'</select></label>'
       +'<button class="btn" style="font-size:11px;padding:6px 10px" onclick="MCL.downloadTemplate()" title="A ready-made Excel workbook with real dropdowns on Part/Edge Band/Services — the same one the MSSI website offers"><i class="ti ti-file-spreadsheet"></i>Download Excel template</button>'
       +'<label class="btn" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Upload a filled-in copy of the template"><i class="ti ti-upload"></i>Upload filled Excel'
       +'<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="MCL.uploadExcel(this)"></label>'
@@ -35071,6 +35155,9 @@ var MCL=(function(){
     downloadTemplate:downloadTemplate, uploadExcel:uploadExcel,
     setGrain:function(v){ S.grain=v; },
     setGroupBy:function(v){ S.groupBy=v; rerender(); },
+    // One stored value (prodSettings.machineType) with two entry points — this and the machines
+    // table in Settings — so the page and the packer can never disagree about which machine ran.
+    setMachine:function(v){ prodSettings.machineType=v; saveProdSettings(); rerender(); },
     addPanel:function(n){ for(var i=0;i<(n||1);i++) S.panels.push(blankPanel()); rerender(); },
     removePanel:function(i){ S.panels.splice(i,1); rerender(); },
     set:set,
@@ -36742,7 +36829,7 @@ function prodBuildPrompt(){
     +'  "carcassCount": 1\n'
     +'}\n\n'
     +'Settings:\n'
-    +'- Kerf: '+prodSettings.kerf+'mm per cut\n'
+    +'- Machine: '+prodMachine().label+', kerf '+prodKerf()+'mm per cut\n'
     +'- Woodgrain direction: along '+prodState.woodgrainDir+'\n'
     +'- EBT codes legend: '+ebtDesc+'\n'
     +'- Standard board sizes: '+bsDesc+'\n'
@@ -38003,8 +38090,9 @@ function prodComputeBom(comps){
     if(c.length>0&&c.width>0){ for(var q=0;q<qty;q++) groups[key].pieces.push({length:c.length,width:c.width,grain:c.grain||'none'}); }
   }
   var bom=[]; var keys=Object.keys(groups);
-  var kerf=prodSettings.kerf||3;
-  var allowRotate=prodSettings.machineType==='cnc';
+  var _mach=prodMachine();
+  var kerf=_mach.kerf;
+  var allowRotate=_mach.allowRotate;
   for(var j=0;j<keys.length;j++){
     var g=groups[keys[j]];
     var boardW=1220; var boardH=2440;
@@ -38025,7 +38113,11 @@ function prodComputeBom(comps){
       utilizationPct:Math.round(sim.utilization*1000)/10,
       oversizedCount:sim.oversizedCount,
       boardW:boardW,boardH:boardH,layout:sim.layout,   // per-board placed-piece rectangles — see _prodCutLayoutSvg
-      shelves:sim.shelves,kerf:kerf   // per-board rip-cut-strip geometry — see _prodCutSequence
+      shelves:sim.shelves,kerf:kerf,  // per-board rip-cut-strip geometry — see _prodCutSequence
+      // Stamp the machine that actually produced this pack. Reports read THIS, never the live
+      // setting — otherwise switching machines after an analysis would relabel an old cut sheet
+      // with a kerf it was never packed at.
+      machineKey:_mach.key, machineLabel:_mach.label, allowRotate:allowRotate
     });
   }
   return bom;
@@ -38478,9 +38570,49 @@ function _prodServiceRowCorrected(idx,newVal){
 // math of its own: it just draws the rectangles already decided. A full page re-render is fine
 // here (matches every other Designers Support toggle) since opening a diagram is an occasional
 // click, not a per-keystroke path.
+// Layouts now open by DEFAULT (the cut layout is the first thing the analysis is meant to show),
+// so the stored flag records the exception — `false` means this material was collapsed by hand.
+// Anything else, including a fresh analysis's empty {}, reads as open.
 function prodToggleBomLayout(idx){
-  prodState.expandedLayout[idx]=!prodState.expandedLayout[idx];
+  prodState.expandedLayout[idx]=(prodState.expandedLayout[idx]===false);
   renderProductionPage();
+}
+function _prodLayoutOpen(idx){ return prodState.expandedLayout[idx]!==false; }
+
+// Edge banding broken down by tape, plus the per-lm services. Both come straight from
+// prodComputeServices — nothing is recomputed here, so these can't disagree with the totals in
+// the KPI row above or with the rows that reach the quotation.
+function _prodSvcDetailHtml(svc){
+  var tapes=(svc&&svc.edgebandingByTape)||[];
+  var extras=(svc&&svc.extraServicesByName)||[];
+  if(!tapes.length&&!extras.length) return '';
+  var th='style="text-align:left;font-size:11px;color:var(--text2);font-weight:600;padding:4px 6px"';
+  var h='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:12px">';
+  if(tapes.length){
+    h+='<div><div style="font-size:12px;font-weight:600;margin-bottom:4px">Edge banding by tape</div>'
+      +'<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Tape</th><th '+th+' >Length</th></tr>';
+    for(var i=0;i<tapes.length;i++){
+      // 'Unspecified' is a real bucket, not an error — a list that never named a tape colour
+      // still bands, it just can't say with what. Showing it is what makes that visible.
+      var unspec=(tapes[i].tape==='Unspecified');
+      h+='<tr style="border-top:1px solid var(--border)">'
+        +'<td style="padding:4px 6px'+(unspec?';color:var(--amber);font-weight:600':'')+'">'+escHtml(tapes[i].tape)
+        +(unspec?' <span style="font-weight:400;font-size:10px">— no tape named on those rows</span>':'')+'</td>'
+        +'<td style="padding:4px 6px;text-align:right;white-space:nowrap">'+(tapes[i].lm||0).toFixed(1)+' lm</td></tr>';
+    }
+    h+='</table><div style="font-size:10px;color:var(--text2);margin-top:3px">Includes the '+prodSettings.ebtWastage+'% wastage allowance.</div></div>';
+  }
+  if(extras.length){
+    h+='<div><div style="font-size:12px;font-weight:600;margin-bottom:4px">Other services</div>'
+      +'<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Service</th><th '+th+' >Qty</th></tr>';
+    for(var j=0;j<extras.length;j++){
+      h+='<tr style="border-top:1px solid var(--border)">'
+        +'<td style="padding:4px 6px">'+escHtml(extras[j].service)+'</td>'
+        +'<td style="padding:4px 6px;text-align:right;white-space:nowrap">'+(extras[j].qty||0)+' '+escHtml(extras[j].unit||'')+'</td></tr>';
+    }
+    h+='</table></div>';
+  }
+  return h+'</div>';
 }
 // Real cutting instructions for ONE board, derived from the packer's own shelf geometry --
 // never guessed. A shelf IS a rip-cut strip by construction (see guillotinePackBoards's own
@@ -38519,7 +38651,7 @@ function _prodCutSequence(bm,boardIndex){
 // fit. Kerf is not drawn as its own line (it's a cut allowance, not a physical gap worth rendering
 // at this scale) -- pieces are drawn edge-to-edge from their recorded x/y/w/h.
 function _prodBoardSvg(pieces,boardW,boardH){
-  var maxPx=280; // longest board dimension on screen, in px -- boards print landscape-ish either way
+  var maxPx=460; // longest board dimension on screen, in px -- boards print landscape-ish either way
   var scale=maxPx/Math.max(boardW,boardH);
   var pw=Math.round(boardW*scale),ph=Math.round(boardH*scale);
   // The <svg> width/height (pw/ph) vs its viewBox (raw board mm) is what does the screen scaling
@@ -38527,7 +38659,13 @@ function _prodBoardSvg(pieces,boardW,boardH){
   // `scale`. A first version multiplied both, shrinking every piece to a sliver in one corner;
   // caught only by actually looking at the rendered SVG, not by the numbers (boardsNeeded/
   // utilization were correct throughout, since neither reads this function at all).
-  var fontSize=Math.max(10,Math.round(Math.min(boardW,boardH)*0.018));
+  // Size the label from the SCREEN, not from the board. Sizing it as a fraction of the board
+  // (the old rule) rendered a 1220×2440 sheet's labels at ~2.5 real px — geometrically correct
+  // and completely unreadable, which only shows up by looking at it. Work back from the target
+  // on-screen size through the same `scale` the viewBox applies, so a label is legible on any
+  // board size. The gate below then hides it on pieces genuinely too small to hold it.
+  var LABEL_PX=11;
+  var fontSize=Math.round(LABEL_PX/scale);
   var strokeW=Math.max(1,Math.round(fontSize*0.15));
   var rects='';
   for(var p2=0;p2<pieces.length;p2++){
@@ -38568,7 +38706,7 @@ function _prodCutSheetHtml(bm){
     var ripM=(seq.ripLenMm/1000).toFixed(3), crossM=(seq.crosscutLenMm/1000).toFixed(3), totalM=(seq.totalLenMm/1000).toFixed(3);
     var usedM2=(usedMm2/1e6).toFixed(3), offcutM2=((boardAreaMm2-usedMm2)/1e6).toFixed(3), boardM2=(boardAreaMm2/1e6).toFixed(3);
     h+='<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px;background:var(--card)">'
-      +'<div style="font-size:12px;font-weight:700;margin-bottom:8px">Board '+(bi+1)+' of '+bm.layout.length+' <span style="font-weight:400;color:var(--text2)">— '+boardW+'×'+boardH+'mm, kerf '+(bm.kerf||prodSettings.kerf||3)+'mm, '+(prodSettings.machineType==='cnc'?'grain rotation allowed':'grain rotation not allowed')+'</span></div>'
+      +'<div style="font-size:12px;font-weight:700;margin-bottom:8px">Board '+(bi+1)+' of '+bm.layout.length+' <span style="font-weight:400;color:var(--text2)">— '+boardW+'×'+boardH+'mm, '+escHtml(bm.machineLabel||prodMachine().label)+', kerf '+(bm.kerf==null?prodKerf():bm.kerf)+'mm, '+(bm.allowRotate?'rotation allowed':'no rotation')+'</span></div>'
       +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:10px">'
       +'<div>'
         +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text2);margin-bottom:4px">Cutting sequence</div>'
@@ -38693,13 +38831,52 @@ function prodBuildResultHtml(result){
     +'<div class="kpi"><div class="lbl">Panel cutting</div><div class="val" style="font-size:18px">'+(svc.cuttingLM||0).toFixed(1)+'</div><div class="sub">linear meters</div></div>'
     +'<div class="kpi"><div class="lbl">Edgebanding</div><div class="val" style="font-size:18px">'+(svc.edgebandingLM||0).toFixed(1)+'</div><div class="sub">lm · incl. '+prodSettings.ebtWastage+'% wastage</div></div>'
     +'<div class="kpi"><div class="lbl">Hole boring</div><div class="val" style="font-size:18px">'+(svc.holeCount||0)+'</div><div class="sub">holes total</div></div>'
-    +'</div></div></div>';
+    +'</div>'
+    // Edge banding per tape colour/type and the per-linear-metre services (grooving, routing,
+    // manual edgebanding) are already computed for the quotation — show them here too, or the
+    // only place to see how much of EACH tape to buy is the reflect summary further down.
+    +_prodSvcDetailHtml(svc)
+    +'</div></div>';
+  // What the boards were ACTUALLY packed with — read off the rows, not the live setting, so
+  // changing machine after an analysis can't relabel a result it did not produce.
+  var _bomMach0=bom.length?bom[0]:null;
+  var _bomMachLabel=(_bomMach0&&_bomMach0.machineLabel?_bomMach0.machineLabel:prodMachine().label)
+    +' · '+((_bomMach0&&_bomMach0.kerf!=null)?_bomMach0.kerf:prodKerf())+'mm kerf';
+  var _bomMachRotate=_bomMach0?!!_bomMach0.allowRotate:prodMachine().allowRotate;
+  // ── Cutting layout ── the first thing the analysis shows: how every board is actually cut,
+  // one collapsible block per material, open by default. The diagrams live here rather than
+  // nested inside the Bill of Materials rows so the layout leads and the boards-needed table
+  // stays a clean summary underneath it.
+  var layoutBlocks='', totalBoards=0;
+  for(var lb=0;lb<bom.length;lb++){
+    var lm=bom[lb];
+    totalBoards+=lm.boardsNeeded||0;
+    if(!(lm.layout&&lm.layout.length)) continue;
+    var lOpen=_prodLayoutOpen(lb);
+    var lTitle=[lm.material,lm.color,(lm.thickness?lm.thickness+'mm':'')].filter(function(x){return x;}).join(' · ');
+    layoutBlocks+='<div style="border:1px solid var(--border);border-radius:6px;margin-bottom:10px;overflow:hidden">'
+      +'<div onclick="prodToggleBomLayout('+lb+')" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg2);cursor:pointer">'
+      +'<i class="ti ti-chevron-'+(lOpen?'down':'right')+'" style="font-size:12px;color:var(--text2)"></i>'
+      +'<span style="font-weight:600;font-size:12px">'+escHtml(lTitle)+'</span>'
+      +'<span style="font-size:11px;color:var(--text2)">'+lm.layout.length+' board'+(lm.layout.length===1?'':'s')
+        +' · '+lm.boardSize+' · '+(lm.utilizationPct||0)+'% used</span>'
+      +(lm.oversizedCount?'<span style="font-size:11px;color:var(--bad,#dc2626);font-weight:600">⚠ '+lm.oversizedCount+' piece(s) too big for this board</span>':'')
+      +'</div>'
+      +(lOpen?'<div style="padding:10px">'+_prodCutSheetHtml(lm)+'</div>':'')
+      +'</div>';
+  }
+  var layoutHtml=layoutBlocks
+    ? '<div class="card" style="margin-bottom:14px">'
+      +'<div class="card-head"><h3><i class="ti ti-grid-dots"></i>Cutting layout — '+totalBoards+' board'+(totalBoards===1?'':'s')+'</h3></div>'
+      +'<div style="font-size:11px;color:var(--text2);margin-bottom:10px">'+escHtml(_bomMachLabel)+' · '
+      +(_bomMachRotate?'pieces may be rotated to pack tighter (grain-locked pieces never are)':'guillotine cuts, no rotation')
+      +'. Cut sequence and lengths below are read off the same layout that produced the board count.</div>'
+      +layoutBlocks+'</div>'
+    : '';
   var bomRows='';
   for(var b=0;b<bom.length;b++){
     var bm=bom[b];
     var utilColor=bm.utilizationPct>=70?'var(--good,#16a34a)':(bm.utilizationPct>=50?'var(--warn,#d97706)':'var(--bad,#dc2626)');
-    var hasLayout=bm.layout&&bm.layout.length;
-    var isOpen=!!prodState.expandedLayout[b];
     bomRows+='<tr>'
       +'<td>'+escHtml(bm.material)+'</td>'
       +'<td>'+escHtml(bm.color)+'</td>'
@@ -38710,16 +38887,12 @@ function prodBuildResultHtml(result){
       +'<td style="text-align:right;font-weight:600">'+bm.boardsNeeded+'</td>'
       +'<td style="text-align:right;color:'+utilColor+'">'+(bm.utilizationPct||0)+'%</td>'
       +'<td style="font-size:10px;color:var(--text2)">'+escHtml(bm.areas||'')+(bm.oversizedCount?' <span style="color:var(--bad,#dc2626);font-weight:600">⚠ '+bm.oversizedCount+' piece(s) too big for this board</span>':'')
-      +(hasLayout?' <a href="#" onclick="prodToggleBomLayout('+b+');return false" style="color:var(--navy);white-space:nowrap">'+(isOpen?'Hide cut layout':'View cut layout')+' <i class="ti ti-chevron-'+(isOpen?'up':'down')+'" style="font-size:10px"></i></a>':'')
       +'</td>'
       +'</tr>';
-    if(hasLayout&&isOpen){
-      bomRows+='<tr><td colspan="9" style="background:var(--bg2);padding:10px">'+_prodCutSheetHtml(bm)+'</td></tr>';
-    }
   }
   var bomHtml='<div class="card" style="margin-bottom:14px">'
     +'<div class="card-head"><h3><i class="ti ti-layout-board"></i>Bill of Materials — boards needed</h3></div>'
-    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Simulated by cutting layout ('+(prodSettings.machineType==='cnc'?'CNC/nesting router, rotation allowed':'guillotine panel-saw, no rotation')+', '+(prodSettings.kerf||3)+'mm kerf) — not a flat area estimate.</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Simulated by cutting layout ('+escHtml(_bomMachLabel)+', '+(_bomMachRotate?'rotation allowed':'no rotation')+') — not a flat area estimate.</div>'
     +'<div style="overflow-x:auto"><table class="data">'
     +'<thead><tr><th>Material</th><th>Color</th><th>Texture</th><th style="text-align:right">Thickness</th><th style="text-align:right">Total area</th><th>Board size</th><th style="text-align:right">Sheets needed</th><th style="text-align:right">Utilization</th><th>Used in areas</th></tr></thead>'
     +'<tbody>'+bomRows+'</tbody>'
@@ -38764,7 +38937,11 @@ function prodBuildResultHtml(result){
       +(result.summary?' '+escHtml(result.summary):'')+'</div>';
   return topBanner
     +actHtml+'<div id="prod-summary-wrap">'+prodBuildSummaryHtml()+'</div>'
-    +bomHtml+hwHtml+svcHtml+kpiHtml+compHtml+holeHtml; // order per user request: Bill of Materials -> Hardware -> Services -> totals -> Cutting List (last, most detailed) -> Hole schedule
+    +layoutHtml+bomHtml+svcHtml+kpiHtml+hwHtml+compHtml+holeHtml;
+  // Order per user request 2026-09-22: the cutting layout comes FIRST, then what it adds up to --
+  // boards needed, then edge banding + services -- then hardware, then the detailed cutting list
+  // and hole schedule. (Supersedes the earlier order, which led with the Bill of Materials and
+  // kept the layout collapsed inside it.)
 }
 
 function prodExportExcel(){
