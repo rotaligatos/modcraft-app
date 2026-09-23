@@ -17299,8 +17299,27 @@ var _WEB_EBT={'':[0,0],'1L':[1,0],'2L':[2,0],'1S':[0,1],'2S':[0,2],
               '1L 1S':[1,1],'2L 1S':[2,1],'1L 2S':[1,2],'4S':[2,2]};        // [long,short]
 var _EBT_BY_COUNT={'0|0':'','1|0':'1s','2|0':'2s','0|1':'1l','0|2':'2l',
                    '1|1':'1s/1l','1|2':'1s/2l','2|1':'2s/1l','2|2':'4s'};   // 'short|long'
+// Clients write the SAME nine codes in their own words. These are the unambiguous ones, mapped
+// before the table lookup so a legend nobody would misread does not land on an estimator's desk
+// as "unrecognised". Anything NOT listed here still flags and keeps the client's own text -- the
+// point is to stop the obvious cases being manual work, never to guess at a doubtful one.
+var _WEB_EBT_SYNONYM=[
+  [/^(4|4S|4SIDES|ALL|ALLROUND|ALLAROUND|ALLSIDES|ALLEDGES|FULL|AROUND)$/,'4S'],
+  [/^(0|NONE|NIL|NO|NA|N\/A|-|--)$/,'']
+];
+function _webEbtNormalise(raw){
+  // Spacing is not vocabulary: "2L1S" is the same code as "2L 1S".
+  var t=raw.replace(/^(\d)\s*L\s*(\d)\s*S$/,'$1L $2S').replace(/^(\d)\s*S\s*(\d)\s*L$/,'$2L $1S');
+  if(_WEB_EBT[t]!==undefined) return t;
+  var squashed=t.replace(/[\s.]/g,'');            // "ALL AROUND" / "4 SIDES" -> "ALLAROUND" / "4SIDES"
+  for(var i=0;i<_WEB_EBT_SYNONYM.length;i++){
+    if(_WEB_EBT_SYNONYM[i][0].test(squashed)) return _WEB_EBT_SYNONYM[i][1];
+  }
+  return t;
+}
 function _webEbtToModcraft(code,L,W){
   var raw=(code||'').trim().toUpperCase().replace(/\s+/g,' ');
+  raw=_webEbtNormalise(raw);
   var ls=_WEB_EBT[raw];
   if(!ls) return {ebt:'',unknown:raw!==''};
   var longIsLength=(+L||0)>=(+W||0);
@@ -34775,6 +34794,25 @@ var MCL=(function(){
     return h+'</div>';
   }
 
+  // Thickness stated by a material, for auto-filling the Th column.
+  // ⚠ A laminated board's thickness is the SUBSTRATE's ONLY — the ~1mm HPL per face is not added
+  // (the plant's convention, and the website's). Its build label carries BOTH figures
+  // ("Pure White 0.7mm HPL on Raw Boards 4x8 18mm MDF · 2F"), and the generic parser takes the
+  // FIRST "…mm" it sees — which is the finish, 0.7mm. So a build must be resolved back to its
+  // substrate here, never parsed off its own label.
+  function thicknessForMaterial(val){
+    var v=String(val||'').trim();
+    if(!v||typeof _prodParseMaterialDescriptor!=='function') return 0;
+    for(var i=0;i<S.hpl.length;i++){
+      var hr=S.hpl[i];
+      var ss=String(hr.sub||'').split(' — ')[0].trim();
+      var sf=String(hr.fin||'').split(' — ')[0].trim();
+      if(!ss||!sf) continue;
+      if(v===sf+' on '+ss+' · '+(hr.faces||'')) return _prodParseMaterialDescriptor(hr.sub).thickness||0;
+    }
+    return _prodParseMaterialDescriptor(v).thickness||0;
+  }
+
   // Machine options, each showing its own kerf so the number driving the board count is never
   // hidden behind a name — especially for the two machines that aren't owned yet and carry
   // placeholder kerfs.
@@ -35171,7 +35209,21 @@ var MCL=(function(){
     addPanel:function(n){ for(var i=0;i<(n||1);i++) S.panels.push(blankPanel()); rerender(); },
     removePanel:function(i){ S.panels.splice(i,1); rerender(); },
     set:set,
-    matSearch:function(inp,i){ S.panels[i].mat=inp.value; fillMatList('mcl-mat-dl-'+i,inp.value); },
+    matSearch:function(inp,i){
+      S.panels[i].mat=inp.value; fillMatList('mcl-mat-dl-'+i,inp.value);
+      // The picked material already states its thickness — fill it in rather than have it typed
+      // a second time, where the two can silently disagree and the panel gets cut from the wrong
+      // board. Only ever writes when the text actually states a thickness; typing a partial name
+      // leaves Th alone. The user can still type over it afterwards.
+      var th=thicknessForMaterial(inp.value);
+      if(th&&S.panels[i].th!==th){
+        S.panels[i].th=th;
+        var tr=inp.closest&&inp.closest('tr');
+        var ti=tr&&tr.querySelector('.mcl-f-th');
+        if(ti) ti.value=th;                       // patch in place — a re-render would lose focus
+        _mclFooter();
+      }
+    },
     addSvc:function(i,v){ if(!v) return; if(S.panels[i].svcs.indexOf(v)<0) S.panels[i].svcs.push(v); rerender(); },
     removeSvc:function(i,s){ S.panels[i].svcs.splice(s,1); rerender(); },
     // Rewrites the chip in place; no re-render, so the number keeps focus while
@@ -38251,7 +38303,12 @@ function prodBuildSummary(result) {
   }
   var hws=[];var hw=result.hardware||[];
   for(var h=0;h<hw.length;h++){
-    if(!hw[h].name||!(hw[h].qty>0)) continue;
+    if(!hw[h].name) continue;                     // a nameless row has nothing to price or match
+    // A quantity-less row used to be dropped here, silently -- the client asked for hinges and
+    // the quotation simply never mentioned them, which reads exactly like "no hinges needed".
+    // Keep it and flag it: the estimator can enter the count, which is the only place the answer
+    // exists. Same rule the panels already follow for a missing dimension or quantity.
+    var hwNoQty=!(hw[h].qty>0);
     // Edge banding tape/trim lands in the AI's "hardware" JSON bucket (it's a linear consumable,
     // not a board — see the prompt's own "add to hardware with unit lm" instruction), but this
     // app's own Price DB convention prices it as a MATERIAL (see the cabinet templates' "1mm PVC
@@ -38262,7 +38319,13 @@ function prodBuildSummary(result) {
     // above) and search dbMaterials first, falling back to dbHardware in case it's stocked there.
     var isTapeLike=(hw[h].unit==='lm')||/\b(edge\s*band(ing)?|ebt|edge\s*tape|trim\s*tape)\b/i.test(hw[h].name);
     var hwCatalog=isTapeLike?dbMaterials.concat(dbHardware):dbHardware;
-    hws.push(catalogMatchRow(hw[h].name,applyJargon(hw[h].name,'hardware'),hwCatalog,hw[h].qty,hw[h].unit||'pcs'));
+    var hwRow=catalogMatchRow(hw[h].name,applyJargon(hw[h].name,'hardware'),hwCatalog,hw[h].qty,hw[h].unit||'pcs');
+    if(hwNoQty){
+      hwRow.needsReview=true;
+      hwRow.reviewNote='"'+hw[h].name+'" arrived without a quantity — enter how many, or it prices at nothing.'
+        +(hwRow.reviewNote?' '+hwRow.reviewNote:'');
+    }
+    hws.push(hwRow);
   }
   // Keyword-matched (not exact-string) against your actual Price DB service catalog — exact-name
   // matching silently dropped any service whose catalog name didn't literally equal one of a

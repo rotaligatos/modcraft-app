@@ -643,6 +643,97 @@ const PROFILES = {
         }, { mismatchedRowFlagged: true, noteNamesBothFigures: true,
              matchingRowNotFlagged: true, matchingRowAtOtherThicknessNotFlagged: true });
 
+      /* Rommel, 2026-09-22, comparing against the MSSI website's cutting list: picking a material
+         there writes its thickness into the Th box; Modcraft left Th to be typed, so the SKU and
+         the Th column could silently disagree and a panel be cut from the wrong board.
+         ⚠ The HPL case is the one that bites: a laminated board's thickness is the SUBSTRATE's
+         only, and its build label carries BOTH figures -- "Pure White 0.7mm HPL on ... 18mm MDF".
+         The generic parser takes the FIRST "...mm" it sees, which is the 0.7mm finish, so the
+         build must be resolved back to its substrate. Pinned here because getting it wrong yields
+         a plausible number (0.7) rather than an obvious failure. */
+      if (window.MCL && typeof window.MCL.matSearch === 'function')
+        check('MCL.matSearch: the picked material fills Th -- and an HPL build fills its SUBSTRATE thickness, not the finish', () => {
+          const w = window;
+          w.setProdTab('cutlist');
+          w.MCL.addHpl();
+          const hi = w.MCL.state().hpl.length - 1;
+          w.MCL.setHpl(hi, 'sub', 'Raw Boards 4x8 18mm MDF — MDF-18R');
+          w.MCL.setHpl(hi, 'fin', 'Pure White 0.7mm HPL — HPL-WHT');
+          w.MCL.setHpl(hi, 'faces', '2F');
+          const inputs = [].slice.call(document.querySelectorAll('input[oninput*="matSearch"]'));
+          const pick = (idx, val) => {
+            const el = inputs[idx];
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            const shown = el.closest('tr').querySelector('.mcl-f-th');
+            return { state: w.MCL.state().panels[idx].th, shown: shown ? +shown.value : null };
+          };
+          const plain = pick(0, 'Real White PB 4x8 2F (25mm, Matte)');
+          /* Move this row OFF the default 18 first. The substrate here is also 18mm, so leaving
+             the default in place would let "nothing happened at all" score as a pass. */
+          w.MCL.set(1, 'th', 25);
+          const hpl = pick(1, 'Pure White 0.7mm HPL on Raw Boards 4x8 18mm MDF · 2F');
+          const partial = pick(2, 'Real White PB');          // states no thickness
+          const before = w.MCL.state().panels[2].th;
+          return {
+            plainSkuFillsThickness: plain.state === 25 && plain.shown === 25,
+            hplBuildUsesSubstrate: hpl.state === 18 && hpl.shown === 18,
+            hplBuildIsNotTheFinishThickness: hpl.state !== 0.7,
+            aPartialNameLeavesThAlone: partial.state === before
+          };
+        }, { plainSkuFillsThickness: true, hplBuildUsesSubstrate: true,
+             hplBuildIsNotTheFinishThickness: true, aPartialNameLeavesThAlone: true });
+
+      /* "let it understand as well, all around is 4s, if no input then its none" -- clients write
+         the same nine codes in their own words. Only the unambiguous ones are translated; anything
+         doubtful still flags and keeps the client's own text, because banding is charged by the
+         metre and a wrong guess is billed, not noticed. */
+      if (typeof window._webEbtToModcraft === 'function')
+        check('_webEbtToModcraft: reads "all around" as 4S and a blank/none as no banding, without guessing at doubtful legends', () => {
+          const f = (t) => window._webEbtToModcraft(t, 600, 400);
+          const allRound = ['4S', 'ALL AROUND', 'all around', 'ALLROUND', '4 SIDES', '4'];
+          const none = ['', '0', 'NONE', 'N/A', 'NA', 'nil'];
+          return {
+            everyAllRoundFormIs4s: allRound.every(t => f(t).ebt === '4s' && !f(t).unknown),
+            everyNoneFormIsBlankAndUnflagged: none.every(t => f(t).ebt === '' && !f(t).unknown),
+            spacingIsNotVocabulary: f('2L1S').ebt === f('2L 1S').ebt && f('2L 1S').ebt !== '',
+            aDoubtfulLegendStillFlags: f('2 long 1 short').unknown === true,
+            anExactCodeStillWorks: f('1L 1S').ebt === '1s/1l'
+          };
+        }, { everyAllRoundFormIs4s: true, everyNoneFormIsBlankAndUnflagged: true,
+             spacingIsNotVocabulary: true, aDoubtfulLegendStillFlags: true,
+             anExactCodeStillWorks: true });
+
+      /* A hardware row with no quantity was dropped before it reached the quotation -- the client
+         asked for hinges and the quotation simply never mentioned them, which reads exactly like
+         "no hinges needed". Flag it instead; the estimator has the count, we do not. A NAMELESS
+         row is still dropped: there is nothing to price or match. */
+      if (typeof window.prodBuildSummary === 'function' && typeof window._cutListToAnalysis === 'function')
+        check('prodBuildSummary: hardware with no quantity survives to the quotation, flagged -- only a nameless row is dropped', () => {
+          const w = window;
+          const saved = { result: w.prodState.result, summary: w.prodState.summary };
+          try {
+            const r = w._cutListToAnalysis({ grain: 'length', hpl: [], hardware: [
+                { item: 'Overlay hinge', qty: 8, unit: 'pcs', notes: '' },
+                { item: 'Drawer slide 450mm', qty: '', unit: 'pcs', notes: '' },
+                { item: '', qty: 5, unit: 'pcs', notes: 'nameless' }
+              ], panels: [{ group: 'C', part: 'Door', mat: 'Real White PB 4x8 2F (18mm, Matte)',
+                th: 18, L: 600, W: 400, qty: 2, ebt: '4S', emat: '', grain: '', svcs: [], remark: '' }] }, null);
+            w.prodState.result = r;
+            w.prodBuildSummary(r);
+            const hws = (w.prodState.summary || {}).hardware || [];
+            const slide = hws.filter(h => /slide/i.test(h.name || ''))[0];
+            return {
+              hingeReachesQuotation: hws.some(h => /hinge/i.test(h.name || '')),
+              blankQtyRowSurvives: !!slide,
+              andIsFlaggedAboutTheQuantity: !!slide && !!slide.needsReview
+                && /without a quantity/i.test(slide.reviewNote || ''),
+              namelessRowStillDropped: !hws.some(h => /nameless/i.test(h.name || ''))
+            };
+          } finally { w.prodState.result = saved.result; w.prodState.summary = saved.summary; }
+        }, { hingeReachesQuotation: true, blankQtyRowSurvives: true,
+             andIsFlaggedAboutTheQuantity: true, namelessRowStillDropped: true });
+
       /* Rommel, 2026-09-22: "it should produce 1st the cutting layout ... After showing this, a
          summary of how many boards are needed, how many edgebands are need and also the
          equivalent services". The layout used to be collapsed inside a Bill of Materials row and
