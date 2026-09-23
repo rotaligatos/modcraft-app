@@ -643,6 +643,61 @@ const PROFILES = {
         }, { mismatchedRowFlagged: true, noteNamesBothFigures: true,
              matchingRowNotFlagged: true, matchingRowAtOtherThicknessNotFlagged: true });
 
+      /* Rommel, 2026-09-22: match the website — only TWO lamination rates exist, and anything that
+         is not MDF/PB takes the PLYWOOD rate. This replaced a third "doesn't match a known rule"
+         branch that quoted NOTHING and left the line to be chased; if the flag went unnoticed the
+         lamination was billed at zero, i.e. the work done for free. Plywood is the dearer of the
+         two, so an unusual board is never quoted short.
+         The FACE COUNT is deliberately still flagged: 1 Face and 2 Face are separate SKUs priced
+         about double apart, so unlike the substrate there is no safe direction to guess in. */
+      if (typeof window.prodBuildSummary === 'function' && typeof window.prodComputeBom === 'function')
+        check('prodBuildSummary: an HPL substrate that is not MDF/PB takes the plywood rate instead of flagging at zero', () => {
+          const w = window;
+          const saved = { boardSizes: w.prodSettings.boardSizes, result: w.prodState.result,
+                          summary: w.prodState.summary };
+          const svcFor = (material, faces) => {
+            const comps = [{ area: 'A', name: 'p', material: material, color: 'White', texture: '',
+                             thickness: 18, faces: faces, length: 600, width: 400, qty: 2,
+                             notes: 'HPL laminated' }];
+            const res = { components: comps, hardware: [], holeSchedule: [], summary: '' };
+            res._bom = w.prodComputeBom(comps);
+            res._services = w.prodComputeServices(comps, [], []);
+            w.prodState.result = res;
+            w.prodBuildSummary(res);
+            const rows = ((w.prodState.summary || {}).services || [])
+              .filter(s => /HPL Lamination/i.test(s.aiName || s.name || ''));
+            const r = rows[0] || {};
+            /* Only the LABEL is asserted on. Whether that service name resolves in the catalogue
+               is a separate concern that always fails offline, where SERVICES is the 6-row
+               placeholder -- so needsReview here reports catalogue presence, not the substrate
+               rule under test. The face-count case is identified by its own note instead. */
+            return { label: r.aiName || r.name || '(none)', note: r.reviewNote || '' };
+          };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'PB', sizes: [{ w: 1220, h: 2440 }] }];
+            const mdf  = svcFor('MDF 4x8 (18mm) HPL', 2);
+            const ply  = svcFor('Plywood 4x8 (18mm) HPL', 2);
+            const hdf  = svcFor('HDF 4x8 (18mm) HPL', 2);
+            const versa = svcFor('Versaboard 4x8 (18mm) HPL', 2);
+            const compact = svcFor('Compact Laminate 4x8 (12mm) HPL', 2);
+            const noFaces = svcFor('MDF 4x8 (18mm) HPL', 0);
+            return {
+              mdfTakesMdfPbRate:  /MDF\/PB, 2 Face/.test(mdf.label),
+              plywoodTakesPlywoodRate: /Plywood, 2 Face/.test(ply.label),
+              hdfTakesPlywoodRate:     /Plywood, 2 Face/.test(hdf.label),
+              versaboardTakesPlywoodRate: /Plywood, 2 Face/.test(versa.label),
+              compactTakesPlywoodRate: /Plywood, 2 Face/.test(compact.label),
+              // The one thing that must STILL flag rather than be guessed.
+              anUnknownFaceCountStillFlags: /face count/i.test(noFaces.note)
+            };
+          } finally {
+            w.prodSettings.boardSizes = saved.boardSizes;
+            w.prodState.result = saved.result; w.prodState.summary = saved.summary;
+          }
+        }, { mdfTakesMdfPbRate: true, plywoodTakesPlywoodRate: true, hdfTakesPlywoodRate: true,
+             versaboardTakesPlywoodRate: true, compactTakesPlywoodRate: true,
+             anUnknownFaceCountStillFlags: true });
+
       /* Rommel, 2026-09-22, comparing against the MSSI website's cutting list: picking a material
          there writes its thickness into the Th box; Modcraft left Th to be typed, so the SKU and
          the Th column could silently disagree and a panel be cut from the wrong board.
