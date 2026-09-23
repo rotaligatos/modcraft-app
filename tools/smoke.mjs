@@ -578,6 +578,71 @@ const PROFILES = {
         }, { fullSheetLabelLegible: true, smallBoardLabelLegible: true,
              wideSheetLabelLegible: true, consistentAcrossBoardSizes: true });
 
+      /* Rommel, 2026-09-22: "It should only apply the specific cutting on a specific material
+         based on thickness, color, type of board and texture. It should not mix." Adversarial by
+         construction -- every pair differs by exactly ONE of those attributes and all pieces are
+         the same size, so nothing is separated by luck and any merge is a genuine mixing bug. The
+         last row is an exact duplicate of the first and MUST merge, or the guard has gone too far
+         the other way and would buy a separate sheet per row. */
+      if (typeof window.prodComputeBom === 'function')
+        check('prodComputeBom: a board never mixes specs -- thickness, colour, board type, texture and faces each split the group', () => {
+          const w = window;
+          const saved = { boardSizes: w.prodSettings.boardSizes };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'PB', sizes: [{ w: 1220, h: 2440 }] }];
+            const base = { area: 'A', name: 'p', length: 600, width: 400, qty: 2 };
+            const comps = [
+              Object.assign({}, base, { material: 'PB',  color: 'real white', texture: 'matte',   thickness: 18, faces: 2 }),
+              Object.assign({}, base, { material: 'PB',  color: 'real white', texture: 'matte',   thickness: 25, faces: 2 }),
+              Object.assign({}, base, { material: 'PB',  color: 'warm white', texture: 'matte',   thickness: 18, faces: 2 }),
+              Object.assign({}, base, { material: 'PB',  color: 'real white', texture: 'stipple', thickness: 18, faces: 2 }),
+              Object.assign({}, base, { material: 'MDF', color: 'real white', texture: 'matte',   thickness: 18, faces: 2 }),
+              Object.assign({}, base, { material: 'PB',  color: 'real white', texture: 'matte',   thickness: 18, faces: 1 }),
+              Object.assign({}, base, { material: 'PB',  color: 'real white', texture: 'matte',   thickness: 18, faces: 2, qty: 3 })
+            ];
+            const bom = w.prodComputeBom(comps);
+            const specOf = b => [b.material, b.color, b.texture, b.thickness, b.faces].join('|');
+            const packed = bom.reduce((n, b) => n + b.layout.reduce((m, brd) => m + brd.length, 0), 0);
+            return {
+              oneGroupPerDistinctSpec: bom.length === 6,
+              everySpecUnique: new Set(bom.map(specOf)).size === bom.length,
+              identicalRowsShareTheirBoards:
+                (bom.filter(b => specOf(b) === 'PB|real white|matte|18|2')[0] || {}).layout
+                  .reduce((n, brd) => n + brd.length, 0) === 5,
+              noPieceLostOrDuplicated: packed === 15
+            };
+          } finally { w.prodSettings.boardSizes = saved.boardSizes; }
+        }, { oneGroupPerDistinctSpec: true, everySpecUnique: true,
+             identicalRowsShareTheirBoards: true, noPieceLostOrDuplicated: true });
+
+      /* The thickness is written in BOTH the SKU text and the Th column, and Th is what the
+         grouping actually uses while the SKU is what a person reads. A new row starts at th:18,
+         so choosing a 25mm SKU and leaving Th alone is the DEFAULT slip -- it silently merged a
+         25mm panel into the 18mm group and cut it from the wrong board, with nothing flagged.
+         Reproduced exactly that way before the fix. Flags, never picks a winner: either field
+         could be the mistaken one, and guessing would mix materials just as quietly. */
+      if (typeof window._cutListToAnalysis === 'function')
+        check('_cutListToAnalysis: flags a SKU/Th thickness mismatch, and does not false-flag a row where they agree', () => {
+          const mk = (mat, th) => ({ group: 'Cab', part: 'Side panel', mat: mat, th: th,
+                                     L: 600, W: 400, qty: 2, ebt: '', emat: '', grain: '', svcs: [], remark: '' });
+          const out = window._cutListToAnalysis({
+            grain: 'length', panels: [
+              mk('Real White PB 4x8 2F (18mm, Matte)', 18),   // agrees
+              mk('Real White PB 4x8 2F (25mm, Matte)', 18),   // SKU 25 vs Th 18
+              mk('Real White PB 4x8 2F (25mm, Matte)', 25)    // agrees at a different thickness
+            ], hpl: [], hardware: []
+          }, null);
+          const c = out.components;
+          const note = (c[1].reviewNote || '');
+          return {
+            mismatchedRowFlagged: !!c[1].needsReview,
+            noteNamesBothFigures: note.indexOf('25mm') >= 0 && note.indexOf('18mm') >= 0,
+            matchingRowNotFlagged: !c[0].needsReview,
+            matchingRowAtOtherThicknessNotFlagged: !c[2].needsReview
+          };
+        }, { mismatchedRowFlagged: true, noteNamesBothFigures: true,
+             matchingRowNotFlagged: true, matchingRowAtOtherThicknessNotFlagged: true });
+
       /* Rommel, 2026-09-22: "it should produce 1st the cutting layout ... After showing this, a
          summary of how many boards are needed, how many edgebands are need and also the
          equivalent services". The layout used to be collapsed inside a Bill of Materials row and

@@ -9216,7 +9216,7 @@ slip through unnoticed multiple times.
   guard in this session was proven to fail on the unfixed code before being trusted on the fixed
   code — including via a genuine `git stash` round-trip on the real file, not a hypothetical.
 
-# OPEN — updated 2026-08-24/25 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-08-24/25 (session end) — SUPERSEDED by the 2026-09-22 list at the end of this file, kept for detail
 > The 2026-08-19 list above is superseded but not stale — read it for anything not covered here.
 > This session did not touch the Custom Report Export, the Wufoo key, the two carried-forward
 > tickets, the mobilization-zero report, or the two adoption habits — all carried forward
@@ -10557,7 +10557,7 @@ reported.
   content volume, not a mistake. Knowing when to STOP and report rather than keep patching is as
   important as the fixes themselves in a production pricing app.
 
-# OPEN — updated 2026-09-14 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-09-14 (session end) — SUPERSEDED by the 2026-09-22 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
 ## Confirmed done this session — do not re-raise
@@ -10945,7 +10945,7 @@ card ever briefly show "On" right after clicking, even if a later visit reverts 
   exactly what's ruled out, here is the one client-side question that would resolve it" — not a
   guessed fix shipped on faith.
 
-# OPEN — updated 2026-09-16 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-09-16 (session end) — SUPERSEDED by the 2026-09-22 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
 ## Confirmed done this session — do not re-raise
@@ -11005,3 +11005,233 @@ card ever briefly show "On" right after clicking, even if a later visit reverts 
   per-user report** — it changes the whole shape of the investigation.
 - **When server-side evidence has been exhausted, say so plainly and name the exact next
   question** — don't ship a guessed fix for a client-side failure that can't be reproduced.
+
+## What was changed on 2026-09-22 (session — cutting layout leads the analysis; kerf becomes per-machine)
+
+One commit, `eebabd0`, deployed and confirmed serving live. Rommel described what he wanted the
+Cutting List → "Load into analysis" flow to produce: the cutting layout FIRST, varying by machine
+(panel saw default, with nesting/CNC provision at different kerf), then a summary of boards,
+edgebands and the equivalent services.
+
+### Investigated before building — most of it already existed
+Surveyed the real code rather than taking the ask at face value. Already shipped (2026-09-08/09):
+kerf-aware guillotine packing → boards needed, a real per-board cut sheet (numbered rip/crosscut
+sequence, cut lengths, utilization, scaled diagram), edge banding split by tape colour, and
+cutting/grooving/routing/manual-edgebanding quantities all flowing into the quotation. Four genuine
+gaps remained, and those are what shipped.
+
+**Three questions were put to Rommel rather than guessed** — kerf figures per machine, what
+actually distinguishes nesting from CNC, and where the machine selector belongs. His answers:
+*"I only have panel saw with 3mm kerf size. the nesting and cnc is just a flexibility in case I
+made some upgrade"*, *"the nesting vs cnc - i dont get this question"* (my question was unclear —
+dropped it and said plainly that until he owns one, the only thing modellable is kerf), and
+*"Machine selector should be in the cutting list page."*
+
+### 1. Kerf is per machine, not one global
+`prodSettings.kerf` was a single value shared by every machine — so a router bit removed exactly as
+much material as a saw blade, and the board count (which follows directly from kerf) could only
+ever be right for one of them. Replaced with a **machines registry**:
+
+```javascript
+prodSettings.machines = {
+  panelsaw: {label:'Panel Saw',      kerf:3, allowRotate:false, owned:true},
+  nesting:  {label:'Nesting Router', kerf:6, allowRotate:true,  owned:false},
+  cnc:      {label:'CNC Router',     kerf:6, allowRotate:true,  owned:false}
+}
+```
+
+- **`prodMachine(key)` / `prodKerf()` / `prodMachineLabel()` / `prodMachineKeys()`** — the ONE
+  resolution point. Everything that packs boards, prints a cut sheet or tells the AI the kerf reads
+  through it. An unknown/missing key falls back to Panel Saw rather than a 0mm kerf, which would
+  silently under-count boards on every material.
+- **Each BOM row is STAMPED** with `machineKey`/`machineLabel`/`allowRotate`/`kerf`. Reports read
+  the stamp, never the live setting — otherwise switching machine after an analysis would relabel
+  an old cut sheet with a kerf it was never packed at.
+- Nesting/CNC kerfs are **placeholders** and are labelled as such in the UI; the dropdown shows each
+  machine's kerf inline so the number driving the count is never hidden behind a name.
+
+> ⚠ **Two drift traps closed deliberately — do not reopen either.**
+> `loadProdSettings` migrates a saved global `kerf` into `machines.panelsaw.kerf` and **deletes the
+> key**. `saveProductionSettings` therefore must NOT write `prodSettings.kerf` or
+> `prodSettings.machineType` back — the first would resurrect the global and let the next page load
+> overwrite the whole machines table with it; the second would reset a per-job machine choice the
+> Cutting List page now owns. Both were removed and both are pinned by a regression check reading
+> the function's own source.
+
+### 2. Machine selector moved to the Cutting List page
+Beside Job grain / Group by, via `MCL.setMachine(v)` → writes `prodSettings.machineType` +
+`saveProdSettings()`. Settings → Designers Support now only *defines* the machines (a per-machine
+kerf table, `_prodMachineTableHtml` / `_prodSetMachineKerf`, saving on change like the EBT
+conditions); the single kerf input and the old 2-option machine dropdown are gone from there.
+**One stored value, two entry points** — they cannot disagree.
+
+### 3. Cutting layout leads the analysis
+The cut sheet was collapsed inside a Bill of Materials row and opened only on click. It is now its
+own card at the top — one collapsible block per material, **open by default**. `expandedLayout` now
+records the EXCEPTION (`false` = collapsed by hand); anything else, including a fresh analysis's
+empty `{}`, reads as open (`_prodLayoutOpen`). The per-row toggle link was removed from the BOM
+table, leaving it a clean summary.
+
+**Render order is now** layout → boards → edge banding + services → hardware → detailed cutting
+list → hole schedule. ⚠ **This supersedes the earlier order** (BOM → Hardware → Services → Cutting
+List), which was itself set to a previous Rommel request — he was told so before it was changed and
+did not object.
+
+### 4. Edge banding per tape + per-lm services now visible in the Services summary
+`edgebandingByTape` and `extraServicesByName` were computed and reached the quotation, but the
+Services summary card showed only four KPIs — so the only place to see how much of EACH tape to buy
+was the reflect panel further down the page. New `_prodSvcDetailHtml(svc)` renders both, reading
+straight from `prodComputeServices` (nothing recomputed, so it cannot disagree with the totals
+above it or with the rows that reach the quotation). The `'Unspecified'` tape bucket is shown in
+amber rather than hidden — a list that never named a colour still bands, and that needs to be
+visible.
+
+### ⚠ A real defect found by LOOKING, which every number passed
+`_prodBoardSvg` sized piece labels as a fraction of the **board**
+(`min(boardW,boardH)*0.018`), so on a full 1220×2440 sheet drawn 280px tall they rendered at
+**~2.5 real pixels** — geometrically perfect and completely illegible. Every geometry test passed
+throughout, because none of them reads the label. Found only by driving the real page and looking
+at the rendered SVG.
+
+Fixed by working back from the target **on-screen** size through the same `scale` the viewBox
+applies (`LABEL_PX=11` → `fontSize = LABEL_PX/scale`), so a label is legible on any board size, and
+by raising `maxPx` 280 → 460 now that the layout leads the page. This is the second time this exact
+function has had a look-at-it-only bug (the 2026-09-08 double-scaling sliver was the first).
+
+### Verified
+Six regression checks in `tools/smoke.mjs`, **each confirmed to fail against the pre-fix code via
+`git stash push -- index.html`** before passing on the fix (two reference genuinely new functions
+and are correctly skipped pre-fix under the established gated-existence convention, rather than
+falsely passing). Three pre-existing BOM tests were updated off the removed global kerf onto the
+per-machine one — one of them was genuinely failing and caught by the gate, the other two were
+silently testing at 3mm while claiming 0mm.
+
+Driven end-to-end in a browser through the **real** `MCL.addPanel`/`MCL.set`/`MCL.load` API (the
+same calls the page's own inputs make) on a 4-row, 16-piece, 2-material list: layout renders ahead
+of the boards table and open without a click; per-tape lengths sum to the stated total
+(10.8 + 9.6 = 20.4 lm); boards 3 × PB + 1 × Plywood; switching machine genuinely changes the kerf
+(3 → 6) and rotation (false → true) used AND stamped on each row; the machines table writes a kerf
+and rejects junk input. `node tools/verify.mjs` green (132 + 9 checks).
+
+### Method notes worth keeping
+- **Survey before building when the ask sounds big.** Four of the seven things described already
+  existed; saying so plainly and naming only the real gaps kept this to one focused commit.
+- **A question the user doesn't understand is a badly-framed question, not their problem.** "Nesting
+  vs CNC — I don't get this question" was fair; the right move was to drop it and state the
+  limitation plainly, not to re-ask it.
+- **Look at the rendered output.** The label bug is the second in this same function that no
+  numeric assertion could catch. When a change is visual, take a screenshot — and when a screenshot
+  looks wrong, read the DOM (`font-size` × scale) to prove it rather than adjusting by eye.
+- **Suspect the rig.** Screenshots timed out repeatedly and returned blank frames under an emulated
+  1440×1000 viewport; resetting to the pane's own size fixed it. A first retry is normal here, not
+  evidence of a broken page.
+- **`MCL` has no `set(obj)` — its `set` is `set(i,field,value)`.** A pre-existing smoke check
+  guarded on `typeof window.MCL.set === 'function'` and a bulk state object; it is skipped/ineffective
+  as written. Not fixed this session, but worth knowing before trusting it.
+- Shell heredocs mangled a patch script again (the 4th time in this repo) — used the Write tool for
+  any content carrying escapes, per the standing rule.
+
+
+### Same session, follow-up — "it should not mix": verified, and one real mixing bug found
+Rommel, straight after the layout work: *"It should only apply the specific cutting on a specific
+material based on thickness, color, type of board and texture. It should not mix."*
+
+**The grouping itself was already correct.** `prodComputeBom`'s key is
+`material|color|texture|thickness|faces|colorB|textureB|hpl`, each group holds only its own pieces
+and gets its own `guillotinePackBoards` call, so a board can only ever carry one exact spec.
+Proved adversarially rather than by reading: seven rows where every pair differs by exactly ONE of
+those attributes, all the same size so nothing separates by luck → **6 groups, 6 boards, the one
+genuinely duplicate row merged, 15 pieces in and 15 packed.**
+
+**But a real mixing bug sat one level up, in how thickness reaches that key.** `_cutListToAnalysis`
+takes thickness from the **Th column** (`thickness:+pn.th||0`), never from the SKU — and Rommel
+confirmed *"in real application, it can be seen both in the sku and th"*, so the two genuinely can
+disagree. A new row starts at `th:18` (`blankPanel()`), so **picking a 25mm SKU and leaving Th
+alone is the DEFAULT slip.** Reproduced cleanly on a fresh page: a 18mm SKU and a 25mm SKU, both
+with Th 18, produced **ONE group of 4 pieces on ONE board — a 25mm panel cut from an 18mm sheet,
+with zero rows flagged.**
+
+Rommel's call: *"if such case, that sku and th is not aligned it should be smart enough to identify
+it and flagged it."* Built exactly that — when the SKU states a thickness and the Th column
+disagrees, the row is flagged with both figures named
+(*"the SKU says 25mm but the Th column says 18mm — set them to the same thickness, or this panel is
+cut from the wrong board"*).
+
+> ⚠ **It flags and never picks a winner, deliberately.** Either field could be the mistaken one, so
+> silently adopting the SKU's thickness would mix materials just as quietly in the other direction.
+> Same flag-not-guess rule the rest of this pipeline follows. HPL rows are untouched — their
+> thickness legitimately comes from the substrate build, and the check sits in the non-HPL branch
+> only.
+
+Verified: mismatched row flagged, matching rows not false-flagged (including one that agrees at a
+*different* thickness), and with Th set correctly all six distinct specs separate onto their own
+boards with nothing flagged. Two regression checks added — the SKU/Th one **fails against the
+pre-fix code**; the no-mixing one **passes pre-fix and is labelled as a regression guard**, not as
+a fix, since that behaviour was already right.
+
+### A rig failure worth remembering
+`MCL.clear()` calls `confirm()`, which returns false unattended — so it silently does **not** clear.
+Three consecutive "results" were leftovers accumulating across runs, and showed groups from rows
+that were never added in that run. Caught only because a group appeared that could not have come
+from the input. **Reload the page between cutting-list runs; do not trust `MCL.clear()` in a
+script.** Same lesson as every other rig failure in this file: when a result contains something the
+input cannot explain, suspect the harness first.
+
+# OPEN — updated 2026-09-22 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+
+## Confirmed done this session — do not re-raise
+- Cutting layout renders first and open by default, with the machine and kerf it was actually
+  packed at named on every board.
+- Kerf is per machine; the machine is picked per job on the Cutting List page and defined in
+  Settings. Panel Saw 3mm is the only owned machine; nesting/CNC carry labelled placeholder kerfs.
+- Edge banding per tape colour and the per-lm services now show in the Services summary.
+- Piece labels on the board diagram are legible at any board size.
+- **A board never mixes specs** — verified adversarially; thickness, colour, board type,
+  texture and faces each split the group. A SKU/Th thickness disagreement is now flagged
+  rather than silently cutting a panel from the wrong board.
+
+## New this session — worth watching
+- **Nesting and CNC behave identically apart from kerf.** Both allow rotation; that is the only
+  distinction modellable without knowing the real machine. When Rommel actually acquires one, set
+  its kerf in Settings and ask how it really packs before assuming the current behaviour is right.
+- **`prodSettings.kerf` is gone.** Any new code must read `prodKerf()` / `prodMachine()`. Writing a
+  `kerf` key back anywhere would be silently undone-and-then-destructive on the next page load (see
+  the migration note above).
+- **The guillotine packer is still a 1D shelf heuristic**, not true 2D nesting — unchanged this
+  session and still self-documented as a stub. A real nesting router would deserve a better packer
+  than "the same shelf algorithm with rotation allowed."
+
+## Still open, unverified this session — re-check before acting on any of these
+(carried forward unchanged from 2026-09-16 — none of this session's work touched any of these)
+- **Rotate the Wufoo API key** — still in public git history. The only item with a security clock.
+- **Orders 8834 and 8840** — unlinked, candidates recorded in the 2026-08-18/16 entries; needs the
+  team's confirmation, not more code.
+- **Ticket `a0cea6f8` ("Option 2 captures the project name")** — `needs_human`, not yet triaged.
+- **Mobilization reads zero after unlock; Designers Support Transportation "still locked."**
+  Reported 2026-08-12, never reproduced. Need: which stage, the exact field, whether it followed an
+  option switch.
+- **The two habits** (Client Approve usage, arrival-source usage) — last measured 2026-08-16.
+  Re-measure rather than quote the old figures.
+- **The Schedule (Gantt/Calendar) page and Reports → User/Projects tabs still read
+  `DEMO_PROJS`/`DEMO_USERS` directly** (found 2026-08-20). Nobody has asked for this yet.
+- **"By cabinet type" print mode, materials/hardware weight in cutting-list mode** — still on hold
+  per Rommel's explicit request; do not build without walking him through it again from scratch.
+- **`QT-W00000136.R1` itemized-print merged-line report** — from the 2026-08-25 session, unresolved.
+- **Phone (`approve.html`) support for order_pause** — still not built, deliberately.
+- **Stage 2 field-level lock parity while paused** — Stage 2 still has no field-by-field disable
+  sweep at all (pre-existing gap).
+- **Michael Delos Reyes needs a signature image uploaded** before CWL's Noted-by fallback is usable.
+- **The unlock-reconciliation fix has a ~60s residual window** — watch for a race within seconds.
+- **`qApproved`/`qClientApproved` remain deliberately coupled** — do not decouple without a real
+  conversation with Rommel first.
+
+## Standing rules reinforced this session
+- **One fact, one home.** A kerf lived in two places for about ten minutes during this change and
+  both the migration and the Settings save path had to be written specifically to stop it drifting
+  back. When replacing a global with a per-thing value, delete the global and make every read go
+  through one resolver.
+- **Stamp what was used, don't re-read the setting at render time.** A report that re-reads live
+  config will confidently relabel old output with settings it was never produced under.
+- **A test that passes on genuinely broken output is worse than no test.** The label bug survived
+  every geometry assertion; the check added for it measures the on-screen size, not the geometry.
