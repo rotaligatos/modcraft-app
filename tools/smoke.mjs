@@ -4311,6 +4311,23 @@ const PROFILES = {
           return r;
         }, { noArgDirect: 'Module System and Services, Inc.', reviewerSees: 'Module Systems and Services, Inc.', prefix: 'M',
              subsidiaryKept: 'Cebu World Laminate, Inc.', typeKept: 'Direct' });
+      /* MSSI commission compared an exact "Module Systems" against the viewer; every MSSI user is
+         "Module System" (singular) in User Roles, so it never applied. */
+      if (typeof window.recalc === 'function')
+        check('MSSI commission applies for "Module System" (singular) users, only on a CWL subsidiary', () => {
+          const w = window, sv = { home: w.qHomeCompany, cu: w.currentUserCompany };
+          try {
+            if (typeof w._mssiCommApplies !== 'function') return 'missing _mssiCommApplies';
+            w.qHomeCompany = 'Module System and Services, Inc.';
+            const r = { cwl: w._mssiCommApplies('Subsidiary', 'Cebu World Laminate, Inc.'),
+                        wcl: w._mssiCommApplies('Subsidiary', 'World Class Laminate, Inc.'),
+                        direct: w._mssiCommApplies('Direct', 'Cebu World Laminate, Inc.') };
+            w.qHomeCompany = 'World Class Laminate, Inc.';
+            r.notMssi = w._mssiCommApplies('Subsidiary', 'Cebu World Laminate, Inc.');
+            r.bothStages = [w._recalcCore, w._recalcFQCore].every(f => typeof f === 'function' && /_mssiCommApplies\(/.test(f.toString()));
+            return r;
+          } finally { w.qHomeCompany = sv.home; w.currentUserCompany = sv.cu; }
+        }, { cwl: true, wcl: false, direct: false, notMssi: false, bothStages: true });
       return out;
     }
   },
