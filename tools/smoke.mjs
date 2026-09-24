@@ -4416,6 +4416,23 @@ const PROFILES = {
                      search: pick({ 'orders-search': 'stephanie' }) };
           } finally { set({}); w.pendingOrders = sv.po; w.dirData = sv.dir; }
         }, { handlerFromQuote: 'Kaye', cebu: ['2'], nobody: ['3'], from: ['2', '3'], search: ['1'] });
+      /* 2026-09-24: Dashboard — pipeline, team performance and order cards ignored the date range. */
+      if (typeof window._dashOrderInScope === 'function' && document.getElementById('dash-from'))
+        check('Dashboard: pipeline and orders follow the date range and company', () => {
+          const w = window, f = document.getElementById('dash-from'), t = document.getElementById('dash-to'), c = document.getElementById('dash-co');
+          const sv = { dir: w.dirData, po: w.pendingOrders, f: f.value, t: t.value, c: c ? c.value : '' };
+          try {
+            w.dirData = [
+              { id: 'QT-W00000901', baseSerial: 'QT-W00000901', value: 1, user: 'x', created: '2026-09-10T01:00:00Z', updatedAt: new Date().toISOString(), status: 'Draft' },
+              { id: 'QT-C00000901', baseSerial: 'QT-C00000901', value: 1, user: 'x', created: '2026-07-10T01:00:00Z', updatedAt: new Date().toISOString(), status: 'IQ Locked' }];
+            w.pendingOrders = [{ id: '1', receivedAt: '2026-09-14T00:00:00Z', status: 'Pending' }, { id: '2', receivedAt: '2026-07-01T00:00:00Z', status: 'Pending' }];
+            f.value = '2026-09-01'; t.value = '2026-12-31'; if (c) c.value = '';
+            w._dashUpdateKPIs();
+            const pipe = document.getElementById('dash-pipeline').innerText;
+            return { issuedHidden: !/Issued/.test(pipe), draftShown: /Draft/.test(pipe),
+                     orders: w.pendingOrders.filter(w._dashOrderInScope).map(o => o.id) };
+          } finally { w.dirData = sv.dir; w.pendingOrders = sv.po; f.value = sv.f; t.value = sv.t; if (c) c.value = sv.c; }
+        }, { issuedHidden: true, draftShown: true, orders: ['1'] });
       return out;
     }
   },
