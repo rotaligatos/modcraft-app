@@ -4464,6 +4464,29 @@ const PROFILES = {
           out.push({ label: 'Schedule reads real quotation dates, not DEMO_PROJS', got: r, want, ok: JSON.stringify(r) === JSON.stringify(want) });
         })();
       else out.push({ label: 'Schedule reads real quotation dates, not DEMO_PROJS', err: '_schedJobs missing', ok: false });
+      /* 2026-09-25: a Staff user "sometimes becomes Admin". gCheckRole's .catch set
+         currentRole='Admin' on ANY failure — a failed Roles read, or an exception inside gShowApp
+         (which runs inside the same promise chain). It must fail closed. */
+      if (typeof window.gCheckRole === 'function')
+        await (async () => {
+          const w = window, sv = { get: w._sheetsGetWithRetry, show: w.gShowApp, user: w.gUser, role: w.currentRole, acc: w.currentUserAcc };
+          const r = {};
+          try {
+            w.gUser = { email: 'staff@example.test', name: 'Staff' };
+            w._sheetsGetWithRetry = () => Promise.reject(new Error('network'));
+            w.gShowApp = () => {};
+            w.currentRole = '';
+            w.gCheckRole(); await new Promise(res => setTimeout(res, 30));
+            r.readFails = w.currentRole;
+            w._sheetsGetWithRetry = () => Promise.resolve({ values: [['h'], ['Staff', 'staff@example.test', 'Staff', 'yes', 'World Class Laminate, Inc.']] });
+            w.gShowApp = () => { throw new Error('boom'); };
+            w.gCheckRole(); await new Promise(res => setTimeout(res, 30));
+            r.startThrows = w.currentRole;
+          } finally { w._sheetsGetWithRetry = sv.get; w.gShowApp = sv.show; w.gUser = sv.user; w.currentRole = sv.role; w.currentUserAcc = sv.acc;
+                      const ov = document.getElementById('login-overlay'); if (ov) ov.style.display = 'none'; }
+          const want = { readFails: '', startThrows: 'Staff' };
+          out.push({ label: 'Role check never grants Admin on failure', got: r, want, ok: JSON.stringify(r) === JSON.stringify(want) });
+        })();
       return out;
     }
   },
