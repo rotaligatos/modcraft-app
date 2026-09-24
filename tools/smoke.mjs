@@ -698,6 +698,27 @@ const PROFILES = {
              versaboardTakesPlywoodRate: true, compactTakesPlywoodRate: true,
              anUnknownFaceCountStillFlags: true });
 
+      /* Rommel, 2026-09-24: holes are counted PER PANEL everywhere. The website asks "how many
+         holes on this panel" and a client thinks "2 hinges per door", but the count was taken
+         as the row total -- 4 doors x 2 holes arrived as 2, and boring (priced per hole) was
+         under-quoted by the row's quantity. Found by simulating a real client job end to end. */
+      if (typeof window._cutListToAnalysis === 'function' && typeof window.prodComputeServices === 'function')
+        check('_cutListToAnalysis: a hole count is per panel, multiplied by the row quantity', () => {
+          const mk = (qty, svc) => ({ group: 'C', part: 'Door', mat: 'Real White PB 4x8 2F (18mm, Matte)',
+            th: 18, L: 700, W: 445, qty: qty, ebt: '', emat: '', grain: '', svcs: [svc], remark: '' });
+          const out = window._cutListToAnalysis({ grain: 'length', hpl: [], hardware: [], panels: [
+            mk(4, 'Boring 35mm (Hinges) × 2 holes'),   // 4 doors, 2 holes each -> 8
+            mk(1, 'Boring 5mm (Pegs) × 3 holes')        // single panel -> 3
+          ] }, null);
+          const hs = out.holeSchedule || [];
+          const svc = window.prodComputeServices(out.components, hs, out.extraServices || []);
+          return {
+            fourDoorsTwoHolesEachIsEight: !!hs[0] && hs[0].qty === 8,
+            aSinglePanelIsUnchanged: !!hs[1] && hs[1].qty === 3,
+            totalReachesTheServices: svc.holeCount === 11
+          };
+        }, { fourDoorsTwoHolesEachIsEight: true, aSinglePanelIsUnchanged: true, totalReachesTheServices: true });
+
       /* Rommel, 2026-09-22, comparing against the MSSI website's cutting list: picking a material
          there writes its thickness into the Th box; Modcraft left Th to be typed, so the SKU and
          the Th column could silently disagree and a panel be cut from the wrong board.
