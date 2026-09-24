@@ -4433,6 +4433,15 @@ const PROFILES = {
                      orders: w.pendingOrders.filter(w._dashOrderInScope).map(o => o.id) };
           } finally { w.dirData = sv.dir; w.pendingOrders = sv.po; f.value = sv.f; t.value = sv.t; if (c) c.value = sv.c; }
         }, { issuedHidden: true, draftShown: true, orders: ['1'] });
+      /* 2026-09-24: Client directory — search, account-category filter and sort. */
+      if (typeof window._clientMatches === 'function')
+        check('Clients: search (any word order, by quotation #), account filter', () => {
+          const C = [
+            { name: 'Ana', bizname: 'Studio Tille Inc.', type: 'Direct', segment: 'Homeowners', segmentGroup: 'B2C', txns: [{ id: 'QT-W00000120' }] },
+            { name: 'Ben', bizname: 'Johndorf Property Ventures', type: 'Subsidiary', segment: 'Real Estate Developers', segmentGroup: 'B2B', txns: [{ id: 'QT-C00000018' }] }];
+          const m = (q, t, s) => C.filter(c => window._clientMatches(c, q, t, s)).map(c => c.name);
+          return { serial: m('c00000018', '', ''), words: m('property johndorf', '', ''), direct: m('', 'Direct', ''), b2b: m('', '', 'B2B') };
+        }, { serial: ['Ben'], words: ['Ben'], direct: ['Ana'], b2b: ['Ben'] });
       return out;
     }
   },
