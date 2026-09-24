@@ -4487,6 +4487,20 @@ const PROFILES = {
           const want = { readFails: '', startThrows: 'Staff' };
           out.push({ label: 'Role check never grants Admin on failure', got: r, want, ok: JSON.stringify(r) === JSON.stringify(want) });
         })();
+      /* 2026-09-25: a reopened quotation's Activity log showed blank rows — the restore drew
+         e.time / e.msg, which no entry has (they carry ts / action / user / att). */
+      if (typeof window.restoreFullQuotationState === 'function' && document.getElementById('activity-log-body'))
+        check('Activity log shows its entries when a quotation is reopened', () => {
+          const w = window, sv = { ready: w.supaReady };
+          try {
+            w.supaReady = () => false;
+            w.restoreFullQuotationState({ serial: 'QT-W00000999', client: { name: 'T', type: 'Direct' },
+              areas: [{ name: 'Area 1', items: [], svcItems: [], matItems: [], hwItems: [], bomItems: [] }],
+              log: [{ ts: 'Sep 24, 04:29 PM', user: 'Tester (Staff)', action: 'Quotation locked.', att: [{ name: 'proof.jpg', path: 'x' }] }] });
+            const t = document.getElementById('activity-log-body').innerText;
+            return { action: /Quotation locked\./.test(t), user: /Tester \(Staff\)/.test(t), attachment: /proof\.jpg/.test(t) };
+          } finally { w.supaReady = sv.ready; }
+        }, { action: true, user: true, attachment: true });
       return out;
     }
   },

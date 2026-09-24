@@ -6522,6 +6522,7 @@ function initQuotation() {
   renderCustomCFStatus();
   // Clear activity log display
   var _alb=el('activity-log-body');
+  _actServerLog=null; _actServerFor='';
   if(_alb)_alb.innerHTML='<div style="color:var(--text2);text-align:center;padding:10px">No activity yet.</div>';
   updateLockUI();
   // Always reset to Stage 1 view (s2-wrap may still be visible from a previous Stage 2 session)
@@ -24064,19 +24065,77 @@ function logActivity(action, serial, attachments) {
   if(serial===undefined||serial===_openSer){ qLog.unshift({ts:ts,action:action,user:userName,att:attachments||null}); renderActivityLog(); }
   gLogToSheets(action, serial, attachments);
 }
+// The quotation's saved log (state.log) only holds what happened while the quotation was open in
+// someone's browser. Entries filed against it from elsewhere — an approval applied from the phone
+// or the Approvals page, a background unlock — go only to the permanent activity_log table. So the
+// panel shows that table for this quotation (every serial it has carried: base, options, .R
+// revisions, and earlier numbers), with its attachments, plus any saved entry the table does not
+// have yet (a log line still queued offline, or one written under the draft key before the number
+// was claimed). activity_log is append-only, so nothing shown here can be edited or removed.
+var _actServerLog=null, _actServerFor='';
+function _refreshActivityLogFromServer(){
+  var base=(typeof _serialRoot==='function')?_serialRoot(qSerial||''):(qSerial||'');
+  if(!base||!(typeof supaReady==='function'&&supaReady())) return;
+  var forKey=base;
+  var cols='at,user_email,action,serial,attachments';
+  var prev=(qPrevSerials||[]).map(function(x){return _serialRoot(x);}).filter(function(x){return x&&x!==base;});
+  var reqs=[supa.from('activity_log').select(cols).like('serial',base+'%').order('at',{ascending:false}).limit(1000)];
+  if(prev.length) reqs.push(supa.from('activity_log').select(cols).in('serial',prev).order('at',{ascending:false}).limit(1000));
+  Promise.all(reqs).then(function(res){
+    if(_serialRoot(qSerial||'')!==forKey) return;          // another quotation was opened meanwhile
+    var rows=[];
+    for(var i=0;i<res.length;i++){ if(res[i].error){ console.warn('[log] activity read failed',res[i].error); return; } rows=rows.concat(res[i].data||[]); }
+    _actServerLog=rows; _actServerFor=forKey;
+    renderActivityLog();
+  }).catch(function(e){ console.warn('[log] activity read threw',e); });
+}
+function _actNameFor(email){
+  var em=String(email||'').trim().toLowerCase();
+  var u=(typeof sheetUsers!=='undefined'?sheetUsers:[]).filter(function(x){return String(x.email||'').trim().toLowerCase()===em;})[0];
+  return u?(u.name+(u.pos?' ('+u.pos+')':'')):(email||'');
+}
+// Saved entries carry "Sep 24, 04:29 PM" with no year. Read it as this year, or last year if that
+// would put it in the future (a December entry read in January).
+function _actTsMs(ts){
+  var m=String(ts||'').match(/^([A-Za-z]{3}) (\d{1,2}), (.+)$/); if(!m) return 0;
+  var y=new Date().getFullYear(), t=Date.parse(m[1]+' '+m[2]+', '+y+' '+m[3]);
+  if(t>Date.now()+86400000) t=Date.parse(m[1]+' '+m[2]+', '+(y-1)+' '+m[3]);
+  return t||0;
+}
+function _actEntries(){
+  if(!_actServerLog||_actServerFor!==_serialRoot(qSerial||'')) return qLog;
+  // Server rows first (exact times), newest first; then any saved entry the server lacks,
+  // matched by the action text (a multiset, so two identical lines both count).
+  var have={};
+  var srv=_actServerLog.map(function(r){
+    have[r.action]=(have[r.action]||0)+1;
+    return {ts:new Date(r.at).toLocaleString('en-PH',{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}),
+            action:r.action, user:_actNameFor(r.user_email), att:(Array.isArray(r.attachments)&&r.attachments.length)?r.attachments:null,
+            _t:Date.parse(r.at)||0};
+  });
+  var extra=[];
+  qLog.forEach(function(e){
+    if(have[e.action]){ have[e.action]--; return; }
+    extra.push(Object.assign({},e,{_t:_actTsMs(e.ts)}));
+  });
+  // One timeline, newest first. A saved entry whose time cannot be read goes to the top rather
+  // than being lost at the bottom.
+  return extra.concat(srv).sort(function(a,b){ return (b._t||Infinity)-(a._t||Infinity); });
+}
 function renderActivityLog() {
   var body=el("activity-log-body"); if(!body) return;
-  if(!qLog.length){
+  var list=_actEntries();
+  if(!list.length){
     body.innerHTML='<div style="color:var(--text2);text-align:center;padding:10px">No activity yet.</div>';
     return;
   }
   var h="";
-  for(var i=0;i<qLog.length;i++){
-    var ev=qLog[i];
+  for(var i=0;i<list.length;i++){
+    var ev=list[i];
     h+='<div style="display:flex;gap:10px;padding:5px 0;border-bottom:.5px solid var(--border);align-items:flex-start">'
-      +'<div style="flex-shrink:0;width:110px;color:var(--text2);font-size:11px;padding-top:1px">'+ev.ts+'</div>'
-      +'<div style="flex:1"><div style="font-size:12px;color:var(--text)">'+ev.action+'</div>'
-      +'<div style="font-size:11px;color:var(--text2)">'+ev.user+'</div>'
+      +'<div style="flex-shrink:0;width:110px;color:var(--text2);font-size:11px;padding-top:1px">'+escHtml(ev.ts||'')+'</div>'
+      +'<div style="flex:1"><div style="font-size:12px;color:var(--text)">'+escHtml(ev.action||'')+'</div>'
+      +'<div style="font-size:11px;color:var(--text2)">'+escHtml(ev.user||'')+'</div>'
       +_evidenceLinksHtml(ev.att)
       +'</div>'
       +'</div>';
@@ -34565,12 +34624,11 @@ function restoreFullQuotationState(state){
   populateInstRegionSelect();
   // Restore log
   qLog=JSON.parse(JSON.stringify(state.log||[]));
-  var logEl=el('activity-log-body');
-  if(logEl&&qLog.length){
-    logEl.innerHTML=qLog.slice().reverse().map(function(e){
-      return '<div style="display:flex;gap:8px;padding:4px 0;border-bottom:.5px solid var(--border);font-size:12px"><span style="color:var(--text2);flex-shrink:0">'+escHtml(e.time||'')+'</span><span>'+escHtml(e.msg||'')+'</span></div>';
-    }).join('');
-  }
+  // This used to draw e.time / e.msg — fields no entry has (they carry ts / action / user / att),
+  // so a reopened quotation showed a column of empty rows. One renderer for every path.
+  _actServerLog=null; _actServerFor='';
+  renderActivityLog();
+  _refreshActivityLogFromServer();
   // Reset Drive links for this session
   qDriveLinks={};
   var qdl=el('q-drive-links'); if(qdl) qdl.innerHTML='';
