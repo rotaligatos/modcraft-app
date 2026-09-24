@@ -11363,6 +11363,141 @@ loads + pdf.js; `readClientSheet(aoa)` is pure so it can move into `index.html` 
 - A change that fixes one file can break two others — re-run the WHOLE scoreboard every time.
 - Python/pip available: `python -m pip install openpyxl xlrd pypdf` (installed this session).
 
+## What was changed on 2026-09-24 (session 3 — Supabase egress, Reports/Cost report/Orders/Dashboard/Clients search & filters)
+
+Five commits after the MSSI commission fix, all deployed and confirmed live: `dedba58`, `fc56e8c`,
+`a8432b7`, `b462272`, `ef5f3c6`, `4f75ab9`.
+
+### 1. Supabase free-tier egress was running out mid-month (`dedba58`)
+Rommel reported the Supabase free allowance (5 GB/month data transfer, not storage — the database
+itself is 139 MB of 500 MB) was being exhausted early. Measured over one day, 7 users: the app was
+re-downloading ENTIRE tables on every poll — `pending_orders` 1,132×/day (1.86 MB each, 89% of it
+the unused raw Wufoo POST), `approval_requests` 1,129× (0.82 MB), `messages` 1,056× (0.93 MB),
+every quotation's full saved state 61×/day for Project List checks (17 MB, half of it signature
+images), the 153k-row materials catalogue 38× (14 MB), and the open quotation's full state twice a
+minute. ~5 GB/day uncompressed against a 5 GB/month allowance.
+
+Fixed by making every poll ask "has anything changed?" first:
+- **`_supaCachedSelect(table, cols)`** — fingerprints a table as `count + newest updated_at` (one
+  cheap query) before deciding whether to re-download; reuses the kept rows if unchanged. Used for
+  `approval_requests`, `messages`, `pending_orders`.
+- **`pending_orders` reads skip the `raw` column** (the untouched Wufoo POST — nothing reads it
+  back) via an explicit column list, `PENDING_ORDER_COLS`.
+- **`quotation_state_lite`** — a Postgres view (`security_invoker`) that strips `optionsList`, `log`,
+  `areas`, `fqAreas`, rates, cost report and signature images from `quotation_states.state`. 17 MB
+  → 1.4 MB for all 343 quotations. Used by the Project List checks, the credits check, and the
+  once-a-minute lock/pause reconciler (`_pollStateLite`, shared by both reconcilers per poll —
+  memoized 5s so two reconcilers in one poll cycle cost one read, not two).
+- **The materials catalogue is cached in IndexedDB per browser** (`_supaFetchAllRowsCached`),
+  fingerprinted by row count + highest id + newest `updated_at`; re-downloaded only when the
+  catalogue itself changed.
+- `messages` gained an `updated_at` column + trigger (migration `egress_reduction_messages...`) —
+  it had none before, so there was nothing to fingerprint it by.
+
+**Not yet measured post-fix** — check Supabase → Usage in a few days; daily transfer should have
+dropped sharply (estimated >90%, unconfirmed). Data already used this month still counts toward
+the monthly cap until the billing cycle resets.
+
+### 2. Reports page: 4 tabs were showing sample data, not real quotations (`fc56e8c`)
+Rommel: "under report, it seems many of it are still stall and outdate." Confirmed: **Overview**,
+**User KPI**, **Project tracker** and **Archive** had never been wired to real data — fixed
+numbers in the markup (312 quotations, 72% win rate, ₱32.6M, a hardcoded chart array), four
+invented people (Maria Santos, Jose Reyes, Ana Cruz, Lea Tan), four invented projects (Richmont,
+SM Prime, Ayala, Verde), one invented archived row (Cityland). A dead date-range + Export PDF
+button at the top did nothing.
+
+Rebuilt all four to read the real Project List, through the SAME functions the Dashboard and
+Custom export already use — `KPI_DEFS`, `_reportRevenueTrend`, `_reportTeamStats`,
+`_reportProjectRows`, `quotAgeStage`, `_isClientApprovedEntry` — so a report can never disagree
+with the Dashboard or the Project List it summarises. `gLoadDirData` re-reads the list if it's
+stale (>30s) whenever the tab opens. Rows in Project tracker / Archive open the quotation. Removed
+the dead date-range/Export-PDF controls.
+
+**Also fixed**: the Project List itself (`renderDirectory`) silently fell back to the same four
+invented projects (`DEMO_PROJS`) if `dirData` was ever empty — now shows an empty list instead.
+`DEMO_PROJS`/`DEMO_USERS` are still read by the Schedule (Gantt/Calendar) page — that was NOT
+touched this session (see OPEN list).
+
+### 3. Cost report had no way to find a quotation (`a8432b7`)
+The only entry point was one long `<select>` listing every serial. Added: a search box (serial,
+client, project, prepared by, agent — words in any order via `_crMatches`), a company filter
+(same W/M/C key `_quotCompanyKey` uses), and a created-date range. Matches render as a clickable
+list (client, project, company, date, preparer, total, status); capped at 60 rows with a "narrow
+the search" note. The Project List loads when the tab opens.
+
+⚠ A function name collision: the file already had an unrelated `_crFilter(key)` (Cost Breakdown
+tab filter pills). The new filter state/logic was renamed `_crFind*` before shipping.
+
+### 4. Orders — search was already good; added company/date/handler filters + a "who has this" tag (`b462272`)
+Rommel: "hard to look for specific orders... there's no marking who is doing the order if looking
+at the order itself." The search box and per-word matching already existed and worked; what was
+missing was (a) filters beyond search, and (b) any record of who is actually working an order.
+
+- **`pending_orders` gained `handled_by` / `handled_by_email` / `handled_at`** (Supabase migration
+  `pending_orders_handled_by`). Recorded the moment someone clicks **Export to Quotation**
+  (`_setOrderHandler`); a later pickup by someone else replaces it and logs the handover. The card
+  shows a navy name pill, or "Not picked up" (muted) if nobody has claimed it.
+  **Backfilled 128 of 143 existing orders** from the activity log (who exported it) or the linked
+  quotation's preparer: Jhover 39, Stephanie 33, Kaye 29, Joanna 27.
+- **Company filter**: uses the LINKED QUOTATION's company (`_orderFilterCompany`), not the order's
+  own `sourceCompany` — every Wufoo order is recorded as World Class Laminate regardless of which
+  company actually handles it, so filtering on the order alone always returned everything or
+  nothing for Module/Cebu.
+- **Received-date range**, and a **Handled by** dropdown (built from whoever currently has orders,
+  plus "Nobody yet"). Search now also matches the handler's name. Tab counts follow every filter
+  via one shared `_orderPassesFilters`, so a tab count can never disagree with what clicking it
+  shows.
+
+### 5. Dashboard: several cards ignored the date range / company filters entirely (`ef5f3c6`)
+Rommel: "it seems not all is [affected] by filter." True. Root cause was NOT one shared bug — five
+separate places independently forgot to apply `_dashDateFilter`/`_dashScopedEntries`:
+
+- **Pipeline** widget used every date ever, and tested retired status STRINGS
+  (`statusMap['Locked']`/`['Approved']`/`['Archived']`) that the app hasn't written since the
+  status ladder was redefined — so most bars always read 0, filtered or not. Rebuilt on
+  `_normalizeStatusLabel`/`quotAgeStage`/`_isClientApprovedEntry`, period-filtered: Draft / Issued
+  / Won / Declined / Archived.
+- **Team performance** matrix followed the company filter but not the date range. Now both
+  (`teamAll = filtered`, used everywhere `all` previously was in that block).
+- **Monthly revenue chart** summed EVERY quotation's value for the calendar year regardless of
+  status or the selected range — literally the whole pipeline, not revenue, and disagreed with
+  the "Revenue (period)" tile beside it. Now: won revenue (client-approved Final Quotation, whole
+  job via `_rollupJobs`), by the month it was won, within the selected period/company. Chart title
+  corrected to "Won revenue by month".
+- **"Archived this month" tile** tested `e.status.toLowerCase()==='archived'` — a value that is
+  NEVER stored (ageing is derived live by `quotAgeStage`, never written back) — so it always read
+  0 regardless of anything. Fixed to `quotAgeStage(e)==='archived'`, period-filtered. Relabelled
+  "Archived" (the "this month" framing was never really true either).
+- **Order-driven tiles** (order queue card, SLA-breach count, response-time samples, unclaimed-order
+  pool) used the order's own `sourceCompany` for the company filter — always WCL, so Module/Cebu
+  silently hid every order — and had no date filter at all. New shared `_dashOrderInScope(o)`
+  (company via the linked quotation, date via `receivedAt`) is now used everywhere an order is
+  tested against the dashboard's two filters, replacing five separate hand-rolled checks.
+
+### 6. Client directory had no search or account filter (`4f75ab9`)
+Rommel: "client page has no filter and search." Only a segment `<select>` existed. Added:
+- **Search** (`_clientMatches`): name, business name, contact, email, address, notes, and the
+  client's own quotation serials — words in any order, so "property johndorf" finds a client by
+  either the company name or a serial fragment.
+- **Account category filter**: All / Direct / Subsidiary.
+- **Sort**: Name A–Z, latest transaction, highest sales, most projects.
+- Empty result shows a "Clear filters" link.
+
+**Also fixed in the same pass**: "Closed projects" tile and the per-client "Closed" tally both
+tested `t.st==="Closed"` — a status string the app hasn't written since the ladder was redefined —
+so they always read 0. Renamed **"Won projects"**, tested via `_normalizeStatusLabel(t.st)==='FQ
+Approved'`, fixed in both the directory KPI strip and the client detail modal's transaction table
+(which also had its own hardcoded teal/amber pill logic — now uses `_STATUS_PILL_COLOR`).
+**Never falls back to `DEMO_CLIENTS`** on a failed load — shows "No clients loaded yet" instead.
+
+### Recurring pattern across sessions 2–6 today, worth keeping in mind for future audits
+**A retired/renamed status string silently reads as zero, everywhere, forever** — this is now the
+single most common defect class found this month: MSSI commission (company name), Reports
+Overview/Archive, Dashboard pipeline/archived-tile, Client directory Closed/Won. Any code comparing
+`e.status` or `t.st` to a literal string (`'Closed'`, `'Archived'`, `'Locked'`, `'Approved'`)
+instead of going through `_normalizeStatusLabel`/`quotAgeStage`/`_isClientApprovedEntry` should be
+treated as suspect on sight.
+
 ## What was changed on 2026-09-24 (session 2 — "duplicate quotation with a different number and company", and the MSSI commission)
 
 Two commits, `5b864dd` and `7598631`, both deployed and confirmed live.
@@ -11432,7 +11567,7 @@ saved quotation.** `currentUserCompany` is right only for a brand-new draft. Alw
 names through `_canonCompany`; the User Roles sheet has "Module System" (singular) on 8 users and
 "Cebu World Laminates" (plural) on one.
 
-# OPEN — updated 2026-09-24 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-09-24 (session end) — SUPERSEDED by the session-3 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
 ## ⚠ FIRST THING NEXT SESSION — waiting on Rommel's answers
@@ -11456,8 +11591,61 @@ names through `_canonCompany`; the User Roles sheet has "Module System" (singula
 Rotate the Wufoo API key (security clock) · Orders 8834/8840 unlinked · ticket `a0cea6f8` ·
 mobilization-zero-after-unlock (never reproduced) · the two habits (re-measure) · Schedule/Reports
 DEMO data · "By cabinet type" print mode (on hold) · `QT-W00000136.R1` print report · phone order_pause ·
-Stage 2 field-level lock parity · Michael Delos Reyes signature image · unlock-reconciliation ~60s
-window · `qApproved`/`qClientApproved` coupling (do not decouple without Rommel).
+# OPEN — updated 2026-09-24 (session 3 end) — THIS IS THE AUTHORITATIVE LIST
+> Everything above this point is superseded but not stale — read for detail on anything not
+> repeated here.
+
+## Confirmed done this session — do not re-raise
+- Supabase egress fix shipped (`dedba58`) — polls no longer re-download whole tables. NOT yet
+  measured against real usage; check Supabase → Usage in a few days.
+- Reports Overview / User KPI / Project tracker / Archive rebuilt on real data (`fc56e8c`).
+- Cost report: search, company filter, date range (`a8432b7`).
+- Orders: who is handling each order (name pill, recorded on pickup) + company/date/handler
+  filters (`b462272`). 15 of 143 orders still have no recorded handler.
+- Dashboard: pipeline, team performance, revenue chart, "Archived" tile and every order-driven
+  tile now follow the date range and company filter (`ef5f3c6`).
+- Client directory: search, account-category filter, sort, "Won projects" fix (`4f75ab9`).
+
+## ⚠ FIRST THING NEXT SESSION — waiting on Rommel's answers (carried over, unresolved)
+1. **P4 cutting length** — how does the plant count cutting? (full perimeter? + board-edge trim?)
+   Evidence: plant billed 908.04 m vs Modcraft 366.82 m on Studio Tille (123572.pdf).
+2. **Cut-size formula** — confirm *cut = finished − tape + trim per banded edge*, and the trim amount.
+
+## Next, in order (Rommel: "discuss problems one by one", no change without agreement)
+3. **P2** website grooving "(along L/W)" → compute from the edge instead of flagging.
+4. **P3** dead "Cabinet component rules" settings → replace with the finished/cut dropdown + tape
+   thickness + trim (after #2).
+5. **P5** "4x8" in the colour field.
+6. **Template reader into Modcraft** — per-client remembered mapping, column-correction UI,
+   material code → SKU mapping. His biggest pain point.
+7. **Layout page ease of use** — summary strip, board thumbnails + grouping, part numbers, fix the
+   Reflect-summary-above-layout order, trim allowance, printable cut sheets/labels.
+8. **Build the Job Order** per the agreed design (after 1–2).
+9. MSSI website: add the optional Cabinet column to its hardware table (separate repo).
+
+## New this session — not urgent, worth doing when there's room
+- **Confirm the Supabase egress fix actually worked** — check Usage after a few days of normal
+  traffic; the pre-fix baseline (~5 GB/day) is in this file's session-3 entry if a before/after is
+  wanted.
+- **15 orders have no recorded handler** (`handled_by` blank) — couldn't be backfilled from the
+  activity log or a linked quotation. Harmless; they'll pick up a name the next time anyone
+  exports/re-touches them.
+- **Sweep for more retired-status-string comparisons.** This session found the same bug shape five
+  separate times (`t.st==="Closed"`, `statusMap['Locked']`, `e.status.toLowerCase()==='archived'`,
+  the MSSI commission's exact-string check). Anything comparing `.status`/`.st` to a literal
+  instead of `_normalizeStatusLabel`/`quotAgeStage`/`_isClientApprovedEntry` is suspect. Not
+  exhaustively searched — worth a dedicated grep pass (`===['"]Closed`, `===['"]Archived`,
+  `===['"]Locked`, `===['"]Approved` across the file) next time there's a quiet session.
+- **Schedule (Gantt/Calendar) still reads `DEMO_PROJS`/`DEMO_USERS`** directly — same sample-data
+  problem the Reports page had, not yet fixed. Nobody has asked for it explicitly this round, but
+  given the pattern found today it's likely showing the same four invented projects.
+
+## Still open, carried forward unchanged (see 2026-09-16 list for detail)
+Rotate the Wufoo API key (security clock) · Orders 8834/8840 unlinked · ticket `a0cea6f8` ·
+mobilization-zero-after-unlock (never reproduced) · the two habits (re-measure) · "By cabinet type"
+print mode (on hold) · `QT-W00000136.R1` print report · phone order_pause · Stage 2 field-level
+lock parity · Michael Delos Reyes signature image · unlock-reconciliation ~60s window ·
+`qApproved`/`qClientApproved` coupling (do not decouple without Rommel).
 
 ## Added 2026-09-24 (session 2)
 - **Tell the team to reload once** so every open tab picks up the quotation-company fix.
