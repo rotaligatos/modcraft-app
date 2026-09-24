@@ -719,6 +719,45 @@ const PROFILES = {
           };
         }, { fourDoorsTwoHolesEachIsEight: true, aSinglePanelIsUnchanged: true, totalReachesTheServices: true });
 
+      /* Rommel, 2026-09-24: an optional Cabinet column on hardware rows. The quotation only needs
+         the TOTAL, but the shop needs to know which cabinet each item goes into. So the same
+         hinge on two cabinet rows must reach the quotation as ONE line with the total, while the
+         split survives for the Job Order. Three things must never happen: two DIFFERENT units
+         added together; a blank-quantity row hidden by being summed into a filled one; and the
+         per-row detail (cabinet) lost before the Job Order can use it. */
+      if (typeof window._cutListToAnalysis === 'function' && typeof window.prodBuildSummary === 'function')
+        check('hardware Cabinet column: one quotation line per item, the split kept, a blank row still flagged', () => {
+          const w = window;
+          const saved = { result: w.prodState.result, summary: w.prodState.summary };
+          try {
+            const r = w._cutListToAnalysis({ grain: 'length', hpl: [], panels: [
+                { group: 'Cabinet 1', part: 'Door', mat: 'Real White PB 4x8 2F (18mm, Matte)', th: 18,
+                  L: 700, W: 445, qty: 2, ebt: '', emat: '', grain: '', svcs: [], remark: '' }],
+              hardware: [
+                { item: 'Overlay hinge', qty: 4, unit: 'pcs', notes: '', cabinet: 'Cabinet 1' },
+                { item: 'Overlay hinge', qty: 8, unit: 'pcs', notes: '', cabinet: 'Cabinet 2' },
+                { item: 'Drawer slide', qty: 2, unit: 'pair', notes: '', cabinet: 'Cabinet 1' },
+                { item: 'Drawer slide', qty: '', unit: 'pair', notes: '', cabinet: 'Cabinet 2' },
+                { item: 'Drawer slide', qty: 6, unit: 'pcs', notes: '', cabinet: '' }
+              ] }, null);
+            w.prodState.result = r; w.prodBuildSummary(r);
+            const hws = (w.prodState.summary || {}).hardware || [];
+            const hinge = hws.filter(h => /hinge/i.test(h.name || ''));
+            const slidePair = hws.filter(h => /slide/i.test(h.name || '') && /pair/i.test(h.unit || ''))[0];
+            const slidePcs = hws.filter(h => /slide/i.test(h.name || '') && /pcs/i.test(h.unit || ''))[0];
+            return {
+              cabinetReachesTheAnalysis: r.hardware[0].cabinet === 'Cabinet 1',
+              hingeIsOneQuotationLine: hinge.length === 1 && hinge[0].qty === 12,
+              theSplitIsKeptForTheJobOrder: !!hinge[0] && /Cabinet 1 ×4/.test(hinge[0].cabinetSplit || '')
+                && /Cabinet 2 ×8/.test(hinge[0].cabinetSplit || ''),
+              differentUnitsNeverAddedTogether: !!slidePair && !!slidePcs && slidePcs.qty === 6,
+              aBlankRowStillFlagsTheMergedLine: !!slidePair && slidePair.qty === 2 && !!slidePair.needsReview
+                && /no quantity/i.test(slidePair.reviewNote || '')
+            };
+          } finally { w.prodState.result = saved.result; w.prodState.summary = saved.summary; }
+        }, { cabinetReachesTheAnalysis: true, hingeIsOneQuotationLine: true, theSplitIsKeptForTheJobOrder: true,
+             differentUnitsNeverAddedTogether: true, aBlankRowStillFlagsTheMergedLine: true });
+
       /* Rommel, 2026-09-22, comparing against the MSSI website's cutting list: picking a material
          there writes its thickness into the Th box; Modcraft left Th to be typed, so the SKU and
          the Th column could silently disagree and a panel be cut from the wrong board.
