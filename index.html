@@ -3303,6 +3303,33 @@ var qPrevSerials = [];      // serial(s) this quotation was renumbered FROM (com
 var _lastAcceptedClType = 'Direct';      // last cl-type value the serial-prefix check accepted (for reverting on cancel)
 var _lastAcceptedClCompanySel = '';      // last cl-company-sel value accepted
 var _skipCompanyPrefixCheck = false;     // guards against re-triggering the check while programmatically reverting
+var _companyChangePending = false;       // a renumber confirm is open — a second change must not open a second one
+// The quotation's HOME company — whose quotation this is. "Direct" means this company; the
+// Subsidiary list offers every company except this one. It used to be whoever happened to be
+// VIEWING (currentUserCompany), so the same saved quotation showed a different company to every
+// reviewer from another company, printed under it, and saved it into the Project List — and any
+// touch of the company fields then renumbered it into that company's series: the "duplicate with a
+// different number and company" (QT-M00000160 → W00000241 → M00000161 → C00000018, 2026-09-17).
+// '' = not decided yet (new, unsaved draft) → follows the viewer until the first save fixes it.
+var qHomeCompany = '';
+function _quotHomeCompany(){ return qHomeCompany || currentUserCompany; }
+// Home company of a saved quotation. Saved explicitly since 2026-09-24; for older saves it is
+// recovered from facts the quotation already carries, never from who is looking at it:
+//   Direct  → the serial prefix (W/M/C), which has followed the quotation's company since 07-04;
+//   either  → the preparer's own company (Prepared-by signature, then the Project List user).
+function _homeCompanyFromState(state){
+  var c=(state&&state.client)||{};
+  if(c.homeCompany) return c.homeCompany;
+  var pm=String((state&&state.serial)||'').match(/^QT-([WCM])\d{8}/);
+  if((c.type||'Direct')==='Direct'&&pm) return {W:COMPANIES[0],M:COMPANIES[1],C:COMPANIES[2]}[pm[1]];
+  var sig=state&&state.signatures&&state.signatures.prepared, users=(typeof sheetUsers!=='undefined'&&sheetUsers)||[];
+  var em=String((sig&&sig.email)||'').trim().toLowerCase(), nm=String((sig&&sig.name)||'').trim().toLowerCase();
+  for(var i=0;i<users.length;i++){
+    var u=users[i];
+    if((em&&String(u.email||'').trim().toLowerCase()===em)||(nm&&String(u.name||'').trim().toLowerCase()===nm)) return u.company||'';
+  }
+  return '';   // unknown — follows the viewer, exactly as before
+}
 var qVatApproved = true;
 var qDiscApproved = false;
 var qDiscPct = 0;
@@ -6338,6 +6365,7 @@ function initQuotation() {
   // selected on the PREVIOUS quotation (which would file it under the wrong entity's sequence,
   // to the staff member's own company).
   if(el('cl-type'))el('cl-type').value='Direct';
+  qHomeCompany='';   // a new quotation belongs to whoever makes it — fixed at its first save
   if(typeof renderClientCompanyField==='function') renderClientCompanyField();
   qSerial=''; qDraftKey=_newDraftKey(); // no number until one is claimed, at first save
   qSerialCommitted=false;
@@ -6540,13 +6568,19 @@ function _quotContentSig(){
 }
 
 function getCompanyName(type) {
-  if(type === 'Direct') return currentUserCompany;
+  // Called with no argument in ~15 places (the Supabase company column, signature routing, the
+  // Noted-by threshold, mobility origin). Undefined fell into the Subsidiary branch below, so a
+  // DIRECT quotation reported "the first company that is not mine" — every Module Systems Direct
+  // quotation was stored in Supabase as World Class Laminate. No argument = read the form.
+  if(type === undefined) type = el('cl-type') ? el('cl-type').value : 'Direct';
+  if(type === 'Direct') return _quotHomeCompany();
   // Subsidiary: read the rendered dropdown
   var sel = el('cl-company-sel');
   if(sel && sel.value) return sel.value;
-  // fallback: first company that is not the user's own
+  // fallback: first company that is not this quotation's home company
+  var _home=_canonCompany(_quotHomeCompany());
   for(var ci=0;ci<COMPANIES.length;ci++){
-    if(COMPANIES[ci] !== currentUserCompany) return COMPANIES[ci];
+    if(COMPANIES[ci] !== _home) return COMPANIES[ci];
   }
   return COMPANIES[0];
 }
@@ -6565,11 +6599,13 @@ function renderClientCompanyField() {
   var type = el('cl-type') ? el('cl-type').value : 'Direct';
   if(type === 'Direct') {
     row.innerHTML = '<label class="fld">Company</label>'
-      + '<input value="'+currentUserCompany+'" disabled style="background:var(--bg);color:var(--text2);cursor:not-allowed">';
+      + '<input value="'+_quotHomeCompany()+'" disabled style="background:var(--bg);color:var(--text2);cursor:not-allowed">';
   } else {
-    var opts = '';
+    // Exclude the quotation's HOME company, compared canonically — the User Roles sheet holds
+    // "Module System and Services" (singular), which an exact compare never excluded.
+    var opts = '', _homeC=_canonCompany(_quotHomeCompany());
     for(var _ci=0;_ci<COMPANIES.length;_ci++){
-      if(COMPANIES[_ci] !== currentUserCompany){
+      if(COMPANIES[_ci] !== _homeC){
         opts += '<option value="'+COMPANIES[_ci]+'">'+COMPANIES[_ci]+'</option>';
       }
     }
@@ -6655,24 +6691,39 @@ function _onQuotationCompanyMightChange(){
   }
 
   // Prefix would change on an already-saved quotation — confirm before reclaiming.
+  // One question at a time: flipping the fields twice used to open two dialogs from the same old
+  // number and claim two new ones (W00000241.R1 → M00000161 AND → C00000018, 6 s apart). While one
+  // is open, later changes just wait — the claim reads the company as it stands when confirmed.
+  if(_companyChangePending) return;
+  _companyChangePending=true;
   var oldSerial=qSerial;
   var prefixNames={W:'World Class Laminate',M:'Module Systems and Services',C:'Cebu World Laminate'};
   var msg='Changing the company to '+newCo+' moves this quotation to a different numbering series ('
     +(prefixNames[committedPrefix]||committedPrefix)+' → '+(prefixNames[newPrefix]||newPrefix)+').\n\n'
     +'A NEW quotation number will be assigned. The current number ('+oldSerial+') will be kept on record for traceability.\n\nContinue?';
   _confirm(msg,function(){
+    // The company may have been changed again while the dialog was open — if it is back on the
+    // number's own series, there is nothing to renumber.
+    if(_serialPrefix()===committedPrefix){
+      _companyChangePending=false;
+      _lastAcceptedClType=(el('cl-type')||{}).value||'Direct'; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
+      return;
+    }
+    newCo=getCompanyName((el('cl-type')||{}).value||'Direct');
     _claimSerialForNewPrefix(oldSerial,function(newSerial){
+      _companyChangePending=false;
       if(!newSerial){ showToast('Could not assign a new number — try again.'); _revertCompanyChange(); return; }
       qPrevSerials=qPrevSerials||[]; qPrevSerials.push(oldSerial);
       qSerial=newSerial;                    // base follows
       var qs=el('q-serial'); if(qs) qs.textContent=newSerial;
-      _lastAcceptedClType=newType; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
+      _lastAcceptedClType=(el('cl-type')||{}).value||'Direct'; _lastAcceptedClCompanySel=(el('cl-company-sel')?el('cl-company-sel').value:'');
       logActivity('Quotation renumbered '+oldSerial+' → '+newSerial+' (company changed to '+newCo+')');
       showToast('Quotation renumbered to '+newSerial+' — previous number '+oldSerial+' kept on record.');
       renderPrevSerialNote();
       gSaveQuotation();
     });
   },function(){
+    _companyChangePending=false;
     _revertCompanyChange();
   });
 }
@@ -6811,7 +6862,14 @@ function clSelectClient(id){
   // type decides Direct vs Subsidiary pricing, which is not a detail to leave to
   // whoever happens to remember. Mirrors what reopening a saved quotation does.
   if(el('cl-city')) el('cl-city').value=c.city||'';
-  if(el('cl-type')&&c.type){
+  // A NUMBERED quotation's company is changed only on purpose, from the Account type / company
+  // fields. Picking a client used to flip the type here and rebuild the Subsidiary list — which
+  // lands on its FIRST option (World Class Laminate), because a client record does not say WHICH
+  // subsidiary — then offered to renumber into that series. Clicking OK produced a new W number for
+  // what was a C job (QT-M00000160 → QT-W00000241, 2026-09-17). Drafts still take the client's type.
+  if(el('cl-type')&&c.type&&qSerialCommitted&&el('cl-type').value!==c.type){
+    showToast('Account type left as '+el('cl-type').value+' — this quotation already has its number. Change it in Account type if it is really wrong.');
+  } else if(el('cl-type')&&c.type){
     el('cl-type').value=c.type;
     if(typeof renderClientCompanyField==='function') renderClientCompanyField();
     if(typeof updateBanner==='function') updateBanner();
@@ -33080,6 +33138,7 @@ function _serialClaimSettled(){
 }
 function _gSaveQuotationCore(){
   if(!gToken||!gUser) return;
+  if(!qHomeCompany) qHomeCompany=currentUserCompany;   // the first save fixes whose quotation this is
   if(!qSerialCommitted){
     // ── Refuse to claim a number this base serial already has ──────────────────────────────
     // qSerialCommitted=false is supposed to mean "this quotation has never been through a save,
@@ -33576,6 +33635,7 @@ function getFullQuotationState(){
     leadOther:(el('cl-lead-other')?el('cl-lead-other').value:''),
     delivery:(el('cl-delivery')?el('cl-delivery').value:''),
     type:(el('cl-type')?el('cl-type').value:'Direct'),
+    homeCompany:_quotHomeCompany(), // whose quotation this is — Direct means this company (see qHomeCompany)
     company:(el('cl-company-sel')?el('cl-company-sel').value:''), // subsidiary company selection — was never persisted before 2026-07-04
     service:(el('cl-service')?el('cl-service').value:'Fabrication only'),
     segment:(el('cl-segment')?el('cl-segment').value:''),
@@ -33948,8 +34008,14 @@ function restoreFullQuotationState(state){
   if(el('cl-lead-other')){ el('cl-lead-other').value=c.leadOther||''; el('cl-lead-other').style.display=(c.lead==='Other')?'block':'none'; }
   if(el('cl-delivery')) el('cl-delivery').value=c.delivery||'';
   if(el('cl-type')) el('cl-type').value=c.type||'Direct';
+  qHomeCompany=_homeCompanyFromState(state);  // BEFORE the company field renders — it reads it
   if(typeof renderClientCompanyField==='function') renderClientCompanyField(); // rebuilds cl-company-sel per the restored type
-  if(c.company&&el('cl-company-sel')){ el('cl-company-sel').value=c.company; updateBanner(); }
+  if(c.company&&el('cl-company-sel')){
+    var _cs=el('cl-company-sel'), _cv=_canonCompany(c.company)||c.company;
+    // A value missing from the list would silently show the FIRST option instead (and save it).
+    if(!Array.prototype.some.call(_cs.options,function(o){return o.value===_cv;})){ var _o=document.createElement('option'); _o.value=_cv; _o.textContent=_cv; _cs.appendChild(_o); }
+    _cs.value=_cv; updateBanner();
+  }
   if(el('cl-service')) el('cl-service').value=c.service||'Fabrication only';
   if(typeof onServiceChange==='function') onServiceChange();
   // Re-establish the linked-client signal so the Lead field greys out correctly

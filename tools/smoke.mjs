@@ -4276,6 +4276,41 @@ const PROFILES = {
       if (typeof window._pollApprovalsNow === 'function')
         check('_pollApprovalsNow: the lock-reconcile pass is wired into the same poll as everything else',
           () => /_refreshOpenQuotationLockState\(\)/.test(window._pollApprovalsNow.toString()), true);
+      /* 2026-09-24: a quotation's company followed the VIEWER, so a reviewer from another company
+         saw (and saved, printed, renumbered into) their own company — the "duplicate with a
+         different number and company". The company now belongs to the quotation. */
+      if (typeof window.getCompanyName === 'function' && document.getElementById('cl-type'))
+        check('quotation company belongs to the quotation, not the viewer', () => {
+          const w = window, ct = document.getElementById('cl-type');
+          const sv = { cu: w.currentUserCompany, home: w.qHomeCompany, type: ct.value, comm: w.qSerialCommitted, lc: w.liveClients };
+          const r = {};
+          try {
+            // 1. No-arg call on a Direct quotation (Supabase company column, routing) — was "first other company"
+            w.currentUserCompany = 'Module System and Services, Inc.'; w.qHomeCompany = '';
+            ct.value = 'Direct'; w.renderClientCompanyField();
+            r.noArgDirect = w.getCompanyName();
+            // 2. A WCL reviewer opens an MSSI Direct quotation: still MSSI, still an M series
+            w.qHomeCompany = w._homeCompanyFromState({ serial: 'QT-M00000160', client: { type: 'Direct' } });
+            w.currentUserCompany = 'World Class Laminate, Inc.';
+            w.renderClientCompanyField();
+            r.reviewerSees = w.getCompanyName('Direct'); r.prefix = w._serialPrefix();
+            // 3. A CWL reviewer opens a CWL-subsidiary quotation: CWL stays selectable, not the first option
+            w.currentUserCompany = 'Cebu World Laminate, Inc.';
+            ct.value = 'Subsidiary'; w.renderClientCompanyField();
+            const sel = document.getElementById('cl-company-sel'); sel.value = 'Cebu World Laminate, Inc.';
+            r.subsidiaryKept = w.getCompanyName('Subsidiary');
+            // 4. Picking a client on an already-numbered quotation does not flip its account type
+            ct.value = 'Direct'; w.renderClientCompanyField(); w.qSerialCommitted = true;
+            w.liveClients = [{ id: 'zz-test', name: 'T', type: 'Subsidiary' }];
+            w.clSelectClient('zz-test');
+            r.typeKept = ct.value;
+          } finally {
+            w.currentUserCompany = sv.cu; w.qHomeCompany = sv.home; w.qSerialCommitted = sv.comm; w.liveClients = sv.lc;
+            ct.value = sv.type; w.renderClientCompanyField();
+          }
+          return r;
+        }, { noArgDirect: 'Module System and Services, Inc.', reviewerSees: 'Module Systems and Services, Inc.', prefix: 'M',
+             subsidiaryKept: 'Cebu World Laminate, Inc.', typeKept: 'Direct' });
       return out;
     }
   },
