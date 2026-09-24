@@ -4328,6 +4328,42 @@ const PROFILES = {
             return r;
           } finally { w.qHomeCompany = sv.home; w.currentUserCompany = sv.cu; }
         }, { cwl: true, wcl: false, direct: false, notMssi: false, bothStages: true });
+      /* 2026-09-24 egress: whole tables were re-downloaded every 45-60 s and the free 5 GB/month
+         ran out in about a week. A poll must ask "changed?" first and reuse what it has. */
+      if (typeof window._supaCachedSelect === 'function')
+        await (async () => {
+          const w = window, saved = { supa: w.supa, ready: w.supaReady, use: w.USE_SUPABASE, lq: w.loadQuotationJson };
+          let downloads = 0, fp = '3|t1', stateReads = 0;
+          const q = (table) => {
+            const b = { _cols: null,
+              select(c, o) { b._cols = c; b._count = !!(o && o.count); return b; },
+              order() { return b; }, limit() { return b; }, eq() { return b; },
+              maybeSingle() { stateReads++; return Promise.resolve({ data: { state: { locked: true } }, error: null }); },
+              then(res, rej) {
+                if (b._count) return Promise.resolve({ data: [{ updated_at: fp.split('|')[1] }], count: +fp.split('|')[0], error: null }).then(res, rej);
+                downloads++; return Promise.resolve({ data: [{ id: 'a' }], error: null }).then(res, rej);
+              } };
+            return b;
+          };
+          const r = {};
+          try {
+            w.supa = { from: q }; w.supaReady = () => true; w.USE_SUPABASE = true;
+            await w._supaCachedSelect('messages', '*');
+            await w._supaCachedSelect('messages', '*');
+            r.unchangedDownloadsOnce = downloads;
+            fp = '4|t2'; await w._supaCachedSelect('messages', '*');
+            r.changeDownloadsAgain = downloads;
+            let got = 0; w.loadQuotationJson = () => { r.fellBackToFullState = true; };
+            w._pollStateLite('QT-W00000001', () => got++); w._pollStateLite('QT-W00000001', () => got++);
+            await new Promise(res => setTimeout(res, 20));
+            r.twoReconcilersOneRead = stateReads === 1 && got === 2;
+            r.ordersSkipRaw = !/[,']raw[,']/.test(w.PENDING_ORDER_COLS) && /pause_history/.test(w.PENDING_ORDER_COLS);
+            r.checksUseSlimView = /quotation_state_lite/.test(w._allQuotationStates.toString());
+          } finally { w.supa = saved.supa; w.supaReady = saved.ready; w.USE_SUPABASE = saved.use; w.loadQuotationJson = saved.lq; }
+          const want = { unchangedDownloadsOnce: 1, changeDownloadsAgain: 2, twoReconcilersOneRead: true, ordersSkipRaw: true, checksUseSlimView: true };
+          out.push({ label: 'Supabase polls reuse unchanged tables and read the slim state view', got: r, want, ok: JSON.stringify(r) === JSON.stringify(want) });
+        })();
+      else out.push({ label: 'Supabase polls reuse unchanged tables and read the slim state view', err: '_supaCachedSelect missing', ok: false });
       return out;
     }
   },

@@ -13483,7 +13483,7 @@ function _clearOrderPauseOnQuotation(serial,who,orderId){
 function _refreshOpenQuotationPauseState(){
   var serial=qBaseSerial||qSerial;
   if(!serial||/^DRAFT-/.test(serial)||!gToken) return;
-  loadQuotationJson(serial,function(state){
+  _pollStateLite(serial,function(state){
     if(!state) return;
     var serverPaused=!!(state.orderPaused&&state.orderPaused.active);
     var localPaused=_qOrderPaused();
@@ -13520,7 +13520,7 @@ function _refreshOpenQuotationPauseState(){
 function _refreshOpenQuotationLockState(){
   var serial=qBaseSerial||qSerial;
   if(!serial||/^DRAFT-/.test(serial)||!gToken) return;
-  loadQuotationJson(serial,function(state){
+  _pollStateLite(serial,function(state){
     if(!state) return;
     var changed=false;
     if(!!state.locked!==!!qLocked){
@@ -16714,10 +16714,12 @@ function orderChannelLabel(o){ return orderChannel(o)==='web'?'Website':'Wufoo';
 //   valid state — orders accumulate over time (historical ones stay with
 //   status Done), so a real account essentially never has zero rows once
 //   backfilled. —
+var PENDING_ORDER_COLS='id,received_at,client_name,company_name,contact_number,customer_email,salesman_email,request_type,type_of_service,floor,board_substrate,haspe_flow,edging,boring,cutting,lipping,hg_included,hg_groove,hg_installation,hg_by,agent_name,attachment_1,attachment_2,status,quotation_serial,sent_at,source_company,created_at,updated_at,order_kind,address,project_name,delivery,segment,lead_source,target_date,notes,attachments,pause_history';
 function supaGetPendingOrders(){
   if(!supaReady()) return Promise.resolve(null);
   try{
-    return supa.from('pending_orders').select('*').then(function(r){
+    // Every column except `raw` (the untouched Wufoo POST, 89% of the table) - nothing reads it back.
+    return _supaCachedSelect('pending_orders',PENDING_ORDER_COLS).then(function(r){
       if(r.error) return null;
       if(!r.data||!r.data.length) return null;
       return r.data;
@@ -26970,7 +26972,7 @@ function _findQuotationCredits(cb){
   // signature said Rafael while column H correctly said Kaye. Ranked, that conflict cannot arise.
   Promise.all([
     sheetsGet('Quotations!A:AB'),
-    supa.from('quotation_states').select('serial,state'),
+    supa.from('quotation_state_lite').select('serial,state'),
     supa.from('activity_log').select('user_email,action,at')
         .like('action','Quotation created from Order #%').order('at',{ascending:true}),
     supa.from('activity_log').select('serial,user_email,at')
@@ -27587,7 +27589,7 @@ function supaGetQuotationsForTxns(){
 function supaGetApprovalRequests(){
   if(!supaReady()) return Promise.resolve(null);
   try{
-    return supa.from('approval_requests').select('*').then(function(r){
+    return _supaCachedSelect('approval_requests','*').then(function(r){
       if(r.error) return null;
       return r.data||[];
     }).catch(function(){ return null; });
@@ -27596,7 +27598,7 @@ function supaGetApprovalRequests(){
 function supaGetMessages(){
   if(!supaReady()) return Promise.resolve(null);
   try{
-    return supa.from('messages').select('*').then(function(r){
+    return _supaCachedSelect('messages','*').then(function(r){
       if(r.error) return null;
       return r.data||[];
     }).catch(function(){ return null; });
@@ -29028,7 +29030,7 @@ function _allQuotationStates(cb){
   // fallback, and also the only source when nobody has connected.
   if(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady()){
     try{
-      supa.from('quotation_states').select('serial,state').then(function(r){
+      supa.from('quotation_state_lite').select('serial,state').then(function(r){
         if(r.error||!r.data){ _statesFromSheet(cb); return; }
         var out={}; r.data.forEach(function(row){ if(row.serial) out[row.serial]=row.state||{}; });
         cb(out,'Supabase');
@@ -31874,6 +31876,112 @@ function _syncServicesFromDb(){
 //  2. NOBODY COMPARED THE TOTAL. One exact count settles whether the whole table arrived. If it
 //     did not, this now says so and returns an error, so supaGetPriceDb falls back to Sheets —
 //     a slower complete catalogue beats a fast one missing rows nobody can identify.
+// ── Supabase egress (free plan: 5 GB/month) ────────────────────────────────────────────────────
+// Measured 2026-09-24 over one day, 7 users: the app re-downloaded whole tables on every poll —
+// pending_orders 1,132x (1.86 MB each, 1.65 MB of it the raw Wufoo POST nothing reads), approvals
+// 1,129x (0.82 MB), messages 1,056x (0.93 MB), every quotation's full state 61x (17 MB, 8.7 MB of
+// it signature images), the 153k-row materials catalogue 38x (14 MB), and the open quotation's full
+// state twice a minute. ~5 GB/day before compression — the monthly allowance in about a week.
+//
+// The rule now: ask "has anything changed?" (one row + a count) before downloading a table, keep
+// what was downloaded, and read the slim state view where the whole state is not needed.
+
+// Fingerprint = row count + newest updated_at. Count catches inserts and deletes, updated_at every
+// edit (each table has a BEFORE UPDATE trigger; an upsert fires it too). RLS applies to both, so a
+// user's fingerprint only covers rows they can see — which is exactly what they download.
+var _supaTblCache={};
+function _supaFingerprint(table){
+  return supa.from(table).select('updated_at',{count:'exact'})
+    .order('updated_at',{ascending:false,nullsFirst:false}).limit(1)
+    .then(function(r){
+      if(r.error||typeof r.count!=='number') return null;
+      return r.count+'|'+((r.data&&r.data[0]&&r.data[0].updated_at)||'');
+    }).catch(function(){ return null; });
+}
+// Returns {data, error} like a supabase select. Unchanged since last time -> the kept copy, no download.
+function _supaCachedSelect(table,cols){
+  var c=_supaTblCache[table];
+  return _supaFingerprint(table).then(function(fp){
+    if(fp&&c&&c.fp===fp&&c.cols===cols) return {data:c.rows,error:null,cached:true};
+    return supa.from(table).select(cols).then(function(r){
+      if(!r.error&&fp) _supaTblCache[table]={fp:fp,cols:cols,rows:r.data||[]};
+      return r;
+    });
+  });
+}
+
+// The open quotation's lock / pause reconcile runs every poll. It needs a dozen flags, not the
+// quotation — read them from the slim view (max ~6 KB instead of up to 600 KB), and let the two
+// reconcilers share one read per poll.
+var _pollStateMemo={serial:'',at:0,p:null};
+function _pollStateLite(serial,cb){
+  if(!(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady())){
+    loadQuotationJson(serial,cb); return;
+  }
+  var now=Date.now();
+  if(!(_pollStateMemo.serial===serial&&now-_pollStateMemo.at<5000&&_pollStateMemo.p)){
+    _pollStateMemo={serial:serial,at:now,p:supa.from('quotation_state_lite').select('state').eq('serial',serial).maybeSingle()
+      .then(function(r){ return (r&&!r.error&&r.data)?(r.data.state||null):undefined; })
+      .catch(function(){ return undefined; })};
+  }
+  _pollStateMemo.p.then(function(st){
+    if(st===undefined) loadQuotationJson(serial,cb);   // view unreachable -> the old path, not nothing
+    else cb(st);
+  });
+}
+
+// The 153k-row materials catalogue is kept in this browser (IndexedDB — too big for localStorage)
+// and only downloaded again when the table itself changed: row count + highest id (a re-sync
+// rewrites every row with new ids) + newest updated_at. A failure anywhere falls back to a download.
+var _IDB_NAME='modcraft-cache';
+function _idbOpen(){
+  return new Promise(function(res,rej){
+    try{
+      var rq=indexedDB.open(_IDB_NAME,1);
+      rq.onupgradeneeded=function(){ rq.result.createObjectStore('kv'); };
+      rq.onsuccess=function(){ res(rq.result); }; rq.onerror=function(){ rej(rq.error); };
+    }catch(e){ rej(e); }
+  });
+}
+function _idbGet(key){
+  return _idbOpen().then(function(db){ return new Promise(function(res){
+    try{ var rq=db.transaction('kv','readonly').objectStore('kv').get(key);
+         rq.onsuccess=function(){ res(rq.result||null); }; rq.onerror=function(){ res(null); }; }
+    catch(e){ res(null); }
+  }); }).catch(function(){ return null; });
+}
+function _idbPut(key,val){
+  return _idbOpen().then(function(db){ return new Promise(function(res){
+    try{ var tx=db.transaction('kv','readwrite'); tx.objectStore('kv').put(val,key);
+         tx.oncomplete=function(){ res(true); }; tx.onerror=function(){ res(false); }; }
+    catch(e){ res(false); }
+  }); }).catch(function(){ return false; });
+}
+function _supaCatalogueFingerprint(table){
+  return Promise.all([
+    supa.from(table).select('id',{count:'exact'}).order('id',{ascending:false}).limit(1),
+    supa.from(table).select('updated_at').order('updated_at',{ascending:false,nullsFirst:false}).limit(1)
+  ]).then(function(r){
+    if(r[0].error||r[1].error||typeof r[0].count!=='number') return null;
+    return r[0].count+'|'+(((r[0].data||[])[0]||{}).id||'')+'|'+(((r[1].data||[])[0]||{}).updated_at||'');
+  }).catch(function(){ return null; });
+}
+function _supaFetchAllRowsCached(table,columns){
+  return _supaCatalogueFingerprint(table).then(function(fp){
+    if(!fp) return _supaFetchAllRows(table,columns);
+    var key='tbl:'+table+':'+columns;
+    return _idbGet(key).then(function(hit){
+      if(hit&&hit.fp===fp&&Array.isArray(hit.rows)&&hit.rows.length){
+        console.log('[supa] '+table+': '+hit.rows.length+' rows from this browser copy (unchanged)');
+        return {data:hit.rows,error:null,cached:true};
+      }
+      return _supaFetchAllRows(table,columns).then(function(r){
+        if(!r.error&&r.data&&r.data.length) _idbPut(key,{fp:fp,rows:r.data,at:Date.now()});
+        return r;
+      });
+    });
+  });
+}
 function _supaFetchAllRows(table,columns){
   var PAGE=10000, CONCURRENCY=3, total=null;
   function verify(all){
@@ -31933,7 +32041,7 @@ function supaGetPriceDb(){
       // order, Postgres makes no guarantee the read-back matches, which would silently scramble a
       // saved custom order.
       supa.from('price_services').select('name,unit,price,svc_type,teams,shifts_per_day,output_per_shift,cost_data').order('id',{ascending:true}),
-      _supaFetchAllRows('price_materials','name,unit,price'),
+      _supaFetchAllRowsCached('price_materials','name,unit,price'),
       supa.from('price_hardware').select('name,unit,price'),
       supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price')
     ]).then(function(results){
