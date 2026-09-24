@@ -14319,7 +14319,7 @@ function setRepTab(t) {
   }
   if(t==="export") renderExportTab();
   else if(t==="leadsrc") renderLeadSourceReport();
-  else if(t==="costrep") renderCostReportTab();
+  else if(t==="costrep"){ renderCostReportTab(); gLoadDirData(function(){ if(repTab==='costrep') _crRenderList(); }); }
   else if(t==="compref") renderCompRef();
 }
 function renderReports() {
@@ -14410,17 +14410,18 @@ function _buildLeadSourceReport(){
 }
 // ── Project Cost Report (Admin/Manager) ───────────────────────────────────
 var _crSelectedSerial='';
+// Finding the quotation: one long dropdown of every serial was the only way in. Now a search box
+// (serial, client, project, prepared by, agent — words in any order), a company filter (the same
+// W/M/C key the Dashboard uses, so both agree on which company a quotation belongs to) and a
+// created-date range. Matches list below; clicking one loads its report.
+var _crFind={q:'',co:'',from:'',to:''};
+var CR_LIST_MAX=60;
 function renderCostReportTab(){
   var w=el('rep-costrep'); if(!w) return;
   if(!canViewCostReport()){w.innerHTML='<div class="alert alert-warn"><i class="ti ti-lock"></i> Admin / Director / Manager access only.</div>';return;}
-  var merged={};
-  (dirData||[]).forEach(function(e){if(e&&e.id)merged[e.id]=e;});
-  _mergeSessionOver(merged,function(e,k){return k;});
-  var list=Object.keys(merged).map(function(k){return merged[k];})
-    .sort(function(a,b){return String(b.created||'').localeCompare(String(a.created||''));});
-  var opts=list.map(function(e){
-    return '<option value="'+escHtml(e.id)+'"'+(_crSelectedSerial===e.id?' selected':'')+'>'+escHtml(e.id+(e.client?' — '+e.client:''))+'</option>';
-  }).join('');
+  var f=_crFind;
+  var coOpts=[['','All companies'],['W','World Class Laminate'],['M','Module Systems & Services'],['C','Cebu World Laminate'],['none','Unassigned (older serials)']]
+    .map(function(o){return '<option value="'+o[0]+'"'+(f.co===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('');
   w.innerHTML='<div class="card">'
     +'<div class="card-head" style="background:var(--wash-navy);display:flex;align-items:center;gap:8px">'
     +'<h3 style="margin:0;flex:1"><i class="ti ti-report-money" style="color:var(--navy)"></i> Project cost report</h3>'
@@ -14428,17 +14429,86 @@ function renderCostReportTab(){
     +'</div>'
     +'<div class="card-body">'
     +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
-    +'<select id="cr-serial" style="height:34px;font-size:12px;min-width:320px"><option value="">Select a quotation…</option>'+opts+'</select>'
-    +'<button class="btn btn-primary" onclick="loadCostReport()" style="font-size:12px"><i class="ti ti-file-search"></i> Load report</button>'
-    +'<span style="font-size:11px;color:var(--text2)">Full cost structure incl. contingency, buffer, markup and profit — for Admin / Manager / Director decisions.</span>'
+    +'<div style="position:relative;flex:1;min-width:240px"><i class="ti ti-search" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text2);font-size:14px"></i>'
+    +'<input id="cr-q" type="search" placeholder="Search serial, client, project, prepared by, agent…" value="'+escHtml(f.q)+'" oninput="_crSet(\'q\',this.value)" style="height:34px;font-size:12px;width:100%;padding-left:30px"></div>'
+    +'<select id="cr-co" onchange="_crSet(\'co\',this.value)" style="height:34px;font-size:12px;width:210px">'+coOpts+'</select>'
+    +'<label style="font-size:12px;color:var(--text2)">Created</label>'
+    +'<input id="cr-from" type="date" value="'+escHtml(f.from)+'" onchange="_crSet(\'from\',this.value)" style="height:34px;font-size:12px;width:140px">'
+    +'<span style="font-size:12px;color:var(--text2)">to</span>'
+    +'<input id="cr-to" type="date" value="'+escHtml(f.to)+'" onchange="_crSet(\'to\',this.value)" style="height:34px;font-size:12px;width:140px">'
+    +'<button class="btn" onclick="_crClear()" style="font-size:12px;height:34px"><i class="ti ti-x"></i> Clear</button>'
     +'</div>'
-    +'<div id="cr-body" style="margin-top:14px"><div style="font-size:12px;color:var(--muted)"><i class="ti ti-info-circle"></i> Select a quotation and click Load report.</div></div>'
+    +'<div id="cr-list" style="margin-top:10px"></div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-top:6px">Full cost structure incl. contingency, buffer, markup and profit — for Admin / Manager / Director decisions.</div>'
+    +'<div id="cr-body" style="margin-top:14px">'+(_crSelectedSerial?'':'<div style="font-size:12px;color:var(--muted)"><i class="ti ti-info-circle"></i> Find the quotation above and click it to load its report.</div>')+'</div>'
     +'</div></div>';
+  _crRenderList();
+  if(_crSelectedSerial) loadCostReport(_crSelectedSerial);
 }
-function loadCostReport(){
-  var s=el('cr-serial')?el('cr-serial').value:'';
+function _crSet(k,v){ _crFind[k]=v||''; _crRenderList(); }
+function _crClear(){
+  _crFind={q:'',co:'',from:'',to:''};
+  ['cr-q','cr-from','cr-to'].forEach(function(id){ var e=el(id); if(e) e.value=''; });
+  var c=el('cr-co'); if(c) c.value='';
+  _crRenderList();
+}
+// Pure: the matching quotations, newest first. Kept separate from the rendering so it can be tested.
+function _crMatches(list,f){
+  var words=String(f.q||'').toLowerCase().split(/\s+/).filter(Boolean);
+  return (list||[]).filter(function(e){
+    if(!e||!e.id) return false;
+    var d=String(e.created||'').substring(0,10);
+    if(f.from&&d<f.from) return false;
+    if(f.to&&d>f.to) return false;
+    if(f.co){
+      var k=(typeof _quotCompanyKey==='function')?_quotCompanyKey(e):'';
+      if(f.co==='none'?k!=='':k!==f.co) return false;
+    }
+    if(words.length){
+      var hay=[e.id,e.baseSerial,e.client,e.contact,e.project,e.user,e.agent,e.type].join(' ').toLowerCase();
+      for(var i=0;i<words.length;i++) if(hay.indexOf(words[i])<0) return false;
+    }
+    return true;
+  }).sort(function(a,b){return String(b.created||'').localeCompare(String(a.created||''));});
+}
+function _crAllQuotations(){
+  var merged={};
+  (dirData||[]).forEach(function(e){if(e&&e.id)merged[e.id]=e;});
+  _mergeSessionOver(merged,function(e,k){return k;});
+  return Object.keys(merged).map(function(k){return merged[k];});
+}
+function _crRenderList(){
+  var box=el('cr-list'); if(!box) return;
+  var all=_crAllQuotations(), hits=_crMatches(all,_crFind), shown=hits.slice(0,CR_LIST_MAX);
+  if(!hits.length){
+    box.innerHTML='<div style="font-size:12px;color:var(--text2);padding:8px 0">No quotation matches'+(all.length?'':' — the Project List has not loaded yet')+'.</div>';
+    return;
+  }
+  var coName={W:'WCL',M:'MSSI',C:'CWL'};
+  var h='<div style="font-size:11px;color:var(--text2);margin-bottom:4px">'+hits.length+' of '+all.length+' quotation'+(all.length===1?'':'s')
+    +(hits.length>shown.length?' — showing the newest '+shown.length+', narrow the search to see the rest':'')+'</div>'
+    +'<div style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:8px">'
+    +'<table class="data" style="margin:0"><thead><tr><th>Serial</th><th>Client</th><th>Project</th><th>Company</th><th>Created</th><th>Prepared by</th><th style="text-align:right">Total</th><th>Status</th></tr></thead><tbody>';
+  shown.forEach(function(e){
+    var sel=_crSelectedSerial===e.id, st=_normalizeStatusLabel(e.status||'');
+    var k=(typeof _quotCompanyKey==='function')?_quotCompanyKey(e):'';
+    h+='<tr style="cursor:pointer'+(sel?';background:var(--wash-navy)':'')+'" onclick="loadCostReport(\''+String(e.id).replace(/'/g,"\\'")+'\')">'
+      +'<td style="font-family:monospace;font-size:11px">'+escHtml(e.id)+'</td>'
+      +'<td style="font-weight:500">'+escHtml(e.client||'')+'</td>'
+      +'<td style="font-size:12px;color:var(--text2)">'+escHtml(e.project||'')+'</td>'
+      +'<td style="font-size:12px">'+(coName[k]||'—')+'</td>'
+      +'<td style="font-size:12px;color:var(--text2)">'+escHtml(String(e.created||'').substring(0,10))+'</td>'
+      +'<td style="font-size:12px">'+escHtml(e.user||'')+'</td>'
+      +'<td style="text-align:right;font-weight:500">'+fmtMoney(e.value||0)+'</td>'
+      +'<td><span class="pill pill-'+(_STATUS_PILL_COLOR[st]||'muted')+'">'+escHtml(st)+'</span></td></tr>';
+  });
+  box.innerHTML=h+'</tbody></table></div>';
+}
+function loadCostReport(serial){
+  var s=serial||'';
   if(!s){showToast('Select a quotation first.');return;}
   _crSelectedSerial=s;
+  _crRenderList();   // highlight the chosen row
   el('cr-body').innerHTML='<div style="font-size:12px;color:var(--text2)"><i class="ti ti-loader"></i> Loading saved state for '+escHtml(s)+'…</div>';
   loadQuotationJson(s,function(state){
     if(!state){el('cr-body').innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i> No saved state found for this quotation.</div>';return;}

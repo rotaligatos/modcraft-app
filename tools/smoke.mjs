@@ -4385,6 +4385,18 @@ const PROFILES = {
                      archive: /QT-W00000901/.test(t('arch-tbl')) && !/QT-W00000902/.test(t('arch-tbl')) };
           } finally { w.dirData = sv.dir; w.sheetUsers = sv.su; }
         }, { noSample: true, tracker: true, user: true, archive: true });
+      /* 2026-09-24: Cost report — find a quotation by search, company and created-date range. */
+      if (typeof window._crMatches === 'function')
+        check('Cost report finder: search (any word order), company and date range', () => {
+          const L = [
+            { id: 'QT-W00000901', client: 'Johndorf Property', project: 'Tower A kitchens', user: 'Stephanie', created: '2026-09-10T01:00:00Z' },
+            { id: 'QT-C00000018', client: 'Johndorf Property', project: 'Cebu units', user: 'Kaye', created: '2026-09-17T01:00:00Z' },
+            { id: 'QT-M00000150', client: 'St Paul College', project: 'Library', user: 'Joanna', created: '2026-08-01T01:00:00Z' }
+          ];
+          const ids = f => window._crMatches(L, Object.assign({ q: '', co: '', from: '', to: '' }, f)).map(e => e.id);
+          return { word: ids({ q: 'kitchens johndorf' }), company: ids({ co: 'C' }),
+                   range: ids({ from: '2026-09-01', to: '2026-09-15' }), newestFirst: ids({ q: 'johndorf' }) };
+        }, { word: ['QT-W00000901'], company: ['QT-C00000018'], range: ['QT-W00000901'], newestFirst: ['QT-C00000018', 'QT-W00000901'] });
       return out;
     }
   },
