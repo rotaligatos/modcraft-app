@@ -11363,6 +11363,75 @@ loads + pdf.js; `readClientSheet(aoa)` is pure so it can move into `index.html` 
 - A change that fixes one file can break two others — re-run the WHOLE scoreboard every time.
 - Python/pip available: `python -m pip install openpyxl xlrd pypdf` (installed this session).
 
+## What was changed on 2026-09-24 (session 2 — "duplicate quotation with a different number and company", and the MSSI commission)
+
+Two commits, `5b864dd` and `7598631`, both deployed and confirmed live.
+
+### The report
+Rommel: a user quotes for CWLI, someone reviews it, and "suddenly another version or a duplicate
+with a different number and company" appears.
+
+### Evidence first (activity log + Supabase)
+QT-M00000160 (Johndorf Property Ventures, Stephanie, 2026-09-17): unlock approved by Allan at
+08:54:48, then **renumbered M00000160 → W00000241 (company WCL)** 18 s later, then at 09:00:58
+**W00000241.R1 → M00000161** and at 09:01:04 **W00000241.R1 → C00000018**. Both of those last two
+started from the SAME old number, so two renumber confirm dialogs were open at once. M00000161 was
+a wasted number.
+
+### Root cause — a quotation's company followed the VIEWER
+- `getCompanyName('Direct')` returned `currentUserCompany`, meaning the company of whoever had the
+  quotation open, not whoever made it. A reviewer from another company saw it under their own
+  company, and it printed and saved that way. Any touch of Account type/company then offered to
+  renumber it into that company's series.
+- The Subsidiary dropdown excluded the VIEWER's company with an exact compare. A saved value missing
+  from the list silently showed the FIRST option (the `<select>` fallback trap).
+- **`clSelectClient` (my own 2026-08-28 change) made it worse.** Re-picking a Subsidiary client on
+  a saved quotation rebuilt the dropdown onto its first option, World Class Laminate, because a
+  client record does not say WHICH subsidiary. It then offered to renumber. That is how M160
+  became W241.
+- **`getCompanyName()` with NO argument** (~15 callers: `supaUpsertQuotation`, `supaUpsertClient`,
+  signature routing, Noted-by threshold, mobility origin) fell into the Subsidiary branch and
+  returned "first company not mine". **70 Module Systems Direct quotations were stored in Supabase
+  with company = World Class Laminate.** The Sheet column U was correct (that caller passes a type).
+
+### Fix (`5b864dd`)
+- **`qHomeCompany` / `_quotHomeCompany()`** is whose quotation it is. It is `''` on a new draft
+  (follows the viewer), fixed at the first save (`_gSaveQuotationCore`), saved as
+  `state.client.homeCompany`, and restored before `renderClientCompanyField`. Older saves recover it
+  via `_homeCompanyFromState()`: for Direct from the serial prefix (W/M/C), otherwise from the
+  preparer's company (Prepared-by signature → sheetUsers). It is never taken from the viewer.
+- `getCompanyName(undefined)` reads `cl-type` from the form. Direct returns the home company.
+- The Subsidiary list excludes the home company canonically (`_canonCompany`). On restore, a saved
+  value missing from the list is appended rather than falling back to the first option.
+- `clSelectClient` does NOT change the account type on a quotation that already has a number
+  (`qSerialCommitted`). It shows a toast instead; drafts still take the client's type.
+- `_companyChangePending`: only one renumber dialog at a time. On confirm, if the company is back on
+  the number's own series, nothing is renumbered; the claim uses the company as it stands then.
+- **Data:** corrected `quotations.company` in Supabase for the 70 Direct new-format rows whose
+  company disagreed with their serial prefix (Supabase only; the Sheet was already right, so this
+  closes a split rather than opening one).
+
+### MSSI commission (`7598631`)
+Both stages checked `currentUserCompany === 'Module Systems and Services, Inc.'`. Every MSSI user is
+"Module System" (singular) in User Roles, so the commission could never apply. It is now one shared
+rule, `_mssiCommApplies(type, sub)`: Subsidiary + home company canonically MSSI + subsidiary
+canonically CWL. **The commission is currently DISABLED in Settings (`mssiCommissionEnabled:false`,
+5%), so no price moved.** It will genuinely apply once switched on.
+
+### Verified
+Two new `tools/smoke.mjs` checks. The company check covers: no-arg Direct, a WCL reviewer on an
+MSSI quotation (still M), a CWL reviewer on a CWL-subsidiary quotation (CWL kept), and client pick
+on a numbered quotation (type kept). The commission check covers the singular name, a WCL
+subsidiary, Direct, a non-MSSI home company, and wiring into both `_recalcCore`/`_recalcFQCore`.
+Both fail on the pre-fix code (via `git stash`), though for the company check only because the new
+function is missing. `node tools/verify.mjs` green; both confirmed served live.
+
+### Standing rule from this
+**A quotation's company is a fact of the quotation. Never derive it from `currentUserCompany` for a
+saved quotation.** `currentUserCompany` is right only for a brand-new draft. Always compare company
+names through `_canonCompany`; the User Roles sheet has "Module System" (singular) on 8 users and
+"Cebu World Laminates" (plural) on one.
+
 # OPEN — updated 2026-09-24 (session end) — THIS IS THE AUTHORITATIVE LIST
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
@@ -11389,3 +11458,12 @@ mobilization-zero-after-unlock (never reproduced) · the two habits (re-measure)
 DEMO data · "By cabinet type" print mode (on hold) · `QT-W00000136.R1` print report · phone order_pause ·
 Stage 2 field-level lock parity · Michael Delos Reyes signature image · unlock-reconciliation ~60s
 window · `qApproved`/`qClientApproved` coupling (do not decouple without Rommel).
+
+## Added 2026-09-24 (session 2)
+- **Tell the team to reload once** so every open tab picks up the quotation-company fix.
+- Existing duplicate/renumbered quotations were NOT merged; each has its own history and the old
+  numbers are in `prevSerials`. Clean up only if someone points at a specific pair.
+- MSSI commission now works but is OFF in Settings. Turning it on changes prices for MSSI → CWL
+  subsidiary quotations (locked ones stay frozen).
+- `_homeCompanyFromState` falls back to the viewer for old-format serials (QT-YYMMDD-RRRR) with no
+  Prepared-by signature. Harmless, but those can still show the viewer's company.
