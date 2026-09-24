@@ -4442,6 +4442,28 @@ const PROFILES = {
           const m = (q, t, s) => C.filter(c => window._clientMatches(c, q, t, s)).map(c => c.name);
           return { serial: m('c00000018', '', ''), words: m('property johndorf', '', ''), direct: m('', 'Direct', ''), b2b: m('', '', 'B2B') };
         }, { serial: ['Ben'], words: ['Ben'], direct: ['Ana'], b2b: ['Ben'] });
+      /* 2026-09-25: Schedule page + the quotation-form capacity check read four invented projects
+         (DEMO_PROJS). They must read real quotation dates. */
+      if (typeof window._schedJobs === 'function')
+        await (async () => {
+          const w = window, sv = { dir: w.dirData, aqs: w._allQuotationStates, gl: w.gLoadDirData };
+          let r = {};
+          try {
+            w.dirData = [
+              { id: 'QT-W00000901', baseSerial: 'QT-W00000901', client: 'Has dates', status: 'IQ Locked', created: '2026-09-01' },
+              { id: 'QT-W00000902', baseSerial: 'QT-W00000902', client: 'No dates', status: 'Draft', created: '2026-09-02' }];
+            w.gLoadDirData = cb => cb();
+            w._allQuotationStates = cb => cb({ 'QT-W00000901': { dates: { fab: '2026-09-21', inst: '2026-10-15' }, projectSize: 6 }, 'QT-W00000902': { dates: {} } });
+            w._schedInvalidate();
+            const jobs = await new Promise(res => w._schedJobs(res));
+            r = { count: jobs.length, client: jobs[0] && jobs[0].client, units: jobs[0] && jobs[0].units,
+                  hasEstEnd: !!(jobs[0] && jobs[0].fabEnd && jobs[0].fabEnd > '2026-09-21'),
+                  demoGone: typeof w.DEMO_PROJS === 'undefined' && typeof w.DEMO_USERS === 'undefined' };
+          } finally { w.dirData = sv.dir; w._allQuotationStates = sv.aqs; w.gLoadDirData = sv.gl; w._schedInvalidate(); }
+          const want = { count: 1, client: 'Has dates', units: 6, hasEstEnd: true, demoGone: true };
+          out.push({ label: 'Schedule reads real quotation dates, not DEMO_PROJS', got: r, want, ok: JSON.stringify(r) === JSON.stringify(want) });
+        })();
+      else out.push({ label: 'Schedule reads real quotation dates, not DEMO_PROJS', err: '_schedJobs missing', ok: false });
       return out;
     }
   },
