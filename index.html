@@ -1984,6 +1984,14 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
                   style="display:none;position:absolute;right:6px;border:none;background:none;cursor:pointer;color:var(--text2);padding:2px;line-height:1">
             <i class="ti ti-x" style="font-size:13px"></i></button>
         </span>
+        <select id="orders-co" onchange="renderOrders()" title="Company" style="width:190px;height:32px;font-size:12px;border-radius:6px;border:.5px solid var(--border);padding:0 8px;background:var(--card)">
+          <option value="">All companies</option><option value="W">World Class Laminate</option><option value="M">Module Systems &amp; Services</option><option value="C">Cebu World Laminate</option><option value="none">No company</option>
+        </select>
+        <select id="orders-handler" onchange="renderOrders()" title="Handled by" style="width:170px;height:32px;font-size:12px;border-radius:6px;border:.5px solid var(--border);padding:0 8px;background:var(--card)"><option value="">Anyone</option></select>
+        <span style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text2)">Received
+          <input type="date" id="orders-from" onchange="renderOrders()" style="height:32px;font-size:12px;width:132px">
+          to <input type="date" id="orders-to" onchange="renderOrders()" style="height:32px;font-size:12px;width:132px">
+        </span>
         <span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)">Sort
           <select id="orders-sort" onchange="renderOrders()" style="height:32px;font-size:12px;border-radius:6px;border:.5px solid var(--border);padding:0 8px;background:var(--card)">
             <option value="new">Newest first</option>
@@ -16852,7 +16860,7 @@ function orderChannelLabel(o){ return orderChannel(o)==='web'?'Website':'Wufoo';
 //   valid state — orders accumulate over time (historical ones stay with
 //   status Done), so a real account essentially never has zero rows once
 //   backfilled. —
-var PENDING_ORDER_COLS='id,received_at,client_name,company_name,contact_number,customer_email,salesman_email,request_type,type_of_service,floor,board_substrate,haspe_flow,edging,boring,cutting,lipping,hg_included,hg_groove,hg_installation,hg_by,agent_name,attachment_1,attachment_2,status,quotation_serial,sent_at,source_company,created_at,updated_at,order_kind,address,project_name,delivery,segment,lead_source,target_date,notes,attachments,pause_history';
+var PENDING_ORDER_COLS='id,received_at,client_name,company_name,contact_number,customer_email,salesman_email,request_type,type_of_service,floor,board_substrate,haspe_flow,edging,boring,cutting,lipping,hg_included,hg_groove,hg_installation,hg_by,agent_name,attachment_1,attachment_2,status,quotation_serial,sent_at,source_company,created_at,updated_at,order_kind,address,project_name,delivery,segment,lead_source,target_date,notes,attachments,pause_history,handled_by,handled_by_email,handled_at';
 function supaGetPendingOrders(){
   if(!supaReady()) return Promise.resolve(null);
   try{
@@ -16930,6 +16938,7 @@ function gLoadPendingOrders(cb) {
           targetDate: r.target_date||'',
           notes:      r.notes||'',
           pauseHistory: Array.isArray(r.pause_history)?r.pause_history:[],
+          handledBy:  r.handled_by||'', handledByEmail: r.handled_by_email||'', handledAt: r.handled_at||'',
           _row: null, // no Sheets row for a Supabase-sourced order — see _setOrderStatus, already handles this correctly
           _raw: null
         };
@@ -17161,12 +17170,68 @@ function orderMatchesSearch(o,q){
   if(!q) return true;
   var hay=[o.id,o.clientName,o.companyName,o.contact,o.custEmail,o.salesEmail,
            o.agent,o.projectName,o.address,o.notes,o.service,o.substrate,
-           o.reqType,o.kind,o.quotSerial,o.segment,o.leadSource,o.sourceCompany]
+           o.reqType,o.kind,o.quotSerial,o.segment,o.leadSource,o.sourceCompany,o.handledBy]
           .join(' ').toLowerCase();
   // every word must appear somewhere, in any order — so "kaye gymfix" works
   var words=q.split(/\s+/);
   for(var i=0;i<words.length;i++) if(hay.indexOf(words[i])<0) return false;
   return true;
+}
+// Who is working an order. Recorded when someone exports it to a quotation (the pickup), and
+// replaced if someone else picks it up later — the card shows the CURRENT handler. Before this the
+// order itself never said who had it; the only trace was a line in the activity log.
+function _setOrderHandler(orderId){
+  var name=(gUser&&gUser.name)||'', email=String((gUser&&gUser.email)||'').trim().toLowerCase(), at=new Date().toISOString();
+  if(!name&&!email) return;
+  for(var i=0;i<pendingOrders.length;i++) if(pendingOrders[i].id===orderId){
+    var prev=pendingOrders[i].handledBy||'';
+    pendingOrders[i].handledBy=name||email; pendingOrders[i].handledByEmail=email; pendingOrders[i].handledAt=at;
+    if(prev&&prev!==(name||email)) logActivity('Order #'+orderId+' taken over from '+prev+' by '+(name||email)+'.','');
+    break;
+  }
+  if(SUPA_DUAL_WRITE&&supaReady()){
+    try{ supa.from('pending_orders').update({handled_by:name||email,handled_by_email:email,handled_at:at}).eq('id',String(orderId))
+      .then(function(r){ if(r.error) console.warn('[supa] order handler update error:',r.error.message||r.error); }); }
+    catch(e){ console.warn('[supa] order handler update threw',e); }
+  }
+}
+// Who has it, for display and filtering: the recorded handler, else the linked quotation's preparer.
+function _orderHandler(o){
+  if(o.handledBy) return o.handledBy;
+  var q=(o.quotSerial&&!/^DRAFT-/.test(o.quotSerial))?_orderQuotationEntry(o.quotSerial):null;
+  return (q&&q.user)||'';
+}
+// Company for filtering: the linked quotation's company (the Wufoo form itself is always WCL's),
+// else the order's own source company.
+function _orderFilterCompany(o){
+  var q=(o.quotSerial&&!/^DRAFT-/.test(o.quotSerial))?_orderQuotationEntry(o.quotSerial):null;
+  var k=q&&typeof _quotCompanyKey==='function'?_quotCompanyKey(q):'';
+  return k||_orderCompanyKey(o);
+}
+// Search + company + received-date + handler — one test, used by the list AND the tab counts so
+// a count never disagrees with what the tab shows.
+function _orderPassesFilters(o){
+  if(!orderMatchesSearch(o,ordersSearchTerm())) return false;
+  var co=(el('orders-co')||{}).value||'', from=(el('orders-from')||{}).value||'', to=(el('orders-to')||{}).value||'', hb=(el('orders-handler')||{}).value||'';
+  if(co&&(co==='none'?_orderFilterCompany(o)!=='':_orderFilterCompany(o)!==co)) return false;
+  var d=String(o.receivedAt||'').substring(0,10);
+  if(from&&(!d||d<from)) return false;
+  if(to&&(!d||d>to)) return false;
+  if(hb){ var h=_orderHandler(o); if(hb==='__none'?!!h:h!==hb) return false; }
+  return true;
+}
+function _fillOrdersHandlerFilter(){
+  var sel=el('orders-handler'); if(!sel) return;
+  var cur=sel.value, seen={};
+  pendingOrders.forEach(function(o){ var h=_orderHandler(o); if(h) seen[h]=1; });
+  var names=Object.keys(seen).sort();
+  sel.innerHTML='<option value="">Anyone</option><option value="__none">Nobody yet</option>'+names.map(function(n){return '<option>'+escHtml(n)+'</option>';}).join('');
+  if(cur&&(cur==='__none'||seen[cur])) sel.value=cur;
+}
+function clearOrdersFilters(){
+  ['orders-search','orders-from','orders-to'].forEach(function(id){ var e=el(id); if(e) e.value=''; });
+  ['orders-co','orders-handler'].forEach(function(id){ var e=el(id); if(e) e.value=''; });
+  renderOrders();
 }
 function clearOrdersSearch(){
   var i=el('orders-search'); if(i){ i.value=''; i.focus(); }
@@ -17181,7 +17246,7 @@ function renderOrdersTabs(){
     var t=ORDER_TABS[i];
     // Counts follow the search, so a tab reading 0 means "no matches here"
     // rather than leaving you to guess which tab your order is sitting in.
-    var n=pendingOrders.filter(t.match).filter(function(o){return orderMatchesSearch(o,q);}).length;
+    var n=pendingOrders.filter(t.match).filter(_orderPassesFilters).length;
     var on=(t.key===cur);
     h+='<button onclick="setOrdersTab(\''+t.key+'\')" style="border:none;background:none;cursor:pointer;'
       +'padding:8px 14px;font-size:13px;font-weight:'+(on?'600':'500')+';'
@@ -17293,7 +17358,8 @@ function renderOrders(){
   var q=ordersSearchTerm();
   var clr=el('orders-search-clear'); if(clr) clr.style.display=q?'block':'none';
   var inTab=pendingOrders.filter(ordersTabMatch(filter));
-  var list=inTab.filter(function(o){return orderMatchesSearch(o,q);});
+  _fillOrdersHandlerFilter();
+  var list=inTab.filter(_orderPassesFilters);
   // Received-at drives the order. Oldest-first is the one to use when working the
   // queue down — it is the order closest to breaching its SLA.
   var _sortDir=(el('orders-sort')||{}).value||'new';
@@ -17314,10 +17380,10 @@ function renderOrders(){
     return;
   }
   if(!list.length){
-    var msg='<i class="ti ti-inbox"></i> No orders found for this filter.';
+    var msg='<i class="ti ti-inbox"></i> No orders found for this filter. <a href="#" onclick="clearOrdersFilters();return false" style="color:var(--navy);font-weight:600">Clear all filters</a>';
     if(q){
       // Say where it IS, rather than leaving them to click every tab.
-      var elsewhere=pendingOrders.filter(function(o){return orderMatchesSearch(o,q);}).length;
+      var elsewhere=pendingOrders.filter(_orderPassesFilters).length;
       msg=elsewhere
         ? '<i class="ti ti-search"></i> Nothing matches “'+escHtml(q)+'” in this tab — but '+elsewhere
           +' order'+(elsewhere!==1?'s':'')+' elsewhere match'+(elsewhere===1?'es':'')+'. The counts on the tabs above show where.'
@@ -17432,6 +17498,9 @@ function renderOrders(){
       +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
       +'<span style="font-weight:600;font-size:13px;color:var(--navy)">'+(o.id?'#'+o.id:'–')+'</span>'
       +statusBadge+kindBadge+reqBadge+pauseBadge
+      +(function(){ var hb=_orderHandler(o); return hb
+        ? '<span class="pill pill-navy" title="'+(o.handledBy?'Picked up'+(o.handledAt?' '+fmtDT(o.handledAt):''):'Prepared the linked quotation')+'"><i class="ti ti-user" style="font-size:11px"></i> '+escHtml(hb)+'</span>'
+        : (o.status==='Pending'?'<span class="pill pill-muted"><i class="ti ti-user-question" style="font-size:11px"></i> Not picked up</span>':''); })()
       +'<span style="font-size:11px;color:var(--text2)">Received: '+fmtDT(o.receivedAt)+'</span>'
       +'</div>'
       // Timer
@@ -17870,6 +17939,7 @@ function _exportOrderToQuotationForced(orderId){
     // indefinitely. It is replaced with the real number the moment one is claimed, in
     // _acceptClaimedSerial.
     _setOrderStatus(orderId,'In Progress',qDraftKey||'');
+    _setOrderHandler(orderId);
     renderOrders && _updateOrdersBadge();
     logActivity('Quotation created from Order #'+orderId+(o.clientName?' — '+o.clientName:''));
     showToast('Order #'+orderId+' loaded — client fields pre-filled.');

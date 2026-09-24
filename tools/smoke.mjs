@@ -4397,6 +4397,25 @@ const PROFILES = {
           return { word: ids({ q: 'kitchens johndorf' }), company: ids({ co: 'C' }),
                    range: ids({ from: '2026-09-01', to: '2026-09-15' }), newestFirst: ids({ q: 'johndorf' }) };
         }, { word: ['QT-W00000901'], company: ['QT-C00000018'], range: ['QT-W00000901'], newestFirst: ['QT-C00000018', 'QT-W00000901'] });
+      /* 2026-09-24: Orders — who is handling it, and filters for company / received date / handler. */
+      if (typeof window._orderPassesFilters === 'function' && document.getElementById('orders-co'))
+        check('Orders: handler shown/filterable, company and received-date filters', () => {
+          const w = window, sv = { po: w.pendingOrders, dir: w.dirData };
+          const ids = ['orders-search', 'orders-co', 'orders-handler', 'orders-from', 'orders-to'];
+          const set = v => ids.forEach(id => { const e = document.getElementById(id); if (e) e.value = v[id] || ''; });
+          try {
+            w.dirData = [{ id: 'QT-C00000018', baseSerial: 'QT-C00000018', user: 'Kaye', created: '2026-09-17', status: 'IQ Locked' }];
+            w.pendingOrders = [
+              { id: '1', receivedAt: '2026-09-17T00:00:00Z', status: 'In Progress', handledBy: 'Stephanie', quotSerial: '', sourceCompany: 'World Class Laminate, Inc.' },
+              { id: '2', receivedAt: '2026-09-23T00:00:00Z', status: 'Pending', quotSerial: 'QT-C00000018', sourceCompany: 'World Class Laminate, Inc.' },
+              { id: '3', receivedAt: '2026-09-24T00:00:00Z', status: 'Pending', quotSerial: '', sourceCompany: '' }];
+            w._fillOrdersHandlerFilter();
+            const pick = v => { set(v); return w.pendingOrders.filter(w._orderPassesFilters).map(o => o.id); };
+            return { handlerFromQuote: w._orderHandler(w.pendingOrders[1]), cebu: pick({ 'orders-co': 'C' }),
+                     nobody: pick({ 'orders-handler': '__none' }), from: pick({ 'orders-from': '2026-09-20' }),
+                     search: pick({ 'orders-search': 'stephanie' }) };
+          } finally { set({}); w.pendingOrders = sv.po; w.dirData = sv.dir; }
+        }, { handlerFromQuote: 'Kaye', cebu: ['2'], nobody: ['3'], from: ['2', '3'], search: ['1'] });
       return out;
     }
   },
