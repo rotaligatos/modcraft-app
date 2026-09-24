@@ -4364,6 +4364,27 @@ const PROFILES = {
           out.push({ label: 'Supabase polls reuse unchanged tables and read the slim state view', got: r, want, ok: JSON.stringify(r) === JSON.stringify(want) });
         })();
       else out.push({ label: 'Supabase polls reuse unchanged tables and read the slim state view', err: '_supaCachedSelect missing', ok: false });
+      /* 2026-09-24: Reports Overview / User KPI / Project tracker / Archive showed sample data
+         (312 quotations, "Maria Santos", "Cityland Dev."). They must read the real Project List. */
+      if (typeof window.renderProjTracker === 'function')
+        check('Reports tabs show real quotations, not sample data', () => {
+          const w = window, sv = { dir: w.dirData, su: w.sheetUsers };
+          const old = new Date(Date.now() - 60 * 86400000).toISOString();
+          try {
+            w.dirData = [
+              { id: 'QT-W00000901', baseSerial: 'QT-W00000901', client: 'Real Client A', type: 'Fabrication only', value: 1000, user: 'Tester One', created: old, updatedAt: old, status: 'IQ Awaiting Client Approval' },
+              { id: 'QT-W00000902', baseSerial: 'QT-W00000902', client: 'Real Client B', type: 'Fabrication only', value: 2000, user: 'Tester One', created: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'Draft' }
+            ];
+            w.sheetUsers = [{ name: 'Tester One', pos: 'Staff', includeKpi: true, active: true }];
+            w.renderRepOverview(); w.renderUserKpi(); w.renderProjTracker(); w.renderArchive();
+            const t = id => (document.getElementById(id) || {}).innerHTML || '';
+            const all = t('rep-ov-kpis') + t('user-kpi-tbl') + t('proj-tbl') + t('arch-tbl') + t('kpi-filter');
+            return { noSample: !/Maria Santos|Cityland|Richmont|₱32\.6M/.test(all),
+                     tracker: /Real Client A/.test(t('proj-tbl')) && /Real Client B/.test(t('proj-tbl')),
+                     user: /Tester One/.test(t('user-kpi-tbl')),
+                     archive: /QT-W00000901/.test(t('arch-tbl')) && !/QT-W00000902/.test(t('arch-tbl')) };
+          } finally { w.dirData = sv.dir; w.sheetUsers = sv.su; }
+        }, { noSample: true, tracker: true, user: true, archive: true });
       return out;
     }
   },
