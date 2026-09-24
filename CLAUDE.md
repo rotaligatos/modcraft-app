@@ -11177,7 +11177,7 @@ from the input. **Reload the page between cutting-list runs; do not trust `MCL.c
 script.** Same lesson as every other rig failure in this file: when a result contains something the
 input cannot explain, suspect the harness first.
 
-# OPEN — updated 2026-09-22 (session end) — THIS IS THE AUTHORITATIVE LIST
+# OPEN — updated 2026-09-22 (session end) — SUPERSEDED by the 2026-09-24 list at the end of this file, kept for detail
 > Every list above is superseded but not stale — read for detail on anything not covered here.
 
 ## Confirmed done this session — do not re-raise
@@ -11235,3 +11235,157 @@ input cannot explain, suspect the harness first.
   config will confidently relabel old output with settings it was never produced under.
 - **A test that passes on genuinely broken output is worse than no test.** The label bug survived
   every geometry assertion; the check added for it measures the on-screen size, not the geometry.
+
+## What was changed on 2026-09-23/24 (session — MSSI rules ported, flow review, Job Order design, client-template reader)
+
+Four commits after the 2026-09-22 entry above: `1235f5f`, `08bf81a`, `50d6b3d`, `82b1c65`, all
+deployed and confirmed served. Plus a full review of the cutting list → analysis flow (no code),
+an agreed Job Order design (not built), and a standalone template-reader prototype (not in the app).
+
+### 1. Rules ported from the MSSI website's cutting list (`1235f5f`, `08bf81a`)
+Compared Modcraft's cutting list against `MSSI Webpage/portal.html` (the live website version;
+`cutlist-template.html` there is an older prototype — do not use it as the reference).
+- **Th fills itself from the picked material** (`thicknessForMaterial` inside the MCL IIFE, called
+  from `MCL.matSearch`). ⚠ For an HPL build it returns the **substrate's** thickness: the build
+  label carries two figures ("Pure White **0.7mm** HPL on … **18mm** MDF") and the generic parser
+  takes the FIRST "…mm", which is the finish. Only writes when the text states a thickness.
+- **Client edge-code wording** (`_WEB_EBT_SYNONYM`, `_webEbtNormalise` before `_webEbtToModcraft`):
+  all around / ALLROUND / 4 SIDES / 4 → 4S; blank / 0 / NONE / N/A / NIL → none, unflagged;
+  "2L1S" = "2L 1S". Rommel: *"all around is 4s, if no input then its none"*. Deliberately ONLY
+  unambiguous forms — "2 long 1 short" and "TBLR" still flag (banding is billed per metre).
+- **Hardware with no quantity** now reaches the reflect summary flagged instead of being dropped.
+- **HPL rate: anything that is not MDF/PB takes the PLYWOOD rate** (HDF, Versaboard, Compact,
+  unrecognised) — Rommel approved, matching the website's 2026-07-31 correction. The old branch
+  quoted nothing. ⚠ **An unknown FACE COUNT still flags** (1 Face vs 2 Face are ~2× apart, no safe
+  direction to guess).
+- ⚠ **Do NOT align the HPL area convention.** The website doubles area for 2F (`L×W×qty×2`);
+  Modcraft uses single-side area against a 2-Face SKU at double rate. Matching them bills 4 faces.
+
+### 2. Review of the cutting list → analysis flow (Rommel asked: review only, don't touch quotation side)
+**Simulation:** real client job `samplesofcuttinglist/MARGARITA.xls` (41 rows, 103 pieces, 7 boards)
+run through the REAL pipeline vs an independent Python calculation. **Every number matched**:
+area 35.98 m², edge banding 161.33 lm (80.01 white / 81.33 acacia), grooving 20.61 lm, the one
+missing-qty row flagged. Board counts credible (5mm backing genuinely needs 4; 18mm 7 at 82.6%).
+
+**Problem list — "discuss one by one" (Rommel's instruction). Status:**
+| # | Problem | Status |
+|---|---|---|
+| P1 | Holes counted once per row; website asks "holes **on this panel**" → under-quoted by row qty | ✅ FIXED `50d6b3d` — ×row qty; MCL box reads "holes/panel". No real orders were affected (0 website cutting-list orders existed). |
+| P2 | Website grooving arrives as "(along L/W)", Modcraft only reads a typed "× N lm" → every website grooving line flags | OPEN |
+| P3 | Settings → Designers Support **"Cabinet component rules"** (`prodSettings.cabinetRules`: `ebtDeduct`, `ebtThickness`, size rules) is saved but **read by nothing** — no calc, no prompt | OPEN — resolve together with the finished/cut dropdown |
+| P4 | **Cutting length.** Priced as Σ(L+W)×qty (half perimeter). Cut sheet's saw travel is another number. Plant actually billed **908.04 m** for Studio Tille vs Modcraft's **366.82 m** (full perimeter 733.64 m). ≈₱8,100 short on that job | **OPEN — waiting on Rommel: how does the plant count cutting?** Do not change without his answer (it changes quoted price) |
+| P5 | Board size "4x8" leaks into the colour field ("white melamine 4x8") | OPEN, cosmetic |
+
+**Ease-of-use findings (not built):**
+- Upload reads only OUR template's column positions → every client list is retyped (→ template reader below).
+- Grooving length is typed; could be derived from the edge like banding.
+- Results page is **23,321 px** for a 19-board job; the layout alone is ~15 screens before the boards table.
+- ⚠ The **Reflect-to-Quotation summary still sits ABOVE the cutting layout** — I told Rommel on
+  2026-09-22 the layout was first; that was wrong.
+- Comparable tools (CutOptim, CutWize guide, CutList Plus, Cutlist Evolution, CutMaster 2D): summary
+  strip first; boards as thumbnails, click to open; identical boards grouped "×3"; **part numbers on
+  each piece**; step-through cut sequence; **trim allowance** for factory board edges (Modcraft has
+  none); printable cut sheets + part labels.
+
+### 3. Job Order — design AGREED with Rommel, NOT built
+**What exists:** PMES tables (`pmes_production_jobs` with payment-gate columns, `pmes_components` =
+barcode tokens `job-area-component-part-NN/total`, `pmes_job_materials`, `pmes_job_stages`).
+KEYSTONE = the **Admin App** (`Desktop/Admin App`, `adm_*` tables): `adm_release_gate` **inserts or
+updates** `pmes_production_jobs` — today it would release an **EMPTY** job, because nothing carries
+the cutting content. `pmes_components` has **no size, material or edge data**. PMES has only 2
+hand-entered test jobs.
+
+**Agreed lifecycle:** draft (after analysis) → **reserved at the INITIAL lock** (per option, frozen,
+tied to serial + option + revision) → ready (Final Quotation client-approved) → released by KEYSTONE
+→ PMES creates one barcoded part per piece.
+
+**Rommel's decisions (2026-09-24):**
+- **Finished vs cut size = a per-job DROPDOWN in the cutting list** (depends on the client).
+  The edge bander **trims before gluing**, so proposed: *cut = finished − tape thickness + trim, per
+  banded edge*. ⚠ **Formula and trim amount NOT yet confirmed by Rommel.** Tape thickness varies per
+  tape (0.4 / 1 / 2 mm). Client forms often state it (VALERA "sizes are final", MARGARITA Tagalog
+  note, 123572 tick box "[X] Finished Size").
+- **Reserve at the Initial lock** — keeps a record even if the Final changes / disputes arise.
+- **Print from both Modcraft and PMES.** PMES splits a **mother JO** into **per-process JOs**
+  (cutting, edge banding, boring, grooving…) for each operator → Modcraft produces the mother JO
+  with complete per-piece data; process JOs are filtered views of the same pieces.
+- **Per option**; only the approved option is released; unlock/revision → new version (old kept);
+  a reserved JO is frozen (changes = new version, never edits).
+- **Barcodes:** the client's own coding if supplied, otherwise the production format.
+- JO contents: cut sizes, which edges + tape, grain, grooving, holes, board layouts + cut sequence,
+  materials, hardware (per cabinet), labels in PMES barcode format.
+
+### 4. Optional Cabinet column on hardware rows (`82b1c65`) — built
+MCL hardware rows gain `cab` (optional; suggests the panel group names via `#mcl-hw-cab-dl` so names
+match). Carried as `cabinet` through `toCl` → `_cutListToAnalysis` → `result.hardware`.
+`prodBuildSummary` now **merges same name + unit into ONE quotation line** with the total and keeps
+`cabinetSplit` ("Cabinet 1 ×4 · Cabinet 2 ×8") for the JO. Different units never merged; a blank-qty
+source row keeps the merged line flagged. Excel `XL_HW_HDR` gained **Cabinet appended LAST** (old
+4-column files still import). The MSSI website hardware table does NOT have it yet.
+
+### 5. Client-template reader — PROTOTYPE ONLY (untracked file, not in the app, not deployed)
+`prototype_template_reader.html` in the Modcraft folder. **Deliberately not committed** (the whole
+repo root is served publicly by GitHub Pages). Double-click to use. Uses the same SheetJS the app
+loads + pdf.js; `readClientSheet(aoa)` is pure so it can move into `index.html` later.
+- Finds the header row among the first 30 **non-blank** rows; maps columns by keyword; picks the
+  filled column of merged duplicates; detects per-edge 0/1/2 count columns; reads edge notation
+  per DIMENSION (L/W/H) and converts to our long/short code by actual size; grooving from its own
+  column OR the comment; room headings → groups; **material heading lines** ("18mm WARM WHITE… 2F")
+  → material for rows below; size-mode notes and **tick boxes**; hardware-only sheets read as
+  hardware; free-form **block lists** ("18 x 540 x 2182 · 2 PCS" + "edgeband … loc of EB …");
+  edges named by length ("EBT along '337' & '1236'"); rows with a qty but no size ("SEE DRAWING")
+  are **kept and flagged**, never dropped.
+- PDFs: pdf.js text positions → lines → columns from the header's positions (midpoint bounds);
+  a phrase is split into words ONLY when it holds 2+ separate numbers (fused columns). Splitting
+  everything was measured WORSE — do not change that without re-running the scoreboard.
+- **Honest scoreboard:** 3 spreadsheets exact. PDFs **blind first run: 3/13 read, 0 fully right.**
+  After general fixes: **all 11 distinct cutting-list PDFs exact** vs totals computed independently
+  in Python. `123572.pdf` correctly refused (it is MSSI's own Service Form, not a list).
+  `STUDIO TILLE.pdf` = duplicate of `_C14`. GEFFY = genuine drawing (no usable text).
+  ⚠ The after-fix numbers are **in-sample**; the blind score is the real measure for a new client.
+- **Answer keys found:** `123572.pdf` = the plant's actual quote for Studio Tille C10–C14 (boards,
+  cutting 908.04 m, edge banding 122.88 + 187.92 m, HPL lamination 21 boards). `LIMSHEN HOME.pdf` has
+  per-row **TOTAL CUT** (= full perimeter) and **TOTAL EB** columns.
+- **13 of 14 sample PDFs have a real text layer** → most "drawings" Rommel receives are tables and
+  can be read exactly without AI. Recommendation given: PDF tables → this reader; true drawings →
+  AI reads intent only (type + W/H/D) and the parametric engine generates parts.
+- Not built: per-client remembered mapping, a column-correction UI, client material code → our SKU
+  mapping, wiring into Modcraft.
+
+⚠ `samplesofcuttinglist/` holds **real client data** — untracked, and must **never** be committed
+(public repo; client-privacy rule).
+
+### Method notes worth keeping
+- **Record the blind score before tuning.** 0/13 fully correct blind vs 11/11 after fixes are two
+  different claims; conflating them would overstate confidence.
+- **Build the truth independently** (Python on pypdf layout text) — my own first truth extractor was
+  wrong twice (skipped rows lacking optional columns; line grouping differed between PDF tools).
+- A change that fixes one file can break two others — re-run the WHOLE scoreboard every time.
+- Python/pip available: `python -m pip install openpyxl xlrd pypdf` (installed this session).
+
+# OPEN — updated 2026-09-24 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Every list above is superseded but not stale — read for detail on anything not covered here.
+
+## ⚠ FIRST THING NEXT SESSION — waiting on Rommel's answers
+1. **P4 cutting length** — how does the plant count cutting? (full perimeter? + board-edge trim?)
+   Evidence: plant billed 908.04 m vs Modcraft 366.82 m on Studio Tille (123572.pdf).
+2. **Cut-size formula** — confirm *cut = finished − tape + trim per banded edge*, and the trim amount.
+
+## Next, in order (Rommel: "discuss problems one by one", no change without agreement)
+3. **P2** website grooving "(along L/W)" → compute from the edge instead of flagging.
+4. **P3** dead "Cabinet component rules" settings → replace with the finished/cut dropdown + tape
+   thickness + trim (after #2).
+5. **P5** "4x8" in the colour field.
+6. **Template reader into Modcraft** — per-client remembered mapping, column-correction UI,
+   material code → SKU mapping. His biggest pain point.
+7. **Layout page ease of use** — summary strip, board thumbnails + grouping, part numbers, fix the
+   Reflect-summary-above-layout order, trim allowance, printable cut sheets/labels.
+8. **Build the Job Order** per the agreed design (after 1–2).
+9. MSSI website: add the optional Cabinet column to its hardware table (separate repo).
+
+## Still open, carried forward unchanged (see 2026-09-16 list for detail)
+Rotate the Wufoo API key (security clock) · Orders 8834/8840 unlinked · ticket `a0cea6f8` ·
+mobilization-zero-after-unlock (never reproduced) · the two habits (re-measure) · Schedule/Reports
+DEMO data · "By cabinet type" print mode (on hold) · `QT-W00000136.R1` print report · phone order_pause ·
+Stage 2 field-level lock parity · Michael Delos Reyes signature image · unlock-reconciliation ~60s
+window · `qApproved`/`qClientApproved` coupling (do not decouple without Rommel).
