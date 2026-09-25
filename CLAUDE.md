@@ -11655,3 +11655,103 @@ lock parity · Michael Delos Reyes signature image · unlock-reconciliation ~60s
   subsidiary quotations (locked ones stay frozen).
 - `_homeCompanyFromState` falls back to the viewer for old-format serials (QT-YYMMDD-RRRR) with no
   Prepared-by signature. Harmless, but those can still show the viewer's company.
+
+## What was changed on 2026-09-25 (session — the cutting-list problem list closed: P2, P3, P4, P5)
+
+Three commits, all deployed: `b9e2fb6`, `3ea3086`, `cdecaf5`. Each has a reproduce-first check in
+`tools/smoke.mjs` confirmed failing on the pre-fix code.
+
+### Rommel's answers (settled — do not re-ask)
+- **Cutting length = option B: all 4 sides of every piece** (full perimeter). He remembers the plant
+  adding 10–12% on top. That does NOT reproduce the plant's figure (see below); he is asking the plant.
+- **Cut size = finished size** on the normal edge bander (it trims an amount equal to the tape
+  thickness). A rarely-used bander **without a trimmer** gives cut = finished − tape thickness per
+  banded edge → to be a machine choice on the Job Order, next to the panel saw.
+- **HPL: laminate first.** Every HPL build (substrate + finish + 1F/2F) becomes its own material in
+  the cutting list, and panels are cut from it. This is how both the MSSI website and Modcraft
+  already work — no change. (He also said plywood is "cut first, then laminated by hand" and MDF/PB
+  is laminated as whole 4×8 boards "unless the client asks for cutting" — but chose to follow the
+  laminate-first model. Plant question #9 covers the exception.)
+- **P5 ("4x8" in the colour) — left as is, off the list.** Cosmetic; "4x8" in the colour words
+  actually steers matching to a 4x8 SKU over a 6x8.
+
+### P4 — cutting counts all 4 sides (`b9e2fb6`)
+`prodComputeServices`: `cutLM += 2*(l+w)*qty` (was `(l+w)*qty`, half the perimeter). This changes
+quoted price on every cutting-list job — Rommel's explicit decision.
+
+### P2 — website grooving arrives measured (`3ea3086`)
+`_cutListToAnalysis`: a website chip ending `(L)` / `(W)` = run along the panel's length/width;
+`(1200mm)` = a curved manual run. Each is PER PANEL × row qty (same rule as holes). Previously every
+website grooving line arrived with no run length and was flagged.
+> ⚠ I first told Rommel three website service names didn't match the catalogue. **Wrong** — that
+> table came from the offline `INIT_SERVICES` seed. The LIVE `price_services` uses the website's
+> names exactly ("Grooving (3mm width melamine)", "Router Grooving", "Sliding Door Grooving").
+> No rename was needed. Same mistake as 2026-09-13: **catalogue content questions need a live
+> Supabase query, never the offline seed.**
+
+### P3 — dead "Cabinet component rules" removed (`cdecaf5`)
+Settings → Designers Support: the component-formula table and "Deduct EBT thickness … 0.5mm"
+switch were saved and read by nothing, and the switch (ON by default) contradicted the plant.
+Removed from the default object, the settings UI, the save path, and `prodAddCabinetRule`/
+`prodRemoveCabinetRule`. `loadProdSettings` deletes any saved `cabinetRules` from localStorage.
+
+### Studio Tille analysis — why Modcraft's cutting and board figures differ from the plant's
+Ran all five lists (C10–C14: 178 rows, 351 pieces) through the prototype reader + the real packer.
+| | Metres |
+|---|---|
+| Actual panel-saw travel incl. waste cuts (rips 268.4 + crosscuts 100.4 + offcut cuts 43.0) | 411.8 |
+| All 4 sides of every piece (B, now live) | 733.64 |
+| B + 10% / + 12% | 807.0 / 821.7 |
+| B + trim all 4 edges of 27 boards | 931.3 |
+| **Plant billed** | **908.04** (≈ B + 24%) |
+**No rule reproduces 908.** Saw travel is SHORTER than B (neighbours share cuts), so waste cuts
+move away from 908, not toward it.
+
+Boards — ⚠ I first compared against the plant's **27**, which is only section A of the quote;
+section B also bills **25 raw plywood boards** laminated (21 × 2F + 4 × 1F). Real comparison:
+warm white plywood plant 22 / Modcraft 21 · **laminated HPL boards plant 25 / Modcraft 17** ·
+6mm 4 / 4 · 9mm MDF plant 1 / Modcraft 0.
+
+### Plant questions list (given to Rommel — he is asking the plant)
+1. How 908.04 m of cutting was derived (allowance %? board-edge trim? rule or hand estimate?)
+2. What "Slitting 27 m" is and when it's charged
+3. How laminated-board count (25) is decided (HPL sheets supplied? 3% damage allowance? whole boards per colour?)
+4. Warm white 22 vs 21 — spare board?
+5. What the single 9mm MDF was for (shaker doors?)
+6. Factory board-edge trim before cutting — mm per edge
+7. No-trimmer bander: cut = finished − tape per banded edge — correct?
+8. Tape thicknesses used, and which jobs use the no-trimmer bander
+9. MDF/PB + HPL when the client asks for cutting — cut first then laminate?
+**Questions 1 and 3 affect price.**
+
+# OPEN — updated 2026-09-25 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Everything above is superseded but not stale — read for detail on anything not repeated here.
+
+## Confirmed done — do not re-raise
+P1 holes per panel · P2 website grooving measured · P3 dead cabinet rules removed · P4 cutting = all
+4 sides · P5 left as is (Rommel's decision). Cut size = finished size (normal bander). HPL =
+laminate first (no change needed).
+
+## ⚠ FIRST THING NEXT SESSION — waiting on the plant's answers
+The 9 plant questions above. When answers arrive:
+- **Q1** → cutting-length rule (a one-line change in `prodComputeServices`, plus its smoke check).
+- **Q3/Q4** → board-count allowance, if the plant adds spares/damage allowance per material.
+- **Q6** → board-edge trim allowance in the packer (usable board = 1220×2440 minus trim).
+- **Q7/Q8** → edge-bander machine choice for the Job Order.
+
+## Next, in order (Rommel: "discuss one by one", no price change without agreement)
+1. **Template reader into Modcraft** — per-client remembered mapping, column-correction UI,
+   material code → SKU mapping. His biggest pain point. Prototype: `prototype_template_reader.html`
+   (untracked, never commit — repo is public; `samplesofcuttinglist/` is real client data).
+2. **Layout page ease of use** — summary strip, board thumbnails + grouping, part numbers, fix the
+   Reflect-summary-above-layout order, printable cut sheets/labels (trim allowance after Q6).
+3. **Build the Job Order** per the agreed design (2026-09-23/24 entry), incl. the edge-bander choice.
+4. MSSI website: add the optional Cabinet column to its hardware table (separate repo).
+
+## Carried forward unchanged (see the 2026-09-24 session-3 list for detail)
+Confirm the Supabase egress fix in Usage · 15 orders with no handler · sweep for retired-status
+string compares · Schedule page still on `DEMO_PROJS` · rotate the Wufoo API key (security clock) ·
+Orders 8834/8840 unlinked · ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits ·
+"By cabinet type" print mode (on hold) · `QT-W00000136.R1` print report · phone order_pause ·
+Stage 2 lock parity while paused · Michael Delos Reyes signature image · unlock-reconciliation ~60s
+window · `qApproved`/`qClientApproved` coupling · MSSI commission is OFF in Settings.
