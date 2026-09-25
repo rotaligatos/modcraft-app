@@ -17895,6 +17895,12 @@ function _cutListToAnalysis(cl,order){
     if(pn.emat) notes.push('edge tape: '+pn.emat);
     var edgeTape=String(pn.emat||'').trim();
     if(pn.remark) notes.push('remarks: '+pn.remark);
+    // The client-list importer (CLR) carries whatever its reader could not settle as "⚠ …"
+    // in the remark. It stays a review flag here — a row whose quantity was missing and
+    // defaulted to one must not arrive looking settled.
+    String(pn.remark||'').split(' · ').forEach(function(seg){
+      if(seg.indexOf('⚠')===0) review.push(seg.replace(/^⚠\s*/,'')+' (as read from the client\'s list)');
+    });
     // Per-piece services. Boring is priced per hole, handled below. Grooving/Routing/Manual
     // Edgebanding are all priced per LINEAR METRE in the catalog, and the picked string is
     // already the exact catalog SKU (svcOptions() lists real SERVICES names, not a generic
@@ -35454,6 +35460,8 @@ var MCL=(function(){
       +'<button class="btn" style="font-size:11px;padding:6px 10px" onclick="MCL.downloadTemplate()" title="A ready-made Excel workbook with real dropdowns on Part/Edge Band/Services — the same one the MSSI website offers"><i class="ti ti-file-spreadsheet"></i>Download Excel template</button>'
       +'<label class="btn" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Upload a filled-in copy of the template"><i class="ti ti-upload"></i>Upload filled Excel'
       +'<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="MCL.uploadExcel(this)"></label>'
+      +'<label class="btn btn-primary" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Read a client\'s own cutting list — their Excel or PDF, in their layout. You check the columns before anything is imported."><i class="ti ti-file-import"></i>Import client\'s list'
+      +'<input type="file" accept=".xlsx,.xls,.csv,.pdf" multiple style="display:none" onchange="CLR.open(this)"></label>'
       +'</div></div>';
 
     // HPL builds — declared first, because a panel's material can be one of them.
@@ -35870,6 +35878,22 @@ var MCL=(function(){
       S.panels=blankPanels(10); S.hpl=[]; S.hardware=[]; rerender();
     },
     state:function(){ return S; },
+    thicknessFor:function(v){ return thicknessForMaterial(v); },
+    blankPanel:function(){ return blankPanel(); },
+    // The client-list importer (CLR) hands its rows over here. Same replace-not-append rule
+    // and the same "don't silently overwrite typed work" confirm the template upload uses.
+    importRows:function(panels,hardware,label){
+      panels=panels||[]; hardware=hardware||[];
+      if(!panels.length&&!hardware.length){ showToast('Nothing to import.'); return false; }
+      var t=totals();
+      var hit=(panels.length&&t.rows>0)||(hardware.length&&S.hardware.length);
+      if(hit&&!confirm('This replaces what is already on this list with '
+        +(label||'the imported list')+'. Continue?')) return false;
+      if(panels.length) S.panels=panels;
+      if(hardware.length) S.hardware=hardware;
+      rerender();
+      return true;
+    },
     // Exposed so the conversion can be exercised without the DOM.
     toCl:function(){
       var t=totals();
@@ -35913,6 +35937,825 @@ var MCL=(function(){
       showToast('✓ '+payload.components.length+' components'
         +(flagged?' — '+flagged+' need review':' — nothing flagged'));
     }
+  };
+})();
+
+
+// ── Client cutting-list reader (CLR) ────────────────────────────────────────
+// Reads a client's OWN cutting list — Excel or a text PDF, in whatever layout they use — into
+// the Cutting List tab. Ported from prototype_template_reader.html, where it read all 11
+// distinct sample cutting-list PDFs and 3 spreadsheets exactly against independently computed
+// totals (blind first run: 3 of 13 PDFs — the rest came from general fixes, so a new client's
+// layout may still need a correction, which is why nothing is imported before a person has
+// seen the columns). IIFE-wrapped: nothing but CLR reaches global scope.
+var CLR=(function(){
+const esc = s => escHtml(String(s == null ? '' : s));
+/* ─────────────────────────────────────────────────────────────────────────────
+   THE LOGIC. Pure: takes an array-of-arrays (one sheet), returns a result. No DOM.
+   ───────────────────────────────────────────────────────────────────────────── */
+const norm = s => String(s == null ? '' : s).toLowerCase().replace(/\(mm\)/g, '')
+  .replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+const isNum = v => /^\s*-?[\d,]+(\.\d+)?\s*(mm|pcs?|pc)?\s*$/i.test(String(v == null ? '' : v));
+
+// Order matters: the more specific rule must come first ("e-matl" before "material",
+// "edge material" before "edge").
+const FIELD_RULES = [
+  { field: 'emat',   re: /(e-?matl|ebt material|edge ?(band(ing)?)? ?mat|tape|eb colou?r)/ },
+  { field: 'groove', re: /groov/ },
+  { field: 'edge',   re: /(edg|^eb$|sides to be eb|banding)/ },
+  { field: 'remark', re: /(remark|comment|^notes?$)/ },
+  { field: 'item',   re: /^(item( no\.?)?|no\.?|#|s\/n|label)$/ },
+  { field: 'part',   re: /(part ?name|^part$|parts|description|designation|component|^desc|panel ?id|s\/n part|board name)/ },
+  { field: 'thk',    re: /(thk|thick|^t$)/ },
+  { field: 'qty',    re: /(qty|quantity|^pcs|no\. of)/ },
+  // A bare "L" / "W" (after "(mm)" is stripped) is length / width. Safe: per-edge 0/1 flag
+  // columns headed L and W are claimed first, by their data, in findEdgeFlagCols.
+  { field: 'length', re: /(length|^len$|^l$|height|^h$)/ },
+  { field: 'width',  re: /(width|^w$|breadth)/ },
+  { field: 'material', re: /(material|^board( \/ hpl| colou?r)?$|^mat$|finish)/ },
+];
+function classify(h) {
+  const n = norm(h); if (!n) return null;
+  for (const r of FIELD_RULES) if (r.re.test(n)) return r.field;
+  return null;
+}
+
+// Header row = the row, among the first 30 NON-BLANK rows, whose cells match the most known
+// fields. Counting only non-blank rows matters: one sample list's header sits on row 32 after 26
+// empty formatting rows, which a plain "first 25 rows" search never reached.
+function findHeader(aoa) {
+  let best = { row: -1, hits: 0 }, seen = 0;
+  for (let r = 0; r < aoa.length && seen < 30; r++) {
+    if (!(aoa[r] || []).some(v => String(v).trim())) continue;
+    seen++;
+    const hits = new Set((aoa[r] || []).map(classify).filter(Boolean)).size;
+    if (hits > best.hits) best = { row: r, hits };
+  }
+  return best.hits >= 3 ? best : { row: -1, hits: best.hits };
+}
+
+// Four-column per-edge flag blocks (one sample: L L W W, values 0/1). Found before the
+// normal mapping, because single-letter "L"/"W" headers would otherwise be read as
+// length/width.
+function findEdgeFlagCols(aoa, h) {
+  const hdr = aoa[h] || [], out = [];
+  for (let c = 0; c < hdr.length; c++) {
+    const n = norm(hdr[c]);
+    if (!/^[lwsh]$/.test(n)) continue;
+    let flagLike = 0, filled = 0;
+    for (let r = h + 1; r < Math.min(aoa.length, h + 80); r++) {
+      const v = (aoa[r] || [])[c];
+      // Only numbers are evidence. A page title or material note that happens to fall in
+      // this column says nothing about what the column holds (one sample: 27 of 27 numbers
+      // were counts, but 3 text notes pulled the share to exactly 90% and it was rejected).
+      if (!isNum(v)) continue;
+      filled++; if (+v === 0 || +v === 1 || +v === 2) flagLike++;
+    }
+    // Values are 0/1 flags (one sample) or small per-dimension counts 0–2 (another).
+    if (filled && flagLike / filled > 0.9) out.push({ col: c, dim: n === 'w' || n === 's' ? 'W' : 'L' });
+  }
+  return out.length >= 2 ? out : [];
+}
+
+// Several columns can claim one field (merged header cells: LENGTH | LENGTH). Keep the
+// one that actually holds data.
+function pickBest(aoa, h, cols, numeric) {
+  let best = cols[0], bestN = -1;
+  for (const c of cols) {
+    let n = 0;
+    for (let r = h + 1; r < Math.min(aoa.length, h + 120); r++) {
+      const v = (aoa[r] || [])[c];
+      if (numeric ? isNum(v) : String(v == null ? '' : v).trim() !== '') n++;
+    }
+    if (n > bestN) { bestN = n; best = c; }
+  }
+  return best;
+}
+
+// Edge notation → edges counted per DIMENSION (along length / along width).
+// Accepts "2L", "2W2L", "1W, 2H", "4S", "ALL AROUND", "1L 1S"… H (height) is the length.
+function parseEdgeDims(raw) {
+  const t = String(raw == null ? '' : raw).toUpperCase().replace(/[.,;/]+/g, ' ').trim();
+  if (!t || /^(0|NONE|NIL|NO|N\/?A|-)$/.test(t)) return { L: 0, W: 0, ok: true };
+  if (/^(4|4S|ALL( ?AROUND| ?ROUND| ?SIDES)?|FULL|4 ?SIDES)$/.test(t.replace(/\s+/g, ' ')))
+    return { L: 2, W: 2, ok: true };
+  let L = 0, W = 0, seen = false;
+  const re = /(\d)\s*([LWHS])/g; let m;
+  while ((m = re.exec(t))) {
+    seen = true; const n = +m[1];
+    if (m[2] === 'W' || m[2] === 'S') W += n; else L += n;    // S(hort) read as width edges
+  }
+  if (!seen && /^[LWH]$/.test(t)) return { L: t === 'W' ? 0 : 1, W: t === 'W' ? 1 : 0, ok: true };
+  return seen ? { L: Math.min(L, 2), W: Math.min(W, 2), ok: true } : { L: 0, W: 0, ok: false };
+}
+
+// Our code is long/short, not length/width — so it depends on the actual size.
+function toOurCode(eL, eW, len, wid) {
+  const long = len >= wid ? eL : eW, short = len >= wid ? eW : eL;
+  const map = { '1,0': '1L', '2,0': '2L', '0,1': '1S', '0,2': '2S', '1,1': '1L 1S',
+                '2,1': '2L 1S', '1,2': '1L 2S', '2,2': '4S', '0,0': '' };
+  return map[long + ',' + short];
+}
+
+// Client material codes: MELWH182F → 18mm 2F · MP18 → 18mm · PB09 → 9mm · ACACIA362F → 36mm 2F.
+function parseMatCode(s) {
+  const t = String(s || '').toUpperCase();
+  let m = t.match(/(\d{1,2})([12])F\b/);
+  if (m) return { thk: +m[1], faces: +m[2] };
+  const faces = /DOUBLE FACE|2 ?FACE|\b2F\b/.test(t) ? 2 : (/SINGLE FACE|1 ?FACE|\b1F\b/.test(t) ? 1 : 0);
+  m = t.match(/\b(\d{1,2}(?:\.\d)?)\s*MM\b/) || t.match(/[A-Z](\d{2})\b/);
+  return m ? { thk: +m[1], faces } : { thk: 0, faces };
+}
+// A line that names a board rather than a room: "18mm WARM WHITE, MFC, DOUBLE FACE",
+// ": 09mm /PLYWOOD / 4'x8' /WARM WHITE/2F", "boards 18mm PB 2 FACE MATT". Rows under it
+// that carry no material of their own inherit it.
+const BOARD_WORD = /\b(PB|MDF|MFC|PLY(WOOD)?|MELAMINE|PARTICLE|HPL|MARINE|BOARDS?|COMPACT|LAMINATE)\b/i;
+function matHeading(t) {
+  const s = String(t || '');
+  if (!/\d\s*mm\b/i.test(s) || !BOARD_WORD.test(s)) return null;
+  const c = parseMatCode(s);
+  const tape = s.match(/(\d(?:\.\d)?)\s*mm\s*edge ?band/i);
+  return { material: s.replace(/^[:\s]+/, '').trim(), thk: c.thk, faces: c.faces, tapeMm: tape ? +tape[1] : 0 };
+}
+
+// Notes above the header that change how sizes must be read.
+function readNotes(aoa, h) {
+  const notes = [], ctx = {};
+  for (let r = 0; r < h; r++) {
+    const txt = (aoa[r] || []).filter(v => String(v).trim()).join(' ').trim();
+    if (!txt) continue;
+    notes.push(txt);
+    // An order form with tick boxes: "[ X ] Finished Size … [ ] Cut Size". Only a TICKED
+    // box counts — an empty "[ ] Finished Size" must not be read as finished.
+    const ticked = txt.match(/\[\s*[xX✓✔]\s*\]\s*(finished|cut)\s*size/i);
+    if (ticked) ctx.sizeMode = { value: ticked[1].toLowerCase(), why: 'ticked on their form: ' + txt };
+    else if (/\[\s*\]/.test(txt)) { /* an unticked box says nothing */ }
+    else if (/final|finished/i.test(txt)) ctx.sizeMode = { value: 'finished', why: txt };
+    else if (/magbabawas|deduct|less (the )?edg/i.test(txt)) ctx.sizeMode = { value: 'finished', why: txt };
+    const mh = matHeading(txt);
+    if (mh) { ctx.material = mh; (ctx.materials = ctx.materials || []).push(mh); if (mh.tapeMm) ctx.tapeMm = mh.tapeMm; }
+    const kv = txt.match(/^(color|colour|finish|project( name)?|module( name)?|client)\s*:\s*(.+)$/i);
+    if (kv) ctx[kv[1].toLowerCase().split(' ')[0]] = kv[kv.length - 1].trim();
+  }
+  return { notes, ctx };
+}
+
+// Edge/groove written in words, already LONG/SHORT: "2 LONG SIDES", "1 SHORT SIDE",
+// "ALL SIDES", "NONE". Returns long/short counts, or null when it cannot tell.
+function parseLongShortWords(s) {
+  const t = String(s || '').toUpperCase().trim();
+  if (!t || /^(NONE|NIL|N\/?A|-|0)$/.test(t)) return { long: 0, short: 0 };
+  if (/ALL( SIDES| EDGES| AROUND)?|4 ?SIDES/.test(t)) return { long: 2, short: 2 };
+  let long = 0, short = 0, seen = false;
+  t.replace(/(\d|ONE|TWO|BOTH)\s*(LONG|SHORT)/g, (_, n, side) => {
+    seen = true; const k = { ONE: 1, TWO: 2, BOTH: 2 }[n] || +n;
+    if (side === 'LONG') long += k; else short += k;
+  });
+  return seen ? { long: Math.min(long, 2), short: Math.min(short, 2) } : null;
+}
+
+// For lists that are not a table at all (one sample): one piece per small block of lines —
+// "boards <material> groove <spec>" / "18 x 540 x 2182  2 PCS" / "edgeband <tape> loc of EB <spec>".
+// Used only when no header row exists.
+function readDimensionBlocks(aoa) {
+  const lines = aoa.map(r => (r || []).filter(v => String(v).trim()).join(' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const rows = []; let group = '', mat = null, groove = null, cur = null;
+  lines.forEach((t, i) => {
+    const bm = t.match(/^boards?\s+(.*?)(?:\s+groove\s+(.*))?$/i);
+    const dm = t.match(/(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(\d+)\s*(PCS?|PIECES?|SETS?)?\b/i);
+    const em = t.match(/^edge ?band\w*\s+(.*?)\s+loc(?:ation)? of eb\s+(.*)$/i);
+    if (bm) { mat = matHeading(bm[1]) || { material: bm[1], thk: 0, faces: parseMatCode(bm[1]).faces };
+              groove = bm[2] ? parseLongShortWords(bm[2]) : null; return; }
+    if (dm) {
+      const n = [+dm[1], +dm[2], +dm[3]].sort((a, b) => a - b);    // thinnest is the thickness
+      cur = { src: i + 1, group, part: '', material: mat ? mat.material : '', thk: n[0], faces: mat ? mat.faces : 0,
+              L: n[2], W: n[1], qty: +dm[4], eL: 0, eW: 0, code: '', emat: '', grooveLm: 0, remark: '', issues: [] };
+      if (groove) cur.grooveLm = (groove.long * cur.L + groove.short * cur.W) / 1000 * cur.qty;
+      if (!dm[5]) cur.issues.push('quantity has no "pcs" — check it');
+      cur._edgeSeen = false;
+      rows.push(cur); return;
+    }
+    if (em && cur) {
+      cur.emat = /^none$/i.test(em[1].trim()) ? '' : em[1].trim();
+      const ls = parseLongShortWords(em[2]);
+      if (!ls) cur.issues.push('edge "' + em[2] + '" not understood');
+      else { cur.eL = ls.long; cur.eW = ls.short;      // L is the long side here, so long = eL
+             cur.code = toOurCode(ls.long, ls.short, cur.L, cur.W); }
+      cur._edgeSeen = true; return;
+    }
+    if (!/^(date|name|proj|email|lot|brgy|\d{8,})/i.test(t) && t.length < 60 && !/@/.test(t)) group = t;
+  });
+  rows.forEach(r => { if (!r._edgeSeen) r.issues.push('no edgeband line after it'); delete r._edgeSeen; });
+  return rows;
+}
+
+function readClientSheet(aoa, force) {
+  const res = { header: null, map: {}, how: {}, rows: [], issues: [], ctx: {}, notes: [], edgeFlags: [] };
+  const hd = (force && force.header != null && force.header >= 0) ? { row: force.header, hits: 99 } : findHeader(aoa);
+  if (hd.row < 0) {
+    const blocks = readDimensionBlocks(aoa);
+    if (blocks.length) { res.kind = 'blocks'; res.header = -1; res.rows = blocks; res.how.all = 'no table — read as one block of lines per piece'; return res; }
+    res.issues.push('Could not find a header row — a person has to point at it.'); return res;
+  }
+  const h = res.header = hd.row;
+  const { notes, ctx } = readNotes(aoa, h); res.notes = notes; res.ctx = ctx;
+
+  res.edgeFlags = findEdgeFlagCols(aoa, h);
+  const taken = new Set(res.edgeFlags.map(f => f.col));
+  const byField = {};
+  (aoa[h] || []).forEach((cell, c) => {
+    if (taken.has(c)) return;
+    const f = classify(cell); if (!f) return;
+    (byField[f] = byField[f] || []).push(c);
+  });
+  for (const f in byField) {
+    const numeric = ['length', 'width', 'qty', 'thk'].includes(f);
+    res.map[f] = byField[f].length > 1 ? pickBest(aoa, h, byField[f], numeric) : byField[f][0];
+    res.how[f] = byField[f].length > 1 ? 'chose the filled one of ' + byField[f].length + ' columns' : 'header text';
+  }
+  if (res.edgeFlags.length) res.how.edge = 'per-edge 0/1 columns (' + res.edgeFlags.map(f => f.dim).join(' ') + ')';
+  // A person's correction (or a remembered one) wins over the automatic reading.
+  if (force && force.map) {
+    for (const f in force.map) {
+      const v = force.map[f], keep = v != null && v >= 0;
+      if ((keep ? v : undefined) !== res.map[f]) res.how[f] = 'set by you';
+      if (keep) res.map[f] = v; else delete res.map[f];
+    }
+    // An edge column chosen by hand replaces per-edge count columns found automatically.
+    if (res.map.edge != null && res.how.edge === 'set by you') res.edgeFlags = [];
+  }
+  // A "Width/Height" layout: Height is the long, grain-running dimension in cabinetry.
+  const hdrTxt = c => norm((aoa[h] || [])[c]);
+  if (res.map.length != null && /height/.test(hdrTxt(res.map.length))) res.how.length = 'Height read as Length';
+
+  // No sizes, but a quantity and a description: this is a hardware list (one sample's
+  // "Bill of Quantity"), not a failed cutting list. Read it as hardware. A line with no
+  // quantity is kept and flagged — the same rule Modcraft now uses — never dropped.
+  if (res.map.length == null && res.map.width == null && res.map.qty != null && (res.map.part != null || res.map.item != null)) {
+    res.kind = 'hardware';
+    for (let r = h + 1; r < aoa.length; r++) {
+      const row = aoa[r] || [];
+      const name = String(row[res.map.part != null ? res.map.part : res.map.item] || '').trim();
+      const qRaw = String(row[res.map.qty] == null ? '' : row[res.map.qty]).trim();
+      if (!name) continue;
+      const qm = qRaw.match(/^(\d+(?:\.\d+)?)\s*([a-z]*)/i);
+      res.rows.push({ src: r + 1, name, qty: qm ? +qm[1] : 0, unit: qm && qm[2] ? qm[2].toLowerCase() : '',
+                      issues: qm ? [] : ['no quantity'] });
+    }
+    return res;
+  }
+  for (const need of ['length', 'width', 'qty'])
+    if (res.map[need] == null) res.issues.push('No column found for ' + need + '.');
+  if (res.issues.length) return res;
+
+  let group = '', groupSub = '', curMat = res.ctx.material || null;
+  // Every board line seen so far. A list can state two boards above its table (one sample: 18mm and
+  // 9mm); taking just the last one put every 18mm row on the 9mm board. A row whose own
+  // thickness matches one of them takes that one.
+  const boards = (res.ctx.materials || []).slice();
+  for (let r = h + 1; r < aoa.length; r++) {
+    const row = aoa[r] || [], g = f => res.map[f] == null ? '' : row[res.map[f]];
+    // "2010 mm", "1,200", "2 PCS" — keep the number, drop the unit. A cell with no digits
+    // at all stays 0, so a text heading is never mistaken for a size.
+    const num = v => { const m = String(v == null ? '' : v).replace(/,/g, '').match(/-?\d+(\.\d+)?/); return m ? +m[0] : 0; };
+    const L = num(g('length')), W = num(g('width'));
+    const text = row.filter(v => String(v).trim()).map(String);
+    if (!(L > 0 && W > 0)) {
+      const whole = text.join(' ').trim();
+      // A size statement can sit mid-table ("CUTTING LIST (FINISH SIZE W/ EBT)"), not only above it.
+      if (!res.ctx.sizeMode && /finish(ed)? (cut )?size|sizes? (are|is) final/i.test(whole))
+        res.ctx.sizeMode = { value: 'finished', why: whole };
+      // A row that names a part AND gives a quantity but has no size ("FRONT RAIL - SC | 1 |
+      // SEE DRAWING") is a piece, not a heading. Dropping it would make the job quietly
+      // smaller — keep it and flag it for a person.
+      // A material line comes first: "DOOR & EXPOSE PANEL : 18mm 2F PB MARINO WALNUT" is not a
+      // piece whose quantity is 18 — it switches the board for every row below it.
+      const mhFirst = matHeading(whole);
+      if (mhFirst) { curMat = mhFirst; boards.push(mhFirst); continue; }
+      const q0 = num(g('qty')), p0 = String(g('part') || '').trim();
+      if (q0 > 0 && p0 && (L > 0 || W > 0 || /see drawing|see dwg|refer/i.test(whole))) {
+        res.rows.push({ src: r + 1, group: [group, groupSub].filter(Boolean).join(' › '), part: p0,
+          material: String(g('material') || (curMat && curMat.material) || '').trim(), thk: 0, faces: 0,
+          L, W, qty: q0, eL: 0, eW: 0, code: '', emat: '', grooveLm: 0, remark: whole,
+          issues: ['no size given' + (/see drawing|see dwg/i.test(whole) ? ' — "see drawing"' : '') + ' — needs a person'] });
+        continue;
+      }
+      // A row with words and no size is a heading: room, then module/cabinet under it.
+      if (text.length && whole.length < 90) {
+        const t = whole;
+        if (/^page\s*\d+$/i.test(t)) continue;           // a printed page marker, not a room
+        const mh = matHeading(t);
+        if (mh) { curMat = mh; boards.push(mh); continue; }                // names a board, not a room
+        if (/^[A-Z0-9 &/'()\-.]+$/.test(t) && !/\d{2,}/.test(t)) { group = t; groupSub = ''; }
+        else groupSub = t;
+      }
+      continue;
+    }
+    const qty = num(g('qty')) > 0 ? num(g('qty')) : 0;
+    const thkCol = parseFloat(String(g('thk')).replace(/[^\d.]/g, ''));      // "18 mm" → 18
+    let rowMat = curMat;
+    if (!g('material') && thkCol > 0 && rowMat && rowMat.thk && rowMat.thk !== thkCol) {
+      for (let bi = boards.length - 1; bi >= 0; bi--) if (boards[bi].thk === thkCol) { rowMat = boards[bi]; break; }
+    }
+    const matTxt = String(g('material') || (rowMat && rowMat.material) || res.ctx.finish || res.ctx.color || '').trim();
+    const mc = parseMatCode(matTxt);
+    const thk = thkCol > 0 ? thkCol : (mc.thk || (rowMat && rowMat.thk) || 0);
+
+    let eL = 0, eW = 0, edgeOk = true, edgeRaw = '';
+    if (res.edgeFlags.length) {
+      res.edgeFlags.forEach(f => { const v = +row[f.col] || 0; if (f.dim === 'W') eW += v; else eL += v; });
+    } else if (res.map.edge != null) {
+      edgeRaw = String(g('edge') || '');
+      const p = parseEdgeDims(edgeRaw); eL = p.L; eW = p.W; edgeOk = p.ok;
+      if (!edgeOk) {
+        // "EBT ALONG '337' & '1236'" names each banded edge by its own length: one quoted
+        // number = one edge. Only counted when every number matches this piece's L or W,
+        // so a stray figure can never band an edge the piece does not have.
+        const nums = (edgeRaw.match(/'(\d+(?:\.\d+)?)'/g) || []).map(s => +s.replace(/'/g, ''));
+        if (/all edges|all sides/i.test(edgeRaw)) { eL = 2; eW = 2; edgeOk = true; }
+        else if (nums.length && nums.every(n => n === L || n === W)) {
+          eL = Math.min(2, nums.filter(n => n === L).length);
+          eW = Math.min(2, nums.filter(n => n === W && n !== L).length);
+          edgeOk = true;
+        }
+        const tape = edgeRaw.match(/^(.*?)\s+EBT\b/i);            // "SILKY WHITE GREY EBT ALONG…"
+        if (edgeOk && tape && !g('emat')) row.__tape = tape[1].trim();
+      }
+    }
+    // Grooving: its own column, or written into the comment ("W/ GROOVING 1L").
+    let grooveTxt = String(g('groove') || '').trim();
+    const rem = String(g('remark') || '').trim();
+    if (!grooveTxt && /groov/i.test(rem)) grooveTxt = rem;
+    let grooveLm = 0, grooveOk = true;
+    if (grooveTxt && !/^0(\.0+)?$/.test(grooveTxt)) {
+      // The notation can sit before the word ("1W groove for grab bar") or after it
+      // ("W/ GROOVING 1L"), so read only the count-and-side tokens wherever they are.
+      const tokens = (grooveTxt.toUpperCase().match(/\b\d\s*[LWHS]\b/g) || []).join(' ');
+      const gp = parseEdgeDims(tokens);
+      if (gp.ok && (gp.L || gp.W)) grooveLm = (gp.L * L + gp.W * W) / 1000 * (qty || 1);
+      else grooveOk = false;
+    }
+    const issues = [];
+    if (!qty) issues.push('no quantity');
+    if (!edgeOk) issues.push('edge notation "' + edgeRaw + '" not understood');
+    if (!grooveOk) issues.push('grooving "' + grooveTxt + '" not understood');
+    if (!thk) issues.push('no thickness');
+    if (!matTxt) issues.push('no material');
+    res.rows.push({
+      src: r + 1, group: [group, groupSub].filter(Boolean).join(' › '),
+      part: String(g('part') || g('item') || '').trim(), material: matTxt, thk, faces: mc.faces,
+      L, W, qty, eL, eW, code: toOurCode(Math.min(eL, 2), Math.min(eW, 2), L, W),
+      emat: String(g('emat') || row.__tape || '').trim().replace(/^0(\.0+)?$/, ''),
+      grooveLm, remark: rem, issues
+    });
+  }
+  return res;
+}
+
+function totals(rows) {
+  const t = { rows: rows.length, pieces: 0, area: 0, edgeLm: 0, grooveLm: 0, flagged: 0 };
+  rows.forEach(r => { const q = r.qty || 1; t.pieces += q; t.area += r.L * r.W / 1e6 * q;
+    t.edgeLm += (r.eL * r.L + r.eW * r.W) / 1000 * q; t.grooveLm += r.grooveLm; if (r.issues.length) t.flagged++; });
+  return t;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   PDF → the same array-of-arrays a spreadsheet gives, so readClientSheet() is shared.
+   A text PDF has no cells, only words at positions. Rebuild lines by height on the
+   page, then columns from the header line's own word positions.
+   ───────────────────────────────────────────────────────────────────────────── */
+async function pdfToLines(buf) {
+  const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+  const lines = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const items = tc.items.filter(it => it.str && it.str.trim())
+      .map(it => ({ s: it.str, x: it.transform[4], y: it.transform[5], w: it.width, h: Math.abs(it.transform[3]) || 8 }));
+    // Same line = same height on the page, within a third of the text height.
+    items.sort((a, b) => b.y - a.y || a.x - b.x);
+    const pageLines = [];
+    for (const it of items) {
+      const ln = pageLines.find(l => Math.abs(l.y - it.y) <= Math.max(2, it.h * 0.35));
+      if (ln) ln.items.push(it); else pageLines.push({ y: it.y, items: [it] });
+    }
+    for (const ln of pageLines) {
+      ln.items.sort((a, b) => a.x - b.x);
+      // Words close together are one phrase ("ITEM CODE / DESCRIPTION"); a real gap splits columns.
+      const ph = [];
+      for (const it of ln.items) {
+        const last = ph[ph.length - 1];
+        // A word gap is about a third of the text height; a column gap is well over one.
+        // 0.9 was too generous — One sample's "Quantity" and "Length" columns fused into one word.
+        if (last && it.x - (last.x1) < Math.max(2, it.h * 0.5)) { last.s += (it.x - last.x1 > 0.5 ? ' ' : '') + it.s; last.x1 = it.x + it.w; }
+        else ph.push({ s: it.s, x0: it.x, x1: it.x + it.w });
+      }
+      lines.push({ page: p, phrases: ph.map(q => ({ s: q.s.trim(), x0: q.x0, x1: q.x1 })) });
+    }
+  }
+  return lines;
+}
+function linesToAoa(lines) {
+  // Find the header line the same way readClientSheet finds a header row.
+  let hi = -1, best = 0;
+  lines.forEach((l, i) => {
+    const hits = new Set(l.phrases.map(p => classify(p.s)).filter(Boolean)).size;
+    if (hits > best) { best = hits; hi = i; }
+  });
+  if (hi < 0 || best < 3) return lines.map(l => [l.phrases.map(p => p.s).join(' ')]);
+  // Two-row headers: "DIMENSION" above "WIDTH (W) | LENGTH (L)", "EDGEBANDING" above "W | L".
+  // When the row underneath supplies a size column the top row lacks, the sub-columns
+  // replace whatever group label sits above them.
+  let hdr = lines[hi].phrases, consumed = -1;
+  const sub = lines[hi + 1];
+  if (sub && sub.phrases.length >= 2) {
+    const fieldsOf = ps => new Set(ps.map(p => classify(p.s)).filter(Boolean));
+    const top = fieldsOf(hdr), under = fieldsOf(sub.phrases);
+    if ((!top.has('length') && under.has('length')) || (!top.has('width') && under.has('width'))) {
+      const overlaps = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0;
+      hdr = hdr.filter(p => !sub.phrases.some(s => overlaps(p, s))).concat(sub.phrases)
+               .sort((a, b) => a.x0 - b.x0);
+      consumed = hi + 1;
+    }
+  }
+  const cols = hdr.map(p => ({ x0: p.x0, x1: p.x1, c: (p.x0 + p.x1) / 2 }));
+  const hdrKey = lines[hi].phrases.map(p => norm(p.s)).join('|');
+  // Each column owns the space halfway to its neighbours' centres. Whole-phrase overlap was
+  // fragile: a narrow header label next to a wide value pulled the value into the wrong
+  // column (one sample's "LENGTH" handgrab direction landing in the banding column).
+  const bounds = cols.map((c, i) => i ? (cols[i - 1].c + c.c) / 2 : -Infinity);
+  const colAt = x => { let k = 0; for (let i = 0; i < bounds.length; i++) if (x >= bounds[i]) k = i; return k; };
+  // Split a phrase into words, estimating each word's position from its place in the text.
+  // Needed when the PDF prints two columns as one run — One sample's "10 2010 mm" is quantity
+  // then length, and must land in two columns, not one.
+  const splitWords = ph => {
+    const s = ph.s, len = s.length || 1, span = ph.x1 - ph.x0, out = [];
+    s.replace(/\S+/g, (w, at) => { out.push({ s: w, c: ph.x0 + span * (at + w.length / 2) / len }); return w; });
+    return out;
+  };
+  const aoa = [];
+  lines.forEach((l, i) => {
+    if (i < hi) { aoa.push([l.phrases.map(p => p.s).join(' ')]); return; }
+    if (i > hi && l.phrases.map(p => norm(p.s)).join('|') === hdrKey) return;   // header repeated on the next page
+    if (i === consumed) return;                                                 // merged into the header
+    if (i === hi) { aoa.push(hdr.map(p => p.s)); return; }
+    const row = new Array(cols.length).fill('');
+    const put = (c, s) => { row[c] = row[c] ? row[c] + ' ' + s : s; };
+    l.phrases.forEach(p => {
+      // Split a phrase into words ONLY when it holds two separate numbers — the sign of two
+      // columns printed as one run ("10 2010 mm"). Splitting everything was measured worse:
+      // it scattered "6.5mm OPPOSITE 1L" (one sample) across columns and broke two files that
+      // whole phrases read exactly.
+      const pureNums = (p.s.match(/(^|\s)\d+(\.\d+)?(?=\s|mm\b|$)/g) || []).length;
+      if (pureNums >= 2) splitWords(p).forEach(w => put(colAt(w.c), w.s));
+      else put(colAt((p.x0 + p.x1) / 2), p.s);
+    });
+    aoa.push(row);
+  });
+  return aoa;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MODCRAFT SIDE. Everything above is the prototype's reader, unchanged except that
+   readClientSheet takes an optional `force` ({header, map}) so a person can correct it.
+   ───────────────────────────────────────────────────────────────────────────── */
+  var FIELDS=[['part','Part / description'],['item','Item no.'],['material','Material'],['thk','Thickness'],
+    ['length','Length'],['width','Width'],['qty','Qty'],['edge','Edge banding'],['emat','Edge tape'],
+    ['groove','Grooving'],['remark','Remarks']];
+  var ST={files:[],active:0,store:{templates:{},mats:{}},matEdit:{}};
+  var STORE_KEY='CLIENT_TEMPLATES', LS_KEY='mc_client_templates';
+
+  function sigOf(aoa,h){ return h<0?'':(aoa[h]||[]).map(norm).filter(Boolean).join('|'); }
+  function matKey(s){ return norm(s); }
+
+  // The remembered layouts and material mappings live in the shared settings table, so a
+  // correction one estimator makes is there for the next one. localStorage is only a mirror
+  // for when Supabase is not connected.
+  function loadStore(){
+    try{ var ls=JSON.parse(localStorage.getItem(LS_KEY)||'null'); if(ls&&ls.templates) ST.store=ls; }catch(e){}
+    if(typeof supaReady!=='function'||!supaReady()) return Promise.resolve();
+    return supa.from('settings').select('value').eq('key',STORE_KEY).maybeSingle().then(function(r){
+      var v=r&&r.data&&r.data.value;
+      if(typeof v==='string'){ try{ v=JSON.parse(v); }catch(e){ v=null; } }
+      if(v&&v.templates){ ST.store={templates:v.templates||{},mats:v.mats||{}};
+        try{ localStorage.setItem(LS_KEY,JSON.stringify(ST.store)); }catch(e){} }
+    }).catch(function(){});
+  }
+  function saveStore(){
+    try{ localStorage.setItem(LS_KEY,JSON.stringify(ST.store)); }catch(e){}
+    if(typeof supaUpsertSetting==='function') supaUpsertSetting(STORE_KEY,ST.store);
+  }
+
+  // Apply a remembered layout. Tried against the header row the reader found; if it found
+  // none, every early row is checked for a remembered header, so a client whose sheet the
+  // reader cannot place on its own is still recognised the second time.
+  function rememberedForce(aoa){
+    var t=ST.store.templates||{};
+    var hd=findHeader(aoa);
+    if(hd.row>=0){ var s=sigOf(aoa,hd.row); if(t[s]) return {header:hd.row,map:t[s].map,why:t[s]}; return null; }
+    for(var r=0,seen=0;r<aoa.length&&seen<40;r++){
+      if(!(aoa[r]||[]).some(function(v){return String(v).trim();})) continue; seen++;
+      var s2=sigOf(aoa,r); if(t[s2]) return {header:r,map:t[s2].map,why:t[s2]};
+    }
+    return null;
+  }
+
+  function readSheet(sh){
+    sh.res=readClientSheet(sh.aoa,sh.force||null);
+    sh.sig=sigOf(sh.aoa,sh.res.header);
+    sh.include=!!sh.res.rows.length;
+  }
+  function addSheet(file,sheetName,aoa){
+    var sh={sheetName:sheetName,aoa:aoa,force:null,remembered:null};
+    var rf=rememberedForce(aoa);
+    if(rf){ sh.force={header:rf.header,map:rf.map}; sh.remembered=rf.why; }
+    readSheet(sh);
+    // A side sheet with no table at all (a cover page, a legend) is dropped — but only when
+    // the file already has a readable sheet, so a file is never shown as nothing at all.
+    if(sh.res.header<0&&!sh.res.rows.length&&!sh.remembered&&file.sheets.length) return;
+    file.sheets.push(sh);
+  }
+
+  function readFile(file){
+    return new Promise(function(resolve){
+      var rd=new FileReader();
+      rd.onload=function(){
+        var buf=new Uint8Array(rd.result), f={name:file.name,sheets:[],error:''};
+        if(/\.pdf$/i.test(file.name)){
+          _loadPdfJs(function(err){
+            if(err){ f.error='PDF reader failed to load'; resolve(f); return; }
+            pdfToLines(buf).then(function(lines){
+              if(!lines.length){ f.error='No text in this PDF — it is a scanned image or a drawing, so it cannot be read without AI.'; resolve(f); return; }
+              addSheet(f,'PDF',linesToAoa(lines)); resolve(f);
+            }).catch(function(e){ f.error='Could not read this PDF ('+(e&&e.message||e)+')'; resolve(f); });
+          });
+        } else {
+          try{
+            var wb=XLSX.read(buf,{type:'array'});
+            wb.SheetNames.forEach(function(sn){
+              addSheet(f,sn,XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,blankrows:true,defval:''}));
+            });
+            if(!f.sheets.length) f.error='No cutting-list table found in this file.';
+          }catch(e){ f.error='Could not read this file ('+(e&&e.message||e)+')'; }
+          resolve(f);
+        }
+      };
+      rd.readAsArrayBuffer(file);
+    });
+  }
+
+  function ensureModal(){
+    if(el('ov-clr')) return;
+    var d=document.createElement('div');
+    d.className='overlay'; d.id='ov-clr';
+    d.innerHTML='<div class="modal" style="max-width:min(1500px,96vw)">'
+      +'<div class="modal-head"><h3>Import client\'s cutting list</h3><button class="modal-close" onclick="CLR.close()">×</button></div>'
+      +'<div class="modal-body" id="ov-clr-body" style="max-height:74vh;overflow:auto"></div>'
+      +'<div class="modal-foot" id="ov-clr-foot"></div></div>';
+    document.body.appendChild(d);
+  }
+
+  function allSheets(){ var a=[]; ST.files.forEach(function(f,fi){ f.sheets.forEach(function(s,si){ a.push({f:f,fi:fi,s:s,si:si}); }); }); return a; }
+  function includedRows(kind){
+    var out=[];
+    allSheets().forEach(function(x){
+      if(!x.s.include) return;
+      var isHw=x.s.res.kind==='hardware';
+      if((kind==='hardware')!==isHw) return;
+      x.s.res.rows.forEach(function(r){ out.push({r:r,sh:x.s,file:x.f}); });
+    });
+    return out;
+  }
+  function distinctMats(){
+    var seen={},out=[];
+    includedRows('panels').forEach(function(x){
+      var m=String(x.r.material||'').trim(); if(!m) return;
+      var k=matKey(m); if(seen[k]){ seen[k].n+=(x.r.qty||1); return; }
+      seen[k]={text:m,key:k,n:(x.r.qty||1)}; out.push(seen[k]);
+    });
+    return out;
+  }
+  function mappedSku(k){
+    if(ST.matEdit[k]!=null) return ST.matEdit[k];
+    return (ST.store.mats||{})[k]||'';
+  }
+  function cellTxt(v){ return String(v==null?'':v).replace(/\s+/g,' ').trim(); }
+
+  function render(){
+    ensureModal();
+    var body=el('ov-clr-body'), foot=el('ov-clr-foot');
+    var th='style="text-align:left;font-size:11px;color:var(--text2);font-weight:600;padding:4px 6px;white-space:nowrap;border-bottom:.5px solid var(--border)"';
+    var td='style="font-size:12px;padding:3px 6px;border-bottom:.5px solid var(--border);vertical-align:top"';
+    var sel='style="padding:3px 5px;border:.5px solid var(--border);border-radius:5px;font-size:11px;font-family:inherit;max-width:170px"';
+    var h='';
+    ST.files.filter(function(f){ return f.error; }).forEach(function(f){
+      h+='<div style="padding:8px 10px;margin-bottom:8px;border-radius:6px;background:var(--wash-coral);color:var(--pill-coral);font-size:12px"><b>'+esc(f.name)+'</b> — '+esc(f.error)+'</div>';
+    });
+    var sheets=allSheets();
+    if(!sheets.length){
+      body.innerHTML=h||'<div style="font-size:12px;color:var(--text2)">Nothing readable.</div>';
+      foot.innerHTML='<button class="btn" onclick="CLR.close()">Close</button>'; return;
+    }
+    if(ST.active>=sheets.length) ST.active=0;
+
+    // One tab per file/sheet; each can be left out.
+    h+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">';
+    sheets.forEach(function(x,i){
+      var r=x.s.res, fl=r.rows.filter(function(q){return q.issues&&q.issues.length;}).length;
+      var lbl=x.f.name+(x.s.sheetName!=='PDF'&&x.f.sheets.length>1?' › '+x.s.sheetName:'');
+      var stat=r.kind==='hardware'?r.rows.length+' hardware':(r.rows.length+' rows');
+      h+='<div style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:7px;cursor:pointer;'
+        +'border:.5px solid '+(i===ST.active?'var(--navy)':'var(--border)')+';background:'+(i===ST.active?'var(--wash-navy)':'var(--card)')+'" onclick="CLR.pick('+i+')">'
+        +'<input type="checkbox" '+(x.s.include?'checked':'')+' onclick="event.stopPropagation();CLR.include('+i+',this.checked)" title="Import this sheet">'
+        +'<span style="font-size:12px;font-weight:600">'+esc(lbl)+'</span>'
+        +'<span style="font-size:11px;color:var(--text2)">'+stat+(fl?' · <span style="color:var(--pill-amber)">'+fl+' to check</span>':'')+'</span></div>';
+    });
+    h+='</div>';
+
+    var s=sheets[ST.active].s, res=s.res;
+    // What the reader understood, said plainly so it can be checked.
+    var facts=[];
+    if(s.remembered) facts.push('<span class="pill pill-teal">Recognised layout</span> remembered from '+esc(s.remembered.file||'an earlier list')+(s.remembered.at?' ('+esc(String(s.remembered.at).slice(0,10))+')':''));
+    if(res.kind==='blocks') facts.push('No table — read as one block of lines per piece.');
+    if(res.kind==='hardware') facts.push('No sizes, but quantities and names — read as a <b>hardware</b> list.');
+    if(res.ctx&&res.ctx.sizeMode) facts.push('<b>Sizes are '+esc(res.ctx.sizeMode.value)+' sizes</b> — “'+esc(String(res.ctx.sizeMode.why).slice(0,120))+'”');
+    if(res.ctx&&res.ctx.material) facts.push('Board stated above the table: <b>'+esc(res.ctx.material.material)+'</b>');
+    if(res.edgeFlags&&res.edgeFlags.length) facts.push('Edge banding read from per-edge count columns.');
+    (res.issues||[]).forEach(function(m){ facts.push('<span style="color:var(--pill-coral)">'+esc(m)+'</span>'); });
+    if(facts.length) h+='<div style="font-size:12px;line-height:1.7;margin-bottom:8px">'+facts.join('<br>')+'</div>';
+
+    // Column mapping — the part a person corrects.
+    if(res.kind!=='blocks'){
+      var hdr=res.header>=0?(s.aoa[res.header]||[]):[];
+      var hopts='', seen=0;
+      for(var r=0;r<s.aoa.length&&seen<40;r++){
+        var txt=(s.aoa[r]||[]).map(cellTxt).filter(Boolean).join(' · ');
+        if(!txt) continue; seen++;
+        hopts+='<option value="'+r+'"'+(r===res.header?' selected':'')+'>Row '+(r+1)+': '+esc(txt.slice(0,70))+'</option>';
+      }
+      h+='<div style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:flex-end;padding:10px;border:.5px solid var(--border);border-radius:8px;margin-bottom:10px;background:var(--card2)">'
+        +'<label style="font-size:11px;color:var(--text2)">Header row<br><select '+sel.replace('max-width:170px','max-width:320px')+' onchange="CLR.setHeader(this.value)">'
+        +(res.header<0?'<option value="-1" selected>— not found, pick one —</option>':'')+hopts+'</select></label>';
+      if(res.header>=0){
+        FIELDS.forEach(function(fd){
+          var c=res.map[fd[0]];
+          var o='<option value="-1">— none —</option>';
+          hdr.forEach(function(cell,ci){ var t=cellTxt(cell); if(!t) return;
+            o+='<option value="'+ci+'"'+(c===ci?' selected':'')+'>'+esc(t.slice(0,28))+'</option>'; });
+          var mine=res.how&&res.how[fd[0]]==='set by you';
+          h+='<label style="font-size:11px;color:var(--text2)">'+fd[1]+(mine?' ✎':'')+'<br><select '+sel+' onchange="CLR.setCol(\''+fd[0]+'\',this.value)">'+o+'</select></label>';
+        });
+      }
+      h+='</div>';
+    }
+
+    // The rows as read.
+    var rows=res.rows, flagged=rows.filter(function(q){return q.issues&&q.issues.length;});
+    if(res.kind==='hardware'){
+      h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Row</th><th '+th+'>Item</th><th '+th+'>Qty</th><th '+th+'>Unit</th><th '+th+'>Check</th></tr>';
+      rows.forEach(function(q){ h+='<tr><td '+td+'>'+q.src+'</td><td '+td+'>'+esc(q.name)+'</td><td '+td+'>'+(q.qty||'')+'</td><td '+td+'>'+esc(q.unit)+'</td><td '+td+'><span style="color:var(--pill-amber);font-size:11px">'+esc((q.issues||[]).join('; '))+'</span></td></tr>'; });
+      h+='</table>';
+    } else if(rows.length){
+      var t=totals(rows);
+      h+='<div style="font-size:12px;margin-bottom:6px"><b>'+t.rows+'</b> rows · <b>'+t.pieces+'</b> pieces · '+t.area.toFixed(2)+' m² · edge banding '
+        +t.edgeLm.toFixed(2)+' lm'+(t.grooveLm?' · grooving '+t.grooveLm.toFixed(2)+' lm':'')
+        +(flagged.length?' · <span style="color:var(--pill-amber);font-weight:600">'+flagged.length+' to check</span>':' · <span style="color:var(--pill-teal)">nothing flagged</span>')+'</div>';
+      h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Row</th><th '+th+'>Group</th><th '+th+'>Part</th><th '+th+'>Material</th><th '+th+'>Th</th><th '+th+'>L</th><th '+th+'>W</th><th '+th+'>Qty</th><th '+th+'>Edge</th><th '+th+'>Tape</th><th '+th+'>Groove lm</th><th '+th+'>Check</th></tr>';
+      rows.slice(0,400).forEach(function(q){
+        var bad=q.issues&&q.issues.length;
+        h+='<tr style="'+(bad?'background:var(--wash-amber)':'')+'"><td '+td+'>'+q.src+'</td><td '+td+'>'+esc(q.group)+'</td><td '+td+'>'+esc(q.part)+'</td>'
+          +'<td '+td+'>'+esc(q.material)+'</td><td '+td+'>'+(q.thk||'')+'</td><td '+td+'>'+(q.L||'')+'</td><td '+td+'>'+(q.W||'')+'</td><td '+td+'>'+(q.qty||'')+'</td>'
+          +'<td '+td+'>'+esc(q.code||'')+'</td><td '+td+'>'+esc(q.emat||'')+'</td><td '+td+'>'+(q.grooveLm?q.grooveLm.toFixed(2):'')+'</td>'
+          +'<td '+td+'><span style="font-size:11px;color:var(--pill-amber)">'+esc((q.issues||[]).join('; '))+'</span></td></tr>';
+      });
+      h+='</table>'+(rows.length>400?'<div style="font-size:11px;color:var(--text2)">Showing the first 400 of '+rows.length+' rows — all of them are imported.</div>':'');
+    }
+
+    // Material mapping across every included sheet. Optional: an unmapped material still goes
+    // through Designers Support's own catalogue matcher, exactly as before.
+    var mats=distinctMats();
+    if(mats.length){
+      h+='<div style="margin-top:14px;padding:10px;border:.5px solid var(--border);border-radius:8px">'
+        +'<div style="font-weight:600;font-size:13px;margin-bottom:2px">Their materials → our SKUs</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Optional. A mapping is remembered, so the same client wording maps itself next time. Left blank, the text goes to the catalogue matcher as usual.</div>'
+        +'<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>As written</th><th '+th+'>Pieces</th><th '+th+'>Our SKU</th></tr>';
+      mats.forEach(function(m,mi){
+        var v=mappedSku(m.key), rem=(ST.store.mats||{})[m.key]&&ST.matEdit[m.key]==null;
+        h+='<tr><td '+td+'>'+esc(m.text)+'</td><td '+td+'>'+m.n+'</td><td '+td+'>'
+          +'<input list="clr-mat-dl-'+mi+'" value="'+esc(v)+'" placeholder="search our catalogue…" data-k="'+esc(m.key)+'"'
+          +' oninput="CLR.matSearch(this,'+mi+')" onchange="CLR.matSearch(this,'+mi+')"'
+          +' style="width:100%;max-width:520px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
+          +'<datalist id="clr-mat-dl-'+mi+'"></datalist>'+(rem?' <span class="pill pill-teal" style="font-size:10px">remembered</span>':'')+'</td></tr>';
+      });
+      h+='</table></div>';
+    }
+    body.innerHTML=h;
+
+    var np=includedRows('panels').length, nh=includedRows('hardware').length;
+    foot.innerHTML='<span style="font-size:11px;color:var(--text2);margin-right:auto;flex:1;min-width:0">Rows land in the cutting list below, where they can still be edited before “Load into analysis”.</span>'
+      +'<button class="btn" onclick="CLR.close()">Cancel</button>'
+      +'<button class="btn btn-primary" '+(np||nh?'':'disabled')+' onclick="CLR.commit()">Import '
+      +(np?np+' row'+(np===1?'':'s'):'')+(np&&nh?' + ':'')+(nh?nh+' hardware':'')+'</button>';
+  }
+
+  // A read row → a cutting-list panel. Anything the reader flagged travels with the row as a
+  // ⚠ remark, so it is still visible after import — never silently resolved.
+  function toPanel(r,sizeMode){
+    var p=MCL.blankPanel();
+    var mat=String(r.material||'').trim(), sku=mat?mappedSku(matKey(mat)):'';
+    p.group=r.group||'Cabinet 1';
+    p.part=r.part||'Part';
+    p.mat=sku||mat;
+    var th=+r.thk||0;
+    if(!th&&p.mat) th=MCL.thicknessFor(p.mat)||0;
+    p.th=th;
+    p.L=+r.L||0; p.W=+r.W||0;
+    p.qty=+r.qty||1;
+    p.ebt=r.code||'';
+    p.emat=r.emat||'';
+    // Grooving arrives as a run length already computed from the edge it follows, for the
+    // whole row. Left as plain "Grooving": which of the catalogue's grooving prices applies is
+    // for the estimator to pick, and Designers Support flags the unmatched name until they do.
+    p.svcs=r.grooveLm>0?['Grooving × '+(Math.round(r.grooveLm*1000)/1000)+' lm']:[];
+    var rm=[];
+    if(r.remark) rm.push(r.remark);
+    if(sku&&mat&&sku!==mat) rm.push('client wrote: '+mat);
+    (r.issues||[]).forEach(function(m){ rm.push('⚠ '+m); });
+    if(sizeMode) rm.push(sizeMode+' size');
+    p.remark=rm.join(' · ');
+    return p;
+  }
+
+  function commit(){
+    var panels=[], hw=[], srcNames=[];
+    includedRows('panels').forEach(function(x){
+      var sm=x.sh.res.ctx&&x.sh.res.ctx.sizeMode?x.sh.res.ctx.sizeMode.value:'';
+      panels.push(toPanel(x.r,sm));
+    });
+    includedRows('hardware').forEach(function(x){
+      hw.push({name:x.r.name,qty:+x.r.qty||0,unit:x.r.unit||'pcs',note:(x.r.issues||[]).join('; '),cab:''});
+    });
+    ST.files.forEach(function(f){ if(f.sheets.some(function(s){return s.include;})) srcNames.push(f.name); });
+    if(!MCL.importRows(panels,hw,srcNames.join(', '))) return;
+
+    // Remember what a person corrected: layouts they changed, and every material mapping.
+    var changed=false, who=(gUser&&(gUser.name||gUser.email))||'', now=new Date().toISOString();
+    ST.store.templates=ST.store.templates||{}; ST.store.mats=ST.store.mats||{};
+    allSheets().forEach(function(x){
+      if(!x.s.include||!x.s.sig||!x.s.force||!x.s.force.map) return;
+      ST.store.templates[x.s.sig]={map:x.s.res.map,file:x.f.name,at:now,by:who}; changed=true;
+    });
+    Object.keys(ST.matEdit).forEach(function(k){
+      var v=String(ST.matEdit[k]||'').trim();
+      if(v){ if(ST.store.mats[k]!==v){ ST.store.mats[k]=v; changed=true; } }
+      else if(ST.store.mats[k]){ delete ST.store.mats[k]; changed=true; }
+    });
+    if(changed) saveStore();
+    var flagged=panels.filter(function(p){ return p.remark.indexOf('⚠')>=0; }).length;
+    try{ logActivity('Client cutting list imported ('+srcNames.join(', ')+') — '+panels.length+' rows'
+      +(hw.length?', '+hw.length+' hardware':'')+(flagged?', '+flagged+' flagged':''),''); }catch(e){}
+    closeModal('ov-clr');
+    showToast('✓ Imported '+panels.length+' row'+(panels.length===1?'':'s')+(hw.length?' + '+hw.length+' hardware':'')
+      +(flagged?' — '+flagged+' carry a ⚠ remark to check':''));
+  }
+
+  function open(inputEl){
+    var files=[].slice.call((inputEl&&inputEl.files)||[]);
+    if(inputEl) inputEl.value='';
+    if(!files.length) return;
+    if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return; }
+    ST.files=[]; ST.active=0; ST.matEdit={};
+    ensureModal();
+    el('ov-clr-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Reading '+files.length+' file'+(files.length===1?'':'s')+'…</div>';
+    el('ov-clr-foot').innerHTML='';
+    openModal('ov-clr');
+    return loadStore().then(function(){
+      return files.reduce(function(p,f){ return p.then(function(){ return readFile(f).then(function(r){ ST.files.push(r); }); }); },Promise.resolve());
+    }).then(render);
+  }
+
+  return {
+    open:open, render:render, commit:commit,
+    close:function(){ closeModal('ov-clr'); },
+    pick:function(i){ ST.active=i; render(); },
+    include:function(i,on){ allSheets()[i].s.include=!!on; render(); },
+    setHeader:function(v){
+      var s=allSheets()[ST.active].s;
+      s.force={header:+v,map:null}; s.remembered=null; readSheet(s); render();
+    },
+    setCol:function(field,v){
+      var s=allSheets()[ST.active].s, m={};
+      for(var k in s.res.map) m[k]=s.res.map[k];
+      m[field]=+v;
+      s.force={header:s.res.header,map:m}; readSheet(s); render();
+    },
+    matSearch:function(inp,mi){
+      ST.matEdit[inp.getAttribute('data-k')]=inp.value;
+      _refillDatalist('clr-mat-dl-'+mi,getMatSource(),inp.value);
+    },
+    // Pure reader + conversion, exposed for tests.
+    readClientSheet:readClientSheet, linesToAoa:linesToAoa, totals:totals, toPanel:toPanel,
+    _state:function(){ return ST; }
   };
 })();
 

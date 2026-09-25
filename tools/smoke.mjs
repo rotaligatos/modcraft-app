@@ -4541,6 +4541,50 @@ const PROFILES = {
             return { action: /Quotation locked\./.test(t), user: /Tester \(Staff\)/.test(t), attachment: /proof\.jpg/.test(t) };
           } finally { w.supaReady = sv.ready; }
         }, { action: true, user: true, attachment: true });
+
+      /* 2026-09-25: client cutting-list reader (CLR) ported into the Cutting List tab. Synthetic
+         sheets only — the real sample lists are client data and never enter this public repo. */
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function') {
+        const C = window.CLR;
+        // A client layout: title rows, header not on row 1, Height/Width naming, "mm" in cells,
+        // words for the banding. Height is read as length; edges convert to our long/short code
+        // through the real sizes.
+        const aoa = [
+          ['ACME INTERIORS'], [''], ['FINISHED SIZE'],
+          ['NO.', 'DESCRIPTION', 'QTY', 'HEIGHT', 'WIDTH', 'THK', 'EDGE', 'MATERIAL'],
+          ['1', 'SIDE', '2', '720 mm', '560 mm', '18', 'ALL AROUND', 'WHITE PB 2F'],
+          ['2', 'SHELF', '3', '400', '800', '18', '1L', 'WHITE PB 2F'],
+          ['3', 'BACK', '', '700', '500', '6', '', 'MDF 6MM']
+        ];
+        check('CLR: finds the header, reads sizes/codes/size mode, flags a row with no quantity', () => {
+          const r = C.readClientSheet(aoa);
+          return { header: r.header, rows: r.rows.length, sizeMode: r.ctx.sizeMode && r.ctx.sizeMode.value,
+            codes: r.rows.map(x => x.code), L0: r.rows[0].L, qtyFlag: r.rows[2].issues.includes('no quantity'),
+            pieces: C.totals(r.rows).pieces };
+        }, { header: 3, rows: 3, sizeMode: 'finished', codes: ['4S', '1S', ''], L0: 720, qtyFlag: true, pieces: 6 });
+        // Two boards stated above one table: each row takes the board of its own thickness,
+        // not simply the last one stated (one sample list put every 18mm row on its 9mm board).
+        check('CLR: a row takes the stated board matching its own thickness', () => {
+          const r = C.readClientSheet([
+            ['MATERIALS : 18mm PLYWOOD WARM WHITE 2F'], [': 09mm PLYWOOD WARM WHITE 2F'],
+            ['No.', 'Designation', 'Quantity', 'Length', 'Width', 'Thickness', 'Eb'],
+            ['A', 'RAIL', '2', '2010', '120', '18 mm', '2L'], ['B', 'BASE', '1', '900', '400', '9 mm', '']]);
+          return r.rows.map(x => /18mm/.test(x.material) ? 18 : (/09mm/.test(x.material) ? 9 : 0));
+        }, [18, 9]);
+        check('CLR: a person\'s column correction wins (clearing Qty reports it missing)', () => {
+          const r = C.readClientSheet(aoa, { header: 3, map: { qty: -1 } });
+          return r.issues;
+        }, ['No column found for qty.']);
+        // End to end: a reader flag must reach Designers Support as a review flag, not just a
+        // remark — the missing quantity defaults to one and must not arrive looking settled.
+        if (typeof window._cutListToAnalysis === 'function' && window.MCL)
+          check('CLR: a reader flag stays a review flag through _cutListToAnalysis', () => {
+            const r = C.readClientSheet(aoa);
+            const panels = r.rows.map(x => C.toPanel(x, 'finished'));
+            const pay = window._cutListToAnalysis({ grain: 'L', panels, hpl: [], hardware: [] }, null);
+            return { comps: pay.components.length, review: pay.components.map(c => !!c.needsReview) };
+          }, { comps: 3, review: [false, false, true] });
+      }
       return out;
     }
   },
