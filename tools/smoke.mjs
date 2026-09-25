@@ -161,6 +161,23 @@ const PROFILES = {
          (emat) and Remarks field so an uploaded/typed value has somewhere to land
          instead of being silently dropped on the way into toCl(). Proven end-to-end
          against the real converter, not just that the field exists on the object. */
+      /* P3, 2026-09-25 — "Cabinet component rules" was saved and read by nothing, and its
+         default "deduct 0.5mm edge tape" contradicted the plant (cut size = finished size).
+         Removed; an old saved copy must be dropped on load, not carried forever. */
+      if (typeof window.loadProdSettings === 'function' && typeof window.renderProductionSettings === 'function')
+        check('P3: dead "Cabinet component rules" is gone, and an old saved copy is dropped on load', () => {
+          const w = window, key = 'mc_prod', saved = localStorage.getItem(key);
+          try {
+            const old = JSON.parse(saved || '{}'); old.cabinetRules = { ebtDeduct: true, ebtThickness: 0.5, components: [] };
+            localStorage.setItem(key, JSON.stringify(old));
+            w.loadProdSettings();
+            if (w.prodSettings.cabinetRules !== undefined) throw new Error('saved cabinetRules survived load');
+            if (JSON.parse(localStorage.getItem(key)).cabinetRules !== undefined) throw new Error('not dropped from storage');
+            if (typeof w.prodAddCabinetRule === 'function') throw new Error('prodAddCabinetRule still defined');
+            const src = String(w.renderProductionSettings);
+            if (/Cabinet component rules|prod-ebt-deduct/.test(src)) throw new Error('settings still render the section');
+          } finally { if (saved === null) localStorage.removeItem(key); else localStorage.setItem(key, saved); }
+        });
       /* P2, 2026-09-25 — the MSSI website sends grooving as the edge it runs along ("(L)"/"(W)")
          and a manual run as "(1200mm)", never "× N lm". Each is per panel, times the row qty.
          Before this every website grooving line arrived with no run length and was flagged. */
