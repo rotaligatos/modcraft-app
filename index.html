@@ -226,6 +226,7 @@ input[type=checkbox],input[type=radio]{width:auto;height:auto}
 .modal-head{padding:13px 18px;border-bottom:0.5px solid var(--border);background:var(--card2);display:flex;justify-content:space-between;align-items:center;border-radius:14px 14px 0 0}
 .modal-head h3{font-size:15px;font-weight:500}
 .modal-body{padding:18px;max-height:80vh;overflow-y:auto}
+.modal-foot{padding:12px 18px;border-top:0.5px solid var(--border);display:flex;gap:8px;justify-content:flex-end;align-items:center;flex-wrap:wrap}
 .modal-close{background:transparent;border:none;font-size:20px;cursor:pointer;color:var(--text2);line-height:1;padding:2px}
 table.data{width:100%;border-collapse:collapse;font-size:13px}
 table.data th{text-align:left;padding:8px 12px;font-size:11px;color:var(--text2);font-weight:500;text-transform:uppercase;letter-spacing:.04em;border-bottom:0.5px solid var(--border);background:var(--card2);white-space:nowrap}
@@ -1232,6 +1233,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
       <div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap">
         <button class="btn" id="s1-preview-btn" onclick="openPrint()" data-lock-exempt="1"><i class="ti ti-printer"></i>Preview & Print</button>
         <button class="btn" onclick="generateBomReport()" data-lock-exempt="1" style="background:var(--bg);color:var(--text);border-color:var(--border)"><i class="ti ti-clipboard-list"></i>Generate BOM</button>
+        <button class="btn" onclick="openJobOrders()" data-lock-exempt="1" title="The production Job Order reserved from this quotation's cutting list" style="background:var(--bg);color:var(--text);border-color:var(--border)"><i class="ti ti-file-barcode"></i>Job Order</button>
         <button class="btn" id="s1-savedraft-btn" onclick="saveDraftS1()" style="background:var(--bg);color:var(--text);border-color:var(--border)"><i class="ti ti-device-floppy"></i>Save draft</button>
         <button class="btn btn-primary" id="approve-btn" onclick="doApprove()" style="flex:2;justify-content:center"><i class="ti ti-circle-check"></i>Approve & proceed to Stage 2</button>
         <button class="btn" id="lock-btn" onclick="doLockOnly()" style="background:var(--navy);color:var(--on-accent);border-color:var(--navy)"><i class="ti ti-lock"></i>Lock</button>
@@ -4342,6 +4344,8 @@ var prodSettings = {
     cnc:      {label:'CNC Router',     kerf:6, allowRotate:true,  owned:false}
   },
   machineType: 'panelsaw',
+  // Edge bander for the Job Order's cut sizes: 'trimmer' (normal — cut = finished) or 'no_trimmer'.
+  banderType: 'trimmer',
   ebtWastage: 5,
   ebtLegend: [
     {code:'N/A',   desc:'No edgebanding',                   condition:''},
@@ -22704,6 +22708,11 @@ function _doLockOnlyConfirmed(){
   logActivity('Quotation locked.');
   gSaveQuotation(); updateLockUI(); updateSentStatus();
   saveQuotationToDrive('final','Final Quotation');
+  // Same lock-time saves Lock & Send makes. Lock alone used to skip them, so a quotation locked
+  // and never sent had no saved analysis — and nothing for its Job Order to be built from.
+  _saveBoardLayoutToDrive();
+  _saveDrawingAnalysisToDrive();
+  _reserveJobOrder();
   renderOptionBar();
 }
 function doSendOnly(){
@@ -23001,6 +23010,7 @@ function confirmSend(via) {
     _saveBoardLayoutToDrive();
     _saveDrawingAnalysisToDrive();
     _copyOrderAttachmentsToQuotationFolder();
+    _reserveJobOrder();
     renderOptionBar();
   }
   // Lock & Send is a real send, so it stops the response clock exactly as the Share buttons do.
@@ -23056,6 +23066,7 @@ function skipSend() {
     _saveBoardLayoutToDrive();
     _saveDrawingAnalysisToDrive();
     _copyOrderAttachmentsToQuotationFolder();
+    _reserveJobOrder();
     renderOptionBar();
   }
 }
@@ -23960,6 +23971,7 @@ function confirmClientApprove(){
   _saveBoardLayoutToDrive();
   _saveDrawingAnalysisToDrive();
   _copyOrderAttachmentsToQuotationFolder();
+  _markJobOrderReady();
   gSaveQuotation();
 }
 // "Client Declined" — client doesn't want to proceed. Can be triggered from Stage 1 (Initial
@@ -25548,6 +25560,7 @@ function renderFQCards() {
   h+='<div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap;align-items:center">'
     +'<button class="btn" id="fq-preview-btn" onclick="openPrint()"><i class="ti ti-printer"></i>Preview &amp; Print</button>'
     +'<button class="btn" onclick="generateBomReport()" style="background:var(--bg);color:var(--text);border-color:var(--border)"><i class="ti ti-clipboard-list"></i>Generate BOM</button>'
+    +'<button class="btn" onclick="openJobOrders()" style="background:var(--bg);color:var(--text);border-color:var(--border)"><i class="ti ti-file-barcode"></i>Job Order</button>'
     +'<button class="btn btn-outline" id="fq-savedraft-btn" onclick="fqSaveDraft()" style="background:var(--bg);color:var(--text);border-color:var(--border)"><i class="ti ti-device-floppy"></i>Save Draft</button>'
     +'<button class="btn" id="fq-lock-btn" onclick="doFQLock()" style="flex:2;justify-content:center"><i class="ti ti-lock"></i>Lock &amp; Send</button>'
     +'<button class="btn" id="fq-client-approve-btn" onclick="requestClientApprove()" style="display:none;flex:2;justify-content:center"><i class="ti ti-user-check"></i>Client Approve</button>'
@@ -35457,6 +35470,11 @@ var MCL=(function(){
       +'<label style="font-size:11px;color:var(--text2)" title="Sets the kerf and rotation used to lay out the boards">Machine'
       +'<select onchange="MCL.setMachine(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
       +machineOpts()+'</select></label>'
+      // Edge bander, for the Job Order's cut sizes. Standard banders trim, so cut = finished.
+      +'<label style="font-size:11px;color:var(--text2)" title="Decides the cut sizes on the Job Order">Edge bander'
+      +'<select onchange="MCL.setBander(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
+      +'<option value="trimmer"'+(prodSettings.banderType!=='no_trimmer'?' selected':'')+'>Standard (trims) — cut = finished</option>'
+      +'<option value="no_trimmer"'+(prodSettings.banderType==='no_trimmer'?' selected':'')+'>No trimmer — cut smaller by tape</option></select></label>'
       +'<button class="btn" style="font-size:11px;padding:6px 10px" onclick="MCL.downloadTemplate()" title="A ready-made Excel workbook with real dropdowns on Part/Edge Band/Services — the same one the MSSI website offers"><i class="ti ti-file-spreadsheet"></i>Download Excel template</button>'
       +'<label class="btn" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Upload a filled-in copy of the template"><i class="ti ti-upload"></i>Upload filled Excel'
       +'<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="MCL.uploadExcel(this)"></label>'
@@ -35827,6 +35845,9 @@ var MCL=(function(){
     // One stored value (prodSettings.machineType) with two entry points — this and the machines
     // table in Settings — so the page and the packer can never disagree about which machine ran.
     setMachine:function(v){ prodSettings.machineType=v; saveProdSettings(); rerender(); },
+    // Stamped on the loaded result too, so a Job Order reserved later from it uses the choice made here.
+    setBander:function(v){ prodSettings.banderType=(v==='no_trimmer'?'no_trimmer':'trimmer'); saveProdSettings();
+      if(prodState.result) prodState.result._bander=prodSettings.banderType; },
     addPanel:function(n){ for(var i=0;i<(n||1);i++) S.panels.push(blankPanel()); rerender(); },
     removePanel:function(i){ S.panels.splice(i,1); rerender(); },
     set:set,
@@ -35929,6 +35950,7 @@ var MCL=(function(){
       if(!cl.panels.length){ showToast('Add at least one panel row first.'); return; }
       var payload=_cutListToAnalysis(cl,null);
       prodLoadStructuredList(payload,'Cutting list — entered in Modcraft');
+      if(prodState.result) prodState.result._bander=prodSettings.banderType||'trimmer';
       var flagged=0;
       for(var c=0;c<payload.components.length;c++) if(payload.components[c].needsReview) flagged++;
       try{ logActivity('Cutting list entered in Modcraft loaded into Designers Support — '
@@ -36758,6 +36780,342 @@ function linesToAoa(lines) {
     _state:function(){ return ST; }
   };
 })();
+
+
+// ── Job Order ──────────────────────────────────────────────────────────────────
+// The production document for a quotation's cutting list: every part with its CUT size, edges
+// and tape, grain, grooving, holes, the board layouts with their cut sequence, hardware per
+// cabinet, and one barcode per physical piece.
+//
+// Lifecycle (agreed with Rommel 2026-09-24):
+//   reserved   — at every Initial Quotation lock, per option, frozen (job_orders_freeze trigger).
+//                A later lock after an unlock is a NEW version; the older one is superseded,
+//                never edited, so there is always a record of what was quoted.
+//   ready      — when the client approves the Final Quotation for that option.
+//   released   — by KEYSTONE (Admin App), which hands the job to PMES. Not set from here.
+//
+// Cut size: a normal edge bander trims an amount equal to the tape, so cut = finished (Rommel,
+// 2026-09-25). A bander WITHOUT a trimmer needs cut = finished − tape thickness per banded edge;
+// that choice sits beside the cutting machine on the Cutting List page. Awaiting the plant's
+// confirmation (question 7), so it is never the default.
+var JO_DEFAULT_TAPE_MM=1;
+
+function _joTapeMm(tape){ var m=String(tape||'').match(/(\d+(?:\.\d+)?)\s*mm/i); return m?+m[1]:0; }
+// Edges banded along each dimension: sc = edges on the width sides, lc = edges on the length sides.
+function _joEdgeCounts(ebt){
+  var raw=String(ebt||'').trim(), key=raw.toLowerCase();
+  if(EBT_CODE_MAP[key]!==undefined) return {sc:EBT_CODE_MAP[key][0],lc:EBT_CODE_MAP[key][1],known:true};
+  var up=raw.toUpperCase(), sc=0, lc=0;
+  if(up.indexOf('T')>=0) sc++; if(up.indexOf('B')>=0) sc++; if(up.indexOf('L')>=0) lc++; if(up.indexOf('R')>=0) lc++;
+  return {sc:sc,lc:lc,known:!raw||sc+lc>0};
+}
+// Short area code for the barcode, same shape as PMES's ("KIT"): one word → its first letters,
+// several words → their initials.
+function _joAreaCode(area){
+  // Only the room: an imported group reads "MASTERS BEDROOM › 88T-2S NOTE…", and the note after
+  // the › is detail about the cabinet, not the area.
+  var w=String(area||'GEN').split('›')[0].toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean);
+  if(!w.length) return 'GEN';
+  if(w.length===1) return w[0].slice(0,4);
+  return w.slice(0,4).map(function(x){return x[0];}).join('');
+}
+function _joPad(n,w){ n=String(n); while(n.length<w) n='0'+n; return n; }
+// What a Job Order says about the job — everything except its own number, version, date and
+// barcodes (which embed the number). Two reservations with the same signature are the same job.
+function _joSig(d){
+  if(!d) return '';
+  return _canonicalJson({b:d.bander,o:d.optionLabel,
+    p:(d.parts||[]).map(function(p){ var q={}; for(var k in p) if(k!=='barcodes'&&k!=='scan') q[k]=p[k]; return q; }),
+    bo:(d.boards||[]).map(function(x){ return [x.material,x.color,x.thickness,x.boardsNeeded,x.layout]; }),
+    h:d.hardware,ho:d.holes});
+}
+// Modcraft's own Job Order number. KEYSTONE currently mints a separate random JO-YYMMDD-XXXX when
+// it releases; to scan these labels in PMES, the gate must adopt this number (Admin App change).
+function _joNumber(baseSerial,optionId,version){
+  return 'JO-'+String(baseSerial).replace(/^QT-/,'')+(optionId?'-O'+optionId:'')+'-V'+version;
+}
+
+// Build the Job Order from an analysis result. Pure: no network, no globals written.
+function _joBuild(result,ctx){
+  ctx=ctx||{};
+  var comps=(result&&result.components)||[];
+  var bander=ctx.bander==='no_trimmer'?'no_trimmer':'trimmer';
+  var defTape=+ctx.defaultTapeMm||JO_DEFAULT_TAPE_MM;
+  var bom=(result&&result._bom)||prodComputeBom(comps);
+  var parts=[], pieces=0, flagged=0;
+  for(var i=0;i<comps.length;i++){
+    var c=comps[i], qty=Math.max(1,+c.qty||1), L=+c.length||0, W=+c.width||0;
+    var ec=_joEdgeCounts(c.ebt), flags=[];
+    var tapeMm=_joTapeMm(c.edgeTape), banded=ec.sc+ec.lc>0, cutL=L, cutW=W;
+    if(bander==='no_trimmer'&&banded){
+      if(!tapeMm){ tapeMm=defTape; flags.push('tape thickness not stated — '+defTape+'mm assumed'); }
+      // An edge on a width side shortens the LENGTH; an edge on a length side narrows the WIDTH.
+      cutL=Math.round((L-ec.sc*tapeMm)*10)/10; cutW=Math.round((W-ec.lc*tapeMm)*10)/10;
+    }
+    if(!ec.known) flags.push('edge code "'+c.ebt+'" not understood');
+    if(!(L>0&&W>0)) flags.push('no size — cannot be cut from this list');
+    if(c.needsReview) flags.push(c.reviewNote||'flagged for review');
+    var pn='P'+(i+1), area=c.area||'General', ac=_joAreaCode(area);
+    var comp=String(c.name||pn).toUpperCase().replace(/[-\/]+/g,' ').replace(/\s+/g,' ').trim().slice(0,24);
+    // barcodes: the full PMES-style ID (job-area-component-part-NN/total). scan: the short code the
+    // label's bars encode — ~45 characters of Code128 on a 6cm label is too dense to scan reliably.
+    var codes=[], scan=[], short=String(ctx.joNumber||'').replace(/^JO-/,'');
+    for(var n=1;n<=qty;n++){ codes.push(ctx.joNumber+'-'+ac+'-'+comp+'-'+pn+'-'+_joPad(n,2)+'/'+_joPad(qty,2)); scan.push(short+'-'+pn+'-'+_joPad(n,2)); }
+    if(flags.length) flagged++;
+    pieces+=qty;
+    parts.push({p:pn,ref:i,area:area,areaCode:ac,name:c.name||'',material:c.material||'',color:c.color||'',
+      texture:c.texture||'',thickness:+c.thickness||0,faces:+c.faces||0,L:L,W:W,qty:qty,cutL:cutL,cutW:cutW,
+      ebt:c.ebt||'',sc:ec.sc,lc:ec.lc,tape:c.edgeTape||'',tapeMm:tapeMm,grain:c.grain||'',grooving:c.grooving||'',
+      notes:c.notes||'',flags:flags,barcodes:codes,scan:scan});
+  }
+  var boards=bom.map(function(b){ return {material:b.material,color:b.color,texture:b.texture,thickness:b.thickness,
+    faces:b.faces,boardSize:b.boardSize,boardW:b.boardW,boardH:b.boardH,boardsNeeded:b.boardsNeeded,
+    utilizationPct:b.utilizationPct,oversizedCount:b.oversizedCount||0,oversizedRefs:b.oversizedRefs||[],
+    layout:b.layout||[],shelves:b.shelves||[],kerf:b.kerf,machineLabel:b.machineLabel,allowRotate:b.allowRotate}; });
+  var sv=(result&&result._services)||prodComputeServices(comps,(result&&result.holeSchedule)||[],(result&&result.extraServices)||[]);
+  return {
+    joNumber:ctx.joNumber||'', serial:ctx.serial||'', optionId:ctx.optionId||0, optionLabel:ctx.optionLabel||'',
+    version:ctx.version||0, client:ctx.client||'', project:ctx.project||'', company:ctx.company||'',
+    preparedBy:ctx.preparedBy||'', createdAt:ctx.createdAt||new Date().toISOString(),
+    bander:bander, defaultTapeMm:defTape,
+    machine:boards.length?{label:boards[0].machineLabel,kerf:boards[0].kerf,allowRotate:boards[0].allowRotate}:null,
+    source:ctx.source||'', parts:parts, pieceCount:pieces, flaggedParts:flagged,
+    boards:boards, boardCount:boards.reduce(function(n,b){return n+(b.boardsNeeded||0);},0),
+    hardware:((result&&result.hardware)||[]).map(function(h){ return {name:h.name||h.item||'',qty:h.qty||0,unit:h.unit||'',cabinet:h.cabinet||'',notes:h.notes||''}; }),
+    holes:(result&&result.holeSchedule)||[],
+    services:{cuttingLM:sv.cuttingLM||0,edgebandingLM:sv.edgebandingLM||0,holeCount:sv.holeCount||0,
+      edgebandingByTape:sv.edgebandingByTape||[],extraServicesByName:sv.extraServicesByName||[]}
+  };
+}
+
+// The analysis this quotation carries: the one reflected in this session, else the output saved
+// with it at an earlier lock (drawing_analyses → Storage).
+function _joAnalysisForQuotation(baseSerial){
+  if(qDrawingAnalysis&&qDrawingAnalysis.result) return Promise.resolve({result:qDrawingAnalysis.result,fileName:qDrawingAnalysis.fileName||''});
+  if(!supaReady()) return Promise.resolve(null);
+  return supa.from('drawing_analyses').select('output_file_path,file_name').eq('serial',baseSerial).maybeSingle().then(function(r){
+    var row=r&&r.data; if(!row||!row.output_file_path) return null;
+    return supa.storage.from('quotations').download(row.output_file_path).then(function(d){
+      if(!d||d.error||!d.data) return null;
+      return d.data.text().then(function(t){ var j=JSON.parse(t); return j&&j.result?{result:j.result,fileName:row.file_name||''}:null; });
+    });
+  }).catch(function(){ return null; });
+}
+
+// Reserve a new Job Order version at an Initial Quotation lock. Never blocks the lock: every
+// failure is logged loudly and the quotation proceeds, exactly like the other lock-time saves.
+function _reserveJobOrder(){
+  if(qDraftKey||!qSerial) return Promise.resolve(null);
+  if(typeof supaReady!=='function'||!supaReady()){ console.warn('[jo] not reserved — Supabase not connected'); return Promise.resolve(null); }
+  var base=qBaseSerial||qSerial, optId=qActiveOptionId||0;
+  var optLabel=optId?((qOptionsList.find(function(o){return o.id===optId;})||{}).label||('Option '+optId)):'';
+  var rev=(String(qSerial).match(/\.R(\d+)$/)||[])[1]||'';
+  var company=getCompanyName(), who=(gUser&&(gUser.name||gUser.email))||'';
+  var client=(el('cl-bizname')&&el('cl-bizname').value)||(el('cl-name')&&el('cl-name').value)||'';
+  var project=(el('cl-project')&&el('cl-project').value)||'';
+  return _joAnalysisForQuotation(base).then(function(an){
+    if(!an||!an.result||!(an.result.components||[]).length) return null;   // no cutting list on this quotation
+    // Each reserve supersedes the one before, so only the newest few rows can still be live.
+    return supa.from('job_orders').select('id,version,status,jo_number,data').eq('serial',base).eq('option_id',optId)
+      .order('version',{ascending:false}).limit(3).then(function(r){
+      if(r.error) throw r.error;
+      var rows=r.data||[], v=(rows.length?rows[0].version:0)+1, jo=_joNumber(base,optId,v);
+      var bander=an.result._bander||prodSettings.banderType||'trimmer';
+      var data=_joBuild(an.result,{joNumber:jo,serial:qSerial,optionId:optId,optionLabel:optLabel,version:v,
+        client:client,project:project,company:company,preparedBy:who,bander:bander,source:an.fileName});
+      data.revision=rev;
+      // Lock, then Send, locks twice. A second lock of the SAME content keeps the Job Order it
+      // already has rather than minting an identical new version.
+      var top=rows[0];
+      if(top&&(top.status==='reserved'||top.status==='ready')&&_joSig(top.data)===_joSig(data)) return top.jo_number;
+      var live=rows.filter(function(x){return x.status==='reserved'||x.status==='ready';}).map(function(x){return x.id;});
+      var sup=live.length?supa.from('job_orders').update({status:'superseded',superseded_at:new Date().toISOString(),
+        status_note:'replaced by '+jo}).in('id',live):Promise.resolve({});
+      return sup.then(function(s){
+        if(s&&s.error) throw s.error;
+        return supa.from('job_orders').insert([{jo_number:jo,serial:base,option_id:optId,option_label:optLabel||null,
+          version:v,status:'reserved',company:company,bander:data.bander,piece_count:data.pieceCount,
+          board_count:data.boardCount,data:data,reserved_by:who}]);
+      }).then(function(ins){
+        if(ins&&ins.error) throw ins.error;
+        logActivity('Job Order '+jo+' reserved — '+data.pieceCount+' pieces, '+data.boardCount+' boards'
+          +(data.flaggedParts?', '+data.flaggedParts+' part(s) flagged':'')+(live.length?' (replaces the earlier version)':''),base);
+        return jo;
+      });
+    });
+  }).catch(function(e){
+    console.warn('[jo] reserve failed',e);
+    try{ logActivity('⚠ Job Order could NOT be reserved at this lock — '+((e&&e.message)||e)+'. Open Job Order on the quotation to retry.',base); }catch(x){}
+    return null;
+  });
+}
+
+// The client approved the Final Quotation for this option: its latest reserved Job Order is ready
+// for KEYSTONE to release.
+function _markJobOrderReady(){
+  if(qDraftKey||!qSerial||typeof supaReady!=='function'||!supaReady()) return Promise.resolve();
+  var base=qBaseSerial||qSerial, optId=qActiveOptionId||0;
+  return supa.from('job_orders').select('id,jo_number,status').eq('serial',base).eq('option_id',optId)
+    .order('version',{ascending:false}).limit(1).then(function(r){
+      var row=r&&r.data&&r.data[0];
+      if(!row){ logActivity('⚠ Client approved, but no Job Order is reserved for '+(optId?'Option '+optId:'this quotation')+' — lock it again, or open Job Order to reserve one.',base); return; }
+      if(row.status!=='reserved') return;
+      return supa.from('job_orders').update({status:'ready',ready_at:new Date().toISOString()}).eq('id',row.id).then(function(u){
+        if(u&&u.error) throw u.error;
+        logActivity('Job Order '+row.jo_number+' is ready for release (Final Quotation client-approved).',base);
+      });
+    }).catch(function(e){ console.warn('[jo] ready failed',e); });
+}
+
+// ── Job Order document ───────────────────────────────────────────────────────
+function _joDocHtml(jo,status){
+  var e=escHtml, flagParts=jo.parts.filter(function(p){return p.flags.length;});
+  var cut=jo.bander==='no_trimmer';
+  var h='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">'
+    +'<div><h1>Job Order '+e(jo.joNumber||'(draft)')+'</h1>'
+    +'<div class="sub">'+e(jo.serial)+(jo.optionLabel?' · '+e(jo.optionLabel):'')+(jo.revision?' · revision '+e(jo.revision):'')
+    +' · '+e(jo.client)+(jo.project?' · '+e(jo.project):'')+'<br>'+e(jo.company)+' · prepared by '+e(jo.preparedBy)+' · '+e(String(jo.createdAt).slice(0,16).replace('T',' '))+'</div></div>'
+    +'<div style="border:2px solid '+(status==='DRAFT'?'#b45309':'#1f3a5f')+';color:'+(status==='DRAFT'?'#b45309':'#1f3a5f')+';font-weight:700;padding:4px 10px;border-radius:6px;font-size:13px">'+e(status)+'</div></div>'
+    +'<table class="pl" style="margin:8px 0"><tr><th>Pieces</th><th>Parts</th><th>Boards</th><th>Cutting</th><th>Edge banding</th><th>Holes</th><th>Machine</th><th>Edge bander</th></tr>'
+    +'<tr><td>'+jo.pieceCount+'</td><td>'+jo.parts.length+'</td><td>'+jo.boardCount+'</td><td>'+(jo.services.cuttingLM||0).toFixed(1)+' lm</td>'
+    +'<td>'+(jo.services.edgebandingLM||0).toFixed(1)+' lm</td><td>'+(jo.services.holeCount||0)+'</td>'
+    +'<td>'+e(jo.machine?jo.machine.label+' · kerf '+jo.machine.kerf+'mm':'—')+'</td>'
+    +'<td>'+(cut?'<b>No trimmer</b> — cut = finished − tape per banded edge':'Standard (trims) — cut = finished size')+'</td></tr></table>';
+  if(flagParts.length){
+    // One line per distinct note, naming the parts it applies to — the same note on 36 parts is
+    // one thing to check, not 36.
+    var byMsg={}, order=[];
+    flagParts.forEach(function(p){ p.flags.forEach(function(m){ if(!byMsg[m]){ byMsg[m]=[]; order.push(m); } byMsg[m].push(p.p); }); });
+    h+='<div style="border:1.5px solid #b45309;color:#7c2d12;background:#fff7ed;padding:6px 10px;border-radius:6px;font-size:11px;margin-bottom:8px"><b>'+flagParts.length+' part(s) need checking before cutting:</b><br>'
+      +order.map(function(m){ var ps=byMsg[m]; return e(m)+' — <b>'+(ps.length>12?ps.slice(0,12).join(', ')+' +'+(ps.length-12)+' more':ps.join(', '))+'</b>'; }).join('<br>')+'</div>';
+  }
+  h+='<h2>Parts — cut list</h2><table class="pl"><tr><th>Part</th><th>Area</th><th>Component</th><th>Material</th><th>Th</th>'
+    +'<th>Finished L×W</th><th>'+(cut?'<b>Cut</b> L×W':'Cut L×W')+'</th><th>Qty</th><th>Edge</th><th>Tape</th><th>Grain</th><th>Groove</th><th>Barcodes</th></tr>';
+  jo.parts.forEach(function(p){
+    var diff=p.cutL!==p.L||p.cutW!==p.W;
+    h+='<tr'+(p.flags.length?' style="background:#fff7ed"':'')+'><td><b>'+p.p+'</b></td><td>'+e(p.area)+'</td><td>'+e(p.name)+'</td>'
+      +'<td>'+e([p.material,p.color].filter(Boolean).join(' '))+'</td><td>'+(p.thickness||'')+'</td><td>'+p.L+' × '+p.W+'</td>'
+      +'<td'+(diff?' style="font-weight:700"':'')+'>'+p.cutL+' × '+p.cutW+'</td><td>'+p.qty+'</td><td>'+e(p.ebt||'—')+'</td>'
+      +'<td>'+e(p.tape)+(p.tapeMm&&cut?' ('+p.tapeMm+'mm)':'')+'</td><td>'+e(p.grain)+'</td><td>'+e(p.grooving)+'</td>'
+      +'<td style="font-family:monospace;font-size:9px">'+e(p.barcodes[0])+(p.qty>1?' … /'+_joPad(p.qty,2):'')+'</td></tr>';
+  });
+  h+='</table>';
+  if(jo.hardware.length){
+    h+='<h2>Hardware</h2><table class="pl"><tr><th>Item</th><th>Cabinet</th><th>Qty</th><th>Unit</th><th>Notes</th></tr>';
+    jo.hardware.forEach(function(x){ h+='<tr><td>'+e(x.name)+'</td><td>'+e(x.cabinet||'—')+'</td><td>'+x.qty+'</td><td>'+e(x.unit)+'</td><td>'+e(x.notes)+'</td></tr>'; });
+    h+='</table>';
+  }
+  if(jo.holes.length){
+    h+='<h2>Hole schedule</h2><table class="pl"><tr><th>Component</th><th>Type</th><th>Qty</th><th>Ø</th><th>Notes</th></tr>';
+    jo.holes.forEach(function(x){ h+='<tr><td>'+e(x.component)+'</td><td>'+e(x.holeType)+'</td><td>'+x.qty+'</td><td>'+(x.diameter||'')+'mm</td><td>'+e(x.notes||'')+'</td></tr>'; });
+    h+='</table>';
+  }
+  var tapes=jo.services.edgebandingByTape||[], ex=jo.services.extraServicesByName||[];
+  if(tapes.length||ex.length){
+    h+='<h2>Edge banding & services</h2><table class="pl"><tr><th>Item</th><th>Quantity</th></tr>';
+    tapes.forEach(function(t){ h+='<tr><td>Edge tape — '+e(t.tape)+'</td><td>'+(t.lm||0).toFixed(1)+' lm</td></tr>'; });
+    ex.forEach(function(s){ h+='<tr><td>'+e(s.service)+'</td><td>'+s.qty+' '+e(s.unit)+'</td></tr>'; });
+    h+='</table>';
+  }
+  jo.boards.forEach(function(bm){
+    if(!(bm.layout&&bm.layout.length)) return;
+    var t=[bm.material,bm.color,(bm.thickness?bm.thickness+'mm':'')].filter(Boolean).join(' · ');
+    h+='<div class="pb"><h2>Cutting — '+e(t)+' — '+bm.boardsNeeded+' board'+(bm.boardsNeeded===1?'':'s')+' ('+e(bm.boardSize)+')</h2>'
+      +(cut?'<div class="sub">Layouts are drawn at finished size; cut pieces are up to 2 × tape smaller, so they still fit.</div>':'')
+      +(bm.oversizedCount?'<div style="color:#b91c1c;font-size:11px;font-weight:700">⚠ '+bm.oversizedCount+' piece(s) too big for this board and NOT on any layout: '
+        +bm.oversizedRefs.map(function(x){return 'P'+(x+1);}).join(', ')+'</div>':'')
+      +_prodCutSheetHtml(bm,true)+'</div>';
+  });
+  return h;
+}
+function _joPrint(jo,status){ _prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status)); }
+// One sticker per piece with a Code128 barcode (the PMES scan format), in cutting order.
+function _joPrintLabels(jo){
+  var byRef={}; jo.parts.forEach(function(p){ byRef[p.ref]=p; });
+  var used={}, cells='', n=0;
+  function lab(p,where){
+    used[p.ref]=(used[p.ref]||0)+1; var k=used[p.ref]-1, code=p.barcodes[k]||p.barcodes[0];
+    var sc=(p.scan&&(p.scan[k]||p.scan[0]))||code; n++;
+    return '<div class="lb"><div class="pn">'+p.p+'</div><div class="nm">'+escHtml(p.name)+'</div>'
+      +'<div class="sz">'+p.cutL+' × '+p.cutW+' × '+(p.thickness||0)+'</div>'
+      +'<div>'+escHtml([p.material,p.color].filter(Boolean).join(' '))+' · edge '+escHtml(p.ebt||'none')+'</div>'
+      +'<svg class="bc" data-code="'+escHtml(sc)+'"></svg><div class="wh"><b>'+escHtml(sc)+'</b> · '+where+'<br>'+escHtml(code)+'</div></div>';
+  }
+  jo.boards.forEach(function(bm){
+    (bm.layout||[]).forEach(function(lay,bi){ lay.forEach(function(pc){ var p=byRef[pc.ref]; if(p) cells+=lab(p,'board '+(bi+1)+'/'+bm.layout.length); }); });
+    (bm.oversizedRefs||[]).forEach(function(ref){ if(byRef[ref]) cells+=lab(byRef[ref],'NOT PLACED — too big'); });
+  });
+  _prodPrintWindow('Labels '+jo.joNumber,'<h1 class="noprint">'+escHtml(jo.joNumber)+' — '+n+' labels</h1><div class="grid">'+cells+'</div>'
+    +'<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>'
+    +'<script>window.addEventListener("load",function(){document.querySelectorAll("svg.bc").forEach(function(s){try{JsBarcode(s,s.getAttribute("data-code"),{format:"CODE128",height:30,width:1.4,displayValue:false,margin:0});}catch(e){}});});<\/script>',
+    '.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}'
+    +'.lb{border:1px dashed #999;padding:5px 7px;font-size:9px;line-height:1.3;height:38mm;overflow:hidden;page-break-inside:avoid;break-inside:avoid}'
+    +'.pn{font-size:16px;font-weight:700;float:right}.nm{font-weight:700;font-size:10px}.sz{font-size:11px;font-weight:700}'
+    +'.bc{display:block;max-width:100%;height:30px;margin-top:2px}.wh{color:#444;font-family:monospace;font-size:8px}');
+}
+
+// Designers Support: preview the Job Order this analysis WOULD produce. Nothing is saved — a Job
+// Order is reserved only when the quotation is locked.
+function prodPrintJobOrderDraft(){
+  var r=prodState.result; if(!r||r.error) return;
+  var jo=_joBuild(r,{joNumber:'DRAFT',serial:(qSerial||qDraftKey||''),bander:r._bander||prodSettings.banderType,
+    preparedBy:(gUser&&(gUser.name||gUser.email))||'',source:prodState.fileName});
+  _joPrint(jo,'DRAFT');
+}
+
+// Quotation page: every Job Order version for this quotation, newest first.
+function openJobOrders(){
+  var base=qBaseSerial||qSerial;
+  if(qDraftKey||!base){ showToast('Save the quotation first — a Job Order belongs to a numbered quotation.'); return; }
+  if(!el('ov-jo')){
+    var d=document.createElement('div'); d.className='overlay'; d.id='ov-jo';
+    d.innerHTML='<div class="modal wide"><div class="modal-head"><h3>Job Orders</h3><button class="modal-close" onclick="closeModal(\'ov-jo\')">×</button></div>'
+      +'<div class="modal-body" id="ov-jo-body" style="max-height:70vh;overflow:auto"></div>'
+      +'<div class="modal-foot" id="ov-jo-foot"></div></div>';
+    document.body.appendChild(d);
+  }
+  el('ov-jo-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Loading…</div>';
+  el('ov-jo-foot').innerHTML='<button class="btn" onclick="closeModal(\'ov-jo\')">Close</button>';
+  openModal('ov-jo');
+  if(!supaReady()){ el('ov-jo-body').innerHTML='<div style="font-size:12px;color:var(--pill-coral)">Not connected to the database — connect in Settings → Company & DB.</div>'; return; }
+  supa.from('job_orders').select('id,jo_number,option_id,option_label,version,status,piece_count,board_count,bander,reserved_at,reserved_by,ready_at,released_at,status_note')
+    .eq('serial',base).order('option_id').order('version',{ascending:false}).then(function(r){
+      var rows=(r&&r.data)||[], h='';
+      var col={reserved:'navy',ready:'teal',released:'teal',superseded:'gray',cancelled:'coral'};
+      if(!rows.length) h+='<div style="font-size:12px;color:var(--text2);margin-bottom:10px">No Job Order yet. One is reserved automatically each time the Initial Quotation is locked, from the cutting list reflected into it.</div>';
+      else{
+        h+='<table class="data"><thead><tr><th>Job Order</th><th>Option</th><th>Status</th><th style="text-align:right">Pieces</th><th style="text-align:right">Boards</th><th>Reserved</th><th></th></tr></thead><tbody>';
+        rows.forEach(function(x){
+          h+='<tr style="'+(x.status==='superseded'?'opacity:.55':'')+'"><td style="font-weight:600">'+escHtml(x.jo_number)+'</td><td>'+escHtml(x.option_label||'—')+'</td>'
+            +'<td><span class="pill pill-'+(col[x.status]||'amber')+'">'+escHtml(x.status)+'</span>'+(x.status_note?'<div style="font-size:10px;color:var(--text2)">'+escHtml(x.status_note)+'</div>':'')+'</td>'
+            +'<td style="text-align:right">'+(x.piece_count||0)+'</td><td style="text-align:right">'+(x.board_count||0)+'</td>'
+            +'<td style="font-size:11px">'+escHtml(fmtDT(x.reserved_at))+'<br><span style="color:var(--text2)">'+escHtml(x.reserved_by||'')+'</span></td>'
+            +'<td style="white-space:nowrap"><button class="btn" style="font-size:11px;padding:3px 8px" onclick="printJobOrder(\''+x.id+'\',false)"><i class="ti ti-printer"></i>Job Order</button> '
+            +'<button class="btn" style="font-size:11px;padding:3px 8px" onclick="printJobOrder(\''+x.id+'\',true)"><i class="ti ti-barcode"></i>Labels</button></td></tr>';
+        });
+        h+='</tbody></table>';
+      }
+      el('ov-jo-body').innerHTML=h;
+      // A lock whose reservation failed (or a quotation locked before Job Orders existed) can be
+      // reserved by hand — only while the Initial Quotation is locked, the same moment it would
+      // have happened automatically.
+      if(qLocked) el('ov-jo-foot').innerHTML='<button class="btn" onclick="_joReserveNow()"><i class="ti ti-plus"></i>Reserve a new version now</button>'
+        +'<button class="btn" onclick="closeModal(\'ov-jo\')">Close</button>';
+    });
+}
+function _joReserveNow(){
+  if(!qLocked){ showToast('Lock the Initial Quotation first.'); return; }
+  _reserveJobOrder().then(function(jo){
+    showToast(jo?'✓ Job Order '+jo+' reserved':'No Job Order reserved — this quotation has no cutting list, or the save failed (see the activity log).');
+    openJobOrders();
+  });
+}
+function printJobOrder(id,labels){
+  supa.from('job_orders').select('data,status').eq('id',id).maybeSingle().then(function(r){
+    var row=r&&r.data; if(!row){ showToast('Could not load that Job Order.'); return; }
+    if(labels) _joPrintLabels(row.data); else _joPrint(row.data,String(row.status).toUpperCase());
+  });
+}
 
 // ── Saved Analyses tab ────────────────────────────────────────────────────
 // Global list, filterable by serial/client/file name — every Designers Support analysis that was
@@ -40591,6 +40949,7 @@ function prodBuildResultHtml(result){
     +'<button class="btn btn-success" onclick="prodReflectToQuotation()"><i class="ti ti-transfer"></i>Reflect to quotation</button>'
     +(bom.some(function(b){return b.layout&&b.layout.length;})
       ?'<button class="btn" onclick="prodPrintCutSheets()" title="Parts list plus one cut sheet per board (identical boards printed once)"><i class="ti ti-printer"></i>Print cut sheets</button>'
+       +'<button class="btn" onclick="prodPrintJobOrderDraft()" title="Preview the Job Order this list would produce. Nothing is saved — it is reserved when the quotation is locked."><i class="ti ti-file-barcode"></i>Job Order (draft)</button>'
        +'<button class="btn" onclick="prodPrintLabels()" title="One label per piece, in cutting order, with its part number"><i class="ti ti-tag"></i>Print part labels</button>':'')
     +'<button class="btn" onclick="prodClearFile()"><i class="ti ti-refresh"></i>New analysis</button>'
     +'</div>';

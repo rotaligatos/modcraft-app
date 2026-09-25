@@ -4636,6 +4636,39 @@ const PROFILES = {
                      labels: (cap[1].match(/class="lb"/g) || []).length, noTokens: !/var\(--/.test(cap.join('')) };
           } finally { w.prodSettings.boardSizes = saved.bs; w.prodState.result = saved.r; w.open = saved.open; }
         }, { sheets: 1, groupedNote: true, labels: 3, noTokens: true });
+
+      /* 2026-09-25: Job Order. Reserved at every Initial lock (frozen, versioned), ready at Final
+         client approval. Cut size = finished on a standard bander; minus tape per banded edge on a
+         bander without a trimmer. */
+      if (typeof window._joBuild === 'function') {
+        const comps = [
+          { area: 'KITCHEN', name: 'Side', material: 'PB', color: 'W', thickness: 18, length: 720, width: 560, qty: 2, ebt: '1s/1l', edgeTape: 'White 1mm PVC', grain: 'length' },
+          { area: 'KITCHEN', name: 'Shelf', material: 'PB', color: 'W', thickness: 18, length: 800, width: 400, qty: 1, ebt: '4s', edgeTape: 'White PVC', grain: 'none' },
+          { area: 'KITCHEN', name: 'Back', material: 'MDF', color: 'W', thickness: 6, length: 700, width: 500, qty: 1, ebt: '', edgeTape: '', grain: 'none' }];
+        const res = { components: comps, hardware: [], holeSchedule: [] };
+        check('Job Order: cut = finished on a standard bander; minus tape per banded edge without a trimmer', () => {
+          const t = window._joBuild(res, { joNumber: 'JO-T-V1', bander: 'trimmer' });
+          const n = window._joBuild(res, { joNumber: 'JO-T-V1', bander: 'no_trimmer', defaultTapeMm: 2 });
+          return { trimmerSame: t.parts.every(p => p.cutL === p.L && p.cutW === p.W),
+                   side: [n.parts[0].cutL, n.parts[0].cutW],   // 1mm tape, one edge each way
+                   shelf: [n.parts[1].cutL, n.parts[1].cutW],  // unstated tape -> 2mm default, 2 each way, flagged
+                   shelfFlagged: n.parts[1].flags.some(f => /tape thickness not stated/.test(f)),
+                   back: [n.parts[2].cutL, n.parts[2].cutW],   // unbanded: unchanged
+                   pieces: t.pieceCount, uniqueCodes: new Set([].concat(...t.parts.map(p => p.barcodes))).size,
+                   scan: t.parts[0].scan[1] };
+        }, { trimmerSame: true, side: [719, 559], shelf: [796, 396], shelfFlagged: true, back: [700, 500],
+             pieces: 4, uniqueCodes: 4, scan: 'T-V1-P1-02' });
+        check('Job Order: same content = same signature across versions; a change breaks it', () => {
+          const a = window._joBuild(res, { joNumber: 'JO-T-V1' }), b = window._joBuild(res, { joNumber: 'JO-T-V2' });
+          const c = window._joBuild({ components: comps.map((x, i) => i ? x : Object.assign({}, x, { qty: 3 })), hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1' });
+          return [window._joSig(a) === window._joSig(b), window._joSig(a) === window._joSig(c)];
+        }, [true, false]);
+        check('Job Order: reserved on every Initial lock path, marked ready on Final client approval', () => {
+          const has = (f, s) => typeof window[f] === 'function' && String(window[f]).includes(s);
+          return [has('_doLockOnlyConfirmed', '_reserveJobOrder()'), has('confirmSend', '_reserveJobOrder()'),
+                  has('skipSend', '_reserveJobOrder()'), has('confirmClientApprove', '_markJobOrderReady()')];
+        }, [true, true, true, true]);
+      }
       return out;
     }
   },
