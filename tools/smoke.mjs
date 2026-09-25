@@ -1294,6 +1294,13 @@ const PROFILES = {
          SERVICE quantity, unaffected by colour -- can be affected). A piece with no tape named
          lands in the 'Unspecified' bucket rather than being silently dropped, matching this whole
          pipeline's "loud, never short" rule. */
+      /* 2026-09-25 — Rommel: the plant counts cutting as all four sides of every piece (full
+         perimeter). It was L+W once, half the real figure, so cutting was quoted at half. */
+      if (typeof window.prodComputeServices === 'function')
+        check('prodComputeServices: cutting length is the full perimeter of every piece', () => {
+          const s = window.prodComputeServices([{ length: 600, width: 400, qty: 3, ebt: '' }], [], []);
+          if (s.cuttingLM !== 6) throw new Error('600x400 x3 should cut 2*(0.6+0.4)*3 = 6 lm, got ' + s.cuttingLM);
+        });
       if (typeof window.prodComputeServices === 'function')
         check('prodComputeServices: edgebandingLM groups by tape colour, and the groups sum to the same total', () => {
           const w = window;
