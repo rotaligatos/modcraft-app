@@ -4585,6 +4585,57 @@ const PROFILES = {
             return { comps: pay.components.length, review: pay.components.map(c => !!c.needsReview) };
           }, { comps: 3, review: [false, false, true] });
       }
+
+      /* 2026-09-25: layout page — part numbers, identical-board grouping, reflect summary last,
+         printable cut sheets and labels. */
+      if (typeof window._prodBoardGroups === 'function' && typeof window.prodComputeBom === 'function')
+        check('layout: every placed piece carries its part, identical boards group, oversize names its part', () => {
+          const w = window, saved = w.prodSettings.boardSizes;
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 1220, h: 2440 }] }];
+            // 3 identical full-length strips per board worth of pieces -> boards 1..n identical
+            const comps = [
+              { area: 'A', name: 'Tall', material: 'TestMat', color: 'W', texture: '', thickness: 18, length: 2400, width: 1200, qty: 3, faces: 2, grain: 'none' },
+              { area: 'A', name: 'Huge', material: 'TestMat', color: 'W', texture: '', thickness: 18, length: 3000, width: 500, qty: 1, faces: 2, grain: 'none' }];
+            const bm = w.prodComputeBom(comps)[0];
+            const refs = [].concat(...bm.layout).map(p => p.ref);
+            const g = w._prodBoardGroups(bm);
+            return { boards: bm.boardsNeeded, everyPieceHasPart: refs.every(r => r === 0),
+                     groups: g.length, groupedBoards: g[0].boards.length, oversizedRefs: bm.oversizedRefs };
+          } finally { w.prodSettings.boardSizes = saved; }
+        }, { boards: 3, everyPieceHasPart: true, groups: 1, groupedBoards: 3, oversizedRefs: [1] });
+      if (typeof window.prodBuildResultHtml === 'function' && typeof window._prodBoardSvg === 'function')
+        check('layout: pieces are labelled with their part number; reflect summary comes after the layout', () => {
+          const w = window, saved = { bs: w.prodSettings.boardSizes, r: w.prodState.result, s: w.prodState.summary };
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 1220, h: 2440 }] }];
+            const comps = [{ area: 'A', name: 'Side', material: 'TestMat', color: 'W', texture: '', thickness: 18,
+                             length: 600, width: 400, qty: 2, faces: 2, ebt: '', edgeTape: '', grain: 'none' }];
+            const res = { components: comps, hardware: [], holeSchedule: [], summary: '' };
+            res._bom = w.prodComputeBom(comps); res._services = w.prodComputeServices(comps, [], []);
+            w.prodState.result = res;
+            const html = w.prodBuildResultHtml(res);
+            const iLayout = html.indexOf('Cutting layout'), iReflect = html.indexOf('<div id="prod-summary-wrap"');
+            return { partOnPiece: />P1( · |<\/text><text[^>]*>)600×400</.test(html), reflectAfterLayout: iLayout >= 0 && iReflect > iLayout,
+                     hasPrintButtons: html.includes('prodPrintCutSheets()') && html.includes('prodPrintLabels()') };
+          } finally { w.prodSettings.boardSizes = saved.bs; w.prodState.result = saved.r; w.prodState.summary = saved.s; }
+        }, { partOnPiece: true, reflectAfterLayout: true, hasPrintButtons: true });
+      if (typeof window.prodPrintCutSheets === 'function' && typeof window.prodPrintLabels === 'function')
+        check('print: one label per placed piece, one sheet per board group, no theme tokens on paper', () => {
+          const w = window, saved = { bs: w.prodSettings.boardSizes, r: w.prodState.result, open: w.open };
+          const cap = [];
+          try {
+            w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 1220, h: 2440 }] }];
+            const comps = [{ area: 'A', name: 'Tall', material: 'TestMat', color: 'W', texture: '', thickness: 18,
+                             length: 2400, width: 1200, qty: 3, faces: 2, grain: 'none' }];
+            const res = { components: comps, hardware: [], holeSchedule: [] };
+            res._bom = w.prodComputeBom(comps); w.prodState.result = res;
+            w.open = () => ({ document: { write: h => cap.push(h), close() {} }, focus() {}, print() {} });
+            w.prodPrintCutSheets(); w.prodPrintLabels();
+            return { sheets: (cap[0].match(/Cutting sequence/g) || []).length, groupedNote: /×3 identical/.test(cap[0]),
+                     labels: (cap[1].match(/class="lb"/g) || []).length, noTokens: !/var\(--/.test(cap.join('')) };
+          } finally { w.prodSettings.boardSizes = saved.bs; w.prodState.result = saved.r; w.open = saved.open; }
+        }, { sheets: 1, groupedNote: true, labels: 3, noTokens: true });
       return out;
     }
   },
