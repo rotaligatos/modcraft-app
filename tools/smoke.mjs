@@ -161,6 +161,22 @@ const PROFILES = {
          (emat) and Remarks field so an uploaded/typed value has somewhere to land
          instead of being silently dropped on the way into toCl(). Proven end-to-end
          against the real converter, not just that the field exists on the object. */
+      /* P2, 2026-09-25 — the MSSI website sends grooving as the edge it runs along ("(L)"/"(W)")
+         and a manual run as "(1200mm)", never "× N lm". Each is per panel, times the row qty.
+         Before this every website grooving line arrived with no run length and was flagged. */
+      if (typeof window._cutListToAnalysis === 'function')
+        check('_cutListToAnalysis: website grooving "(L)"/"(W)"/"(Nmm)" becomes a per-panel run × qty', () => {
+          const cl = { panels: [
+            { group: 'K', part: 'Side', mat: 'Real White PB 4x8 2F (18mm, Matte)', th: 18, L: 720, W: 560, qty: 2, ebt: '',
+              svcs: ['Grooving 3mm (melamine) (L)', 'Router Grooving (8-12mm) (W)', 'Manual Edgebanding EVA (1200mm)'] }
+          ], hpl: [], hardware: [] };
+          const p = window._cutListToAnalysis(cl, null);
+          const got = {}; (p.extraServices || []).forEach(e => { got[e.service] = e.qty; });
+          if (got['Grooving 3mm (melamine)'] !== 1.44) throw new Error('(L) should be 0.72×2 = 1.44, got ' + JSON.stringify(got));
+          if (got['Router Grooving (8-12mm)'] !== 1.12) throw new Error('(W) should be 0.56×2 = 1.12, got ' + JSON.stringify(got));
+          if (got['Manual Edgebanding EVA'] !== 2.4) throw new Error('(1200mm) should be 1.2×2 = 2.4, got ' + JSON.stringify(got));
+          if (/run length/.test((p.components[0] || {}).reviewNote || '')) throw new Error('still flagged for a missing run length');
+        });
       if (typeof window.MCL === 'object' && typeof window._cutListToAnalysis === 'function')
         check('MCL panel emat/remark survive toCl() -> _cutListToAnalysis() as notes', () => {
           const w = window, savedConfirm = w.confirm;
