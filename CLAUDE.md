@@ -12210,6 +12210,14 @@ partially_received/received. The MRF's data already came from the Modcraft quota
 `adm_generate_pr_from_quotation` — previewed live on QT-W00000183: 3 outsourced hardware lines,
 ₱11,580) but has never been used: 0 PRs, 0 POs, **0 suppliers** — supplier directory must be filled
 before POs mean anything.
+**JO gate + materials (2026-09-26, same session):** new PMES role `materials` (the person who completes the
+transfer) is the only non-supervisor who can confirm MRF receipt; staff no longer can. The JO review card
+shows materials complete/partial from the MRF (`pmes_job_material_state`). Incomplete → staff may
+recommend proceeding with a reason → supervisor (`supervisor_ok`) → manager, two different people; a
+manager cannot approve first. Complete → one supervisor. ⚠ PMES patch scripts: my idempotency check
+("skip if the new text is present and the anchor is gone") does NOT stop re-insertion when the anchor
+survives the insert — that put the Piece 1 methods in PMES app.js 4× (fixed). Check `uniq -d` on
+function/method names after any scripted PMES edit.
 **Next:** operators' emails, suppliers into KEYSTONE, and a first real end-to-end run: quotation → JO → KEYSTONE release → PMES check/approve → output → schedule.
 Was: Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
 then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
