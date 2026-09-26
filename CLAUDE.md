@@ -11836,3 +11836,62 @@ ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cab
 hold) · `QT-W00000136.R1` print report · phone order_pause · Stage 2 lock parity while paused ·
 Michael Delos Reyes signature · unlock-reconciliation ~60s window · `qApproved`/`qClientApproved`
 coupling · MSSI commission OFF · `samplesofcuttinglist/` is client data — never commit.
+
+## What was changed on 2026-09-26 (session 2 — own user lists for PMES and KEYSTONE, and the Command Center)
+
+Rommel: PMES is for production staff, KEYSTONE for admin staff — neither are Modcraft's users.
+Decisions: PMES roles **operator / supervisor / manager / admin**; KEYSTONE gets **its own list
+too**; a **central Command Center** (standalone page) manages both, open to **Modcraft
+Admin/Director**; Modcraft's own users stay in the User Roles sheet (shown read-only). Rommel is
+Admin in all of it.
+
+### Database (migrations `own_user_lists_pmes_keystone`, `keystone_uses_own_user_list`,
+`command_center_access_and_last_admin_guard`)
+- **`pmes_users`** (email, name, role, `stations` text[], active, notes) and **`keystone_users`**
+  (email, name, role [Modcraft role words], company, access_companies, receive_all, active).
+  Emails stored trimmed + lower-case (check constraint).
+- **`user_access_log`** — append-only, written by trigger on every insert/update/delete of either
+  list (before/after JSON, who). Readable by Modcraft Admin/Director.
+- **Last-admin guard** — deferred constraint trigger: neither list can be left with no active admin.
+- **PMES**: `pmes_me()` now reads `pmes_users`. Helpers `pmes_role()`, `pmes_rank()`
+  (operator 10 · supervisor 20 · manager 30 · admin 40), `pmes_stations()`. Every `pmes_*` table:
+  read = any PMES user; write by tier — operator: stage events, components, job stages, time
+  observations, runs, excess, withdrawals, tally cards · supervisor: jobs, job materials, receipts,
+  packing · manager: setup lists, machines, operations, standards. Deletes need supervisor+.
+  **An operator with stations set may only insert stage events for those stations** (RLS).
+- **KEYSTONE**: helpers `ks_role()`, `ks_is_admin_tier()`, `ks_sees_all_companies()`,
+  `ks_visible_companies()`, `ks_company_visible()`, `keystone_me()`. **Every `adm_*` function and
+  policy was rewritten from `app_*` to `ks_*`** (automated text swap; rollback copy of the old
+  definitions in `Desktop/Admin App/ROLLBACK_function_defs_2026-09-26.json`). `adm_role_rank()`
+  reads `keystone_users`. `adm_v_release_queue` / `adm_v_quotation_payment_status` now run with
+  owner rights (`security_invoker=false`) and filter by `ks_company_visible()` — KEYSTONE staff are
+  not Modcraft/PMES users, so the old invoker views would have shown them nothing.
+- `cc_me()` — Command Center access = `app_is_admin_tier()`. `adm_user_caps` writable by
+  Modcraft Admin/Director too, so capabilities are managed centrally.
+- **Seeded so nobody working today was locked out:** PMES = Modcraft Admin/Directors as admin
+  (Rommel, Kathleen, IT Admin); KEYSTONE = everyone with an `adm_user_caps` row + Admin/Directors,
+  copying role, company, access companies (14 users).
+- Verified by impersonation (rolled back): production-only operator reads jobs, logs CUT, refused
+  DRL and setup edits, sees no quotations/gates; supervisor logs any stage, cannot self-promote;
+  KEYSTONE-only WCL staff sees 259 queue rows, none from other companies, no PMES; Modcraft-only
+  staff sees nothing in PMES; Rommel sees all 348, can write caps; last-admin guard fires.
+
+### Apps
+- **`command-center.html`** (this repo → `rotaligatos.github.io/modcraft-app/command-center.html`):
+  People (everyone across the three apps, + KEYSTONE / + PMES quick-add), PMES users (role,
+  stations, active, notes), KEYSTONE users (role, company, also-sees, all-companies, capabilities,
+  approve/vouch limits), Change log.
+- **PMES** (backup `modcraft-pmes-app.PRE-OWNUSERS-backup`): sign-in text, role on the user chip,
+  New Job tab hidden below supervisor, operators land on Scan, scan station offers only the
+  operator's stations, mismatch logged at their station; **Setup → Production users** for PMES
+  admins (same list).
+- **KEYSTONE** (backup `index.PRE-OWNUSERS-backup.html`): sign-in reads `keystone_me()`;
+  messages point to the Command Center.
+
+# OPEN — updated 2026-09-26 (session 2 end)
+- **Add the production staff** in the Command Center → PMES users (none are on it yet).
+- Publish PMES and KEYSTONE (GitHub Pages) and add each address to Supabase Redirect URLs.
+- Supabase advisors will flag the two KEYSTONE views as definer views — intentional (explicit
+  `ks_company_visible` filter); do not flip back to invoker without a replacement.
+- A new KEYSTONE/PMES function or policy must use the `ks_*` / `pmes_*` helpers, never `app_*`.
+- Everything else from the 2026-09-26 list above still stands.
