@@ -11755,3 +11755,84 @@ Orders 8834/8840 unlinked · ticket `a0cea6f8` · mobilization-zero-after-unlock
 "By cabinet type" print mode (on hold) · `QT-W00000136.R1` print report · phone order_pause ·
 Stage 2 lock parity while paused · Michael Delos Reyes signature image · unlock-reconciliation ~60s
 window · `qApproved`/`qClientApproved` coupling · MSSI commission is OFF in Settings.
+
+## What was changed on 2026-09-25/26 (session — client-list import, layout page, Job Order, KEYSTONE/PMES bridge)
+
+Commits `da530e8`..`b03e4a6` (Modcraft), plus Supabase migrations and two apps outside this repo.
+(`f26ec0e`, "a request routed to someone by name always reaches them", was made in a parallel
+session — see its own message.)
+
+### Modcraft
+1. **Import client's list** (`da530e8`) — Cutting List tab button; any client Excel/text-PDF. `CLR`
+   IIFE (ported `prototype_template_reader.html`, reads all 16 samples identically). Preview window:
+   header row + per-column correction, rows with flags, their material → our SKU mapping. Layout
+   corrections + mappings remembered company-wide in `settings` key `CLIENT_TEMPLATES`. Reader fix:
+   a row takes the stated board matching its own thickness. Reader flags reach Designers Support as
+   review flags (`⚠` segments in the remark). Original client file kept (`MCL.setSourceFiles`) and
+   saved at lock as the raw upload ("customer cutting list").
+2. **Layout page** (`1d61abb`) — summary strip; board thumbnails with identical boards grouped
+   "×N"; part numbers P# on pieces (packer layout carries `ref`, bookkeeping only); Reflect summary
+   moved to the end; Print cut sheets / Print part labels.
+3. **Job Order = MOTHER JO** (`328bfa6`, `bd5f2ee`, `10a8eaa`, `a408c6b`, `b03e4a6`) — Supabase
+   `job_orders` (frozen by trigger, versioned per serial+option, no delete). Reserved at every
+   Initial lock path (unchanged re-lock keeps the version, `_joSig` via `_canonicalJson`); `ready` at
+   Final client approval; `released` by KEYSTONE. Quotation toolbar **Job Order** (versions, print,
+   labels, reserve-now); Designers Support **Job Order (draft)**. Each part carries: cut size, edges,
+   tape, PMES area/part codes (`PMES_AREA_RULES`/`PMES_PART_RULES`, MISC if unknown), barcodes in
+   PMES `full_barcode_id` form + short `scan` code (labels encode the short one — Rommel approved),
+   **special cut** (component field "Special", else detected from name/remarks), **HPL order**
+   (plywood cut-first; MDF/PB laminate-first unless the job's "HPL on MDF/PB" says cut-first),
+   **bander per piece** (tape ≥1mm → trimming bander; only thinner tape may go to the old no-trim
+   machine, cut smaller by tape), **route** in PMES stage codes, `boardOf`, `storageFolder`,
+   `sourceKind`. Lock-only now also saves board layout + drawing analysis. Shop drawing saved at
+   lock (`_prodShopDrawingHtml`, fixed colours — the old print used var() tokens).
+4. **Plant answers applied** (`9254f1a`, `631701d`) — cutting = 4 sides + **10% allowance**
+   (`cuttingLMNet` keeps the bare figure); **HPL sheets = boards × faces (pc), lamination = boards**
+   (was panel sqm against a per-piece price — overcharged); cutting allowance + EBT wastage are
+   **company-wide** (`prodAllowances` in Settings CONFIG). HPL detection now reads the colour too
+   (imported "…RAW BOARD / HPL SILKY…" labels were quoted with no HPL at all).
+5. `.modal-foot` finally has styling (affected 9 windows).
+
+### Supabase (migrations)
+`job_orders`; `adm_release_gate` (KEYSTONE) now: uses the ready JO's number as PMES `job_code`,
+marks the JO released, creates one `pmes_components` per piece (`scan_code`, `route` text[],
+`spec` jsonb), one `pmes_job_stages` per process in production order, and copies the mother JO into
+`pmes_production_jobs.mother_jo`. **PMES sign-in**: `pmes_me()`; every `pmes_*` table policy =
+`app_current_role() is not null`; views `security_invoker`; nothing granted to anon.
+
+### Other apps (not git — backups beside them)
+- **KEYSTONE** (`Desktop/Admin App/index.html`, backup `index.PRE-JOBORDER-backup.html`): release
+  preview banner naming the Job Order. Not published (rotaligatos.github.io/keystone = 404).
+- **PMES** (`Desktop/Modcraft Product Manufacturing Execution System (PMES)/modcraft-pmes-app`,
+  backup `modcraft-pmes-app.PRE-PROCESSJO-backup`): Google sign-in; scan by `scan_code`; per-piece
+  route in scan station; job page shows per-piece routes; **Process JO** per stage (`process-jo.js`):
+  D1–D6 tick columns + daily log, cutting layout / edge-banding layout / boring schedule / HPL
+  boards by process, BOM summary, attached files listed from Storage (printouts excluded).
+  `MODCRAFT_BRIDGE_NOTES.md` updated. Not published.
+
+# OPEN — updated 2026-09-26 (session end) — THIS IS THE AUTHORITATIVE LIST
+
+## ⚠ FIRST THING NEXT SESSION — PMES users are NOT Modcraft users
+Rommel: PMES is for **production** staff, KEYSTONE for **admin** staff — different people. The PMES
+sign-in built this session admits only active users in Modcraft's `public.users` (`pmes_me()` and
+the `app_current_role() is not null` policies), so production staff would be locked out. Needs its
+own user list (e.g. `pmes_users`: email, name, role/station, active), managed from PMES (or
+KEYSTONE — ask which), with `pmes_me()` + all `pmes_*` policies switched to it. Ask Rommel who
+manages PMES accounts and what roles exist (operator / supervisor / admin?) before building.
+Also check KEYSTONE's own access model the same way.
+
+## Then
+1. Publish PMES (and KEYSTONE) — GitHub Pages like Modcraft; add each address to Supabase →
+   Authentication → Redirect URLs.
+2. First real run: import a client list → analyse → lock → Job Order → client approve → KEYSTONE
+   release → PMES process JOs. Nothing real has gone through release yet.
+3. Grooving has no PMES stage; hole positions only on the mother JO.
+4. Grooving price picking (plain "Grooving" still flagged); "HPL" + no 1F/2F still flagged.
+
+## Carried forward unchanged
+Rotate the Wufoo API key (security clock) · Supabase egress fix — check Usage · 15 orders with no
+handler · retired-status string sweep · Schedule page on `DEMO_PROJS` · Orders 8834/8840 unlinked ·
+ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on
+hold) · `QT-W00000136.R1` print report · phone order_pause · Stage 2 lock parity while paused ·
+Michael Delos Reyes signature · unlock-reconciliation ~60s window · `qApproved`/`qClientApproved`
+coupling · MSSI commission OFF · `samplesofcuttinglist/` is client data — never commit.
