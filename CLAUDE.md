@@ -12173,7 +12173,13 @@ supervisor confirms/rejects; confirmed pieces set the stage in progress / comple
 `pmes_stage_planned()` (same rule as the app's `componentsForStage`). Tested by impersonation, rolled
 back: 12 of 30 → in progress, 30 of 30 → complete, staff cannot confirm. Rommel had already approved
 the test JO `36665M/L` live (Piece 1 confirmed in his hands).
-**Agreed order next:** Piece 3 MSSI machine
+**Piece 3 shipped same session** (PMES: `pmes_stage_capacity` + `pmes_capacity_set` /
+`pmes_capacity_mirror_modcraft`; MSSI mirrored 2026-09-26, 9 processes; Schedule tab + IE "Process
+capacity" card; pure scheduler `schedule.js` with `schedule.test.js`, 14/14). **Capacity's home is
+PMES now** — Modcraft's Services capacity was only the seed; ASM/QC/PACK/CURE must be typed in PMES.
+Modcraft does NOT read it back yet (that is Piece 4 territory).
+**Agreed order next:** Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
+then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
 capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
 Plus: MRF released with the JO (warehouse "processed" → production "received" confirmations); barcodes
 remain the long-term logging method.
