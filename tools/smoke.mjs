@@ -1342,6 +1342,18 @@ const PROFILES = {
             return { net: s.cuttingLMNet, withAllowance: s.cuttingLM, pct: s.cutAllowancePct, noAllowance: z.cuttingLM };
           } finally { w.prodSettings.cutAllowance = saved; }
         }, { net: 6, withAllowance: 6.6, pct: 10, noAllowance: 6 });
+      /* 2026-09-26: the cutting allowance and EBT wastage are company-wide — saved with the shared
+         Settings CONFIG and applied on load, not kept per browser. */
+      if (typeof window._collectAppSettings === 'function' && typeof window._applyAppSettings === 'function')
+        check('Settings: cutting allowance and EBT wastage travel with the company settings', () => {
+          const w = window, saved = { c: w.prodSettings.cutAllowance, e: w.prodSettings.ebtWastage };
+          try {
+            w.prodSettings.cutAllowance = 7; w.prodSettings.ebtWastage = 4;
+            const out = w._collectAppSettings().prodAllowances;
+            w._applyAppSettings({ prodAllowances: { cutAllowance: 12, ebtWastage: 6 } });
+            return { collected: out, applied: [w.prodSettings.cutAllowance, w.prodSettings.ebtWastage] };
+          } finally { w.prodSettings.cutAllowance = saved.c; w.prodSettings.ebtWastage = saved.e; }
+        }, { collected: { cutAllowance: 7, ebtWastage: 4 }, applied: [12, 6] });
       /* 2026-09-26 — plant: a 2F board takes 2 HPL sheets and a 1F board 1; lamination is priced
          per board. Both used to be the panels' area in sqm against a per-piece price. */
       if (typeof window.prodBuildSummary === 'function' && typeof window.prodComputeBom === 'function')
