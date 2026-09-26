@@ -12309,3 +12309,4 @@ commission OFF · `samplesofcuttinglist/` is client data — never commit · dis
   the printout Modcraft saved in Storage (newest Final Quotation first, drafts selectable), sandboxed,
   Print / Save PDF. ⚠ Storage `quotations` bucket is readable by ANY signed-in user of any app (no
   company scoping) — flagged, not changed.
+- **2026-09-27 PMES `548ffba`**: whoever checked a JO cannot approve it; a manager/admin may (own check, or skipping an absent supervisor on incomplete materials) only with a written reason, recorded as manager discretion. Enforced in `pmes_jo_approve`.
