@@ -11895,3 +11895,24 @@ Admin in all of it.
   `ks_company_visible` filter); do not flip back to invoker without a replacement.
 - A new KEYSTONE/PMES function or policy must use the `ks_*` / `pmes_*` helpers, never `app_*`.
 - Everything else from the 2026-09-26 list above still stands.
+
+## AGREED PLAN (2026-09-26) — Modcraft users into the Command Center, phased
+Rommel agreed on option 2: the database becomes the master for Modcraft users, reached **in
+phases**, each one reversible, with only one thing changing at a time. Priority order:
+**cutting list first**, then this, then MSSI website admin, then SCM.
+
+| Phase | What changes | Undo |
+|---|---|---|
+| 1. Check the copy | Database copy of Modcraft users made complete (all users, all fields incl. PIN hash/salt, feature access, delegation, device). Command Center shows Modcraft users and flags any difference from the Sheet. Read-only. | nothing to undo |
+| 2. Mirror | Command Center edits Modcraft users → writes BOTH the User Roles Sheet (Google Sheets API, admin's own Google sign-in) and the database. Modcraft still signs in from the Sheet, so a remote change takes effect in Modcraft at once. | stop CC writes |
+| 3. Shadow sign-in | `gCheckRole` reads both, still USES the Sheet, logs every disagreement. Run 1–2 weeks. | remove the check |
+| 4. Switch | Only after a clean shadow period: sign-in uses the database; the Sheet becomes a read-only copy kept in sync. Modcraft Settings → Users edits the same list. | one setting back to the Sheet (still current) |
+| 5. Full admin | Command Center reaches parity with Modcraft's Users screen: 13 feature switches, delegation, receive-all, access companies, device ID/binding, KPI, require-PIN, PIN reset, Lami, signature upload on behalf, remove, search/filters; one person shown across all apps. | — |
+
+⚠ This reverses the 2026-07-05 "gCheckRole stays Sheets-only permanently" decision — but ONLY via
+the shadow period in phase 3. Do not skip it. The staleness concern that decision was about goes
+away once the Command Center is the single place users are edited.
+
+**Also agreed:** every app is installable like Modcraft — Command Center, KEYSTONE, PMES (has a
+basic manifest, no service worker), later MSSI admin / SCM. Do it alongside the Command Center work.
+PMES and KEYSTONE are still evolving; their user lists are built to take new roles/permissions.
