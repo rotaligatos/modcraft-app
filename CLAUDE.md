@@ -12294,3 +12294,11 @@ commission OFF · `samplesofcuttinglist/` is client data — never commit · dis
   **Delete after the walk** (quotation, state, job_order, gate, MRF, payments, PMES job + children, fixture).
 - Found, not changed: in PMES the same person may check AND approve a JO (no two-person rule on the
   complete-materials path). Rommel to decide.
+- **KEYSTONE Release Queue reworked after Rommel's walk** (Keystone `1e053c6`, migration
+  `keystone_queue_details_and_readable_mr_preview`): search + company/status filters; each card shows
+  client, project, prepared by, agent, revision, client-approved date, destination plant, Job Order;
+  review windows read in words (MR preview now lists its lines; raw JSON under "Technical details");
+  scroll kept after an action; modal closes on the backdrop only if the press started there, and on Esc;
+  gate form defaults the plant to the quotation's company and the required % follows the chosen terms
+  (his test gate had "100% upon approval" with 50% required).
+- Open question for Rommel: should a payment gate open automatically at Final client approval?
