@@ -4347,6 +4347,8 @@ var prodSettings = {
   // Edge bander for the Job Order's cut sizes: 'trimmer' (normal — cut = finished) or 'no_trimmer'.
   banderType: 'trimmer',
   ebtWastage: 5,
+  // Production allowance added to cutting length (%). Plant default is 12; Rommel chose 10.
+  cutAllowance: 10,
   ebtLegend: [
     {code:'N/A',   desc:'No edgebanding',                   condition:''},
     {code:'4s',    desc:'All 4 sides (2 short + 2 long)',   condition:''},
@@ -34906,6 +34908,8 @@ function renderProductionSettings() {
     +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 14px">'
     +'<div><label class="fld">EBT wastage allowance (%)</label>'
     +'<input type="number" id="prod-ebt-waste" value="'+prodSettings.ebtWastage+'" min="0" max="50" style="height:32px;font-size:12px"></div>'
+    +'<div><label class="fld">Cutting allowance (%)</label>'
+    +'<input type="number" id="prod-cut-allow" value="'+(prodSettings.cutAllowance==null?10:prodSettings.cutAllowance)+'" min="0" max="50" style="height:32px;font-size:12px"></div>'
     +'</div>'
     // Machines and their kerf. Which machine a JOB uses is picked on the Cutting List page — this
     // table only defines what each machine is, so there is one source of truth for a kerf.
@@ -35034,6 +35038,7 @@ function saveProductionSettings() {
     }
   }
   prodSettings.ebtWastage=waste;
+  var _ca=parseFloat((el('prod-cut-allow')||{}).value); if(isFinite(_ca)&&_ca>=0) prodSettings.cutAllowance=_ca;
   prodSettings.ebtLegend=ebt;
   if(bs.length) prodSettings.boardSizes=bs;
   prodSettings.shopDrawing={
@@ -36796,8 +36801,9 @@ function linesToAoa(lines) {
 //
 // Cut size: a normal edge bander trims an amount equal to the tape, so cut = finished (Rommel,
 // 2026-09-25). A bander WITHOUT a trimmer needs cut = finished − tape thickness per banded edge;
-// that choice sits beside the cutting machine on the Cutting List page. Awaiting the plant's
-// confirmation (question 7), so it is never the default.
+// that choice sits beside the cutting machine on the Cutting List page. Confirmed by the plant
+// 2026-09-26 (question 7). That older machine is used only when the trimming bander is at capacity,
+// so it is never the default.
 var JO_DEFAULT_TAPE_MM=1;
 
 function _joTapeMm(tape){ var m=String(tape||'').match(/(\d+(?:\.\d+)?)\s*mm/i); return m?+m[1]:0; }
@@ -39865,7 +39871,12 @@ function prodComputeServices(comps,holes,extraServices){
   var edgebandingByTape=tapeOrder.map(function(t){ return {tape:t,lm:Math.round(byTape[t]*100)/100}; });
   var totalHoles=0;
   for(var h=0;h<holes.length;h++) totalHoles+=(holes[h].qty||0);
-  return {cuttingLM:Math.round(cutLM*100)/100,edgebandingLM:Math.round(ebtLM*100)/100,
+  // Production allowance on cutting (plant, 2026-09-26: they add 12% by default; Rommel settled on
+  // 10%). Applied once, here, so every screen and the quotation line agree. cuttingLMNet is the
+  // bare four-sides figure, kept for the cut sheet and for checking against a plant quote.
+  var cutAllow=(+prodSettings.cutAllowance||0);
+  return {cuttingLM:Math.round(cutLM*(1+cutAllow/100)*100)/100,cuttingLMNet:Math.round(cutLM*100)/100,
+    cutAllowancePct:cutAllow,edgebandingLM:Math.round(ebtLM*100)/100,
     edgebandingByTape:edgebandingByTape,holeCount:totalHoles,extraServicesByName:extraServicesByName};
 }
 
@@ -40115,7 +40126,11 @@ function prodBuildSummary(result) {
     if(bm.hpl){
       // The HPL sheet itself — same catalog-match/review treatment as any other material.
       var hplName=['HPL',bm.color,bm.colorB,bm.faces?bm.faces+'F':''].filter(function(s){return s&&s.trim();}).join(' ');
-      mats.push(catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,bm.totalArea,'sqm',bm.texture));
+      // Counted in SHEETS, as the catalogue sells HPL ("pc"). Plant rule (2026-09-26): a 2F board
+      // takes 2 HPL sheets, a 1F board takes 1 — laminated as whole boards, then cut. This used to
+      // be the panels' area in sqm against a per-sheet price, billing each square metre as a sheet.
+      var hplSheets=(bm.boardsNeeded||0)*(bm.faces===2?2:1);
+      mats.push(catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,hplSheets,'pc',bm.texture));
       // Substrate determines WHICH lamination service — reuse the same field parser built for
       // catalog matching so "Plywood"/"PB"/"MDF"/"PB-MR"/"MDF-MR" are recognized regardless of how
       // the AI phrased the material string.
@@ -40131,16 +40146,18 @@ function prodBuildSummary(result) {
       // line for someone to chase — if the flag went unnoticed the lamination was billed at zero.
       // Plywood beating MDF/PB when a name contains both is already handled upstream by
       // PROD_SUBSTRATE_MAP's ordering ('plywood' is matched before the bare 'pb'/'mdf' entries).
+      // The lamination service is priced per BOARD laminated (catalogue unit "piece"), so its
+      // quantity is the board count, not the panels' area in sqm.
       if(!facesLabel){
         // The face count still flags, and must: 1 Face and 2 Face are separate SKUs priced about
         // 2x apart, so unlike the substrate there is no safe direction to guess in.
-        pendingHplServices.push({label:'HPL Lamination',qty:bm.totalArea,query:'',
+        pendingHplServices.push({label:'HPL Lamination',qty:bm.boardsNeeded,query:'',
           needsReview:true,reviewNote:'HPL detected on "'+rn+'" but the face count isn\'t clear — 1 Face and 2 Face are priced about double apart, so pick the right lamination service from the dropdown.'});
       } else if(substrate==='PB'||substrate==='MDF'||substrate==='PB-MR'||substrate==='MDF-MR'){
-        pendingHplServices.push({label:'HPL Lamination (MDF/PB, '+facesLabel+')',qty:bm.totalArea,
+        pendingHplServices.push({label:'HPL Lamination (MDF/PB, '+facesLabel+')',qty:bm.boardsNeeded,
           query:'HPL Lamination MDF PB '+facesLabel});
       } else {
-        pendingHplServices.push({label:'HPL Lamination (Plywood, '+facesLabel+')',qty:bm.totalArea,
+        pendingHplServices.push({label:'HPL Lamination (Plywood, '+facesLabel+')',qty:bm.boardsNeeded,
           query:'HPL Lamination Plywood '+facesLabel});
       }
     }
@@ -40889,7 +40906,7 @@ function prodBuildResultHtml(result){
     +'<div class="card-head"><h3><i class="ti ti-settings-2"></i>Services summary</h3></div>'
     +'<div class="card-body"><div class="kpi-grid">'
     +'<div class="kpi"><div class="lbl">Carcass units</div><div class="val" style="font-size:18px">'+(result.carcassCount||0)+'</div><div class="sub">furniture pieces</div></div>'
-    +'<div class="kpi"><div class="lbl">Panel cutting</div><div class="val" style="font-size:18px">'+(svc.cuttingLM||0).toFixed(1)+'</div><div class="sub">linear meters</div></div>'
+    +'<div class="kpi"><div class="lbl">Panel cutting</div><div class="val" style="font-size:18px">'+(svc.cuttingLM||0).toFixed(1)+'</div><div class="sub">lm'+(svc.cutAllowancePct?' · incl. '+svc.cutAllowancePct+'% allowance':'')+'</div></div>'
     +'<div class="kpi"><div class="lbl">Edgebanding</div><div class="val" style="font-size:18px">'+(svc.edgebandingLM||0).toFixed(1)+'</div><div class="sub">lm · incl. '+prodSettings.ebtWastage+'% wastage</div></div>'
     +'<div class="kpi"><div class="lbl">Hole boring</div><div class="val" style="font-size:18px">'+(svc.holeCount||0)+'</div><div class="sub">holes total</div></div>'
     +'</div>'
@@ -41000,7 +41017,7 @@ function prodBuildResultHtml(result){
   var stripHtml='<div class="card" style="display:flex;flex-wrap:wrap;padding:0;margin-bottom:14px;overflow:hidden">'
     +stat('Boards',totalBoardsAll,bom.length+' material'+(bom.length===1?'':'s'))
     +stat('Pieces',totalPieces,comps.length+' parts')
-    +stat('Cutting',(svc.cuttingLM||0).toFixed(1),'lm')
+    +stat('Cutting',(svc.cuttingLM||0).toFixed(1),'lm'+(svc.cutAllowancePct?' · incl. '+svc.cutAllowancePct+'%':''))
     +stat('Edge banding',(svc.edgebandingLM||0).toFixed(1),'lm')
     +(grooveLm?stat('Grooving',grooveLm.toFixed(1),'lm'):'')
     +stat('Holes',svc.holeCount||0,'')
@@ -41041,7 +41058,7 @@ function prodExportExcel(){
   var cd=[['Area','Component','Material','Color','Texture','Thickness (mm)','Length (mm)','Width (mm)','Qty','Faces','Grain','EBT','Grooving','Notes']];
   for(var i=0;i<comps.length;i++){var c=comps[i];cd.push([c.area||'',c.name||'',c.material||'',c.color||'',c.texture||'',c.thickness||0,c.length||0,c.width||0,c.qty||1,c.faces||2,c.grain||'',c.ebt||'',c.grooving||'',c.notes||'']);}
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cd),'Cutting List');
-  var sd=[['Service','Quantity','Unit'],['Panel cutting',svc.cuttingLM||0,'lm'],['Edgebanding (incl. '+prodSettings.ebtWastage+'% wastage)',svc.edgebandingLM||0,'lm'],['Hole boring',svc.holeCount||0,'holes']];
+  var sd=[['Service','Quantity','Unit'],['Panel cutting'+(svc.cutAllowancePct?' (incl. '+svc.cutAllowancePct+'% allowance)':''),svc.cuttingLM||0,'lm'],['Edgebanding (incl. '+prodSettings.ebtWastage+'% wastage)',svc.edgebandingLM||0,'lm'],['Hole boring',svc.holeCount||0,'holes']];
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(sd),'Services Summary');
   var bd=[['Material','Color','Texture','Thickness (mm)','Total Area (sqm)','Board Size','Sheets Needed','Utilization %','Oversized Pieces']];
   for(var b=0;b<bom.length;b++){var bm=bom[b];bd.push([bm.material,bm.color,bm.texture,bm.thickness,bm.totalArea,bm.boardSize,bm.boardsNeeded,bm.utilizationPct||0,bm.oversizedCount||0]);}

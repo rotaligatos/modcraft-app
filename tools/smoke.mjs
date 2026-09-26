@@ -1330,10 +1330,36 @@ const PROFILES = {
       /* 2026-09-25 — Rommel: the plant counts cutting as all four sides of every piece (full
          perimeter). It was L+W once, half the real figure, so cutting was quoted at half. */
       if (typeof window.prodComputeServices === 'function')
-        check('prodComputeServices: cutting length is the full perimeter of every piece', () => {
-          const s = window.prodComputeServices([{ length: 600, width: 400, qty: 3, ebt: '' }], [], []);
-          if (s.cuttingLM !== 6) throw new Error('600x400 x3 should cut 2*(0.6+0.4)*3 = 6 lm, got ' + s.cuttingLM);
-        });
+        /* 2026-09-26 — plant: a production allowance is added to cutting (they use 12%, Rommel set
+           10%). cuttingLMNet stays the bare four-sides figure. */
+        check('prodComputeServices: cutting = full perimeter, plus the cutting allowance', () => {
+          const w = window, saved = w.prodSettings.cutAllowance;
+          try {
+            w.prodSettings.cutAllowance = 10;
+            const s = w.prodComputeServices([{ length: 600, width: 400, qty: 3, ebt: '' }], [], []);
+            w.prodSettings.cutAllowance = 0;
+            const z = w.prodComputeServices([{ length: 600, width: 400, qty: 3, ebt: '' }], [], []);
+            return { net: s.cuttingLMNet, withAllowance: s.cuttingLM, pct: s.cutAllowancePct, noAllowance: z.cuttingLM };
+          } finally { w.prodSettings.cutAllowance = saved; }
+        }, { net: 6, withAllowance: 6.6, pct: 10, noAllowance: 6 });
+      /* 2026-09-26 — plant: a 2F board takes 2 HPL sheets and a 1F board 1; lamination is priced
+         per board. Both used to be the panels' area in sqm against a per-piece price. */
+      if (typeof window.prodBuildSummary === 'function' && typeof window.prodComputeBom === 'function')
+        check('prodBuildSummary: HPL sheets = boards × faces, lamination = boards', () => {
+          const w = window, saved = w.prodSettings.boardSizes;
+          try {
+            w.prodSettings.boardSizes = [{ material: 'Plywood', sizes: [{ w: 1220, h: 2440 }] }];
+            const comps = [{ area: 'A', name: 'Door', material: 'Plywood HPL', color: 'Walnut', texture: '', thickness: 18,
+                             length: 2000, width: 1100, qty: 3, faces: 2, ebt: '', grain: 'none', notes: 'HPL' }];
+            const res = { components: comps, hardware: [], holeSchedule: [] };
+            res._bom = w.prodComputeBom(comps); res._services = w.prodComputeServices(comps, [], []);
+            w.prodBuildSummary(res);
+            const sum = w.prodState.summary, boards = res._bom[0].boardsNeeded;
+            const hpl = sum.materials.find(r => /^HPL/i.test(r.aiName || ''));
+            const lam = sum.services.find(r => /lamination/i.test(r.aiName || r.name || ''));
+            return { boards, hplSheets: hpl && hpl.qty, hplUnit: hpl && hpl.unit, laminated: lam && lam.qty };
+          } finally { w.prodSettings.boardSizes = saved; }
+        }, { boards: 3, hplSheets: 6, hplUnit: 'pc', laminated: 3 });
       if (typeof window.prodComputeServices === 'function')
         check('prodComputeServices: edgebandingLM groups by tape colour, and the groups sum to the same total', () => {
           const w = window;
