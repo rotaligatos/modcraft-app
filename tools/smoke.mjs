@@ -4827,6 +4827,22 @@ const PROFILES = {
                      sku: c[0].catalogName, ba: ba && ba.qty, review: c[0].needsReview };
           } finally { w.dbMaterials = keep; }
         }, { n: 2, th: [18, 18], faces: [1, 1], ebt: ['4s', ''], sku: 'Real White PB 4x8 1F (18mm, Matte)', ba: 6, review: false });
+        check('Client wording: long descriptions read to colour/substrate/texture; HPL raw boards never get a coloured board', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = ['Segatto Coffee/Warm White PB 4x8 (15mm, Crosscut)', 'Warm White PB 4x8 2F (15mm, Matte)',
+            'DuraSave Plywood 1F Warm White 18mm', 'Marino Walnut PB 4x8 2F (18mm, Supermatte)'].map((name) => ({ name, unit: 'pc', price: 0 }));
+          try {
+            const rd = w.CLR.readClientMat('* USE 18MM 2F PB MARINO WALNUT S2 W/ 1MM WHITE PVC EDGE BAND TAPE');
+            const plain = w.CLR.suggestFor({ key: 't-pb15ww', text: 'PB15 WARM WHITE', thk: 15, faces: 2 })[0];
+            const hpl = w.CLR.suggestFor({ key: 't-hpl', text: '18MM PLYWOOD RAW BOARD / HPL WALNUT', thk: 18 }).length;
+            const noColour = w.CLR.suggestFor({ key: 't-nocol', text: '18mm PB 2 FACE MATT', thk: 18, faces: 2 }).length;
+            // With a priced raw board in the Price Database, the HPL build suggests exactly that.
+            w.dbMaterials = w.dbMaterials.concat([{ name: 'Ordinary Plywood 4x8 (18mm)', unit: 'pc', price: 1500 }]);
+            const raw = w.CLR.suggestFor({ key: 't-hpl2', text: '18MM PLYWOOD RAW BOARD / HPL WALNUT', thk: 18 }).slice();
+            return { colours: rd.colours, subs: rd.subs, plain, hpl, noColour, raw };
+          } finally { w.dbMaterials = keep; }
+        }, { colours: ['walnut'], subs: ['pb'], plain: 'Warm White PB 4x8 2F (15mm, Matte)', hpl: 0, noColour: 0,
+             raw: ['Ordinary Plywood 4x8 (18mm)'] });
         check('Tapes: a client tape colour gets edge-band suggestions, and a mapped tape arrives resolved', () => {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = ['Acacia PB 4x8 2F (18mm, Stipple)', 'Acacia 2mmx54mm Matte PVC Premium Edgeband',

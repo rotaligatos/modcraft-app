@@ -11974,3 +11974,18 @@ Simulated on MARGARITA: both tapes suggested sensibly, arrived resolved; second 
 already mapped". ⚠ Test harness note: the public `catalogue_search` RPC returns NO edge bands, so any
 simulation built from it must add edge-band SKUs by hand (the live app loads the full catalogue).
 `OTHER_COLOURS` hoisted to CLR scope (shared by board and tape suggestions).
+
+## What was changed on 2026-09-26 (session 6 — suggestions measured across all samples, reader rebuilt)
+Rommel: tape finish follows the board — matte, high gloss only on a high-gloss board (`4889cdd`).
+Then measured suggestion coverage on all 14 sample lists (47 distinct board descriptions) against a
+~6k-item live catalogue slice. First pass: **17/47 (36%)** — every word had to appear in the SKU, so long
+descriptions ("USE 18MM 2F PB WHITE 212 S2 W/ 1MM MARINO WALNUT PVC EDGE BAND TAPE") never matched.
+Rebuilt as `readClientMat()`: tape part cut off ("W/…", "EB=…", "- 1mm EDGEBAND"), words classed as
+colours (required), shades/substrate/texture (preferred), the rest ignored; MFC→PB, MATT→matte.
+Extra colour words in a SKU rank it down, so the plain board comes first. A description with no colour
+suggests nothing (a guess would mislead). **HPL builds** ("PLYWOOD RAW BOARD / HPL WALNUT") suggest
+only a *priced raw board* from the Price Database — ⚠ **the Price Database has NO raw/uncoated board**
+(every plywood is laminated in a colour; the built-in list's "Marine Plywood 18mm" has no price), so
+those rows show an amber note to add one.
+Result: **30 of 36 suggestible rows (83%)**; the other 11 are 9 HPL (no raw board exists) + 2 no-colour.
+Remaining misses were thicknesses absent from the test slice. Every mapping is still remembered.
