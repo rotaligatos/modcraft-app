@@ -12156,5 +12156,20 @@ column on hardware · grooving has a PMES stage now but PMES scan/process screen
   Reads everything, writes nothing until Rommel defines its duties — widen `pmes_rank()`/policies
   then, never by reusing `operator`. Added to the check constraint, `pmes_rank()`, Command Center
   `PMES_ROLES`, and the PMES app (`PMES_RANK`/`PMES_ROLES`, commit `0f2c177` in `rotaligatos/PMES`).
+
+## What was changed on 2026-09-26 (session 12 — PMES Piece 1: the Job Order review gate)
+Rommel's PMES design (MSSI first; per-company machines/capacity later): staff checks the JO
+(details correct, materials available) → supervisor approves → only then print/schedule/run.
+Supervisor can return it to staff or to the Modcraft preparer (missing components, wrong materials).
+Built in `rotaligatos/PMES` (`0f2c177`→ this session's commit) + migrations `pmes_jo_review_gate`,
+`pmes_jo_return_msg_ctx`, `pmes_jo_gate_trg_fix`. **Enforced by a DB trigger**, not the UI: no stage
+/component progress or scan event on a JO that is not `approved`. Return-to-Modcraft inserts an urgent
+`messages` row to the preparer (matched by `quotations.prepared_by` name) + Modcraft Admins, and puts
+the note on `job_orders.status_note`. Tested as Nelit (staff) / Reynaldo (supervisor) by impersonation,
+rolled back. Full notes in PMES `MODCRAFT_BRIDGE_NOTES.md` ("Piece 1").
+**Agreed order next:** Piece 2 actual output (staff keys, supervisor confirms) → Piece 3 MSSI machine
+capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
+Plus: MRF released with the JO (warehouse "processed" → production "received" confirmations); barcodes
+remain the long-term logging method.
 Next: watch the shadow log 1–2 weeks; then phase 4 (needs a security-definer PIN check against
 `user_pins` — never a client read), then phase 5 (full admin parity).
