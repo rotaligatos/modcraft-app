@@ -12113,3 +12113,17 @@ ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cab
 Reyes signature · unlock-reconciliation ~60s window · `qApproved`/`qClientApproved` coupling · MSSI
 commission OFF · `samplesofcuttinglist/` is client data — never commit · MSSI website: optional Cabinet
 column on hardware · grooving has a PMES stage now but PMES scan/process screens for GRV untested live.
+
+## What was changed on 2026-09-26 (session 10 — Command Center phase 2: mirror, BUILT, not yet run on a real row)
+- **Modcraft users tab can now Edit, Add, Deactivate/Activate and Reset PIN.** Each writes the User Roles
+  Sheet (A–AA, exactly `saveUserRow`'s layout; add = append like `submitAddUser` plus AA) **and**
+  `public.users`, then logs via new RPC **`cc_log_sheet_change`** (app `MODCRAFT-SHEET`, admin-tier only,
+  before/after with `pin_set` only — never the hash). Takes effect in Modcraft at the person's next sign-in.
+- Google connect now asks for **`spreadsheets` (write)** through Modcraft's GIS client; token stored with `rw`.
+- **Guard:** every write re-reads that row first and refuses if it moved or differs from what the page
+  loaded (`mcGuardRow`). PIN columns W:X are always taken from the fresh row; only Reset PIN clears them
+  (and the `user_pins` copy via `cc_sync_user_pins`). Nothing is ever deleted from the Sheet.
+- Role/company values not in the lists are kept as their own option (no `<select>` fallback swap).
+- Simulation `tools/sim_cc_phase2.mjs` (stubbed Supabase/Google, fake Sheet): 17/17 pass; guard proven
+  by mutation (removing it turns 2 checks red). **No real Sheet row has been written yet — pick a test row with Rommel.**
+Next: first real edit on a row Rommel chooses; then phase 3 (shadow sign-in).

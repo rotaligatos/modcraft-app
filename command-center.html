@@ -77,7 +77,8 @@ button.btn:disabled{opacity:.45;cursor:not-allowed}
 
    Each app keeps its OWN user list, because the people differ:
      Modcraft  — sales/estimating. Users live in the User Roles Google Sheet (PINs too),
-                 so they are shown here READ-ONLY and still managed in Modcraft.
+                 which Modcraft still signs in from. Phase 2: edits here write that Sheet AND
+                 the database copy (public.users), never delete, and are logged.
      KEYSTONE  — admin staff. keystone_users + capabilities (adm_user_caps).
      PMES      — production staff. pmes_users: operator / supervisor / manager / admin,
                  operators optionally limited to stations.
@@ -151,9 +152,9 @@ function parseSheetUsers(rows){
   }
   return out;
 }
-var MC={sheet:null,err:'',loading:false,pins:null,busy:false};
-function gToken(){
-  try{ var t=JSON.parse(sessionStorage.getItem('cc_gtok')||'null'); if(t&&t.exp>Date.now()) return t.tok; }catch(e){}
+var MC={sheet:null,raw:null,err:'',loading:false,pins:null,busy:false,edit:null};
+function gToken(needRw){
+  try{ var t=JSON.parse(sessionStorage.getItem('cc_gtok')||'null'); if(t&&t.exp>Date.now()&&(!needRw||t.rw)) return t.tok; }catch(e){}
   return '';
 }
 // Read access to the Sheet through Modcraft's OWN Google client — the one that already reads it
@@ -166,11 +167,13 @@ function connectSheet(){
   }
   var tc=google.accounts.oauth2.initTokenClient({
     client_id:GOOG_CLIENT_ID,
-    scope:'https://www.googleapis.com/auth/spreadsheets.readonly',
+    // Phase 2: edit access, so a change made here reaches the Sheet Modcraft signs people in from.
+    scope:'https://www.googleapis.com/auth/spreadsheets',
     login_hint:(ME&&ME.email)||'',
     callback:function(resp){
-      if(resp.error){ MC.err='Google did not grant read access to the Sheet ('+resp.error+').'; draw(); return; }
-      try{ sessionStorage.setItem('cc_gtok',JSON.stringify({tok:resp.access_token,
+      if(resp.error){ MC.err='Google did not grant access to the Sheet ('+resp.error+').'; draw(); return; }
+      var rw=false; try{ rw=google.accounts.oauth2.hasGrantedAllScopes(resp,'https://www.googleapis.com/auth/spreadsheets'); }catch(e){}
+      try{ sessionStorage.setItem('cc_gtok',JSON.stringify({tok:resp.access_token,rw:!!rw,
         exp:Date.now()+Math.max(60,(+resp.expires_in||3600)-120)*1000})); }catch(e){}
       readSheet();
     }
@@ -191,7 +194,7 @@ async function readSheet(){
         +(res.status===401?' The access expired — connect again.':'')
         +(res.status===403&&/scope/i.test(why)?' Read access to the Sheet was not granted — connect again and allow it.':'');
     }
-    else { MC.sheet=parseSheetUsers((await res.json()).values||[]); }
+    else { MC.raw=(await res.json()).values||[]; MC.sheet=parseSheetUsers(MC.raw); }
     var ps=await supa.rpc('cc_pin_status'); MC.pins={};
     (ps.data||[]).forEach(function(x){ MC.pins[norm(x.email)]=x; });
   }catch(e){ MC.err='The Sheet could not be read: '+e.message; }
@@ -287,8 +290,8 @@ function viewPeople(){
   var act=function(l){return l.filter(function(r){return r.active!==false}).length};
   return '<div class="card"><span class="stat"><b>'+act(D.modcraft)+'</b>Modcraft</span>'+
     '<span class="stat"><b>'+act(D.ks)+'</b>KEYSTONE</span><span class="stat"><b>'+act(D.pmes)+'</b>PMES</span>'+
-    '<p class="sub" style="margin-top:10px">Modcraft users are shown read-only — they are managed in Modcraft → Settings → Users '+
-    '(the User Roles sheet, where their PINs live). Use the buttons to give someone KEYSTONE or PMES access.</p></div>'+
+    '<p class="sub" style="margin-top:10px">Modcraft users are edited in the <b>Modcraft users</b> tab (it writes the User Roles sheet Modcraft signs in from). '+
+    'Use the buttons to give someone KEYSTONE or PMES access.</p></div>'+
     '<div class="card"><div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Modcraft</th><th>KEYSTONE</th><th>PMES</th><th></th></tr></thead><tbody>'+
     rows.map(function(p){
       var ksAdm=p.ks&&(p.ks.role==='Admin'||p.ks.role==='Director');
@@ -348,11 +351,12 @@ function mcRows(){
   return rows.filter(function(r){ return passCo(r.company); });
 }
 function viewMc(){
-  var head='<div class="card"><h2>Modcraft users</h2><p class="sub">Phase 1 of moving Modcraft users here. The <b>User Roles Google Sheet is still the master</b> — Modcraft signs people in from it, and users are still edited in Modcraft → Settings → Users. '
-    +'This tab reads the Sheet (read-only), compares every person with the database copy, and can bring the copy up to date. Nothing here changes the Sheet or who can sign in.</p>';
+  var head='<div class="card"><h2>Modcraft users</h2><p class="sub">The <b>User Roles Google Sheet is still the master</b> — Modcraft signs people in from it. '
+    +'Editing here writes the Sheet <b>and</b> the database copy together, so it takes effect in Modcraft at the person’s next sign-in. '
+    +'People are never deleted — deactivate instead. Every change is in the Change log.</p>';
   if(MC.err==='need-token'||(!MC.sheet&&!gToken()&&!MC.loading))
-    return head+'<p class="sub">To read the Sheet, allow read-only access once in the Google popup (lasts about an hour).</p>'
-      +'<button class="btn primary" onclick="connectSheet()">Connect the Google Sheet (read-only)</button></div>';
+    return head+'<p class="sub">Allow access to Google Sheets once in the Google popup (lasts about an hour).</p>'
+      +'<button class="btn primary" onclick="connectSheet()">Connect the Google Sheet</button></div>';
   if(MC.loading) return head+'<p class="sub">Reading the Sheet…</p></div>';
   if(MC.err) return head+'<div class="note err">'+esc(MC.err)+'</div><button class="btn" onclick="readSheet()">Try again</button> '
     +'<button class="btn primary" onclick="connectSheet()">Connect the Google Sheet again</button></div>';
@@ -369,13 +373,19 @@ function viewMc(){
     +(dups?'<div class="note warn">'+dups+' email(s) appear twice in the database copy (usually a trailing space). The clean row is updated; the extra one is left for review.</div>':'')
     +(n['db-only']?'<div class="note warn">"Only in copy" people are not on the Sheet. They are left alone — removing them is a decision, not a sync.</div>':'')
     +'<button class="btn primary" '+(todo&&!MC.busy?'':'disabled')+' onclick="syncMc()">'+(MC.busy?'Updating…':'Update the database copy from the Sheet ('+todo+')')+'</button> '
-    +'<button class="btn" onclick="readSheet()">Read again</button></div>'
-    +'<div class="card"><div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role (Sheet)</th><th>State</th><th>Differences — Sheet → copy</th></tr></thead><tbody>'
+    +'<button class="btn" onclick="readSheet()">Read again</button> '
+    +'<button class="btn" onclick="mcOpenAdd()">+ Add a Modcraft user</button>'
+    +(gToken(true)?'':'<p class="sub" style="margin-top:8px">Editing needs edit access to the Sheet — the first Edit asks Google for it.</p>')+'</div>'
+    +mcEditor()
+    +'<div class="card"><div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role (Sheet)</th><th>State</th><th>Differences — Sheet → copy</th><th></th></tr></thead><tbody>'
     +rows.map(function(r){
       var nm=(r.u&&r.u.name)||(r.d&&r.d.name)||'';
       return '<tr><td>'+esc(nm)+'</td><td class="mono">'+esc(r.email)+(r.dup?' <span class="pill p-off">twice</span>':'')+'</td><td>'+esc(r.company||'—')+'</td>'
         +'<td>'+esc(r.u?r.u.pos:'—')+'</td><td>'+stateTxt[r.state]+'</td><td style="font-size:12px">'
-        +r.diffs.map(function(x){ return '<b>'+esc(x.label)+'</b>: '+esc(x.sheet)+' → '+esc(x.db); }).join('<br>')+'</td></tr>';
+        +r.diffs.map(function(x){ return '<b>'+esc(x.label)+'</b>: '+esc(x.sheet)+' → '+esc(x.db); }).join('<br>')+'</td>'
+        +'<td style="white-space:nowrap">'+(r.u?'<button class="btn" '+(MC.busy?'disabled ':'')+'onclick="mcOpenEdit(\''+esc(r.email)+'\')">Edit</button> '
+          +'<button class="btn" '+(MC.busy?'disabled ':'')+'onclick="mcToggleActive(\''+esc(r.email)+'\')">'+(r.u.active?'Deactivate':'Activate')+'</button>'
+          +(r.u.pinHash?' <button class="btn" '+(MC.busy?'disabled ':'')+'onclick="mcResetPin(\''+esc(r.email)+'\')">Reset PIN</button>':''):'')+'</td></tr>';
     }).join('')+'</tbody></table></div></div>';
 }
 async function syncMc(){
@@ -395,6 +405,202 @@ async function syncMc(){
   else if(b.error){ toast('People updated, but PINs were not copied: '+b.error.message); }
   else toast('Database copy updated for '+rows.length+' person(s); PINs copied for '+b.data+'.');
   await loadAll(); await readSheet();
+}
+
+/* ── Modcraft users, phase 2 (mirror): a change made here is written to the User Roles Sheet —
+   which Modcraft still signs people in from, so it takes effect there at once — and to the
+   database copy. Rules: the row is re-read first and the change is refused if it differs from
+   what this page loaded; nothing is ever deleted from the Sheet (deactivate instead); PIN hashes
+   are only ever cleared (Reset PIN), never written or logged; every change goes to the log. */
+var MC_ROLES=['Staff','Team Lead','Supervisor','Manager','Director','Admin'];
+var SHEET_W=27; // columns A..AA
+function _mcPinAlways(pos){ return pos==='Manager'||pos==='Director'||pos==='Admin'; }
+function _padRow(r){ var o=[]; for(var i=0;i<SHEET_W;i++){ var v=r&&r[i]; o.push(v==null?'':String(v)); } return o; }
+function _sameRow(a,b){ a=_padRow(a); b=_padRow(b); for(var i=0;i<SHEET_W;i++){ if(a[i]!==b[i]) return false; } return true; }
+function _tf(b){ return b?'TRUE':'FALSE'; }
+// Exactly the row Modcraft's saveUserRow() writes, column for column. Keep the two in step.
+function mcBuildRow(u){
+  var a=u.acc||{};
+  return [String(u.name||'').trim(),norm(u.email),u.pos,u.active?'yes':'no',String(u.company||'').trim(),String(u.mac||'').trim(),
+    _tf(a['Dashboard']),_tf(a['KPI']),_tf(a['Reports']),_tf(a['Profit/Revenue']),_tf(a['Quotations']),_tf(a['Analytics']), // G-L
+    _tf(a['Approvals']),_tf(a['Schedule']),                                                                              // M-N
+    u.delegateTo||'',_tf(u.delegateActive),_tf(u.receiveAll),                                                           // O-Q
+    _tf(a['Projects']),_tf(a['Clients']),_tf(a['Designers Support']),_tf(a['Settings']),_tf(a['Users']),                // R-V
+    u.pinHash||'',u.pinSalt||'',                                                                                         // W-X
+    (u.accessCompanies||[]).map(accKey).filter(Boolean).join(','),                                                       // Y
+    _tf(u.includeKpi),_tf(u.requirePin)];                                                                                // Z-AA
+}
+function mcDbRow(u){
+  return {email:norm(u.email),name:u.name||'',role:u.pos,company:u.company||null,active:!!u.active,device_id:u.mac||null,
+    feature_access:u.acc,delegate_to:u.delegateTo||null,delegate_active:!!u.delegateActive,receive_all:!!u.receiveAll,
+    access_companies:(u.accessCompanies||[]).map(accKey).filter(Boolean),include_in_kpi:!!u.includeKpi,require_pin:!!u.requirePin};
+}
+// What the log keeps: whether a PIN is set, never the hash itself.
+function mcLogObj(u){ if(!u) return null; var d=mcDbRow(u); d.pin_set=!!u.pinHash; d.sheet_row=u.row||null; return d; }
+
+async function sheetsCall(method,range,body,suffix){
+  var tok=gToken(true); if(!tok) throw new Error('Edit access to the Sheet has expired or was not granted — connect again.');
+  var res=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+(suffix||''),
+    {method:method,headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  var j=null; try{ j=await res.json(); }catch(e){}
+  if(!res.ok){
+    if(res.status===401){ try{ sessionStorage.removeItem('cc_gtok'); }catch(e){} }
+    throw new Error('Google answered '+res.status+((j&&j.error&&j.error.message)?': '+j.error.message:''));
+  }
+  return j||{};
+}
+// Re-read the row just before writing. Refuse if it moved or changed since this page read it —
+// someone may be editing the same person in Modcraft at this moment.
+async function mcGuardRow(u){
+  var fresh=await sheetsCall('GET','User Roles!A'+u.row+':AA'+u.row);
+  var now=(fresh.values||[])[0]||[];
+  var loaded=(MC.raw||[])[u.row-1]||[];
+  if(norm(now[1])!==norm(u.email)&&norm(now[0])!==norm(u.email))
+    throw new Error('Row '+u.row+' no longer holds '+u.email+' — the Sheet was rearranged. Read the Sheet again, then redo the change.');
+  if(!_sameRow(now,loaded))
+    throw new Error(u.email+' was changed in the Sheet after this page read it (possibly in Modcraft just now). Read the Sheet again and redo the change.');
+  return now;
+}
+function mcNeedRw(){
+  if(gToken(true)) return false;
+  toast('Editing needs edit access to the Sheet — allow it in the Google popup.');
+  connectSheet(); return true;
+}
+function mcCopy(u){ return JSON.parse(JSON.stringify(u)); }
+async function mcAfterWrite(before,next,action,dbWarn){
+  var warn=dbWarn||[];
+  var d=await supa.from('users').upsert(mcDbRow(next),{onConflict:'email'});
+  if(d.error) warn.push('the database copy was not updated ('+d.error.message+') — "Update the database copy" will catch it');
+  if(action==='reset PIN'){
+    var p=await supa.rpc('cc_sync_user_pins',{p_rows:[{email:norm(next.email),pin_hash:'',pin_salt:''}]});
+    if(p.error) warn.push('the PIN copy was not cleared ('+p.error.message+')');
+  }
+  var l=await supa.rpc('cc_log_sheet_change',{p_email:next.email,p_action:action,p_before:mcLogObj(before),p_after:mcLogObj(next)});
+  if(l.error) warn.push('the change was not logged ('+l.error.message+')');
+  return warn;
+}
+async function mcWriteUser(before,next,action){
+  if(MC.busy) return; if(mcNeedRw()) return;
+  MC.busy=true; draw();
+  try{
+    var now=await mcGuardRow(before);
+    // PINs are set by their owner in Modcraft. Only Reset PIN may change these two columns here.
+    if(action!=='reset PIN'){ next.pinHash=now[22]||''; next.pinSalt=now[23]||''; }
+    await sheetsCall('PUT','User Roles!A'+before.row+':AA'+before.row,
+      {range:'User Roles!A'+before.row+':AA'+before.row,majorDimension:'ROWS',values:[mcBuildRow(next)]},'?valueInputOption=USER_ENTERED');
+    var warn=await mcAfterWrite(before,next,action);
+    MC.edit=null;
+    toast(norm(next.email)+': '+action+' — saved to the Sheet'+(warn.length?'. But '+warn.join('; '):' and the database copy')+'.');
+  }catch(e){ toast('Not saved: '+e.message); }
+  MC.busy=false;
+  await loadAll(); await readSheet();
+}
+async function mcAddUser(next){
+  if(MC.busy) return; if(mcNeedRw()) return;
+  MC.busy=true; draw();
+  try{
+    var fresh=await sheetsCall('GET','User Roles!A:B');
+    var taken=(fresh.values||[]).some(function(r){ return norm(r[1])===norm(next.email)||norm(r[0])===norm(next.email); });
+    if(taken) throw new Error(next.email+' is already on the Sheet — edit that row instead.');
+    await sheetsCall('POST','User Roles!A:AA',{values:[mcBuildRow(next)]},':append?valueInputOption=USER_ENTERED');
+    var warn=await mcAfterWrite(null,next,'added');
+    MC.edit=null;
+    toast(norm(next.email)+' added to the Sheet'+(warn.length?'. But '+warn.join('; '):' and the database copy')+'.');
+  }catch(e){ toast('Not added: '+e.message); }
+  MC.busy=false;
+  await loadAll(); await readSheet();
+}
+function mcFind(email){ return (MC.sheet||[]).find(function(u){ return norm(u.email)===email; }); }
+function mcOpenEdit(email){ if(mcNeedRw()) return; MC.edit={mode:'edit',email:email}; draw(); el('mc-editor').scrollIntoView({block:'start'}); }
+function mcOpenAdd(){ if(mcNeedRw()) return; MC.edit={mode:'add'}; draw(); el('mc-editor').scrollIntoView({block:'start'}); }
+function mcToggleActive(email){
+  var u=mcFind(email); if(!u) return;
+  if(!confirm((u.active?'Deactivate ':'Activate ')+(u.name||email)+'? '+(u.active?'They will no longer be able to sign in to Modcraft.':'They will be able to sign in to Modcraft again.'))) return;
+  var n=mcCopy(u); n.active=!u.active; mcWriteUser(u,n,u.active?'deactivated':'activated');
+}
+function mcResetPin(email){
+  var u=mcFind(email); if(!u) return;
+  if(!confirm('Reset the approval PIN for '+(u.name||email)+'? They must set a new one in Modcraft (avatar menu) before their next approval. Tell them.')) return;
+  var n=mcCopy(u); n.pinHash=''; n.pinSalt=''; mcWriteUser(u,n,'reset PIN');
+}
+function mcRoleChanged(){
+  var pos=el('me-role').value, always=_mcPinAlways(pos), rp=el('me-reqpin');
+  if(rp){ rp.disabled=always; if(always) rp.checked=true; }
+  var acw=el('me-ac-wrap'); if(acw) acw.style.display=(pos==='Admin'||pos==='Director')?'none':'';
+  if(MC.edit&&MC.edit.mode==='add') ACC_KEYS.forEach(function(k,i){ el('me-acc-'+i).checked=getDefaultAcc(pos,k); });
+}
+function mcAccChanged(i){
+  // Modcraft's rule: Quotations on means Projects on; Projects off means Quotations off.
+  var q=ACC_KEYS.indexOf('Quotations'), p=ACC_KEYS.indexOf('Projects');
+  if(i===q&&el('me-acc-'+q).checked) el('me-acc-'+p).checked=true;
+  if(i===p&&!el('me-acc-'+p).checked) el('me-acc-'+q).checked=false;
+}
+function mcEditor(){
+  if(!MC.edit) return '';
+  var add=MC.edit.mode==='add', u=add?null:mcFind(MC.edit.email);
+  if(!add&&!u){ MC.edit=null; return ''; }
+  var coDefault=CO_FILTER&&CO_FILTER!=='none'?COMPANIES.find(function(c){ return coKey(c)===CO_FILTER; }):'';
+  var b=u||{name:'',email:'',pos:'Staff',active:true,company:coDefault||'',mac:'',acc:{},delegateTo:'',delegateActive:false,receiveAll:false,accessCompanies:[],includeKpi:false,requirePin:false};
+  if(add) ACC_KEYS.forEach(function(k){ b.acc[k]=getDefaultAcc('Staff',k); });
+  // A stored value that is not one of the choices is kept as its own option, never silently swapped.
+  var roles=MC_ROLES.indexOf(b.pos)<0?MC_ROLES.concat([b.pos]):MC_ROLES;
+  var cos=b.company&&COMPANIES.indexOf(b.company)<0?COMPANIES.concat([b.company]):COMPANIES;
+  var always=_mcPinAlways(b.pos), hideAc=b.pos==='Admin'||b.pos==='Director';
+  var others=(MC.sheet||[]).filter(function(x){ return norm(x.email)!==norm(b.email); });
+  return '<div class="card" id="mc-editor" style="border:2px solid var(--accent)"><h2>'+(add?'Add a Modcraft user':'Edit '+esc(b.name||b.email))+'</h2>'
+    +'<p class="sub">Saved to the User Roles Sheet (Modcraft signs people in from it) and to the database copy. '
+    +(add?'':'Sheet row '+b.row+'. ')+'The PIN is set by the person in Modcraft.</p>'
+    +'<div class="grid-add">'
+    +'<div><div class="sub">Full name</div><input id="me-name" value="'+esc(b.name)+'" style="width:100%"></div>'
+    +'<div><div class="sub">Email (Google account)</div>'+(add?'<input id="me-email" style="width:100%" placeholder="name@worldclasslaminate.com.ph">':'<div class="mono" style="padding:7px 0">'+esc(norm(b.email))+'</div>')+'</div>'
+    +'<div><div class="sub">Role</div><select id="me-role" style="width:100%" onchange="mcRoleChanged()">'+roles.map(function(r){ return '<option'+(r===b.pos?' selected':'')+'>'+esc(r)+'</option>'; }).join('')+'</select></div>'
+    +'<div><div class="sub">Company</div><select id="me-co" style="width:100%"><option value="">—</option>'+cos.map(function(c){ return '<option'+(c===b.company?' selected':'')+'>'+esc(c)+'</option>'; }).join('')+'</select></div>'
+    +'<div><div class="sub">Registered device (optional)</div><input id="me-mac" class="mono" value="'+esc(b.mac)+'" style="width:100%"></div>'
+    +'</div>'
+    +'<div class="sub" style="margin-top:12px">Feature access</div><div>'+ACC_KEYS.map(function(k,i){
+      return '<label class="chk"><input type="checkbox" id="me-acc-'+i+'" onchange="mcAccChanged('+i+')"'+(b.acc[k]?' checked':'')+'>'+esc(k)+'</label>'; }).join('')+'</div>'
+    +'<div class="grid-add" style="margin-top:12px">'
+    +'<div><div class="sub">Delegate approvals to</div><input id="me-dt" list="me-dt-list" value="'+esc(b.delegateTo)+'" style="width:100%"><datalist id="me-dt-list">'
+      +others.map(function(x){ return '<option value="'+esc(norm(x.email))+'">'+esc(x.name)+'</option>'; }).join('')+'</datalist></div>'
+    +'<div><label class="chk"><input type="checkbox" id="me-da"'+(b.delegateActive?' checked':'')+'>Delegation on</label><br>'
+    +'<label class="chk"><input type="checkbox" id="me-ra"'+(b.receiveAll?' checked':'')+'>Receives from all companies</label></div>'
+    +'<div id="me-ac-wrap"'+(hideAc?' style="display:none"':'')+'><div class="sub">Also sees</div>'+CO_KEYS.map(function(k){
+      return '<label class="chk"><input type="checkbox" id="me-ac-'+k[0]+'"'+((b.accessCompanies||[]).map(accKey).indexOf(k[0])>=0?' checked':'')+'>'+k[1]+'</label>'; }).join('')+'</div>'
+    +'<div><label class="chk"><input type="checkbox" id="me-act"'+(b.active?' checked':'')+'>Active (can sign in)</label><br>'
+    +'<label class="chk"><input type="checkbox" id="me-kpi"'+(b.includeKpi?' checked':'')+'>In Team performance</label><br>'
+    +'<label class="chk" title="Always on for Manager, Director and Admin"><input type="checkbox" id="me-reqpin"'+(b.requirePin||always?' checked':'')+(always?' disabled':'')+'>Require own PIN</label></div>'
+    +'</div>'
+    +'<div style="margin-top:14px"><button class="btn primary" '+(MC.busy?'disabled':'')+' onclick="mcSaveEditor()">'+(MC.busy?'Saving…':(add?'Add to the Sheet':'Save to the Sheet'))+'</button> '
+    +'<button class="btn" onclick="MC.edit=null;draw()">Cancel</button></div></div>';
+}
+function mcCollect(b){
+  var pos=el('me-role').value, acc={};
+  ACC_KEYS.forEach(function(k,i){ acc[k]=el('me-acc-'+i).checked; });
+  if(acc['Quotations']) acc['Projects']=true;
+  var ac=(pos==='Admin'||pos==='Director')?(b.accessCompanies||[]):CO_KEYS.map(function(k){ return k[0]; }).filter(function(k){ return el('me-ac-'+k).checked; });
+  return {row:b.row,name:el('me-name').value.trim(),email:b.email,pos:pos,active:el('me-act').checked,company:el('me-co').value,
+    mac:el('me-mac').value.trim(),acc:acc,delegateTo:norm(el('me-dt').value),delegateActive:el('me-da').checked,receiveAll:el('me-ra').checked,
+    accessCompanies:ac,includeKpi:el('me-kpi').checked,requirePin:_mcPinAlways(pos)?true:el('me-reqpin').checked,
+    pinHash:b.pinHash||'',pinSalt:b.pinSalt||''};
+}
+function mcSaveEditor(){
+  if(!MC.edit) return;
+  if(MC.edit.mode==='add'){
+    var e=norm(el('me-email').value);
+    if(!validEmail(e)) return toast('Enter a valid email.');
+    if(!el('me-name').value.trim()) return toast('Enter the full name.');
+    if(mcFind(e)) return toast(e+' is already on the Sheet — edit that row instead.');
+    var n=mcCollect({email:e,accessCompanies:[]}); n.active=el('me-act').checked; n.pinHash=''; n.pinSalt='';
+    if(!confirm('Add '+n.name+' ('+e+') as '+n.pos+(n.company?' at '+n.company:'')+'? They can sign in to Modcraft straight away.')) return;
+    return mcAddUser(n);
+  }
+  var u=mcFind(MC.edit.email); if(!u) return;
+  var next=mcCollect(u);
+  if(!next.name) return toast('Enter the full name.');
+  var ch=mcDiffs(next,mcDbRow(u)).map(function(x){ return x.label; });
+  if(!ch.length) return toast('Nothing changed.');
+  if(!confirm('Save '+(u.name||u.email)+' — '+ch.join(', ')+'? Modcraft picks this up at their next sign-in.')) return;
+  mcWriteUser(u,next,'edited: '+ch.join(', '));
 }
 
 /* ── PMES users ───────────────────────────────────────────────────────────── */
@@ -501,13 +707,13 @@ async function addKs(){
 function diffText(b,a){
   if(!b) return 'added as '+esc(a.role);
   if(!a) return 'removed';
-  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id'];
+  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id','pin_set'];
   var out=keys.filter(function(k){return JSON.stringify(b[k])!==JSON.stringify(a[k])}).map(function(k){
     return esc(k)+': '+esc(JSON.stringify(b[k]))+' → '+esc(JSON.stringify(a[k]))});
   return out.join(' · ')||'no field change';
 }
 function viewLog(){
-  return '<div class="card"><h2>Change log</h2><p class="sub">Every change to the KEYSTONE and PMES lists, from any app. Cannot be edited.</p>'+
+  return '<div class="card"><h2>Change log</h2><p class="sub">Every change to the Modcraft, KEYSTONE and PMES lists, from any app — MODCRAFT-SHEET rows are Sheet edits made here. Cannot be edited.</p>'+
     '<div class="tbl-wrap"><table><thead><tr><th>When</th><th>App</th><th>Account</th><th>Change</th><th>By</th></tr></thead><tbody>'+
     (D.log.length?D.log.map(function(l){return '<tr><td style="white-space:nowrap">'+fmt(l.at)+'</td><td>'+esc(l.app)+'</td><td class="mono">'+esc(l.email)+
       '</td><td>'+diffText(l.before,l.after)+'</td><td class="mono">'+esc(l.changed_by||'setup')+'</td></tr>'}).join('')
