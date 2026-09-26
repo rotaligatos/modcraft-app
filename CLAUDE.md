@@ -12269,3 +12269,22 @@ ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cab
 `QT-W00000136.R1` print report · phone order_pause · Stage 2 lock parity while paused · Michael Delos
 Reyes signature · unlock-reconciliation ~60s window · `qApproved`/`qClientApproved` coupling · MSSI
 commission OFF · `samplesofcuttinglist/` is client data — never commit · distinct app icons (placeholder).
+
+## What was changed on 2026-09-26 (session 13 — first end-to-end test run)
+- **Test Job Order built by Modcraft's own code**: `tools/e2e_build_jo.mjs` loads index.html headless
+  (offline) and runs `_cutListToAnalysis` → `_joBuild` on a small synthetic kitchen list (11 pieces,
+  3 boards, special cut, grooving, boring). Reusable for future runs.
+- **Whole chain run in the database as the real people in each role, rolled back** (serial
+  `QT-T00000001`, nothing persisted — verified): Kathleen opens the gate + builds the MRF (5 lines) +
+  records the 50% down payment → Rommel releases (11 PMES parts, 8 processes CUT>SCUT>EBB>GRV>DRL>ASM>QC>PACK,
+  mother JO copied, JO marked released) → warehouse issue → staff receipt refused → output before
+  approval refused → Reynaldo receives (materials complete) → board 1 marked with a knot → Angelica
+  checks → Reynaldo approves → output keyed + confirmed on every process (all complete) →
+  Stephanie sees it via `modcraft_jo_progress`.
+- **Fault fixed**: release mapped only sheet/sqm/pcs/kg, but the catalogue uses "pc" (153k materials)
+  and "lm" (edge tape), so every real line reached PMES as "other". New `pmes_norm_unit()`;
+  `pmes_job_materials.unit` allows lm/roll/set; an unknown unit is kept in the notes. PMES
+  add-material dropdown updated (PMES `5709ad4`).
+- Not a fault: job stays `in_production` after PACK — packing list → handed off is a manual PMES step.
+- Not tested: the screens (needs a real signed-in session with persisted data), cut-plan save/adopt.
+- `public._e2e_fixture` (RLS on, no grants) holds the test JO + state for re-runs; drop when done.
