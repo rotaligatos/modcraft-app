@@ -62,10 +62,10 @@ button.btn:disabled{opacity:.45;cursor:not-allowed}
 </head>
 <body>
 <header>
+  <img src="rtmo-logo.png" alt="RTmo Digital Solutions" title="RTmo Digital Solutions" style="height:40px;width:auto;background:#fff;border-radius:7px;padding:2px 6px">
   <h1>Command Center</h1>
   <nav id="nav"></nav>
   <div class="who" id="who"></div>
-  <img src="rtmo-logo.png" alt="RTmo Digital Solutions" title="RTmo Digital Solutions" style="height:40px;width:auto;background:#fff;border-radius:7px;padding:2px 6px">
 </header>
 <div class="wrap" id="root"><div class="card">Loading…</div></div>
 <div class="toast" id="toast"></div>
@@ -98,7 +98,7 @@ var KS_ROLES=['Admin','Director','Manager','Supervisor','Approver','Encoder','St
 var PMES_ROLES=['staff','materials','operator','supervisor','manager','admin'];
 var CAPS=[['can_request','Request'],['can_approve','Approve'],['can_vouch','Vouch'],['can_release','Release'],
           ['can_source','Source'],['can_issue','Warehouse issue'],['is_plant_head','Head of Plant Ops'],['is_manager_approver','Mgr approver'],['is_hpo_approver','HPO approver'],['is_md_approver','MD approver']];
-var TABS=[['people','People'],['mc','Modcraft users'],['pmes','PMES users'],['ks','KEYSTONE users'],['log','Change log']];
+var TABS=[['people','People'],['mc','Modcraft users'],['pmes','PMES users'],['ks','KEYSTONE users'],['deleg','PMES delegations'],['log','Change log']];
 
 var ME=null, TAB=(new URLSearchParams(location.search).get('tab'))||'people', D={modcraft:[],ks:[],pmes:[],caps:[],stages:[],log:[],shadow:[]};
 // Company filter across every list ('' = all, 'none' = no company set). Keys: wcl / mssi / cwl.
@@ -253,12 +253,13 @@ async function loadAll(){
     supa.from('adm_user_caps').select('*'),
     supa.from('pmes_stage_types').select('code,label,sort_order').order('sort_order'),
     supa.from('user_access_log').select('*').order('at',{ascending:false}).limit(300),
-    supa.from('user_shadow_log').select('id,at,email,ok,diffs,build').order('at',{ascending:false}).limit(1000)
+    supa.from('user_shadow_log').select('id,at,email,ok,diffs,build').order('at',{ascending:false}).limit(1000),
+    supa.from('pmes_delegations').select('*').order('starts_at',{ascending:false}).limit(200)
   ]);
   var bad=q.filter(function(x){return x.error});
   if(bad.length) toast('Some lists could not load: '+bad[0].error.message);
   D.modcraft=q[0].data||[]; D.ks=q[1].data||[]; D.pmes=q[2].data||[];
-  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[];
+  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[]; D.deleg=q[7].data||[];
 }
 
 function drawNav(){
@@ -269,7 +270,7 @@ function drawNav(){
       return '<option value="'+o[0]+'"'+(CO_FILTER===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('')+'</select>';
 }
 function draw(){
-  var fn={people:viewPeople,mc:viewMc,pmes:viewPmes,ks:viewKs,log:viewLog}[TAB];
+  var fn={people:viewPeople,mc:viewMc,pmes:viewPmes,ks:viewKs,deleg:viewDeleg,log:viewLog}[TAB];
   try{ el('root').innerHTML=fn(); }catch(e){ fatal('This view failed: '+esc(e.message)); console.error(e); }
 }
 
@@ -748,6 +749,56 @@ function viewLog(){
 }
 
 async function refresh(){await loadAll();draw()}
+
+/* ── PMES approval delegations (added 2026-09-27) ────────────────────────────
+   A PMES manager hands their Job Order approval authority to a named person for a period.
+   Same database functions PMES uses (pmes_delegate_create / pmes_delegate_revoke); Command Center
+   admins may set one up for any manager. History is kept — ended, never deleted. */
+function viewDeleg(){
+  var users=D.pmes.filter(function(u){return u.active!==false});
+  var nameOf=function(e){var u=D.pmes.find(function(x){return norm(x.email)===norm(e)});return u?(u.name||u.email):e};
+  var mgrs=users.filter(function(u){return u.role==='manager'||u.role==='admin'});
+  var dels=users.filter(function(u){return ['staff','supervisor','manager'].indexOf(u.role)>=0});
+  var now=Date.now(), pad=function(n){return String(n).padStart(2,'0')};
+  var loc=function(d){return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes())};
+  var st=function(d){return d.revoked_at?['p-off','Ended '+fmt(d.revoked_at)]:new Date(d.ends_at)<=now?['p-off','Expired']
+    :new Date(d.starts_at)>now?['p-none','Upcoming']:['p-on','Active']};
+  var rows=(D.deleg||[]).filter(function(d){
+    if(!CO_FILTER) return true;
+    var u=D.pmes.find(function(x){return norm(x.email)===norm(d.from_email)});
+    return CO_FILTER==='none'?!(u&&u.company):coKey(u&&u.company)===CO_FILTER;});
+  return '<div class="card"><h2 style="margin-top:0">PMES approval delegation</h2>'+
+    '<p class="sub">When a PMES manager is away, their Job Order approval authority can go to a named person for up to 60 days. '+
+    'Approvals made that way are recorded in PMES as “On behalf of …”. The person who checked a Job Order still cannot approve it.</p>'+
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px">'+
+      '<div><div class="sub">Manager</div><select id="dgFrom" style="width:100%">'+mgrs.map(function(u){return '<option value="'+esc(u.email)+'">'+esc(u.name||u.email)+'</option>'}).join('')+'</select></div>'+
+      '<div><div class="sub">Delegate to</div><select id="dgTo" style="width:100%"><option value="">— choose —</option>'+dels.map(function(u){return '<option value="'+esc(u.email)+'">'+esc((u.name||u.email)+' · '+u.role)+'</option>'}).join('')+'</select></div>'+
+      '<div><div class="sub">From</div><input type="datetime-local" id="dgStart" style="width:100%" value="'+loc(new Date())+'"></div>'+
+      '<div><div class="sub">Until</div><input type="datetime-local" id="dgEnd" style="width:100%" value="'+loc(new Date(now+7*864e5))+'"></div>'+
+    '</div><input id="dgReason" placeholder="Reason (e.g. on leave, site visit)" style="width:100%;margin-top:8px">'+
+    '<button class="btn primary" style="margin-top:8px" onclick="ccDelegCreate()">Delegate approval</button></div>'+
+    '<div class="card"><div class="tbl-wrap"><table><thead><tr><th>Manager</th><th>Delegate</th><th>Period</th><th>Reason</th><th>Status</th><th></th></tr></thead><tbody>'+
+    (rows.length?rows.map(function(d){var s=st(d);return '<tr><td>'+esc(nameOf(d.from_email))+'</td><td>'+esc(nameOf(d.to_email))+'</td>'+
+      '<td class="mono">'+esc(fmt(d.starts_at))+' – '+esc(fmt(d.ends_at))+'</td><td>'+esc(d.reason)+(d.revoke_note?'<div class="sub">Ended: '+esc(d.revoke_note)+'</div>':'')+
+      '<div class="sub">set by '+esc(d.created_by)+'</div></td><td><span class="pill '+s[0]+'">'+esc(s[1])+'</span></td>'+
+      '<td>'+(!d.revoked_at&&new Date(d.ends_at)>now?'<button class="btn" onclick="ccDelegEnd(\''+esc(d.id)+'\')">End now</button>':'')+'</td></tr>'}).join('')
+      :'<tr><td colspan="6" class="sub">No delegations yet.</td></tr>')+'</tbody></table></div></div>';
+}
+async function ccDelegCreate(){
+  var to=el('dgTo').value, s=el('dgStart').value, e=el('dgEnd').value, r=el('dgReason').value.trim();
+  if(!to) return toast('Choose who receives the approval authority.');
+  if(!s||!e) return toast('Set the period.');
+  if(!r) return toast('Give the reason.');
+  var res=await supa.rpc('pmes_delegate_create',{p_from:el('dgFrom').value,p_to:to,p_start:new Date(s).toISOString(),p_end:new Date(e).toISOString(),p_reason:r});
+  if(res.error) return toast(res.error.message);
+  toast('Delegated. The person must reload PMES to see it.'); refresh();
+}
+async function ccDelegEnd(id){
+  var note=prompt('End this delegation now? Optional note:'); if(note===null) return;
+  var res=await supa.rpc('pmes_delegate_revoke',{p_id:id,p_note:note});
+  if(res.error) return toast(res.error.message);
+  toast('Delegation ended.'); refresh();
+}
 supa.auth.onAuthStateChange(function(ev){if(ev==='SIGNED_OUT')location.reload()});
 // Installable: the same no-cache worker Modcraft uses, scoped to this page only.
 if('serviceWorker' in navigator&&location.protocol==='https:')
