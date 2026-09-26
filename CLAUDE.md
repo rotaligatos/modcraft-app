@@ -12200,8 +12200,17 @@ confirmed/planned per process). **Both Modcraft→PMES mirror triggers were drop
 them while the flag is on. Falls back to CONFIG's copy when not connected. Known limits: capacity is
 read for the signed-in user's company (not per quotation); ASM/QC/PACK/CURE process capacity still
 must be typed in PMES. Smoke checks pinned (5).
-**Next:** the MRF confirmations (warehouse processed → production received), operators' emails, and a
-first real end-to-end run: quotation → JO → KEYSTONE release → PMES check/approve → output → schedule.
+**MRF confirmations SHIPPED 2026-09-26** (migration `mrf_warehouse_processed_production_received`):
+KEYSTONE Lines → per-line processed qty + Confirm processed (`adm_mr_process`, new cap `can_issue`, in the
+Command Center as "Warehouse issue"); PMES job page MRF card → Confirm received (`pmes_mr_receive`,
+staff+), which also writes `pmes_material_receipts` via `pmes_job_materials.mr_line_id` (now set by
+`adm_release_gate` — patched in place). Statuses: authorized → partially_issued/issued →
+partially_received/received. The MRF's data already came from the Modcraft quotation scope
+(`adm_extract_materials`). **The outsource Purchase Request already works** (KEYSTONE "Generate PR",
+`adm_generate_pr_from_quotation` — previewed live on QT-W00000183: 3 outsourced hardware lines,
+₱11,580) but has never been used: 0 PRs, 0 POs, **0 suppliers** — supplier directory must be filled
+before POs mean anything.
+**Next:** operators' emails, suppliers into KEYSTONE, and a first real end-to-end run: quotation → JO → KEYSTONE release → PMES check/approve → output → schedule.
 Was: Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
 then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
 capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
