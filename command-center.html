@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Command Center</title>
 <meta name="robots" content="noindex">
+<link rel="manifest" href="cc.webmanifest">
+<meta name="theme-color" content="#12233d">
+<link rel="apple-touch-icon" href="icons/modcraft/icon-180.png">
+<link rel="icon" href="icons/modcraft/icon-192.png">
 <style>
 :root{
   --bg:#f4f6f9; --card:#fff; --card2:#f7f9fb; --line:#dde3ea; --text:#15202e; --text2:#5b6878;
@@ -91,9 +95,86 @@ var KS_ROLES=['Admin','Director','Manager','Supervisor','Approver','Encoder','St
 var PMES_ROLES=['operator','supervisor','manager','admin'];
 var CAPS=[['can_request','Request'],['can_approve','Approve'],['can_vouch','Vouch'],['can_release','Release'],
           ['can_source','Source'],['is_manager_approver','Mgr approver'],['is_hpo_approver','HPO approver'],['is_md_approver','MD approver']];
-var TABS=[['people','People'],['pmes','PMES users'],['ks','KEYSTONE users'],['log','Change log']];
+var TABS=[['people','People'],['mc','Modcraft users'],['pmes','PMES users'],['ks','KEYSTONE users'],['log','Change log']];
 
-var ME=null, TAB='people', D={modcraft:[],ks:[],pmes:[],caps:[],stages:[],log:[]};
+var ME=null, TAB=(new URLSearchParams(location.search).get('tab'))||'people', D={modcraft:[],ks:[],pmes:[],caps:[],stages:[],log:[]};
+// Company filter across every list ('' = all, 'none' = no company set). Keys: wcl / mssi / cwl.
+var CO_FILTER='';
+try{ CO_FILTER=sessionStorage.getItem('cc_co')||''; }catch(e){}
+function passCo(company){
+  if(!CO_FILTER) return true;
+  var k=coKey(company);
+  return CO_FILTER==='none'?!k:k===CO_FILTER;
+}
+function setCo(v){ CO_FILTER=v; try{ sessionStorage.setItem('cc_co',v); }catch(e){} drawNav(); draw(); }
+
+/* ── Modcraft users, phase 1: the User Roles Google Sheet is still the master. This tab reads it
+   (read-only), compares every person with the database copy, and can bring the copy up to date.
+   The same reading rules as Modcraft's parseUserRows(), so the two can never read a row differently. */
+var SHEETS_ID='1Rs79K8wX27lxVRddksNlYwdyesTCOjIhHCqH0jRMV-o';
+var ACC_KEYS=['Dashboard','KPI','Reports','Profit/Revenue','Quotations','Analytics','Approvals','Schedule','Projects','Clients','Designers Support','Settings','Users'];
+function getDefaultAcc(pos,key){
+  var full={Dashboard:true,KPI:true,Reports:true,'Profit/Revenue':true,Quotations:true,Analytics:true,Approvals:true,Schedule:true,Projects:true,Clients:true,'Designers Support':true,Settings:true,Users:true};
+  var d={
+    'Staff'    :{Dashboard:true,KPI:false,Reports:false,'Profit/Revenue':false,Quotations:true,Analytics:false,Approvals:false,Schedule:true,Projects:true,Clients:true,'Designers Support':false,Settings:false,Users:false},
+    'Team Lead':{Dashboard:true,KPI:true, Reports:false,'Profit/Revenue':false,Quotations:true,Analytics:false,Approvals:false,Schedule:true,Projects:true,Clients:true,'Designers Support':true, Settings:false,Users:false},
+    'Supervisor':{Dashboard:true,KPI:true,Reports:true, 'Profit/Revenue':false,Quotations:true,Analytics:true, Approvals:true, Schedule:true,Projects:true,Clients:true,'Designers Support':true, Settings:false,Users:false},
+    'Manager'  :{Dashboard:true,KPI:true, Reports:true, 'Profit/Revenue':true, Quotations:true,Analytics:true, Approvals:true, Schedule:true,Projects:true,Clients:true,'Designers Support':true, Settings:true, Users:false},
+    'Director' :{Dashboard:true,KPI:true, Reports:true, 'Profit/Revenue':true, Quotations:true,Analytics:true, Approvals:true, Schedule:true,Projects:true,Clients:true,'Designers Support':true, Settings:true, Users:false},
+    'Admin':full
+  };
+  return ((d[pos]||d['Staff'])[key])||false;
+}
+function parseAccBool(v){return v===true||String(v).toUpperCase()==='TRUE'||v==='yes'||v==='1';}
+function parseSheetUsers(rows){
+  var out=[];
+  for(var i=1;i<rows.length;i++){
+    var r=rows[i]; if(!r||!r.length) continue;
+    var isNew=r[0]&&r[0].indexOf('@')<0&&r[1]&&r[1].indexOf('@')>=0;
+    var u={row:i+1,acc:{},delegateTo:'',delegateActive:false,receiveAll:false,accessCompanies:[],mac:''};
+    if(isNew){
+      u.name=r[0]||''; u.email=r[1]||''; u.pos=r[2]||'Staff'; u.active=(r[3]||'yes').toLowerCase()==='yes'; u.company=r[4]||''; u.mac=r[5]||'';
+      for(var k=0;k<8;k++) u.acc[ACC_KEYS[k]]=r[6+k]!==undefined?parseAccBool(r[6+k]):getDefaultAcc(u.pos,ACC_KEYS[k]);
+      for(var k2=8;k2<ACC_KEYS.length;k2++) u.acc[ACC_KEYS[k2]]=r[9+k2]!==undefined?parseAccBool(r[9+k2]):getDefaultAcc(u.pos,ACC_KEYS[k2]);
+      u.delegateTo=(r[14]||'').trim(); u.delegateActive=parseAccBool(r[15]||''); u.receiveAll=parseAccBool(r[16]||'');
+      u.accessCompanies=(r[24]||'').split(',').map(function(x){return x.trim();}).filter(Boolean);
+    } else {
+      u.email=r[0]||''; u.pos=r[1]||'Staff'; u.active=(r[2]||'yes').toLowerCase()==='yes'; u.company=r[3]||''; u.name=u.email.split('@')[0];
+      ACC_KEYS.forEach(function(kk){ u.acc[kk]=getDefaultAcc(u.pos,kk); });
+    }
+    if(!u.email) continue;
+    u.pinHash=r[22]||''; u.pinSalt=r[23]||'';
+    u.includeKpi=String(r[25]||'').toUpperCase()==='TRUE';
+    u.requirePin=String(r[26]||'').toUpperCase()==='TRUE';
+    out.push(u);
+  }
+  return out;
+}
+var MC={sheet:null,err:'',loading:false,pins:null,busy:false};
+function gToken(){
+  try{ var t=JSON.parse(sessionStorage.getItem('cc_gtok')||'null'); if(t&&t.exp>Date.now()) return t.tok; }catch(e){}
+  return '';
+}
+function connectSheet(){
+  // Google access with read-only permission to the Sheet; comes back to this tab.
+  supa.auth.signInWithOAuth({provider:'google',options:{
+    redirectTo:location.origin+location.pathname+'?tab=mc',
+    scopes:'https://www.googleapis.com/auth/spreadsheets.readonly'}});
+}
+async function readSheet(){
+  var tok=gToken(); if(!tok){ MC.err='need-token'; draw(); return; }
+  MC.loading=true; MC.err=''; draw();
+  try{
+    var res=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent('User Roles!A:AA'),
+      {headers:{Authorization:'Bearer '+tok}});
+    if(res.status===401||res.status===403){ try{ sessionStorage.removeItem('cc_gtok'); }catch(e){} MC.err='need-token'; }
+    else if(!res.ok) MC.err='The Sheet could not be read ('+res.status+').';
+    else { MC.sheet=parseSheetUsers((await res.json()).values||[]); }
+    var ps=await supa.rpc('cc_pin_status'); MC.pins={};
+    (ps.data||[]).forEach(function(x){ MC.pins[norm(x.email)]=x; });
+  }catch(e){ MC.err='The Sheet could not be read: '+e.message; }
+  MC.loading=false; draw();
+}
 
 function el(id){return document.getElementById(id)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -111,6 +192,11 @@ function dbErr(e){
 async function boot(){
   var s=await supa.auth.getSession();
   if(!s.data.session) return signIn();
+  // Right after a Google sign-in that asked for Sheet access, Supabase hands over Google's own
+  // access token once. Kept for this browser tab only (Google tokens last ~1 hour).
+  if(s.data.session.provider_token){
+    try{ sessionStorage.setItem('cc_gtok',JSON.stringify({tok:s.data.session.provider_token,exp:Date.now()+50*60*1000})); }catch(e){}
+  }
   var r=await supa.rpc('cc_me');
   if(r.error) return fatal('Could not check your account: '+esc(r.error.message));
   ME=r.data||{};
@@ -119,6 +205,7 @@ async function boot(){
   if(!ME.allowed) return fatal('<b>'+esc(ME.email)+'</b> is not a Modcraft Admin or Director, so the Command Center is closed to this account.');
   await loadAll();
   drawNav(); draw();
+  if(TAB==='mc'&&gToken()) readSheet();
 }
 function signIn(){
   el('root').innerHTML='<div class="card" style="max-width:440px;margin:40px auto;text-align:center">'+
@@ -129,7 +216,7 @@ function fatal(html){el('root').innerHTML='<div class="card"><div class="note er
 
 async function loadAll(){
   var q=await Promise.all([
-    supa.from('users').select('email,name,role,company,active'),
+    supa.from('users').select('*'),
     supa.from('keystone_users').select('*').order('active',{ascending:false}).order('name'),
     supa.from('pmes_users').select('*').order('active',{ascending:false}).order('name'),
     supa.from('adm_user_caps').select('*'),
@@ -144,10 +231,13 @@ async function loadAll(){
 
 function drawNav(){
   el('nav').innerHTML=TABS.map(function(t){
-    return '<button class="'+(TAB===t[0]?'on':'')+'" onclick="TAB=\''+t[0]+'\';drawNav();draw()">'+t[1]+'</button>'}).join('');
+    return '<button class="'+(TAB===t[0]?'on':'')+'" onclick="TAB=\''+t[0]+'\';drawNav();draw()">'+t[1]+'</button>'}).join('')
+    +'<select onchange="setCo(this.value)" style="margin-left:6px" title="Show one company">'
+    +[['','All companies']].concat(CO_KEYS,[['none','No company']]).map(function(o){
+      return '<option value="'+o[0]+'"'+(CO_FILTER===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('')+'</select>';
 }
 function draw(){
-  var fn={people:viewPeople,pmes:viewPmes,ks:viewKs,log:viewLog}[TAB];
+  var fn={people:viewPeople,mc:viewMc,pmes:viewPmes,ks:viewKs,log:viewLog}[TAB];
   try{ el('root').innerHTML=fn(); }catch(e){ fatal('This view failed: '+esc(e.message)); console.error(e); }
 }
 
@@ -162,7 +252,11 @@ function viewPeople(){
   function add(list,key){list.forEach(function(r){var e=norm(r.email);if(!e)return;
     map[e]=map[e]||{email:e,name:''};map[e][key]=r;if(!map[e].name&&r.name)map[e].name=r.name})}
   add(D.modcraft,'mc'); add(D.ks,'ks'); add(D.pmes,'pm');
-  var rows=Object.keys(map).map(function(k){return map[k]}).sort(function(a,b){return (a.name||a.email).localeCompare(b.name||b.email)});
+  var rows=Object.keys(map).map(function(k){return map[k]}).filter(function(p){
+      var cos=[p.mc&&p.mc.company,p.ks&&p.ks.company,p.pm&&p.pm.company].filter(Boolean);
+      if(!CO_FILTER) return true;
+      return CO_FILTER==='none'?!cos.length:cos.some(function(c){ return coKey(c)===CO_FILTER; });
+    }).sort(function(a,b){return (a.name||a.email).localeCompare(b.name||b.email)});
   var act=function(l){return l.filter(function(r){return r.active!==false}).length};
   return '<div class="card"><span class="stat"><b>'+act(D.modcraft)+'</b>Modcraft</span>'+
     '<span class="stat"><b>'+act(D.ks)+'</b>KEYSTONE</span><span class="stat"><b>'+act(D.pmes)+'</b>PMES</span>'+
@@ -188,6 +282,93 @@ function quickAdd(app,email){
 }
 function coKey(c){c=String(c||'').toLowerCase();if(!c.trim())return '';return c.indexOf('cebu')>=0?'cwl':c.indexOf('module')>=0?'mssi':'wcl'}
 
+/* ── Modcraft users (phase 1: compare the Sheet with the database copy) ───── */
+// "Also sees" is stored as keys (wcl/mssi/cwl); a full company name is turned into its key.
+function accKey(x){ var l=String(x||'').trim().toLowerCase(); return /^(wcl|mssi|cwl)$/.test(l)?l:coKey(x); }
+function sameArr(a,b){ a=(a||[]).map(accKey).filter(Boolean).sort(); b=(b||[]).map(accKey).filter(Boolean).sort(); return a.join(',')===b.join(','); }
+function mcDiffs(u,d){
+  // Every field the database copy holds, compared with how Modcraft reads the Sheet.
+  var out=[];
+  function f(label,a,b){ out.push({label:label,sheet:a,db:b}); }
+  if(String(u.name||'').trim()!==String(d.name||'').trim()) f('name',u.name,d.name);
+  if(u.pos!==d.role) f('role',u.pos,d.role);
+  if(coKey(u.company)!==coKey(d.company)) f('company',u.company,d.company);
+  if(!!u.active!==!!d.active) f('active',u.active?'yes':'no',d.active?'yes':'no');
+  if(String(u.mac||'')!==String(d.device_id||'')) f('device',u.mac||'—',d.device_id||'—');
+  var fa=d.feature_access||{}, accDiff=ACC_KEYS.filter(function(k){ return !!u.acc[k]!==!!fa[k]; });
+  if(accDiff.length) f('feature access',accDiff.map(function(k){return k+':'+(u.acc[k]?'on':'off');}).join(', '),accDiff.map(function(k){return k+':'+(fa[k]?'on':'off');}).join(', '));
+  if(norm(u.delegateTo)!==norm(d.delegate_to)) f('delegate to',u.delegateTo||'—',d.delegate_to||'—');
+  if(!!u.delegateActive!==!!d.delegate_active) f('delegation on',u.delegateActive?'yes':'no',d.delegate_active?'yes':'no');
+  if(!!u.receiveAll!==!!d.receive_all) f('all companies',u.receiveAll?'yes':'no',d.receive_all?'yes':'no');
+  if(!sameArr(u.accessCompanies,d.access_companies)) f('also sees',(u.accessCompanies||[]).join(', ')||'—',(d.access_companies||[]).join(', ')||'—');
+  if(!!u.includeKpi!==!!d.include_in_kpi) f('in KPI',u.includeKpi?'yes':'no',d.include_in_kpi?'yes':'no');
+  if(!!u.requirePin!==!!d.require_pin) f('require PIN',u.requirePin?'yes':'no',d.require_pin?'yes':'no');
+  return out;
+}
+function mcRows(){
+  var db={}, dup={};
+  D.modcraft.forEach(function(d){ var k=norm(d.email); if(db[k]) dup[k]=true; else db[k]=d; });
+  var rows=[], seen={};
+  (MC.sheet||[]).forEach(function(u){
+    var k=norm(u.email); seen[k]=true;
+    var d=db[k], pin=MC.pins&&MC.pins[k];
+    var diffs=d?mcDiffs(u,d):[];
+    var pinState=!pin?'not copied':((!!u.pinHash)!==pin.has_pin?'differs':'same');
+    if(pinState!=='same') diffs.push({label:'PIN',sheet:u.pinHash?'set':'not set',db:pin?(pin.has_pin?'set':'not set'):'not copied yet'});
+    rows.push({email:k,u:u,d:d,diffs:diffs,state:!d?'sheet-only':(diffs.length?'differs':'same'),dup:!!dup[k],company:u.company});
+  });
+  D.modcraft.forEach(function(d){ var k=norm(d.email); if(!seen[k]){ seen[k]=true; rows.push({email:k,d:d,diffs:[],state:'db-only',dup:!!dup[k],company:d.company}); } });
+  return rows.filter(function(r){ return passCo(r.company); });
+}
+function viewMc(){
+  var head='<div class="card"><h2>Modcraft users</h2><p class="sub">Phase 1 of moving Modcraft users here. The <b>User Roles Google Sheet is still the master</b> — Modcraft signs people in from it, and users are still edited in Modcraft → Settings → Users. '
+    +'This tab reads the Sheet (read-only), compares every person with the database copy, and can bring the copy up to date. Nothing here changes the Sheet or who can sign in.</p>';
+  if(MC.err==='need-token'||(!MC.sheet&&!gToken()&&!MC.loading))
+    return head+'<p class="sub">To read the Sheet, allow read-only access to it once (Google asks; lasts about an hour).</p>'
+      +'<button class="btn primary" onclick="connectSheet()">Connect the Google Sheet (read-only)</button></div>';
+  if(MC.loading) return head+'<p class="sub">Reading the Sheet…</p></div>';
+  if(MC.err) return head+'<div class="note err">'+esc(MC.err)+'</div><button class="btn" onclick="readSheet()">Try again</button></div>';
+  if(!MC.sheet) return head+'<button class="btn primary" onclick="readSheet()">Read the Sheet</button></div>';
+  var rows=mcRows();
+  var n={same:0,differs:0,'sheet-only':0,'db-only':0}; rows.forEach(function(r){ n[r.state]++; });
+  var dups=rows.filter(function(r){return r.dup;}).length;
+  var todo=rows.filter(function(r){ return r.state==='differs'||r.state==='sheet-only'; }).length;
+  var stateTxt={same:'<span class="pill p-on">matches</span>',differs:'<span class="pill p-off">differs</span>',
+    'sheet-only':'<span class="pill p-off">not in copy</span>','db-only':'<span class="pill p-none">only in copy</span>'};
+  return head
+    +'<div style="margin:6px 0 10px"><span class="stat"><b>'+n.same+'</b>match</span><span class="stat"><b>'+n.differs+'</b>differ</span>'
+    +'<span class="stat"><b>'+n['sheet-only']+'</b>missing from copy</span><span class="stat"><b>'+n['db-only']+'</b>only in copy</span></div>'
+    +(dups?'<div class="note warn">'+dups+' email(s) appear twice in the database copy (usually a trailing space). The clean row is updated; the extra one is left for review.</div>':'')
+    +(n['db-only']?'<div class="note warn">"Only in copy" people are not on the Sheet. They are left alone — removing them is a decision, not a sync.</div>':'')
+    +'<button class="btn primary" '+(todo&&!MC.busy?'':'disabled')+' onclick="syncMc()">'+(MC.busy?'Updating…':'Update the database copy from the Sheet ('+todo+')')+'</button> '
+    +'<button class="btn" onclick="readSheet()">Read again</button></div>'
+    +'<div class="card"><div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role (Sheet)</th><th>State</th><th>Differences — Sheet → copy</th></tr></thead><tbody>'
+    +rows.map(function(r){
+      var nm=(r.u&&r.u.name)||(r.d&&r.d.name)||'';
+      return '<tr><td>'+esc(nm)+'</td><td class="mono">'+esc(r.email)+(r.dup?' <span class="pill p-off">twice</span>':'')+'</td><td>'+esc(r.company||'—')+'</td>'
+        +'<td>'+esc(r.u?r.u.pos:'—')+'</td><td>'+stateTxt[r.state]+'</td><td style="font-size:12px">'
+        +r.diffs.map(function(x){ return '<b>'+esc(x.label)+'</b>: '+esc(x.sheet)+' → '+esc(x.db); }).join('<br>')+'</td></tr>';
+    }).join('')+'</tbody></table></div></div>';
+}
+async function syncMc(){
+  var rows=mcRows().filter(function(r){ return r.state==='differs'||r.state==='sheet-only'; });
+  if(!rows.length) return;
+  if(!confirm('Update the database copy for '+rows.length+' person(s) from the Sheet? The Sheet itself is not changed.')) return;
+  MC.busy=true; draw();
+  var up=rows.map(function(r){ var u=r.u; return {email:r.email,name:u.name||'',role:u.pos,company:u.company||null,active:!!u.active,
+    device_id:u.mac||null,feature_access:u.acc,delegate_to:u.delegateTo||null,delegate_active:!!u.delegateActive,
+    receive_all:!!u.receiveAll,access_companies:(u.accessCompanies||[]).map(accKey).filter(Boolean),
+    include_in_kpi:!!u.includeKpi,require_pin:!!u.requirePin}; });
+  var a=await supa.from('users').upsert(up,{onConflict:'email'});
+  var pins=(MC.sheet||[]).map(function(u){ return {email:norm(u.email),pin_hash:u.pinHash||'',pin_salt:u.pinSalt||''}; });
+  var b=await supa.rpc('cc_sync_user_pins',{p_rows:pins});
+  MC.busy=false;
+  if(a.error){ toast('The copy was not updated: '+a.error.message); }
+  else if(b.error){ toast('People updated, but PINs were not copied: '+b.error.message); }
+  else toast('Database copy updated for '+rows.length+' person(s); PINs copied for '+b.data+'.');
+  await loadAll(); await readSheet();
+}
+
 /* ── PMES users ───────────────────────────────────────────────────────────── */
 function stationBoxes(sel,cls){
   return D.stages.map(function(s){return '<label class="chk" title="'+esc(s.label)+'"><input type="checkbox" class="'+cls+'" value="'+esc(s.code)+'"'+
@@ -198,10 +379,13 @@ function viewPmes(){
     '<p class="sub"><b>Operator</b>: scan and log work, only at ticked stations (none ticked = any). '+
     '<b>Supervisor</b>: all stations, jobs, job materials, packing. <b>Manager</b>: + setup lists, machines, standards. '+
     '<b>Admin</b>: + manage Production users (also from PMES → Setup).</p>'+
-    '<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Stations (operators)</th><th>Active</th><th>Notes</th><th></th></tr></thead><tbody>'+
+    '<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role</th><th>Stations (operators)</th><th>Active</th><th>Notes</th><th></th></tr></thead><tbody>'+
     D.pmes.map(function(u,i){
+      if(!passCo(u.company)) return '';
       return '<tr class="'+(u.active?'':'off')+'" id="pm-'+i+'"><td><input class="f-name" value="'+esc(u.name)+'"></td>'+
-      '<td class="mono">'+esc(u.email)+'</td><td><select class="f-role">'+PMES_ROLES.map(function(r){return '<option'+(r===u.role?' selected':'')+'>'+r+'</option>'}).join('')+'</select></td>'+
+      '<td class="mono">'+esc(u.email)+'</td>'+
+      '<td><select class="f-co"><option value="">—</option>'+COMPANIES.map(function(x){return '<option'+(coKey(x)===coKey(u.company)?' selected':'')+'>'+esc(x)+'</option>'}).join('')+'</select></td>'+
+      '<td><select class="f-role">'+PMES_ROLES.map(function(r){return '<option'+(r===u.role?' selected':'')+'>'+r+'</option>'}).join('')+'</select></td>'+
       '<td>'+stationBoxes(u.stations||[],'f-st')+'</td><td><input type="checkbox" class="f-act"'+(u.active?' checked':'')+'></td>'+
       '<td><input class="f-notes" value="'+esc(u.notes)+'"></td>'+
       '<td><button class="btn primary" onclick="savePmes('+i+')">Save</button></td></tr>'}).join('')+
@@ -210,13 +394,14 @@ function viewPmes(){
     '<div><div class="sub">Email</div><input id="pmNewEmail" placeholder="name@worldclasslaminate.com.ph" style="width:100%"></div>'+
     '<div><div class="sub">Name</div><input id="pmNewName" style="width:100%"></div>'+
     '<div><div class="sub">Role</div><select id="pmNewRole" style="width:100%">'+PMES_ROLES.map(function(r){return '<option>'+r+'</option>'}).join('')+'</select></div>'+
+    '<div><div class="sub">Company</div><select id="pmNewCo" style="width:100%"><option value="">—</option>'+COMPANIES.map(function(x){return '<option>'+esc(x)+'</option>'}).join('')+'</select></div>'+
     '<div><button class="btn primary" onclick="addPmes()">Add user</button></div></div>'+
     '<div class="sub" style="margin-top:10px">Stations (operators only)</div><div id="pmNewSt">'+stationBoxes([],'f-st')+'</div></div>';
 }
 function picked(root,cls){return [].slice.call(root.querySelectorAll('input.'+cls+':checked')).map(function(c){return c.value})}
 async function savePmes(i){
   var u=D.pmes[i], tr=el('pm-'+i);
-  var patch={name:tr.querySelector('.f-name').value.trim(),role:tr.querySelector('.f-role').value,
+  var patch={name:tr.querySelector('.f-name').value.trim(),role:tr.querySelector('.f-role').value,company:tr.querySelector('.f-co').value||null,
     stations:picked(tr,'f-st'),active:tr.querySelector('.f-act').checked,notes:tr.querySelector('.f-notes').value.trim()};
   var r=await supa.from('pmes_users').update(patch).eq('email',u.email).select();
   if(r.error) return toast(dbErr(r.error));
@@ -225,7 +410,7 @@ async function savePmes(i){
 }
 async function addPmes(){
   var e=norm(el('pmNewEmail').value); if(!validEmail(e)) return toast('Enter a valid email.');
-  var r=await supa.from('pmes_users').insert({email:e,name:el('pmNewName').value.trim(),role:el('pmNewRole').value,stations:picked(el('pmNewSt'),'f-st')});
+  var r=await supa.from('pmes_users').insert({email:e,name:el('pmNewName').value.trim(),role:el('pmNewRole').value,company:el('pmNewCo').value||null,stations:picked(el('pmNewSt'),'f-st')});
   if(r.error) return toast(dbErr(r.error));
   toast('Added '+e+' to PMES'); await refresh();
 }
@@ -238,6 +423,7 @@ function viewKs(){
     'Capabilities decide what they may do. Admin/Director already hold every operational capability; approver roles are always explicit.</p>'+
     '<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Company</th><th>Also sees</th><th>All cos.</th><th>Capabilities</th><th>Limits (₱)</th><th>Active</th><th></th></tr></thead><tbody>'+
     D.ks.map(function(u,i){
+      if(!passCo(u.company)) return '';
       var c=capsOf(u.email);
       return '<tr class="'+(u.active?'':'off')+'" id="ks-'+i+'"><td><input class="f-name" value="'+esc(u.name)+'"></td>'+
       '<td class="mono">'+esc(u.email)+'</td>'+
@@ -287,7 +473,7 @@ async function addKs(){
 function diffText(b,a){
   if(!b) return 'added as '+esc(a.role);
   if(!a) return 'removed';
-  var keys=['name','role','company','active','receive_all','stations','access_companies','notes'];
+  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id'];
   var out=keys.filter(function(k){return JSON.stringify(b[k])!==JSON.stringify(a[k])}).map(function(k){
     return esc(k)+': '+esc(JSON.stringify(b[k]))+' → '+esc(JSON.stringify(a[k]))});
   return out.join(' · ')||'no field change';
@@ -302,6 +488,9 @@ function viewLog(){
 
 async function refresh(){await loadAll();draw()}
 supa.auth.onAuthStateChange(function(ev){if(ev==='SIGNED_OUT')location.reload()});
+// Installable: the same no-cache worker Modcraft uses, scoped to this page only.
+if('serviceWorker' in navigator&&location.protocol==='https:')
+  navigator.serviceWorker.register('./sw.js',{scope:'./command-center.html'}).catch(function(){});
 boot();
 </script>
 </body>
