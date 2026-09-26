@@ -4847,6 +4847,17 @@ const PROFILES = {
           } finally { w.dbMaterials = keep; }
         }, { colours: ['walnut'], subs: ['pb'], plain: 'Warm White PB 4x8 2F (15mm, Matte)', hpl: 0, noColour: 0,
              raw: ['Ordinary Plywood 4x8 (18mm)'], mdf: ['Raw Boards 4x8 18mm MDF', 'Raw Boards 2x8 18mm MDF'] });
+        check('Outsource: raw marine plywood chosen at import arrives as an outsourced board line', () => {
+          const w = window;
+          const a = w._cutListToAnalysis({ panels: [{ group: 'A', part: 'Door', mat: '18MM PLYWOOD RAW BOARD / HPL WALNUT', th: 18,
+            L: 700, W: 400, qty: 2, ebt: '', outsource: 'Marine Plywood 18mm (raw)' }], hpl: [], hardware: [] });
+          const bom = w.prodComputeBom(a.components);
+          w.prodBuildSummary({ components: a.components, _bom: bom, _services: {}, hardware: [] });
+          const m = w.prodState.summary.materials;
+          const board = m.find((x) => x.outsource);
+          const sheet = m.find((x) => /^HPL/.test(x.aiName || ''));
+          return { board: board && board.name, review: board && board.needsReview, sheet: sheet && sheet.aiName };
+        }, { board: 'Marine Plywood 18mm (raw)', review: false, sheet: 'HPL walnut' });
         check('Grooving: a plain "Grooving" is priced by rule — board type, or sliding/router/insert/handgrab when stated', () => {
           const w = window, keep = w.SERVICES;
           w.SERVICES = ['Grooving (3mm width melamine)', 'Grooving (3mm width compact lam)', 'Grooving (minimum charge)',

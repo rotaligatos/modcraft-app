@@ -12002,3 +12002,10 @@ Remaining misses were thicknesses absent from the test slice. Every mapping is s
   handgrab → Handgrab Groove (from the service chip, the row's remarks, and the part name). Found by
   pattern in the live catalogue, so renames still resolve. The pick is noted on the component and can
   be changed in the summary. MARGARITA's 20.61 m now arrives priced, not flagged.
+- **Raw marine plywood is outsourced (Rommel).** For an HPL build on plywood with no priced raw board,
+  the import window offers **"Outsource: Marine Plywood <th>mm (raw)"** (remembered like any mapping,
+  stored as `OUTSOURCE: …`). `toPanel` keeps the client's wording as the material (HPL still detected)
+  and sets `panel.outsource`; it rides `toCl` → `outsourceName` on the component → per BOM group →
+  `prodBuildSummary` emits the board line already marked Outsource, so it lands in the quotation's
+  outsource section for the supplier price. Also: the HPL sheet's search term no longer carries the
+  client's build words ("HPL raw hpl walnut" → "HPL walnut").
