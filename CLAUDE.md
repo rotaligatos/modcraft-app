@@ -12149,5 +12149,12 @@ column on hardware · grooving has a PMES stage now but PMES scan/process screen
   memory. A "differs" row means the two stores drifted: fix the row (Edit, or Update the database
   copy) and watch the next sign-in. Disagreements from users who never connect to Supabase simply
   never get recorded (the check needs `supaReady()`), so a quiet log is not proof for THEM.
+- **PMES users added 2026-09-26 (Rommel's list):** MSSI — Allan Lagsao (manager), Reynaldo Rivera
+  (supervisor), Angelica Lucaylucay `mssi.production@` (staff); CWLI — Stiffany Gabut (manager), Nelit
+  Ancajas, Rhodalyn Dela Pena, Noel Inocentes (staff). Operators' emails still to come.
+- **New PMES role `staff`** (rank 5, below operator): office production staff, NOT a machine operator.
+  Reads everything, writes nothing until Rommel defines its duties — widen `pmes_rank()`/policies
+  then, never by reusing `operator`. Added to the check constraint, `pmes_rank()`, Command Center
+  `PMES_ROLES`, and the PMES app (`PMES_RANK`/`PMES_ROLES`, commit `0f2c177` in `rotaligatos/PMES`).
 Next: watch the shadow log 1–2 weeks; then phase 4 (needs a security-definer PIN check against
 `user_pins` — never a client read), then phase 5 (full admin parity).
