@@ -12183,6 +12183,9 @@ Also fixed: the PMES IE "Machine | Services | Capacity" sheet was empty — Modc
 `pmes_auto_assign_service_machines()` now mirror it and group services under machines, re-run by triggers
 on every Modcraft Save settings and every Price DB rewrite. ⚠ Any future change to how Modcraft stores
 service capacity must keep CONFIG `serviceCapacity` keyed by service name, or the mirror goes blank.
+IE sheet gained a "Move to" picker per service row (manager+) to regroup a service under any machine or
+back to Others; "+ Add machine" was already there. Services themselves are added in Modcraft → Settings →
+Services and arrive by the mirror; there is deliberately no "add service" in PMES.
 **Agreed order next:** Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
 then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
 capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
