@@ -12218,6 +12218,14 @@ manager cannot approve first. Complete → one supervisor. ⚠ PMES patch script
 ("skip if the new text is present and the anchor is gone") does NOT stop re-insertion when the anchor
 survives the insert — that put the Piece 1 methods in PMES app.js 4× (fixed). Check `uniq -d` on
 function/method names after any scripted PMES edit.
+**Board inspection + defect-aware cutting optimization + additional boards (2026-09-26, same session)** — full
+notes in PMES `MODCRAFT_BRIDGE_NOTES.md`. Materials person marks defects/rejects (`pmes_boards`,
+`pmes_board_defects`); PMES `optimizer.js` = Modcraft's packer (verified identical with no defects, by a test
+that loads Modcraft's own `guillotinePackBoards`) + defects as no-cut zones + shortfall count; staff save a
+plan, supervisor adopts, process JO prints it. Extra boards: supervisor → manager → KEYSTONE "Board Requests"
+(accept = new warehouse MRF) → reject may be escalated → Head of Plant Ops (`adm_user_caps.is_plant_head`,
+explicit only — Admins do NOT get it automatically). ⚠ If Modcraft's `guillotinePackBoards` ever changes,
+re-run `node optimizer.test.js` in PMES — the fidelity check will show whether PMES must follow.
 **Next:** operators' emails, suppliers into KEYSTONE, and a first real end-to-end run: quotation → JO → KEYSTONE release → PMES check/approve → output → schedule.
 Was: Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
 then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
