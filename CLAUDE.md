@@ -12310,3 +12310,4 @@ commission OFF · `samplesofcuttinglist/` is client data — never commit · dis
   Print / Save PDF. ⚠ Storage `quotations` bucket is readable by ANY signed-in user of any app (no
   company scoping) — flagged, not changed.
 - **2026-09-27 PMES `548ffba`**: whoever checked a JO cannot approve it; a manager/admin may (own check, or skipping an absent supervisor on incomplete materials) only with a written reason, recorded as manager discretion. Enforced in `pmes_jo_approve`.
+- **2026-09-27**: PMES approval delegation (`pmes_delegations`, Setup → Approval delegation, PMES `669a34e`); PMES Dashboard home (`pmes_dashboard`, PMES `0bff2ac`); KEYSTONE opens on Dashboard (`7f9e275`); RTmo logo (`Logo RTmo/rtmo1.png` → `rtmo-logo.png`) top right in PMES, KEYSTONE and Command Center, on a white chip. The image's tagline reads "Rffciency" (typo in the artwork).
