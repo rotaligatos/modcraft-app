@@ -7721,6 +7721,14 @@ function _discScopeOn(){
 // own wording ("… 2mmx22mm Matte PVC Premium Edgeband", "Edge Tape 0.4mm"). A tape whose name
 // says none of this simply stays under Materials rather than being guessed into its own bucket.
 function _isEdgeTapeName(nm){ return /edge\s*-?\s*(band|tape)|edgeband/i.test(String(nm||'')); }
+// The edge-band items of the materials catalogue, cached per catalogue array (it is only ever
+// replaced wholesale on a reload, so a new array means a fresh list).
+var _prodEdgeTapeCache={src:null,list:[]};
+function _prodEdgeTapeCatalog(){
+  var src=(typeof dbMaterials!=='undefined'&&dbMaterials)||[];
+  if(_prodEdgeTapeCache.src!==src) _prodEdgeTapeCache={src:src,list:src.filter(function(m){ return m&&_isEdgeTapeName(m.name); })};
+  return _prodEdgeTapeCache.list;
+}
 // Edge-banding tape is always sold by the linear metre, but a lot of live Price DB rows carry a
 // wrong stored unit (often "pc"), and a custom-typed name has no catalogue unit to fall back on
 // at all. Rommel, 2026-09-08: picked "Hamilton 1x22mm PVC Edgeband" and the row showed "pc" -- the
@@ -17839,7 +17847,7 @@ function _cutListToAnalysis(cl,order){
     var L=+pn.L||0, W=+pn.W||0;
     var label=String(pn.mat||'').trim();
     var b=builds[label];
-    var material='', color='', faces=0;
+    var material='', color='', faces=0, catalogName='';
     if(b){
       var subName=String(b.sub).split(' — ')[0].trim();
       material=_webMatFamily(b.sub)||subName;
@@ -17886,6 +17894,13 @@ function _cutListToAnalysis(cl,order){
         color=(md&&md.colorText)||(fam?mname:'');
       }
       if(sku) notes.push('SKU '+sku);
+      // The material IS a catalogue SKU when its name is one, exactly: picked from the list in
+      // the cutting list, mapped by a person in the client-list import, or remembered from an
+      // earlier mapping. That choice is carried as-is. Rebuilding a search from the parsed fields
+      // threw it away and asked again with worse candidates (end-to-end run, 2026-09-26).
+      var exactSku=(typeof lookupInSource==='function'&&typeof getMatSource==='function')
+        ?(lookupInSource(getMatSource(),label)||(cut>=0?lookupInSource(getMatSource(),mname):null)):null;
+      if(exactSku) catalogName=exactSku.name;
       if(md&&md.faces) faces=md.faces; else facesUnknown++;
       if(pn.matCustom) review.push('the client typed this material instead of picking it from the catalogue');
       // Rommel, 2026-09-22: the thickness is written in BOTH the SKU and the Th column, so the
@@ -17987,7 +18002,7 @@ function _cutListToAnalysis(cl,order){
       colorB:'', textureB:'',
       thickness:+pn.th||0, length:L, width:W, qty:+pn.qty||1,
       faces:faces, grain:gr||jobGrain,
-      ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving,
+      ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName,
       needsReview:review.length>0, reviewNote:review.join('; '),
       notes:notes.join(' · ')
     });
@@ -36933,6 +36948,9 @@ function _joRoute(o){
   if(o.bander==='manual') r.push('MEB');
   else if(o.bander==='no_trimmer') r.push('EBA');
   else if(o.bander==='trimmer') r.push('EBB');
+  // Grooving has its own station (GRV), after edge banding like boring. Before 2026-09-26 a grooved
+  // piece's route skipped it, so no station ever saw the groove.
+  if(o.grooved) r.push('GRV');
   if(o.holes) r.push('DRL');
   r.push('ASM','QC','PACK');
   return r;
@@ -36986,7 +37004,7 @@ function _joBuild(result,ctx){
       hplOrder=(/^(MDF|PB)/.test(sub||'')&&hplOrderJob==='laminate_first')?'laminate_first':'cut_first';
     }
     var hasHoles=holes.some(function(hh){ return hh&&hh.component&&c.name&&String(hh.component).toLowerCase()===String(c.name).toLowerCase(); });
-    var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles});
+    var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles,grooved:!!String(c.grooving||'').trim()});
     if(!ec.known) flags.push('edge code "'+c.ebt+'" not understood');
     if(!(L>0&&W>0)) flags.push('no size — cannot be cut from this list');
     if(c.needsReview) flags.push(c.reviewNote||'flagged for review');
@@ -36996,7 +37014,10 @@ function _joBuild(result,ctx){
     var pa=_joPmesArea(area); if(pa==='MISC') pa=_joPmesArea(c.name);
     var pp=_joPmesPart(c.name);
     var grp=String(area).split('›')[0];
-    var comp=(pn+' '+grp).toUpperCase().replace(/[-\/]+/g,' ').replace(/\s+/g,' ').trim().slice(0,30);
+    // Letters, digits and underscores only: the component sits between the dashes of the barcode
+    // ID, and a space (or "›", ".", "/") in a printed/scanned ID breaks keyboard-wedge scanners and
+    // lookups (end-to-end run 2026-09-26 produced "…-BED-P1 MASTERS BEDROOM-SP-01/02").
+    var comp=(pn+' '+grp).toUpperCase().replace(/[^A-Z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,30).replace(/_+$/,'');
     // barcodes: the full PMES-style ID (job-area-component-part-NN/total). scan: the short code the
     // label's bars encode — ~45 characters of Code128 on a 6cm label is too dense to scan reliably.
     var codes=[], scan=[], short=String(ctx.joNumber||'').replace(/^JO-/,'');
@@ -39178,7 +39199,7 @@ function _prodNormalizeComponent(c){
     width:+c.width||0,qty:+c.qty||1,faces:+c.faces||0,
     grain:(c.grain==='length'||c.grain==='width')?c.grain:'none',
     ebt:String(c.ebt||''),edgeTape:String(c.edgeTape||''),grooving:String(c.grooving||''),
-    specialCut:String(c.specialCut||''),
+    specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||'')
   };
 }
@@ -40150,7 +40171,12 @@ function prodComputeBom(comps){
     // the HPL words in the colour, and reading only material+notes quoted it with no lamination.
     var isHpl=/\bhpl\b/i.test((c.material||'')+' '+(c.color||'')+' '+(c.notes||''));
     var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0,c.colorB||'',c.textureB||'',isHpl].join('|');
-    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,colorB:c.colorB||'',textureB:c.textureB||'',hpl:isHpl,totalAreaMm2:0,areas:{},pieces:[]};
+    if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,colorB:c.colorB||'',textureB:c.textureB||'',hpl:isHpl,totalAreaMm2:0,areas:{},pieces:[],catalogName:undefined};
+    // The exact SKU chosen for these pieces. Every piece in the group must name the same one;
+    // if they disagree, or some have none, the group falls back to catalogue matching.
+    var cn=c.catalogName||'';
+    if(groups[key].catalogName===undefined) groups[key].catalogName=cn;
+    else if(groups[key].catalogName!==cn) groups[key].catalogName='';
     var qty=c.qty||1;
     groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*qty;
     var ar=c.area||'General';
@@ -40175,7 +40201,7 @@ function prodComputeBom(comps){
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,faces:g.faces,
-      colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,
+      colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,catalogName:g.catalogName||'',
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
@@ -40211,9 +40237,9 @@ function prodBuildSummary(result) {
   // texture (materials only) seeds the Made-to-Order lead-time suggestion if this row ends up
   // flagged with no catalog match, or carries an mto tag through automatically when it confidently
   // matches a catalog SKU that's itself already tagged MTO (see setMtoMaterialName/_applyMtoTags).
-  function catalogMatchRow(aiName,mappedName,catalogArr,qty,unit,texture){
+  function catalogMatchRow(aiName,mappedName,catalogArr,qty,unit,texture,isMaterialOverride){
     var candidates=_prodFindCatalogMatches(mappedName,catalogArr,6);
-    var isMaterial=(catalogArr===dbMaterials);
+    var isMaterial=isMaterialOverride!=null?!!isMaterialOverride:(catalogArr===dbMaterials);
     var row={aiName:aiName,name:mappedName,qty:qty,unit:unit,include:true,price:0,custom:true,
       outsource:false,mto:false,mtoLeadDays:0,texture:texture||'',
       matchCandidates:candidates.map(function(c){return c.name;}),needsReview:false,reviewNote:''};
@@ -40266,7 +40292,18 @@ function prodBuildSummary(result) {
     // even sees the second color to match against.
     var parts=[bm.material,bm.color,bm.colorB,bm.texture?'('+bm.texture+')':'',bm.textureB&&bm.textureB!==bm.texture?'('+bm.textureB+')':'',bm.thickness?bm.thickness+'mm':'',bm.faces?bm.faces+'F':''];
     var rn=parts.filter(function(s){return s&&s.trim();}).join(' ');
-    mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet',bm.texture));
+    var picked=bm.catalogName&&typeof lookupInSource==='function'?lookupInSource(dbMaterials,bm.catalogName):null;
+    if(picked){
+      // Already chosen as an exact SKU — resolved on arrival, candidates kept so it can be changed.
+      var prow=catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet',bm.texture);
+      prow.name=picked.name; prow.unit=picked.unit||'sheet'; prow.price=picked.price||0; prow.custom=false;
+      prow.needsReview=false; prow.reviewNote='';
+      if(prow.matchCandidates.indexOf(picked.name)<0) prow.matchCandidates.unshift(picked.name);
+      if(picked.mto){ prow.mto=true; prow.mtoLeadDays=_mtoDefaultLeadDays(bm.texture); }
+      mats.push(prow);
+    } else {
+      mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'sheet',bm.texture));
+    }
     if(bm.hpl){
       // The HPL sheet itself — same catalog-match/review treatment as any other material.
       var hplName=['HPL',bm.color,bm.colorB,bm.faces?bm.faces+'F':''].filter(function(s){return s&&s.trim();}).join(' ');
@@ -40320,7 +40357,11 @@ function prodBuildSummary(result) {
   for(var et=0;et<ebtByTape.length;et++){
     var etg=ebtByTape[et];
     if(etg.tape==='Unspecified'||!(etg.lm>0)) continue;
-    mats.push(catalogMatchRow(etg.tape,applyJargon(etg.tape,'materials'),dbMaterials,etg.lm,'lm'));
+    // Searched against EDGE-BAND items only. Against the whole materials catalogue a tape named
+    // "ACACIA" scored the acacia BOARDS highest, and on a thin catalogue a board was picked on its
+    // own: 81 m of tape priced as 81 boards (end-to-end run, 2026-09-26). A tape can only ever be
+    // tape, so boards are never offered for it.
+    mats.push(catalogMatchRow(etg.tape,applyJargon(etg.tape,'materials'),_prodEdgeTapeCatalog(),etg.lm,'lm',null,true));
   }
   var hws=[];var hwRaw=result.hardware||[];
   // One quotation line per item. With the optional Cabinet column the same hinge can sit on

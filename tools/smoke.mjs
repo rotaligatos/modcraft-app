@@ -4758,12 +4758,50 @@ const PROFILES = {
             length: 700, width: 500, qty: 2, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1' });
           return { parts, areas, id: jo.parts[0].barcodes[1] };
         }, { parts: ['SP', 'TR', 'DRS', 'DRF', 'DRB', 'PT', 'TR', 'BK', 'SH', 'DR', 'FP', 'MISC'],
-             areas: ['BED', 'KIT', 'MISC', 'CLS', 'BTH'], id: 'JO-T-V1-KIT-P1 KITCHEN-SP-02/02' });
+             areas: ['BED', 'KIT', 'MISC', 'CLS', 'BTH'], id: 'JO-T-V1-KIT-P1_KITCHEN-SP-02/02' });
         check('Job Order: reserved on every Initial lock path, marked ready on Final client approval', () => {
           const has = (f, s) => typeof window[f] === 'function' && String(window[f]).includes(s);
           return [has('_doLockOnlyConfirmed', '_reserveJobOrder()'), has('confirmSend', '_reserveJobOrder()'),
                   has('skipSend', '_reserveJobOrder()'), has('confirmClientApprove', '_markJobOrderReady()')];
         }, [true, true, true, true]);
+        // End-to-end run 2026-09-26 (MARGARITA.xls) found these four.
+        check('E2E 1: an edge-tape line is matched against edge-band items only, never boards', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = [{ name: '[SDP] Acacia PB 4x8 2F (18mm, Stipple)', unit: 'pc', price: 2690 },
+                           { name: 'Acacia 1mmx22mm Matte PVC Premium Edgeband', unit: 'lm', price: 20 }];
+          try {
+            w.prodBuildSummary({ components: [], _bom: [], _services: { edgebandingByTape: [{ tape: 'ACACIA', lm: 81.33 }] }, hardware: [] });
+            const row = w.prodState.summary.materials.find((m) => m.unit === 'lm' || m.aiName === 'ACACIA');
+            return row ? { boardOffered: (row.matchCandidates || []).some((n) => /4x8/.test(n)), notBoard: !/4x8/.test(row.name) } : 'no row';
+          } finally { w.dbMaterials = keep; }
+        }, { boardOffered: false, notBoard: true });
+        check('E2E 2: a SKU chosen on the cutting list arrives resolved, not re-matched', () => {
+          const w = window, keep = w.dbMaterials;
+          const sku = 'Real White PB 4x8 2F (18mm, Matte)';
+          w.dbMaterials = [{ name: sku, unit: 'pc', price: 2330 }, { name: 'Real White PB 4x8 1F (18mm, Matte)', unit: 'pc', price: 2020 },
+                           { name: 'Real White PB 4x8 2F (15mm, Matte)', unit: 'pc', price: 2100 }];
+          try {
+            const a = w._cutListToAnalysis({ panels: [{ group: 'A', part: 'Side', mat: sku, th: 18, L: 700, W: 500, qty: 2, ebt: '' }], hpl: [], hardware: [] });
+            const comps = a.components || a.result && a.result.components;
+            const bom = w.prodComputeBom(comps);
+            w.prodBuildSummary({ components: comps, _bom: bom, _services: {}, hardware: [] });
+            const row = w.prodState.summary.materials[0];
+            return { carried: comps[0].catalogName, name: row.name, review: row.needsReview, price: row.price };
+          } finally { w.dbMaterials = keep; }
+        }, { carried: 'Real White PB 4x8 2F (18mm, Matte)', name: 'Real White PB 4x8 2F (18mm, Matte)', review: false, price: 2330 });
+        check('E2E 3: a grooved piece is routed through the grooving station (GRV), others are not', () => {
+          const jo = window._joBuild({ components: [
+            { area: 'A', name: 'Side', material: 'PB', thickness: 18, length: 700, width: 500, qty: 1, ebt: '1l', grooving: 'Grooving' },
+            { area: 'A', name: 'Shelf', material: 'PB', thickness: 18, length: 700, width: 300, qty: 1, ebt: '1l' }], hardware: [], holeSchedule: [] },
+            { joNumber: 'JO-T-G1' });
+          return jo.parts.map((p) => p.route.join('>'));
+        }, ['CUT>EBB>GRV>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK']);
+        check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
+          const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
+            thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });
+          const id = jo.parts[0].barcodes[0];
+          return /^[A-Z0-9-]+-[A-Z]+-[A-Z0-9_]+-[A-Z]+-\d\d\/\d\d$/.test(id) ? 'clean' : id;
+        }, 'clean');
       }
       return out;
     }

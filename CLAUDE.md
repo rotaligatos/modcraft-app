@@ -11922,3 +11922,20 @@ needs a company filter, company must be visible per person, and later phases mus
 scoping (a company admin managing only their company is a likely future ask). Compare companies via
 `app_normalize_company` / `_canonCompany` keys, never exact strings ("Module System" singular is
 live on 8 users).
+
+## What was changed on 2026-09-26 (session 3 — first end-to-end run, 4 fixes)
+Ran MARGARITA.xls through import → analysis → Job Order → approval → KEYSTONE release → PMES (release
+in a rolled-back transaction, as Rommel, under the new KEYSTONE list). Figures matched the hand count
+(161.33 m EB, 20.61 m grooving). Four faults fixed, each with a smoke check proven to fail pre-fix:
+1. **Edge-tape lines matched boards.** "ACACIA" tape scored acacia boards highest; on a thin catalogue
+   it auto-picked a board (81 m tape → 81 boards). Tape rows now search `_prodEdgeTapeCatalog()`
+   (edge-band items only; `catalogMatchRow` gained an `isMaterialOverride` arg).
+2. **A chosen SKU was thrown away.** `_cutListToAnalysis` now sets `catalogName` when the panel's
+   material is exactly a catalogue name (picked, mapped at import, or remembered); it survives
+   `_prodNormalizeComponent`, `prodComputeBom` carries it per group (blank if pieces disagree), and
+   `prodBuildSummary` resolves that row on arrival (candidates kept so it can be changed).
+3. **Grooved pieces skipped any station.** New PMES stage **GRV** (sort 85); `_joRoute` adds it after
+   edge banding when `c.grooving` is set; `adm_release_gate`'s hard-coded stage order now includes
+   GRV; PMES process JO (`process-jo.js`, local) shows a Grooving column for GRV.
+4. **Barcode IDs had spaces** ("P1 MASTERS BEDROOM"). Component part of the ID is now `[A-Z0-9_]`.
+Not tested: PMES process sheets on screen, and a real signed-in lock (need a live login).
