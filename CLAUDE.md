@@ -12178,6 +12178,11 @@ the test JO `36665M/L` live (Piece 1 confirmed in his hands).
 capacity" card; pure scheduler `schedule.js` with `schedule.test.js`, 14/14). **Capacity's home is
 PMES now** — Modcraft's Services capacity was only the seed; ASM/QC/PACK/CURE must be typed in PMES.
 Modcraft does NOT read it back yet (that is Piece 4 territory).
+Also fixed: the PMES IE "Machine | Services | Capacity" sheet was empty — Modcraft never wrote capacity into
+`price_services` (only CONFIG `serviceCapacity`). DB functions `pmes_sync_services_from_modcraft()` +
+`pmes_auto_assign_service_machines()` now mirror it and group services under machines, re-run by triggers
+on every Modcraft Save settings and every Price DB rewrite. ⚠ Any future change to how Modcraft stores
+service capacity must keep CONFIG `serviceCapacity` keyed by service name, or the mirror goes blank.
 **Agreed order next:** Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
 then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
 capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
