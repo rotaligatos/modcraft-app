@@ -12129,4 +12129,22 @@ column on hardware · grooving has a PMES stage now but PMES scan/process screen
 - **Live test 2026-09-26 (Rommel approved):** Andrei Salvador row 6 renamed "(test)" then back — Sheet row
   byte-identical to the original after, DB copy followed both times, 2 MODCRAFT-SHEET log rows, no hash in the log.
   Also fixed: boot() was storing the Supabase provider_token as the Sheet token (wrong Google project, 403).
-Next: phase 3 (shadow sign-in).
+
+## What was changed on 2026-09-26 (session 11 — Command Center phase 3: shadow sign-in, LIVE)
+- **Sign-in still uses the Sheet.** After it succeeds, `_shadowUserCheck()` (scheduled 3 s after
+  `gShowApp`, waits up to 60 s for Supabase) compares the person's Sheet row with `public.users`
+  (`_shadowUserDiffs`, same fields as the Command Center's `mcDiffs`) and their PIN with `user_pins`
+  via RPC `mc_shadow_pin` (answers same/differs/not-copied — never a hash), then records it with RPC
+  `mc_shadow_report` into new table **`user_shadow_log`** (admin-tier read; no direct inserts). It
+  cannot touch `currentRole`/`currentUserAcc` — pinned by a smoke check.
+- **PINs kept in step:** `submitSetPin` also calls `mc_set_own_pin` (own row only); `resetUserPin`
+  also clears the copy via `cc_sync_user_pins`. Without this every new PIN would be a permanent diff.
+- **Command Center → Modcraft users** gained a "Shadow sign-in — last 14 days" card (per person:
+  checks, disagreements, last result with the fields that differed).
+- **First live record 2026-09-26 09:44 UTC: Rommel, ok=true, no diffs.**
+- ⚠ **Phase 4 (switch sign-in to the database) only after a clean stretch** — check the card, not
+  memory. A "differs" row means the two stores drifted: fix the row (Edit, or Update the database
+  copy) and watch the next sign-in. Disagreements from users who never connect to Supabase simply
+  never get recorded (the check needs `supaReady()`), so a quiet log is not proof for THEM.
+Next: watch the shadow log 1–2 weeks; then phase 4 (needs a security-definer PIN check against
+`user_pins` — never a client read), then phase 5 (full admin parity).
