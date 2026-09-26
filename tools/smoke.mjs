@@ -4839,10 +4839,14 @@ const PROFILES = {
             // With a priced raw board in the Price Database, the HPL build suggests exactly that.
             w.dbMaterials = w.dbMaterials.concat([{ name: 'Ordinary Plywood 4x8 (18mm)', unit: 'pc', price: 1500 }]);
             const raw = w.CLR.suggestFor({ key: 't-hpl2', text: '18MM PLYWOOD RAW BOARD / HPL WALNUT', thk: 18 }).slice();
-            return { colours: rd.colours, subs: rd.subs, plain, hpl, noColour, raw };
+            // The Price Database's own naming for MDF/PB: "Raw Boards 4x8 18mm MDF"; 4x8 first, MR only when asked.
+            w.dbMaterials = w.dbMaterials.concat(['Raw Boards 2x8 18mm MDF', 'Raw Boards 4x8 MR 18mm MDF', 'Raw Boards 4x8 18mm MDF']
+              .map((name) => ({ name, unit: 'pc', price: 1000 })));
+            const mdf = w.CLR.suggestFor({ key: 't-hpl3', text: '18MM MDF RAW BOARD / HPL WHITE', thk: 18 }).slice();
+            return { colours: rd.colours, subs: rd.subs, plain, hpl, noColour, raw, mdf };
           } finally { w.dbMaterials = keep; }
         }, { colours: ['walnut'], subs: ['pb'], plain: 'Warm White PB 4x8 2F (15mm, Matte)', hpl: 0, noColour: 0,
-             raw: ['Ordinary Plywood 4x8 (18mm)'] });
+             raw: ['Ordinary Plywood 4x8 (18mm)'], mdf: ['Raw Boards 4x8 18mm MDF', 'Raw Boards 2x8 18mm MDF'] });
         check('Tapes: a client tape colour gets edge-band suggestions, and a mapped tape arrives resolved', () => {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = ['Acacia PB 4x8 2F (18mm, Stipple)', 'Acacia 2mmx54mm Matte PVC Premium Edgeband',
