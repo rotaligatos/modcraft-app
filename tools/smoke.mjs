@@ -133,6 +133,37 @@ const PROFILES = {
           return [/mc_set_own_pin/.test(String(window.submitSetPin)), /cc_sync_user_pins/.test(String(window.resetUserPin))];
         }, [true,true]);
       }
+      /* PMES Piece 4: capacity is OWNED BY PMES. Modcraft reads it per company and its Services
+         page stops accepting edits to the capacity fields. Pins the read path and the read-only gate. */
+      if (typeof window.supaLoadPmesCapacity === 'function') {
+        check('_pmesCompanyCode maps any spelling to the PMES code', () =>
+          [window._pmesCompanyCode('Module System and Services, Inc.'), window._pmesCompanyCode('Cebu World Laminates'), window._pmesCompanyCode('World Class Laminate, Inc.'), window._pmesCompanyCode('')],
+          ['MSSI','CWLI','WCLI','']);
+        check('supaLoadPmesCapacity applies the PMES rows to SERVICE_CAPACITY and resyncs SERVICES', () => {
+          const w = window, keep = { supa: w.supa, ready: w.supaReady, db: w.dbServices, cap: w.SERVICE_CAPACITY, flag: w.CAPACITY_FROM_PMES, svcs: w.SERVICES };
+          let applied = null;
+          try {
+            w.CAPACITY_FROM_PMES = true; w.supaReady = () => true;
+            // a thenable that runs its callback synchronously, so the check can inspect the result
+            w.supa = { rpc: () => ({ then: (fn) => { fn({ data: [{ service_name: 'Cutting X', svc_type: 'production', machine_type: 'Panel Saw', teams: 2, shifts_per_day: 1, output_per_shift: 640 }] }); return { catch: () => {} }; } }) };
+            w.dbServices = [{ name: 'Cutting X', unit: 'lm', price: 10 }]; w.SERVICE_CAPACITY = {};
+            w.supaLoadPmesCapacity();
+            const cap = w.SERVICE_CAPACITY['Cutting X'] || {}, svc = w.SERVICES.find((x) => x.name === 'Cutting X') || {};
+            applied = [cap.teams, cap.outputPerShift, svc.machineType, svc.teams, w._pmesCapacityLoaded];
+          } finally { w.supa = keep.supa; w.supaReady = keep.ready; w.dbServices = keep.db; w.SERVICE_CAPACITY = keep.cap; w.CAPACITY_FROM_PMES = keep.flag; w.SERVICES = keep.svcs; }
+          return applied;
+        }, [2, 640, 'Panel Saw', 2, true]);
+        check('Settings → Services: capacity inputs are disabled while capacity comes from PMES', () => {
+          const src = String(window.renderServicesSettings);
+          return /capRO\s*=\s*CAPACITY_FROM_PMES/.test(src) && src.indexOf("'<input'+capRO+' type=\"number\"") >= 0;
+        }, true);
+        check('Job Orders panel asks PMES for production progress', () => String(window.openJobOrders).indexOf('_joLoadProduction(base)') >= 0 && typeof window._joProductionHtml === 'function', true);
+        check('_joProductionHtml: a returned JO shows the note; per-stage confirmed/planned', () => {
+          const h = window._joProductionHtml([{ job_code: 'JO-9', status: 'in_production', company: 'MSSI', review: 'returned', returned_to: 'modcraft', return_note: 'wrong backing',
+            stages: [{ code: 'CUT', label: 'Cutting', status: 'in_progress', planned: 30, confirmed: 12, pending: 0 }] }]);
+          return [/wrong backing/.test(h), h.indexOf('12/30') >= 0, /Returned/.test(h)];
+        }, [true, true, true]);
+      }
       check('undo-approval button exists and is exempt from the lock sweep', () => {
         const b = document.getElementById('undo-iqappr-btn');
         return { exists: !!b, exempt: b ? b.getAttribute('data-lock-exempt') : null,

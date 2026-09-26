@@ -4656,7 +4656,13 @@ var logisticsDb={materials:[],trucks:[]};
 var SUPA_URL='https://nkpekroogqsmfilypowd.supabase.co';
 var SUPA_ANON_KEY='sb_publishable_jpp6ZiFup3v0VVRJtjCOTQ_bF-SEpt4';
 var USE_SUPABASE=true;      // READ quotations+state from Supabase first, fall back to Sheets (flipped 2026-07-02 after live migration verified: 149/149 headers, 119/119 states, 0 orphans)
-var SUPA_DUAL_WRITE=true;   // when true, ALSO write quotations+state to Supabase (safe/additive — Sheets stays primary)
+var SUPA_DUAL_WRITE=true;
+// Capacity (teams / shifts / output per shift / type / machine) is OWNED BY PMES since 2026-09-26
+// (pmes_service_capacity, per company). When true, Modcraft READS it for the signed-in company and
+// the fields in Settings → Services are read-only. Turn off only to fall back to CONFIG's copy.
+var CAPACITY_FROM_PMES=true;
+var _pmesCapacityLoaded=false;   // true once a PMES read succeeded this session (for the Settings note)
+var _pmesCapacityCompany='';     // the company code the figures came from   // when true, ALSO write quotations+state to Supabase (safe/additive — Sheets stays primary)
 var supa=null;             // supabase-js client
 var supaSession=null;      // current Supabase auth session (null until Google sign-in completes)
 var _supaPreOpenedPopup=null; // popup pre-opened synchronously on the Sign-in click, for the one-time Supabase auto-connect (see gSignIn/_supaAutoConnect)
@@ -20818,7 +20824,10 @@ function renderServicesSettings() {
     + '</div></div>'
     + (_svcReorderMode
         ? '<div style="font-size:11px;color:var(--navy);background:var(--wash-navy);border:.5px solid #c7d2fe;border-radius:6px;padding:6px 10px;margin-bottom:10px"><i class="ti ti-arrows-sort"></i> Reorder mode ON — drag <i class="ti ti-grip-vertical"></i> any row to reorder'+(_svcGroupByMachine?', or drop it onto a machine group to reassign it':'')+'. Click "Done reordering" when finished.</div>'
-        : '<div style="font-size:11px;color:var(--text2);margin-bottom:10px">Service catalog — name, UOM, and capacity. Click <b>Edit order</b> to drag-reorder rows. Price, Op Cost, and Margin are managed in <b>Settings → Cost Breakdown</b>.</div>');
+        : '<div style="font-size:11px;color:var(--text2);margin-bottom:10px">Service catalog — name, UOM, and capacity. Click <b>Edit order</b> to drag-reorder rows. Price, Op Cost, and Margin are managed in <b>Settings → Cost Breakdown</b>.</div>')
+    + (CAPACITY_FROM_PMES ? '<div style="font-size:11px;color:var(--navy);background:var(--wash-navy);border:.5px solid #c7d2fe;border-radius:6px;padding:6px 10px;margin-bottom:10px"><i class="ti ti-building-factory-2"></i> <b>Capacity is set in PMES</b> (IE → capacity sheet), per company'
+        + (_pmesCapacityLoaded ? ' — showing <b>'+escHtml(_pmesCapacityCompany)+'</b>' : ' — <b>not connected</b>, showing the last copy saved here')
+        + '. Type, machine, teams, shifts and output/shift are read-only on this page.</div>' : '');
 
   // Shared datalist of machine names already used, for autocomplete consistency
   var machines = [];
@@ -20871,11 +20880,12 @@ function renderServicesSettings() {
       rh += '<input list="svc-machine-list" value="'+escHtml(s.machineType||'')+'" oninput="_svcCapSet('+i+',\'machineType\',this.value)" placeholder="Machine" style="height:30px;font-size:12px">';
       rh += '<span></span><span></span><span></span>';
     } else {
-      rh += '<select onchange="_svcCapSet('+i+',\'type\',this.value)" style="height:30px;font-size:12px">'+typeOpts+'</select>';
-      rh += '<input list="svc-machine-list" value="'+escHtml(s.machineType||'')+'" oninput="_svcCapSet('+i+',\'machineType\',this.value)" placeholder="Machine" style="height:30px;font-size:12px">';
-      rh += '<input type="number" min="1" value="'+(s.teams||1)+'" oninput="_svcCapSet('+i+',\'teams\',+this.value||1)" style="height:30px;font-size:13px;text-align:center">';
-      rh += '<input type="number" min="1" max="3" value="'+(s.shiftsPerDay||1)+'" oninput="_svcCapSet('+i+',\'shiftsPerDay\',+this.value||1)" style="height:30px;font-size:13px;text-align:center">';
-      rh += '<input type="number" min="0" value="'+(s.outputPerShift||'')+'" oninput="_svcCapSet('+i+',\'outputPerShift\',+this.value||0)" style="height:30px;font-size:13px;text-align:center" placeholder="0">';
+      var capRO = CAPACITY_FROM_PMES ? ' disabled title="Set in PMES → IE → capacity sheet"' : '';
+      rh += '<select'+capRO+' onchange="_svcCapSet('+i+',\'type\',this.value)" style="height:30px;font-size:12px">'+typeOpts+'</select>';
+      rh += '<input'+capRO+' list="svc-machine-list" value="'+escHtml(s.machineType||'')+'" oninput="_svcCapSet('+i+',\'machineType\',this.value)" placeholder="Machine" style="height:30px;font-size:12px">';
+      rh += '<input'+capRO+' type="number" min="1" value="'+(s.teams||1)+'" oninput="_svcCapSet('+i+',\'teams\',+this.value||1)" style="height:30px;font-size:13px;text-align:center">';
+      rh += '<input'+capRO+' type="number" min="1" max="3" value="'+(s.shiftsPerDay||1)+'" oninput="_svcCapSet('+i+',\'shiftsPerDay\',+this.value||1)" style="height:30px;font-size:13px;text-align:center">';
+      rh += '<input'+capRO+' type="number" min="0" value="'+(s.outputPerShift||'')+'" oninput="_svcCapSet('+i+',\'outputPerShift\',+this.value||0)" style="height:30px;font-size:13px;text-align:center" placeholder="0">';
     }
     rh += '<button class="btn" onclick="removeService('+i+')" style="height:30px;width:34px;padding:0;justify-content:center;color:var(--coral)" title="Remove"><i class="ti ti-trash"></i></button>';
     rh += '</div>';
@@ -32484,6 +32494,29 @@ function _initPriceDBConfirmed() {
     });
 }
 
+// Company code PMES keys capacity by (MSSI / WCLI / CWLI), from any spelling of the company name.
+function _pmesCompanyCode(co){
+  var k=normalizeCompanyKey(co); return k==='cwl'?'CWLI':k==='mssi'?'MSSI':k==='wcl'?'WCLI':'';
+}
+// Pull this company's capacity from PMES into SERVICE_CAPACITY (only the capacity fields — the
+// cost-breakdown fields stay in CONFIG), then rebuild SERVICES. Silent no-op when not connected:
+// the CONFIG copy is then what shows, exactly as before.
+function supaLoadPmesCapacity(cb){
+  if(!CAPACITY_FROM_PMES||typeof supaReady!=='function'||!supaReady()){ if(cb) cb(false); return; }
+  var code=_pmesCompanyCode(currentUserCompany)||'MSSI';
+  supa.rpc('modcraft_service_capacity',{p_company:code}).then(function(r){
+    if(r.error||!r.data||!r.data.length){ if(r.error) console.warn('[pmes] capacity read failed:',r.error.message); if(cb) cb(false); return; }
+    r.data.forEach(function(x){
+      var sc=SERVICE_CAPACITY[x.service_name]=SERVICE_CAPACITY[x.service_name]||{};
+      sc.teams=+x.teams||0; sc.shiftsPerDay=+x.shifts_per_day||0; sc.outputPerShift=+x.output_per_shift||0;
+      if(x.svc_type) sc.type=x.svc_type; if(x.machine_type) sc.machineType=x.machine_type;
+    });
+    _pmesCapacityLoaded=true; _pmesCapacityCompany=code;
+    console.log('[pmes] capacity for '+code+': '+r.data.length+' service(s)');
+    _syncServicesFromDb();
+    if(cb) cb(true);
+  }).catch(function(e){ console.warn('[pmes] capacity read threw',e); if(cb) cb(false); });
+}
 function _syncServicesFromDb(){
   // Merge dbServices (name/unit/price from Price DB) with SERVICE_CAPACITY (type/teams/output)
   // Result goes into SERVICES so Settings → Services tab shows the real list
@@ -32800,6 +32833,7 @@ function _loadPriceDbFromMirror(showFeedback){
       dbTemplates=data.templates.map(function(r){return {cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0};});
       _applyMtoTags();
       _syncServicesFromDb();
+      supaLoadPmesCapacity();
       _syncHardwareFromDb();
       dbLoaded=true;
       renderPriceDbSettings();
@@ -32830,6 +32864,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
       dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
       _applyMtoTags();
       _syncServicesFromDb();
+      supaLoadPmesCapacity();
       _syncHardwareFromDb();
       dbLoaded=true;
       renderPriceDbSettings(); // always refresh settings panel counts
@@ -37677,13 +37712,51 @@ function openJobOrders(){
         });
         h+='</tbody></table>';
       }
-      el('ov-jo-body').innerHTML=h;
+      el('ov-jo-body').innerHTML=h+'<div id="ov-jo-prod"></div>';
+      _joLoadProduction(base);
       // A lock whose reservation failed (or a quotation locked before Job Orders existed) can be
       // reserved by hand — only while the Initial Quotation is locked, the same moment it would
       // have happened automatically.
       if(qLocked) el('ov-jo-foot').innerHTML='<button class="btn" onclick="_joReserveNow()"><i class="ti ti-plus"></i>Reserve a new version now</button>'
         +'<button class="btn" onclick="closeModal(\'ov-jo\')">Close</button>';
     });
+}
+// What production has done with this quotation's Job Orders (PMES): review gate, per-process
+// planned vs confirmed pieces, returns with their note. Read-only here — PMES is where it changes.
+function _joLoadProduction(serial){
+  var box=el('ov-jo-prod'); if(!box) return;
+  supa.rpc('modcraft_jo_progress',{p_serial:serial}).then(function(r){
+    var jobs=(r&&r.data)||[];
+    if(r&&r.error){ box.innerHTML='<div style="font-size:11px;color:var(--text2);margin-top:10px">Production status unavailable: '+escHtml(r.error.message)+'</div>'; return; }
+    box.innerHTML=_joProductionHtml(jobs);
+  }).catch(function(e){ box.innerHTML='<div style="font-size:11px;color:var(--text2);margin-top:10px">Production status unavailable.</div>'; });
+}
+function _joProductionHtml(jobs){
+  if(!jobs.length) return '<div style="font-size:11px;color:var(--text2);margin-top:12px"><i class="ti ti-building-factory-2"></i> Not in production yet — a Job Order reaches PMES when KEYSTONE releases it.</div>';
+  var revLbl={received:['amber','Received — waiting for staff check'],checked:['navy','Checked — waiting for supervisor'],approved:['teal','Approved for the line'],returned:['coral','Returned']};
+  var h='<div style="margin-top:14px;font-weight:600;font-size:12px"><i class="ti ti-building-factory-2"></i> In production (PMES)</div>';
+  jobs.forEach(function(j){
+    var rv=revLbl[j.review]||['gray',j.review||'—'];
+    h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:8px">'
+      +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><div><b>'+escHtml(j.job_code)+'</b> <span class="pill pill-muted">'+escHtml(j.company||'')+'</span> <span class="pill pill-muted">'+escHtml(String(j.status||'').replace(/_/g,' '))+'</span></div>'
+      +'<span class="pill pill-'+rv[0]+'">'+escHtml(rv[1])+(j.review==='returned'&&j.returned_to?' to '+escHtml(j.returned_to):'')+'</span></div>'
+      +(j.review==='returned'&&j.return_note?'<div style="font-size:11px;color:var(--pill-coral);margin-top:4px"><b>Production says:</b> '+escHtml(j.return_note)+'</div>':'')
+      +(j.approved_at?'<div style="font-size:10px;color:var(--text2);margin-top:2px">Approved '+escHtml(fmtDT(j.approved_at))+(j.approved_by?' by '+escHtml(j.approved_by):'')+'</div>':'');
+    var st=j.stages||[];
+    if(st.length){
+      h+='<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">';
+      st.forEach(function(s){
+        var pct=s.planned?Math.min(100,Math.round(s.confirmed/s.planned*100)):0;
+        var col=s.status==='complete'?'var(--teal)':s.confirmed>0?'var(--amber)':'var(--border)';
+        h+='<div style="min-width:120px;font-size:11px"><div><b>'+escHtml(s.label||s.code)+'</b> '+s.confirmed+'/'+s.planned+(s.pending?' <span style="color:var(--text2)">(+'+s.pending+' unconfirmed)</span>':'')+'</div>'
+          +'<div style="background:var(--card2);border-radius:4px;height:5px;margin-top:3px;overflow:hidden"><div style="background:'+col+';height:100%;width:'+pct+'%"></div></div></div>';
+      });
+      h+='</div>';
+      if(j.last_output) h+='<div style="font-size:10px;color:var(--text2);margin-top:4px">Last confirmed output '+escHtml(j.last_output)+'</div>';
+    }
+    h+='</div>';
+  });
+  return h;
 }
 function _joReserveNow(){
   if(!qLocked){ showToast('Lock the Initial Quotation first.'); return; }
