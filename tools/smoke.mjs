@@ -4847,6 +4847,21 @@ const PROFILES = {
           } finally { w.dbMaterials = keep; }
         }, { colours: ['walnut'], subs: ['pb'], plain: 'Warm White PB 4x8 2F (15mm, Matte)', hpl: 0, noColour: 0,
              raw: ['Ordinary Plywood 4x8 (18mm)'], mdf: ['Raw Boards 4x8 18mm MDF', 'Raw Boards 2x8 18mm MDF'] });
+        check('Grooving: a plain "Grooving" is priced by rule — board type, or sliding/router/insert/handgrab when stated', () => {
+          const w = window, keep = w.SERVICES;
+          w.SERVICES = ['Grooving (3mm width melamine)', 'Grooving (3mm width compact lam)', 'Grooving (minimum charge)',
+            'Router Grooving', 'Sliding Door Grooving', 'Groove for Insert', 'Handgrab Groove', 'Routered Handgrab / Finger handgrab']
+            .map((name) => ({ name, unit: 'lm', price: 20 }));
+          try {
+            const pick = (b, h) => (w._pickGroovingService(b, h) || {}).name;
+            const a = w._cutListToAnalysis({ panels: [{ group: 'A', part: 'Back', mat: 'Real White PB 4x8 2F (18mm, Matte)', th: 18,
+              L: 1000, W: 500, qty: 2, ebt: '', svcs: ['Grooving × 2 lm'] }], hpl: [], hardware: [] });
+            return { row: (a.extraServices[0] || {}).service, plain: pick('PB white', ''), compact: pick('Compact Laminate 12mm', ''),
+                     sliding: pick('PB', 'sliding door'), router: pick('PB', '10mm groove'), insert: pick('PB', 'glass insert'),
+                     handgrab: pick('PB', 'handgrab') };
+          } finally { w.SERVICES = keep; }
+        }, { row: 'Grooving (3mm width melamine)', plain: 'Grooving (3mm width melamine)', compact: 'Grooving (3mm width compact lam)',
+             sliding: 'Sliding Door Grooving', router: 'Router Grooving', insert: 'Groove for Insert', handgrab: 'Handgrab Groove' });
         check('Tapes: a client tape colour gets edge-band suggestions, and a mapped tape arrives resolved', () => {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = ['Acacia PB 4x8 2F (18mm, Stipple)', 'Acacia 2mmx54mm Matte PVC Premium Edgeband',

@@ -11989,3 +11989,16 @@ only a *priced raw board* from the Price Database — ⚠ **the Price Database h
 those rows show an amber note to add one.
 Result: **30 of 36 suggestible rows (83%)**; the other 11 are 9 HPL (no raw board exists) + 2 no-colour.
 Remaining misses were thicknesses absent from the test slice. Every mapping is still remembered.
+
+## What was changed on 2026-09-26 (session 7 — raw boards found, grooving priced by rule)
+- **Raw boards exist** as "Raw Boards 4x8 18mm MDF/PB/HDF" (+MR, 2x8/4x8/6x8). HPL-on-MDF/PB rows now
+  suggest them (4x8 first, MR only when the client says MR) — `6c48f24`. **No raw plywood in the
+  Supabase copy** (153,383 rows, refreshed 23 Sep; nothing named "marine"). Rommel says marine plywood
+  is in the database — likely added to the Sheet after 23 Sep (auto-resyncs on the next signed-in load)
+  or he saw the built-in unpriced "Marine Plywood 18mm". Once priced, plywood HPL rows suggest it.
+- **Grooving price by rule** (`_pickGroovingService`, `_svcByExactName`): a plain "Grooving" becomes
+  "Grooving (3mm width melamine)", or the compact-laminate price when the board is compact laminate;
+  "sliding" → Sliding Door Grooving, router / 8–12mm → Router Grooving, insert → Groove for Insert,
+  handgrab → Handgrab Groove (from the service chip, the row's remarks, and the part name). Found by
+  pattern in the live catalogue, so renames still resolve. The pick is noted on the component and can
+  be changed in the summary. MARGARITA's 20.61 m now arrives priced, not flagged.
