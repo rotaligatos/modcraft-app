@@ -4680,22 +4680,51 @@ const PROFILES = {
          bander without a trimmer. */
       if (typeof window._joBuild === 'function') {
         const comps = [
-          { area: 'KITCHEN', name: 'Side', material: 'PB', color: 'W', thickness: 18, length: 720, width: 560, qty: 2, ebt: '1s/1l', edgeTape: 'White 1mm PVC', grain: 'length' },
+          { area: 'KITCHEN', name: 'Side', material: 'PB', color: 'W', thickness: 18, length: 720, width: 560, qty: 2, ebt: '1s/1l', edgeTape: 'White 0.4mm PVC', grain: 'length' },
           { area: 'KITCHEN', name: 'Shelf', material: 'PB', color: 'W', thickness: 18, length: 800, width: 400, qty: 1, ebt: '4s', edgeTape: 'White PVC', grain: 'none' },
           { area: 'KITCHEN', name: 'Back', material: 'MDF', color: 'W', thickness: 6, length: 700, width: 500, qty: 1, ebt: '', edgeTape: '', grain: 'none' }];
         const res = { components: comps, hardware: [], holeSchedule: [] };
-        check('Job Order: cut = finished on a standard bander; minus tape per banded edge without a trimmer', () => {
+        /* Plant, 2026-09-26: tape 1mm and up always goes on the trimming bander; only thinner tape
+           may go on the old no-trim machine (overflow), and then the cut is smaller by the tape. */
+        check('Job Order: per-piece bander — only tape under 1mm goes on the old machine and is cut smaller', () => {
           const t = window._joBuild(res, { joNumber: 'JO-T-V1', bander: 'trimmer' });
-          const n = window._joBuild(res, { joNumber: 'JO-T-V1', bander: 'no_trimmer', defaultTapeMm: 2 });
+          const n = window._joBuild(res, { joNumber: 'JO-T-V1', bander: 'no_trimmer' });
+          const thick = window._joBuild({ components: [Object.assign({}, comps[0], { edgeTape: 'White 1mm PVC' })], hardware: [], holeSchedule: [] },
+            { joNumber: 'JO-T-V1', bander: 'no_trimmer' });
           return { trimmerSame: t.parts.every(p => p.cutL === p.L && p.cutW === p.W),
-                   side: [n.parts[0].cutL, n.parts[0].cutW],   // 1mm tape, one edge each way
-                   shelf: [n.parts[1].cutL, n.parts[1].cutW],  // unstated tape -> 2mm default, 2 each way, flagged
+                   side: [n.parts[0].cutL, n.parts[0].cutW, n.parts[0].bander],      // 0.4mm tape: old machine
+                   oneMm: [thick.parts[0].cutL, thick.parts[0].cutW, thick.parts[0].bander], // 1mm: trimmer
+                   shelf: [n.parts[1].cutL, n.parts[1].cutW, n.parts[1].bander],     // unstated: trimmer, flagged
                    shelfFlagged: n.parts[1].flags.some(f => /tape thickness not stated/.test(f)),
-                   back: [n.parts[2].cutL, n.parts[2].cutW],   // unbanded: unchanged
+                   back: [n.parts[2].cutL, n.parts[2].cutW, n.parts[2].bander],      // unbanded
                    pieces: t.pieceCount, uniqueCodes: new Set([].concat(...t.parts.map(p => p.barcodes))).size,
                    scan: t.parts[0].scan[1] };
-        }, { trimmerSame: true, side: [719, 559], shelf: [796, 396], shelfFlagged: true, back: [700, 500],
+        }, { trimmerSame: true, side: [719.6, 559.6, 'no_trimmer'], oneMm: [720, 560, 'trimmer'],
+             shelf: [800, 400, 'trimmer'], shelfFlagged: true, back: [700, 500, ''],
              pieces: 4, uniqueCodes: 4, scan: 'T-V1-P1-02' });
+        check('HPL written in the colour (imported client labels) is still detected', () => {
+          const w = window;
+          const comps = [{ area: 'A', name: 'Door', material: 'Plywood', color: 'raw hpl silky off white', thickness: 18,
+                           length: 700, width: 400, qty: 1, faces: 2, ebt: '' }];
+          const bm = w.prodComputeBom(comps)[0];
+          const jo = w._joBuild({ components: comps, hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1' });
+          return { bomHpl: bm.hpl, route: jo.parts[0].route.join('>') };
+        }, { bomHpl: true, route: 'CUT>MHPL>ASM>QC>PACK' });
+        check('Job Order: route per piece — special cut, HPL order, bander, drilling', () => {
+          const w = window;
+          const r = w._joBuild({ components: [
+              { area: 'K', name: 'HG tapering door', material: 'Plywood HPL', thickness: 18, length: 700, width: 400, qty: 1, ebt: '4s', edgeTape: 'White 1mm', notes: 'HPL' },
+              { area: 'K', name: 'Side', material: 'MDF HPL', thickness: 18, length: 700, width: 560, qty: 1, ebt: '1l', edgeTape: '1mm', notes: 'HPL' },
+              { area: 'K', name: 'Shelf', material: 'PB', thickness: 18, length: 700, width: 300, qty: 1, ebt: '' }],
+            hardware: [], holeSchedule: [{ component: 'Side', holeType: 'Hinges', qty: 2, diameter: 35 }] },
+            { joNumber: 'JO-T-V1', bander: 'trimmer' });
+          const cutFirst = w._joBuild({ components: [
+              { area: 'K', name: 'Side', material: 'MDF HPL', thickness: 18, length: 700, width: 560, qty: 1, ebt: '', notes: 'HPL' }],
+            hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1', hplOrder: 'cut_first' });
+          return { special: r.parts[0].special, routes: r.parts.map(p => p.route.join('>')), mdfCutFirst: cutFirst.parts[0].route.join('>') };
+        }, { special: 'TAPERING',
+             routes: ['SCUT>MHPL>EBB>ASM>QC>PACK', 'HPL>CURE>CUT>EBB>DRL>ASM>QC>PACK', 'CUT>ASM>QC>PACK'],
+             mdfCutFirst: 'CUT>MHPL>ASM>QC>PACK' });
         check('Job Order: same content = same signature across versions; a change breaks it', () => {
           const a = window._joBuild(res, { joNumber: 'JO-T-V1' }), b = window._joBuild(res, { joNumber: 'JO-T-V2' });
           const c = window._joBuild({ components: comps.map((x, i) => i ? x : Object.assign({}, x, { qty: 3 })), hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1' });

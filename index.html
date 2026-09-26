@@ -4346,6 +4346,9 @@ var prodSettings = {
   machineType: 'panelsaw',
   // Edge bander for the Job Order's cut sizes: 'trimmer' (normal — cut = finished) or 'no_trimmer'.
   banderType: 'trimmer',
+  // HPL on MDF/PB: 'laminate_first' (whole boards, then cut — the plant default) or 'cut_first'
+  // (the client asked for cutting). Plywood is always cut first. Per job, stamped on the result.
+  hplOrder: 'laminate_first',
   ebtWastage: 5,
   // Production allowance added to cutting length (%). Plant default is 12; Rommel chose 10.
   cutAllowance: 10,
@@ -35496,7 +35499,12 @@ var MCL=(function(){
       +'<label style="font-size:11px;color:var(--text2)" title="Decides the cut sizes on the Job Order">Edge bander'
       +'<select onchange="MCL.setBander(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
       +'<option value="trimmer"'+(prodSettings.banderType!=='no_trimmer'?' selected':'')+'>Standard (trims) — cut = finished</option>'
-      +'<option value="no_trimmer"'+(prodSettings.banderType==='no_trimmer'?' selected':'')+'>No trimmer — cut smaller by tape</option></select></label>'
+      +'<option value="no_trimmer"'+(prodSettings.banderType==='no_trimmer'?' selected':'')+'>Old machine for thin tape — cut smaller by tape</option></select></label>'
+      // HPL on MDF/PB is laminated as whole boards unless the client asked for cutting (plywood is always cut first).
+      +'<label style="font-size:11px;color:var(--text2)" title="Only affects HPL on MDF/PB. Plywood HPL is always cut first, then laminated by hand.">HPL on MDF/PB'
+      +'<select onchange="MCL.setHplOrder(this.value)" style="margin-left:5px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
+      +'<option value="laminate_first"'+(prodSettings.hplOrder!=='cut_first'?' selected':'')+'>Laminate whole boards, then cut</option>'
+      +'<option value="cut_first"'+(prodSettings.hplOrder==='cut_first'?' selected':'')+'>Cut first (client asked)</option></select></label>'
       +'<button class="btn" style="font-size:11px;padding:6px 10px" onclick="MCL.downloadTemplate()" title="A ready-made Excel workbook with real dropdowns on Part/Edge Band/Services — the same one the MSSI website offers"><i class="ti ti-file-spreadsheet"></i>Download Excel template</button>'
       +'<label class="btn" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Upload a filled-in copy of the template"><i class="ti ti-upload"></i>Upload filled Excel'
       +'<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="MCL.uploadExcel(this)"></label>'
@@ -35870,6 +35878,8 @@ var MCL=(function(){
     // Stamped on the loaded result too, so a Job Order reserved later from it uses the choice made here.
     setBander:function(v){ prodSettings.banderType=(v==='no_trimmer'?'no_trimmer':'trimmer'); saveProdSettings();
       if(prodState.result) prodState.result._bander=prodSettings.banderType; },
+    setHplOrder:function(v){ prodSettings.hplOrder=(v==='cut_first'?'cut_first':'laminate_first'); saveProdSettings();
+      if(prodState.result) prodState.result._hplOrder=prodSettings.hplOrder; },
     addPanel:function(n){ for(var i=0;i<(n||1);i++) S.panels.push(blankPanel()); rerender(); },
     removePanel:function(i){ S.panels.splice(i,1); rerender(); },
     set:set,
@@ -35972,7 +35982,7 @@ var MCL=(function(){
       if(!cl.panels.length){ showToast('Add at least one panel row first.'); return; }
       var payload=_cutListToAnalysis(cl,null);
       prodLoadStructuredList(payload,'Cutting list — entered in Modcraft');
-      if(prodState.result) prodState.result._bander=prodSettings.banderType||'trimmer';
+      if(prodState.result){ prodState.result._bander=prodSettings.banderType||'trimmer'; prodState.result._hplOrder=prodSettings.hplOrder||'laminate_first'; }
       var flagged=0;
       for(var c=0;c<payload.components.length;c++) if(payload.components[c].needsReview) flagged++;
       try{ logActivity('Cutting list entered in Modcraft loaded into Designers Support — '
@@ -36821,7 +36831,6 @@ function linesToAoa(lines) {
 // that choice sits beside the cutting machine on the Cutting List page. Confirmed by the plant
 // 2026-09-26 (question 7). That older machine is used only when the trimming bander is at capacity,
 // so it is never the default.
-var JO_DEFAULT_TAPE_MM=1;
 
 function _joTapeMm(tape){ var m=String(tape||'').match(/(\d+(?:\.\d+)?)\s*mm/i); return m?+m[1]:0; }
 // Edges banded along each dimension: sc = edges on the width sides, lc = edges on the length sides.
@@ -36879,23 +36888,80 @@ function _joNumber(baseSerial,optionId,version){
   return 'JO-'+String(baseSerial).replace(/^QT-/,'')+(optionId?'-O'+optionId:'')+'-V'+version;
 }
 
+// A piece that can't go through the panel saw as a plain rectangle. Read from the name and the
+// client's remarks — the plant's own JO writes these as "HG TAPERING", "SHAKER DOOR". Returns the
+// words that matched (the reason), or ''.
+var JO_SPECIAL_RE=/\b(taper(ed|ing)?|shakers?|curve[ds]?|curved|radius|radiused|arc(hed)?|l[- ]?shape[d]?|notch(ed)?|mitre[d]?|miter(ed)?|bevel(led|ed)?|angled?|scribe[d]?|irregular|special\s*cut|round(ed)?\s*corner|45\s*°?\s*(cut|deg))\b/i;
+function _joDetectSpecial(c){
+  var t=[c&&c.name,c&&c.notes].filter(Boolean).join(' ');
+  var m=t.match(JO_SPECIAL_RE);
+  return m?m[0].toUpperCase():'';
+}
+// Manual edge banding requested for this piece — a curved or special edge the machines can't band.
+function _joHasManualEb(c,extras){
+  var nm=String(c&&c.name||'').toLowerCase();
+  if(/manual\s*edge/i.test(String(c&&c.notes||''))) return true;
+  return (extras||[]).some(function(x){
+    return x&&/manual\s*edge/i.test(x.service||'')&&nm&&String(x.notes||'').toLowerCase().indexOf(nm)===0;
+  });
+}
+// The production route for one piece, in PMES stage codes (pmes_stage_types). HPL laminated first
+// (MDF/PB whole boards) goes HPL → CURE before cutting; HPL cut first goes to manual lamination
+// after cutting. Edge banding by the machine the piece needs; drilling when it has holes.
+// Grooving has no PMES stage yet, so it is carried on the part, not in the route.
+function _joRoute(o){
+  var r=[];
+  if(o.hplOrder==='laminate_first') r.push('HPL','CURE');
+  r.push(o.special?'SCUT':'CUT');
+  if(o.hplOrder==='cut_first') r.push('MHPL');
+  if(o.bander==='manual') r.push('MEB');
+  else if(o.bander==='no_trimmer') r.push('EBA');
+  else if(o.bander==='trimmer') r.push('EBB');
+  if(o.holes) r.push('DRL');
+  r.push('ASM','QC','PACK');
+  return r;
+}
+
 // Build the Job Order from an analysis result. Pure: no network, no globals written.
 function _joBuild(result,ctx){
   ctx=ctx||{};
   var comps=(result&&result.components)||[];
   var bander=ctx.bander==='no_trimmer'?'no_trimmer':'trimmer';
-  var defTape=+ctx.defaultTapeMm||JO_DEFAULT_TAPE_MM;
   var bom=(result&&result._bom)||prodComputeBom(comps);
+  var hplOrderJob=ctx.hplOrder==='cut_first'?'cut_first':'laminate_first';
+  var holes=(result&&result.holeSchedule)||[], extras=(result&&result.extraServices)||[];
   var parts=[], pieces=0, flagged=0;
   for(var i=0;i<comps.length;i++){
     var c=comps[i], qty=Math.max(1,+c.qty||1), L=+c.length||0, W=+c.width||0;
     var ec=_joEdgeCounts(c.ebt), flags=[];
     var tapeMm=_joTapeMm(c.edgeTape), banded=ec.sc+ec.lc>0, cutL=L, cutW=W;
-    if(bander==='no_trimmer'&&banded){
-      if(!tapeMm){ tapeMm=defTape; flags.push('tape thickness not stated — '+defTape+'mm assumed'); }
+    // Which edge bander this PIECE goes on. Plant (2026-09-26): tape 1mm and up always goes on the
+    // trimming bander; the old no-trim machine takes only thinner tape, and only when the job is
+    // set to use it (overflow). Curved/special edges are banded by hand.
+    var manualEb=_joHasManualEb(c,extras), pieceBander='';
+    if(banded){
+      if(manualEb) pieceBander='manual';
+      else if(bander==='no_trimmer'&&tapeMm>0&&tapeMm<1) pieceBander='no_trimmer';
+      else pieceBander='trimmer';
+      if(bander==='no_trimmer'&&!tapeMm&&!manualEb)
+        flags.push('tape thickness not stated — sent to the trimming bander (cut = finished size)');
+    }
+    if(pieceBander==='no_trimmer'){
       // An edge on a width side shortens the LENGTH; an edge on a length side narrows the WIDTH.
       cutL=Math.round((L-ec.sc*tapeMm)*10)/10; cutW=Math.round((W-ec.lc*tapeMm)*10)/10;
     }
+    // Special cut: typed on the component, else read from its name/remarks.
+    var special=String(c.specialCut||'').trim()||_joDetectSpecial(c);
+    // HPL order. Plywood (and any non-MDF/PB substrate) is cut first and laminated by hand; MDF/PB
+    // is laminated as whole boards first, unless the job says the client asked for cutting (plant,
+    // 2026-09-26, question 9).
+    var isHpl=/\bhpl\b/i.test((c.material||'')+' '+(c.color||'')+' '+(c.notes||'')), hplOrder='';
+    if(isHpl){
+      var sub=_prodParseMaterialDescriptor(c.material||'').substrate;
+      hplOrder=(/^(MDF|PB)/.test(sub||'')&&hplOrderJob==='laminate_first')?'laminate_first':'cut_first';
+    }
+    var hasHoles=holes.some(function(hh){ return hh&&hh.component&&c.name&&String(hh.component).toLowerCase()===String(c.name).toLowerCase(); });
+    var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles});
     if(!ec.known) flags.push('edge code "'+c.ebt+'" not understood');
     if(!(L>0&&W>0)) flags.push('no size — cannot be cut from this list');
     if(c.needsReview) flags.push(c.reviewNote||'flagged for review');
@@ -36915,6 +36981,7 @@ function _joBuild(result,ctx){
     parts.push({p:pn,ref:i,area:area,pmesArea:pa,pmesPart:pp,component:comp,name:c.name||'',material:c.material||'',color:c.color||'',
       texture:c.texture||'',thickness:+c.thickness||0,faces:+c.faces||0,L:L,W:W,qty:qty,cutL:cutL,cutW:cutW,
       ebt:c.ebt||'',sc:ec.sc,lc:ec.lc,tape:c.edgeTape||'',tapeMm:tapeMm,grain:c.grain||'',grooving:c.grooving||'',
+      bander:pieceBander,special:special,hpl:isHpl,hplOrder:hplOrder,holes:hasHoles,route:route,
       notes:c.notes||'',flags:flags,barcodes:codes,scan:scan});
   }
   var boards=bom.map(function(b){ return {material:b.material,color:b.color,texture:b.texture,thickness:b.thickness,
@@ -36926,7 +36993,7 @@ function _joBuild(result,ctx){
     joNumber:ctx.joNumber||'', serial:ctx.serial||'', optionId:ctx.optionId||0, optionLabel:ctx.optionLabel||'',
     version:ctx.version||0, client:ctx.client||'', project:ctx.project||'', company:ctx.company||'',
     preparedBy:ctx.preparedBy||'', createdAt:ctx.createdAt||new Date().toISOString(),
-    bander:bander, defaultTapeMm:defTape,
+    bander:bander, hplOrder:hplOrderJob,
     machine:boards.length?{label:boards[0].machineLabel,kerf:boards[0].kerf,allowRotate:boards[0].allowRotate}:null,
     source:ctx.source||'', parts:parts, pieceCount:pieces, flaggedParts:flagged,
     pmesMisc:{area:parts.filter(function(p){return p.pmesArea==='MISC';}).length,
@@ -36973,7 +37040,8 @@ function _reserveJobOrder(){
       var rows=r.data||[], v=(rows.length?rows[0].version:0)+1, jo=_joNumber(base,optId,v);
       var bander=an.result._bander||prodSettings.banderType||'trimmer';
       var data=_joBuild(an.result,{joNumber:jo,serial:qSerial,optionId:optId,optionLabel:optLabel,version:v,
-        client:client,project:project,company:company,preparedBy:who,bander:bander,source:an.fileName});
+        client:client,project:project,company:company,preparedBy:who,bander:bander,source:an.fileName,
+        hplOrder:an.result._hplOrder||prodSettings.hplOrder||'laminate_first'});
       data.revision=rev;
       // Lock, then Send, locks twice. A second lock of the SAME content keeps the Job Order it
       // already has rather than minting an identical new version.
@@ -37031,7 +37099,10 @@ function _joDocHtml(jo,status){
     +'<tr><td>'+jo.pieceCount+'</td><td>'+jo.parts.length+'</td><td>'+jo.boardCount+'</td><td>'+(jo.services.cuttingLM||0).toFixed(1)+' lm</td>'
     +'<td>'+(jo.services.edgebandingLM||0).toFixed(1)+' lm</td><td>'+(jo.services.holeCount||0)+'</td>'
     +'<td>'+e(jo.machine?jo.machine.label+' · kerf '+jo.machine.kerf+'mm':'—')+'</td>'
-    +'<td>'+(cut?'<b>No trimmer</b> — cut = finished − tape per banded edge':'Standard (trims) — cut = finished size')+'</td></tr></table>';
+    +'<td>'+(function(){ var n={trimmer:0,no_trimmer:0,manual:0}; jo.parts.forEach(function(p){ if(n[p.bander]!=null) n[p.bander]+=p.qty; });
+      return (n.trimmer?'Trimming: '+n.trimmer+' pcs':'')+(n.no_trimmer?(n.trimmer?' · ':'')+'<b>Old machine</b>: '+n.no_trimmer+' pcs (cut smaller by tape)':'')
+        +(n.manual?(n.trimmer||n.no_trimmer?' · ':'')+'Manual: '+n.manual+' pcs':'')||'—'; })()+'</td></tr></table>'
+    +'<div class="sub">HPL on MDF/PB: '+(jo.hplOrder==='cut_first'?'cut first, then laminated (client asked)':'laminated as whole boards, then cut')+'. Plywood HPL is always cut first, then laminated by hand.</div>';
   if(flagParts.length){
     // One line per distinct note, naming the parts it applies to — the same note on 36 parts is
     // one thing to check, not 36.
@@ -37046,13 +37117,15 @@ function _joDocHtml(jo,status){
     +(pm.area&&pm.part?'; ':'')+(pm.part?pm.part+' part(s) have no recognised part type (filed as MISC)':'')
     +' — shown in orange in the PMES column.</div>';
   h+='<h2>Parts — cut list</h2><table class="pl"><tr><th>Part</th><th>Area</th><th>Component</th><th>Material</th><th>Th</th>'
-    +'<th>Finished L×W</th><th>'+(cut?'<b>Cut</b> L×W':'Cut L×W')+'</th><th>Qty</th><th>Edge</th><th>Tape</th><th>Grain</th><th>Groove</th><th>PMES</th><th>Barcodes</th></tr>';
+    +'<th>Finished L×W</th><th>'+(cut?'<b>Cut</b> L×W':'Cut L×W')+'</th><th>Qty</th><th>Edge</th><th>Tape</th><th>Grain</th><th>Groove</th><th>Special</th><th>Route</th><th>PMES</th><th>Barcodes</th></tr>';
   jo.parts.forEach(function(p){
     var diff=p.cutL!==p.L||p.cutW!==p.W;
     h+='<tr'+(p.flags.length?' style="background:#fff7ed"':'')+'><td><b>'+p.p+'</b></td><td>'+e(p.area)+'</td><td>'+e(p.name)+'</td>'
       +'<td>'+e([p.material,p.color].filter(Boolean).join(' '))+'</td><td>'+(p.thickness||'')+'</td><td>'+p.L+' × '+p.W+'</td>'
       +'<td'+(diff?' style="font-weight:700"':'')+'>'+p.cutL+' × '+p.cutW+'</td><td>'+p.qty+'</td><td>'+e(p.ebt||'—')+'</td>'
       +'<td>'+e(p.tape)+(p.tapeMm&&cut?' ('+p.tapeMm+'mm)':'')+'</td><td>'+e(p.grain)+'</td><td>'+e(p.grooving)+'</td>'
+      +'<td'+(p.special?' style="font-weight:700"':'')+'>'+e(p.special||'')+'</td>'
+      +'<td style="font-family:monospace;font-size:9px">'+e((p.route||[]).filter(function(s){return s!=='ASM'&&s!=='QC'&&s!=='PACK';}).join(' → '))+'</td>'
       +'<td style="white-space:nowrap'+(p.pmesArea==='MISC'||p.pmesPart==='MISC'?';color:#b45309':'')+'">'+e((p.pmesArea||'')+' / '+(p.pmesPart||''))+'</td>'
       +'<td style="font-family:monospace;font-size:9px">'+e(p.barcodes[0])+(p.qty>1?' … /'+_joPad(p.qty,2):'')+'</td></tr>';
   });
@@ -37116,6 +37189,7 @@ function _joPrintLabels(jo){
 function prodPrintJobOrderDraft(){
   var r=prodState.result; if(!r||r.error) return;
   var jo=_joBuild(r,{joNumber:'DRAFT',serial:(qSerial||qDraftKey||''),bander:r._bander||prodSettings.banderType,
+    hplOrder:r._hplOrder||prodSettings.hplOrder,
     preparedBy:(gUser&&(gUser.name||gUser.email))||'',source:prodState.fileName});
   _joPrint(jo,'DRAFT');
 }
@@ -39064,6 +39138,7 @@ function _prodNormalizeComponent(c){
     width:+c.width||0,qty:+c.qty||1,faces:+c.faces||0,
     grain:(c.grain==='length'||c.grain==='width')?c.grain:'none',
     ebt:String(c.ebt||''),edgeTape:String(c.edgeTape||''),grooving:String(c.grooving||''),
+    specialCut:String(c.specialCut||''),
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||'')
   };
 }
@@ -39741,6 +39816,9 @@ function _prodConfirmComponentReview(idx){
 function _prodComponentFieldCorrected(idx,field,newVal){
   var r=prodState.result; if(!r||!r.components||!r.components[idx]) return;
   var c=r.components[idx];
+  // Special cut only routes the piece in production (Job Order / PMES); it changes no price, and
+  // setting it must not clear an unrelated review flag.
+  if(field==='specialCut'){ c.specialCut=String(newVal||'').trim(); renderProductionPage(); return; }
   if(field==='faces'||field==='ebt'||field==='edgeTape'||field==='grooving'){
     if(c.name&&newVal) _prodSaveJargonRule(c.name,field,String(newVal));
     c[field]=newVal;
@@ -40021,7 +40099,9 @@ function prodComputeBom(comps){
     // HPL finish is also part of the key — an HPL-laminated panel needs the extra lamination
     // service + the HPL sheet itself (see prodBuildSummary), a genuinely different job from a
     // plain melamine-faced board of the same substrate/color/thickness/faces.
-    var isHpl=/\bhpl\b/i.test((c.material||'')+' '+(c.notes||''));
+    // Colour too: an imported client label ("18MM PLYWOOD RAW BOARD / HPL SILKY OFF-WHITE") lands
+    // the HPL words in the colour, and reading only material+notes quoted it with no lamination.
+    var isHpl=/\bhpl\b/i.test((c.material||'')+' '+(c.color||'')+' '+(c.notes||''));
     var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0,c.colorB||'',c.textureB||'',isHpl].join('|');
     if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,colorB:c.colorB||'',textureB:c.textureB||'',hpl:isHpl,totalAreaMm2:0,areas:{},pieces:[]};
     var qty=c.qty||1;
@@ -40900,7 +40980,10 @@ function prodBuildResultHtml(result){
         +'<div style="display:flex;align-items:center;gap:4px;margin-bottom:4px"><span style="color:var(--text2);flex-shrink:0">Faces:</span><input type="number" value="'+(c.faces||'')+'" min="1" max="2" onchange="_prodComponentFieldCorrected('+origIdx+',\'faces\',parseInt(this.value)||1)" style="height:32px;font-size:14px;width:56px;text-align:center;flex-shrink:0"></div>'
         +'<div style="display:flex;align-items:center;gap:4px;margin-bottom:4px"><span style="color:var(--text2);flex-shrink:0">EBT:</span><input type="text" value="'+escHtml(c.ebt||'')+'" onchange="_prodComponentFieldCorrected('+origIdx+',\'ebt\',this.value)" style="height:32px;font-size:13px;width:100%"></div>'
         +'<div style="display:flex;align-items:center;gap:4px;margin-bottom:4px"><span style="color:var(--text2);flex-shrink:0">Tape:</span><input type="text" value="'+escHtml(c.edgeTape||'')+'" placeholder="colour/type" onchange="_prodComponentFieldCorrected('+origIdx+',\'edgeTape\',this.value)" style="height:32px;font-size:13px;width:100%"></div>'
-        +'<div style="display:flex;align-items:center;gap:4px"><span style="color:var(--text2);flex-shrink:0">Groove:</span><input type="text" value="'+escHtml(c.grooving||'')+'" placeholder="none" onchange="_prodComponentFieldCorrected('+origIdx+',\'grooving\',this.value)" style="height:32px;font-size:13px;width:100%"></div>'
+        +'<div style="display:flex;align-items:center;gap:4px;margin-bottom:4px"><span style="color:var(--text2);flex-shrink:0">Groove:</span><input type="text" value="'+escHtml(c.grooving||'')+'" placeholder="none" onchange="_prodComponentFieldCorrected('+origIdx+',\'grooving\',this.value)" style="height:32px;font-size:13px;width:100%"></div>'
+        // Special cut sends the piece to Special Cutting in production instead of the panel saw.
+        // Blank = worked out from the name/remarks (taper, shaker, curve, L-shape…), shown as the hint.
+        +'<div style="display:flex;align-items:center;gap:4px"><span style="color:var(--text2);flex-shrink:0">Special:</span><input type="text" value="'+escHtml(c.specialCut||'')+'" placeholder="'+escHtml(_joDetectSpecial(c)||'none')+'" title="Special cut (taper, shaker, curve, L-shape…). Leave blank to use what the name/remarks say." onchange="_prodComponentFieldCorrected('+origIdx+',\'specialCut\',this.value)" style="height:32px;font-size:13px;width:100%"></div>'
         +'</td>'
       +'<td style="font-size:11px;color:var(--text2)">'+escHtml(c.grain||'')+'</td>'
       +'</tr>';
