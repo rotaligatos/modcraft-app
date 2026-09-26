@@ -12009,3 +12009,10 @@ Remaining misses were thicknesses absent from the test slice. Every mapping is s
   `prodBuildSummary` emits the board line already marked Outsource, so it lands in the quotation's
   outsource section for the supplier price. Also: the HPL sheet's search term no longer carries the
   client's build words ("HPL raw hpl walnut" → "HPL walnut").
+- **HPL faces per job (Rommel: depends on the client's project).** Cutting List job setting
+  **"HPL faces (when not stated)": Ask on each line / 1 face / 2 faces** (`MCL.setHplFaces`, `S.hplFaces`,
+  reset by Clear, carried as `cl.hplFaces`). In `_cutListToAnalysis` an HPL row that does not say 1F/2F
+  takes it (noted "job setting"); a row that says it keeps its own. Default "Ask" = unchanged behaviour.
+  Studio Tille C11 with 2 faces: 2 HPL sheets per board + "HPL Lamination (Plywood, 2 Face)", resolved.
+- Test hygiene: simulations call `logActivity`, which queues in `mc_log_outbox` in the preview browser —
+  clear it (and `mc_client_templates`, `_e2e_cat`) after a run.

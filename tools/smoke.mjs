@@ -4858,6 +4858,14 @@ const PROFILES = {
           const sheet = m.find((x) => /^HPL/.test(x.aiName || ''));
           return { board: board && board.name, review: board && board.needsReview, sheet: sheet && sheet.aiName };
         }, { board: 'Marine Plywood 18mm (raw)', review: false, sheet: 'HPL walnut' });
+        check('HPL faces: the job setting fills rows that do not say 1F/2F; rows that say it keep their own', () => {
+          const w = window;
+          const run = (hf) => w._cutListToAnalysis({ hplFaces: hf, panels: [
+            { group: 'A', part: 'Door', mat: '18MM PLYWOOD RAW BOARD / HPL WALNUT', th: 18, L: 700, W: 400, qty: 1, ebt: '' },
+            { group: 'A', part: 'Side', mat: '18MM PLYWOOD RAW BOARD / HPL WALNUT - 1F', th: 18, L: 700, W: 400, qty: 1, ebt: '' }],
+            hpl: [], hardware: [] }).components.map((c) => c.faces);
+          return { ask: run(0), two: run(2), one: run(1) };
+        }, { ask: [0, 1], two: [2, 1], one: [1, 1] });
         check('Grooving: a plain "Grooving" is priced by rule — board type, or sliding/router/insert/handgrab when stated', () => {
           const w = window, keep = w.SERVICES;
           w.SERVICES = ['Grooving (3mm width melamine)', 'Grooving (3mm width compact lam)', 'Grooving (minimum charge)',
