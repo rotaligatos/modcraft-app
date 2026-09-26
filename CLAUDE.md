@@ -12060,3 +12060,56 @@ Next: phase 2 (mirror — Command Center edits write the Sheet AND the copy), th
   with the Sheets API disabled (403). Rommel ran the update: 14 people, PINs copied to `user_pins`.
   Deleted the stale duplicate `users` row `wcli-it-admin@… ` (trailing space, July backfill) with his
   go-ahead; the clean row remains (require_pin true). Expected state now: 14 match.
+
+# OPEN — updated 2026-09-26 (end of the long session) — THIS IS THE AUTHORITATIVE LIST
+> Supersedes every OPEN list above. Read the 2026-09-26 session entries above for detail.
+
+## Done today (do not redo)
+Own user lists for PMES (`pmes_users`, operator/supervisor/manager/admin, stations, company) and
+KEYSTONE (`keystone_users` + caps), all `adm_*`/`pmes_*` SQL on `ks_*`/`pmes_*` helpers · Command
+Center (`command-center.html`) with People / Modcraft users / PMES / KEYSTONE / Change log, company
+filter, installable · first end-to-end run (MARGARITA) and its fixes: tape≠boards, picked SKU kept,
+GRV grooving station, clean barcodes · client-code suggestions (36%→83%), per-client memory, tape
+colours, matte-unless-gloss, over-25mm glued boards + Board Assembly, raw boards for HPL on MDF/PB,
+raw marine plywood = outsource, grooving priced by rule, per-job "HPL faces (when not stated)" ·
+PMES + KEYSTONE published and installable · **Command Center phase 1 done on live data** (14 people,
+PINs copied to the unreadable `user_pins`, duplicate IT-admin row deleted).
+
+## ⚠ NEXT — Command Center phase 2 (mirror), per the AGREED PLAN above
+Editing a Modcraft user in the Command Center writes **both** the User Roles Google Sheet **and**
+`public.users` (+ `user_pins` via `cc_sync_user_pins` if a PIN is involved). Modcraft still signs in
+from the Sheet, so a remote change takes effect in Modcraft immediately. Build notes:
+- Sheet access: Modcraft's GIS client `605710112392-vgvmr9e66b8himis6ka118cdq5er6393` in a popup
+  (`connectSheet()` in command-center.html) — phase 2 needs scope `spreadsheets` (write), not readonly.
+  Supabase's Google provider (project 64620211331) has the Sheets API OFF — do not use it for Sheets.
+- Write the row EXACTLY as Modcraft's `saveUserRow` does (index.html; `User Roles!A{row}:AA{row}`, same
+  column layout as `parseSheetUsers`/`parseUserRows`: A name, B email, C role, D active yes/no, E company,
+  F device, G–N first 8 ACC_KEYS, O delegate to, P delegate on, Q receive all, R–V ACC_KEYS 9–13,
+  W pin hash, X pin salt, Y access companies, Z include KPI, AA require PIN). Re-read the row first and
+  refuse if it moved/changed since the page loaded (someone may be editing in Modcraft at the same time).
+- Add person = append a row the same way `submitAddUser` does. Never delete from the Sheet in phase 2
+  (deactivate instead).
+- Multi-company: company filter already on every list; company admins managing only their company is
+  a likely future ask — keep company scoping in mind.
+- PIN reset from the Command Center: clear W:X in the Sheet and the `user_pins` row together.
+- Log every change (user_access_log already logs `users`; Sheet writes should be logged too).
+- Simulate before shipping (Rommel: "simulate every time"): mock `fetch` for Sheets in a preview,
+  and verify with a real test row only with his go-ahead.
+Then phase 3 (shadow sign-in, 1–2 weeks), 4 (switch, needs a security-definer PIN check against
+`user_pins`), 5 (full admin parity + one person across all apps).
+
+## Rommel's to-dos
+- Sign in once at https://rotaligatos.github.io/PMES/ and https://rotaligatos.github.io/Keystone/ to confirm
+  sign-in returns to each app (redirect URLs are set).
+- Add production staff in Command Center → PMES users.
+- Supply distinct icons for Command Center, PMES, KEYSTONE (placeholder = Modcraft icon).
+- Marine plywood raw board: confirm it is outsourced only (done in app) — nothing to add to the DB.
+
+## Carried forward, unchanged
+Rotate the Wufoo API key (security clock) · confirm Supabase egress fix in Usage · 15 orders with no
+handler · retired-status string sweep · Schedule page on `DEMO_PROJS` · Orders 8834/8840 unlinked ·
+ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on hold) ·
+`QT-W00000136.R1` print report · phone order_pause · Stage 2 lock parity while paused · Michael Delos
+Reyes signature · unlock-reconciliation ~60s window · `qApproved`/`qClientApproved` coupling · MSSI
+commission OFF · `samplesofcuttinglist/` is client data — never commit · MSSI website: optional Cabinet
+column on hardware · grooving has a PMES stage now but PMES scan/process screens for GRV untested live.
