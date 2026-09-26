@@ -12288,3 +12288,9 @@ commission OFF · `samplesofcuttinglist/` is client data — never commit · dis
 - Not a fault: job stays `in_production` after PACK — packing list → handed off is a manual PMES step.
 - Not tested: the screens (needs a real signed-in session with persisted data), cut-plan save/adopt.
 - `public._e2e_fixture` (RLS on, no grants) holds the test JO + state for re-runs; drop when done.
+- **TEST job SAVED for Rommel to walk** (2026-09-26): `quotations` + `quotation_states` `QT-T00000001`
+  ("TEST — E2E TEST CLIENT") and `job_orders` `JO-T00000001-1` (ready). Supabase only — not in the
+  Google Sheet, so it does not appear in Modcraft's Project List. Shows in KEYSTONE's release queue.
+  **Delete after the walk** (quotation, state, job_order, gate, MRF, payments, PMES job + children, fixture).
+- Found, not changed: in PMES the same person may check AND approve a JO (no two-person rule on the
+  complete-materials path). Rommel to decide.
