@@ -4827,6 +4827,20 @@ const PROFILES = {
                      sku: c[0].catalogName, ba: ba && ba.qty, review: c[0].needsReview };
           } finally { w.dbMaterials = keep; }
         }, { n: 2, th: [18, 18], faces: [1, 1], ebt: ['4s', ''], sku: 'Real White PB 4x8 1F (18mm, Matte)', ba: 6, review: false });
+        check('Tapes: a client tape colour gets edge-band suggestions, and a mapped tape arrives resolved', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = ['Acacia PB 4x8 2F (18mm, Stipple)', 'Acacia 2mmx54mm Matte PVC Premium Edgeband',
+            'Acacia 1mmx22mm Matte PVC Premium Edgeband', 'Acacia .5mmx22mm Matte PVC Premium Edgeband',
+            'Real White 1mmx22mm Matte PVC Premium Edgeband'].map((name) => ({ name, unit: 'lm', price: 20 }));
+          try {
+            const sug = w.CLR.suggestTape({ key: 'tape:t-acacia', text: 'ACACIA' });
+            w.prodBuildSummary({ components: [], _bom: [], hardware: [],
+              _services: { edgebandingByTape: [{ tape: 'Acacia 1mmx22mm Matte PVC Premium Edgeband', lm: 10 }] } });
+            const row = w.prodState.summary.materials[0];
+            return { first: sug[0], noBoard: !sug.some((n) => /4x8/.test(n)), resolved: !row.needsReview, name: row.name };
+          } finally { w.dbMaterials = keep; }
+        }, { first: 'Acacia 1mmx22mm Matte PVC Premium Edgeband', noBoard: true, resolved: true,
+             name: 'Acacia 1mmx22mm Matte PVC Premium Edgeband' });
       }
       return out;
     }

@@ -11961,3 +11961,16 @@ Simulated on MARGARITA.xls against ~4,200 real catalogue items (catalogue_search
 - Checks added (both fail on the pre-change code).
 Not done yet: tape colours ("WHITE", "ACACIA") are not remembered in the import window — they still
 need picking in the summary each time. Obvious next step.
+
+## What was changed on 2026-09-26 (session 5 — client tape colours learn once too)
+The import window now has **"Their edge tapes → our edge-band SKUs"**: each tape the client names
+("WHITE", "ACACIA") gets up to 3 edge-band suggestions (`CLR.suggestTape`: colour words required,
+standard 22mm width and 1mm first, other colours / floor samples lower), remembered under
+`tape:<name>` in the same per-client / shared `CLIENT_TEMPLATES` store, with an "N of M tapes already
+mapped" line. `toPanel` writes the mapped SKU into the panel's edge tape; `prodBuildSummary` resolves
+a tape that is an exact edge-band SKU on arrival. The Job Order then reads the tape thickness from the
+SKU name, so 1mm tape routes to the trimming bander.
+Simulated on MARGARITA: both tapes suggested sensibly, arrived resolved; second import "2 of 2 tapes
+already mapped". ⚠ Test harness note: the public `catalogue_search` RPC returns NO edge bands, so any
+simulation built from it must add edge-band SKUs by hand (the live app loads the full catalogue).
+`OTHER_COLOURS` hoisted to CLR scope (shared by board and tape suggestions).
