@@ -12190,7 +12190,19 @@ Services and arrive by the mirror; there is deliberately no "add service" in PME
 reads it.** Today the flow is Modcraft → PMES (triggers on `settings.CONFIG` / `price_services`). When
 Piece 4 flips it, that mirror MUST be switched off the same day and Modcraft's Services capacity fields
 become read-only "from PMES" — never run both directions at once. Capacity becomes per company then.
-**Agreed order next:** Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
+**Piece 4 SHIPPED 2026-09-26 — THE FLIP IS DONE.** `pmes_service_capacity` (company × service name)
+is the home of service capacity; MSSI seeded from CONFIG (90). Modcraft: `CAPACITY_FROM_PMES=true` —
+`supaLoadPmesCapacity()` after the Price DB loads fills `SERVICE_CAPACITY` from
+`modcraft_service_capacity(company)` for `currentUserCompany`; Settings → Services capacity inputs are
+disabled with a "set in PMES" note (`_svcCapSet` still works for the cost-breakdown fields). The Job
+Orders panel shows production progress via `modcraft_jo_progress(serial)` (review gate, return note,
+confirmed/planned per process). **Both Modcraft→PMES mirror triggers were dropped** — never re-add
+them while the flag is on. Falls back to CONFIG's copy when not connected. Known limits: capacity is
+read for the signed-in user's company (not per quotation); ASM/QC/PACK/CURE process capacity still
+must be typed in PMES. Smoke checks pinned (5).
+**Next:** the MRF confirmations (warehouse processed → production received), operators' emails, and a
+first real end-to-end run: quotation → JO → KEYSTONE release → PMES check/approve → output → schedule.
+Was: Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
 then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
 capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
 Plus: MRF released with the JO (warehouse "processed" → production "received" confirmations); barcodes
