@@ -11916,3 +11916,9 @@ away once the Command Center is the single place users are edited.
 **Also agreed:** every app is installable like Modcraft — Command Center, KEYSTONE, PMES (has a
 basic manifest, no service worker), later MSSI admin / SCM. Do it alongside the Command Center work.
 PMES and KEYSTONE are still evolving; their user lists are built to take new roles/permissions.
+
+**Multi-company (Rommel, 2026-09-26):** the Command Center serves WCL, MSSI and CWL. Every view
+needs a company filter, company must be visible per person, and later phases must respect company
+scoping (a company admin managing only their company is a likely future ask). Compare companies via
+`app_normalize_company` / `_canonCompany` keys, never exact strings ("Module System" singular is
+live on 8 users).
