@@ -12055,3 +12055,8 @@ Remaining misses were thicknesses absent from the test slice. Every mapping is s
 - Not verified: the Google consent for Sheet read access, and a real sheet read — needs Rommel signed in.
 Next: phase 2 (mirror — Command Center edits write the Sheet AND the copy), then 3 (shadow sign-in),
 4 (switch), 5 (full admin parity).
+- **Phase 1 run on live data (2026-09-26):** Sheet reads through **Modcraft's own GIS client**
+  (605710112392…, popup) — Supabase's Google provider is a different Google project (64620211331)
+  with the Sheets API disabled (403). Rommel ran the update: 14 people, PINs copied to `user_pins`.
+  Deleted the stale duplicate `users` row `wcli-it-admin@… ` (trailing space, July backfill) with his
+  go-ahead; the clean row remains (require_pin true). Expected state now: 14 match.
