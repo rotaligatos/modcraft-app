@@ -4802,6 +4802,31 @@ const PROFILES = {
           const id = jo.parts[0].barcodes[0];
           return /^[A-Z0-9-]+-[A-Z]+-[A-Z0-9_]+-[A-Z]+-\d\d\/\d\d$/.test(id) ? 'clean' : id;
         }, 'clean');
+        check('Codes: a client code reads as words, and suggestions keep colour, thickness and faces', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = ['Acacia PB 4x8 1F (15mm, Matte)', 'Alder/White MDF 4x8 1F (15mm, Matte)',
+            'Real White PB 4x8 1F (15mm, Matte)', 'Real White PB 4x8 2F (15mm, Matte)', 'Real White PB 4x8 1F (18mm, Matte)',
+            'Real White 1mmx22mm Matte PVC Premium Edgeband'].map((name) => ({ name, unit: 'pc', price: 0 }));
+          try {
+            const sug = w.CLR.suggestFor({ key: 't-melwh151f', text: 'MELWH151F', thk: 15, faces: 1 });
+            const lam = w.CLR.suggestFor({ key: 't-wh362f', text: 'WH362F', thk: 36, faces: 2 });
+            return { words: w.CLR.codeWords('MELWH182F'), sug: sug.slice(0, 2), lam: lam.slice(0, 1) };
+          } finally { w.dbMaterials = keep; }
+        }, { words: 'melamine white', sug: ['Real White PB 4x8 1F (15mm, Matte)', 'Alder/White MDF 4x8 1F (15mm, Matte)'],
+             lam: ['Real White PB 4x8 1F (18mm, Matte)'] });
+        check('Over 25mm: a 36mm panel = two 18mm 1F boards, banded once, Board Assembly per lm of perimeter', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = [{ name: 'Real White PB 4x8 1F (18mm, Matte)', unit: 'pc', price: 2020 },
+                           { name: 'Real White PB 4x8 2F (18mm, Matte)', unit: 'pc', price: 2330 }];
+          try {
+            const a = w._cutListToAnalysis({ panels: [{ group: 'A', part: 'Top', mat: 'Real White PB 4x8 2F (18mm, Matte)', th: 36,
+              L: 1000, W: 500, qty: 2, ebt: '4S', emat: 'WHITE' }], hpl: [], hardware: [] });
+            const c = a.components;
+            const ba = (a.extraServices || []).find((x) => x.service === 'Board Assembly');
+            return { n: c.length, th: c.map((x) => x.thickness), faces: c.map((x) => x.faces), ebt: c.map((x) => x.ebt),
+                     sku: c[0].catalogName, ba: ba && ba.qty, review: c[0].needsReview };
+          } finally { w.dbMaterials = keep; }
+        }, { n: 2, th: [18, 18], faces: [1, 1], ebt: ['4s', ''], sku: 'Real White PB 4x8 1F (18mm, Matte)', ba: 6, review: false });
       }
       return out;
     }

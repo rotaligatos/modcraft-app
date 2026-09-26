@@ -11939,3 +11939,25 @@ in a rolled-back transaction, as Rommel, under the new KEYSTONE list). Figures m
    GRV; PMES process JO (`process-jo.js`, local) shows a Grooving column for GRV.
 4. **Barcode IDs had spaces** ("P1 MASTERS BEDROOM"). Component part of the ID is now `[A-Z0-9_]`.
 Not tested: PMES process sheets on screen, and a real signed-in lock (need a live login).
+
+## What was changed on 2026-09-26 (session 4 — client codes learn once; over-25mm panels)
+Simulated on MARGARITA.xls against ~4,200 real catalogue items (catalogue_search slice + known SKUs).
+- **Import window suggests SKUs for a client code** (`CLR.suggestFor`, `CLR.codeWords`): the code is
+  read as words (MEL→melamine, WH→white; `CODE_WORDS`) plus the row's own thickness/faces. Only
+  candidates with every colour word, the same thickness and the same faces are offered; other colours
+  or split boards ("Acacia/Real White") and names without a face count rank lower. One-click buttons.
+  ~110 ms for 7 codes on 4.2k items. All 7 MARGARITA codes got a sensible first suggestion.
+- **Remembered per client first, shared second.** Store `CLIENT_TEMPLATES` gained `clientMats`
+  keyed by the quotation's client (cl-bizname / cl-name). A shared mapping is only set when none
+  exists (or no client is known), so one client's meaning does not overwrite another's.
+- **Coverage line**: "N of M materials already mapped (x remembered for this client, y shared)".
+  Second import of the same list: 7 of 7 for this client; a different client: 7 of 7 shared, and every
+  board line arrived matched (only tape colours still need a pick).
+- **Over 25mm = glued boards (Rommel).** In `_cutListToAnalysis`, th > 25 becomes n × 18mm boards
+  (or n × the mapped SKU's thickness when it divides evenly), each **1F faces out** (a mapped 2F SKU is
+  swapped for its 1F sibling), same L×W. Only the first board carries edge banding/grooving, so banding
+  is never doubled; the rest are "(board k of n)". **Board Assembly** added per **lm of perimeter** ×
+  pieces × (n−1). Note on the part: tape must be at least that thick. Uneven splits / >2 boards flag.
+- Checks added (both fail on the pre-change code).
+Not done yet: tape colours ("WHITE", "ACACIA") are not remembered in the import window — they still
+need picking in the summary each time. Obvious next step.

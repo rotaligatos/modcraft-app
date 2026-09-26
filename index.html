@@ -17909,7 +17909,8 @@ function _cutListToAnalysis(cl,order){
       // is the DEFAULT slip, and it silently packed a 25mm panel onto an 18mm board with the two
       // merged into one group. Flag it; never pick a winner, because either field could be the
       // mistaken one and guessing would mix materials just as quietly in the other direction.
-      if(md&&md.thickness&&(+pn.th||0)&&md.thickness!==(+pn.th||0)){
+      var _thN=(+pn.th||0), _lamOk=_thN>25&&md&&md.thickness&&md.thickness<_thN&&(_thN%md.thickness===0);
+      if(md&&md.thickness&&_thN&&md.thickness!==_thN&&!_lamOk){
         review.push('the SKU says '+md.thickness+'mm but the Th column says '+(+pn.th)
           +'mm — set them to the same thickness, or this panel is cut from the wrong board');
       }
@@ -17996,16 +17997,53 @@ function _cutListToAnalysis(cl,order){
       }
     }
     var gr=pn.grain?_webGrainToModcraft(pn.grain):'';
-    comps.push({
+    var th=+pn.th||0, rowQty=+pn.qty||1;
+    // Over 25mm is not a board: it is built by gluing boards together (Rommel, 2026-09-26). A 36mm
+    // panel = two 18mm boards, each 1F with its face outward, glued, then charged Board Assembly
+    // per lm of the panel's perimeter. The boards are what get cut and bought, so the panel
+    // becomes that many pieces of the board thickness. Edge banding, grooving and holes belong to
+    // the finished panel, so only the first board carries them — banding is never doubled.
+    var lam=null;
+    if(th>25){
+      var bt=(b?0:(typeof md!=='undefined'&&md&&md.thickness&&md.thickness<th&&th%md.thickness===0?md.thickness:0))||18;
+      var nb=th/bt;
+      if(nb!==Math.round(nb)||nb<2){
+        review.push(th+'mm is over 25mm, so it is made by gluing boards — but it is not a whole number of '+bt
+          +'mm boards; set which boards make it up');
+      } else {
+        lam={boards:nb,bt:bt};
+        if(nb>2) review.push(th+'mm = '+nb+' × '+bt+'mm boards — the inner board'+(nb>3?'s have':' has')
+          +' no face to show; confirm the board for '+(nb>3?'them':'it'));
+        // Only when the label describes the finished panel (its own thickness): a mapped 18mm board
+        // SKU is 1F by design here, and says nothing about the panel's faces.
+        if(faces&&faces!==2&&!(md&&md.thickness&&md.thickness<th)) review.push('laminated panel marked '+faces+'F — two boards faces-out gives 2F; confirm the faces');
+        // The mapped SKU may be the 2F board; faces-out lamination uses its 1F sibling.
+        if(catalogName&&/\b2F\b/.test(catalogName)){
+          var one=lookupInSource(getMatSource(),catalogName.replace(/\b2F\b/,'1F'));
+          catalogName=one?one.name:'';
+        }
+        extraSvcs.push({service:'Board Assembly',qty:Math.round(2*(L+W)/1000*rowQty*(nb-1)*1000)/1000,unit:'lm',
+          notes:String(pn.part||'')+(pn.group?' - '+pn.group:'')+' — '+nb+' × '+bt+'mm glued to '+th+'mm'});
+        notes.push('laminated: '+nb+' × '+bt+'mm 1F boards, faces out, glued to '+th+'mm'
+          +(eb.ebt?' — edge tape must be at least '+th+'mm wide':''));
+      }
+    }
+    var baseComp={
       area:String(pn.group||'General'), name:String(pn.part||''),
       material:material, color:color, texture:_webTextureOf(label),
       colorB:'', textureB:'',
-      thickness:+pn.th||0, length:L, width:W, qty:+pn.qty||1,
-      faces:faces, grain:gr||jobGrain,
+      thickness:lam?lam.bt:th, length:L, width:W, qty:rowQty,
+      faces:lam?1:faces, grain:gr||jobGrain,
       ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName,
       needsReview:review.length>0, reviewNote:review.join('; '),
       notes:notes.join(' · ')
-    });
+    };
+    comps.push(baseComp);
+    if(lam){
+      for(var lb=2;lb<=lam.boards;lb++) comps.push(Object.assign({},baseComp,{
+        name:String(pn.part||'')+' (board '+lb+' of '+lam.boards+')', ebt:'', edgeTape:'', grooving:'',
+        notes:'glued to '+String(pn.part||'')+' — laminated build, see the first board'}));
+    }
   }
   if(facesUnknown) warn.push(facesUnknown+' panel'+(facesUnknown===1?' has':'s have')
     +' no face count — the SKU does not say 1F or 2F, so the catalogue match cannot tell a 1-face board from a 2-face one');
@@ -36504,7 +36542,7 @@ function linesToAoa(lines) {
   var FIELDS=[['part','Part / description'],['item','Item no.'],['material','Material'],['thk','Thickness'],
     ['length','Length'],['width','Width'],['qty','Qty'],['edge','Edge banding'],['emat','Edge tape'],
     ['groove','Grooving'],['remark','Remarks']];
-  var ST={files:[],active:0,store:{templates:{},mats:{}},matEdit:{}};
+  var ST={files:[],active:0,store:{templates:{},mats:{},clientMats:{}},matEdit:{},sugg:{}};
   var STORE_KEY='CLIENT_TEMPLATES', LS_KEY='mc_client_templates';
 
   function sigOf(aoa,h){ return h<0?'':(aoa[h]||[]).map(norm).filter(Boolean).join('|'); }
@@ -36519,7 +36557,7 @@ function linesToAoa(lines) {
     return supa.from('settings').select('value').eq('key',STORE_KEY).maybeSingle().then(function(r){
       var v=r&&r.data&&r.data.value;
       if(typeof v==='string'){ try{ v=JSON.parse(v); }catch(e){ v=null; } }
-      if(v&&v.templates){ ST.store={templates:v.templates||{},mats:v.mats||{}};
+      if(v&&v.templates){ ST.store={templates:v.templates||{},mats:v.mats||{},clientMats:v.clientMats||{}};
         try{ localStorage.setItem(LS_KEY,JSON.stringify(ST.store)); }catch(e){} }
     }).catch(function(){});
   }
@@ -36613,13 +36651,84 @@ function linesToAoa(lines) {
     includedRows('panels').forEach(function(x){
       var m=String(x.r.material||'').trim(); if(!m) return;
       var k=matKey(m); if(seen[k]){ seen[k].n+=(x.r.qty||1); return; }
-      seen[k]={text:m,key:k,n:(x.r.qty||1)}; out.push(seen[k]);
+      seen[k]={text:m,key:k,n:(x.r.qty||1),thk:x.r.thk||0,faces:x.r.faces||0}; out.push(seen[k]);
     });
     return out;
   }
+  // Which client this list belongs to — the quotation's client, if one is open. Two clients can
+  // use the same code for different boards, so a mapping is remembered per client first and
+  // shared company-wide second.
+  function clientKey(){
+    var v=(el('cl-bizname')&&el('cl-bizname').value)||(el('cl-name')&&el('cl-name').value)||'';
+    return norm(v);
+  }
+  function clientMap(){ var c=clientKey(); return c?((ST.store.clientMats||{})[c]||{}):{}; }
   function mappedSku(k){
     if(ST.matEdit[k]!=null) return ST.matEdit[k];
-    return (ST.store.mats||{})[k]||'';
+    return clientMap()[k]||(ST.store.mats||{})[k]||'';
+  }
+  function mappedFrom(k){
+    if(ST.matEdit[k]!=null) return '';
+    if(clientMap()[k]) return 'client';
+    if((ST.store.mats||{})[k]) return 'shared';
+    return '';
+  }
+
+  // Suggest SKUs for a client's code. A code like MELWH182F is read as words (MEL → melamine,
+  // WH → white) plus the row's own thickness and faces; the catalogue is searched with that, and
+  // only candidates of the same thickness and face count are offered. Over 25mm is a glued build of
+  // 18mm 1F boards (Rommel, 2026-09-26), so that is what is suggested.
+  var CODE_WORDS={MELAMINE:'melamine',MELA:'melamine',MEL:'melamine',WHITE:'white',WHT:'white',WHI:'white',WH:'white',
+    BLACK:'black',BLK:'black',BK:'black',GREY:'gray',GRAY:'gray',GRY:'gray',PLYWOOD:'plywood',PLY:'plywood',
+    MDF:'MDF',PB:'PB',WARM:'warm',REAL:'real',WW:'warm white',RW:'real white',OAK:'oak',WALNUT:'walnut',WAL:'walnut',
+    ACACIA:'acacia',CHERRY:'cherry',TEAK:'teak',BEECH:'beech',ASH:'ash',MAPLE:'maple',ALMOND:'almond',CREAM:'cream'};
+  function codeWords(txt){
+    var out=[];
+    String(txt||'').toUpperCase().replace(/[^A-Z]+/g,' ').trim().split(' ').forEach(function(run){
+      var i=0;
+      while(i<run.length){
+        var hit='';
+        for(var L=Math.min(run.length-i,8);L>=2;L--){ var w=run.substr(i,L); if(CODE_WORDS[w]){ hit=w; break; } }
+        if(hit){ out.push(CODE_WORDS[hit]); i+=hit.length; }
+        else { var rest=run.slice(i); if(rest.length>2&&!/^F$/.test(rest)) out.push(rest.toLowerCase()); break; }
+      }
+    });
+    return out.join(' ');
+  }
+  function suggestFor(m){
+    if(ST.sugg[m.key]) return ST.sugg[m.key];
+    var list=[];
+    try{
+      var th=+m.thk||0, faces=+m.faces||0, lam=th>25;
+      if(lam){ th=18; faces=1; }
+      var q=codeWords(m.text)+(th?' '+th+'mm':'')+(faces?' '+faces+'F':'');
+      var cands=(typeof _prodFindCatalogMatches==='function')?_prodFindCatalogMatches(q,getMatSource(),80):[];
+      // Colour words the code names must all be in the SKU (a white code never suggests acacia);
+      // SKUs carrying OTHER colours (Alder/White for plain white) rank after the plain ones.
+      var NEUTRAL={melamine:1,pb:1,mdf:1,plywood:1,hdf:1};
+      var OTHER_COLOURS=['acacia','cherry','alder','oak','walnut','teak','ash','maple','beech','black','gray','grey','cream','almond','beige','brown','emperado','marble','granite','wenge','mahogany','pine','narra','white'];
+      var need=codeWords(m.text).toLowerCase().split(' ').filter(function(w){ return w&&!NEUTRAL[w]; });
+      var seen={}, pool=[];
+      cands.forEach(function(c){
+        if(!c||!c.name||seen[c.name]) return;
+        if(typeof _isEdgeTapeName==='function'&&_isEdgeTapeName(c.name)) return;
+        var d=(typeof _prodParseMaterialDescriptor==='function')?_prodParseMaterialDescriptor(c.name):{};
+        if(th&&d.thickness&&d.thickness!==th) return;
+        if(faces&&d.faces&&d.faces!==faces) return;
+        var low=c.name.toLowerCase();
+        if(need.some(function(w){ return low.indexOf(w)<0; })) return;
+        // Rank: other colours in the name (e.g. Acacia/Real White is a two-colour board) push it
+        // down, as does a name that does not state the face count the row needs.
+        var extra=OTHER_COLOURS.filter(function(w){ return need.indexOf(w)<0&&low.indexOf(w)>=0; }).length*2
+          +(/\//.test(c.name)?2:0)+(faces&&!d.faces?1:0);
+        seen[c.name]=1; pool.push({n:c.name,x:extra,i:pool.length});
+      });
+      pool.sort(function(a,b){ return a.x-b.x||a.i-b.i; });
+      pool.slice(0,3).forEach(function(p){ list.push(p.n); });
+      if(lam) list.lam=true;
+    }catch(e){}
+    ST.sugg[m.key]=list;
+    return list;
   }
   function cellTxt(v){ return String(v==null?'':v).replace(/\s+/g,' ').trim(); }
 
@@ -36719,15 +36828,28 @@ function linesToAoa(lines) {
     if(mats.length){
       h+='<div style="margin-top:14px;padding:10px;border:.5px solid var(--border);border-radius:8px">'
         +'<div style="font-weight:600;font-size:13px;margin-bottom:2px">Their materials → our SKUs</div>'
-        +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Optional. A mapping is remembered, so the same client wording maps itself next time. Left blank, the text goes to the catalogue matcher as usual.</div>'
+        +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Optional. A mapping is remembered for this client and shared with everyone, so the same code maps itself next time. Left blank, the text goes to the catalogue matcher as usual.</div>';
+      var known=mats.filter(function(m){ return mappedSku(m.key); }).length;
+      var fromClient=mats.filter(function(m){ return mappedFrom(m.key)==='client'; }).length;
+      var fromShared=mats.filter(function(m){ return mappedFrom(m.key)==='shared'; }).length;
+      h+='<div style="font-size:12px;margin-bottom:8px"><b>'+known+' of '+mats.length+'</b> materials already mapped'
+        +(fromClient||fromShared?' ('+[fromClient?fromClient+' remembered for this client':'',fromShared?fromShared+' shared':''].filter(Boolean).join(', ')+')':'')
+        +(known<mats.length?' · <span style="color:var(--pill-amber)">'+(mats.length-known)+' new</span>':'')+'</div>'
         +'<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>As written</th><th '+th+'>Pieces</th><th '+th+'>Our SKU</th></tr>';
       mats.forEach(function(m,mi){
-        var v=mappedSku(m.key), rem=(ST.store.mats||{})[m.key]&&ST.matEdit[m.key]==null;
-        h+='<tr><td '+td+'>'+esc(m.text)+'</td><td '+td+'>'+m.n+'</td><td '+td+'>'
+        var v=mappedSku(m.key), from=mappedFrom(m.key);
+        var sug=v?[]:suggestFor(m);
+        h+='<tr><td '+td+'>'+esc(m.text)+(m.thk?'<div style="font-size:11px;color:var(--text2)">'+m.thk+'mm'+(m.faces?' · '+m.faces+'F':'')+'</div>':'')+'</td><td '+td+'>'+m.n+'</td><td '+td+'>'
           +'<input list="clr-mat-dl-'+mi+'" value="'+esc(v)+'" placeholder="search our catalogue…" data-k="'+esc(m.key)+'"'
           +' oninput="CLR.matSearch(this,'+mi+')" onchange="CLR.matSearch(this,'+mi+')"'
           +' style="width:100%;max-width:520px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
-          +'<datalist id="clr-mat-dl-'+mi+'"></datalist>'+(rem?' <span class="pill pill-teal" style="font-size:10px">remembered</span>':'')+'</td></tr>';
+          +'<datalist id="clr-mat-dl-'+mi+'"></datalist>'
+          +(from?' <span class="pill pill-teal" style="font-size:10px">'+(from==='client'?'remembered for this client':'remembered')+'</span>':'')
+          +(sug.length?'<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center"><span style="font-size:11px;color:var(--text2)">'
+              +(sug.lam?'Over 25mm — glued from 18mm 1F boards. Board:':'Suggested:')+'</span>'
+              +sug.map(function(n){ return '<button class="btn" style="padding:2px 8px;font-size:11px" data-k="'+esc(m.key)+'" data-sku="'+esc(n)+'" onclick="CLR.useSku(this)">'+esc(n)+'</button>'; }).join('')+'</div>'
+            :(!v&&m.thk&&+m.thk>25?'<div style="font-size:11px;color:var(--text2);margin-top:4px">Over 25mm — glued from 18mm 1F boards. Pick the 18mm board it is made of.</div>':''))
+          +'</td></tr>';
       });
       h+='</table></div>';
     }
@@ -36785,15 +36907,25 @@ function linesToAoa(lines) {
 
     // Remember what a person corrected: layouts they changed, and every material mapping.
     var changed=false, who=(gUser&&(gUser.name||gUser.email))||'', now=new Date().toISOString();
-    ST.store.templates=ST.store.templates||{}; ST.store.mats=ST.store.mats||{};
+    ST.store.templates=ST.store.templates||{}; ST.store.mats=ST.store.mats||{}; ST.store.clientMats=ST.store.clientMats||{};
+    var ck=clientKey();
     allSheets().forEach(function(x){
       if(!x.s.include||!x.s.sig||!x.s.force||!x.s.force.map) return;
       ST.store.templates[x.s.sig]={map:x.s.res.map,file:x.f.name,at:now,by:who}; changed=true;
     });
     Object.keys(ST.matEdit).forEach(function(k){
       var v=String(ST.matEdit[k]||'').trim();
-      if(v){ if(ST.store.mats[k]!==v){ ST.store.mats[k]=v; changed=true; } }
-      else if(ST.store.mats[k]){ delete ST.store.mats[k]; changed=true; }
+      var cm=ck?(ST.store.clientMats[ck]=ST.store.clientMats[ck]||{}):null;
+      if(v){
+        if(cm&&cm[k]!==v){ cm[k]=v; changed=true; }
+        // The shared mapping is set when nobody has one yet (or no client is known); an
+        // existing shared mapping is not overwritten by one client's different meaning.
+        if(!ST.store.mats[k]||!ck){ if(ST.store.mats[k]!==v){ ST.store.mats[k]=v; changed=true; } }
+      }
+      else {
+        if(cm&&cm[k]){ delete cm[k]; changed=true; }
+        else if(!ck&&ST.store.mats[k]){ delete ST.store.mats[k]; changed=true; }
+      }
     });
     if(changed) saveStore();
     var flagged=panels.filter(function(p){ return p.remark.indexOf('⚠')>=0; }).length;
@@ -36809,7 +36941,7 @@ function linesToAoa(lines) {
     if(inputEl) inputEl.value='';
     if(!files.length) return;
     if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return; }
-    ST.files=[]; ST.active=0; ST.matEdit={}; ST.rawFiles=files;
+    ST.files=[]; ST.active=0; ST.matEdit={}; ST.sugg={}; ST.rawFiles=files;
     ensureModal();
     el('ov-clr-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Reading '+files.length+' file'+(files.length===1?'':'s')+'…</div>';
     el('ov-clr-foot').innerHTML='';
@@ -36838,6 +36970,8 @@ function linesToAoa(lines) {
       ST.matEdit[inp.getAttribute('data-k')]=inp.value;
       _refillDatalist('clr-mat-dl-'+mi,getMatSource(),inp.value);
     },
+    useSku:function(btn){ ST.matEdit[btn.getAttribute('data-k')]=btn.getAttribute('data-sku'); render(); },
+    codeWords:codeWords, suggestFor:suggestFor,
     // Pure reader + conversion, exposed for tests.
     readClientSheet:readClientSheet, linesToAoa:linesToAoa, totals:totals, toPanel:toPanel,
     _state:function(){ return ST; }
