@@ -12186,6 +12186,10 @@ service capacity must keep CONFIG `serviceCapacity` keyed by service name, or th
 IE sheet gained a "Move to" picker per service row (manager+) to regroup a service under any machine or
 back to Others; "+ Add machine" was already there. Services themselves are added in Modcraft → Settings →
 Services and arrive by the mirror; there is deliberately no "add service" in PMES.
+**DIRECTION (Rommel, 2026-09-26): PMES will dictate the capacity of each machine and service; Modcraft
+reads it.** Today the flow is Modcraft → PMES (triggers on `settings.CONFIG` / `price_services`). When
+Piece 4 flips it, that mirror MUST be switched off the same day and Modcraft's Services capacity fields
+become read-only "from PMES" — never run both directions at once. Capacity becomes per company then.
 **Agreed order next:** Piece 4 (updates back to Modcraft/CRM: JO status, progress, capacity read-back);
 then the MRF confirmations (warehouse processed → production received). Was: Piece 3 MSSI machine
 capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
