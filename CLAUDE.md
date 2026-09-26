@@ -12234,3 +12234,38 @@ Plus: MRF released with the JO (warehouse "processed" → production "received" 
 remain the long-term logging method.
 Next: watch the shadow log 1–2 weeks; then phase 4 (needs a security-definer PIN check against
 `user_pins` — never a client read), then phase 5 (full admin parity).
+
+# OPEN — updated 2026-09-26 (session end, PMES pieces 1–4 + MRF + boards) — THIS IS THE AUTHORITATIVE LIST
+> Supersedes every OPEN list above. The 2026-09-26 session entries (sessions 10–12 and the PMES notes
+> appended to them) have the detail; PMES `MODCRAFT_BRIDGE_NOTES.md` has the full PMES/KEYSTONE design.
+
+## Done this session (do not redo)
+Command Center phase 2 (edit Modcraft users → Sheet + DB, live-tested) and phase 3 (shadow sign-in, live) ·
+PMES users added (MSSI + CWLI; roles staff / materials / operator / supervisor / manager / admin) ·
+PMES Piece 1 JO review gate · Piece 2 actual output · Piece 3 capacity + schedule · Piece 4 flip (PMES owns
+capacity, Modcraft reads it; Modcraft→PMES mirror triggers dropped) · MRF warehouse-processed →
+materials-received · JO check shows materials status, proceed-with-incomplete = supervisor + manager ·
+board inspection + defect map + defect-aware optimizer + additional-board requests (KEYSTONE accept/reject,
+escalation to Head of Plant Ops).
+**Rommel = Admin AND Head of Plant Operations** — `adm_user_caps.is_plant_head = true` set 2026-09-26.
+
+## Waiting on Rommel
+- Emails for the **materials** person and the **operators** (add in Command Center → PMES users).
+- Who gets **Warehouse issue** (`can_issue`) in KEYSTONE.
+- **Suppliers** in KEYSTONE (0 today) — the outsource purchase request works but POs need suppliers.
+- ASM / QC / PACK / CURE process capacity typed in PMES (no Modcraft figure exists).
+
+## Next
+1. First real end-to-end run: quotation → Job Order → KEYSTONE release (JO + MRF) → warehouse processed →
+   materials received + board inspection → staff JO check → supervisor approve → cutting plan adopted →
+   output → schedule → progress visible in Modcraft.
+2. Printed cut sequence: where a strip skips past a defect, list the extra waste crosscut (known gap).
+3. Command Center phase 4 (sign-in from the database) — only after a clean shadow-log stretch.
+
+## Carried forward, unchanged
+Rotate the Wufoo API key (security clock) · confirm Supabase egress fix in Usage · 15 orders with no
+handler · retired-status string sweep · Schedule page on `DEMO_PROJS` · Orders 8834/8840 unlinked ·
+ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on hold) ·
+`QT-W00000136.R1` print report · phone order_pause · Stage 2 lock parity while paused · Michael Delos
+Reyes signature · unlock-reconciliation ~60s window · `qApproved`/`qClientApproved` coupling · MSSI
+commission OFF · `samplesofcuttinglist/` is client data — never commit · distinct app icons (placeholder).
