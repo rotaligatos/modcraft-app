@@ -12302,3 +12302,10 @@ commission OFF · `samplesofcuttinglist/` is client data — never commit · dis
   gate form defaults the plant to the quotation's company and the required % follows the chosen terms
   (his test gate had "100% upon approval" with 50% required).
 - Open question for Rommel: should a payment gate open automatically at Final client approval?
+- **2026-09-27 (KEYSTONE `8b1b1ec`)**: opening a payment gate only records amount/terms/plant — no insert
+  trigger; the MRF is a draft until release, and only "Unlock MR + Job Order" sends MRF + JO to PMES.
+  Destination plant: MSSI for MSSI **and WCL** quotations, CWLI for Cebu — in the form and as a DB
+  default (`adm_gate_default_destination` trigger, when none given). **View quotation** on each card:
+  the printout Modcraft saved in Storage (newest Final Quotation first, drafts selectable), sandboxed,
+  Print / Save PDF. ⚠ Storage `quotations` bucket is readable by ANY signed-in user of any app (no
+  company scoping) — flagged, not changed.
