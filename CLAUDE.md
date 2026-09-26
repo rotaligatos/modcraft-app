@@ -12125,5 +12125,8 @@ column on hardware · grooving has a PMES stage now but PMES scan/process screen
   (and the `user_pins` copy via `cc_sync_user_pins`). Nothing is ever deleted from the Sheet.
 - Role/company values not in the lists are kept as their own option (no `<select>` fallback swap).
 - Simulation `tools/sim_cc_phase2.mjs` (stubbed Supabase/Google, fake Sheet): 17/17 pass; guard proven
-  by mutation (removing it turns 2 checks red). **No real Sheet row has been written yet — pick a test row with Rommel.**
-Next: first real edit on a row Rommel chooses; then phase 3 (shadow sign-in).
+  by mutation (removing it turns 2 checks red).
+- **Live test 2026-09-26 (Rommel approved):** Andrei Salvador row 6 renamed "(test)" then back — Sheet row
+  byte-identical to the original after, DB copy followed both times, 2 MODCRAFT-SHEET log rows, no hash in the log.
+  Also fixed: boot() was storing the Supabase provider_token as the Sheet token (wrong Google project, 403).
+Next: phase 3 (shadow sign-in).
