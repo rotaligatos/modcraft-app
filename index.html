@@ -35928,9 +35928,10 @@ var MCL=(function(){
       if(!t.rows&&!S.hpl.length&&!S.hardware.length) return;
       if(!confirm('Clear this cutting list?')) return;
       // Back to the same 10-row starting state a fresh open shows, not to zero.
-      S.panels=blankPanels(10); S.hpl=[]; S.hardware=[]; rerender();
+      S.panels=blankPanels(10); S.hpl=[]; S.hardware=[]; S.sourceFiles=[]; rerender();
     },
     state:function(){ return S; },
+    setSourceFiles:function(files){ S.sourceFiles=(files||[]).slice(); },
     thicknessFor:function(v){ return thicknessForMaterial(v); },
     blankPanel:function(){ return blankPanel(); },
     // The client-list importer (CLR) hands its rows over here. Same replace-not-append rule
@@ -35983,6 +35984,11 @@ var MCL=(function(){
       var payload=_cutListToAnalysis(cl,null);
       prodLoadStructuredList(payload,'Cutting list — entered in Modcraft');
       if(prodState.result){ prodState.result._bander=prodSettings.banderType||'trimmer'; prodState.result._hplOrder=prodSettings.hplOrder||'laminate_first'; }
+      // An imported client list keeps its original file as the analysis's source (saved at lock).
+      if(S.sourceFiles&&S.sourceFiles.length&&prodState.result){
+        prodState.file=S.sourceFiles[0]; prodState.fileName=S.sourceFiles[0].name;
+        prodState.result._sourceKind='customer_list';
+      }
       var flagged=0;
       for(var c=0;c<payload.components.length;c++) if(payload.components[c].needsReview) flagged++;
       try{ logActivity('Cutting list entered in Modcraft loaded into Designers Support — '
@@ -36751,6 +36757,9 @@ function linesToAoa(lines) {
     });
     ST.files.forEach(function(f){ if(f.sheets.some(function(s){return s.include;})) srcNames.push(f.name); });
     if(!MCL.importRows(panels,hw,srcNames.join(', '))) return;
+    // The client's own file travels with the list, so it is saved with the quotation at lock
+    // ("customer cutting list") and reaches production with the Job Order.
+    MCL.setSourceFiles((ST.rawFiles||[]).filter(function(f){ return srcNames.indexOf(f.name)>=0; }));
 
     // Remember what a person corrected: layouts they changed, and every material mapping.
     var changed=false, who=(gUser&&(gUser.name||gUser.email))||'', now=new Date().toISOString();
@@ -36778,7 +36787,7 @@ function linesToAoa(lines) {
     if(inputEl) inputEl.value='';
     if(!files.length) return;
     if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return; }
-    ST.files=[]; ST.active=0; ST.matEdit={};
+    ST.files=[]; ST.active=0; ST.matEdit={}; ST.rawFiles=files;
     ensureModal();
     el('ov-clr-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Reading '+files.length+' file'+(files.length===1?'':'s')+'…</div>';
     el('ov-clr-foot').innerHTML='';
@@ -37019,13 +37028,13 @@ function _joBuild(result,ctx){
 // The analysis this quotation carries: the one reflected in this session, else the output saved
 // with it at an earlier lock (drawing_analyses → Storage).
 function _joAnalysisForQuotation(baseSerial){
-  if(qDrawingAnalysis&&qDrawingAnalysis.result) return Promise.resolve({result:qDrawingAnalysis.result,fileName:qDrawingAnalysis.fileName||''});
+  if(qDrawingAnalysis&&qDrawingAnalysis.result) return Promise.resolve({result:qDrawingAnalysis.result,fileName:qDrawingAnalysis.fileName||'',elevation:!!qDrawingAnalysis.elevationResult});
   if(!supaReady()) return Promise.resolve(null);
   return supa.from('drawing_analyses').select('output_file_path,file_name').eq('serial',baseSerial).maybeSingle().then(function(r){
     var row=r&&r.data; if(!row||!row.output_file_path) return null;
     return supa.storage.from('quotations').download(row.output_file_path).then(function(d){
       if(!d||d.error||!d.data) return null;
-      return d.data.text().then(function(t){ var j=JSON.parse(t); return j&&j.result?{result:j.result,fileName:row.file_name||''}:null; });
+      return d.data.text().then(function(t){ var j=JSON.parse(t); return j&&j.result?{result:j.result,fileName:row.file_name||'',elevation:!!j.elevationResult}:null; });
     });
   }).catch(function(){ return null; });
 }
@@ -37053,6 +37062,12 @@ function _reserveJobOrder(){
         client:client,project:project,company:company,preparedBy:who,bander:bander,source:an.fileName,
         hplOrder:an.result._hplOrder||prodSettings.hplOrder||'laminate_first'});
       data.revision=rev;
+      // Where production finds this job's files (source file, elevation, customer cutting list, shop
+      // drawing, order attachments): the quotation's Storage folder. PMES lists it when a JO opens,
+      // so files saved at this same lock are not missed.
+      data.storageFolder=_supaSafeStorageKey(base);
+      data.sourceFileName=an.fileName||'';
+      data.sourceKind=an.result._sourceKind||(an.elevation?'elevation':(an.result._structured?'typed_list':'drawing'));
       // Lock, then Send, locks twice. A second lock of the SAME content keeps the Job Order it
       // already has rather than minting an identical new version.
       var top=rows[0];
@@ -38272,6 +38287,14 @@ function _saveDrawingAnalysisToDrive(){
     rawFilePath:''
   };
   var driveChain=ensureDriveFolder().then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);});
+  // The shop drawing generated from an elevation, saved beside the quotation so production gets it
+  // with the Job Order (PMES lists this folder).
+  if(da.elevationResult&&typeof _prodShopDrawingHtml==='function'){
+    var sdName=qSerial+' — '+client+' — shop drawing.html', sdHtml=_prodShopDrawingHtml(da.elevationResult,false);
+    supaUploadQuotationFile(baseSerial,sdName,'text/html',sdHtml);
+    driveChain.then(function(fid){ return _driveUpsertFile(fid,sdName,'text/html',sdHtml); })
+      .catch(function(e){ console.warn('Shop drawing Drive save failed:',e); });
+  }
   // Output JSON — plain text, uses the same helpers as every other saved-report artifact.
   driveChain.then(function(fid){
     supaUploadQuotationFile(baseSerial,outputFileName,'application/json',JSON.stringify(outputPayload,null,2));
@@ -39471,8 +39494,11 @@ function prodRenderShopDrawing(er){
       +' <button class="btn btn-danger" style="font-size:12px" onclick="prodClearFile()"><i class="ti ti-x"></i> Start over</button>')
     +'</div>';
 }
-function prodPrintShopDrawing(){
-  var er=prodState.elevationResult;if(!er)return;
+// The shop drawing as a standalone page. Fixed colours throughout: in a standalone document the
+// app's theme tokens do not exist, and a var(--…) there silently drops the colour. Used for the
+// print and for the copy saved with the quotation (a Job Order attachment).
+function _prodShopDrawingHtml(er,autoPrint){
+  if(!er) return '';
   var us=er.units||[],n=us.length;
   var co=prodGetCoInfo();
   var today=new Date();
@@ -39521,30 +39547,34 @@ function prodPrintShopDrawing(){
     +'<title>Shop Drawing'+(er.projectName?' -- '+er.projectName:'')+'</title>'
     +'<style>'
     +'*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif}'
-    +'body{background:var(--card)}'
+    +'body{background:#fff}'
     +'@page{size:A4 landscape;margin:4mm}'
-    +'.sheet{width:289mm;height:202mm;display:flex;border:1px solid #333;page-break-after:always;overflow:hidden;background:var(--card)}'
+    +'.sheet{width:289mm;height:202mm;display:flex;border:1px solid #333;page-break-after:always;overflow:hidden;background:#fff}'
     +'.da{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}'
-    +'.row1{flex:0 0 57%;border-bottom:0.5px solid var(--line2);display:flex;overflow:hidden}'
+    +'.row1{flex:0 0 57%;border-bottom:0.5px solid #bbb;display:flex;overflow:hidden}'
     +'.row2{flex:1;display:flex;overflow:hidden}'
     +'.cell{flex:1;display:flex;align-items:center;justify-content:center;padding:1.5mm;overflow:hidden;min-width:0}'
-    +'.cs{flex:0 0 34%;border-left:0.5px solid var(--line2)}'
+    +'.cs{flex:0 0 34%;border-left:0.5px solid #bbb}'
     +'.cell svg{max-width:100%;max-height:100%;display:block}'
     +'.tb{flex:0 0 58mm;border-left:1px solid #333;display:flex;flex-direction:column;overflow:hidden}'
-    +'.tb-co{background:#1a2a4a;color:var(--on-accent);padding:3.5mm 3mm;font-size:9pt;font-weight:900;letter-spacing:.06em;text-align:center;flex-shrink:0}'
-    +'.tb-rows{flex:1;padding:2mm;display:flex;flex-direction:column;gap:1.3mm;overflow:hidden;border-bottom:0.5px solid var(--line2)}'
-    +'.tbr{display:flex;flex-direction:column;line-height:1.3;font-size:6.5pt;color:var(--ink26)}'
-    +'.tbr span{font-size:4.5pt;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.06em}'
-    +'.tb-notes{padding:2mm;border-bottom:0.5px solid var(--line2);flex-shrink:0}'
+    +'.tb-co{background:#1a2a4a;color:#fff;padding:3.5mm 3mm;font-size:9pt;font-weight:900;letter-spacing:.06em;text-align:center;flex-shrink:0}'
+    +'.tb-rows{flex:1;padding:2mm;display:flex;flex-direction:column;gap:1.3mm;overflow:hidden;border-bottom:0.5px solid #bbb}'
+    +'.tbr{display:flex;flex-direction:column;line-height:1.3;font-size:6.5pt;color:#222}'
+    +'.tbr span{font-size:4.5pt;color:#666;font-weight:700;text-transform:uppercase;letter-spacing:.06em}'
+    +'.tb-notes{padding:2mm;border-bottom:0.5px solid #bbb;flex-shrink:0}'
     +'.tb-nt{font-size:5pt;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:1mm}'
-    +'.tb-ni{font-size:4.5pt;color:var(--text3);line-height:1.7}'
-    +'.tb-sn{padding:2mm 3mm;font-size:22pt;font-weight:900;color:var(--ink27);text-align:center;flex-shrink:0;letter-spacing:.02em;border-top:0.5px solid var(--line2)}'
+    +'.tb-ni{font-size:4.5pt;color:#777;line-height:1.7}'
+    +'.tb-sn{padding:2mm 3mm;font-size:22pt;font-weight:900;color:#1a2a4a;text-align:center;flex-shrink:0;letter-spacing:.02em;border-top:0.5px solid #bbb}'
     +'</style></head><body>'
     +sheets
-    +'<script>window.onload=function(){setTimeout(function(){window.print();},400);};<\/script>'
+    +(autoPrint?'<script>window.onload=function(){setTimeout(function(){window.print();},400);};<\/script>':'')
     +'</body></html>';
+  return html;
+}
+function prodPrintShopDrawing(){
+  var er=prodState.elevationResult;if(!er)return;
   var pw=window.open('','_blank','width=1300,height=950');
-  if(pw){pw.document.write(html);pw.document.close();}
+  if(pw){pw.document.write(_prodShopDrawingHtml(er,true));pw.document.close();}
 }
 function prodExportCollada(){
   var er=prodState.elevationResult; if(!er) return;
