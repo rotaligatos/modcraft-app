@@ -12167,7 +12167,13 @@ Built in `rotaligatos/PMES` (`0f2c177`→ this session's commit) + migrations `p
 `messages` row to the preparer (matched by `quotations.prepared_by` name) + Modcraft Admins, and puts
 the note on `job_orders.status_note`. Tested as Nelit (staff) / Reynaldo (supervisor) by impersonation,
 rolled back. Full notes in PMES `MODCRAFT_BRIDGE_NOTES.md` ("Piece 1").
-**Agreed order next:** Piece 2 actual output (staff keys, supervisor confirms) → Piece 3 MSSI machine
+**Piece 2 shipped same session** (PMES commit after `0a5bb60`; migrations `pmes_stage_outputs_piece2`,
+`pmes_stage_planned_route_fallback`): `pmes_stage_outputs` — staff enters per process/day/machine,
+supervisor confirms/rejects; confirmed pieces set the stage in progress / complete against
+`pmes_stage_planned()` (same rule as the app's `componentsForStage`). Tested by impersonation, rolled
+back: 12 of 30 → in progress, 30 of 30 → complete, staff cannot confirm. Rommel had already approved
+the test JO `36665M/L` live (Piece 1 confirmed in his hands).
+**Agreed order next:** Piece 3 MSSI machine
 capacity (home = PMES, mirrored from Modcraft first) + scheduling → Piece 4 updates to Modcraft/CRM.
 Plus: MRF released with the JO (warehouse "processed" → production "received" confirmations); barcodes
 remain the long-term logging method.
