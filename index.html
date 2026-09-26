@@ -36809,17 +36809,38 @@ function _joEdgeCounts(ebt){
   if(up.indexOf('T')>=0) sc++; if(up.indexOf('B')>=0) sc++; if(up.indexOf('L')>=0) lc++; if(up.indexOf('R')>=0) lc++;
   return {sc:sc,lc:lc,known:!raw||sc+lc>0};
 }
-// Short area code for the barcode, same shape as PMES's ("KIT"): one word → its first letters,
-// several words → their initials.
-function _joAreaCode(area){
-  // Only the room: an imported group reads "MASTERS BEDROOM › 88T-2S NOTE…", and the note after
-  // the › is detail about the cabinet, not the area.
-  var w=String(area||'GEN').split('›')[0].toUpperCase().replace(/[^A-Z0-9 ]+/g,' ').split(/\s+/).filter(Boolean);
-  if(!w.length) return 'GEN';
-  if(w.length===1) return w[0].slice(0,4);
-  return w.slice(0,4).map(function(x){return x[0];}).join('');
-}
 function _joPad(n,w){ n=String(n); while(n.length<w) n='0'+n; return n; }
+// PMES keeps its own fixed code lists (pmes_areas, pmes_part_types) and every PMES part must use
+// them. Mapped by keywords in the area/part name; anything not recognised is MISC and is listed on
+// the Job Order rather than guessed. Order matters: the more specific rule first.
+var PMES_AREA_RULES=[
+  ['KIT',/kitchen|pantry|\bkit\b/i],['BTH',/bath|toilet|\bcr\b|vanity|powder/i],
+  ['CLS',/closet|walk.?in|wardrobe/i],['BED',/bed|\bmbr\b|\bbr\b|masters?/i],
+  ['LIV',/living|\bliv\b|tv|entertain/i],['DIN',/dining|\bdin\b/i],['LDY',/laundry/i],
+  ['OFC',/office|study|work.?station/i],['GAR',/garage/i],['OUT',/outdoor|garden|balcony/i]];
+var PMES_PART_RULES=[
+  // Drawer box parts before drawer fronts: "DRAWER FRONT & BACK" is two box parts, not a front.
+  ['DRS',/(drawer|drwr|drw)\s*(box\s*)?(side|back|sub|f\s*&\s*b|front\s*&\s*back)|(side|back)\s*(drawer|drwr|drw)|front\s*&?\s*back\s*(drawer|drwr|drw)/i],
+  ['DRF',/(drawer|drwr|drw)\s*\d*\s*(front|face)|face\s*(drawer|drwr|drw)|\bd\.?\s*face\b/i],
+  ['DRB',/(drawer|drwr|drw)\s*(bottom|base|floor)|bottom\s*(drawer|drwr|drw)/i],
+  ['TR',/base\s*boards?|toe\s*kick|plinth|\brails?\b/i],
+  ['BK',/back(ing)?\s*(panel)?$|\bbacking\b|back\s*panel/i],
+  ['PT',/partition|divider|\bdiv\b|mullion|c(en)?te?r\s*panel/i],
+  ['SP',/side|siding|end\s*panel|expose[d]?\s*panel|gable/i],['TP',/\btop\b|countertop|worktop/i],
+  ['BP',/bottom|\bbot\b|\bbase\b/i],['SH',/shelf|shelves|ledge|\bfix\s*sh\b|\bsh\b/i],['DR',/door|shutter|flap/i],
+  ['TR',/kick|stretcher|stiffener/i],
+  ['FP',/filler|fascia|face\s*frame|valance|cornice|scribe/i],['CL',/cleat|nailer|batten/i],
+  ['HD',/hardware|mount/i]];
+function _joPmesArea(area){
+  var a=String(area||'');
+  for(var i=0;i<PMES_AREA_RULES.length;i++) if(PMES_AREA_RULES[i][1].test(a)) return PMES_AREA_RULES[i][0];
+  return 'MISC';
+}
+function _joPmesPart(name){
+  var n=String(name||'');
+  for(var i=0;i<PMES_PART_RULES.length;i++) if(PMES_PART_RULES[i][1].test(n)) return PMES_PART_RULES[i][0];
+  return 'MISC';
+}
 // What a Job Order says about the job — everything except its own number, version, date and
 // barcodes (which embed the number). Two reservations with the same signature are the same job.
 function _joSig(d){
@@ -36855,15 +36876,20 @@ function _joBuild(result,ctx){
     if(!ec.known) flags.push('edge code "'+c.ebt+'" not understood');
     if(!(L>0&&W>0)) flags.push('no size — cannot be cut from this list');
     if(c.needsReview) flags.push(c.reviewNote||'flagged for review');
-    var pn='P'+(i+1), area=c.area||'General', ac=_joAreaCode(area);
-    var comp=String(c.name||pn).toUpperCase().replace(/[-\/]+/g,' ').replace(/\s+/g,' ').trim().slice(0,24);
+    var pn='P'+(i+1), area=c.area||'General';
+    // PMES codes: area and part type from PMES's own lists; the component is this part's number
+    // plus its cabinet/group, so two side panels in one cabinet (P3, P4) never share a barcode.
+    var pa=_joPmesArea(area); if(pa==='MISC') pa=_joPmesArea(c.name);
+    var pp=_joPmesPart(c.name);
+    var grp=String(area).split('›')[0];
+    var comp=(pn+' '+grp).toUpperCase().replace(/[-\/]+/g,' ').replace(/\s+/g,' ').trim().slice(0,30);
     // barcodes: the full PMES-style ID (job-area-component-part-NN/total). scan: the short code the
     // label's bars encode — ~45 characters of Code128 on a 6cm label is too dense to scan reliably.
     var codes=[], scan=[], short=String(ctx.joNumber||'').replace(/^JO-/,'');
-    for(var n=1;n<=qty;n++){ codes.push(ctx.joNumber+'-'+ac+'-'+comp+'-'+pn+'-'+_joPad(n,2)+'/'+_joPad(qty,2)); scan.push(short+'-'+pn+'-'+_joPad(n,2)); }
+    for(var n=1;n<=qty;n++){ codes.push(ctx.joNumber+'-'+pa+'-'+comp+'-'+pp+'-'+_joPad(n,2)+'/'+_joPad(qty,2)); scan.push(short+'-'+pn+'-'+_joPad(n,2)); }
     if(flags.length) flagged++;
     pieces+=qty;
-    parts.push({p:pn,ref:i,area:area,areaCode:ac,name:c.name||'',material:c.material||'',color:c.color||'',
+    parts.push({p:pn,ref:i,area:area,pmesArea:pa,pmesPart:pp,component:comp,name:c.name||'',material:c.material||'',color:c.color||'',
       texture:c.texture||'',thickness:+c.thickness||0,faces:+c.faces||0,L:L,W:W,qty:qty,cutL:cutL,cutW:cutW,
       ebt:c.ebt||'',sc:ec.sc,lc:ec.lc,tape:c.edgeTape||'',tapeMm:tapeMm,grain:c.grain||'',grooving:c.grooving||'',
       notes:c.notes||'',flags:flags,barcodes:codes,scan:scan});
@@ -36880,6 +36906,8 @@ function _joBuild(result,ctx){
     bander:bander, defaultTapeMm:defTape,
     machine:boards.length?{label:boards[0].machineLabel,kerf:boards[0].kerf,allowRotate:boards[0].allowRotate}:null,
     source:ctx.source||'', parts:parts, pieceCount:pieces, flaggedParts:flagged,
+    pmesMisc:{area:parts.filter(function(p){return p.pmesArea==='MISC';}).length,
+              part:parts.filter(function(p){return p.pmesPart==='MISC';}).length},
     boards:boards, boardCount:boards.reduce(function(n,b){return n+(b.boardsNeeded||0);},0),
     hardware:((result&&result.hardware)||[]).map(function(h){ return {name:h.name||h.item||'',qty:h.qty||0,unit:h.unit||'',cabinet:h.cabinet||'',notes:h.notes||''}; }),
     holes:(result&&result.holeSchedule)||[],
@@ -36989,14 +37017,20 @@ function _joDocHtml(jo,status){
     h+='<div style="border:1.5px solid #b45309;color:#7c2d12;background:#fff7ed;padding:6px 10px;border-radius:6px;font-size:11px;margin-bottom:8px"><b>'+flagParts.length+' part(s) need checking before cutting:</b><br>'
       +order.map(function(m){ var ps=byMsg[m]; return e(m)+' — <b>'+(ps.length>12?ps.slice(0,12).join(', ')+' +'+(ps.length-12)+' more':ps.join(', '))+'</b>'; }).join('<br>')+'</div>';
   }
+  // Not a cutting problem, so not in the box above — but PMES files these under "Miscellaneous".
+  var pm=jo.pmesMisc||{};
+  if(pm.area||pm.part) h+='<div class="sub">PMES codes: '+(pm.area?pm.area+' part(s) have no recognised area (filed as MISC)':'')
+    +(pm.area&&pm.part?'; ':'')+(pm.part?pm.part+' part(s) have no recognised part type (filed as MISC)':'')
+    +' — shown in orange in the PMES column.</div>';
   h+='<h2>Parts — cut list</h2><table class="pl"><tr><th>Part</th><th>Area</th><th>Component</th><th>Material</th><th>Th</th>'
-    +'<th>Finished L×W</th><th>'+(cut?'<b>Cut</b> L×W':'Cut L×W')+'</th><th>Qty</th><th>Edge</th><th>Tape</th><th>Grain</th><th>Groove</th><th>Barcodes</th></tr>';
+    +'<th>Finished L×W</th><th>'+(cut?'<b>Cut</b> L×W':'Cut L×W')+'</th><th>Qty</th><th>Edge</th><th>Tape</th><th>Grain</th><th>Groove</th><th>PMES</th><th>Barcodes</th></tr>';
   jo.parts.forEach(function(p){
     var diff=p.cutL!==p.L||p.cutW!==p.W;
     h+='<tr'+(p.flags.length?' style="background:#fff7ed"':'')+'><td><b>'+p.p+'</b></td><td>'+e(p.area)+'</td><td>'+e(p.name)+'</td>'
       +'<td>'+e([p.material,p.color].filter(Boolean).join(' '))+'</td><td>'+(p.thickness||'')+'</td><td>'+p.L+' × '+p.W+'</td>'
       +'<td'+(diff?' style="font-weight:700"':'')+'>'+p.cutL+' × '+p.cutW+'</td><td>'+p.qty+'</td><td>'+e(p.ebt||'—')+'</td>'
       +'<td>'+e(p.tape)+(p.tapeMm&&cut?' ('+p.tapeMm+'mm)':'')+'</td><td>'+e(p.grain)+'</td><td>'+e(p.grooving)+'</td>'
+      +'<td style="white-space:nowrap'+(p.pmesArea==='MISC'||p.pmesPart==='MISC'?';color:#b45309':'')+'">'+e((p.pmesArea||'')+' / '+(p.pmesPart||''))+'</td>'
       +'<td style="font-family:monospace;font-size:9px">'+e(p.barcodes[0])+(p.qty>1?' … /'+_joPad(p.qty,2):'')+'</td></tr>';
   });
   h+='</table>';

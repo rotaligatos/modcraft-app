@@ -4663,6 +4663,16 @@ const PROFILES = {
           const c = window._joBuild({ components: comps.map((x, i) => i ? x : Object.assign({}, x, { qty: 3 })), hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1' });
           return [window._joSig(a) === window._joSig(b), window._joSig(a) === window._joSig(c)];
         }, [true, false]);
+        check('Job Order: parts map to PMES area/part codes; barcodes follow PMES full_barcode_id', () => {
+          const w = window, P = w._joPmesPart, A = w._joPmesArea;
+          const parts = ['SIDE PANEL', 'BASE BOARD', 'DRAWER FRONT & BACK', 'DRAWER FACE (LEFT)', 'DRAWER FLOOR',
+            'AB OPEN SHELVES - DIVIDER', 'TOP RAIL', 'BACKING', 'ADJ SHELF', 'DOOR', 'A FILLER', 'HEAD BOARD -L'].map(P);
+          const areas = ['MASTERS BEDROOM › note', 'Kitchen', 'CABINET 2', 'Walk-in closet', 'T&B vanity'].map(A);
+          const jo = w._joBuild({ components: [{ area: 'KITCHEN', name: 'Side panel', material: 'PB', thickness: 18,
+            length: 700, width: 500, qty: 2, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1' });
+          return { parts, areas, id: jo.parts[0].barcodes[1] };
+        }, { parts: ['SP', 'TR', 'DRS', 'DRF', 'DRB', 'PT', 'TR', 'BK', 'SH', 'DR', 'FP', 'MISC'],
+             areas: ['BED', 'KIT', 'MISC', 'CLS', 'BTH'], id: 'JO-T-V1-KIT-P1 KITCHEN-SP-02/02' });
         check('Job Order: reserved on every Initial lock path, marked ready on Final client approval', () => {
           const has = (f, s) => typeof window[f] === 'function' && String(window[f]).includes(s);
           return [has('_doLockOnlyConfirmed', '_reserveJobOrder()'), has('confirmSend', '_reserveJobOrder()'),
