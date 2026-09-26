@@ -12026,7 +12026,8 @@ Remaining misses were thicknesses absent from the test slice. Every mapping is s
 - Both local folders are now **git working copies of those repos** (they had no version control).
   KEYSTONE's local-only files (backups, ROLLBACK_*, admin.html, README, SPEC) are excluded via
   `.git/info/exclude` — only `index.html` is published. To republish: commit + `git push` in that folder.
-- ⚠ **Rommel must add both addresses to Supabase → Authentication → URL Configuration → Redirect URLs**:
-  `https://rotaligatos.github.io/PMES/**` and `https://rotaligatos.github.io/Keystone/**`. Without them,
-  Google sign-in returns to the Site URL (Modcraft) instead of the app. No MCP tool can set this.
+- **Supabase Redirect URLs done (2026-09-26):** `https://rotaligatos.github.io/PMES/**` added via Rommel's Chrome
+  (the mhelle17 account owns project nkpekroogqsmfilypowd — the IT account wcli-it-admin has no access).
+  KEYSTONE was already listed (both `/keystone/**` and `/Keystone/**`). The Supabase MCP cannot change auth
+  settings; use the dashboard.
 - Not yet installable (PWA) — agreed to do with the Command Center work.
