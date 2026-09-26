@@ -3973,6 +3973,25 @@ const PROFILES = {
             w._matSrcCache = saved.matSrcCache; w._hwSrcCache = saved.hwSrcCache; w.qFabMode = saved.qFabMode;
           }
         }, { materialForced: true, hardwareNotForced: true });
+      /* QT-M00000176 (2026-09-26): a signature routed to a Staff signatory by name never reached
+         them — the filter showed Staff only their OWN requests plus company grants, and the
+         request's company ("Module System", singular) matched neither. */
+      check('filterApprovalsByRouting: a request routed TO me is always visible, companies compared canonically', () => {
+        const w = window;
+        const saved = [w.currentRole, w.gUser, w.sheetUsers, w.currentUserCompany];
+        try {
+          w.currentRole = 'Staff'; w.currentUserCompany = 'Module System and Services, Inc.';
+          w.gUser = { email: 'joanna@x.ph' };
+          w.sheetUsers = [{ email: 'joanna@x.ph', accessCompanies: ['wcl', 'cwl'] }];
+          const toMe = { type: 'signature', company: 'Module System and Services, Inc.', fromEmail: 'kaye@x.ph', approverEmail: ' Joanna@x.ph ' };
+          const other = { type: 'discount', company: 'Module System and Services, Inc.', fromEmail: 'kaye@x.ph', approverEmail: 'allan@x.ph' };
+          const granted = { type: 'discount', company: 'Cebu World Laminates', fromEmail: 'kaye@x.ph', approverEmail: 'allan@x.ph' };
+          const r = w.filterApprovalsByRouting([toMe, other, granted]);
+          w.sheetUsers = [{ email: 'joanna@x.ph', accessCompanies: [] }];
+          const r2 = w.filterApprovalsByRouting([toMe, other]);
+          return { withGrants: [r.includes(toMe), r.includes(other), r.includes(granted)], noGrants: [r2.includes(toMe), r2.includes(other)] };
+        } finally { [w.currentRole, w.gUser, w.sheetUsers, w.currentUserCompany] = saved; }
+      }, { withGrants: [true, false, true], noGrants: [true, false] });
       /* Pause button (2026-08-28): freezes the SLA clock while waiting on the client, needs an
          approver, and once approved the linked quotation (if any) is not editable until Resume.
          Current pause state is DERIVED from the last entry in one JSON history array -- never a
