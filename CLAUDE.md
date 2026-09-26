@@ -12031,3 +12031,27 @@ Remaining misses were thicknesses absent from the test slice. Every mapping is s
   KEYSTONE was already listed (both `/keystone/**` and `/Keystone/**`). The Supabase MCP cannot change auth
   settings; use the dashboard.
 - Not yet installable (PWA) — agreed to do with the Command Center work.
+
+## What was changed on 2026-09-26 (session 9 — Command Center phase 1, company filter, installable apps)
+- **Phase 1 done ("check the copy")** — Command Center tab **Modcraft users**: reads the User Roles
+  sheet read-only (Google sign-in with `spreadsheets.readonly`; Google's token kept for the tab ~50 min in
+  `sessionStorage cc_gtok`), parses it with a port of Modcraft's `parseUserRows`/`getDefaultAcc` (keep
+  the two in step), and compares every person with `public.users`: name, role, company (by key), active,
+  device, 13 feature switches, delegation, all-companies, also-sees, in-KPI, require-PIN, PIN set.
+  States: matches / differs / not in copy / only in copy; duplicate email rows flagged. **"Update the
+  database copy from the Sheet"** upserts people (never deletes; only-in-copy people are left alone)
+  and copies PINs via `cc_sync_user_pins`. The Sheet is never written and sign-in is unchanged.
+- **PINs:** new `user_pins` table — RLS on, **no policies, revoked from anon/authenticated**: nobody
+  can read a hash (a 4-digit PIN hash cracks in milliseconds). Written only via admin RPC
+  `cc_sync_user_pins`; `cc_pin_status()` returns set/not-set only. Phase 4's sign-in check must be a
+  security-definer function, never a client read.
+- `user_access_log` now also logs **MODCRAFT** (`users` table) changes, skipping updated_at-only saves.
+- **Company filter** on every Command Center list (All / WCL / MSSI / CWL / No company, by key);
+  `pmes_users.company` added and editable.
+- **Installable:** Command Center (`cc.webmanifest`, scope command-center.html), PMES (`sw.js`,
+  manifest icons), KEYSTONE (`sw.js`, `manifest.webmanifest`). All use the same **no-cache** worker
+  pattern. Verified live: all three workers activate. ⚠ **Icons are the Modcraft icon as a placeholder**
+  — Rommel to supply distinct designs (he rejected hand-drawn ones before).
+- Not verified: the Google consent for Sheet read access, and a real sheet read — needs Rommel signed in.
+Next: phase 2 (mirror — Command Center edits write the Sheet AND the copy), then 3 (shadow sign-in),
+4 (switch), 5 (full admin parity).
