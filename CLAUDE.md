@@ -12075,7 +12075,10 @@ raw marine plywood = outsource, grooving priced by rule, per-job "HPL faces (whe
 PMES + KEYSTONE published and installable · **Command Center phase 1 done on live data** (14 people,
 PINs copied to the unreadable `user_pins`, duplicate IT-admin row deleted).
 
-## ⚠ NEXT — Command Center phase 2 (mirror), per the AGREED PLAN above
+## ✅ DONE 2026-09-26 — Command Center phase 2 (mirror) AND phase 3 (shadow sign-in) — see sessions 10–11 above
+> Kept for the build notes only. **Next is watching the shadow log, then phase 4.**
+
+### (superseded) phase 2 build notes
 Editing a Modcraft user in the Command Center writes **both** the User Roles Google Sheet **and**
 `public.users` (+ `user_pins` via `cc_sync_user_pins` if a PIN is involved). Modcraft still signs in
 from the Sheet, so a remote change takes effect in Modcraft immediately. Build notes:
