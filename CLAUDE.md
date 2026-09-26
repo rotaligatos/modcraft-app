@@ -12016,3 +12016,17 @@ Remaining misses were thicknesses absent from the test slice. Every mapping is s
   Studio Tille C11 with 2 faces: 2 HPL sheets per board + "HPL Lamination (Plywood, 2 Face)", resolved.
 - Test hygiene: simulations call `logActivity`, which queues in `mc_log_outbox` in the preview browser —
   clear it (and `mc_client_templates`, `_e2e_cat`) after a run.
+
+## What was changed on 2026-09-26 (session 8 — PMES and KEYSTONE published)
+- **KEYSTONE** was already on GitHub Pages as `rotaligatos/Keystone` → **https://rotaligatos.github.io/Keystone/**
+  (capital K — the earlier "404" check used lowercase). The live copy was the pre-Job-Order version
+  (identical to `index.PRE-JOBORDER-backup.html`); replaced with the current `index.html` (`12917e1`).
+- **PMES** published as new public repo `rotaligatos/PMES` → **https://rotaligatos.github.io/PMES/** (`d91c8a4`).
+  Public is required for free GitHub Pages (same as Modcraft); only the publishable Supabase key is in it.
+- Both local folders are now **git working copies of those repos** (they had no version control).
+  KEYSTONE's local-only files (backups, ROLLBACK_*, admin.html, README, SPEC) are excluded via
+  `.git/info/exclude` — only `index.html` is published. To republish: commit + `git push` in that folder.
+- ⚠ **Rommel must add both addresses to Supabase → Authentication → URL Configuration → Redirect URLs**:
+  `https://rotaligatos.github.io/PMES/**` and `https://rotaligatos.github.io/Keystone/**`. Without them,
+  Google sign-in returns to the Site URL (Modcraft) instead of the app. No MCP tool can set this.
+- Not yet installable (PWA) — agreed to do with the Command Center work.
