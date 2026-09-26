@@ -103,6 +103,36 @@ const PROFILES = {
          the only thing that clears it. An approved quotation is LOCKED, and updateLockUI disables
          everything inside #s1-wrap without data-lock-exempt, so losing that attribute renders the
          escape hatch disabled exactly when it is needed. Silent, so it is pinned here. */
+      /* Command Center phase 3 (shadow sign-in): the Sheet still decides sign-in; afterwards the
+         Sheet row is compared with the database copy and the result recorded. These pin the pure
+         comparison and prove it is wired after the role is settled -- never before, never gating. */
+      if (typeof window._shadowUserDiffs === 'function') {
+        check('_shadowUserDiffs: identical row (company spelling drift, keys vs names) reports nothing', () => {
+          const u={name:'Ana',pos:'Staff',company:'Module System and Services, Inc.',active:true,mac:'',acc:{Dashboard:true,Quotations:true},
+            delegateTo:'',delegateActive:false,receiveAll:false,accessCompanies:['World Class Laminate, Inc.','cwl'],includeKpi:false,requirePin:false};
+          const d={name:'Ana',role:'Staff',company:'Module Systems and Services, Inc.',active:true,device_id:null,feature_access:{Dashboard:true,Quotations:true},
+            delegate_to:null,delegate_active:false,receive_all:false,access_companies:['cwl','wcl'],include_in_kpi:false,require_pin:false};
+          return window._shadowUserDiffs(u,d).length;
+        }, 0);
+        check('_shadowUserDiffs: role, active, one access switch and also-sees each named once', () => {
+          const u={name:'Ana',pos:'Manager',company:'W',active:false,mac:'',acc:{Dashboard:true,KPI:true},delegateTo:'',accessCompanies:['cwl'],includeKpi:false,requirePin:true};
+          const d={name:'Ana',role:'Staff',company:'W',active:true,device_id:'',feature_access:{Dashboard:true,KPI:false},delegate_to:'',access_companies:[],include_in_kpi:false,require_pin:true};
+          return window._shadowUserDiffs(u,d).map(x=>x.field).sort();
+        }, ['active','also sees','feature access','role']);
+        check('_shadowSnap carries pin_set only, never the hash', () => {
+          const snap=window._shadowSnap({name:'A',pos:'Staff',acc:{},pinHash:'HASH123',pinSalt:'S',rowIdx:4});
+          return [snap.pin_set, JSON.stringify(snap).indexOf('HASH123')<0];
+        }, [true,true]);
+        check('gCheckRole schedules the shadow check AFTER the role is set and the app shown, and it cannot change the role', () => {
+          const src=String(window.gCheckRole);
+          const i=src.indexOf('_roleResolved=true;'), j=src.indexOf('gShowApp();'), k=src.indexOf('_shadowUserCheck');
+          const body=String(window._shadowUserCheck);
+          return [i>0&&j>i&&k>j, /currentRoles*=/.test(body)||/currentUserAccs*=/.test(body)];
+        }, [true,false]);
+        check('setting your own PIN mirrors it to the database copy; an admin reset clears the copy', () => {
+          return [/mc_set_own_pin/.test(String(window.submitSetPin)), /cc_sync_user_pins/.test(String(window.resetUserPin))];
+        }, [true,true]);
+      }
       check('undo-approval button exists and is exempt from the lock sweep', () => {
         const b = document.getElementById('undo-iqappr-btn');
         return { exists: !!b, exempt: b ? b.getAttribute('data-lock-exempt') : null,

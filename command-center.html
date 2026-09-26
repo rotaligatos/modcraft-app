@@ -99,7 +99,7 @@ var CAPS=[['can_request','Request'],['can_approve','Approve'],['can_vouch','Vouc
           ['can_source','Source'],['is_manager_approver','Mgr approver'],['is_hpo_approver','HPO approver'],['is_md_approver','MD approver']];
 var TABS=[['people','People'],['mc','Modcraft users'],['pmes','PMES users'],['ks','KEYSTONE users'],['log','Change log']];
 
-var ME=null, TAB=(new URLSearchParams(location.search).get('tab'))||'people', D={modcraft:[],ks:[],pmes:[],caps:[],stages:[],log:[]};
+var ME=null, TAB=(new URLSearchParams(location.search).get('tab'))||'people', D={modcraft:[],ks:[],pmes:[],caps:[],stages:[],log:[],shadow:[]};
 // Company filter across every list ('' = all, 'none' = no company set). Keys: wcl / mssi / cwl.
 var CO_FILTER='';
 try{ CO_FILTER=sessionStorage.getItem('cc_co')||''; }catch(e){}
@@ -251,12 +251,13 @@ async function loadAll(){
     supa.from('pmes_users').select('*').order('active',{ascending:false}).order('name'),
     supa.from('adm_user_caps').select('*'),
     supa.from('pmes_stage_types').select('code,label,sort_order').order('sort_order'),
-    supa.from('user_access_log').select('*').order('at',{ascending:false}).limit(300)
+    supa.from('user_access_log').select('*').order('at',{ascending:false}).limit(300),
+    supa.from('user_shadow_log').select('id,at,email,ok,diffs,build').order('at',{ascending:false}).limit(1000)
   ]);
   var bad=q.filter(function(x){return x.error});
   if(bad.length) toast('Some lists could not load: '+bad[0].error.message);
   D.modcraft=q[0].data||[]; D.ks=q[1].data||[]; D.pmes=q[2].data||[];
-  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[];
+  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[];
 }
 
 function drawNav(){
@@ -377,6 +378,7 @@ function viewMc(){
     +'<button class="btn" onclick="mcOpenAdd()">+ Add a Modcraft user</button>'
     +(gToken(true)?'':'<p class="sub" style="margin-top:8px">Editing needs edit access to the Sheet — the first Edit asks Google for it.</p>')+'</div>'
     +mcEditor()
+    +mcShadowCard()
     +'<div class="card"><div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role (Sheet)</th><th>State</th><th>Differences — Sheet → copy</th><th></th></tr></thead><tbody>'
     +rows.map(function(r){
       var nm=(r.u&&r.u.name)||(r.d&&r.d.name)||'';
@@ -601,6 +603,28 @@ function mcSaveEditor(){
   if(!ch.length) return toast('Nothing changed.');
   if(!confirm('Save '+(u.name||u.email)+' — '+ch.join(', ')+'? Modcraft picks this up at their next sign-in.')) return;
   mcWriteUser(u,next,'edited: '+ch.join(', '));
+}
+
+/* Phase 3 — shadow sign-in. Modcraft records, after every sign-in, whether the Sheet row and the
+   database copy agreed. Phase 4 (sign in from the database) waits for a clean stretch here. */
+function mcShadowCard(){
+  var rows=D.shadow.filter(function(r){ var u=mcFind(norm(r.email)); return passCo(u?u.company:''); });
+  if(!rows.length) return '<div class="card"><h2>Shadow sign-in</h2><p class="sub">Nothing recorded yet. From the build of 2026-09-26 on, every Modcraft sign-in compares the Sheet with the database copy and records the result here. Sign-in itself still uses the Sheet.</p></div>';
+  var since=Date.now()-14*864e5, recent=rows.filter(function(r){ return new Date(r.at).getTime()>=since; });
+  var bad=recent.filter(function(r){ return !r.ok; });
+  var people={}; recent.forEach(function(r){ var k=norm(r.email); if(!people[k]) people[k]={n:0,bad:0,last:r}; people[k].n++; if(!r.ok) people[k].bad++; });
+  var lastBad=bad[0]?fmt(bad[0].at):'—';
+  var days=recent.length?Math.ceil((Date.now()-new Date(recent[recent.length-1].at).getTime())/864e5):0;
+  return '<div class="card"><h2>Shadow sign-in — last 14 days</h2>'
+    +'<p class="sub">Modcraft still signs people in from the Sheet; after each sign-in it checks the database copy against it and records the result. Sign-in is switched to the database only after a clean stretch.</p>'
+    +'<div style="margin:6px 0 10px"><span class="stat"><b>'+recent.length+'</b>sign-ins checked</span><span class="stat"><b>'+Object.keys(people).length+'</b>people</span>'
+    +'<span class="stat"><b>'+bad.length+'</b>disagreed</span><span class="stat"><b>'+days+'</b>days of data</span></div>'
+    +(bad.length?'<div class="note warn">Last disagreement '+esc(lastBad)+'. Fix the row (Edit above, or Update the database copy), then watch the next sign-in.</div>':(recent.length?'<div class="note" style="background:var(--wash-teal);color:var(--teal)">Every checked sign-in agreed.</div>':''))
+    +'<div class="tbl-wrap"><table><thead><tr><th>Person</th><th>Checks</th><th>Disagreed</th><th>Last check</th><th>Last result</th></tr></thead><tbody>'
+    +Object.keys(people).sort().map(function(k){ var p=people[k], u=mcFind(k);
+      return '<tr><td>'+esc(u?u.name:'')+' <span class="mono">'+esc(k)+'</span></td><td>'+p.n+'</td><td>'+(p.bad?'<span class="pill p-off">'+p.bad+'</span>':'0')+'</td><td>'+fmt(p.last.at)+'</td>'
+        +'<td style="font-size:12px">'+(p.last.ok?'<span class="pill p-on">agreed</span>':(p.last.diffs||[]).map(function(x){ return '<b>'+esc(x.field)+'</b>: '+esc(JSON.stringify(x.sheet))+' → '+esc(JSON.stringify(x.db)); }).join('<br>'))+'</td></tr>'; }).join('')
+    +'</tbody></table></div></div>';
 }
 
 /* ── PMES users ───────────────────────────────────────────────────────────── */

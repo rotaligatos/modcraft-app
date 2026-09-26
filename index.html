@@ -28704,6 +28704,68 @@ function gSignIn(){
   }
 }
 var _roleResolved=false;
+// ── Shadow sign-in (Command Center phase 3) ─────────────────────────────────────────────────
+// Sign-in still USES the User Roles Sheet. After it succeeds, the Sheet's row for this person is
+// compared with the database copy (public.users + user_pins) and the result is recorded in
+// user_shadow_log. Nothing here can change the role, the access, or whether sign-in succeeded —
+// it only observes. Once the log shows a clean run for a while, phase 4 can switch sign-in over.
+var _shadowRan=false;
+// Every field the copy holds, compared the same way the Command Center compares them.
+function _shadowUserDiffs(u,d){
+  var out=[]; if(!u||!d) return out;
+  function f(label,a,b){ out.push({field:label,sheet:a,db:b}); }
+  var t=function(s){ return String(s==null?'':s).trim(); }, lc=function(s){ return t(s).toLowerCase(); };
+  if(t(u.name)!==t(d.name)) f('name',t(u.name),t(d.name));
+  if(t(u.pos)!==t(d.role)) f('role',u.pos,d.role);
+  if(normalizeCompanyKey(u.company)!==normalizeCompanyKey(d.company)) f('company',u.company,d.company);
+  if(!!u.active!==!!d.active) f('active',!!u.active,!!d.active);
+  if(t(u.mac)!==t(d.device_id)) f('device',t(u.mac),t(d.device_id));
+  var fa=d.feature_access||{}, bad=ACC_KEYS.filter(function(k){ return !!(u.acc||{})[k]!==!!fa[k]; });
+  if(bad.length) f('feature access',bad.map(function(k){return k+':'+(u.acc[k]?'on':'off');}).join(','),bad.map(function(k){return k+':'+(fa[k]?'on':'off');}).join(','));
+  if(lc(u.delegateTo)!==lc(d.delegate_to)) f('delegate to',lc(u.delegateTo),lc(d.delegate_to));
+  if(!!u.delegateActive!==!!d.delegate_active) f('delegation on',!!u.delegateActive,!!d.delegate_active);
+  if(!!u.receiveAll!==!!d.receive_all) f('all companies',!!u.receiveAll,!!d.receive_all);
+  var a=(u.accessCompanies||[]).map(normalizeCompanyKey).filter(Boolean).sort().join(','),
+      b=(d.access_companies||[]).map(normalizeCompanyKey).filter(Boolean).sort().join(',');
+  if(a!==b) f('also sees',a,b);
+  if(!!u.includeKpi!==!!d.include_in_kpi) f('in KPI',!!u.includeKpi,!!d.include_in_kpi);
+  if(!!u.requirePin!==!!d.require_pin) f('require PIN',!!u.requirePin,!!d.require_pin);
+  return out;
+}
+// What the log keeps of a Sheet row: whether a PIN is set, never the hash.
+function _shadowSnap(u){
+  return {name:u.name,role:u.pos,company:u.company,active:!!u.active,device:u.mac||'',feature_access:u.acc,
+    delegate_to:u.delegateTo||'',delegate_active:!!u.delegateActive,receive_all:!!u.receiveAll,
+    access_companies:u.accessCompanies||[],include_in_kpi:!!u.includeKpi,require_pin:!!u.requirePin,pin_set:!!u.pinHash,sheet_row:u.rowIdx};
+}
+function _shadowUserCheck(){
+  if(_shadowRan||!gUser||!gUser.email||gUser.email==='local') return;
+  // Supabase connects a few seconds after sign-in (popup + postMessage); wait for it, but not forever.
+  var tries=0;
+  (function wait(){
+    if(_shadowRan) return;
+    if(typeof supaReady!=='function'||!supaReady()){ if(++tries<30) setTimeout(wait,2000); return; }
+    _shadowRan=true;
+    var me=(sheetUsers||[]).find(function(x){ return String(x.email||'').trim().toLowerCase()===gUser.email.trim().toLowerCase(); });
+    if(!me) return;
+    var email=me.email.trim().toLowerCase();
+    supa.from('users').select('*').eq('email',email).then(function(r){
+      var d=(r.data||[])[0];
+      var diffs=d?_shadowUserDiffs(me,d):[{field:'row',sheet:'present',db:'missing'}];
+      return supa.rpc('mc_shadow_pin',{p_hash:me.pinHash||'',p_salt:me.pinSalt||''}).then(function(p){
+        var pin=p.error?'error':(p.data||'');
+        if(pin!=='same') diffs.push({field:'PIN',sheet:me.pinHash?'set':'not set',db:pin});
+        var dbSnap=d?{name:d.name,role:d.role,company:d.company,active:d.active,device:d.device_id||'',feature_access:d.feature_access,
+          delegate_to:d.delegate_to||'',delegate_active:!!d.delegate_active,receive_all:!!d.receive_all,access_companies:d.access_companies||[],
+          include_in_kpi:!!d.include_in_kpi,require_pin:!!d.require_pin}:null;
+        var build=''; try{ build=document.lastModified; }catch(e){}
+        console[diffs.length?'warn':'log']('[shadow] sign-in check '+(diffs.length?'DIFFERS':'matches'),diffs);
+        return supa.rpc('mc_shadow_report',{p_ok:!diffs.length,p_diffs:diffs,p_sheet:_shadowSnap(me),p_db:dbSnap,p_build:build});
+      });
+    }).then(function(r){ if(r&&r.error) console.warn('[shadow] not recorded:',r.error.message); })
+      .catch(function(e){ console.warn('[shadow] check failed',e); });
+  })();
+}
 function gCheckRole(){
   _roleResolved=false;
   var ls=el('login-status'); if(ls){ls.textContent='Loading your permissions...';ls.style.color='var(--text2)';}
@@ -28784,6 +28846,7 @@ function gCheckRole(){
       currentRole=role;
       _roleResolved=true;
       gShowApp();
+      setTimeout(_shadowUserCheck,3000); // phase 3: compare the Sheet with the database copy, record only
     })
     .catch(function(err){
       // ⚠ This used to set currentRole='Admin' and open the app — ANY failure while loading
@@ -29180,6 +29243,9 @@ function submitSetPin() {
         .then(function(){
           me.pinHash=hash; me.pinSalt=salt;
           supaUpsertUser(me);
+          // Mirror to the database PIN copy (user_pins), so the shadow check does not report a
+          // permanent "differs" for a PIN set here. Own row only; the RPC keys on the caller.
+          if(typeof supaReady==='function'&&supaReady()) supa.rpc('mc_set_own_pin',{p_hash:hash,p_salt:salt}).then(function(r){ if(r.error) console.warn('[supa] own PIN not mirrored:',r.error.message); });
           closeModal('ov-set-pin');
           showToast('PIN saved successfully ✓');
           if(_pendingPinResume){
@@ -29205,6 +29271,7 @@ function resetUserPin(i) {
     sheetsUpdate('User Roles!W'+u.rowIdx+':X'+u.rowIdx,[['','']])
       .then(function(){
         u.pinHash=''; u.pinSalt='';
+        if(typeof supaReady==='function'&&supaReady()) supa.rpc('cc_sync_user_pins',{p_rows:[{email:u.email.trim().toLowerCase(),pin_hash:'',pin_salt:''}]}).then(function(r){ if(r.error) console.warn('[supa] PIN copy not cleared:',r.error.message); });
         gSendMessage(u.email,u.name,'Your approval PIN has been reset by '+((gUser&&gUser.name)||'Admin')+'. Please set a new PIN from the avatar menu (top-right) before your next approval.','urgent','pin_reset',function(){});
         showToast('PIN reset for '+u.name+'. They have been notified. ✓');
         renderUsers();
