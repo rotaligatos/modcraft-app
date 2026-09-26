@@ -4831,9 +4831,14 @@ const PROFILES = {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = ['Acacia PB 4x8 2F (18mm, Stipple)', 'Acacia 2mmx54mm Matte PVC Premium Edgeband',
             'Acacia 1mmx22mm Matte PVC Premium Edgeband', 'Acacia .5mmx22mm Matte PVC Premium Edgeband',
+            'Real White 1mmx22mm Edgeband High Gloss Premium Edgeband',
             'Real White 1mmx22mm Matte PVC Premium Edgeband'].map((name) => ({ name, unit: 'lm', price: 20 }));
           try {
             const sug = w.CLR.suggestTape({ key: 'tape:t-acacia', text: 'ACACIA' });
+            // Tape finish follows the board: matte unless the board is high gloss.
+            const matte = w.CLR.suggestTape({ key: 'tape:t-white', text: 'WHITE', gloss: false })[0];
+            const gloss = w.CLR.suggestTape({ key: 'tape:t-white', text: 'WHITE', gloss: true })[0];
+            if (!/Matte/.test(matte) || !/Gloss/.test(gloss)) return { matte, gloss };
             w.prodBuildSummary({ components: [], _bom: [], hardware: [],
               _services: { edgebandingByTape: [{ tape: 'Acacia 1mmx22mm Matte PVC Premium Edgeband', lm: 10 }] } });
             const row = w.prodState.summary.materials[0];
