@@ -11,6 +11,7 @@ A single-file HTML quotation management app for **World Class Laminate, Inc. / R
 
 ## Key files
 - `index.html` — the entire app (HTML + CSS + JS, ~12600 lines)
+- `job-board.html` — Job Board (logistics dispatch). Separate app on the Social-Content-Manager Supabase project (nssviuuagtlvxjvvvagt), email/password sign-in; users managed from `command-center.html?tab=jb`. Installable via `jb.webmanifest` + the shared no-cache `sw.js`. Source of truth is this file — edit here.
 - `server.ps1` — local PowerShell static server (port 8765, serves `quotation_app.html`)
 - `preview_server.ps1` — preview server for Claude testing (port 8766, serves `index.html`)
 - `.claude/launch.json` — launch configs for both servers
