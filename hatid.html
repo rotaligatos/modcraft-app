@@ -3056,6 +3056,7 @@ async function renderNotify(){
       withRetry('Loading settings', () => sb.from('job_notify_settings').select('*').eq('id', true).maybeSingle()).then(r => r.data),
       isAdmin() ? withRetry('Loading Chat spaces', () => sb.from('job_notify_company').select('*').order('company')).then(r => r.data || []) : Promise.resolve([]),
     ]);
+    if (isAdmin()) state.mailGw = (await withRetry('Loading mail status', () => sb.rpc('job_mail_gateway_status'))).data || {};
   } catch { $('fleet-body').innerHTML = '<div class="card empty">Could not load agents.</div>'; return; }
   state.ref.agents = agents; state.ref.agentById = Object.fromEntries(agents.map(a => [a.id, a])); state.ref.notify = cfg;
   const on = (x, l) => `<span class="tag ${x ? 'ok' : ''}">${l}: ${x ? 'on' : 'not set up'}</span>`;
@@ -3077,11 +3078,24 @@ async function renderNotify(){
           <label class="f">Daily summary by email to <span class="ft">— comma-separated</span><input class="i" name="daily_emails" value="${esc((c.daily_emails || []).join(', '))}" placeholder="logistics@…, sales.manager@…"></label></div>
         <div class="row-btns" style="margin:0;justify-content:flex-end"><button class="btn" type="submit">Save ${esc(c.company)}</button></div></form>`).join('')}
     </div>
-    <div class="card pad rp-sec"><h3>Email &amp; SMS</h3>
-      <div class="ft" style="margin-bottom:10px">Google Chat works now at no cost. Email (Resend) and SMS (Semaphore, about ₱0.50 per message) need an account; IT puts the key on the server (RESEND_API_KEY / SEMAPHORE_API_KEY), then switch them on here. Until then those messages show as “Not sent”.</div>
+    <div class="card pad rp-sec"><h3>Email — from your own Google account (free)</h3>
+      <div class="ft" style="margin-bottom:10px">HATID hands each email to a small Google Apps Script that sends it from the Google account that sets it up (best: a shared one like logistics@…).
+        Free, up to about 1,500 emails a day on Google Workspace. Replies go to that mailbox.
+        Status: ${state.mailGw?.connected ? `<span class="tag ok">Connected ${esc(state.mailGw.url_end || '')}</span>` : '<span class="tag">Not connected</span>'}</div>
+      <ol class="gs-steps" style="margin:0 0 10px;padding-left:20px;font-size:14px;line-height:1.7">
+        <li>Signed in to Google as the sending account, open <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com → New project</a>. Name it <b>HATID Mailer</b>.</li>
+        <li><button class="btn" type="button" id="gs-copy">Copy the mail script</button> — delete what’s in the editor, paste, and <b>Save</b>. Then pick <b>authorize</b> in the function list, click <b>Run</b> once and allow the permission.</li>
+        <li><b>Deploy → New deployment</b> → type <b>Web app</b> → Execute as: <b>Me</b> → Who has access: <b>Anyone</b> → <b>Deploy</b>. Copy the <b>Web app URL</b> (ends in <code>/exec</code>).</li>
+        <li><span style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center;width:100%"><input class="i" id="gs-url" style="flex:1;min-width:220px" placeholder="https://script.google.com/macros/s/…/exec"><button class="btn primary" type="button" id="gs-save">Save</button></span></li>
+        <li>Tick <b>Send emails</b> below and Save, then <button class="btn" type="button" id="gs-test" ${state.mailGw?.connected ? '' : 'disabled'}>Send me a test email</button></li>
+      </ol>
+      <div class="ft">Copying the script makes a new secret, so an older copy of the script stops working until you replace it and redeploy (Deploy → Manage deployments → edit → New version).</div>
+    </div>
+    <div class="card pad rp-sec"><h3>Email &amp; SMS switches</h3>
+      <div class="ft" style="margin-bottom:10px">Google Chat works now at no cost. Until a channel is switched on, its messages show as “Not sent” — use Retry on them after switching on. SMS (Semaphore) needs its key on the server (SEMAPHORE_API_KEY).</div>
       <form class="form" id="ns-f">
         <div class="grid2"><label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="email_enabled" ${cfg?.email_enabled ? 'checked' : ''}> Send emails</label>
-          <label class="f">Sender <input class="i" name="email_from" value="${esc(cfg?.email_from || '')}" placeholder="HATID &lt;logistics@yourdomain.com&gt;"></label></div>
+          <label class="f">Sender (only for Resend, not needed with the Google script) <input class="i" name="email_from" value="${esc(cfg?.email_from || '')}" placeholder="HATID &lt;logistics@yourdomain.com&gt;"></label></div>
         <div class="grid2"><label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="sms_enabled" ${cfg?.sms_enabled ? 'checked' : ''}> Send SMS</label>
           <label class="f">SMS sender name <input class="i" name="sms_sender" value="${esc(cfg?.sms_sender || '')}" maxlength="11" placeholder="Registered with Semaphore"></label></div>
         <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="daily_enabled" ${cfg?.daily_enabled !== false ? 'checked' : ''}> Send the daily summary at 6:05 PM (Mon–Sat)</label>
@@ -3100,14 +3114,78 @@ async function renderNotify(){
     try { await withRetry('Saving', () => sb.from('job_notify_company').update({ chat_webhook: url || null, daily_emails: emails, updated_at: new Date().toISOString() }).eq('company', f.dataset.co)); toast(`${f.dataset.co} saved`, 'ok'); } catch {}
     btn.disabled = false;
   }));
+  if ($('gs-copy')) $('gs-copy').addEventListener('click', async e => {
+    const b = e.currentTarget;
+    if (state.mailGw?.has_secret && !confirm('This makes a new secret. If the script is already set up, you must paste this new copy and redeploy it. Continue?')) return;
+    b.disabled = true;
+    try {
+      const { data: sec } = await withRetry('Preparing the script', () => sb.rpc('job_mail_gateway_new_secret'));
+      const code = gasMailerScript(sec);
+      try { await navigator.clipboard.writeText(code); toast('Script copied — paste it into the Apps Script editor', 'ok'); }
+      catch { openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true" style="max-width:720px"><h2>HATID Mailer script</h2><div class="ft">Select all and copy.</div><textarea class="i" style="width:100%;height:340px;font-family:var(--mono);font-size:12px" readonly>${esc(code)}</textarea><div class="row-btns" style="justify-content:flex-end"><button class="btn" id="gs-close">Close</button></div></div>`); $('gs-close').addEventListener('click', () => { closeOverlay(); }); }
+      state.mailGw = { ...(state.mailGw || {}), has_secret: true };
+    } catch {}
+    b.disabled = false;
+  });
+  if ($('gs-save')) $('gs-save').addEventListener('click', async e => {
+    const url = $('gs-url').value.trim(), b = e.currentTarget;
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url)) return toast('Paste the Web app URL — it looks like https://script.google.com/macros/s/…/exec', 'error');
+    if (!state.mailGw?.has_secret) return toast('Copy the mail script first (step 2), so it has its secret', 'error');
+    b.disabled = true;
+    try { await withRetry('Saving', () => sb.rpc('job_mail_gateway_set', { p_url: url })); toast('Mail script connected', 'ok'); renderNotify(); } catch { b.disabled = false; }
+  });
+  if ($('gs-test')) $('gs-test').addEventListener('click', async e => {
+    const b = e.currentTarget;
+    if (!state.ref.notify?.email_enabled) return toast('Tick “Send emails” below and Save first', 'error');
+    b.disabled = true;
+    try { await withRetry('Sending test', () => sb.rpc('job_mail_test')); toast(`Test email on its way to ${state.me.email} — check the inbox (and Spam) in a minute`, 'ok'); } catch {}
+    b.disabled = false;
+  });
   if ($('ns-f')) $('ns-f').addEventListener('submit', async e => {
     e.preventDefault(); const f = e.target, btn = f.querySelector('[type=submit]');
-    if (f.email_enabled.checked && !/<?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>?\s*$/.test(f.email_from.value.trim())) return toast('Enter the sender, e.g. HATID <logistics@yourdomain.com>', 'error');
+    if (f.email_enabled.checked && !state.mailGw?.connected && !/<?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>?\s*$/.test(f.email_from.value.trim())) return toast('Enter the sender, e.g. HATID <logistics@yourdomain.com>', 'error');
     btn.disabled = true;
     try { await withRetry('Saving', () => sb.from('job_notify_settings').update({ email_enabled: f.email_enabled.checked, email_from: f.email_from.value.trim() || null,
       sms_enabled: f.sms_enabled.checked, sms_sender: f.sms_sender.value.trim() || null, daily_enabled: f.daily_enabled.checked, sched_auto: f.sched_auto.checked, updated_at: new Date().toISOString() }).eq('id', true));
       toast('Saved', 'ok'); renderNotify(); } catch { btn.disabled = false; }
   });
+}
+/* The Google Apps Script that sends HATID's emails from the admin's own Google account */
+function gasMailerScript(secret){
+  return `// HATID Mailer — sends HATID emails from this Google account (MailApp).
+// Deploy: Deploy → New deployment → Web app → Execute as: Me → Who has access: Anyone.
+// The secret below must match HATID. Getting a new copy from HATID changes it.
+const SECRET = '${secret}';
+
+function doPost(e) {
+  try {
+    const d = JSON.parse(e.postData.contents || '{}');
+    if (d.secret !== SECRET) return out_({ ok: false, error: 'bad secret' });
+    const to = String(d.to || '').trim();
+    if (!/^[^\\s@,;]+@[^\\s@,;]+\\.[^\\s@,;]+$/.test(to)) return out_({ ok: false, error: 'bad address' });
+    if (MailApp.getRemainingDailyQuota() < 1) return out_({ ok: false, retry: true, error: 'Daily email limit reached' });
+    MailApp.sendEmail({
+      to: to,
+      subject: String(d.subject || 'HATID update').slice(0, 200),
+      body: String(d.text || ''),
+      htmlBody: d.html ? String(d.html) : undefined,
+      name: String(d.name || 'HATID Logistics').slice(0, 80)
+    });
+    return out_({ ok: true, quota: MailApp.getRemainingDailyQuota() });
+  } catch (err) {
+    return out_({ ok: false, error: String(err && err.message || err) });
+  }
+}
+
+// Run this once from the editor (select "authorize" → Run) to allow sending mail.
+function authorize() {
+  Logger.log('Emails left today: ' + MailApp.getRemainingDailyQuota());
+}
+
+function out_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+`;
 }
 function openAgentForm(a, company, done){
   const cos = myCompanies();
