@@ -12316,3 +12316,67 @@ commission OFF · `samplesofcuttinglist/` is client data — never commit · dis
 - Command Center renamed **World Class Laminate, Inc. Command Center**; WCLI logo (`wcli-logo.jpg`) before the title, RTmo logo top right; tabs on their own row.
 - **2026-09-27 PMES layout rework** (PMES `004616a`): tabs Dashboard/Jobs/Materials/Scan/Schedule/More; new Materials page (`pmes_materials_inbox`); job page in sub-tabs (Overview/Materials/Cutting/Production/Parts/Packing); payment card removed (tag only); desktop tabs on top; role landing. Details in PMES MODCRAFT_BRIDGE_NOTES.md.
 - **2026-09-27 KEYSTONE layout rework** (Keystone `9a48324`, migration `adm_quote_labels`): tabs Dashboard / Release Queue / Purchasing (My requests, Approvals, Purchase orders, Suppliers) / Warehouse (Material requests, Board requests) / More (Plant & HRIS), each with a count of what waits for the signed-in person (`refreshNeeds`, 20 s cache); Dashboard 'Needs you' row; Material requests processed in place (`mrProcessInline`) with a needs-processing filter; search + company filter (`listBar`/`applyLF`, rows carry data-s/data-co) and client — project labels (`adm_quote_labels`, security definer, ks_company_visible) on every list; `askText` forms replace every browser prompt; landing: warehouse → Material requests, approvers → Approvals. Bugs fixed: Dashboard 'Open purchase requests' counted non-existent statuses; PO list said 'assigned' instead of the supplier name.
+
+## What was changed on 2026-09-27 (session — end-to-end test, KEYSTONE/PMES/Command Center UX)
+All live and verified in a headless browser (screenshots) + by impersonation. Detail per item is in the
+dated bullets above in this file and in PMES `MODCRAFT_BRIDGE_NOTES.md`. Summary:
+- **End-to-end test** of quotation → Job Order → KEYSTONE gate/MRF/payment/release → warehouse issue →
+  PMES receive/inspect/check/approve/output → Modcraft progress, as the real people, rolled back. Found and
+  fixed the unit bug (catalogue "pc"/"lm" arrived as "other" — `pmes_norm_unit`). Builder: `tools/e2e_build_jo.mjs`.
+- **KEYSTONE:** Release Queue search/filters/client+preparer+revision on cards, readable review windows,
+  View quotation (saved printout), destination plant default MSSI (MSSI+WCL) / CWLI (Cebu) — UI + DB
+  trigger; then a full layout rework: Dashboard / Release Queue / Purchasing / Warehouse / More with sub-tabs,
+  per-person counts, "Needs you", Material requests processed in place, search + company filter + client
+  labels (`adm_quote_labels`) on every list, reason forms instead of prompts, role landing; 2 bugs fixed
+  (Open-PR count, PO supplier name). Opening a gate sends nothing; only "Unlock MR + Job Order" does.
+- **PMES:** two-person JO rule + manager's discretion with a reason; approval delegation
+  (`pmes_delegations`); Dashboard home (`pmes_dashboard`); layout rework (Dashboard/Jobs/Materials/Scan/
+  Schedule/More, Materials page `pmes_materials_inbox`, job page sub-tabs, payment card → tag, desktop tabs on top).
+- **Command Center:** "World Class Laminate, Inc. Command Center", WCLI logo left, RTmo logo right, tabs on
+  their own row, PMES delegations tab. Another session added **HATID** (logistics, `hatid.html`) and its tab.
+- **RTmo logo** (corrected artwork, `Logo RTmo/dda3b9e3-…2.png` → `rtmo-logo.png`) in PMES, KEYSTONE, CC.
+
+# OPEN — updated 2026-09-27 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Supersedes every OPEN list above; read the dated entries above for detail.
+
+## ⚠ Test data still in the live database — delete when Rommel says he is done walking it
+`quotations`/`quotation_states` **QT-T00000001** ("TEST — E2E TEST CLIENT"), `job_orders` **JO-T00000001-1**
+(released), `adm_release_gates` + `adm_payments` + `adm_material_requests` **MR-260926-W934** (status
+authorized — the warehouse has NOT processed it yet) + `adm_mr_lines`, `pmes_production_jobs`
+**JO-T00000001-1** (review "received") + its `pmes_components` (11) / `pmes_job_stages` (8) /
+`pmes_job_materials` (5), `adm_audit_log` rows for that serial, and the scratch table `public._e2e_fixture`.
+Delete children before parents; `adm_audit_log` / activity rows are append-only — leave or ask.
+
+## Next — agreed, not started: Command Center rework (Rommel's preference, 2026-09-27)
+**One main tab per app — Modcraft · PMES · KEYSTONE · HATID — each with its own sub-tabs** ("right now
+everything is scattered"). Ask where People (cross-app per-person view) and the Change log go before building
+(likely People first, Change log as a per-app filtered sub-tab). Within each app:
+- Lists become read-only rows (name, email, company, role, status, permission tags) + one **Edit** that
+  opens a form for that person (same fields/saves as today; KEYSTONE caps grouped Purchasing/Release/
+  Warehouse/Approver roles). **+ Add user** at the top. Search, company filter, "show inactive" on every list.
+- PMES sub-tabs: Users · Delegations. Modcraft: user list first; Sheet-sync controls in a compact bar;
+  shadow sign-in check folded away. Change log: filter by app/person + search.
+- No permission/DB changes. ⚠ Another session edits `command-center.html` (HATID) — pull right before
+  starting, publish promptly.
+
+## Waiting on Rommel
+- Finish walking the test job: KEYSTONE → Warehouse → process MR-260926-W934; PMES → Materials → receive;
+  Cutting → inspect boards / cut plan; Overview → check + approve (as admin he checked it himself → the
+  approve needs a discretion reason); Production → output. Then say "delete the test job".
+- Emails for the PMES **materials** person and **operators**; who gets **Warehouse issue** in KEYSTONE;
+  **suppliers** in KEYSTONE (0); ASM/QC/PACK/CURE capacity in PMES.
+- Payment-gate auto-open at Final client approval (offered, not decided).
+
+## Watch (built, correct in test, not yet used for real)
+First real: delegation created from PMES/Command Center; KEYSTONE "View quotation" on a real saved
+printout; Material requests "Confirm processed" in place; PMES Materials receive; job page sub-tabs.
+
+## Carried forward, unchanged
+Rotate the Wufoo API key (security clock) · Storage `quotations` bucket readable by any signed-in user of
+any app (flagged) · Command Center phase 4 (sign-in from DB) after a clean shadow log · printed cut
+sequence misses the extra waste crosscut around a defect · confirm Supabase egress fix in Usage · 15 orders
+with no handler · retired-status string sweep · Schedule page on `DEMO_PROJS` · Orders 8834/8840 · ticket
+`a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on hold) ·
+`QT-W00000136.R1` · phone order_pause · Stage 2 lock parity while paused · Michael Delos Reyes signature ·
+unlock-reconciliation ~60s · `qApproved`/`qClientApproved` coupling · MSSI commission OFF ·
+`samplesofcuttinglist/` is client data — never commit · distinct app icons for PMES/KEYSTONE/CC.
