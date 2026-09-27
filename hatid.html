@@ -41,6 +41,12 @@ header{position:sticky;top:0;z-index:20;background:var(--accent);color:var(--acc
 .tabs{display:flex;gap:4px;margin-left:12px}
 .tab{background:transparent;border:1px solid transparent;color:inherit;opacity:.75;padding:6px 12px;border-radius:8px;cursor:pointer}
 .tab.active{opacity:1;background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.2)}
+.imp{border:1px dashed var(--line);border-radius:10px;padding:10px 12px;margin:0 0 14px;background:var(--surface-2)}
+.imp summary{cursor:pointer;font-weight:600}
+.imp textarea{width:100%;margin-top:8px;font-size:12px}
+.imp-sum{margin-top:8px;font-size:13px;line-height:1.5}
+.imp-sum ul{margin:4px 0 0;padding-left:18px}
+.imp-sum .warn{color:var(--warn,#b45309)}
 .tab-n{display:inline-block;min-width:18px;padding:0 5px;margin-left:6px;border-radius:9px;background:#e5484d;color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center}
 .msg-wrap{display:grid;grid-template-columns:320px 1fr;gap:12px;align-items:start}
 .msg-list{padding:0;overflow:hidden}
@@ -1195,14 +1201,147 @@ function readItems(root){
 function readBoards(root){ const o = {}; root.querySelectorAll('[data-gauge]').forEach(i => { const n = parseInt(i.value, 10); if (n > 0) o[i.dataset.gauge] = n; }); return o; }
 
 /* ----- New job (manual entry; ModCraft proposals will land here as 'proposed') ----- */
+/* ----- Odoo Helpdesk ticket → New job. Reads the text you get with Ctrl+A / Ctrl+C on the ticket page. ----- */
+const ODOO_LABELS = ['Team','Assigned to','Payment Status','Priority','Type','Tags','Company','Ref. Sales Order','CUSTOMER NAME','Salesperson','Customer Name',
+  'SI Reference:','Close date','Ticket Details','Contact Person','Contact Number','Delivery Address','Fulfillment Status','Delivery Type','Delivery Instructions',
+  'Ticket Date','Scheduled Date','Actual Delivery Date','MSSI Transfer Date','Truck Assignment','Remarks','Reason for Delay / Reschedule','Order Line','Loaded'];
+const odooNorm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const odooNum = s => { const n = Number(String(s || '').replace(/,/g, '').trim()); return Number.isFinite(n) ? n : null; };
+function parseOdooTicket(txt){
+  const lines = String(txt || '').replace(/\r/g, '').split('\n');
+  const labelSet = new Set(ODOO_LABELS);
+  const isRow = l => l.split('\t').length >= 8;
+  const t = { fields: {}, lines: [], ticket: null };
+  for (let i = 0; i < lines.length; i++){
+    const l = lines[i].trim();
+    if (!t.ticket){ const m = l.match(/^(\S+)\s+\(#(\d+)\)$/); if (m) { t.ticket = { so: m[1], no: m[2], label: `${m[1]} (#${m[2]})` }; continue; } }
+    if (isRow(lines[i])){
+      const c = lines[i].split('\t').map(x => x.trim());
+      t.lines.push({ so: c[0], desc: c[2], qty: odooNum(c[4]), delivered: odooNum(c[6]), unit: c[9] || null, subtotal: odooNum(c[11]) });
+      continue;
+    }
+    if (labelSet.has(l) && !(l in t.fields)){
+      const v = [];
+      for (let j = i + 1; j < lines.length && !labelSet.has(lines[j].trim()) && !isRow(lines[j]); j++) v.push(lines[j]);
+      t.fields[l] = v.join('\n').replace(/^\s*\n/, '').trim();
+    }
+  }
+  return t;
+}
+function odooToJob(t){
+  const F = k => (t.fields[k] || '').trim();
+  const instr = F('Delivery Instructions');
+  const pick = re => { const m = instr.match(re); return m ? m[1].trim() : ''; };
+  const so = (F('Ref. Sales Order') || t.ticket?.so || t.lines[0]?.so || '').toUpperCase();
+  const coTxt = odooNorm(F('Company'));
+  const company = /cebu/.test(coTxt) ? 'CWLI' : /module/.test(coTxt) ? 'MSSI' : /world class/.test(coTxt) ? 'WCLI' : null;
+  const dm = F('Scheduled Date').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  const date = dm ? `${dm[3]}-${dm[1].padStart(2, '0')}-${dm[2].padStart(2, '0')}` : null;
+  const dt = odooNorm(F('Delivery Type'));
+  const job_type = /pick/.test(dt) ? 'pickup' : /install/.test(dt) ? (/deliver/.test(dt) ? 'both' : 'installation') : /back ?load|return/.test(dt) ? 'backload' : 'delivery';
+  const PH = /(\+?63\s?9\d{2}[\s-]?\d{3}[\s-]?\d{4}|0\s?9\d{2}[\s-]?\d{3}[\s-]?\d{4})/;
+  let contact = F('Contact Person'), phone = F('Contact Number');
+  const cl = instr.split('\n').find(x => /contact/i.test(x)) || '';
+  if (!contact && cl) contact = cl.replace(/^.*?contact(?:\s*person)?\s*[:\-]\s*/i, '').replace(PH, '').replace(/[\s:,\-–/]+$/, '').trim();
+  if (!phone) phone = (cl.match(PH) || instr.match(PH) || [])[1] || '';
+  const siteLine = t.lines.find(x => /^site\s*:/i.test(x.desc || ''));
+  const address = F('Delivery Address') || pick(/delivery address\s*:\s*(.+)/i) || (siteLine ? siteLine.desc.replace(/^site\s*:\s*/i, '') : '');
+  const terms = pick(/terms?\s*:\s*(.+)/i);
+  const gauges = new Set(state.ref.gauges.filter(g => g.active).map(g => String(Number(g.gauge_mm))));
+  const boards = {}, boardLines = [], items = [], other = [], skipped = [];
+  let total = 0;
+  for (const ln of t.lines){
+    const d = (ln.desc || '').replace(/\s+/g, ' ').trim(); if (!d) continue;
+    total += ln.subtotal || 0;
+    if (!ln.qty){ if (!/^site\s*:/i.test(d)) other.push(d); continue; }
+    if (/delivery charge/i.test(d) || /\bservice\b/i.test(d)){ skipped.push(d); continue; }
+    const g = (d.match(/(\d+(?:\.\d+)?)\s*mm(?!\s*x)/i) || [])[1];
+    if (/\b4\s*x\s*8\b/i.test(d) && g && gauges.has(String(Number(g))) && /^(pc|pcs|sheet|sheets)?$/i.test(ln.unit || '')){
+      const k = String(Number(g)); boards[k] = (boards[k] || 0) + ln.qty; boardLines.push(`${ln.qty} × ${d}`); continue;
+    }
+    items.push({ desc: d, qty: ln.qty, unit: ln.unit });
+  }
+  const notes = [instr, boardLines.length ? 'Boards:\n' + boardLines.join('\n') : '', other.length ? 'Other SO notes: ' + other.join(' · ') : ''].filter(Boolean).join('\n\n');
+  return { so, company, date, job_type, client: F('CUSTOMER NAME') || F('Customer Name'), salesperson: F('Salesperson'), contact, phone: phone.replace(/\s/g, ''),
+    address: address.replace(/\s+/g, ' ').trim(), payment_status: F('Payment Status'), terms, fulfillment: F('Fulfillment Status'),
+    ticket: t.ticket?.label || (so ? so : ''), boards, items, notes, skipped, total: Math.round(total * 100) / 100 };
+}
+function guessDest(company, address){
+  const a = ' ' + odooNorm(address) + ' '; if (!a.trim()) return null;
+  const pools = poolsForCompany(company).map(p => p.id);
+  let best = null;
+  for (const d of state.ref.dests){
+    if (!d.active) continue;
+    const z = state.ref.zoneById[d.zone_id]; if (!z || !pools.includes(z.pool_id)) continue;
+    for (const part of String(d.name).split(/[\/,]/)){   // "Bocaue/ Obando" matches either town
+      const n = odooNorm(part).replace(/\bcity\b/g, '').trim(); if (n.length < 3) continue;
+      if (a.includes(' ' + n + ' ') && (!best || n.length > best.n.length)) best = { d, n };
+    }
+  }
+  return best?.d || null;
+}
+function guessAgent(company, name){
+  const n = odooNorm(name); if (!n) return null;
+  const list = agentsFor(company);
+  return list.find(a => odooNorm(a.name) === n) || list.find(a => odooNorm(a.name).split(' ').every(w => n.split(' ').includes(w))) || null;
+}
+async function fillFromOdoo(f, txt, addItem, refresh){
+  const out = $('nj-imp-out');
+  if (!txt.trim()){ out.innerHTML = ''; return; }
+  const t = parseOdooTicket(txt);
+  if (!t.ticket && !t.fields['Ref. Sales Order'] && !t.lines.length){ out.innerHTML = '<div class="imp-sum warn">This doesn’t look like an Odoo ticket. Open the ticket itself (not the list), press Ctrl+A then Ctrl+C, and paste again.</div>'; return; }
+  const j = odooToJob(t), ok = [], warn = [];
+  const set = (name, v) => { if (v != null && v !== '' && f[name]) f[name].value = v; };
+  if (j.company && myCompanies().includes(j.company)){ f.company.value = j.company; f.destination_id.innerHTML = destOptions(j.company); $('nj-agent').innerHTML = agentOptions(j.company); }
+  else if (j.company) warn.push(`The ticket is for ${j.company}, which you can’t create jobs for`);
+  const co = f.company.value;
+  set('quotation_serial', j.so); set('so_ref', j.so); set('odoo_ticket', j.ticket); set('client_name', j.client);
+  set('client_contact_name', j.contact); if (j.phone && isPhMobile(j.phone)) set('client_phone', j.phone); else if (j.phone) warn.push(`Contact number “${j.phone}” isn’t a mobile number — not filled`);
+  set('job_type', j.job_type); set('scheduled_date', j.date); set('address', j.address); set('notes', j.notes);
+  set('payment_status', j.payment_status); set('payment_terms', j.terms); set('fulfillment_status', j.fulfillment);
+  if (j.total) set('order_value', j.total);
+  f.querySelectorAll('[data-gauge]').forEach(i => { i.value = j.boards[i.dataset.gauge] || ''; });
+  $('nj-items').innerHTML = ''; j.items.forEach(it => addItem(it, true));
+  const ag = guessAgent(co, j.salesperson);
+  if (ag){ $('nj-agent').value = ag.id; ok.push(`Sales agent: ${ag.name}`); }
+  else if (j.salesperson) warn.push(`Salesperson “${j.salesperson}” isn’t in your sales agents yet — add him/her in Fleet › Agents & alerts, or pick one`);
+  const dest = guessDest(co, j.address);
+  if (dest){ f.destination_id.value = dest.id; ok.push(`Destination: ${dest.name} (from the address — please check)`); }
+  else warn.push('Pick the destination — none matched the address');
+  const nb = Object.values(j.boards).reduce((a, b) => a + b, 0);
+  if (nb) ok.push(`${nb} boards → weight worked out`);
+  if (j.items.length) ok.push(`${j.items.length} other item${j.items.length > 1 ? 's' : ''}`);
+  if (j.skipped.length) ok.push(`Left out: ${j.skipped.join(', ')}`);
+  if (!j.contact && !j.phone) warn.push('No contact person or number found — add them so the client gets updates');
+  if (j.date && j.date < localDate()) warn.push(`The ticket’s scheduled date (${j.date}) has passed — change it if needed`);
+  refresh();
+  const render = dup => { out.innerHTML = `<div class="imp-sum"><b>Filled from ${esc(j.ticket || 'the ticket')}.</b>${dup}
+    ${ok.length ? `<ul>${ok.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}${warn.length ? `<ul class="warn">${warn.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>`; };
+  render('');
+  if (j.so){
+    try {
+      const [a, b] = await Promise.all([sb.from('jobs').select('id, status, scheduled_date').eq('quotation_serial', j.so).limit(3),
+        sb.from('jobs').select('id, status, scheduled_date').contains('doc_refs', [{ ref: j.so }]).limit(3)]);
+      const seen = [...(a.data || []), ...(b.data || [])].filter((x, i, arr) => arr.findIndex(y => y.id === x.id) === i);
+      if (seen.length) render(` <div class="warn" style="margin-top:4px">⚠ ${esc(j.so)} already has ${seen.length === 1 ? 'a job' : seen.length + ' jobs'} (${seen.map(x => esc(x.status) + (x.scheduled_date ? ' ' + esc(x.scheduled_date) : '')).join(', ')}). Only create another for a second delivery of the same SO.</div>`);
+    } catch {}
+  }
+}
+
 function openNewJob(){
   const cos = myCompanies();
   openOverlay(`<div class="scrim" data-close></div>
   <div class="modal" role="dialog" aria-modal="true">
     <h2>New job</h2>
+    <details class="imp" id="nj-imp" open><summary>📋 Fill from an Odoo ticket</summary>
+      <div class="ft">In Odoo, open the delivery ticket, click an empty spot on it, press <b>Ctrl+A</b> then <b>Ctrl+C</b>, and paste here. Check the form below, then Create.</div>
+      <textarea class="i" id="nj-paste" rows="3" placeholder="Paste the Odoo ticket here…" aria-label="Odoo ticket text"></textarea>
+      <div id="nj-imp-out"></div>
+    </details>
     <form class="form" id="nj">
+      <input type="hidden" name="odoo_ticket">
       <div class="grid2">
-        <label class="f">Quotation serial *<input class="i" name="quotation_serial" required placeholder="QT-000000"></label>
+        <label class="f">Reference * <span class="ft">— QT serial, or the SO number</span><input class="i" name="quotation_serial" required placeholder="QT-000000 or S00000"></label>
         <label class="f">Company *<select class="i" name="company" required>${cos.map(c => `<option>${c}</option>`).join('')}</select></label>
       </div>
       <div class="grid2">
@@ -1234,6 +1373,14 @@ function openNewJob(){
         <label class="f">Assigned team<input class="i" name="assigned_team" placeholder="Optional"></label>
       </div>
       <div class="ft" id="nj-bracket"></div>
+      <div class="grid2">
+        <label class="f">SO number<input class="i" name="so_ref" placeholder="S00000"></label>
+        <label class="f">Fulfillment status<input class="i" name="fulfillment_status" placeholder="e.g. Full Released"></label>
+      </div>
+      <div class="grid2">
+        <label class="f">Payment status<input class="i" name="payment_status" placeholder="e.g. FULLY PAID"></label>
+        <label class="f">Payment terms<input class="i" name="payment_terms" placeholder="e.g. CBD"></label>
+      </div>
       <label class="f">Site address<textarea class="i" name="address" rows="2"></textarea></label>
       <label class="f">What's being delivered / notes<textarea class="i" name="notes" rows="3"></textarea></label>
       <div class="step-note">New jobs start as <b>Proposed</b> and need confirmation with a truck before they're scheduled — same path ModCraft proposals will take.</div>
@@ -1245,10 +1392,11 @@ function openNewJob(){
   </div>`);
   bindClose();
   const f = $('nj');
-  const addItem = () => { const d = document.createElement('div'); d.className = 'it';
-    d.innerHTML = '<input class="i" data-it="desc" placeholder="Item, e.g. Edge band 1mm" aria-label="Item"><input class="i" data-it="qty" type="number" min="0" step="1" inputmode="numeric" placeholder="Qty" aria-label="Quantity"><input class="i" data-it="unit" placeholder="Unit" aria-label="Unit" list="unit-list"><button type="button" class="x" aria-label="Remove item">×</button>';
-    d.querySelector('.x').addEventListener('click', () => d.remove()); $('nj-items').appendChild(d); d.querySelector('input').focus(); };
-  $('nj-add-item').addEventListener('click', addItem);
+  const addItem = (it, quiet) => { const d = document.createElement('div'); d.className = 'it';
+    d.innerHTML = '<input class="i" data-it="desc" placeholder="Item, e.g. Edge band 1mm" aria-label="Item"><input class="i" data-it="qty" type="number" min="0" step="any" inputmode="decimal" placeholder="Qty" aria-label="Quantity"><input class="i" data-it="unit" placeholder="Unit" aria-label="Unit" list="unit-list"><button type="button" class="x" aria-label="Remove item">×</button>';
+    if (it){ d.querySelector('[data-it=desc]').value = it.desc; d.querySelector('[data-it=qty]').value = it.qty ?? ''; d.querySelector('[data-it=unit]').value = it.unit || ''; }
+    d.querySelector('.x').addEventListener('click', () => d.remove()); $('nj-items').appendChild(d); if (!quiet) d.querySelector('input').focus(); };
+  $('nj-add-item').addEventListener('click', () => addItem());
   if (!$('unit-list')) document.body.insertAdjacentHTML('beforeend', '<datalist id="unit-list"><option>pcs</option><option>rolls</option><option>boxes</option><option>sets</option><option>bundles</option><option>gallons</option></datalist>');
   const refresh = () => {
     const kgB = boardsKg(readBoards(f)), other = Number($('nj-other').value || 0);
@@ -1260,6 +1408,8 @@ function openNewJob(){
   };
   f.company.addEventListener('change', e => { f.destination_id.innerHTML = destOptions(e.target.value); $('nj-agent').innerHTML = agentOptions(e.target.value); refresh(); });
   f.addEventListener('input', refresh);
+  let impT;
+  $('nj-paste').addEventListener('input', () => { clearTimeout(impT); impT = setTimeout(() => fillFromOdoo(f, $('nj-paste').value, addItem, refresh), 150); });
   f.addEventListener('submit', async e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target).entries());
@@ -1272,10 +1422,12 @@ function openNewJob(){
     if (fd.client_phone && !isPhMobile(fd.client_phone)) return toast('Client mobile: enter a Philippine mobile number, e.g. 0917 123 4567', 'error');
     if (fd.client_email) fd.client_email = fd.client_email.trim().toLowerCase();
     fd.status = 'proposed';
+    const so = (fd.so_ref || '').trim().toUpperCase(); delete fd.so_ref;
+    if (so) fd.doc_refs = [{ ref: so, remarks: fd.fulfillment_status || null }];
     const btn = e.target.querySelector('[type=submit]'); btn.disabled = true;
     try {
       const { data } = await withRetry('Creating job', () => sb.from('jobs').insert(fd).select().single());
-      await logEvent(data.id, 'proposed', 'Created manually on HATID');
+      await logEvent(data.id, 'proposed', fd.odoo_ticket ? `Imported from Odoo ticket ${fd.odoo_ticket}` : 'Created manually on HATID');
       toast('Job created', 'ok'); closeOverlay(); loadBoard();
     } catch { btn.disabled = false; }
   });
@@ -1389,6 +1541,8 @@ function renderDrawer(job, events, costs = [], rep = {}){
         <dt>Date</dt><dd>${fmtDate(job.scheduled_date)}${job.special_trip ? ` <span class="tag info">Special trip — ${esc(specialTripReason(job.scheduled_date, di?.pool?.id) || 'weekend/holiday')}</span>` : ''}</dd>
         <dt>Destination</dt><dd>${esc(destLabel(job.destination_id))}${di ? `<div class="ft">${esc(di.group.name)} › ${esc(di.zone.name)} · delivers ${esc((di.group.schedule_days || []).map(d => DAY_SHORT[d]).join(', '))}</div>` : ''}${di?.dest.notes ? `<div class="ft" style="color:var(--warn)">⚠ ${esc(di.dest.notes)}</div>` : ''}</dd>
         <dt>Load</dt><dd>${kg(job.estimated_weight_kg)}${boardsText(job.board_pcs) ? `<div class="ft">${esc(boardsText(job.board_pcs))} (${boardsPcs(job.board_pcs)} pcs)</div>` : ''}</dd>
+        ${job.payment_status || job.payment_terms ? `<dt>Payment</dt><dd>${esc([job.payment_status, job.payment_terms].filter(Boolean).join(' · '))}</dd>` : ''}
+        ${job.odoo_ticket ? `<dt>Odoo ticket</dt><dd>${esc(job.odoo_ticket)}</dd>` : ''}
         <dt>Doc. references</dt><dd>${(job.doc_refs || []).length ? (job.doc_refs || []).map(r => `<span class="mono">${esc(r.ref)}</span>${r.remarks ? ' — ' + esc(r.remarks) : ''}${r.weight ? ` · ${kg(r.weight)}` : ''}`).join('<br>') : '<span class="muted">None yet</span>'}
           ${dispatcher && job.status !== 'rejected' ? ` <button class="lnk" id="dr-refs">Edit</button>` : ''}</dd>
         <dt>Contents</dt><dd style="font-size:14px">${contentsHtml(job).replace('<ul>', '<ul style="margin:0;padding-left:18px">')}${job.loaded_at ? `<div class="ft" style="color:var(--ok)">✓ Loaded ${fmtTime(job.loaded_at)}</div>` : job.truck_id && ['scheduled'].includes(job.status) ? '<div class="ft">Not yet ticked as loaded</div>' : ''}</dd>
