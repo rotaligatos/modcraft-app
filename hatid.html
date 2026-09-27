@@ -48,6 +48,14 @@ table.ct td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:t
 table.ct tr:nth-child(even) td{background:var(--surface-2)}
 table.ct .q{text-align:right;white-space:nowrap;width:1%;font-variant-numeric:tabular-nums}
 table.ct td:nth-child(2){white-space:nowrap;width:1%;color:var(--muted)}
+.pl-day{margin:0 0 16px}
+.pl-day h3{margin:0 0 8px;font-size:15px}
+.pl-trip{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:0 0 8px;background:var(--surface)}
+.pl-th{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin-bottom:6px}
+.pl-bar{flex:1;min-width:120px;max-width:260px;height:8px;border-radius:4px;background:var(--surface-2);overflow:hidden}
+.pl-bar i{display:block;height:100%;background:var(--ok)}
+.pl-trip tr.fixed td{color:var(--muted)}
+.pl-trip select.i{padding:4px 6px;font-size:13px;max-width:280px}
 .sugg{margin:8px 0;padding:8px 10px;border-radius:8px;background:var(--accent-soft);font-size:13.5px}
 .trip.best{box-shadow:0 0 0 2px #e0b300 inset}
 .trip.best b::after{content:' ⭐'}
@@ -989,9 +997,11 @@ const ROLE_LABEL = { admin:'Admin', manager:'Manager', dispatcher:'Dispatcher', 
 function isDispatcher(){ return ['admin','manager','dispatcher'].includes(state.me?.role); }
 function isAdmin(){ return state.me?.role === 'admin'; }
 function isViewer(){ return state.me?.role === 'viewer'; }
-// Money (order values, trip rates, trip cost totals, cost reports): managers and admins, or anyone the
+// Money (order values, trip rates, trip cost totals, cost reports): supervisor and up, or anyone the
 // Command Center marks "Sees costs". Everyone else works with weights, trucks and items only.
-function canSeeCosts(){ return ['admin','manager'].includes(state.me?.role) || state.me?.can_see_costs === true; }
+// Supervisor and up: admins, managers, and anyone who signs delivery schedules (review / confirm / approve)
+function isSupervisorUp(){ return ['admin','manager'].includes(state.me?.role) || (state.me?.schedule_steps || []).some(x => ['review','confirm','approve'].includes(x)); }
+function canSeeCosts(){ return isSupervisorUp() || state.me?.can_see_costs === true; }
 function myCompanies(){ return state.me?.company ? [state.me.company] : ['MSSI','WCLI','CWLI']; }
 
 /* ===== Auth ===== */
@@ -1772,108 +1782,183 @@ function costListHtml(costs, canDelete){
     </tr>`).join('')}</tbody>${canSeeCosts() ? `<tfoot><tr><td>Total</td><td class="num">${peso(total, 2)}</td><td></td></tr></tfoot>` : ''}</table>`;
 }
 
-/* ===== Truck suggestions: rank every truck × trip for a job using the same rules the dispatcher sees =====
-   Order: no warnings first → trips already going to the same area (fewer trips, cheaper) → best fit of the
-   remaining capacity → company-run trucks before paid 3PL trips → earlier trips. Nothing is booked until confirmed. */
+/* ===== Truck planning — looks at a whole delivery day, like building the schedule =====
+   Trip cost model (the same as the trip-rate reports): the farthest drop's rate for the truck's class,
+   plus the pool's 2nd / 3rd / later drop fees. Company-run trucks are costed with the same rate table
+   (as a like-for-like yardstick) and win ties, since they are already paid for.
+   Rules: a trip only carries areas of one delivery group; never over weight or pieces; trucks that are
+   unavailable, coded, or not serving the day are skipped (the dispatcher can still override in the job). */
+const LIVE_ON_TRUCK = ['scheduled','dispatched','in_progress','completed','issue'];
+const costTxt = c => c ? '≈ ' + peso(c) : 'no rate set';
 async function dayPlanCtx(date){
   const [load, jobsRes] = await Promise.all([fetchLoad(date),
-    withRetry('Loading the day’s drops', () => sb.from('jobs').select('id, truck_id, trip_no, destination_id, status').eq('scheduled_date', date).not('truck_id', 'is', null))]);
-  const zones = {};
-  (jobsRes.data || []).filter(j => j.truck_id && !['rejected','cancelled','proposed'].includes(j.status)).forEach(j => {
-    const z = destInfo(j.destination_id)?.zone?.id; if (!z) return;
-    (zones[`${j.truck_id}|${j.trip_no || 1}`] ??= new Set()).add(z);
-  });
-  return { date, load, zones, added: {} };   // added: this session's planned (not yet saved) load per truck|trip
+    withRetry('Loading the day’s drops', () => sb.from('jobs').select('id, quotation_serial, client_name, company, truck_id, trip_no, destination_id, estimated_weight_kg, board_pcs, status, doc_refs')
+      .eq('scheduled_date', date).not('truck_id', 'is', null))]);
+  const fixed = {};
+  (jobsRes.data || []).filter(j => j.truck_id && LIVE_ON_TRUCK.includes(j.status)).forEach(j => { (fixed[`${j.truck_id}|${j.trip_no || 1}`] ??= []).push(j); });
+  return { date, load, fixed };
 }
-function suggestTrucks(job, ctx, destId){
-  const date = ctx.date, w = Number(job.estimated_weight_kg || 0), pc = boardsPcs(job.board_pcs), zone = destInfo(destId)?.zone?.id;
-  const out = [];
-  for (const t of ctx.load.filter(t => (t.pool_companies || []).includes(job.company))){
-    const truck = state.ref.truckById[t.truck_id] || t;
-    for (const x0 of tripLoads(t)){
-      const k = `${t.truck_id}|${x0.trip_no}`, add = ctx.added[k] || { kg: 0, pcs: 0, jobs: 0, zones: new Set() };
-      const x = { ...x0, kg: Number(x0.kg) + add.kg, pcs: Number(x0.pcs) + add.pcs, jobs: x0.jobs + add.jobs };
-      const warnings = ruleWarnings({ job: { ...job, destination_id: destId }, date, destId, truck, tripLoad: x });
-      const kgAfter = x.kg + w, max = Number(t.max_weight_kg) || 1;
-      const sameArea = zone && ((ctx.zones[k] && ctx.zones[k].has(zone)) || add.zones.has(zone));
-      const rate = truck.uses_trip_rates && destId ? rateFor(destId, truck.truck_class, date) : null;
-      const score = warnings.length * 1000 + (sameArea ? -300 : x.jobs ? 150 : 0) + (1 - Math.min(1, kgAfter / max)) * 60
-        + (truck.uses_trip_rates ? 40 + (rate ? Number(rate.rate) / 200 : 20) : 0) + x0.trip_no * 3;
-      const why = [sameArea ? `same area as the ${x.jobs} drop${x.jobs === 1 ? '' : 's'} already on this trip` : x.jobs ? `${x.jobs} other drop${x.jobs === 1 ? '' : 's'} on this trip` : 'empty trip',
-        `${Math.round(max - kgAfter).toLocaleString('en-PH')} kg room left after`, truck.uses_trip_rates ? (rate && canSeeCosts() ? `3PL trip rate ${peso(rate.rate)}` : rate ? '3PL truck' : '3PL, no rate set') : 'company-run truck'];
-      out.push({ truck_id: t.truck_id, trip_no: x0.trip_no, label: t.label, kgAfter, max, warnings, score, why: why.join(' · ') });
+function rateAmt(destId, cls, date){ const r = destId && (rateFor(destId, cls || 'standard', date) || rateFor(destId, 'standard', date)); return r ? Number(r.rate) : null; }
+function tripCost(truck, destIds, date){
+  if (!destIds.length) return 0;
+  const rates = destIds.map(d => rateAmt(d, truck.truck_class, date)).filter(x => x != null);
+  const pool = state.ref.poolById[truck.pool_id] || {};
+  let c = rates.length ? Math.max(...rates) : 0;
+  for (let i = 2; i <= destIds.length; i++) c += Number(i === 2 ? pool.second_drop_fee : i === 3 ? pool.third_drop_fee : pool.succeeding_drop_fee) || 0;
+  return c;
+}
+/* One bin per truck × trip for the day, holding what's already scheduled on it */
+function planBins(ctx){
+  const bins = [];
+  for (const t of ctx.load){
+    const truck = { ...t, ...(state.ref.truckById[t.truck_id] || {}) };
+    for (const x of tripLoads(t)){
+      const key = `${t.truck_id}|${x.trip_no}`, fixed = ctx.fixed[key] || [];
+      bins.push({ key, t, truck, trip_no: x.trip_no, cap: Number(t.max_weight_kg) || 0, capPcs: Number(t.max_pieces) || 0,
+        kg: Number(x.kg) || 0, pcs: Number(x.pcs) || 0, fixed, planned: [],
+        dests: fixed.map(j => j.destination_id).filter(Boolean) });
     }
   }
-  return out.sort((a, b) => a.score - b.score);
+  return bins;
 }
-function planAdd(ctx, opt, job, destId){
-  const k = `${opt.truck_id}|${opt.trip_no}`, a = ctx.added[k] ??= { kg: 0, pcs: 0, jobs: 0, zones: new Set() };
-  a.kg += Number(job.estimated_weight_kg || 0); a.pcs += boardsPcs(job.board_pcs); a.jobs++;
-  const z = destInfo(destId)?.zone?.id; if (z) a.zones.add(z);
+const binGroups = b => new Set(b.dests.map(d => destInfo(d)?.group?.id).filter(Boolean));
+const binZones = b => new Set(b.dests.map(d => destInfo(d)?.zone?.id).filter(Boolean));
+function ruleOk(cache, job, b, ctx){   // rules that don't depend on the load (availability, coding, delivery day, rate)
+  const k = b.key + '|' + job.destination_id;
+  if (!(k in cache)) cache[k] = ruleWarnings({ job, date: ctx.date, destId: job.destination_id, truck: b.truck, tripLoad: null });
+  return cache[k];
+}
+/* Cost of adding this job to bin b; `rest` = kg of this area still waiting (to size a new trip well) */
+function placeScore(job, b, ctx, rest, cache){
+  if (!(b.t.pool_companies || []).includes(job.company)) return null;
+  const w = Number(job.estimated_weight_kg || 0), pc = boardsPcs(job.board_pcs);
+  const over = b.kg + w > b.cap || (b.capPcs && b.pcs + pc > b.capPcs);
+  const warns = ruleOk(cache, job, b, ctx);
+  const info = destInfo(job.destination_id), used = b.dests.length > 0;
+  if (used && info?.group && !binGroups(b).has(info.group.id)) return { bad: 'other area', over, warns };
+  const before = tripCost(b.truck, b.dests, ctx.date), after = tripCost(b.truck, [...b.dests, job.destination_id], ctx.date);
+  let cost;
+  if (used) cost = after - before + (binZones(b).has(info?.zone?.id) ? 0 : 150);   // same delivery group, different area: small detour cost
+  else cost = (after || 1000) / Math.max(1, Math.min(rest, b.cap)) * w               // new trip: its cost shared by the load it will carry (₱1,000 stand-in if no rate is set)
+    + Math.max(0, b.cap - rest) / 100000;                                           // …and among equals, the smallest truck that still fits
+  cost += b.truck.uses_trip_rates ? 0 : -0.5;                                       // company trucks win ties
+  cost += b.trip_no * 0.01;
+  return { cost, over, warns, used, after };
+}
+function planDay(ctx, jobs){
+  const bins = planBins(ctx), cache = {}, placed = [], unplaced = [];
+  // biggest areas first; inside an area, heaviest jobs first
+  const byZone = {};
+  jobs.forEach(j => { const z = destInfo(j.destination_id)?.zone?.id || 'none'; (byZone[z] ??= []).push(j); });
+  const zones = Object.values(byZone).sort((a, b) => sum(b, j => Number(j.estimated_weight_kg || 0)) - sum(a, j => Number(j.estimated_weight_kg || 0)));
+  for (const list of zones){
+    list.sort((a, b) => Number(b.estimated_weight_kg || 0) - Number(a.estimated_weight_kg || 0));
+    let rest = sum(list, j => Number(j.estimated_weight_kg || 0));
+    for (const job of list){
+      const opts = bins.map(b => ({ b, s: placeScore(job, b, ctx, rest, cache) })).filter(o => o.s && !o.s.bad);
+      const good = opts.filter(o => !o.s.over && !o.s.warns.length).sort((a, b) => (b.s.used - a.s.used) * 0 + a.s.cost - b.s.cost);
+      const pick = good[0];
+      if (pick){ addToBin(pick.b, job); placed.push({ job, key: pick.b.key }); }
+      else {
+        const near = opts.filter(o => !o.s.over).sort((a, b) => a.s.warns.length - b.s.warns.length || a.s.cost - b.s.cost)[0];
+        unplaced.push({ job, reason: !opts.length ? `No truck serves ${job.company} for this area` : near ? near.s.warns[0] : 'Every trip that serves this area is full', near: near?.b.key || null });
+      }
+      rest -= Number(job.estimated_weight_kg || 0);
+    }
+  }
+  return { bins, placed, unplaced };
+}
+function addToBin(b, job){ b.planned.push(job); b.kg += Number(job.estimated_weight_kg || 0); b.pcs += boardsPcs(job.board_pcs); b.dests.push(job.destination_id); }
+function removeFromBin(b, job){ b.planned = b.planned.filter(x => x.id !== job.id); b.kg -= Number(job.estimated_weight_kg || 0); b.pcs -= boardsPcs(job.board_pcs);
+  const i = b.dests.lastIndexOf(job.destination_id); if (i >= 0) b.dests.splice(i, 1); }
+
+/* Suggestion for a single job (in its panel): plan the day with this job and the other proposed jobs of that date */
+async function suggestForJob(job, date, destId){
+  const ctx = await dayPlanCtx(date);
+  const others = ((await sb.from('jobs').select('*').eq('status', 'proposed').eq('scheduled_date', date)).data || []).filter(j => j.id !== job.id && j.destination_id);
+  const me = { ...job, destination_id: destId, scheduled_date: date };
+  const plan = planDay(ctx, [me, ...others]);
+  const p = plan.placed.find(x => x.job.id === job.id);
+  if (!p) { const u = plan.unplaced.find(x => x.job.id === job.id); return { ctx, best: null, reason: u?.reason }; }
+  const b = plan.bins.find(x => x.key === p.key), [truck_id, trip] = p.key.split('|');
+  const mates = b.fixed.length + b.planned.length - 1;
+  return { ctx, best: { truck_id, trip_no: +trip, label: b.t.label, kgAfter: b.kg, max: b.cap,
+    why: `${mates ? `rides with ${mates} other drop${mates === 1 ? '' : 's'} going the same way` : 'own trip'} · trip ${Math.round(b.kg / (b.cap || 1) * 100)}% full${canSeeCosts() ? ` · trip cost ${costTxt(tripCost(b.truck, b.dests, date))}` : ''}` } };
 }
 
-/* Plan trucks for every Proposed job at once; the dispatcher reviews, adjusts and confirms */
+/* Plan trucks for all proposed jobs, day by day; shows trips like the schedule; dispatcher adjusts and confirms */
 async function openPlanTrucks(){
   openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" style="max-width:none;width:min(1180px,96vw)">
-    <h2>✨ Plan trucks for proposed jobs</h2>
-    <div class="ft">HATID suggests a truck and trip for each job — trips already going to the same area first, then the best fit, company trucks before 3PL. Change any suggestion, then confirm. Nothing is booked until you press Confirm.</div>
+    <h2>✨ Plan trucks</h2>
+    <div class="ft">For each delivery date HATID fills trips going to the same area first, then nearby areas of the same delivery group, choosing the truck that carries the load at the lowest cost per kg — so small loads get small trucks and big loads fill big ones. Jobs already scheduled stay where they are. Move any job with its dropdown, then confirm. Nothing is booked until you press Confirm.</div>
     <div id="pl-out" style="margin-top:10px"><div class="muted" style="padding:14px"><span class="spin"></span> Planning…</div></div>
     <div class="row-btns" style="justify-content:flex-end;margin-top:10px"><button class="btn" data-close>Close</button><button class="btn ok" id="pl-go" disabled>Confirm</button></div></div>`);
   bindClose();
   let jobs;
-  try { jobs = (await withRetry('Loading proposed jobs', () => sb.from('jobs').select('*').eq('status', 'proposed').order('scheduled_date').limit(200))).data || []; }
+  try { jobs = (await withRetry('Loading proposed jobs', () => sb.from('jobs').select('*').eq('status', 'proposed').order('scheduled_date').limit(300))).data || []; }
   catch { $('pl-out').innerHTML = '<div class="muted">Could not load the proposed jobs.</div>'; return; }
   if (!jobs.length){ $('pl-out').innerHTML = '<div class="card empty">No proposed jobs waiting.</div>'; return; }
-  const today = localDate(), ctxs = {}, rows = [];
-  // heaviest first per day, so big loads get a truck before small ones fill the gaps
-  jobs.sort((a, b) => String(a.scheduled_date || '9').localeCompare(String(b.scheduled_date || '9')) || Number(b.estimated_weight_kg || 0) - Number(a.estimated_weight_kg || 0));
-  for (const j of jobs){
-    const r = { job: j, opts: [], pick: null, why: '' };
-    if (!j.scheduled_date) r.block = 'No date yet — open the job and set one';
-    else if (j.scheduled_date < today) r.block = `Date ${j.scheduled_date} has passed — open the job and set a new one`;
-    else if (!j.destination_id) r.block = 'No destination — open the job and pick one';
-    else {
-      try { ctxs[j.scheduled_date] ??= await dayPlanCtx(j.scheduled_date); } catch { r.block = 'Could not load capacity for this date'; }
-      if (!r.block){
-        r.opts = suggestTrucks(j, ctxs[j.scheduled_date], j.destination_id);
-        r.pick = r.opts[0] || null;
-        if (!r.pick) r.block = `No truck serves ${j.company}`;
-        else planAdd(ctxs[j.scheduled_date], r.pick, j, j.destination_id);
-      }
-    }
-    r.on = !!r.pick && !r.pick.warnings.length;
-    rows.push(r);
+  const today = localDate(), blocked = [], byDate = {};
+  jobs.forEach(j => {
+    if (!j.scheduled_date) blocked.push({ job: j, reason: 'No date yet' });
+    else if (j.scheduled_date < today) blocked.push({ job: j, reason: `Date ${j.scheduled_date} has passed` });
+    else if (!j.destination_id) blocked.push({ job: j, reason: 'No destination' });
+    else (byDate[j.scheduled_date] ??= []).push(j);
+  });
+  const days = [];
+  for (const d of Object.keys(byDate).sort()){
+    try { const ctx = await dayPlanCtx(d); days.push({ date: d, ctx, ...planDay(ctx, byDate[d]) }); }
+    catch { byDate[d].forEach(j => blocked.push({ job: j, reason: 'Could not load capacity for this date' })); }
   }
+  const pct = b => b.cap ? Math.round(b.kg / b.cap * 100) : 0;
+  const jobLine = (j, day, planned) => `<tr${planned ? '' : ' class="fixed"'}><td><a href="#" data-pl-open="${esc(j.id)}" class="mono">${esc(j.quotation_serial)}</a> <span class="co">${esc(j.company)}</span></td>
+    <td>${esc(j.client_name || '—')}</td><td class="ft">${esc(destLabel(j.destination_id))}</td><td class="num">${kg(j.estimated_weight_kg)}</td>
+    <td>${planned ? `<select class="i" data-pl-move="${esc(j.id)}" data-day="${esc(day.date)}">${day.bins.filter(b => (b.t.pool_companies || []).includes(j.company)).map(b =>
+        `<option value="${esc(b.key)}" ${b.planned.some(x => x.id === j.id) ? 'selected' : ''}>${esc(b.t.label)} · trip ${b.trip_no} (${pct(b)}%)</option>`).join('')}<option value="">— leave unassigned —</option></select>` : '<span class="ft">already scheduled</span>'}</td></tr>`;
   const render = () => {
-    $('pl-out').innerHTML = `<div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th></th><th>Job</th><th>Date · destination</th><th>Load</th><th>Suggested truck / trip</th><th>Why / check</th></tr></thead><tbody>
-      ${rows.map((r, i) => { const j = r.job;
-        return `<tr data-pl="${i}"><td><input type="checkbox" data-pl-on ${r.on ? 'checked' : ''} ${r.pick && !r.pick.warnings.length ? '' : 'disabled'} aria-label="Confirm this job"></td>
-          <td><a href="#" data-pl-open><b class="mono">${esc(j.quotation_serial)}</b></a> <span class="co">${esc(j.company)}</span><div>${esc(j.client_name || '—')}</div></td>
-          <td>${j.scheduled_date ? fmtDate(j.scheduled_date) : '—'}<div class="ft">${esc(destLabel(j.destination_id))}</div></td>
-          <td>${kg(j.estimated_weight_kg)}</td>
-          <td>${r.block ? '<span class="muted">—</span>' : `<select class="i" data-pl-sel>${r.opts.slice(0, 12).map((o, k) => `<option value="${k}" ${o === r.pick ? 'selected' : ''}>${k === 0 ? '⭐ ' : ''}${esc(o.label)} · trip ${o.trip_no} · ${Math.round(o.kgAfter).toLocaleString('en-PH')}/${Math.round(o.max).toLocaleString('en-PH')} kg${o.warnings.length ? ' ⚠' : ''}</option>`).join('')}</select>`}</td>
-          <td class="ft">${r.block ? `<span class="warn">${esc(r.block)}</span>` : r.pick.warnings.length
-            ? `<ul class="warn" style="margin:0;padding-left:16px">${r.pick.warnings.map(x => `<li>${esc(x)}</li>`).join('')}</ul><div>Open the job to confirm with a reason.</div>` : esc(r.pick.why)}</td></tr>`; }).join('')}
-      </tbody></table></div>`;
-    const sync = () => { const n = rows.filter(r => r.on).length; $('pl-go').disabled = !n; $('pl-go').textContent = n ? `Confirm ${n} job${n === 1 ? '' : 's'}` : 'Confirm'; };
-    document.querySelectorAll('tr[data-pl]').forEach(tr => { const r = rows[+tr.dataset.pl];
-      tr.querySelector('[data-pl-open]').addEventListener('click', e => { e.preventDefault(); openJob(r.job.id); });
-      tr.querySelector('[data-pl-on]').addEventListener('change', e => { r.on = e.target.checked; sync(); });
-      tr.querySelector('[data-pl-sel]')?.addEventListener('change', e => { r.pick = r.opts[+e.target.value]; r.on = !r.pick.warnings.length; render(); });
-    });
-    sync();
+    let total = 0;
+    $('pl-out').innerHTML = days.map(day => {
+      const used = day.bins.filter(b => b.planned.length);
+      const allUsed = day.bins.filter(b => b.planned.length || b.fixed.length);
+      const cost = sum(used, b => tripCost(b.truck, b.dests, day.date) - tripCost(b.truck, b.fixed.map(j => j.destination_id).filter(Boolean), day.date));
+      const nPlanned = sum(used, b => b.planned.length); total += nPlanned;
+      const fill = allUsed.length ? Math.round(sum(allUsed, b => b.kg) / sum(allUsed, b => b.cap) * 100) : 0;
+      return `<div class="pl-day"><h3>${fmtDate(day.date)} <span class="ft">— ${nPlanned} job${nPlanned === 1 ? '' : 's'} planned on ${used.length} trip${used.length === 1 ? '' : 's'} · trucks out that day ${allUsed.length} trip${allUsed.length === 1 ? '' : 's'} at ${fill}% average fill${canSeeCosts() ? ` · added trip cost ${costTxt(cost)}` : ''}</span></h3>
+        ${allUsed.map(b => { const p = pct(b); return `<div class="pl-trip">
+          <div class="pl-th"><b>${esc(b.t.label)} · trip ${b.trip_no}</b> <span class="ft">${esc(FLEET_LABEL[b.t.fleet_type] || '')}</span>
+            <span class="pl-bar"><i class="${ratioClass(b.kg / (b.cap || 1))}" style="width:${Math.min(100, p)}%"></i></span>
+            <span class="ft">${Math.round(b.kg).toLocaleString('en-PH')} / ${Math.round(b.cap).toLocaleString('en-PH')} kg · <b>${p}%</b>${canSeeCosts() ? ` · trip ${costTxt(tripCost(b.truck, b.dests, day.date))}` : ''}</span></div>
+          <table class="ct"><tbody>${b.fixed.map(j => jobLine(j, day, false)).join('')}${b.planned.map(j => jobLine(j, day, true)).join('')}</tbody></table></div>`; }).join('')}
+        ${day.unplaced.length ? `<div class="pl-trip warnbox"><b>Not planned — open the job to decide</b><table class="ct"><tbody>${day.unplaced.map(u => `<tr><td><a href="#" data-pl-open="${esc(u.job.id)}" class="mono">${esc(u.job.quotation_serial)}</a></td><td>${esc(u.job.client_name || '—')}</td><td class="ft">${esc(destLabel(u.job.destination_id))}</td><td class="num">${kg(u.job.estimated_weight_kg)}</td><td class="ft">${esc(u.reason || '')}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      </div>`; }).join('')
+      + (blocked.length ? `<div class="pl-day"><h3>Can’t plan yet</h3><div class="pl-trip warnbox"><table class="ct"><tbody>${blocked.map(u => `<tr><td><a href="#" data-pl-open="${esc(u.job.id)}" class="mono">${esc(u.job.quotation_serial)}</a></td><td>${esc(u.job.client_name || '—')}</td><td class="ft">${esc(u.reason)} — open the job to set it</td></tr>`).join('')}</tbody></table></div></div>` : '');
+    document.querySelectorAll('[data-pl-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openJob(a.dataset.plOpen); }));
+    document.querySelectorAll('[data-pl-move]').forEach(sel => sel.addEventListener('change', () => {
+      const day = days.find(d => d.date === sel.dataset.day), from = day.bins.find(b => b.planned.some(x => x.id === sel.dataset.plMove));
+      const job = from.planned.find(x => x.id === sel.dataset.plMove); removeFromBin(from, job);
+      if (sel.value){ const to = day.bins.find(b => b.key === sel.value); addToBin(to, job);
+        const w = ruleWarnings({ job, date: day.date, destId: job.destination_id, truck: to.truck, tripLoad: { trip_no: to.trip_no, kg: to.kg - Number(job.estimated_weight_kg || 0), pcs: to.pcs - boardsPcs(job.board_pcs) } });
+        if (w.length) toast(`${job.quotation_serial}: ${w[0]} — confirm this one from the job instead`, 'error'); }
+      else day.unplaced.push({ job, reason: 'Left unassigned' });
+      render();
+    }));
+    const n = sum(days, d => sum(d.bins, b => b.planned.length));
+    $('pl-go').disabled = !n; $('pl-go').textContent = n ? `Confirm ${n} job${n === 1 ? '' : 's'}` : 'Confirm';
   };
   render();
   $('pl-go').addEventListener('click', async e => {
-    const b = e.currentTarget, list = rows.filter(r => r.on && r.pick && !r.pick.warnings.length);
+    const b = e.currentTarget, list = [];
+    for (const d of days) for (const bin of d.bins) for (const j of bin.planned){
+      const w = ruleWarnings({ job: j, date: d.date, destId: j.destination_id, truck: bin.truck, tripLoad: { trip_no: bin.trip_no, kg: bin.kg - Number(j.estimated_weight_kg || 0), pcs: bin.pcs - boardsPcs(j.board_pcs) } });
+      if (w.length) return toast(`${j.quotation_serial} on ${bin.t.label} trip ${bin.trip_no}: ${w[0]} — move it or confirm it from the job with a reason`, 'error');
+      list.push({ j, bin, d });
+    }
     b.disabled = true; let done = 0;
-    for (const r of list){
+    for (const x of list){
       b.innerHTML = `<span class="spin"></span> ${done + 1} of ${list.length}…`;
-      try {
-        await setStatus(r.job, 'scheduled', `Confirmed for ${r.job.scheduled_date} on ${r.pick.label}, trip ${r.pick.trip_no} (suggested by HATID, confirmed by ${state.me.name || state.me.email})`,
-          { truck_id: r.pick.truck_id, trip_no: r.pick.trip_no, rule_warnings: null, override_reason: null });
-        done++;
-      } catch { break; }
+      try { await setStatus(x.j, 'scheduled', `Confirmed for ${x.d.date} on ${x.bin.t.label}, trip ${x.bin.trip_no} (planned by HATID, confirmed by ${state.me.name || state.me.email})`,
+          { truck_id: x.bin.t.truck_id, trip_no: x.bin.trip_no, rule_warnings: null, override_reason: null }); done++; }
+      catch { break; }
     }
     toast(`${done} job${done === 1 ? '' : 's'} scheduled`, done === list.length ? 'ok' : 'error'); closeOverlay(); loadBoard();
   });
@@ -2004,7 +2089,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
   if ($('confirm-sec')){
     /* Pick truck + trip. Each trip shows its load after adding this job; rule checks run on the selection. */
     const w = Number(job.estimated_weight_kg || 0), pc = boardsPcs(job.board_pcs);
-    let load = [], sel = job.truck_id ? { truck: job.truck_id, trip: job.trip_no || 1 } : null, warnings = [], best = null, ctx = null, userPicked = !!sel;
+    let load = [], sel = job.truck_id ? { truck: job.truck_id, trip: job.trip_no || 1 } : null, warnings = [], best = null, bestReason = '', userPicked = !!sel;
     const tripOf = (t, n, date) => {
       const x = tripLoads(t).find(y => y.trip_no === n) || { trip_no: n, jobs: 0, kg: 0, pcs: 0 };
       const mine = job.status !== 'proposed' && t.truck_id === job.truck_id && date === job.scheduled_date && (job.trip_no || 1) === n;
@@ -2037,7 +2122,8 @@ function renderDrawer(job, events, costs = [], rep = {}){
       }).join('');
       box.querySelectorAll('.trip').forEach(b => b.addEventListener('click', () => { sel = { truck: b.dataset.truck, trip: +b.dataset.trip }; userPicked = true; draw(); }));
       if (best) box.querySelector(`.trip[data-truck="${best.truck_id}"][data-trip="${best.trip_no}"]`)?.classList.add('best');
-      $('cf-sugg').innerHTML = best ? `<div class="sugg">⭐ <b>Suggested: ${esc(best.label)} · trip ${best.trip_no}</b> — ${esc(best.warnings.length ? 'no trip is free of warnings; this has the fewest' : best.why)}${sel && (sel.truck !== best.truck_id || sel.trip !== best.trip_no) ? ' <button type="button" class="lnk" id="cf-use">Use it</button>' : ''}</div>` : '';
+      $('cf-sugg').innerHTML = best ? `<div class="sugg">⭐ <b>Suggested: ${esc(best.label)} · trip ${best.trip_no}</b> — ${esc(best.why)}${sel && (sel.truck !== best.truck_id || sel.trip !== best.trip_no) ? ' <button type="button" class="lnk" id="cf-use">Use it</button>' : ''}</div>`
+        : bestReason ? `<div class="sugg">No trip fits without a warning — ${esc(bestReason)}. Pick one below and give a reason.</div>` : '';
       $('cf-use')?.addEventListener('click', () => { sel = { truck: best.truck_id, trip: best.trip_no }; draw(); });
       // rule checks on the current selection
       const t = sel && pool.find(x => x.truck_id === sel.truck);
@@ -2051,15 +2137,19 @@ function renderDrawer(job, events, costs = [], rep = {}){
       const date = $('cf-date').value;
       if (!date){ $('cf-trucks').innerHTML = '<div class="muted">Pick a date to see capacity.</div>'; $('cf-warn').innerHTML = ''; return; }
       $('cf-trucks').innerHTML = '<span class="spin"></span>';
-      try { ctx = await dayPlanCtx(date); load = ctx.load; } catch { $('cf-trucks').innerHTML = '<div class="muted">Could not load capacity.</div>'; return; }
-      suggest(); draw();
+      try { load = await fetchLoad(date); } catch { $('cf-trucks').innerHTML = '<div class="muted">Could not load capacity.</div>'; return; }
+      draw(); suggest();
     };
-    const suggest = () => {   // proposed jobs get the best truck pre-selected (until the dispatcher picks one)
-      best = needsConfirm && ctx && $('cf-dest').value ? suggestTrucks(job, ctx, $('cf-dest').value)[0] || null : null;
+    const suggest = async () => {   // proposed jobs: plan the day and pre-select this job's trip (until the dispatcher picks one)
+      best = null; bestReason = '';
+      const date = $('cf-date').value, destId = $('cf-dest').value;
+      if (!needsConfirm || !date || !destId) { draw(); return; }
+      try { const r = await suggestForJob(job, date, destId); if ($('cf-date').value !== date) return; best = r.best; bestReason = r.reason || ''; } catch {}
       if (best && !userPicked) sel = { truck: best.truck_id, trip: best.trip_no };
+      draw();
     };
     $('cf-date').addEventListener('change', renderPick);
-    $('cf-dest').addEventListener('change', () => { suggest(); draw(); });
+    $('cf-dest').addEventListener('change', () => { draw(); suggest(); });
     renderPick();
 
     $('cf-ok').addEventListener('click', async () => {
@@ -2291,7 +2381,9 @@ const FLEET_TYPES = Object.keys(FLEET_LABEL);
 const TRUCK_STATUS = { active:'Active', maintenance:'Maintenance', retired:'Retired' };
 const MAINT_CAT = { pms:'Preventive maintenance (PMS)', oil_change:'Oil change', tires:'Tires', brakes:'Brakes', battery:'Battery', electrical:'Electrical',
   engine:'Engine', body:'Body', aircon:'Aircon', registration:'LTO registration', insurance:'Insurance', repair:'Repair', other:'Other' };
-function isFleetAdmin(){ return canSeeCosts() && !state.me.company; }  // admins, and managers covering all companies
+function isFleetAdmin(){ return ['admin','manager'].includes(state.me?.role) && !state.me.company; }  // admins, and managers covering all companies
+// Areas & rates (trip rates, drop fees, delivery charges): supervisor and up, or anyone marked "Sees costs & rates"
+function canSeeRates(){ return canSeeCosts(); }
 state.fleetSub = 'trucks';
 document.querySelectorAll('.subtab').forEach(b => b.addEventListener('click', () => { state.fleetSub = b.dataset.sub; renderFleetSub(); }));
 
@@ -2306,7 +2398,8 @@ async function loadFleet(){
   } catch { $('fleet-body').innerHTML = '<div class="card empty">Could not load the fleet.</div>'; }
 }
 function renderFleetSub(){
-  document.querySelectorAll('.subtab').forEach(b => b.classList.toggle('active', b.dataset.sub === state.fleetSub));
+  if (state.fleetSub === 'areas' && !canSeeRates()) state.fleetSub = 'trucks';
+  document.querySelectorAll('.subtab').forEach(b => { b.classList.toggle('active', b.dataset.sub === state.fleetSub); if (b.dataset.sub === 'areas') b.classList.toggle('hidden', !canSeeRates()); });
   ({ trucks: renderTrucks, areas: renderAreas, fuel: renderFuel, maint: renderMaint, calendar: renderCalendar, notify: renderNotify })[state.fleetSub]();
 }
 function setFleetHead(sub, actions){ $('fl-sub').textContent = sub; $('fl-actions').innerHTML = actions; }
