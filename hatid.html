@@ -3096,6 +3096,7 @@ async function renderNotify(){
       <form class="form" id="ns-f">
         <div class="grid2"><label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="email_enabled" ${cfg?.email_enabled ? 'checked' : ''}> Send emails</label>
           <label class="f">Sender (only for Resend, not needed with the Google script) <input class="i" name="email_from" value="${esc(cfg?.email_from || '')}" placeholder="HATID &lt;logistics@yourdomain.com&gt;"></label></div>
+        <label class="f">Send from (alias) <span class="ft">— optional; an alias of the account that runs the mail script, e.g. hatid@… Leave blank to send from that account’s own address.</span><input class="i" type="email" name="email_alias" value="${esc(cfg?.email_alias || '')}" placeholder="Leave blank to use the account’s main address"></label>
         <label class="f">Replies go to <span class="ft">— optional; e.g. a Google Group like logistics@… so the team gets client replies</span><input class="i" type="email" name="email_reply_to" value="${esc(cfg?.email_reply_to || '')}" placeholder="Leave blank: replies go to the sending account"></label>
         <div class="grid2"><label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="sms_enabled" ${cfg?.sms_enabled ? 'checked' : ''}> Send SMS</label>
           <label class="f">SMS sender name <input class="i" name="sms_sender" value="${esc(cfg?.sms_sender || '')}" maxlength="11" placeholder="Registered with Semaphore"></label></div>
@@ -3144,17 +3145,18 @@ async function renderNotify(){
   });
   if ($('ns-f')) $('ns-f').addEventListener('submit', async e => {
     e.preventDefault(); const f = e.target, btn = f.querySelector('[type=submit]');
+    if (f.email_alias.value.trim() && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(f.email_alias.value.trim())) return toast('Check the alias address', 'error');
     if (f.email_reply_to.value.trim() && !/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(f.email_reply_to.value.trim())) return toast('Check the reply-to address', 'error');
     if (f.email_enabled.checked && !state.mailGw?.connected && !/<?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>?\s*$/.test(f.email_from.value.trim())) return toast('Enter the sender, e.g. HATID <logistics@yourdomain.com>', 'error');
     btn.disabled = true;
     try { await withRetry('Saving', () => sb.from('job_notify_settings').update({ email_enabled: f.email_enabled.checked, email_from: f.email_from.value.trim() || null,
-      sms_enabled: f.sms_enabled.checked, sms_sender: f.sms_sender.value.trim() || null, daily_enabled: f.daily_enabled.checked, sched_auto: f.sched_auto.checked, email_reply_to: f.email_reply_to.value.trim().toLowerCase() || null, updated_at: new Date().toISOString() }).eq('id', true));
+      sms_enabled: f.sms_enabled.checked, sms_sender: f.sms_sender.value.trim() || null, daily_enabled: f.daily_enabled.checked, sched_auto: f.sched_auto.checked, email_reply_to: f.email_reply_to.value.trim().toLowerCase() || null, email_alias: f.email_alias.value.trim().toLowerCase() || null, updated_at: new Date().toISOString() }).eq('id', true));
       toast('Saved', 'ok'); renderNotify(); } catch { btn.disabled = false; }
   });
 }
 /* The Google Apps Script that sends HATID's emails from the admin's own Google account */
 function gasMailerScript(secret){
-  return `// HATID Mailer — sends HATID emails from this Google account (MailApp).
+  return `// HATID Mailer — sends HATID emails from this Google account (or one of its aliases).
 // Deploy: Deploy → New deployment → Web app → Execute as: Me → Who has access: Anyone.
 // The secret below must match HATID. Getting a new copy from HATID changes it.
 const SECRET = '${secret}';
@@ -3166,14 +3168,19 @@ function doPost(e) {
     const to = String(d.to || '').trim();
     if (!/^[^\\s@,;]+@[^\\s@,;]+\\.[^\\s@,;]+$/.test(to)) return out_({ ok: false, error: 'bad address' });
     if (MailApp.getRemainingDailyQuota() < 1) return out_({ ok: false, retry: true, error: 'Daily email limit reached' });
-    MailApp.sendEmail({
-      to: to,
-      subject: String(d.subject || 'HATID update').slice(0, 200),
-      body: String(d.text || ''),
+    const opts = {
       htmlBody: d.html ? String(d.html) : undefined,
       name: String(d.name || 'HATID Logistics').slice(0, 80),
       replyTo: /^[^\\s@,;]+@[^\\s@,;]+\\.[^\\s@,;]+$/.test(String(d.replyTo || '')) ? String(d.replyTo) : undefined
-    });
+    };
+    const from = String(d.from || '').trim().toLowerCase();
+    if (from) {
+      // Send from an alias of this account (it must be listed in Gmail → Settings → Accounts → "Send mail as")
+      const aliases = GmailApp.getAliases().map(function (a) { return String(a).toLowerCase(); });
+      if (aliases.indexOf(from) < 0) return out_({ ok: false, error: 'alias not set up', alias: from, aliases: aliases });
+      opts.from = from;
+    }
+    GmailApp.sendEmail(to, String(d.subject || 'HATID update').slice(0, 200), String(d.text || ''), opts);
     return out_({ ok: true, quota: MailApp.getRemainingDailyQuota() });
   } catch (err) {
     return out_({ ok: false, error: String(err && err.message || err) });
@@ -3183,6 +3190,7 @@ function doPost(e) {
 // Run this once from the editor (select "authorize" → Run) to allow sending mail.
 function authorize() {
   Logger.log('Emails left today: ' + MailApp.getRemainingDailyQuota());
+  Logger.log('This account can send as: ' + [Session.getActiveUser().getEmail()].concat(GmailApp.getAliases()).join(', '));
 }
 
 function out_(o) {
