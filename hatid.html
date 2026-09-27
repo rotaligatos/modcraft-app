@@ -42,8 +42,12 @@ header{position:sticky;top:0;z-index:20;background:var(--accent);color:var(--acc
 .tab{background:transparent;border:1px solid transparent;color:inherit;opacity:.75;padding:6px 12px;border-radius:8px;cursor:pointer}
 .tab.active{opacity:1;background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.2)}
 .up-t td{vertical-align:top}
+.sugg{margin:8px 0;padding:8px 10px;border-radius:8px;background:var(--accent-soft);font-size:13.5px}
+.trip.best{box-shadow:0 0 0 2px #e0b300 inset}
+.trip.best b::after{content:' ⭐'}
 .up-t .i{padding:5px 6px;font-size:13px}
 .up-t select.i{max-width:190px}
+.up-t select[data-pl-sel]{max-width:340px;min-width:260px}
 .up-t td:nth-child(2){min-width:200px;max-width:280px}
 .up-t td:last-child{min-width:190px}
 .tbl-wrap{overflow:auto;max-height:60vh}
@@ -558,6 +562,7 @@ table.ut tr.off td{color:var(--muted)}
           <label class="f grow">Search<input class="i" id="f-q" placeholder="Serial, client, address"></label>
           <button class="btn" id="btn-refresh" title="Refresh">↻</button>
           <button class="btn" id="btn-tripsheet">Trip sheets</button>
+          <button class="btn" id="btn-plan" title="Suggest a truck and trip for every proposed job">✨ Plan trucks</button>
           <button class="btn" id="btn-upload-jobs" title="Create jobs from an Odoo ticket export or the HATID Excel template">⬆ Upload tickets</button>
           <button class="btn primary" id="btn-new">+ New job</button>
         </div>
@@ -1098,6 +1103,7 @@ $('btn-refresh').addEventListener('click', loadBoard);
 $('cap-date').addEventListener('change', loadCapacity);
 $('btn-new').addEventListener('click', openNewJob);
 $('btn-upload-jobs').addEventListener('click', openJobUpload);
+$('btn-plan').addEventListener('click', openPlanTrucks);
 document.querySelectorAll('.stat').forEach(s => s.addEventListener('click', () => quickFilter(s.dataset.quick)));
 
 function quickFilter(kind){
@@ -1758,6 +1764,113 @@ function costListHtml(costs, canDelete){
     </tr>`).join('')}</tbody><tfoot><tr><td>Total</td><td class="num">${peso(total, 2)}</td><td></td></tr></tfoot></table>`;
 }
 
+/* ===== Truck suggestions: rank every truck × trip for a job using the same rules the dispatcher sees =====
+   Order: no warnings first → trips already going to the same area (fewer trips, cheaper) → best fit of the
+   remaining capacity → company-run trucks before paid 3PL trips → earlier trips. Nothing is booked until confirmed. */
+async function dayPlanCtx(date){
+  const [load, jobsRes] = await Promise.all([fetchLoad(date),
+    withRetry('Loading the day’s drops', () => sb.from('jobs').select('id, truck_id, trip_no, destination_id, status').eq('scheduled_date', date).not('truck_id', 'is', null))]);
+  const zones = {};
+  (jobsRes.data || []).filter(j => j.truck_id && !['rejected','cancelled','proposed'].includes(j.status)).forEach(j => {
+    const z = destInfo(j.destination_id)?.zone?.id; if (!z) return;
+    (zones[`${j.truck_id}|${j.trip_no || 1}`] ??= new Set()).add(z);
+  });
+  return { date, load, zones, added: {} };   // added: this session's planned (not yet saved) load per truck|trip
+}
+function suggestTrucks(job, ctx, destId){
+  const date = ctx.date, w = Number(job.estimated_weight_kg || 0), pc = boardsPcs(job.board_pcs), zone = destInfo(destId)?.zone?.id;
+  const out = [];
+  for (const t of ctx.load.filter(t => (t.pool_companies || []).includes(job.company))){
+    const truck = state.ref.truckById[t.truck_id] || t;
+    for (const x0 of tripLoads(t)){
+      const k = `${t.truck_id}|${x0.trip_no}`, add = ctx.added[k] || { kg: 0, pcs: 0, jobs: 0, zones: new Set() };
+      const x = { ...x0, kg: Number(x0.kg) + add.kg, pcs: Number(x0.pcs) + add.pcs, jobs: x0.jobs + add.jobs };
+      const warnings = ruleWarnings({ job: { ...job, destination_id: destId }, date, destId, truck, tripLoad: x });
+      const kgAfter = x.kg + w, max = Number(t.max_weight_kg) || 1;
+      const sameArea = zone && ((ctx.zones[k] && ctx.zones[k].has(zone)) || add.zones.has(zone));
+      const rate = truck.uses_trip_rates && destId ? rateFor(destId, truck.truck_class, date) : null;
+      const score = warnings.length * 1000 + (sameArea ? -300 : x.jobs ? 150 : 0) + (1 - Math.min(1, kgAfter / max)) * 60
+        + (truck.uses_trip_rates ? 40 + (rate ? Number(rate.rate) / 200 : 20) : 0) + x0.trip_no * 3;
+      const why = [sameArea ? `same area as the ${x.jobs} drop${x.jobs === 1 ? '' : 's'} already on this trip` : x.jobs ? `${x.jobs} other drop${x.jobs === 1 ? '' : 's'} on this trip` : 'empty trip',
+        `${Math.round(max - kgAfter).toLocaleString('en-PH')} kg room left after`, truck.uses_trip_rates ? (rate ? `3PL trip rate ${peso(rate.rate)}` : '3PL, no rate set') : 'company-run truck'];
+      out.push({ truck_id: t.truck_id, trip_no: x0.trip_no, label: t.label, kgAfter, max, warnings, score, why: why.join(' · ') });
+    }
+  }
+  return out.sort((a, b) => a.score - b.score);
+}
+function planAdd(ctx, opt, job, destId){
+  const k = `${opt.truck_id}|${opt.trip_no}`, a = ctx.added[k] ??= { kg: 0, pcs: 0, jobs: 0, zones: new Set() };
+  a.kg += Number(job.estimated_weight_kg || 0); a.pcs += boardsPcs(job.board_pcs); a.jobs++;
+  const z = destInfo(destId)?.zone?.id; if (z) a.zones.add(z);
+}
+
+/* Plan trucks for every Proposed job at once; the dispatcher reviews, adjusts and confirms */
+async function openPlanTrucks(){
+  openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" style="max-width:none;width:min(1180px,96vw)">
+    <h2>✨ Plan trucks for proposed jobs</h2>
+    <div class="ft">HATID suggests a truck and trip for each job — trips already going to the same area first, then the best fit, company trucks before 3PL. Change any suggestion, then confirm. Nothing is booked until you press Confirm.</div>
+    <div id="pl-out" style="margin-top:10px"><div class="muted" style="padding:14px"><span class="spin"></span> Planning…</div></div>
+    <div class="row-btns" style="justify-content:flex-end;margin-top:10px"><button class="btn" data-close>Close</button><button class="btn ok" id="pl-go" disabled>Confirm</button></div></div>`);
+  bindClose();
+  let jobs;
+  try { jobs = (await withRetry('Loading proposed jobs', () => sb.from('jobs').select('*').eq('status', 'proposed').order('scheduled_date').limit(200))).data || []; }
+  catch { $('pl-out').innerHTML = '<div class="muted">Could not load the proposed jobs.</div>'; return; }
+  if (!jobs.length){ $('pl-out').innerHTML = '<div class="card empty">No proposed jobs waiting.</div>'; return; }
+  const today = localDate(), ctxs = {}, rows = [];
+  // heaviest first per day, so big loads get a truck before small ones fill the gaps
+  jobs.sort((a, b) => String(a.scheduled_date || '9').localeCompare(String(b.scheduled_date || '9')) || Number(b.estimated_weight_kg || 0) - Number(a.estimated_weight_kg || 0));
+  for (const j of jobs){
+    const r = { job: j, opts: [], pick: null, why: '' };
+    if (!j.scheduled_date) r.block = 'No date yet — open the job and set one';
+    else if (j.scheduled_date < today) r.block = `Date ${j.scheduled_date} has passed — open the job and set a new one`;
+    else if (!j.destination_id) r.block = 'No destination — open the job and pick one';
+    else {
+      try { ctxs[j.scheduled_date] ??= await dayPlanCtx(j.scheduled_date); } catch { r.block = 'Could not load capacity for this date'; }
+      if (!r.block){
+        r.opts = suggestTrucks(j, ctxs[j.scheduled_date], j.destination_id);
+        r.pick = r.opts[0] || null;
+        if (!r.pick) r.block = `No truck serves ${j.company}`;
+        else planAdd(ctxs[j.scheduled_date], r.pick, j, j.destination_id);
+      }
+    }
+    r.on = !!r.pick && !r.pick.warnings.length;
+    rows.push(r);
+  }
+  const render = () => {
+    $('pl-out').innerHTML = `<div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th></th><th>Job</th><th>Date · destination</th><th>Load</th><th>Suggested truck / trip</th><th>Why / check</th></tr></thead><tbody>
+      ${rows.map((r, i) => { const j = r.job;
+        return `<tr data-pl="${i}"><td><input type="checkbox" data-pl-on ${r.on ? 'checked' : ''} ${r.pick && !r.pick.warnings.length ? '' : 'disabled'} aria-label="Confirm this job"></td>
+          <td><a href="#" data-pl-open><b class="mono">${esc(j.quotation_serial)}</b></a> <span class="co">${esc(j.company)}</span><div>${esc(j.client_name || '—')}</div></td>
+          <td>${j.scheduled_date ? fmtDate(j.scheduled_date) : '—'}<div class="ft">${esc(destLabel(j.destination_id))}</div></td>
+          <td>${kg(j.estimated_weight_kg)}</td>
+          <td>${r.block ? '<span class="muted">—</span>' : `<select class="i" data-pl-sel>${r.opts.slice(0, 12).map((o, k) => `<option value="${k}" ${o === r.pick ? 'selected' : ''}>${k === 0 ? '⭐ ' : ''}${esc(o.label)} · trip ${o.trip_no} · ${Math.round(o.kgAfter).toLocaleString('en-PH')}/${Math.round(o.max).toLocaleString('en-PH')} kg${o.warnings.length ? ' ⚠' : ''}</option>`).join('')}</select>`}</td>
+          <td class="ft">${r.block ? `<span class="warn">${esc(r.block)}</span>` : r.pick.warnings.length
+            ? `<ul class="warn" style="margin:0;padding-left:16px">${r.pick.warnings.map(x => `<li>${esc(x)}</li>`).join('')}</ul><div>Open the job to confirm with a reason.</div>` : esc(r.pick.why)}</td></tr>`; }).join('')}
+      </tbody></table></div>`;
+    const sync = () => { const n = rows.filter(r => r.on).length; $('pl-go').disabled = !n; $('pl-go').textContent = n ? `Confirm ${n} job${n === 1 ? '' : 's'}` : 'Confirm'; };
+    document.querySelectorAll('tr[data-pl]').forEach(tr => { const r = rows[+tr.dataset.pl];
+      tr.querySelector('[data-pl-open]').addEventListener('click', e => { e.preventDefault(); openJob(r.job.id); });
+      tr.querySelector('[data-pl-on]').addEventListener('change', e => { r.on = e.target.checked; sync(); });
+      tr.querySelector('[data-pl-sel]')?.addEventListener('change', e => { r.pick = r.opts[+e.target.value]; r.on = !r.pick.warnings.length; render(); });
+    });
+    sync();
+  };
+  render();
+  $('pl-go').addEventListener('click', async e => {
+    const b = e.currentTarget, list = rows.filter(r => r.on && r.pick && !r.pick.warnings.length);
+    b.disabled = true; let done = 0;
+    for (const r of list){
+      b.innerHTML = `<span class="spin"></span> ${done + 1} of ${list.length}…`;
+      try {
+        await setStatus(r.job, 'scheduled', `Confirmed for ${r.job.scheduled_date} on ${r.pick.label}, trip ${r.pick.trip_no} (suggested by HATID, confirmed by ${state.me.name || state.me.email})`,
+          { truck_id: r.pick.truck_id, trip_no: r.pick.trip_no, rule_warnings: null, override_reason: null });
+        done++;
+      } catch { break; }
+    }
+    toast(`${done} job${done === 1 ? '' : 's'} scheduled`, done === list.length ? 'ok' : 'error'); closeOverlay(); loadBoard();
+  });
+}
+
 function renderDrawer(job, events, costs = [], rep = {}){
   const dispatcher = isDispatcher();
   const needsConfirm = job.status === 'proposed';
@@ -1805,6 +1918,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
         </div>
         <label class="f" style="margin-top:10px">Destination<select class="i" id="cf-dest">${destOptions(job.company, job.destination_id)}</select></label>
         <div class="f" style="margin-top:10px">Truck and trip <span class="ft">— tap a trip</span></div>
+        <div id="cf-sugg"></div>
         <div class="pick" id="cf-trucks"><div class="muted">Pick a date to see capacity.</div></div>
         <div id="cf-warn"></div>
         <div class="row-btns">
@@ -1882,7 +1996,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
   if ($('confirm-sec')){
     /* Pick truck + trip. Each trip shows its load after adding this job; rule checks run on the selection. */
     const w = Number(job.estimated_weight_kg || 0), pc = boardsPcs(job.board_pcs);
-    let load = [], sel = job.truck_id ? { truck: job.truck_id, trip: job.trip_no || 1 } : null, warnings = [];
+    let load = [], sel = job.truck_id ? { truck: job.truck_id, trip: job.trip_no || 1 } : null, warnings = [], best = null, ctx = null, userPicked = !!sel;
     const tripOf = (t, n, date) => {
       const x = tripLoads(t).find(y => y.trip_no === n) || { trip_no: n, jobs: 0, kg: 0, pcs: 0 };
       const mine = job.status !== 'proposed' && t.truck_id === job.truck_id && date === job.scheduled_date && (job.trip_no || 1) === n;
@@ -1912,7 +2026,10 @@ function renderDrawer(job, events, costs = [], rep = {}){
               <b>Trip ${x.trip_no}</b><span>${Math.round(kgAfter).toLocaleString('en-PH')}/${Math.round(t.max_weight_kg).toLocaleString('en-PH')} kg</span><span>${x.jobs ? x.jobs + ' drop' + (x.jobs > 1 ? 's' : '') + ' already' : 'empty'}</span></button>`; }).join('')}</div>
         </div>`;
       }).join('');
-      box.querySelectorAll('.trip').forEach(b => b.addEventListener('click', () => { sel = { truck: b.dataset.truck, trip: +b.dataset.trip }; draw(); }));
+      box.querySelectorAll('.trip').forEach(b => b.addEventListener('click', () => { sel = { truck: b.dataset.truck, trip: +b.dataset.trip }; userPicked = true; draw(); }));
+      if (best) box.querySelector(`.trip[data-truck="${best.truck_id}"][data-trip="${best.trip_no}"]`)?.classList.add('best');
+      $('cf-sugg').innerHTML = best ? `<div class="sugg">⭐ <b>Suggested: ${esc(best.label)} · trip ${best.trip_no}</b> — ${esc(best.warnings.length ? 'no trip is free of warnings; this has the fewest' : best.why)}${sel && (sel.truck !== best.truck_id || sel.trip !== best.trip_no) ? ' <button type="button" class="lnk" id="cf-use">Use it</button>' : ''}</div>` : '';
+      $('cf-use')?.addEventListener('click', () => { sel = { truck: best.truck_id, trip: best.trip_no }; draw(); });
       // rule checks on the current selection
       const t = sel && pool.find(x => x.truck_id === sel.truck);
       const truck = t && (state.ref.truckById[t.truck_id] || t);
@@ -1925,11 +2042,15 @@ function renderDrawer(job, events, costs = [], rep = {}){
       const date = $('cf-date').value;
       if (!date){ $('cf-trucks').innerHTML = '<div class="muted">Pick a date to see capacity.</div>'; $('cf-warn').innerHTML = ''; return; }
       $('cf-trucks').innerHTML = '<span class="spin"></span>';
-      try { load = await fetchLoad(date); } catch { $('cf-trucks').innerHTML = '<div class="muted">Could not load capacity.</div>'; return; }
-      draw();
+      try { ctx = await dayPlanCtx(date); load = ctx.load; } catch { $('cf-trucks').innerHTML = '<div class="muted">Could not load capacity.</div>'; return; }
+      suggest(); draw();
+    };
+    const suggest = () => {   // proposed jobs get the best truck pre-selected (until the dispatcher picks one)
+      best = needsConfirm && ctx && $('cf-dest').value ? suggestTrucks(job, ctx, $('cf-dest').value)[0] || null : null;
+      if (best && !userPicked) sel = { truck: best.truck_id, trip: best.trip_no };
     };
     $('cf-date').addEventListener('change', renderPick);
-    $('cf-dest').addEventListener('change', draw);
+    $('cf-dest').addEventListener('change', () => { suggest(); draw(); });
     renderPick();
 
     $('cf-ok').addEventListener('click', async () => {
