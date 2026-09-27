@@ -3141,6 +3141,8 @@ async function renderNotify(){
         <li><b>Deploy → New deployment</b> → type <b>Web app</b> → Execute as: <b>Me</b> → Who has access: <b>Anyone</b> → <b>Deploy</b>. Copy the <b>Web app URL</b> (ends in <code>/exec</code>).</li>
         <li><span style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center;width:100%"><input class="i" id="gs-url" style="flex:1;min-width:220px" placeholder="https://script.google.com/macros/s/…/exec"><button class="btn primary" type="button" id="gs-save">Save</button></span></li>
         <li>Tick <b>Send emails</b> below and Save, then <button class="btn" type="button" id="gs-test" ${state.mailGw?.connected ? '' : 'disabled'}>Send me a test email</button></li>
+        <li><b>Replies into HATID:</b> in the script, pick <b>startChecking</b> in the function list at the top → <b>Run</b> → allow access. The inbox is then checked every minute; replies about deliveries appear in <b>Messages</b> (and get the Gmail label “HATID”), everything else stays in Gmail only.
+          ${state.mailGw?.checked_at ? (Date.now() - new Date(state.mailGw.checked_at) < 10 * 60e3 ? `<span class="tag ok">Checking — last ${esc(fmtTime(state.mailGw.checked_at))}</span>` : `<span class="tag bad">Stopped — last check ${esc(fmtTime(state.mailGw.checked_at))}; run startChecking again</span>`) : '<span class="tag">Not started</span>'}</li>
       </ol>
       <div class="ft">Copying the script makes a new secret, so an older copy of the script stops working until you replace it and redeploy (Deploy → Manage deployments → edit → New version).</div>
     </div>
@@ -3243,6 +3245,7 @@ async function renderNotify(){
 function gasMailerScript(secret){
   return `// HATID Mailer — sends HATID emails from this Google account (or one of its aliases).
 // Deploy: Deploy → New deployment → Web app → Execute as: Me → Who has access: Anyone.
+// Replies into HATID: after deploying, run startChecking once (see the bottom of this file).
 // The secret below must match HATID. Getting a new copy from HATID changes it.
 const SECRET = '${secret}';
 
@@ -3280,6 +3283,81 @@ function authorize() {
 
 function out_(o) {
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ---- Replies into HATID ----
+// Run "startChecking" once (select it above → Run). From then on this inbox is checked every minute:
+// replies about deliveries go to HATID › Messages and get the Gmail label "HATID"; all other mail stays only in Gmail.
+const HATID_INBOUND = '${SUPABASE_URL}/functions/v1/job-mail-inbound';
+
+function startChecking() {
+  stopChecking();
+  ScriptApp.newTrigger('checkReplies').timeBased().everyMinutes(1).create();
+  if (!PropertiesService.getScriptProperties().getProperty('since'))
+    PropertiesService.getScriptProperties().setProperty('since', String(Math.floor(Date.now() / 1000) - 86400));
+  checkReplies();
+  Logger.log('HATID now checks this inbox every minute. Run stopChecking to stop.');
+}
+
+function stopChecking() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'checkReplies') ScriptApp.deleteTrigger(t);
+  });
+}
+
+function checkReplies() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const since = Number(props.getProperty('since')) || Math.floor(Date.now() / 1000) - 86400;
+    const startedAt = Math.floor(Date.now() / 1000);
+    const mine = [Session.getEffectiveUser().getEmail()].concat(GmailApp.getAliases()).map(function (a) { return String(a).toLowerCase(); });
+    const threads = GmailApp.search('in:inbox after:' + (since - 120) + ' -category:promotions -category:social', 0, 50);
+    let list = [];
+    const threadOf = {};
+    threads.forEach(function (t) {
+      t.getMessages().forEach(function (m) {
+        if (m.getDate().getTime() / 1000 < since - 120) return;
+        const from = String(m.getFrom() || '');
+        const em = ((from.match(/<([^>]+)>/) || [null, from])[1] || '').trim().toLowerCase();
+        if (!em || mine.indexOf(em) >= 0 || /^(mailer-daemon|postmaster|no-?reply)/.test(em)) return;
+        list.push({ id: m.getId(), from_email: em, from_name: from.replace(/<[^>]*>/, '').replace(/"/g, '').trim(),
+          subject: m.getSubject(), body: clean_(m.getPlainBody()), date: m.getDate().toISOString(),
+          attachments: m.getAttachments({ includeInlineImages: false }).length });
+        threadOf[m.getId()] = t;
+      });
+    });
+    list.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+    let next = startedAt;
+    if (list.length > 100) { list = list.slice(0, 100); next = Math.floor(new Date(list[99].date).getTime() / 1000); }
+    if (list.length) {
+      const res = UrlFetchApp.fetch(HATID_INBOUND, { method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+        payload: JSON.stringify({ secret: SECRET, messages: list }) });
+      if (res.getResponseCode() !== 200) { Logger.log('HATID answered ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 300)); return; }
+      const label = GmailApp.getUserLabelByName('HATID') || GmailApp.createLabel('HATID');
+      (JSON.parse(res.getContentText()).results || []).forEach(function (r) {
+        if (r.stored && threadOf[r.id]) threadOf[r.id].addLabel(label);
+      });
+    }
+    props.setProperty('since', String(next));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Keep only the new part of a reply — drop the quoted earlier emails below it
+function clean_(t) {
+  const lines = String(t || '').replace(/\\r/g, '').split('\\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (/^On .+wrote:\\s*$/.test(l) || (/^On /.test(l) && /^\\S*.*wrote:\\s*$/.test(lines[i + 1] || '') && (lines[i + 1] || '').length < 90)) break;
+    if (/^-{2,}\\s*Original Message/i.test(l) || /^_{8,}\\s*$/.test(l) || (out.length && /^From: .+/.test(l))) break;
+    if (/^>/.test(l)) continue;
+    out.push(l);
+  }
+  return out.join('\\n').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 5000);
 }
 `;
 }
@@ -3467,7 +3545,7 @@ async function loadMsgs(keep){
   refreshMsgBadge();
 }
 function soOf(j){ return (j?.doc_refs || []).map(r => r.ref).filter(Boolean).join(', '); }
-function threadTitle(t){ return t.id === 'unmatched' ? 'Unknown numbers' : (t.job ? (t.job.client_name || t.job.quotation_serial) : 'Delivery'); }
+function threadTitle(t){ return t.id === 'unmatched' ? 'Unknown senders' : (t.job ? (t.job.client_name || t.job.quotation_serial) : 'Delivery'); }
 function renderThreadList(){
   const q = ($('msg-q').value || '').trim().toLowerCase();
   const list = Object.values(state.msgs || {}).filter(t => !q || [threadTitle(t), t.job?.quotation_serial, soOf(t.job), t.job?.client_contact_name].join(' ').toLowerCase().includes(q))
@@ -3488,7 +3566,7 @@ async function openThread(id){
   const j = t.job, ag = j?.agent_id ? state.ref.agentById?.[j.agent_id] : null;
   const bubble = it => {
     if (it.dir === 'in'){ const m = it.m;
-      return `<div class="bub in"><div class="meta">↩ ${esc(m.sender_label || fmtPh(m.sender) || m.sender)} · ${m.channel === 'sms' ? 'SMS' : 'Email'} · ${esc(fmtTime(m.received_at))}</div><div class="tx">${esc(m.body)}</div></div>`; }
+      return `<div class="bub in"><div class="meta">↩ ${esc(m.sender_label || (m.channel === 'sms' ? fmtPh(m.sender) : m.sender))}${m.sender_label && m.channel === 'email' ? ' &lt;' + esc(m.sender) + '&gt;' : ''} · ${m.channel === 'sms' ? 'SMS' : 'Email'} · ${esc(fmtTime(m.received_at))}</div>${m.subject ? `<div class="tx" style="font-weight:600">${esc(m.subject)}</div>` : ''}<div class="tx">${esc(m.body)}</div></div>`; }
     const o = it.o, long = (o.body || '').length > 260;
     return `<div class="bub out"><div class="meta">${esc(OB_KIND_SHORT[o.kind] || o.kind)} → ${esc(o.recipient_label || '')} · ${esc(CH_LABEL[o.channel])} · ${esc(fmtTime(o.created_at))}${o.created_by_name ? ' · by ' + esc(o.created_by_name) : ''}
         · <span class="tag ${o.status === 'sent' ? 'ok' : o.status === 'failed' ? 'bad' : 'info'}" title="${esc(o.last_error || '')}">${o.delivered_at ? 'Delivered' : OB_STATUS[o.status]}</span></div>
@@ -3497,7 +3575,7 @@ async function openThread(id){
   const canSms = x => !!x && isPhMobile(x), canMail = x => !!x && /@/.test(x);
   $('msg-thread').innerHTML = `
     <div class="mt-h"><button class="x no-desk" id="mt-back" aria-label="Back to list">‹</button>
-      <h3>${esc(threadTitle(t))}${j ? `<div class="ft">${esc([soOf(j) ? 'SO ' + soOf(j) : '', j.quotation_serial, j.company, j.scheduled_date ? fmtDate(j.scheduled_date).replace(/<[^>]+>/g, '') : ''].filter(Boolean).join(' · '))}</div>` : '<div class="ft">Replies from numbers that don’t match any client or agent</div>'}</h3>
+      <h3>${esc(threadTitle(t))}${j ? `<div class="ft">${esc([soOf(j) ? 'SO ' + soOf(j) : '', j.quotation_serial, j.company, j.scheduled_date ? fmtDate(j.scheduled_date).replace(/<[^>]+>/g, '') : ''].filter(Boolean).join(' · '))}</div>` : '<div class="ft">Texts and emails that don’t match any delivery, client or agent</div>'}</h3>
       ${j ? `<button class="btn" id="mt-job">Open job</button>` : ''}</div>
     <div class="mt-body" id="mt-body">${t.items.length ? t.items.map(bubble).join('') : '<div class="muted" style="text-align:center;padding:20px">No messages yet — write the first one below.</div>'}</div>
     ${j ? `<div class="mt-compose">
@@ -3529,6 +3607,8 @@ async function openThread(id){
     $('mc-info').textContent = first ? (first[0] === 'sms' ? fmtPh(phone) : mail) : 'No way to reach them yet — add a mobile or email on the job';
     $('mc-send').disabled = !first; syncCh();
   };
+  const lastMail = [...t.items].reverse().find(i => i.dir === 'in' && i.m.channel === 'email' && i.m.subject);
+  if (lastMail) $('mc-subj').value = /^re:/i.test(lastMail.m.subject) ? lastMail.m.subject : 'Re: ' + lastMail.m.subject;
   const syncCh = () => { const ch = $('mc-ch').value; $('mc-subj').classList.toggle('hidden', ch !== 'email');
     const who = $('mc-to').value; $('mc-info').textContent = ch === 'sms' ? fmtPh(who === 'client' ? j.client_phone : ag?.phone) : (who === 'client' ? j.client_email : ag?.email) || '';
     const n = $('mc-body').value.length; $('mc-count').textContent = n ? `${n} characters${ch === 'sms' ? ` · ${Math.max(1, Math.ceil(n / 153))} text${n > 160 ? 's' : ''}` : ''}` : ''; };
@@ -4203,7 +4283,7 @@ async function openNotifications(){
   document.querySelectorAll('[data-nt]').forEach(li => li.addEventListener('click', async () => {
     const n = rows.find(x => x.id === li.dataset.nt);
     if (!n.read_at) { try { await sb.from('job_notifications').update({ read_at: new Date().toISOString() }).eq('id', n.id); } catch {} refreshBell(); }
-    if (n.kind === 'inbox_sms' && isDispatcher()){ closeOverlay(); state.msgOpen = n.ref_id || 'unmatched'; switchView('msgs'); }
+    if (/^inbox_/.test(n.kind || '') && isDispatcher()){ closeOverlay(); state.msgOpen = n.ref_id || 'unmatched'; switchView('msgs'); }
     else if (n.ref_type === 'schedule' && n.ref_pool && n.ref_date) openSchedule(n.ref_pool, n.ref_date);
     else if (n.ref_type === 'job' && n.ref_id && isDispatcher()) openJob(n.ref_id);
     else closeOverlay();
