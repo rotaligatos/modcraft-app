@@ -11,6 +11,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 :root{
   --bg:#f3f4f1; --surface:#ffffff; --surface-2:#f8f8f6; --line:#dddcd6; --ink:#1b1d1f; --muted:#6b6f73;
@@ -75,7 +76,12 @@ input.i:focus,select.i:focus,textarea.i:focus{outline:2px solid var(--accent);ou
 #screen-login{min-height:calc(100vh - 60px);display:grid;place-items:center;padding:16px}
 .login{width:100%;max-width:380px;padding:28px}
 .login h1{margin:0 0 4px;font-size:22px}
-.login form{display:flex;flex-direction:column;gap:12px;margin-top:18px}
+.login form{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+.g-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;margin-top:22px;text-align:center}
+#g-btn{min-height:44px;display:flex;align-items:center;justify-content:center}
+.g-msg{background:var(--bad-soft);color:var(--bad);border-radius:8px;padding:10px 12px;font-size:14px;text-align:left;width:100%}
+.pw-alt{margin-top:22px;border-top:1px solid var(--line);padding-top:12px;font-size:13px}
+.pw-alt summary{cursor:pointer;color:var(--muted)}
 
 /* stats */
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
@@ -439,12 +445,18 @@ table.ut tr.off td{color:var(--muted)}
   <div class="card login">
     <h1>Sign in</h1>
     <div class="muted">Dispatch &amp; field operations for MSSI · WCLI · CWLI</div>
+    <div class="g-wrap">
+      <div id="g-btn"><div class="muted" style="font-size:13px"><span class="spin"></span> Loading Google sign-in…</div></div>
+      <div id="g-msg" class="g-msg hidden" role="alert"></div>
+      <div class="ft">Use the Google account your admin registered for you — company or personal Gmail.</div>
+    </div>
+    <details class="pw-alt"><summary>Sign in with email and password instead</summary>
     <form id="login-form">
       <label class="f">Email<input class="i" type="email" id="login-email" autocomplete="username" required></label>
       <label class="f">Password<input class="i" type="password" id="login-pass" autocomplete="current-password" required></label>
-      <button class="btn primary big" type="submit" id="login-btn">Sign in</button>
+      <button class="btn big" type="submit" id="login-btn">Sign in</button>
       <div id="login-msg" class="muted" style="font-size:13px"></div>
-    </form>
+    </form></details>
   </div>
 </section>
 
@@ -911,7 +923,38 @@ $('login-form').addEventListener('submit', async e => {
   btn.disabled = false; btn.textContent = 'Sign in';
   if (error) $('login-msg').textContent = error.message;
 });
-$('btn-signout').addEventListener('click', () => sb.auth.signOut());
+$('btn-signout').addEventListener('click', () => { try { google.accounts.id.disableAutoSelect(); } catch {} sb.auth.signOut(); });
+
+/* Sign in with Google — same Google sign-in as ModCraft and the Command Center (ModCraft's OAuth client).
+   Google hands the page an ID token; job-google-signin checks it with Google and that the email is registered
+   (Command Center › Job Board users), then returns a one-time token we exchange for a Job Board session. */
+const GOOGLE_CLIENT_ID = '605710112392-vgvmr9e66b8himis6ka118cdq5er6393.apps.googleusercontent.com';
+function gMsg(t){ $('g-msg').textContent = t || ''; $('g-msg').classList.toggle('hidden', !t); }
+async function onGoogleCredential(resp){
+  gMsg(''); $('g-btn').style.opacity = .5;
+  try {
+    let res, j = {};
+    for (let i = 0; i < 3; i++){
+      try { res = await fetch(`${SUPABASE_URL}/functions/v1/job-google-signin`, { method:'POST', headers:{ 'Content-Type':'application/json', apikey: SUPABASE_ANON_KEY },
+        body: JSON.stringify({ credential: resp.credential }) }); break; } catch { if (i < 2) await sleep(600 * 2 ** i); }
+    }
+    if (!res) return gMsg('No connection — check your signal and try again.');
+    j = await res.json().catch(() => ({}));
+    if (!res.ok) return gMsg(j.error || 'Sign-in failed — try again.');
+    const { error } = await sb.auth.verifyOtp({ token_hash: j.token_hash, type: 'email' });
+    if (error) gMsg('Sign-in failed: ' + error.message);
+  } finally { $('g-btn').style.opacity = 1; }
+}
+function initGoogle(tries = 0){
+  if (!window.google?.accounts?.id){
+    if (tries > 40){ $('g-btn').innerHTML = '<div class="muted" style="font-size:13px">Google sign-in didn’t load. Check the connection and reload, or use email and password below.</div>'; return; }
+    return setTimeout(() => initGoogle(tries + 1), 250);
+  }
+  google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onGoogleCredential, auto_select: false, cancel_on_tap_outside: true, use_fedcm_for_prompt: true });
+  $('g-btn').innerHTML = '';
+  google.accounts.id.renderButton($('g-btn'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'signin_with', width: 280 });
+}
+initGoogle();
 
 let bootedFor; // undefined until first auth event, so a signed-out start still shows login
 sb.auth.onAuthStateChange((_evt, session) => {
