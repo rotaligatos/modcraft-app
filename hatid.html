@@ -1195,8 +1195,20 @@ function boardsGrid(prefix, pcs = {}){
     return `<label><span>${k}mm</span><input class="i" type="number" min="0" step="1" inputmode="numeric" data-gauge="${k}" id="${prefix}-g${k.replace('.', '_')}" value="${pcs[k] ?? ''}"></label>`; }).join('')}</div>`;
 }
 function readItems(root){
-  return [...root.querySelectorAll('.it')].map(r => ({ desc: r.querySelector('[data-it=desc]').value.trim(), qty: r.querySelector('[data-it=qty]').value === '' ? null : Number(r.querySelector('[data-it=qty]').value), unit: r.querySelector('[data-it=unit]').value.trim() || null }))
+  return [...root.querySelectorAll('.it')].map(r => ({ desc: r.querySelector('[data-it=desc]').value.trim(), qty: r.querySelector('[data-it=qty]').value === '' ? null : Number(r.querySelector('[data-it=qty]').value), unit: r.querySelector('[data-it=unit]').value.trim() || null, ...(r.dataset.g ? { g: r.dataset.g } : {}) }))
     .filter(x => x.desc);
+}
+/* Board lines in the items list (tagged with their thickness) keep the boards grid, and so the weight, in step */
+function syncBoardsFromItems(f){
+  const sum = {}; f.querySelectorAll('.it[data-g]').forEach(r => { sum[r.dataset.g] = (sum[r.dataset.g] || 0) + (Number(r.querySelector('[data-it=qty]').value) || 0); });
+  const tagged = new Set([...f.querySelectorAll('.it[data-g]')].map(r => r.dataset.g).concat(Object.keys(f._syncedG || {})));
+  tagged.forEach(g => { const i = f.querySelector(`[data-gauge="${g}"]`); if (i) i.value = sum[g] || ''; });
+  f._syncedG = sum;
+}
+/* Boards not already listed line by line in the items (older jobs, or boards typed only in the grid) */
+function boardRemainder(job){
+  const cov = {}; (job.items || []).forEach(it => { if (it.g != null) cov[it.g] = (cov[it.g] || 0) + Number(it.qty || 0); });
+  return Object.entries(job.board_pcs || {}).map(([g, n]) => [g, Number(n) - (cov[String(Number(g))] || 0)]).filter(([, n]) => n > 0).sort((a, b) => a[0] - b[0]);
 }
 function readBoards(root){ const o = {}; root.querySelectorAll('[data-gauge]').forEach(i => { const n = parseInt(i.value, 10); if (n > 0) o[i.dataset.gauge] = n; }); return o; }
 
@@ -1248,7 +1260,7 @@ function odooToJob(t){
   const address = F('Delivery Address') || pick(/delivery address\s*:\s*(.+)/i) || (siteLine ? siteLine.desc.replace(/^site\s*:\s*/i, '') : '');
   const terms = pick(/terms?\s*:\s*(.+)/i);
   const gauges = new Set(state.ref.gauges.filter(g => g.active).map(g => String(Number(g.gauge_mm))));
-  const boards = {}, boardLines = [], items = [], other = [], skipped = [];
+  const boards = {}, items = [], other = [], skipped = [];
   let total = 0;
   for (const ln of t.lines){
     const d = (ln.desc || '').replace(/\s+/g, ' ').trim(); if (!d) continue;
@@ -1257,11 +1269,13 @@ function odooToJob(t){
     if (/delivery charge/i.test(d) || /\bservice\b/i.test(d)){ skipped.push(d); continue; }
     const g = (d.match(/(\d+(?:\.\d+)?)\s*mm(?!\s*x)/i) || [])[1];
     if (/\b4\s*x\s*8\b/i.test(d) && g && gauges.has(String(Number(g))) && /^(pc|pcs|sheet|sheets)?$/i.test(ln.unit || '')){
-      const k = String(Number(g)); boards[k] = (boards[k] || 0) + ln.qty; boardLines.push(`${ln.qty} × ${d}`); continue;
+      const k = String(Number(g)); boards[k] = (boards[k] || 0) + ln.qty; items.push({ desc: d, qty: ln.qty, unit: ln.unit || 'pc', g: k }); continue;
     }
     items.push({ desc: d, qty: ln.qty, unit: ln.unit });
   }
-  const notes = [instr, boardLines.length ? 'Boards:\n' + boardLines.join('\n') : '', other.length ? 'Other SO notes: ' + other.join(' · ') : ''].filter(Boolean).join('\n\n');
+  // Notes keep only what isn't already in its own field (address, contact and terms have their own boxes)
+  const rest = instr.split('\n').filter(x => !/delivery address\s*:|contact(\s*person)?\s*:|terms?\s*:/i.test(x)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const notes = [rest, other.length ? 'Other SO notes: ' + other.join(' · ') : ''].filter(Boolean).join('\n\n');
   return { so, company, date, job_type, client: F('CUSTOMER NAME') || F('Customer Name'), salesperson: F('Salesperson'), contact, phone: phone.replace(/\s/g, ''),
     address: address.replace(/\s+/g, ' ').trim(), payment_status: F('Payment Status'), terms, fulfillment: F('Fulfillment Status'),
     ticket: t.ticket?.label || (so ? so : ''), boards, items, notes, skipped, total: Math.round(total * 100) / 100 };
@@ -1301,7 +1315,7 @@ async function fillFromOdoo(f, txt, addItem, refresh){
   set('payment_status', j.payment_status); set('payment_terms', j.terms); set('fulfillment_status', j.fulfillment);
   if (j.total) set('order_value', j.total);
   f.querySelectorAll('[data-gauge]').forEach(i => { i.value = j.boards[i.dataset.gauge] || ''; });
-  $('nj-items').innerHTML = ''; j.items.forEach(it => addItem(it, true));
+  $('nj-items').innerHTML = ''; j.items.forEach(it => addItem(it, true)); f._syncedG = { ...j.boards };
   const ag = guessAgent(co, j.salesperson);
   if (ag){ $('nj-agent').value = ag.id; ok.push(`Sales agent: ${ag.name}`); }
   else if (j.salesperson) warn.push(`Salesperson “${j.salesperson}” isn’t in your sales agents yet — add him/her in Fleet › Agents & alerts, or pick one`);
@@ -1309,8 +1323,7 @@ async function fillFromOdoo(f, txt, addItem, refresh){
   if (dest){ f.destination_id.value = dest.id; ok.push(`Destination: ${dest.name} (from the address — please check)`); }
   else warn.push('Pick the destination — none matched the address');
   const nb = Object.values(j.boards).reduce((a, b) => a + b, 0);
-  if (nb) ok.push(`${nb} boards → weight worked out`);
-  if (j.items.length) ok.push(`${j.items.length} other item${j.items.length > 1 ? 's' : ''}`);
+  ok.push(`${j.items.length} item line${j.items.length === 1 ? '' : 's'}${nb ? ` — incl. ${nb} boards, weight worked out` : ''}`);
   if (j.skipped.length) ok.push(`Left out: ${j.skipped.join(', ')}`);
   if (!j.contact && !j.phone) warn.push('No contact person or number found — add them so the client gets updates');
   if (j.date && j.date < localDate()) warn.push(`The ticket’s scheduled date (${j.date}) has passed — change it if needed`);
@@ -1359,9 +1372,9 @@ function openNewJob(){
         <label class="f">Job type<select class="i" name="job_type"><option>delivery</option><option>installation</option><option>both</option><option>pickup</option><option value="backload">backload (return load)</option></select></label>
         <label class="f">Requested date<input class="i" type="date" name="scheduled_date" id="nj-date"></label>
       </div>
-      <div class="f">Boards (pieces per thickness, 4×8)</div>
+      <div class="f">Boards (pieces per thickness, 4×8) <span class="ft">— for the weight</span></div>
       ${boardsGrid('nj')}
-      <div class="f">Other items <span class="ft">— listed on the trip sheet and checked off on delivery</span></div>
+      <div class="f">Items <span class="ft">— listed on the trip sheet and checked off on delivery</span></div>
       <div class="items-edit" id="nj-items"></div>
       <div><button type="button" class="btn" id="nj-add-item">+ Add item</button></div>
       <div class="grid2">
@@ -1394,8 +1407,9 @@ function openNewJob(){
   const f = $('nj');
   const addItem = (it, quiet) => { const d = document.createElement('div'); d.className = 'it';
     d.innerHTML = '<input class="i" data-it="desc" placeholder="Item, e.g. Edge band 1mm" aria-label="Item"><input class="i" data-it="qty" type="number" min="0" step="any" inputmode="decimal" placeholder="Qty" aria-label="Quantity"><input class="i" data-it="unit" placeholder="Unit" aria-label="Unit" list="unit-list"><button type="button" class="x" aria-label="Remove item">×</button>';
-    if (it){ d.querySelector('[data-it=desc]').value = it.desc; d.querySelector('[data-it=qty]').value = it.qty ?? ''; d.querySelector('[data-it=unit]').value = it.unit || ''; }
-    d.querySelector('.x').addEventListener('click', () => d.remove()); $('nj-items').appendChild(d); if (!quiet) d.querySelector('input').focus(); };
+    if (it){ d.querySelector('[data-it=desc]').value = it.desc; d.querySelector('[data-it=qty]').value = it.qty ?? ''; d.querySelector('[data-it=unit]').value = it.unit || '';
+      if (it.g != null){ d.dataset.g = it.g; d.title = `${it.g}mm board — counts toward the weight`; } }
+    d.querySelector('.x').addEventListener('click', () => { d.remove(); if (d.dataset.g){ syncBoardsFromItems(f); refresh(); } }); $('nj-items').appendChild(d); if (!quiet) d.querySelector('input').focus(); };
   $('nj-add-item').addEventListener('click', () => addItem());
   if (!$('unit-list')) document.body.insertAdjacentHTML('beforeend', '<datalist id="unit-list"><option>pcs</option><option>rolls</option><option>boxes</option><option>sets</option><option>bundles</option><option>gallons</option></datalist>');
   const refresh = () => {
@@ -1407,7 +1421,7 @@ function openNewJob(){
     $('nj-bracket').textContent = b ? `Customer delivery charge (proposal, reference only): ${peso(b.charge)} — ${b.label}` : '';
   };
   f.company.addEventListener('change', e => { f.destination_id.innerHTML = destOptions(e.target.value); $('nj-agent').innerHTML = agentOptions(e.target.value); refresh(); });
-  f.addEventListener('input', refresh);
+  f.addEventListener('input', e => { if (e.target.dataset.it === 'qty' && e.target.closest('.it[data-g]')) syncBoardsFromItems(f); refresh(); });
   let impT;
   $('nj-paste').addEventListener('input', () => { clearTimeout(impT); impT = setTimeout(() => fillFromOdoo(f, $('nj-paste').value, addItem, refresh), 150); });
   f.addEventListener('submit', async e => {
@@ -3022,7 +3036,7 @@ async function openContacts(){
 /* ===== Job contents, loading checklist and trip sheet (everyone) ===== */
 function contentsList(j){
   const li = [];
-  Object.entries(j.board_pcs || {}).filter(([, n]) => Number(n) > 0).sort((a, b) => a[0] - b[0]).forEach(([g, n]) => li.push(`${n} pcs — ${g}mm boards (4×8)`));
+  boardRemainder(j).forEach(([g, n]) => li.push(`${n} pcs — ${g}mm boards (4×8)`));
   (j.items || []).forEach(it => li.push(`${it.qty ?? ''}${it.unit ? ' ' + it.unit : ''} — ${it.desc}`.replace(/^ — /, '')));
   return li;
 }
@@ -3109,7 +3123,7 @@ async function openTripSheet(date, truckId = ''){
 /* ===== Delivery result: all received / partial / backload ===== */
 function outcomeLines(job){
   const L = [];
-  Object.entries(job.board_pcs || {}).filter(([, n]) => Number(n) > 0).sort((a, b) => a[0] - b[0]).forEach(([g, n]) => L.push({ k: 'b' + g, g, label: `${g}mm boards`, qty: Number(n) }));
+  boardRemainder(job).forEach(([g, n]) => L.push({ k: 'b' + g, g, label: `${g}mm boards`, qty: n }));
   (job.items || []).forEach((it, i) => L.push({ k: 'i' + i, i, label: `${it.desc}${it.unit ? ' (' + it.unit + ')' : ''}`, qty: Number(it.qty || 0) }));
   return L;
 }
@@ -3168,7 +3182,8 @@ function openCompleteModal(job){
 }
 async function createRedelivery(job){
   const back = returnedList(job), board_pcs = {}, items = [];
-  back.forEach(x => x.g != null ? board_pcs[x.g] = x.back : items.push({ ...job.items[x.i], qty: x.back }));
+  back.forEach(x => { if (x.g != null) board_pcs[x.g] = (board_pcs[x.g] || 0) + x.back;
+    else { const it = job.items[x.i]; items.push({ ...it, qty: x.back }); if (it.g != null) board_pcs[it.g] = (board_pcs[it.g] || 0) + x.back; } });
   const row = { quotation_serial: job.quotation_serial, company: job.company, client_name: job.client_name, job_type: job.job_type === 'backload' ? 'delivery' : job.job_type,
     destination_id: job.destination_id, address: job.address, board_pcs, items, estimated_weight_kg: Math.round(boardsKg(board_pcs) * 100) / 100,
     notes: `Redelivery of items returned on ${job.scheduled_date}.` + (job.notes ? '\n' + job.notes : ''), status: 'proposed', redelivery_of: job.id };
