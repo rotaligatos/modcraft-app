@@ -41,6 +41,12 @@ header{position:sticky;top:0;z-index:20;background:var(--accent);color:var(--acc
 .tabs{display:flex;gap:4px;margin-left:12px}
 .tab{background:transparent;border:1px solid transparent;color:inherit;opacity:.75;padding:6px 12px;border-radius:8px;cursor:pointer}
 .tab.active{opacity:1;background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.2)}
+.up-t td{vertical-align:top}
+.up-t .i{padding:5px 6px;font-size:13px}
+.up-t select.i{max-width:190px}
+.up-t td:nth-child(2){min-width:200px;max-width:280px}
+.up-t td:last-child{min-width:190px}
+.tbl-wrap{overflow:auto;max-height:60vh}
 .imp{border:1px dashed var(--line);border-radius:10px;padding:10px 12px;margin:0 0 14px;background:var(--surface-2)}
 .imp summary{cursor:pointer;font-weight:600}
 .imp textarea{width:100%;margin-top:8px;font-size:12px}
@@ -552,6 +558,7 @@ table.ut tr.off td{color:var(--muted)}
           <label class="f grow">Search<input class="i" id="f-q" placeholder="Serial, client, address"></label>
           <button class="btn" id="btn-refresh" title="Refresh">↻</button>
           <button class="btn" id="btn-tripsheet">Trip sheets</button>
+          <button class="btn" id="btn-upload-jobs" title="Create jobs from an Odoo ticket export or the HATID Excel template">⬆ Upload tickets</button>
           <button class="btn primary" id="btn-new">+ New job</button>
         </div>
         <table class="jobs">
@@ -1090,6 +1097,7 @@ $('f-q').addEventListener('input', renderJobs);
 $('btn-refresh').addEventListener('click', loadBoard);
 $('cap-date').addEventListener('change', loadCapacity);
 $('btn-new').addEventListener('click', openNewJob);
+$('btn-upload-jobs').addEventListener('click', openJobUpload);
 document.querySelectorAll('.stat').forEach(s => s.addEventListener('click', () => quickFilter(s.dataset.quick)));
 
 function quickFilter(kind){
@@ -1246,16 +1254,17 @@ function odooToJob(t){
   const pick = re => { const m = instr.match(re); return m ? m[1].trim() : ''; };
   const so = (F('Ref. Sales Order') || t.ticket?.so || t.lines[0]?.so || '').toUpperCase();
   const coTxt = odooNorm(F('Company'));
-  const company = /cebu/.test(coTxt) ? 'CWLI' : /module/.test(coTxt) ? 'MSSI' : /world class/.test(coTxt) ? 'WCLI' : null;
-  const dm = F('Scheduled Date').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  const date = dm ? `${dm[3]}-${dm[1].padStart(2, '0')}-${dm[2].padStart(2, '0')}` : null;
+  const company = /^(mssi|wcli|cwli)$/.test(coTxt) ? coTxt.toUpperCase() : /cebu/.test(coTxt) ? 'CWLI' : /module/.test(coTxt) ? 'MSSI' : /world class/.test(coTxt) ? 'WCLI' : null;
+  const dm = F('Scheduled Date').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/), di = F('Scheduled Date').match(/(\d{4})-(\d{2})-(\d{2})/);
+  const date = di ? `${di[1]}-${di[2]}-${di[3]}` : dm ? `${dm[3]}-${dm[1].padStart(2, '0')}-${dm[2].padStart(2, '0')}` : null;
   const dt = odooNorm(F('Delivery Type'));
   const job_type = /pick/.test(dt) ? 'pickup' : /install/.test(dt) ? (/deliver/.test(dt) ? 'both' : 'installation') : /back ?load|return/.test(dt) ? 'backload' : 'delivery';
   const PH = /(\+?63\s?9\d{2}[\s-]?\d{3}[\s-]?\d{4}|0\s?9\d{2}[\s-]?\d{3}[\s-]?\d{4})/;
   let contact = F('Contact Person'), phone = F('Contact Number');
   const cl = instr.split('\n').find(x => /contact/i.test(x)) || '';
   if (!contact && cl) contact = cl.replace(/^.*?contact(?:\s*person)?\s*[:\-]\s*/i, '').replace(PH, '').replace(/[\s:,\-–/]+$/, '').trim();
-  if (!phone) phone = (cl.match(PH) || instr.match(PH) || [])[1] || '';
+  phone = (phone.match(PH) || [])[1] || (phone ? phone : '') ;
+  if (!phone || !PH.test(phone)) phone = (cl.match(PH) || instr.match(PH) || [])[1] || phone || '';
   const siteLine = t.lines.find(x => /^site\s*:/i.test(x.desc || ''));
   const address = F('Delivery Address') || pick(/delivery address\s*:\s*(.+)/i) || (siteLine ? siteLine.desc.replace(/^site\s*:\s*/i, '') : '');
   const terms = pick(/terms?\s*:\s*(.+)/i);
@@ -1278,7 +1287,7 @@ function odooToJob(t){
   const notes = [rest, other.length ? 'Other SO notes: ' + other.join(' · ') : ''].filter(Boolean).join('\n\n');
   return { so, company, date, job_type, client: F('CUSTOMER NAME') || F('Customer Name'), salesperson: F('Salesperson'), contact, phone: phone.replace(/\s/g, ''),
     address: address.replace(/\s+/g, ' ').trim(), payment_status: F('Payment Status'), terms, fulfillment: F('Fulfillment Status'),
-    ticket: t.ticket?.label || (so ? so : ''), boards, items, notes, skipped, total: Math.round(total * 100) / 100 };
+    ticket: t.ticket?.label || (so ? so : ''), boards, items, notes, skipped, total: Math.round((t.total ?? total) * 100) / 100, email: F('Client Email'), fields: t.fields };
 }
 function guessDest(company, address){
   const a = ' ' + odooNorm(address) + ' '; if (!a.trim()) return null;
@@ -1339,6 +1348,212 @@ async function fillFromOdoo(f, txt, addItem, refresh){
       if (seen.length) render(` <div class="warn" style="margin-top:4px">⚠ ${esc(j.so)} already has ${seen.length === 1 ? 'a job' : seen.length + ' jobs'} (${seen.map(x => esc(x.status) + (x.scheduled_date ? ' ' + esc(x.scheduled_date) : '')).join(', ')}). Only create another for a second delivery of the same SO.</div>`);
     } catch {}
   }
+}
+
+/* ===== Upload tickets: Odoo Helpdesk export (.xlsx/.csv, labels or technical names) or the HATID template → many jobs ===== */
+// Each source column is recognised by any of its names (Odoo's label, Odoo's technical name, or the HATID template heading)
+const UP_TICKET = {
+  'Ref. Sales Order': ['sale_order_id', 'x_studio_many2one_field_qwcli', 'ref sales order', 'sales order', 'so number', 'so no', 'so'],
+  'CUSTOMER NAME': ['sale_order_id/partner_id', 'sales order/customer', 'customer name', 'customer', 'client', 'client name', 'partner_name', 'partner_id', 'partner_id/name'],
+  'Salesperson': ['sale_order_id/user_id', 'sales order/salesperson', 'salesperson', 'sales agent', 'agent'],
+  'Company': ['sale_order_id/company_id', 'sales order/company', 'company_id', 'company'],
+  'Scheduled Date': ['x_studio_scheduled_date', 'scheduled date', 'delivery date', 'date'],
+  'Delivery Type': ['x_studio_delivery_type', 'delivery type', 'job type'],
+  'Fulfillment Status': ['x_studio_fulfillment_status', 'fulfillment status'],
+  'Payment Status': ['x_studio_payment_status', 'payment status'],
+  'Payment Terms': ['payment terms', 'terms'],
+  'Delivery Address': ['x_studio_delivery_address', 'delivery address', 'site address', 'address'],
+  'Delivery Instructions': ['x_studio_delivery_instructions_1', 'x_studio_delivery_instructions', 'delivery instructions', 'instructions', 'notes'],
+  'Contact Person': ['x_studio_contact_person', 'contact person'],
+  'Contact Number': ['x_studio_contact_number', 'contact number', 'mobile', 'contact mobile'],
+  'Client Email': ['partner_email', 'client email', 'email'],
+  'Order Total': ['sale_order_id/amount_total', 'sales order/total', 'order total', 'order value'],
+  '_name': ['name', 'subject', 'ticket'],
+  '_id': ['id', 'ticket id', 'external id'],
+};
+const UP_LINE = {   // per order line (Odoo sub-fields, or the template's item columns)
+  desc: ['order_line/name', 'order lines/description', 'order line/description', 'item description', 'item'],
+  qty: ['order_line/product_uom_qty', 'order lines/quantity', 'order line/quantity', 'order line/qty', 'qty', 'quantity'],
+  unit: ['order_line/product_uom', 'order lines/unit of measure', 'order line/unit of measure', 'unit', 'unit of measure'],
+  subtotal: ['order_line/price_subtotal', 'order lines/subtotal', 'order line/subtotal', 'subtotal'],
+};
+const upKey = h => String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ').replace(/^sale_order_id\/order_line\//, 'order_line/').replace(/^sales order\/order lines\//, 'order lines/');
+function upColumns(headers){
+  const keys = headers.map(upKey), col = {}, line = {};
+  const find = names => { for (const n of names){ const i = keys.indexOf(n); if (i >= 0) return i; } return -1; };
+  for (const [f, names] of Object.entries(UP_TICKET)){ const i = find(names); if (i >= 0) col[f] = i; }
+  for (const [f, names] of Object.entries(UP_LINE)){
+    // line columns: prefer ones under an order-line path, else a plain heading (HATID template)
+    let i = keys.findIndex(k => /\//.test(k) && names.some(n => n.includes('/') && k.endsWith(n.split('/').pop()) && /order/.test(k)));
+    if (i < 0) i = find(names.filter(n => !n.includes('/')));
+    if (i >= 0 && !Object.values(col).includes(i)) line[f] = i;
+  }
+  // x_studio one2many exports its lines as "x_studio_…/field" — take those too
+  if (line.desc == null){ const i = keys.findIndex(k => /^x_studio_one2many[^/]*\/(name|description|product_id)$/.test(k)); if (i >= 0) line.desc = i; }
+  return { col, line };
+}
+function upCell(v){
+  if (v == null) return '';
+  if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  return String(v).trim();
+}
+function parseTicketRows(rows){
+  const known = new Set([...Object.values(UP_TICKET), ...Object.values(UP_LINE)].flat());
+  const hi = rows.slice(0, 15).findIndex(r => r.filter(c => known.has(upKey(c)) || /\/(name|description|quantity|product_uom_qty)$/.test(upKey(c))).length >= 2);
+  if (hi < 0) return { error: 'No heading row found — the first row should have column names (e.g. Ref. Sales Order, Customer, Delivery Address).' };
+  const { col, line } = upColumns(rows[hi]);
+  if (col['Ref. Sales Order'] == null && col._name == null) return { error: 'This file has no sales order column. Export from Odoo › Helpdesk › Tickets with the HATID template, or use the HATID Excel template.' };
+  const keyCol = col._id ?? col['Ref. Sales Order'] ?? col._name;
+  const out = []; let cur = null;
+  for (const r of rows.slice(hi + 1)){
+    const k = upCell(r[keyCol]);
+    if (k && (!cur || k !== cur.key)){
+      cur = { key: k, fields: {}, lines: [], ticket: null, total: null }; out.push(cur);
+      for (const [f, i] of Object.entries(col)) cur.fields[f] = upCell(r[i]);
+      const no = (String(cur.fields._id || '').match(/helpdesk_ticket_(\d+)/) || [])[1];
+      const nm = cur.fields._name || cur.fields['Ref. Sales Order'] || k;
+      if (!cur.fields['Ref. Sales Order']) cur.fields['Ref. Sales Order'] = (nm.match(/\b[A-Z]{1,3}\d{3,}\b/) || [nm])[0];
+      cur.ticket = { so: cur.fields['Ref. Sales Order'], no, label: no ? `${nm} (#${no})` : nm };
+      if (cur.fields['Order Total']) cur.total = odooNum(cur.fields['Order Total']);
+    }
+    if (!cur) continue;
+    if (line.desc != null && upCell(r[line.desc])){
+      cur.lines.push({ desc: upCell(r[line.desc]), qty: odooNum(upCell(r[line.qty])) ?? 0, unit: line.unit != null ? upCell(r[line.unit]).replace(/^units?$/i, 'pc') || null : null,
+        subtotal: line.subtotal != null ? odooNum(upCell(r[line.subtotal])) : null });
+    }
+  }
+  const any = f => out.some(t => (t.fields[f] || '').trim());   // a column counts only if it has data
+  return { tickets: out, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson') };
+}
+function openJobUpload(){
+  const cos = myCompanies();
+  openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true" style="max-width:none;width:min(1180px,96vw)">
+    <h2>Upload tickets</h2>
+    <div class="ft">Choose an <b>Odoo Helpdesk ticket export</b> (.xlsx) or a filled-in <b>HATID Excel template</b>. Each ticket becomes a <b>Proposed</b> job — check the list, then create.</div>
+    <details class="imp" id="up-guide" open style="margin-top:10px"><summary>How to export the tickets from Odoo</summary>
+      <div style="font-size:13px;line-height:1.6;margin-top:6px"><b>First time only — make the “HATID” export template:</b>
+      <ol style="margin:4px 0 8px;padding-left:20px">
+        <li>Odoo › <b>Helpdesk › Tickets</b>, switch to the <b>list view</b> (☰), tick any ticket, then <b>⚙ Action → Export</b>.</li>
+        <li>At the top, <b>untick</b> “I want to update data (import-compatible export)”, and pick <b>XLSX</b>.</li>
+        <li>In the right-hand list, remove everything (🗑). Then use the search box on the left to add:
+          <b>Sales Order</b>, <b>Scheduled Date</b>, <b>Delivery Type</b>, <b>Fulfillment Status</b>, <b>Payment Status</b>, <b>Delivery Address</b>, <b>Delivery Instructions</b>, <b>Contact Person</b>, <b>Contact Number</b>.</li>
+        <li>Click the <b>▸</b> next to <b>Sales Order</b> and add <b>Customer</b>, <b>Salesperson</b>, <b>Company</b> and <b>Total</b>.
+          Still under Sales Order, click <b>▸</b> next to <b>Order Lines</b> and add <b>Description</b>, <b>Quantity</b>, <b>Unit of Measure</b> and <b>Subtotal</b>.</li>
+        <li>Open the template dropdown → <b>New template</b> → name it <b>HATID</b> → save.</li>
+      </ol>
+      <b>Every time after:</b> tick the tickets to schedule → <b>⚙ Action → Export</b> → template <b>HATID</b> → <b>Export</b> → choose the downloaded file below.<br>
+      <span class="ft">Not from Odoo? Use the <button class="lnk" id="up-tpl">⬇ HATID Excel template</button> — one row per item, same SO number on each row.</span></div>
+    </details>
+    <div class="grid2" style="margin-top:10px">
+      <label class="f">File<input class="i" type="file" id="up-file" accept=".xlsx,.xls,.csv"></label>
+      <label class="f">Company for tickets that don’t say<select class="i" id="up-co">${cos.map(c => `<option>${c}</option>`).join('')}</select></label>
+    </div>
+    <div id="up-out"></div>
+    <div class="row-btns" style="justify-content:flex-end;margin-top:10px"><button class="btn" data-close>Cancel</button><button class="btn primary" id="up-go" disabled>Create jobs</button></div>
+  </div>`);
+  bindClose();
+  $('up-tpl').addEventListener('click', downloadJobTemplate);
+  let parsed = null;
+  const build = () => {
+    const co0 = $('up-co').value;
+    parsed.jobs = parsed.tickets.map(t => {
+      const j = odooToJob(t), co = j.company && cos.includes(j.company) ? j.company : (j.company ? null : co0);
+      const dest = co ? guessDest(co, j.address) : null, ag = co ? guessAgent(co, j.salesperson) : null;
+      const date = j.date && j.date >= localDate() ? j.date : '';
+      return { j, co, dest: dest?.id || '', agent: ag?.id || '', date, pick: !!co && !!dest };
+    });
+    render();
+  };
+  const render = () => {
+    const P = parsed, miss = [!P.hasLines && 'order lines (items)', !P.hasClient && 'customer name', !P.hasAgent && 'salesperson', !P.hasCompany && 'company'].filter(Boolean);
+    $('up-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${P.tickets.length} ticket${P.tickets.length === 1 ? '' : 's'} found.
+      ${miss.length ? `<div class="warn">This file has no ${miss.join(', ')} — ${!P.hasLines ? 'jobs will have no item list. ' : ''}Add them to the Odoo export (<button class="lnk" id="up-how2">how</button>) or fill them in after.</div>` : ''}</div>
+      <div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th><input type="checkbox" id="up-all" aria-label="Select all"></th><th>SO / client</th><th>Date</th><th>Destination *</th><th>Sales agent</th><th>Load</th><th>Check</th></tr></thead><tbody>
+      ${P.jobs.map((x, i) => { const j = x.j, nb = Object.values(j.boards).reduce((a, b) => a + b, 0), w = []; 
+        if (!x.co) w.push(`Company ${j.company} isn’t yours`);
+        if (j.salesperson && !x.agent) w.push(`Agent “${j.salesperson}” not set up`);
+        if (!x.dest) w.push('Pick a destination');
+        if (!x.date) w.push(j.date ? `Ticket date ${j.date} has passed — set a date` : 'No date — set one or leave for later');
+        if (!j.contact && !j.phone) w.push('No contact person/number');
+        if (x.dup) w.push(`⚠ ${x.dup}`);
+        if (!j.items.length) w.push('No items');
+        return `<tr data-up="${i}"><td><input type="checkbox" data-up-pick ${x.pick ? 'checked' : ''} ${x.co ? '' : 'disabled'} aria-label="Create this job"></td>
+          <td><b class="mono">${esc(j.so || '—')}</b>${j.ticket && j.ticket !== j.so ? ` <span class="ft">${esc(j.ticket)}</span>` : ''}<div>${esc(j.client || '—')}</div><div class="ft">${esc(j.address || 'no address')}</div></td>
+          <td><input class="i" type="date" data-up-date value="${esc(x.date)}" style="min-width:130px"></td>
+          <td><select class="i" data-up-dest ${x.co ? '' : 'disabled'}>${x.co ? destOptions(x.co, x.dest) : ''}</select></td>
+          <td><select class="i" data-up-agent ${x.co ? '' : 'disabled'}>${x.co ? agentOptions(x.co, x.agent) : ''}</select></td>
+          <td class="ft">${j.items.length} item${j.items.length === 1 ? '' : 's'}${nb ? `<br>${nb} boards · ${Math.round(boardsKg(j.boards))} kg` : ''}</td>
+          <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '✓ Ready'}</td></tr>`; }).join('')}
+      </tbody></table></div>`;
+    $('up-how2')?.addEventListener('click', () => { $('up-guide').open = true; $('up-guide').scrollIntoView({ behavior: 'smooth' }); });
+    const sync = () => { const n = document.querySelectorAll('[data-up-pick]:checked').length; $('up-go').disabled = !n; $('up-go').textContent = n ? `Create ${n} job${n === 1 ? '' : 's'}` : 'Create jobs'; };
+    document.querySelectorAll('tr[data-up]').forEach(tr => { const x = P.jobs[+tr.dataset.up];
+      tr.querySelector('[data-up-dest]').addEventListener('change', e => { x.dest = e.target.value; if (x.dest) tr.querySelector('[data-up-pick]').checked = true; sync(); });
+      tr.querySelector('[data-up-agent]').addEventListener('change', e => { x.agent = e.target.value; });
+      tr.querySelector('[data-up-date]').addEventListener('change', e => { x.date = e.target.value; });
+      tr.querySelector('[data-up-pick]').addEventListener('change', e => { x.pick = e.target.checked; sync(); }); });
+    $('up-all').addEventListener('change', e => { document.querySelectorAll('[data-up-pick]:not(:disabled)').forEach(c => { c.checked = e.target.checked; P.jobs[+c.closest('tr').dataset.up].pick = c.checked; }); sync(); });
+    sync();
+  };
+  const dupCheck = async () => {
+    const sos = [...new Set(parsed.jobs.map(x => x.j.so).filter(Boolean))];
+    if (!sos.length) return;
+    try {
+      const [a, ...b] = await Promise.all([sb.from('jobs').select('quotation_serial, status').in('quotation_serial', sos),
+        ...sos.map(so => sb.from('jobs').select('id, status').contains('doc_refs', [{ ref: so }]).limit(1).then(r => ({ so, n: (r.data || []).length })))]);
+      const has = new Set([...(a.data || []).map(x => x.quotation_serial), ...b.filter(x => x.n).map(x => x.so)]);
+      parsed.jobs.forEach(x => { if (has.has(x.j.so)){ x.dup = `${x.j.so} already has a job`; x.pick = false; } });
+      render();
+    } catch {}
+  };
+  $('up-co').addEventListener('change', () => { if (parsed) { build(); dupCheck(); } });
+  $('up-file').addEventListener('change', async e => {
+    const file = e.target.files[0]; if (!file) return;
+    $('up-out').innerHTML = '<div class="muted" style="padding:14px"><span class="spin"></span> Reading…</div>';
+    try {
+      const X = await loadXlsx();
+      const wb = X.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      const rows = X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
+      const r = parseTicketRows(rows);
+      if (r.error){ $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(r.error)}</div>`; return; }
+      if (!r.tickets.length){ $('up-out').innerHTML = '<div class="imp-sum warn" style="margin-top:10px">No tickets in this file.</div>'; return; }
+      parsed = r; $('up-guide').open = !(r.hasLines && r.hasClient); build(); dupCheck();
+    } catch (err) { $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(err?.message || 'Could not read the file')}</div>`; }
+  });
+  $('up-go').addEventListener('click', async e => {
+    const b = e.currentTarget, picked = parsed.jobs.filter(x => x.pick);
+    const noDest = picked.filter(x => !x.dest); if (noDest.length) return toast(`Pick a destination for ${noDest.map(x => x.j.so).join(', ')}`, 'error');
+    const rows = picked.map(x => { const j = x.j, phone = j.phone && isPhMobile(j.phone) ? j.phone : null;
+      return { id: newId(), quotation_serial: (j.so || j.ticket || 'ODOO').toUpperCase(), company: x.co, client_name: j.client || null, agent_id: x.agent || null,
+        client_contact_name: j.contact || null, client_phone: phone, client_email: /@/.test(j.email || '') ? j.email.trim().toLowerCase() : null,
+        destination_id: x.dest, job_type: j.job_type, scheduled_date: x.date || null, board_pcs: j.boards, items: j.items,
+        estimated_weight_kg: Math.round(boardsKg(j.boards) * 100) / 100, order_value: j.total || null, address: j.address || null, notes: j.notes || null,
+        doc_refs: j.so ? [{ ref: j.so.toUpperCase(), remarks: j.fulfillment || null }] : [], odoo_ticket: j.ticket || null,
+        payment_status: j.payment_status || null, payment_terms: j.terms || null, fulfillment_status: j.fulfillment || null, status: 'proposed' }; });
+    b.disabled = true; b.innerHTML = '<span class="spin"></span> Creating…';
+    try {
+      await withRetry('Creating jobs', () => sb.from('jobs').insert(rows));
+      for (const r of rows) await logEvent(r.id, 'proposed', `Imported from ${r.odoo_ticket ? 'Odoo ticket ' + r.odoo_ticket : 'Excel upload'}`);
+      toast(`${rows.length} job${rows.length === 1 ? '' : 's'} created — confirm them with a truck on Dispatch`, 'ok'); closeOverlay(); loadBoard();
+    } catch { b.disabled = false; b.textContent = `Create ${rows.length} job${rows.length === 1 ? '' : 's'}`; }
+  });
+}
+async function downloadJobTemplate(){
+  try {
+    const X = await loadXlsx();
+    const head = ['SO number', 'Company', 'Client name', 'Salesperson', 'Contact person', 'Contact number', 'Client email', 'Delivery address', 'Delivery date', 'Delivery type',
+      'Payment status', 'Payment terms', 'Fulfillment status', 'Delivery instructions', 'Item description', 'Qty', 'Unit'];
+    const ex = [['S50740', 'WCLI', 'REVCONSTRAK BUILDER SERVICES AND SUPPLY CORP.', 'Mark Jason Barquin', 'Mr. Jon Paule', '09178106756', '', 'Kasilag st BF resort Village Las Piñas City', '2026-10-05', 'Delivery',
+      'FULLY PAID', 'CBD', 'Full Released', 'Call before delivery', 'Real White MDF 4x8 2F (18mm, Stipple)', 10, 'pc'],
+      ['S50740', '', '', '', '', '', '', '', '', '', '', '', '', '', 'Real White 1mmx22mm Matte PVC Edgeband', 104, 'm']];
+    const ws = X.utils.aoa_to_sheet([head, ...ex]); ws['!cols'] = head.map(h => ({ wch: Math.max(12, h.length + 2) }));
+    const how = X.utils.aoa_to_sheet([['HATID — upload tickets'], [''], ['One row per item. Repeat the SO number on every row of the same delivery (other columns only needed on its first row).'],
+      ['Company: MSSI, WCLI or CWLI. Delivery date: YYYY-MM-DD. Delivery type: Delivery, Pick-up, Installation.'],
+      ['Boards like “… MDF 4x8 … (18mm …)” are counted by thickness for the truck weight.'], ['Services and delivery-charge lines are left out automatically.'],
+      ['Upload on HATID › Dispatch › ⬆ Upload tickets. Delete the example rows first.']]);
+    const wb = X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Tickets'); X.utils.book_append_sheet(wb, how, 'How to');
+    X.writeFile(wb, 'HATID-tickets-template.xlsx');
+  } catch (err) { toast(err?.message || 'Could not make the template', 'error'); }
 }
 
 function openNewJob(){
