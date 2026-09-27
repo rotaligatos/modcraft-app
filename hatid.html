@@ -73,6 +73,7 @@ header{position:sticky;top:0;z-index:20;background:var(--accent);color:var(--acc
 .track-setup li{margin-bottom:10px}
 .track-setup .btn{display:inline-block;text-decoration:none;margin-top:4px}
 .track-ok{padding:10px 14px;margin-bottom:12px;font-size:14px}
+input.pc{letter-spacing:.4em;font-size:18px;max-width:180px}
 .setup-code{display:flex;gap:6px;align-items:center;margin:4px 0}
 .setup-code code{flex:1;padding:6px 8px;background:var(--surface-2);border-radius:6px;font-size:13px;word-break:break-all}
 @media (max-width:760px){.map-wrap{grid-template-columns:1fr;grid-template-rows:60vh auto;height:auto}.map-side{border-left:0;border-top:1px solid var(--line);max-height:50vh}}
@@ -3060,8 +3061,13 @@ async function loadUsers(){
       <td>${esc(ROLE_LABEL[u.role] || u.role)}</td>
       <td>${esc(u.company || 'All companies')}</td>
       <td>${esc((u.schedule_steps || []).map(k => ({ review:'Review', confirm:'Confirm', approve:'Approve' })[k]).join(', ') || '—')}</td>
-      <td><span class="pill ${u.active ? 'st-on' : 'st-off'}">${u.active ? 'Active' : 'Switched off'}</span>${u.signature_url ? ' <span class="ft" title="Has a saved signature">✍</span>' : ''}</td>
+      <td><span class="pill ${u.active ? 'st-on' : 'st-off'}">${u.active ? 'Active' : 'Switched off'}</span>${u.signature_url ? ' <span class="ft" title="Has a saved signature">✍</span>' : ''}
+        ${isAdmin() && (u.schedule_steps || []).length || isAdmin() && ['admin','manager','dispatcher'].includes(u.role) ? `<br><button class="lnk" data-pc-reset="${esc(u.id)}" data-nm="${esc(u.name || u.email)}">Reset signing passcode</button>` : ''}</td>
     </tr>`).join('') || '<tr><td colspan="6" class="muted">No users yet.</td></tr>';
+  document.querySelectorAll('[data-pc-reset]').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm(`Reset ${b.dataset.nm}’s signing passcode? They will create a new one the next time they sign.`)) return;
+    try { await withRetry('Resetting passcode', () => sb.rpc('job_passcode_reset', { p_staff: b.dataset.pcReset }), 1); toast('Passcode reset', 'ok'); } catch {}
+  }));
 }
 
 /* ===== Metrics (shared by Dashboard and Reports) =====
@@ -5080,6 +5086,7 @@ async function openSchedule(poolId, date){
   if (stepNow && (my.length || ['admin','manager'].includes(state.me.role))) btns.push('<button class="btn bad" data-act="reject">Return for revision</button>');
   if (stepNow && isDispatcher()) btns.push('<button class="btn" data-act="withdraw">Withdraw to edit</button>');
   if (status === 'approved' && (my.includes('approve') || isAdmin())) btns.push('<button class="btn" data-act="reopen">Reopen</button>');
+  if (status === 'approved') btns.push(s.final_copy_path ? '<button class="btn primary" id="sf-final">📄 Final signed copy</button>' : '<button class="btn" id="sf-mkfinal">📄 Save the final signed copy</button>');
   const notes = [];
   if (stepNow && my.includes(stepNow) && signedThis) notes.push('You already signed this revision — this step needs a different person.');
   if (stepNow && !my.includes(stepNow)) notes.push(`Waiting for the ${SCHED_STEPS.find(x => x[0] === stepNow)[2].toLowerCase()} to ${STEP_VERB[stepNow].toLowerCase()} and sign.`);
@@ -5106,6 +5113,8 @@ async function openSchedule(poolId, date){
   bindClose();
   $('sf-print').addEventListener('click', () => window.print());
   const reload = () => openSchedule(poolId, date);
+  $('sf-final')?.addEventListener('click', () => openFinalCopy(s.final_copy_path));
+  $('sf-mkfinal')?.addEventListener('click', async e => { e.currentTarget.disabled = true; try { await saveFinalCopy(poolId, date); toast('Final signed copy saved', 'ok'); } catch { toast('Could not save the final copy', 'error'); } reload(); });
   document.querySelectorAll('#overlay [data-act]').forEach(b => b.addEventListener('click', () => {
     const act = b.dataset.act, dl = fmtDate(date).replace(/<[^>]+>/g, '');
     if (['reject','withdraw','reopen'].includes(act))
@@ -5114,10 +5123,42 @@ async function openSchedule(poolId, date){
         async note => { await schedAction(poolId, date, act, { note }); toast({ reject: 'Returned for revision', withdraw: 'Withdrawn — you can edit it now', reopen: 'Schedule reopened' }[act], 'ok'); }, reload);
     const what = act === 'submit' ? 'submit this schedule for review' : `${STEP_VERB[act].toLowerCase()} this schedule`;
     openSignModal(act === 'submit' ? 'Sign & submit' : `Sign & ${STEP_VERB[act].toLowerCase()}`, `By signing you ${what} for ${dl} (${pool?.name || ''}).`,
-      async sig => { await schedAction(poolId, date, act, { signature: sig }); toast(act === 'approve' ? 'Schedule approved — everyone has been notified' : 'Signed', 'ok'); }, reload);
+      async (sig, code) => { const r = await schedAction(poolId, date, act, { signature: sig, passcode: code });
+        toast(act === 'approve' ? 'Schedule approved — everyone has been notified' : 'Signed', 'ok');
+        if (act === 'approve') { try { await saveFinalCopy(poolId, date); } catch {} } }, reload);
   }));
   if (editable) bindScheduleEditing(content, date, reload);
   if ($('cf-panel')) renderConfirmPanel(s, pool, date, reload);
+}
+
+/* Final signed copy: the approved FO-LGTS-02 as one self-contained page (signatures embedded), stored once. */
+async function openFinalCopy(path){
+  const w = window.open('', '_blank');
+  try { const { data, error } = await sb.storage.from(MEDIA_BUCKET).download(path); if (error) throw error;
+    const url = URL.createObjectURL(new Blob([await data.text()], { type: 'text/html' }));
+    if (w) w.location = url; else location.assign(url);
+  } catch { if (w) w.close(); toast('Could not open the final copy', 'error'); }
+}
+async function saveFinalCopy(poolId, date){
+  const pool = state.ref.poolById?.[poolId];
+  const [{ data: v }, f] = await Promise.all([sb.rpc('job_schedule_view', { p_pool: poolId, p_date: date }), sb.from('job_settings').select('value').eq('key', 'schedule_form').maybeSingle()]);
+  const s = v?.schedule; if (!s || s.status !== 'approved') throw new Error('not approved');
+  const { data: signs } = await sb.from('delivery_schedule_signoffs').select('*').eq('schedule_id', s.id).eq('revision', s.revision);
+  const toData = async path => { try { const u = await signedUrl(path); const bl = await (await fetch(u)).blob(); return await new Promise(ok => { const r = new FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(bl); }); } catch { return ''; } };
+  const urls = {}; await Promise.all((signs || []).filter(x => x.signature_url).map(async x => { urls[x.step] = await toData(x.signature_url); }));
+  const css = [...document.querySelectorAll('style')].map(x => x.textContent).join('\n');
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Delivery Schedule ${esc(date)} · ${esc(pool?.name || '')} · rev ${s.revision} (final)</title><style>${css}
+body{background:#fff;padding:16px}.no-print{display:none!important}</style></head><body>
+<div style="font:12px system-ui;color:#555;margin-bottom:8px">FINAL SIGNED COPY — approved ${esc(fmtTime(s.approved_at))} · saved from HATID ${esc(new Date().toLocaleString('en-PH'))}</div>
+<div class="sf">${schedFormHtml(pool, date, v.snapshot || [], signs || [], urls, false, f.data?.value || {}, { ...s, snapshot: v.snapshot })}</div>
+<script>window.onload=function(){ if (location.hash==='#print') window.print(); }<\/script></body></html>`;
+  const path = `schedules/${s.id}/rev${s.revision}-final-${Date.now()}.html`;
+  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, new Blob([html], { type: 'text/html' }), { contentType: 'text/html', upsert: false });
+  if (up.error) throw up.error;
+  const r = await sb.rpc('job_schedule_set_final', { p_schedule: s.id, p_path: path });
+  if (r.error) throw r.error;
+  return path;
 }
 
 function schedFormHtml(pool, date, content, signs, urls, editable, form, s){
@@ -5203,8 +5244,8 @@ function openDocRefs(job, onDone){
   });
 }
 
-async function schedAction(poolId, date, action, { note = null, signature = null } = {}){
-  const { data } = await withRetry('Saving', () => sb.rpc('job_schedule_action', { p_pool: poolId, p_date: date, p_action: action, p_note: note, p_signature: signature }), 1);
+async function schedAction(poolId, date, action, { note = null, signature = null, passcode = null } = {}){
+  const { data } = await withRetry('Saving', () => sb.rpc('job_schedule_action', { p_pool: poolId, p_date: date, p_action: action, p_note: note, p_signature: signature, p_passcode: passcode }), 1);
   if (signature) state.me.signature_url = signature;
   return data;
 }
@@ -5212,11 +5253,17 @@ async function schedAction(poolId, date, action, { note = null, signature = null
 /* Sign with the saved signature, or draw a new one (saved for next time) */
 async function openSignModal(title, message, onSigned, back){
   const saved = state.me.signature_url, savedUrl = saved ? await signedUrl(saved) : '';
+  let pc = { set: true }; try { pc = (await sb.rpc('job_passcode_status')).data || pc; } catch {}
   openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true">
     <h2>${esc(title)}</h2><p style="margin-top:0">${esc(message)}</p>
     ${saved ? `<div class="sig-pick"><label style="display:flex;gap:8px;align-items:center"><input type="radio" name="sgm" value="saved" checked> Use my saved signature</label>${savedUrl ? `<img src="${esc(savedUrl)}" alt="Your saved signature">` : ''}
       <label style="display:flex;gap:8px;align-items:center"><input type="radio" name="sgm" value="new"> Draw a new one</label></div>` : '<div class="ft">Draw your signature. It will be saved for your next signing.</div>'}
     <div id="sg-pad-wrap" class="${saved ? 'hidden' : ''}" style="margin-top:8px"><canvas class="sig" id="sg-pad"></canvas><button class="btn" id="sg-clear" style="margin-top:6px">Clear</button></div>
+    ${pc.set ? `<label class="f" style="margin-top:10px">Your signing passcode<input class="i pc" id="sg-pc" type="password" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="••••"></label>
+        <div class="ft">Forgot it? Ask an admin to reset it, then set a new one here.</div>`
+      : `<div class="note" style="margin-top:10px"><b>Create your signing passcode</b> — 4 to 6 digits, asked every time you sign. Keep it to yourself.</div>
+        <div class="grid2"><label class="f">New passcode<input class="i pc" id="sg-pc" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6"></label>
+        <label class="f">Type it again<input class="i pc" id="sg-pc2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6"></label></div>`}
     <div class="row-btns" style="justify-content:flex-end"><button class="btn" id="sg-cancel">Cancel</button><button class="btn ok" id="sg-ok">Sign</button></div></div>`);
   let pad = null;
   const ensurePad = () => { if (!pad){ $('sg-pad-wrap').classList.remove('hidden'); pad = makeSignaturePad($('sg-pad')); } };
@@ -5227,11 +5274,15 @@ async function openSignModal(title, message, onSigned, back){
   $('sg-ok').addEventListener('click', async e => {
     const b = e.currentTarget, useSaved = saved && document.querySelector('[name=sgm]:checked')?.value === 'saved';
     if (!useSaved && (!pad || pad.isEmpty())) return toast('Draw your signature first', 'error');
+    const code = $('sg-pc').value.trim();
+    if (!/^\d{4,6}$/.test(code)) { $('sg-pc').focus(); return toast('Enter your 4–6 digit passcode', 'error'); }
+    if (!pc.set && code !== $('sg-pc2').value.trim()) { $('sg-pc2').focus(); return toast('The two passcodes don’t match', 'error'); }
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Signing…';
     try {
+      if (!pc.set){ await withRetry('Saving passcode', () => sb.rpc('job_passcode_set', { p_new: code }), 1); pc.set = true; }
       const path = useSaved ? saved : await uploadMedia(`signatures/${state.me.id}`, await pad.toBlob(), 'signature.png', 'image/png');
-      await onSigned(path); back();
-    } catch { b.disabled = false; b.textContent = 'Sign'; }
+      await onSigned(path, code); back();
+    } catch { b.disabled = false; b.textContent = 'Sign'; if ($('sg-pc')) { $('sg-pc').value = ''; $('sg-pc').focus(); } }
   });
 }
 function openReasonModal(title, message, onSubmit, back){
