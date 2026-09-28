@@ -785,7 +785,7 @@ table.ut tr.off td{color:var(--muted)}
     <div class="card pad viz rp-sec" id="d-sc" style="margin-top:14px">
       <div class="chart-h" style="flex-wrap:wrap;gap:8px"><div><h3>Logistics scorecard</h3><div class="ft" id="d-sc-sub">Trips, cost, capacity, dispatch and OTIF — HATID plus imported Excel history</div></div>
         <div class="row-btns" style="margin:0;flex-wrap:wrap">
-          <select class="i" id="d-sc-per" aria-label="Period" style="width:auto"><option value="mtd">This month</option><option value="last">Last month</option><option value="ytd">This year</option></select>
+          <select class="i" id="d-sc-per" aria-label="Period" style="width:auto"><option value="latest">Latest month with data</option><option value="mtd">This month</option><option value="last">Last month</option><option value="ytd">This year</option></select>
           <select class="i" id="d-sc-co" aria-label="Company" style="width:auto"><option value="">All companies</option><option>MSSI</option><option>WCLI</option><option>CWLI</option></select>
           <select class="i" id="d-sc-cat" aria-label="Truck type" style="width:auto"><option value="">All truck types</option><option value="company">Company-owned</option><option value="itsp">ITSP (in-house trucker)</option><option value="3pl">3PL / courier</option></select>
           <button class="btn" id="d-sc-open">Full report</button></div></div>
@@ -829,7 +829,7 @@ table.ut tr.off td{color:var(--muted)}
     <div class="card toolbar rp-filters" style="border:1px solid var(--line);margin-bottom:14px">
       <label class="f">Period
         <select class="i" id="rp-preset">
-          <option value="mtd">This month</option><option value="last">Last month</option>
+          <option value="latest">Latest month with data</option><option value="mtd">This month</option><option value="last">Last month</option>
           <option value="30">Last 30 days</option><option value="90">Last 90 days</option>
           <option value="qtd">This quarter</option><option value="ytd">This year</option><option value="lyr">Last year</option><option value="custom">Custom</option>
         </select>
@@ -3456,11 +3456,14 @@ async function renderDashScorecard(){
   $('d-sc-co').classList.toggle('hidden', !!state.me.company);
   $('d-sc-open').classList.toggle('hidden', !canSeeCosts());
   const today = localDate(), per = $('d-sc-per').value, first = today.slice(0, 8) + '01';
+  const latest = await latestDataDate() || today;
   let from = first, to = today;
+  if (per === 'latest'){ const r = latestMonthRange(); from = r.from; to = r.to; }
   if (per === 'last'){ to = addDays(first, -1); from = to.slice(0, 8) + '01'; }
   if (per === 'ytd') from = today.slice(0, 5) + '01-01';
-  const cmp = cmpRange(from, to, 'ly');
-  const t0 = monthsIn(addDays(first, -335), today)[0] + '-01';           // 12 months, this one included
+  const endM = (latest < today ? latest : today).slice(0, 8) + '01';        // trend ends at the latest month with deliveries
+  const t0 = monthsIn(addDays(endM, -335), endM)[0] + '-01';               // 12 months
+  let cmp = cmpRange(from, to, 'ly');
   const lo = [`${+t0.slice(0, 4) - 1}${t0.slice(4)}`, from, cmp.from].sort()[0];   // last year's months too, for the comparison bars
   const token = state.dscToken = (state.dscToken || 0) + 1;
   try {
@@ -3473,10 +3476,14 @@ async function renderDashScorecard(){
     if (cat) recs = recs.filter(r => r.cat === cat);
     const ctx = { monthly, companies: co ? [co] : null, companyWide: !cat };
     const inR = (a, b) => recs.filter(r => r.date >= a && r.date <= b);
+    // like-for-like: stop both periods at the last day with deliveries
+    const dEnd = inR(from, to).reduce((m, r) => r.date > m ? r.date : m, ''), cut = clipEnd(dEnd, to), clipped = !!cut;
+    if (clipped){ cmp = { ...cmp, to: addDays(cmp.from, Math.round((new Date(cut) - new Date(from)) / 864e5)) }; to = cut; }
     const A = lrAgg(inR(from, to), { ...ctx, from, to }), B = lrAgg(inR(cmp.from, cmp.to), { ...ctx, from: cmp.from, to: cmp.to });
     const hasB = B.orders > 0, vs = 'vs last year', d = (k, up, kind) => hasB ? deltaHtml(A[k], B[k], up, kind, vs) : '';
     const cost = canSeeCosts(), tcp = A.tcPctSales ?? A.tcPctDelivered;
-    $('d-sc-sub').textContent = `${fmtDate(from).replace(/<[^>]+>/g, '')} – ${fmtDate(to).replace(/<[^>]+>/g, '')}${hasB ? ' · compared with the same dates last year' : ''}`;
+    $('d-sc-sub').textContent = A.orders ? `${fmtRange(from, to)}${hasB ? ' · compared with the same dates last year' : ''}${clipped ? ` · deliveries recorded up to ${fmtDay(dEnd)}` : ''}`
+      : `${fmtRange(from, to)} · no deliveries recorded yet${latest < from ? ` — latest on record: ${fmtDay(latest)} (choose “Latest month with data”)` : ''}`;
     $('d-sc-kpis').innerHTML = [
       kpi2('Trips', fmtN(A.trips), { delta: d('trips', null), sub: `${fmtN(A.orders)} orders · ${fmtN(A.customers)} customers` }),
       kpi2('Weight delivered', fmtT(A.kg), { delta: d('kg', true), sub: `${fmtT(A.avgDailyKg)} per delivery day` }),
@@ -3487,7 +3494,7 @@ async function renderDashScorecard(){
       kpi2('On-time dispatch', pct(A.onTimeDisp), { delta: d('onTimeDisp', true, 'pts'), sub: `${fmtN(A.lateTrips)} late trips` }),
       kpi2('OTIF', pct1(A.otif), { delta: d('otif', true, 'pts') }),
     ].join('');
-    const months = monthsIn(t0, today), cats = months.map(m => new Date(m + '-01T00:00:00').toLocaleDateString('en-PH', { month:'short' }));
+    const months = monthsIn(t0, endM), cats = months.map(m => new Date(m + '-01T00:00:00').toLocaleDateString('en-PH', { month:'short' }));
     const M = months.map(m => { const a = m + '-01', b = `${m}-${String(daysInMonth(m)).padStart(2, '0')}`; return lrAgg(inR(a, b), { ...ctx, from: a, to: b > today ? today : b }); });
     const LYm = months.map(m => { const y = `${+m.slice(0, 4) - 1}${m.slice(4)}`, a = y + '-01', b = `${y}-${String(daysInMonth(y)).padStart(2, '0')}`; return recs.filter(r => r.date >= a && r.date <= b && r.trip).length; });
     const lyAny = LYm.some(Boolean);
@@ -3505,6 +3512,7 @@ function applyPreset(){
   const p = $('rp-preset').value, today = localDate();
   const first = today.slice(0, 8) + '01';
   if (p === 'mtd'){ $('rp-from').value = first; $('rp-to').value = today; }
+  if (p === 'latest'){ const r = latestMonthRange(); $('rp-from').value = r.from; $('rp-to').value = r.to; }
   if (p === 'last'){ const lastEnd = addDays(first, -1); $('rp-from').value = lastEnd.slice(0, 8) + '01'; $('rp-to').value = lastEnd; }
   if (p === '30'){ $('rp-from').value = addDays(today, -29); $('rp-to').value = today; }
   if (p === '90'){ $('rp-from').value = addDays(today, -89); $('rp-to').value = today; }
@@ -3513,6 +3521,7 @@ function applyPreset(){
   if (p === 'lyr'){ const y = +today.slice(0, 4) - 1; $('rp-from').value = `${y}-01-01`; $('rp-to').value = `${y}-12-31`; }
 }
 $('rp-preset').addEventListener('change', () => { if ($('rp-preset').value !== 'custom'){ applyPreset(); loadReports(); } });
+$('rp-import').addEventListener('click', () => { state.latestData = undefined; });
 ['rp-from','rp-to'].forEach(id => $(id).addEventListener('change', () => { $('rp-preset').value = 'custom'; loadReports(); }));
 $('rp-company').addEventListener('change', loadReports);
 $('rp-cmp').addEventListener('change', loadReports);
@@ -3524,6 +3533,28 @@ $('rp-more').addEventListener('click', () => { const t = document.querySelector(
 $('rp-import').addEventListener('click', () => openHistoryImport());
 document.querySelectorAll('#rp-tabs .subtab').forEach(b => b.addEventListener('click', () => { state.rpTab = b.dataset.rt; renderReports(); }));
 
+const fmtDay = d => new Date(d + 'T00:00:00').toLocaleDateString('en-PH', { month:'short', day:'numeric', year:'numeric' });
+function fmtRange(a, b){ const y = a.slice(0, 4) === b.slice(0, 4); return `${new Date(a + 'T00:00:00').toLocaleDateString('en-PH', { month:'short', day:'numeric', year: y ? undefined : 'numeric' })} – ${fmtDay(b)}`; }
+/* Latest day with a delivery on record (imported history or HATID), for the "Latest month with data" period */
+async function latestDataDate(){
+  if (state.latestData !== undefined && Date.now() - (state.latestDataAt || 0) < 3e5) return state.latestData;
+  const today = localDate(); let best = null;
+  try { const { data } = await sb.rpc('job_history_summary'); (Array.isArray(data) ? data : []).forEach(r => { if (r.last_date && r.last_date <= today && (!best || r.last_date > best)) best = r.last_date; }); } catch {}
+  try { const { data } = await sb.from('job_report_v').select('scheduled_date').in('status', LIVE_JOB).lte('scheduled_date', today).order('scheduled_date', { ascending: false }).limit(1);
+    const d = Array.isArray(data) ? data[0]?.scheduled_date : null; if (d && (!best || d > best)) best = d; } catch {}
+  state.latestDataAt = Date.now(); return state.latestData = best;
+}
+/* When deliveries stop more than a week before the period ends (imported history up to a date), measure up to the end of
+   that last month instead — for this period and the comparison — so the two are like for like. Returns the new end, or null. */
+function clipEnd(dataEnd, to){
+  if (!dataEnd || addDays(dataEnd, 7) >= to) return null;
+  const ym = dataEnd.slice(0, 7), me = `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}`;
+  return me < to ? me : null;
+}
+function latestMonthRange(){
+  const d = state.latestData || localDate(), ym = d.slice(0, 7);
+  return { from: ym + '-01', to: `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}` > localDate() ? localDate() : `${ym}-${String(daysInMonth(ym)).padStart(2, '0')}` };
+}
 /* ----- Shared vocabulary (matches the logistics Excel report) ----- */
 const TRUCK_CAT = { company:'Company-owned', itsp:'ITSP (in-house trucker)', '3pl':'3PL / courier' };
 const CUST_CAT = { regular:'Regular', vip:'VIP', affiliate:'Affiliate' };
@@ -3665,7 +3696,7 @@ function lrAgg(recs, ctx){
   const salesRecs = recs.filter(r => r.sales > 0), sales = sum(salesRecs, r => r.sales);
   const tcOnSales = salesRecs.length ? sum(salesRecs, r => r.tc) : null;
   const days = new Set(trips.map(t => t.date));
-  const kg = sum(recs, r => r.kg);
+  const kg = sum(recs, r => r.kg), hasKg = recs.some(r => r.kg > 0);   // TC2022 has no weights: leave weight-based rates blank
   // month-level figures (total sales, budget, capacity, volume)
   const today = localDate(), curYm = today.slice(0, 7);
   let totalSales = 0, salesMonths = 0, budgetW = 0, budgetS = 0, budgetN = 0, budgetSum = 0, capDen = 0, capTgtSum = 0, capTgtN = 0, cbmD = 0, cbmT = 0, cbmN = 0;
@@ -3696,8 +3727,8 @@ function lrAgg(recs, ctx){
     totalSales: allSalesMonths && ctx.companyWide && ctx.salesOk !== false ? totalSales : null,
     tcPctSales: allSalesMonths && ctx.companyWide && ctx.salesOk !== false && totalSales && tc != null ? tc / totalSales : null,
     budgetPct: budgetS ? budgetW / budgetS : budgetN ? budgetSum / budgetN : null,
-    loadRate: capSum ? sum(capTrips, t => tripKg[t.tripKey]) / capSum : null, loadTrips: capTrips.length,
-    capRate: ctx.companyWide && capDen ? kg / capDen : null, capTarget: capTgtN ? capTgtSum / capTgtN : 0.8,
+    loadRate: capSum && hasKg ? sum(capTrips, t => tripKg[t.tripKey]) / capSum : null, loadTrips: capTrips.length,
+    capRate: ctx.companyWide && capDen && hasKg ? kg / capDen : null, capTarget: capTgtN ? capTgtSum / capTgtN : 0.8,
     volRate: cbmN && cbmT ? cbmD / cbmT : null,
     dispTrips: disp.length, onTimeDisp: disp.length ? (buckets[0] + buckets[1]) / disp.length : null, buckets,
     lateTrips: disp.length - buckets[0] - buckets[1], reasons, reasonTrips: sum(Object.values(reasons), v => v),
@@ -3809,7 +3840,7 @@ function cmpRange(from, to, mode){
   const n = Math.round((new Date(to) - new Date(from)) / 864e5) + 1; return { from: addDays(from, -n), to: addDays(from, -1), label: 'vs previous period' };
 }
 async function loadReports(){
-  if (!$('rp-from').value) applyPreset();
+  if ($('rp-preset').value === 'latest' || !$('rp-from').value){ await latestDataDate(); applyPreset(); }
   const admin = ['admin', 'manager'].includes(state.me.role);
   $('rp-company-wrap').classList.toggle('hidden', !!state.me.company);
   $('rp-import').classList.toggle('hidden', !admin);
@@ -3862,17 +3893,25 @@ function renderReports(){
   if (!document.querySelector('.rp-filters').classList.contains('open')) $('rp-more').textContent = Object.keys(f).length ? `More filters (${Object.keys(f).length})` : 'More filters';
   if (tab === 'jobs') return renderJobsReport(state.reportRows || []);
   if (tab === 'monthly') return renderMonthlyFigures();
-  const L = state.lr, recs = lrApply(L.recs, f), prev = L.prevRecs ? lrApply(L.prevRecs, f) : null;
+  const L0 = state.lr, recs = lrApply(L0.recs, f);
+  // Like-for-like: when deliveries stop before the end of the period (history imported up to a date, or today),
+  // measure both periods only up to the last day that has data.
+  const dataEnd = recs.reduce((m, r) => r.date > m ? r.date : m, ''), cut = clipEnd(dataEnd, L0.to);
+  const L = cut ? { ...L0, to: cut, dataEnd, clipped: L0.to,
+      cmp: L0.cmp ? { ...L0.cmp, to: addDays(L0.cmp.from, Math.round((new Date(cut) - new Date(L0.from)) / 864e5)) } : null } : L0;
+  const prev = L0.prevRecs ? lrApply(L0.prevRecs, f).filter(r => !L.cmp || r.date <= L.cmp.to) : null;
+  if (!recs.length && tab !== 'monthly'){
+    $('rp-body').innerHTML = `<div class="card empty">No deliveries recorded for ${esc(fmtRange(L0.from, L0.to))}${Object.keys(f).length ? ' with these filters' : ''}.
+      ${state.latestData && state.latestData < L0.from ? `<div style="margin-top:10px">The latest delivery on record is ${esc(fmtDay(state.latestData))}. <button class="btn" id="rp-go-latest">Show ${esc(new Date(state.latestData.slice(0, 7) + '-01T00:00:00').toLocaleDateString('en-PH', { month:'long', year:'numeric' }))}</button></div>` : ''}</div>${lrHistoryNote({ L: L0 })}`;
+    $('rp-go-latest')?.addEventListener('click', () => { $('rp-preset').value = 'latest'; loadReports(); });
+    bindHistoryNote(); return;
+  }
   const dimOnly = Object.keys(f).filter(k => k !== 'src').length === 0;
   const companies = L.co ? [L.co] : null;
   const ctx = { from: L.from, to: L.to, monthly: L.monthly, companies, companyWide: dimOnly };
   const A = lrAgg(recs, ctx), B = prev ? lrAgg(prev, { ...ctx, from: L.cmp.from, to: L.cmp.to }) : null;
   const V = { L, f, recs, prev, A, B, ctx, cmpLabel: L.cmp?.label || '' };
   const body = $('rp-body');
-  if (!recs.length && !(prev && prev.length)){
-    body.innerHTML = `<div class="card empty">No deliveries in this period${Object.keys(f).length ? ' for these filters' : ''}.</div>${lrHistoryNote(V)}`;
-    bindHistoryNote(); return;
-  }
   if (tab === 'overview') renderLrOverview(body, V);
   if (tab === 'trips') renderLrTrips(body, V);
   if (tab === 'dispatch') renderLrDispatch(body, V);
@@ -3895,7 +3934,7 @@ function renderLrOverview(body, V){
   const align = (arr, k) => cats.map((_, i) => arr?.[i]?.[k] ?? null);
   const ins = lrInsights(V);
   body.innerHTML = `
-    <div class="card pad rp-sec"><h3>Scorecard</h3><div class="ft" style="margin-bottom:10px">${esc(fmtDate(V.L.from).replace(/<[^>]+>/g, ''))} – ${esc(fmtDate(V.L.to).replace(/<[^>]+>/g, ''))}${B ? ` · compared with ${esc(fmtDate(V.L.cmp.from).replace(/<[^>]+>/g, ''))} – ${esc(fmtDate(V.L.cmp.to).replace(/<[^>]+>/g, ''))}` : ''}</div>
+    <div class="card pad rp-sec"><h3>Scorecard</h3><div class="ft" style="margin-bottom:10px">${esc(fmtRange(V.L.from, V.L.to))}${B ? ` · compared with ${esc(fmtRange(V.L.cmp.from, V.L.cmp.to))}` : ''}${V.L.clipped ? ` · <b>deliveries on record end ${esc(fmtDay(V.L.dataEnd))}</b>, so both periods are measured to ${esc(fmtDay(V.L.to))}` : ''}</div>
       <div class="kpis">
         ${kpi2('Trips', fmtN(A.trips), { delta: d('trips', null), sub: `${fmtN(A.orders)} orders delivered · ${fmtN(A.days)} delivery days` })}
         ${kpi2('Customers served', fmtN(A.customers), { delta: d('customers', true) })}
@@ -4341,7 +4380,7 @@ async function openHistoryImport(){
             await withRetry('Importing history', () => sb.rpc('job_history_import', { p_rows: chunk }), 2);
             done += chunk.length; $('hi-prog').textContent = `Imported ${fmtN(done)} of ${fmtN(rows.length)}…`;
           }
-          toast(`${fmtN(done)} history rows imported`, 'ok'); state.histCache = {}; closeOverlay();
+          toast(`${fmtN(done)} history rows imported`, 'ok'); state.histCache = {}; state.latestData = undefined; closeOverlay();
           if (!$('screen-reports').classList.contains('hidden')) loadReports();
         } catch { b.disabled = false; b.textContent = done ? `Resume import (${fmtN(rows.length - done)} left)` : 'Try again'; rows = rows.slice(done); }
       });
