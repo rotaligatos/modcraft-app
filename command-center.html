@@ -946,6 +946,93 @@ function viewKs(){
     +'</tbody></table></div></div>';
 }
 
+
+/* ── HATID signature + signing passcode (Rommel 2026-09-28) ──
+   Drawing a signature with a finger is poor on most phones, so a signer's signature can be set here:
+   a picture of it (photo or scan — the paper is cleaned off automatically) or the one they already
+   saved in Modcraft. HATID uses it whenever they sign a delivery schedule; they only type their passcode. */
+var JBS={email:null,data:null,err:'',busy:false,mc:null};
+// Photo/scan → ink only on a transparent background, cropped tight, PNG. cb(dataUrl) or cb(null).
+function cleanSigImage(src,cb){
+  var img=new Image();
+  img.onload=function(){
+    var w=img.naturalWidth,h=img.naturalHeight,k=Math.min(1,900/w,500/h); w=Math.max(1,Math.round(w*k)); h=Math.max(1,Math.round(h*k));
+    var c=document.createElement('canvas'); c.width=w; c.height=h; var x=c.getContext('2d');
+    x.fillStyle='#fff'; x.fillRect(0,0,w,h); x.drawImage(img,0,0,w,h);
+    var d=x.getImageData(0,0,w,h), p=d.data, x0=w,y0=h,x1=-1,y1=-1;
+    // paper level = a bright percentile, so a grey/yellowish photo background still clears
+    var lums=[]; for(var i=0;i<p.length;i+=4*7) lums.push(0.299*p[i]+0.587*p[i+1]+0.114*p[i+2]);
+    lums.sort(function(a,b){return a-b}); var paper=lums[Math.floor(lums.length*0.6)]||235, hi=paper-18, lo=Math.max(40,paper-120);
+    for(var yy=0;yy<h;yy++)for(var xx=0;xx<w;xx++){ var j=(yy*w+xx)*4, L=0.299*p[j]+0.587*p[j+1]+0.114*p[j+2];
+      var a=L>=hi?0:L<=lo?255:Math.round((hi-L)/(hi-lo)*255);
+      p[j+3]=a; if(a>0){ var f=0.55; p[j]=Math.round(p[j]*f); p[j+1]=Math.round(p[j+1]*f); p[j+2]=Math.round(p[j+2]*f); }
+      if(a>40){ if(xx<x0)x0=xx; if(xx>x1)x1=xx; if(yy<y0)y0=yy; if(yy>y1)y1=yy; } }
+    if(x1<0){cb(null);return}
+    x.putImageData(d,0,0);
+    var pad=10; x0=Math.max(0,x0-pad); y0=Math.max(0,y0-pad); x1=Math.min(w-1,x1+pad); y1=Math.min(h-1,y1+pad);
+    var o=document.createElement('canvas'); o.width=x1-x0+1; o.height=y1-y0+1; o.getContext('2d').drawImage(c,x0,y0,o.width,o.height,0,0,o.width,o.height);
+    cb(o.toDataURL('image/png'));
+  };
+  img.onerror=function(){cb(null)};
+  img.src=src;
+}
+async function jbLoadSigner(email){
+  JBS={email:email,data:null,err:'',busy:false,mc:null}; jbDrawSigner();
+  try{ JBS.data=await jbCall({action:'signer',email:email}); }catch(e){ JBS.err=e.message; }
+  try{ var r=await supa.from('settings').select('value').eq('key','SIG_'+email).maybeSingle();
+    var v=r.data&&r.data.value; if(typeof v==='string'&&/^data:image\//.test(v)) JBS.mc=v; }catch(e){}
+  jbDrawSigner();
+}
+function jbDrawSigner(){
+  var box=el('jbSig'); if(!box||!JBS.email) return;
+  if(JBS.err){ box.innerHTML='<div class="muted" style="font-size:13px">'+esc(JBS.err)+'</div>'; return; }
+  if(!JBS.data){ box.innerHTML='<div class="muted" style="font-size:13px">Checking HATID…</div>'; return; }
+  var d=JBS.data, pc=d.passcode||{}, dis=JBS.busy?' disabled':'';
+  box.innerHTML='<div class="flex" style="gap:14px;align-items:flex-start;flex-wrap:wrap">'
+    +'<div style="min-width:220px"><div class="sub" style="margin:0 0 4px">Signature used in HATID</div>'
+    +'<div style="width:240px;height:90px;border:1px dashed var(--line,#ccc);border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center">'
+    +(d.sig_url?'<img src="'+esc(d.sig_url)+'" alt="Signature" style="max-width:228px;max-height:80px">':'<span class="muted" style="font-size:12px">None yet</span>')+'</div>'
+    +'<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">'
+    +'<button class="btn"'+dis+' onclick="jbSigUpload()">Upload picture…</button>'
+    +(JBS.mc?'<button class="btn"'+dis+' onclick="jbSigFromMc()" title="The signature this person saved in Modcraft">Use Modcraft signature</button>':'')
+    +(d.sig_url?'<button class="btn"'+dis+' onclick="jbSigClear()">Remove</button>':'')+'</div>'
+    +'<div class="muted" style="font-size:12px;margin-top:6px;max-width:420px">A clear photo or scan of the signature on white paper. The paper is removed automatically.</div></div>'
+    +'<div><div class="sub" style="margin:0 0 4px">Signing passcode</div>'
+    +'<div style="font-size:13px">'+(pc.locked_until?'<span class="pill p-off">Locked until '+esc(new Date(pc.locked_until).toLocaleTimeString('en-PH',{hour:'numeric',minute:'2-digit'}))+'</span> — too many wrong tries'
+      :pc.set?'<span class="pill p-on">Set</span> '+(pc.set_at?'<span class="muted">since '+esc(new Date(pc.set_at).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}))+'</span>':'')
+      :'<span class="pill p-none">Not set yet</span> <span class="muted">— they create it the first time they sign</span>')+'</div>'
+    +(pc.set?'<button class="btn" style="margin-top:8px"'+dis+' onclick="jbPcReset()">Reset signing passcode</button>':'')+'</div></div>';
+}
+async function jbSigSave(dataUrl,what){
+  if(!dataUrl) return toast('Could not find a signature in that picture — try a clearer photo on white paper.');
+  JBS.busy=true; jbDrawSigner();
+  try{ await jbCall({action:'set_signature',email:JBS.email,image:dataUrl}); await supa.rpc('cc_log_jobboard',{p_email:JBS.email,p_action:'HATID signature set ('+what+')'}); toast('Signature saved to HATID'); JB.staff=null; }
+  catch(e){ toast('Signature not saved: '+e.message); }
+  await jbLoadSigner(JBS.email); if(!JB.staff) jbLoadStatus();
+}
+function jbSigUpload(){
+  var inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
+  inp.onchange=function(){ var f=inp.files&&inp.files[0]; if(!f) return;
+    if(f.size>15e6) return toast('That file is too large.');
+    var r=new FileReader(); r.onload=function(){ cleanSigImage(r.result,function(u){ jbSigSave(u,'uploaded'); }); }; r.readAsDataURL(f); };
+  inp.click();
+}
+function jbSigFromMc(){ if(!JBS.mc) return; cleanSigImage(JBS.mc,function(u){ jbSigSave(u,'from Modcraft'); }); }
+async function jbSigClear(){
+  if(!confirm('Remove this signature from HATID? Schedules already signed keep their signature.')) return;
+  JBS.busy=true; jbDrawSigner();
+  try{ await jbCall({action:'clear_signature',email:JBS.email}); await supa.rpc('cc_log_jobboard',{p_email:JBS.email,p_action:'HATID signature removed'}); toast('Signature removed'); JB.staff=null; }
+  catch(e){ toast(e.message); }
+  await jbLoadSigner(JBS.email); if(!JB.staff) jbLoadStatus();
+}
+async function jbPcReset(){
+  if(!confirm('Reset this person’s signing passcode? They will create a new one the next time they sign in HATID.')) return;
+  JBS.busy=true; jbDrawSigner();
+  try{ await jbCall({action:'reset_passcode',email:JBS.email}); await supa.rpc('cc_log_jobboard',{p_email:JBS.email,p_action:'HATID signing passcode reset'}); toast('Signing passcode reset'); }
+  catch(e){ toast(e.message); }
+  await jbLoadSigner(JBS.email);
+}
+
 /* ── HATID users ── */
 function viewJb(){
   if(JB.staff===null&&!JB.loading&&!JB.err) setTimeout(jbLoadStatus,0);
@@ -970,7 +1057,9 @@ function viewJb(){
       +fld('Title (printed under signature)','<input class="f-title" value="'+esc(u.title)+'" style="width:100%" placeholder="e.g. Logistics Supervisor">')
       +fld('Notes','<input class="f-notes" value="'+esc(u.notes)+'" style="width:100%">')
       +'</div><div class="sub" style="margin-top:10px">Signs delivery schedules</div><div>'+jbStepBoxes(u.schedule_steps,u.role==='field')+'</div>'
-      +'<label class="chk" style="margin-top:8px">'+jbCostBox(u)+' Sees costs &amp; rates</label> <label class="chk"><input type="checkbox" class="f-act"'+(u.active?' checked':'')+'>Active (can sign in)</label>','saveJb('+e+')','jb');
+      +'<label class="chk" style="margin-top:8px">'+jbCostBox(u)+' Sees costs &amp; rates</label> <label class="chk"><input type="checkbox" class="f-act"'+(u.active?' checked':'')+'>Active (can sign in)</label>'
+      +'<div class="sub" style="margin-top:14px">Signature &amp; signing passcode</div><div id="jbSig"></div>','saveJb('+e+')','jb');
+    if(JBS.email!==norm(u.email)) setTimeout(function(){ jbLoadSigner(norm(u.email)); },0); else setTimeout(jbDrawSigner,0);
   }
   var msg=JB.msg?'<div class="card" style="border:2px solid var(--accent)"><h2>'+esc(JB.msg.title)+'</h2>'
       +(JB.msg.pw?'<p class="sub">Send these to the person privately. The password is shown only now.</p>'
