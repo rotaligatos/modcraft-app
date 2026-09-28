@@ -3410,6 +3410,24 @@ async function loadDash(){
     const tgt = dispatchTarget(t, today); if (nowHM > tgt.hm) late[t.id] = { c:'bad', i:'⏱', t:`${t.label} not yet out`, s:`Target was ${fmtHM(tgt.hm)}${tgt.coded ? ' (coded today)' : ''} — mark the trip departed or check with the driver`, job:r.id };
   });
   Object.values(late).forEach(x => items.unshift(x));
+  // Tracker phones gone quiet on a delivery day (phone off, flat battery, left behind) — the dispatch time depends on them
+  try {
+    const { data: trk } = await sb.rpc('job_tracker_status');
+    if (Array.isArray(trk) && nowHM >= '06:00' && nowHM <= '20:00'){
+      const seenT = new Set();
+      trk.forEach(d => {
+        if (seenT.has(d.truck_id)) return;
+        const open = rows.filter(r => r.truck_id === d.truck_id && r.scheduled_date === today && ['scheduled','dispatched','in_progress','issue'].includes(r.status));
+        if (!open.length) return;
+        const fresh = trk.filter(x => x.truck_id === d.truck_id).map(x => x.last_seen_at).filter(Boolean).sort().pop();
+        const mins = fresh ? Math.round((Date.now() - new Date(fresh)) / 6e4) : null;
+        if (mins != null && mins <= 15) return;
+        seenT.add(d.truck_id);
+        const t = state.ref.truckById[d.truck_id];
+        items.unshift({ c:'bad', i:'📍', t:`${t?.label || 'Truck'} · tracker silent`, s: `${fresh ? `No GPS signal for ${mins >= 90 ? Math.round(mins / 60) + ' h' : mins + ' min'} (last ${fmtTime(fresh)}${d.last_battery != null ? `, battery ${Math.round(d.last_battery)}%` : ''})` : 'No GPS signal yet today'} — ${open.length} delivery${open.length > 1 ? ' stops' : ''} today. Check the in-truck phone: charged, Traccar running, location on.`, job: open[0].id });
+      });
+    }
+  } catch {}
   // Unavailable today, with jobs on them
   (state.ref.avail || []).filter(a => today >= a.date_from && today <= a.date_to).forEach(a => {
     const t = state.ref.truckById[a.truck_id]; if (!t) return;
@@ -3716,8 +3734,9 @@ function jobRecords(rows, histTypes, tripsTbl = []){
     const tr = r.truck_id ? tripBy.get(r.truck_id + '|' + r.scheduled_date + '|' + (r.trip_no || 1)) : null;
     const fd = r.truck_id && firstDep[r.truck_id + '|' + r.scheduled_date];
     if (trip && t){
-      outAt = tr?.gps_left_at || tr?.departed_at || (fd && fd.trip === (r.trip_no || 1) ? fd.at : null);
-      outSrc = tr?.gps_left_at ? 'gps' : outAt ? 'button' : null;
+      // Tracked truck (dedicated in-truck phone): only the GPS departure counts. Otherwise the button time, marked manual.
+      if (tr?.tracked){ outAt = tr.gps_left_at || null; outSrc = outAt ? 'gps' : null; }
+      else { outAt = tr?.gps_left_at || tr?.departed_at || (fd && fd.trip === (r.trip_no || 1) ? fd.at : null); outSrc = tr?.gps_left_at ? 'gps' : outAt ? 'manual' : null; }
       const tg = tripTarget(t, r.scheduled_date, r.trip_no || 1, tr, firstTrip[r.truck_id + '|' + r.scheduled_date]);
       if (outAt && tg){ lapse = dayManila(outAt) === r.scheduled_date ? minsOf(hmManila(outAt)) - minsOf(tg) : minsOf('23:59') - minsOf(tg); bkt = bucketIdx(lapse); }
       reason = tr?.late_reason || (fd && fd.trip === (r.trip_no || 1) ? fd.reason : null) || null;
@@ -3730,7 +3749,8 @@ function jobRecords(rows, histTypes, tripsTbl = []){
       kg: Number(r.estimated_weight_kg) || 0, truck: tk.key, truckName: tk.name, cat: fleetCat(r.fleet_type),
       province: prov || 'No destination', muni: r.destination_name || '', region: REGION_OF[prov] || (prov ? 'Other' : 'No destination'),
       tc: cost, cap: trip ? Number(r.truck_capacity_kg) || null : null, ctype, sp: spName(r.agent_name),
-      bkt, lapse, reason, outAt, outSrc, ticket: tr?.ticket_no || null, target: trip && t ? tripTarget(t, r.scheduled_date, r.trip_no || 1, tr, firstTrip[r.truck_id + '|' + r.scheduled_date]) : null,
+      bkt, lapse, reason, outAt, outSrc, ticket: tr?.ticket_no || null, tracked: !!tr?.tracked,
+      earlyTap: trip && tr?.departed_at && tr?.gps_left_at ? Math.round((new Date(tr.gps_left_at) - new Date(tr.departed_at)) / 6e4) : null, target: trip && t ? tripTarget(t, r.scheduled_date, r.trip_no || 1, tr, firstTrip[r.truck_id + '|' + r.scheduled_date]) : null,
       err: { inc: r.delivery_outcome === 'partial', ret: r.delivery_outcome === 'returned', vio: itypes.includes('traffic_violation'),
         brk: itypes.some(x => x === 'breakdown' || x === 'accident') || (Number(r.issue_count) > 0 && !itypes.length),
         oth: itypes.some(x => OTHER_ISSUES.includes(x)), late: bkt != null && bkt >= 2 },
@@ -3751,6 +3771,7 @@ function lrAgg(recs, ctx){
   // Load rate = weight carried ÷ capacity of the trucks used, over trips with a real capacity (≥100 kg; couriers carry placeholders)
   const capTrips = trips.filter(t => t.cap >= 100), capSum = sum(capTrips, t => t.cap);
   const disp = trips.filter(t => t.bkt != null), buckets = DISPATCH_BUCKETS.map((_, i) => disp.filter(t => t.bkt === i).length);
+  const dispGps = disp.filter(t => t.outSrc === 'gps'), earlyTaps = trips.filter(t => t.earlyTap != null && t.earlyTap > DISPATCH_GRACE);
   const reasons = {}; trips.filter(t => t.reason && t.bkt != null && t.bkt >= 1).forEach(t => reasons[t.reason] = (reasons[t.reason] || 0) + 1);
   const errRows = recs.filter(r => Object.values(r.err).some(Boolean)), errCounts = {};
   Object.keys(ERR_TYPES).forEach(k => errCounts[k] = recs.filter(r => r.err[k]).length);
@@ -3797,6 +3818,8 @@ function lrAgg(recs, ctx){
     loadRate: capSum && hasKg ? sum(capTrips, t => tripKg[t.tripKey]) / capSum : null, loadTrips: capTrips.length,
     capRate: ctx.companyWide && capDen && hasKg ? kg / capDen : null, capTarget: capTgtN ? capTgtSum / capTgtN : 0.8,
     volRate: cbmN && cbmT ? cbmD / cbmT : null,
+    dispGps: dispGps.length, onTimeGps: dispGps.length ? dispGps.filter(t => t.bkt <= 1).length / dispGps.length : null, dispManual: disp.filter(t => t.outSrc === 'manual').length,
+    earlyTaps: earlyTaps.length, earlyTapAvg: avg(earlyTaps.map(t => t.earlyTap)),
     dispTrips: disp.length, onTimeDisp: disp.length ? (buckets[0] + buckets[1]) / disp.length : null, buckets,
     lateTrips: disp.length - buckets[0] - buckets[1], reasons, reasonTrips: sum(Object.values(reasons), v => v),
     errOrders: errRows.length, otif: recs.length ? 1 - errRows.length / recs.length : null, errCounts,
@@ -4012,7 +4035,7 @@ function renderLrOverview(body, V){
             cls: A.budgetPct != null && (A.tcPctSales ?? A.tcPctDelivered) > A.budgetPct ? 'up-bad' : '' }) : ''}
         ${kpi2('Capacity rate', pct(A.capRate), { delta: d('capRate', true, 'pts'), target: `Target ${pct(A.capTarget)}`, sub: A.capRate == null ? 'Company-wide only — clear truck, place and customer filters' : 'weight delivered ÷ fleet capacity × days', cls: A.capRate != null && A.capRate < A.capTarget ? 'up-bad' : '' })}
         ${kpi2('Load rate', pct(A.loadRate), { delta: d('loadRate', true, 'pts'), sub: `weight carried ÷ capacity of the trucks used · ${fmtN(A.loadTrips)} trips` })}
-        ${kpi2('On-time dispatch (OTS)', pct(A.onTimeDisp), { delta: d('onTimeDisp', true, 'pts'), sub: `${fmtN(A.dispTrips)} trips timed · within ${DISPATCH_GRACE} min of target` })}
+        ${kpi2('On-time dispatch (OTS)', pct(A.onTimeDisp), { delta: d('onTimeDisp', true, 'pts'), sub: `${fmtN(A.dispTrips)} trips timed · within ${DISPATCH_GRACE} min of target${A.dispGps ? ` · <b>GPS-verified ${pct(A.onTimeGps)}</b> on ${fmtN(A.dispGps)} trips` : ''}${A.dispManual ? ` · ${fmtN(A.dispManual)} manual (button)` : ''}` })}
         ${kpi2('OTIF', pct1(A.otif), { delta: d('otif', true, 'pts'), sub: `${fmtN(A.errOrders)} of ${fmtN(A.orders)} orders had an error` })}
         ${A.volRate != null ? kpi2('Dispatched volume', pct(A.volRate), { delta: d('volRate', true, 'pts'), sub: 'delivered CBM ÷ total sales CBM' }) : ''}
       </div></div>
@@ -4063,7 +4086,10 @@ function lrReadiness(V){
   const h = V.recs.filter(r => r.src === 'hatid'); if (!h.length) return '';
   const cost = canSeeCosts(), trips = h.filter(r => r.trip), items = [];
   const add = (n, total, what, fix) => items.push({ n, total, what, fix });
-  add(trips.filter(t => !t.outAt).length, trips.length, 'trips with no departure time', 'Trip sheet › “Trip N departed”, or connect the truck’s tracker so HATID records when it leaves the Home Base');
+  add(trips.filter(t => !t.outAt && t.tracked).length, trips.filter(t => t.tracked).length, 'trips on tracked trucks with no GPS departure', 'Check the in-truck phone: charged, Traccar running, location on — and the Home Base pin on the gate (Map)');
+  add(trips.filter(t => !t.outAt && !t.tracked).length, trips.filter(t => !t.tracked).length, 'trips with no departure time', 'Mount a dedicated tracker phone in the truck (Fleet › Trucks › 📍 Tracker); until then, “Trip N departed” on the trip sheet');
+  add(trips.filter(t => t.outSrc === 'manual').length, trips.length, 'trips timed only by the button (not verified)', 'Mount a dedicated tracker phone in each truck — Fleet › Trucks › 📍 Tracker');
+  add(trips.filter(t => t.earlyTap != null && t.earlyTap > DISPATCH_GRACE).length, trips.filter(t => t.earlyTap != null).length, 'trips where “departed” was tapped before the truck actually left', 'Dispatch & OTIF › Late dispatch by truck shows which trucks; GPS time is what counts');
   add(trips.filter(t => !t.target).length, trips.length, 'trips with no target departure time', 'Trip sheet › “Leave by” for 2nd and later trips (trip 1 uses the pool’s leave-by time)');
   add(trips.filter(t => t.bkt != null && t.bkt >= 2 && !t.reason).length, trips.filter(t => t.bkt != null && t.bkt >= 2).length, 'late trips with no reason', 'Asked when “Trip departed” is pressed late; for GPS departures, pick it on the trip sheet');
   add(h.filter(r => !r.kg).length, h.length, 'deliveries with no weight', 'Job › boards and other items, or the DR weights in Document references');
@@ -4218,6 +4244,8 @@ function renderLrDispatch(body, V){
     <div class="card pad rp-sec"><h3>Dispatch & OTIF</h3><div class="ft" style="margin-bottom:10px">Departure vs target time per trip, and orders delivered without an error</div>
       <div class="kpis">
         ${kpi2('On-time dispatch (OTS)', pct(A.onTimeDisp), { delta: B ? deltaHtml(A.onTimeDisp, B.onTimeDisp, true, 'pts', V.cmpLabel) : '', sub: `${fmtN(A.dispTrips)} trips timed` })}
+        ${kpi2('GPS-verified on-time', pct(A.onTimeGps), { sub: A.dispGps ? `${fmtN(A.dispGps)} trips timed by the truck’s GPS · ${fmtN(A.dispManual)} by button only` : 'No GPS-timed trips yet — mount a phone in each truck' })}
+        ${kpi2('Tapped “departed” early', fmtN(A.earlyTaps), { sub: A.earlyTaps ? `the truck left ${fmtN(A.earlyTapAvg)} min later on average` : 'button matches the GPS', cls: A.earlyTaps ? 'up-bad' : '' })}
         ${kpi2('Late trips', fmtN(A.lateTrips), { delta: B ? deltaHtml(A.lateTrips, B.lateTrips, false, 'rel', V.cmpLabel) : '', sub: `more than ${DISPATCH_GRACE} min after target` })}
         ${kpi2('Average delay when late', avgLate == null ? '—' : fmtN(avgLate) + ' min')}
         ${kpi2('Over 1 hour late', fmtN(A.buckets[7]), { sub: pct(A.dispTrips ? A.buckets[7] / A.dispTrips : null) + ' of trips' })}
@@ -4232,8 +4260,8 @@ function renderLrDispatch(body, V){
         ${hbarsHtml(Object.entries(ERR_TYPES).map(([k, n]) => ({ name: n, v: A.errCounts[k], note: pct1(A.orders ? A.errCounts[k] / A.orders : null) })).filter(x => x.v))}</div>
     </div>
     <div class="card pad rp-sec"><h3>Late dispatch by truck</h3><div class="ft" style="margin-bottom:8px">Trucks with the most late departures first</div>
-      <div class="tbl-wrap"><table class="rt"><thead><tr><th>Truck</th><th>Trips timed</th><th>On time</th><th>Late</th><th>Over 1 hr</th><th>OTS</th><th>Top reason</th></tr></thead><tbody>
-      ${trucks.map(x => { const tr = Object.entries(x.a.reasons).sort((a, b) => b[1] - a[1])[0]; return `<tr><td>${esc(x.name)}</td><td>${fmtN(x.a.dispTrips)}</td><td>${fmtN(x.a.buckets[0] + x.a.buckets[1])}</td><td>${fmtN(x.a.lateTrips)}</td><td>${fmtN(x.a.buckets[7])}</td><td>${pct(x.a.onTimeDisp)}</td><td class="l">${tr ? esc(LATE_DISPATCH[tr[0]] || tr[0]) : '—'}</td></tr>`; }).join('')}
+      <div class="tbl-wrap"><table class="rt"><thead><tr><th>Truck</th><th>Trips timed</th><th>On time</th><th>Late</th><th>Over 1 hr</th><th>OTS</th><th>GPS-timed</th><th>Early taps</th><th>Top reason</th></tr></thead><tbody>
+      ${trucks.map(x => { const tr = Object.entries(x.a.reasons).sort((a, b) => b[1] - a[1])[0]; return `<tr><td>${esc(x.name)}</td><td>${fmtN(x.a.dispTrips)}</td><td>${fmtN(x.a.buckets[0] + x.a.buckets[1])}</td><td>${fmtN(x.a.lateTrips)}</td><td>${fmtN(x.a.buckets[7])}</td><td>${pct(x.a.onTimeDisp)}</td><td>${fmtN(x.a.dispGps)}</td><td>${x.a.earlyTaps ? `<b style="color:var(--bad)">${fmtN(x.a.earlyTaps)}</b>` : '0'}</td><td class="l">${tr ? esc(LATE_DISPATCH[tr[0]] || tr[0]) : '—'}</td></tr>`; }).join('')}
       </tbody></table></div></div>`;
 }
 
@@ -4589,7 +4617,7 @@ function exportCsv(){
   const cols = [['date','Delivery date'],['src','Source',r => r.src === 'hatid' ? 'HATID' : 'Excel'],['company','Company'],['so','SO / reference'],['customer','Customer'],['ctype','Customer category',r => CUST_CAT[r.ctype] || ''],
     ['sp','Salesperson'],['truckName','Truck'],['cat','Truck type',r => TRUCK_CAT[r.cat] || ''],['province','Province'],['muni','City / municipality'],['region','Region'],
     ['trip','Trip count'],['kg','Weight kg'],['cap','Truck capacity kg'],...(cost ? [['tc','Transport cost'],['sales','Order value']] : []),
-    ['ticket','Trip ticket'],['target','Target departure'],['outAt','Departed',r => r.outAt ? hmManila(r.outAt) + (r.outSrc === 'gps' ? ' (GPS)' : '') : ''],['docs','DR / SI no.'],['cbm','CBM',r => r.cbm ? r.cbm.toFixed(3) : ''],
+    ['ticket','Trip ticket'],['target','Target departure'],['outAt','Departed',r => r.outAt ? hmManila(r.outAt) : ''],['outSrc','Departure source',r => r.outSrc === 'gps' ? 'GPS (verified)' : r.outSrc === 'manual' ? 'Button (manual)' : ''],['earlyTap','Tapped early (min)',r => r.earlyTap > DISPATCH_GRACE ? r.earlyTap : ''],['docs','DR / SI no.'],['cbm','CBM',r => r.cbm ? r.cbm.toFixed(3) : ''],
     ['lapse','Dispatch minutes vs target'],['bkt','Dispatch',r => r.bkt == null ? '' : DISPATCH_BUCKETS[r.bkt]],['reason','Late reason',r => LATE_DISPATCH[r.reason] || r.reason || ''],
     ['err','Errors',r => Object.keys(ERR_TYPES).filter(k => r.err[k]).map(k => ERR_TYPES[k]).join('; ')]];
   csvDownload(cols, recs, `hatid-logistics_${$('rp-from').value}_to_${$('rp-to').value}.csv`);
@@ -4747,6 +4775,9 @@ async function openTripSheet(date, truckId = ''){
   try { ({ data: jobs } = await withRetry('Loading trip sheet', () => sb.from('jobs').select('*').eq('scheduled_date', date).not('truck_id', 'is', null)
       .in('status', ['scheduled','dispatched','in_progress','completed','issue']).order('created_at'))); } catch { $('ts-body').innerHTML = '<div class="card empty">Could not load the trip sheet.</div>'; return; }
   try { const { data } = await sb.from('job_trips').select('*').eq('trip_date', date); tripRows = Array.isArray(data) ? data : []; } catch {}
+  let trackers = [];
+  try { const { data } = await sb.rpc('job_tracker_status'); trackers = Array.isArray(data) ? data : []; } catch {}
+  const isTracked = tid => trackers.some(x => x.truck_id === tid);
   const tripRow = (tid, n) => tripRows.find(r => r.truck_id === tid && r.trip_no === +n);
   const office = ['admin', 'manager', 'dispatcher'].includes(state.me.role);
   const trucks = [...new Set(jobs.map(j => j.truck_id))].map(id => state.ref.truckById[id]).filter(Boolean).sort((a, b) => a.label.localeCompare(b.label));
@@ -4766,12 +4797,17 @@ async function openTripSheet(date, truckId = ''){
         const stops = tj.filter(j => (j.trip_no || 1) === n).sort((a, b) => km(a) - km(b) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
         const w = sum(stops, j => j.estimated_weight_kg), pcs = sum(stops, j => boardsPcs(j.board_pcs)), loaded = stops.filter(j => j.loaded_at).length;
         const waiting = stops.filter(j => j.status === 'scheduled'), tr = tripRow(t.id, n), tg = tripTarget(t, date, n, tr, trips[0]);
-        const out = tr?.gps_left_at || tr?.departed_at, lateBy = out && tg ? minsOf(hmManila(out)) - minsOf(tg) : null;
+        const trk = isTracked(t.id) || !!tr?.tracked;
+        const out = trk ? tr?.gps_left_at : (tr?.gps_left_at || tr?.departed_at), lateBy = out && tg ? minsOf(hmManila(out)) - minsOf(tg) : null;
+        const early = tr?.departed_at && tr?.gps_left_at ? Math.round((new Date(tr.gps_left_at) - new Date(tr.departed_at)) / 6e4) : null;
         return `<div class="ts-trip">
           <div class="ts-trip-h"><div><b>Trip ${n}</b>${tr?.ticket_no ? ` <span class="mono" data-tk="${esc(t.id)}|${n}" data-no="1">#${esc(tr.ticket_no)}</span>` : `<span data-tk="${esc(t.id)}|${n}"></span>`} <span class="ft">· ${stops.length} stop${stops.length > 1 ? 's' : ''} · ${Math.round(w).toLocaleString('en-PH')} / ${Number(t.max_weight_kg).toLocaleString('en-PH')} kg · ${pcs} boards · loaded <span data-lc="${esc(t.id)}|${n}">${loaded}</span>/${stops.length}</span>
               <div class="ft" style="margin-top:3px">Leave by ${office && !out ? `<input class="i no-print" type="time" style="width:auto;display:inline-block;padding:2px 6px" data-tgt="${esc(t.id)}|${n}" value="${esc(tg || '')}" aria-label="Trip ${n} target departure"><span class="print-only">${tg ? fmtHM(tg) : '—'}</span>` : `<b>${tg ? fmtHM(tg) : '—'}</b>`}
-                ${out ? ` · <b>left ${fmtHM(hmManila(out))}</b>${tr?.gps_left_at ? ' (GPS)' : ''}${lateBy != null ? (lateBy > DISPATCH_GRACE ? ` <span style="color:var(--bad)">${lateBy} min late${tr?.late_reason ? ' — ' + esc(LATE_DISPATCH[tr.late_reason]) : ''}</span>${!tr?.late_reason && office ? ` <select class="i no-print" style="width:auto;display:inline-block;padding:2px 6px" data-lr="${esc(t.id)}|${n}" aria-label="Reason trip ${n} left late"><option value="">Why late? — pick a reason</option>${Object.entries(LATE_DISPATCH).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>` : ''}` : ' <span style="color:var(--ok)">on time</span>') : ''}${tr?.gps_back_at ? ` · back ${fmtHM(hmManila(tr.gps_back_at))} (GPS)` : ''}` : ''}</div></div>
-            ${waiting.length ? `<button class="btn primary no-print" data-depart="${esc(t.id)}|${n}">Trip ${n} departed</button>` : ''}</div>
+                ${out ? ` · <b>left ${fmtHM(hmManila(out))}</b>${tr?.gps_left_at ? ' (GPS)' : ''}${lateBy != null ? (lateBy > DISPATCH_GRACE ? ` <span style="color:var(--bad)">${lateBy} min late${tr?.late_reason ? ' — ' + esc(LATE_DISPATCH[tr.late_reason]) : ''}</span>${!tr?.late_reason && office ? ` <select class="i no-print" style="width:auto;display:inline-block;padding:2px 6px" data-lr="${esc(t.id)}|${n}" aria-label="Reason trip ${n} left late"><option value="">Why late? — pick a reason</option>${Object.entries(LATE_DISPATCH).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>` : ''}` : ' <span style="color:var(--ok)">on time</span>') : ''}${tr?.gps_back_at ? ` · back ${fmtHM(hmManila(tr.gps_back_at))} (GPS)` : ''}` : ''}
+                ${trk ? ` · <span class="tag info">📍 GPS-timed</span>` : ` · <span class="tag">Manual time — no tracker in this truck</span>`}
+                ${trk && tr?.departed_at && !tr?.gps_left_at ? `<div style="color:var(--warn)">Marked on the road at ${fmtHM(hmManila(tr.departed_at))} — waiting for the GPS to see the truck leave the base</div>` : ''}
+                ${early != null && early > DISPATCH_GRACE ? `<div style="color:var(--bad)">⚠ “Departed” was tapped at ${fmtHM(hmManila(tr.departed_at))}, ${early} min before the truck actually left (GPS ${fmtHM(hmManila(tr.gps_left_at))})</div>` : ''}</div></div>
+            ${waiting.length ? `<button class="btn primary no-print" data-depart="${esc(t.id)}|${n}" data-trk="${trk ? 1 : ''}">${trk ? `Trip ${n} on the road` : `Trip ${n} departed`}</button>` : ''}</div>
           ${stops.map((j, i) => `<div class="stop">
             <span class="no">${i + 1}</span>
             <div class="body">
@@ -4813,7 +4849,8 @@ async function openTripSheet(date, truckId = ''){
     const tg = tripTarget(t, date, +n, tripRow(tid, n), truckTrips[0]), now = hmManila(Date.now());
     const tgt = { hm: tg };
     // Every trip with a target time is measured (on-time dispatch); trip 1 defaults to the pool's leave-by time
-    const late = !!tg && date === localDate() && minsOf(now) - minsOf(tg) > DISPATCH_GRACE;
+    // Tracked trucks: the GPS decides the departure time, so no late prompt here (the reason is picked once the GPS shows it late)
+    const late = !b.dataset.trk && !!tg && date === localDate() && minsOf(now) - minsOf(tg) > DISPATCH_GRACE;
     const go = async reason => {
       const notLoaded = stops.filter(j => !j.loaded_at).length;
       if (notLoaded && !confirm(`${notLoaded} stop${notLoaded > 1 ? 's are' : ' is'} not ticked as loaded. Mark the trip departed anyway?`)) return;
@@ -5598,8 +5635,8 @@ async function openTracker(t){
   if (!t) return;
   openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" style="max-width:640px">
     <h2>📍 Tracker — ${esc(t.label)}</h2>
-    <div class="ft">A phone that rides in this truck (the driver’s or a company phone) sends its location to HATID every minute using the free <b>Traccar Client</b> app — even with the screen off. It appears on <b>HATID › Map</b>. HATID only keeps the location on days this truck has deliveries scheduled; on other days it only notes that the phone is working.
-      <br><b>Drivers’ own phones</b> don’t need this: each driver sets up their phone once from <b>HATID › Field</b>, and HATID follows whichever truck they depart with. Use this only for a phone that always stays in this truck.</div>
+    <div class="ft">A <b>dedicated phone that stays in this truck</b> sends its location to HATID every minute using the free <b>Traccar Client</b> app — even with the screen off. It shows on <b>HATID › Map</b>, and it is what makes this truck <b>GPS-timed</b>: the dispatch time is taken from the moment the truck drives out of the Home Base, not from anyone tapping “departed”. HATID keeps the location only on days this truck has deliveries.</div>
+    <div class="step-note" style="margin-top:8px"><b>For an honest dispatch time:</b> use a company phone that isn’t handed to the driver · mount it on the dashboard and keep it on the 12 V charger · set a screen lock only the office knows · allow location “All the time” and battery “Unrestricted”. If it goes quiet on a delivery day, the Dashboard shows “tracker silent”.</div>
     <div id="tk-list" style="margin-top:10px"><span class="spin"></span></div>
     <div class="row-btns" style="margin-top:10px"><input class="i" id="tk-label" placeholder="Phone name, e.g. Mang Jun’s phone" style="flex:1"><button class="btn primary" id="tk-add">+ Add phone</button></div>
     <div id="tk-setup"></div>
@@ -5609,6 +5646,7 @@ async function openTracker(t){
   const setup = ident => `<div class="step-note" style="margin-top:12px"><b>Set up the phone</b> (2 minutes):
     <ol style="margin:6px 0 0;padding-left:20px;line-height:1.7">
       <li>On the phone, install <b>Traccar Client</b> from Google Play (or the App Store on iPhone). It’s free.</li>
+      <li>Fastest: open this link <b>on that phone</b> to fill in the settings in one tap — <a href="${esc(traccarConfigLink(ident))}">Connect tracker</a> (or copy the two values below).</li>
       <li>Open it and set <b>Device identifier</b>:<div class="setup-code"><code>${esc(ident)}</code><button class="btn" data-copy="${esc(ident)}">Copy</button></div></li>
       <li>Set <b>Server URL</b>:<div class="setup-code"><code>${esc(url)}</code><button class="btn" data-copy="${esc(url)}">Copy</button></div></li>
       <li>Location accuracy <b>High</b> · Interval / frequency <b>60</b> seconds · Distance <b>100</b> m · <b>Offline buffering on</b>.</li>
