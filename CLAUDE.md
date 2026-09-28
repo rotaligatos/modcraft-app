@@ -12400,3 +12400,55 @@ unlock-reconciliation ~60s · `qApproved`/`qClientApproved` coupling · MSSI com
 # OPEN — updated 2026-09-28
 Same as the 2026-09-27 list, except: the Command Center rework is DONE. Test job QT-T00000001 / MR-260926-W934 is
 still waiting for KEYSTONE "Confirm processed" before the PMES per-item check can be walked.
+
+
+## What was changed on 2026-09-28 (session, continued — PMES production flow: pieces, process JOs, schedule, work calendar)
+All live. Full DB/design detail is in PMES `MODCRAFT_BRIDGE_NOTES.md` (sections dated 2026-09-28). Every rule below is enforced in the
+database (RPC + RLS) and was tested by impersonation in rolled-back transactions; screens checked headless with screenshots.
+
+**The agreed PMES flow (Rommel):** mother JO arrives → materials person checks the MRF item by item + inspects boards → office staff
+checks the JO (runs the cut optimizer if boards are bad) → supervisor approves the JO → one **process JO per process** is created →
+production engineer/supervisor sets the **loading schedule** (system recommends) → **supervisor then manager** approve it (shows in
+Modcraft) → **shift head** hands each process JO to machine + operators → pieces are ticked done → plan vs actual.
+
+1. **Defect position in mm** (PMES `f0f5093`): board inspection takes X (across width) / Y (along length from the top) / W / L, editable.
+   Cut optimizer + extra-board requests are for office **staff** (and supervisor+) only, not the materials person.
+2. **Every piece marked done at each process** (PMES `f813c2e`, Modcraft `437172b`): `pmes_component_done` + `pmes_component_mark`.
+   Job sub-tab **Pieces** (grid pieces × processes, tick/undo with reason, bulk). Process status follows the pieces;
+   `pmes_stage_complete_guard` blocks setting Complete by hand. Scanner marks the piece done. Modcraft JO view names pieces not done.
+3. **Roles** `shift_head` (15) and `production_engineer` (18) added (org: MD – HPO – manager – supervisor – PE – shift head – staff –
+   rank and file). Also in Command Center → PMES roles.
+4. **Process JOs** `pmes_process_jos` (created on JO approval), **schedule** (`pmes_schedule_save` / `pmes_schedule_approve`), **hand-out**
+   (`pmes_pjo_handout`). Screen Schedule (`screens-planboard.js`): **Gantt / Kanban / Calendar / Today (shift) / Work calendar**, remembered
+   per user. Modcraft `modcraft_jo_progress` returns schedule status + planned dates (only once approved). (PMES `4e31d1e`, Modcraft `3f13736`)
+5. **Work calendar** (PMES `06bdbfd`): default week per plant + per-week overrides (1–3 shifts, compressed weeks). National + local holidays
+   and default rest days are off; working one needs `pmes_offday_requests` approved **manager → Head of Plant Ops (adm_user_caps.is_plant_head =
+   Rommel) → Managing Director (is_md_approver = Kathleen)**, three different people. Schedule dates can't start/end on an off day.
+   Schedule approval = **supervisor then manager**. `schedule.js` recommends day by day using each day's shifts (tests pass).
+
+⚠ Lessons this session: shell heredocs broke twice more (backticks, quotes) — always write content with the Write tool and append/splice
+with node. A SQL `x and null` returned NULL and silently allowed a holiday — wrap computed booleans in `coalesce(..., false)`.
+
+# OPEN — updated 2026-09-28 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Supersedes every OPEN list above; read the dated entries for detail.
+
+## Waiting on Rommel
+- **Default work week per plant** (starts as Mon–Sat, 1 shift 08:00–17:00) — set it in PMES → Schedule → Work calendar ("Save as the default week", manager+).
+- **Process capacity** in PMES → IE → Process capacity, in the Job Order's units (cutting/edge banding lm, boring holes, rest pieces). He said he will encode it.
+- Assign people to the new roles (shift heads, production engineers) and add operators in Command Center → PMES → Users; materials person email; who gets Warehouse issue in KEYSTONE; suppliers in KEYSTONE.
+- Finish the test job walk (MR-260926-W934 still needs KEYSTONE "Confirm processed"), then say "delete the test job".
+- Payment-gate auto-open at Final client approval (offered, not decided).
+
+## Known limits / watch
+- Test job JO-T00000001-1 has Cutting/Special cut "Complete" set before piece tracking existed — goes away when the test job is deleted.
+- Hourly plan spreads today's plan evenly over shift hours (breaks not placed); night-shift hours after midnight count on the next date.
+- KEYSTONE doesn't show the process JO / schedule; CRM doesn't exist yet (schedule is ready to feed it via the same data).
+- New flows never used for real yet: per-item MRF receipt with photo, extra board requests, pieces grid, schedule approve, hand-out, off-day chain.
+
+## Carried forward, unchanged
+Rotate the Wufoo API key (security clock) · Storage `quotations` bucket readable by any signed-in user of any app · Command Center phase 4
+(sign-in from DB) after a clean shadow log · printed cut sequence misses the extra waste crosscut around a defect · confirm Supabase egress
+fix in Usage · 15 orders with no handler · retired-status string sweep · Schedule page (Modcraft Gantt) on `DEMO_PROJS` · Orders 8834/8840 ·
+ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on hold) · `QT-W00000136.R1` · phone
+order_pause · Stage 2 lock parity while paused · Michael Delos Reyes signature · unlock-reconciliation ~60s · `qApproved`/`qClientApproved`
+coupling · MSSI commission OFF · `samplesofcuttinglist/` is client data — never commit · distinct app icons for PMES/KEYSTONE/CC.
