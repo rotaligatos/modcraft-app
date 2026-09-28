@@ -42,6 +42,8 @@ input,select,textarea{font:inherit;color:var(--text);background:var(--card2);bor
 input[type=checkbox]{width:auto;accent-color:var(--accent)}
 button.btn{font:inherit;cursor:pointer;border-radius:8px;padding:7px 12px;border:1px solid var(--line);background:var(--card2);color:var(--text)}
 button.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+button.btn.danger{color:#b42318;border-color:#f3b8b2;background:transparent}
+button.btn.danger:hover{background:#fef3f2}
 button.btn:disabled{opacity:.45;cursor:not-allowed}
 .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:600;white-space:nowrap}
 .p-none{color:var(--text2);border:1px dashed var(--line)}
@@ -90,7 +92,8 @@ nav button .n{font-size:11px;opacity:.75;margin-left:4px}
    Each app keeps its OWN user list, because the people differ:
      Modcraft  — sales/estimating. Users live in the User Roles Google Sheet (PINs too),
                  which Modcraft still signs in from. Phase 2: edits here write that Sheet AND
-                 the database copy (public.users), never delete, and are logged.
+                 the database copy (public.users), and are logged. Remove deletes the Sheet
+                 row and the database copy (checked and logged the same way).
      KEYSTONE  — admin staff. keystone_users + capabilities (adm_user_caps).
      PMES      — production staff. pmes_users: operator / supervisor / manager / admin,
                  operators optionally limited to stations.
@@ -544,6 +547,36 @@ async function mcAddUser(next){
   MC.busy=false;
   await loadAll(); await readSheet();
 }
+/* Remove a person from Modcraft: delete their row from the User Roles Sheet (checked first, like any
+   edit), then the database copy, and log it. Their quotations and history stay. */
+async function mcRemoveUser(email){
+  var u=mcFind(email); if(!u||MC.busy) return;
+  if(_selfGuard(u.email)) return;
+  if(mcNeedRw()) return;
+  var admins=(MC.sheet||[]).filter(function(x){ return x.active&&(x.pos==='Admin'||x.pos==='Director'); });
+  if(u.active&&(u.pos==='Admin'||u.pos==='Director')&&admins.length<=1) return toast('Modcraft must keep at least one active Admin or Director.');
+  if(!confirm('Remove '+(u.name||u.email)+' ('+u.email+') from Modcraft?\n\nTheir row is deleted from the User Roles Sheet and they can no longer sign in to Modcraft. Their quotations and history stay. This is recorded in the change log.')) return;
+  MC.busy=true; draw();
+  try{
+    await mcGuardRow(u);
+    var tok=gToken(true);
+    var meta=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'?fields=sheets.properties',{headers:{Authorization:'Bearer '+tok}}).then(function(r){ return r.json(); });
+    var sh=((meta&&meta.sheets)||[]).map(function(x){ return x.properties; }).find(function(p){ return p.title==='User Roles'; });
+    if(!sh) throw new Error('Could not find the User Roles tab in the Sheet.');
+    var res=await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+':batchUpdate',{method:'POST',headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},
+      body:JSON.stringify({requests:[{deleteDimension:{range:{sheetId:sh.sheetId,dimension:'ROWS',startIndex:u.row-1,endIndex:u.row}}}]})});
+    if(!res.ok){ var j={}; try{ j=await res.json(); }catch(e){} throw new Error('Google answered '+res.status+((j.error&&j.error.message)?': '+j.error.message:'')); }
+    var warn=[];
+    var d=await supa.from('users').delete().eq('email',norm(u.email));
+    if(d.error) warn.push('the database copy was not removed ('+d.error.message+')');
+    var l=await supa.rpc('cc_log_sheet_change',{p_email:u.email,p_action:'removed',p_before:mcLogObj(u),p_after:null});
+    if(l.error) warn.push('the removal was not logged ('+l.error.message+')');
+    MC.edit=null;
+    toast(norm(u.email)+' removed from Modcraft'+(warn.length?'. But '+warn.join('; '):'')+'.');
+  }catch(e){ toast('Not removed: '+e.message); }
+  MC.busy=false;
+  await loadAll(); await readSheet();
+}
 function mcFind(email){ return (MC.sheet||[]).find(function(u){ return norm(u.email)===email; }); }
 function mcOpenEdit(email){ if(mcNeedRw()) return; MC.edit={mode:'edit',email:email}; draw(); el('mc-editor').scrollIntoView({block:'start'}); }
 function mcOpenAdd(){ if(mcNeedRw()) return; MC.edit={mode:'add'}; draw(); el('mc-editor').scrollIntoView({block:'start'}); }
@@ -605,7 +638,8 @@ function mcEditor(){
     +'<label class="chk" title="Always on for Manager, Director and Admin"><input type="checkbox" id="me-reqpin"'+(b.requirePin||always?' checked':'')+(always?' disabled':'')+'>Require own PIN</label></div>'
     +'</div>'
     +'<div style="margin-top:14px"><button class="btn primary" '+(MC.busy?'disabled':'')+' onclick="mcSaveEditor()">'+(MC.busy?'Saving…':(add?'Add to the Sheet':'Save to the Sheet'))+'</button> '
-    +'<button class="btn" onclick="MC.edit=null;draw()">Cancel</button></div></div>';
+    +'<button class="btn" onclick="MC.edit=null;draw()">Cancel</button>'
+    +(add?'':'<button class="btn danger" style="float:right" '+(MC.busy?'disabled':'')+' onclick="mcRemoveUser(MC.edit.email)">Remove from Modcraft</button>')+'</div></div>';
 }
 function mcCollect(b){
   var pos=el('me-role').value, acc={};
@@ -711,8 +745,8 @@ async function addKs(){
    jobboard_users here is the master. Saving writes it (logged, last-admin guarded) and then asks the
    HATID to apply the change (job-staff-sync on the Social-Content-Manager project). That function
    checks this page's sign-in with Modcraft (cc_me().allowed) before it changes anything. A person with no
-   HATID login yet gets one with a temporary password, shown here once. Nobody is ever deleted —
-   inactive only switches off HATID access (their login may serve other apps). */
+   HATID login yet gets one with a temporary password, shown here once. Remove takes them off this list
+   and switches off their HATID access; their login (which may serve other apps) and HATID history stay. */
 var JB={staff:null,loading:false,busy:false,msg:null,err:''};
 async function jbCall(body){
   var s=await supa.auth.getSession(); var tok=s.data.session&&s.data.session.access_token;
@@ -865,11 +899,32 @@ function applyLF(){
 function tagList(arr){ return (arr||[]).length?arr.map(function(t){return '<span class="pill p-none" style="margin:1px 3px 1px 0">'+esc(t)+'</span>'}).join(''):'<span class="muted">—</span>'; }
 function actPill(on){ return on?'<span class="pill p-on">Active</span>':'<span class="pill p-off">Inactive</span>'; }
 function coShort(c){ var k=coKey(c); return k?k.toUpperCase():''; }
-function editCard(id,title,body,saveCall,cancelApp){
+function editCard(id,title,body,saveCall,cancelApp,removeCall,removeLbl){
   return '<div class="card editcard" id="'+id+'"><div class="flex"><h2 style="margin:0">'+title+'</h2>'
     +'<button class="btn" style="margin-left:auto" onclick="ED.'+cancelApp+'=null;draw()">Close</button></div>'+body
-    +'<div style="margin-top:14px"><button class="btn primary" onclick="'+saveCall+'">Save</button> <button class="btn" onclick="ED.'+cancelApp+'=null;draw()">Cancel</button></div></div>';
+    +'<div class="flex" style="margin-top:14px;gap:6px"><button class="btn primary" onclick="'+saveCall+'">Save</button> <button class="btn" onclick="ED.'+cancelApp+'=null;draw()">Cancel</button>'
+    +(removeCall?'<button class="btn danger" style="margin-left:auto" onclick="'+removeCall+'">'+(removeLbl||'Remove user')+'</button>':'')+'</div></div>';
 }
+/* ── Removing people (Rommel 2026-09-28) ──
+   Removing takes the person off that app's list — they can no longer sign in to it. What they did
+   stays (quotations, jobs, signed schedules, the change log). The database refuses to remove the
+   last active admin, and nobody can remove themselves here. The change log records every removal. */
+function _selfGuard(email){ if(ME&&norm(ME.email)===norm(email)){ toast('You can’t remove yourself.'); return true; } return false; }
+async function _removeRow(table,u,app,after){
+  if(_selfGuard(u.email)) return;
+  if(!confirm('Remove '+(u.name||u.email)+' ('+u.email+') from '+app+'?\n\nThey will no longer be able to sign in to '+app+'. Their past work stays. This is recorded in the change log.')) return;
+  var r=await supa.from(table).delete().eq('email',u.email).select();
+  if(r.error) return toast(dbErr(r.error));
+  if(!r.data||!r.data.length) return toast('Not removed — the database refused the change.');
+  if(after) await after();
+  toast('Removed '+u.email+' from '+app); ED[{pmes_users:'pmes',keystone_users:'ks',jobboard_users:'jb'}[table]]=null; await refresh();
+}
+function removePmes(i){ _removeRow('pmes_users',D.pmes[i],'PMES'); }
+function removeKs(i){ var u=D.ks[i]; _removeRow('keystone_users',u,'KEYSTONE',async function(){ await supa.from('adm_user_caps').delete().eq('email',u.email); }); }
+function removeJb(i){ var u=D.jb[i]; _removeRow('jobboard_users',u,'HATID',async function(){
+  try{ var r=await jbCall({action:'remove',email:norm(u.email)}); toast(u.email+': '+r.status); }
+  catch(e){ toast('Removed from the list, but HATID was not updated: '+e.message+' — use Sync.'); }
+  JB.staff=null; JBS.email=null; }); }
 function fld(label,html){ return '<div><div class="sub">'+label+'</div>'+html+'</div>'; }
 function openEd(app,v){ ED[app]=v; draw(); var c=document.querySelector('.editcard'); if(c) c.scrollIntoView({block:'start'}); }
 
@@ -891,7 +946,7 @@ function viewPmes(){
       +fld('Company','<select class="f-co" style="width:100%"><option value="">—</option>'+COMPANIES.map(function(x){return '<option'+(coKey(x)===coKey(u.company)?' selected':'')+'>'+esc(x)+'</option>'}).join('')+'</select>')
       +fld('Notes','<input class="f-notes" value="'+esc(u.notes)+'" style="width:100%">')
       +'<div><label class="chk"><input type="checkbox" class="f-act"'+(u.active?' checked':'')+'>Active (can sign in)</label></div>'
-      +'</div><div class="sub" style="margin-top:10px">Stations (operators only — none ticked = any)</div><div>'+stationBoxes(u.stations||[],'f-st')+'</div>','savePmes('+e+')','pmes');
+      +'</div><div class="sub" style="margin-top:10px">Stations (operators only — none ticked = any)</div><div>'+stationBoxes(u.stations||[],'f-st')+'</div>','savePmes('+e+')','pmes','removePmes('+e+')','Remove from PMES');
   }
   return '<div class="card"><p class="sub" style="margin:0"><b>Staff</b>: office production staff — sees everything, changes nothing yet. '
     +'<b>Materials</b>: confirms what arrived on each MRF and inspects boards. <b>Operator</b> (rank and file): scans and logs work, only at ticked stations (none = any). <b>Shift head</b> (foreman): hands out process Job Orders to machines/operators and updates accomplishment. <b>Production engineer</b>: prepares the loading schedule. '
@@ -931,7 +986,7 @@ function viewKs(){
       +'<div class="capgrid">'+CAP_GROUPS.map(function(g){return '<div><div class="sub" style="margin:0 0 2px"><b>'+g[0]+'</b></div>'+g[1].map(function(k){
         return '<label class="chk"><input type="checkbox" class="f-cap" value="'+k+'"'+(c[k]?' checked':'')+'>'+esc(capLabel(k))+'</label><br>'}).join('')+'</div>'}).join('')+'</div>'
       +'<div class="grid-add" style="margin-top:10px">'+fld('Approve limit (₱)','<input class="f-alim" type="number" min="0" value="'+(c.approve_limit==null?'':c.approve_limit)+'" style="width:100%">')
-      +fld('Vouch limit (₱)','<input class="f-vlim" type="number" min="0" value="'+(c.vouch_limit==null?'':c.vouch_limit)+'" style="width:100%">')+'</div>','saveKs('+e+')','ks');
+      +fld('Vouch limit (₱)','<input class="f-vlim" type="number" min="0" value="'+(c.vouch_limit==null?'':c.vouch_limit)+'" style="width:100%">')+'</div>','saveKs('+e+')','ks','removeKs('+e+')','Remove from KEYSTONE');
   }
   return '<div class="card"><p class="sub" style="margin:0">Role and company decide what each person sees (Admin/Director see every company; “Sees all companies” too). Capabilities decide what they may do.</p></div>'
     +form+'<div class="card">'+listBar("openEd('ks','add')",'+ Add user')
@@ -1058,7 +1113,7 @@ function viewJb(){
       +fld('Notes','<input class="f-notes" value="'+esc(u.notes)+'" style="width:100%">')
       +'</div><div class="sub" style="margin-top:10px">Signs delivery schedules</div><div>'+jbStepBoxes(u.schedule_steps,u.role==='field')+'</div>'
       +'<label class="chk" style="margin-top:8px">'+jbCostBox(u)+' Sees costs &amp; rates</label> <label class="chk"><input type="checkbox" class="f-act"'+(u.active?' checked':'')+'>Active (can sign in)</label>'
-      +'<div class="sub" style="margin-top:14px">Signature &amp; signing passcode</div><div id="jbSig"></div>','saveJb('+e+')','jb');
+      +'<div class="sub" style="margin-top:14px">Signature &amp; signing passcode</div><div id="jbSig"></div>','saveJb('+e+')','jb','removeJb('+e+')','Remove from HATID');
     if(JBS.email!==norm(u.email)) setTimeout(function(){ jbLoadSigner(norm(u.email)); },0); else setTimeout(jbDrawSigner,0);
   }
   var msg=JB.msg?'<div class="card" style="border:2px solid var(--accent)"><h2>'+esc(JB.msg.title)+'</h2>'
