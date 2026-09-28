@@ -1158,7 +1158,19 @@ function isViewer(){ return state.me?.role === 'viewer'; }
 // Supervisor and up: admins, managers, and anyone who signs delivery schedules (review / confirm / approve)
 function isSupervisorUp(){ return ['admin','manager'].includes(state.me?.role) || (state.me?.schedule_steps || []).some(x => ['review','confirm','approve'].includes(x)); }
 function canSeeCosts(){ return isSupervisorUp() || state.me?.can_see_costs === true; }
-function myCompanies(){ return state.me?.company ? [state.me.company] : ['MSSI','WCLI','CWLI']; }
+/* Companies this person covers. job_staff.companies: null = all companies, else the list (e.g. MSSI + WCLI). */
+function allCos(){ return !state.me?.companies; }
+function myCompanies(){ return state.me?.companies || ['MSSI','WCLI','CWLI']; }
+function soleCo(){ const c = state.me?.companies; return c && c.length === 1 ? c[0] : null; }
+function coversCo(c){ return allCos() || state.me.companies.includes(c); }
+function coversAny(list){ return allCos() || (list || []).some(c => state.me.companies.includes(c)); }
+/* A company picker shows only this person's companies ("All" = all of theirs), and hides when they have just one. */
+function limitCoSelect(sel, wrap){
+  const s = $(sel); if (!s) return;
+  [...s.options].forEach(o => { if (o.value && !coversCo(o.value)) o.remove(); });
+  if (s.value && !coversCo(s.value)) s.value = '';
+  (wrap ? $(wrap) : s).classList.toggle('hidden', !!soleCo());
+}
 
 /* ===== Auth ===== */
 $('login-form').addEventListener('submit', async e => {
@@ -1216,6 +1228,7 @@ async function boot(user){
     const { data } = await withRetry('Loading your profile', () => sb.from('job_staff').select('*').eq('id', user.id).maybeSingle());
     if (!data){ state.me = null; setHeader(user.email); $('noaccess-id').textContent = `User ID: ${user.id} · ${user.email}`; show('screen-noaccess'); return; }
     state.me = data;
+    state.me.companies = Array.isArray(data.companies) && data.companies.length ? data.companies : (data.company ? [data.company] : null);
     setHeader();
     initFilters();
     try { await loadRefData(); } catch {}
@@ -1254,7 +1267,7 @@ function setHeader(fallbackEmail){
     document.querySelector('.tab[data-view=settings]').classList.toggle('hidden', !canSettings());
   }
   $('who').innerHTML = me
-    ? `<b>${esc(me.name || me.email)}</b>${ROLE_LABEL[me.role] || me.role} · ${esc(me.company || 'All companies')}`
+    ? `<b>${esc(me.name || me.email)}</b>${ROLE_LABEL[me.role] || me.role} · ${esc(me.companies ? me.companies.join(' · ') : 'All companies')}`
     : esc(fallbackEmail || '');
 }
 
@@ -1293,7 +1306,7 @@ function initFilters(){
   $('f-to').value = addDays(today, 30);
   $('cap-date').value = today;
   $('fd-date').value = today;
-  $('f-company-wrap').classList.toggle('hidden', !!state.me.company);
+  limitCoSelect('f-company', 'f-company-wrap'); limitCoSelect('d-sc-co'); limitCoSelect('rp-company', 'rp-company-wrap');
 }
 ['f-status','f-company','f-from','f-to'].forEach(id => $(id).addEventListener('change', loadBoard));
 $('f-q').addEventListener('input', renderJobs);
@@ -2655,7 +2668,7 @@ const FLEET_TYPES = Object.keys(FLEET_LABEL);
 const TRUCK_STATUS = { active:'Active', maintenance:'Maintenance', retired:'Retired' };
 const MAINT_CAT = { pms:'Preventive maintenance (PMS)', oil_change:'Oil change', tires:'Tires', brakes:'Brakes', battery:'Battery', electrical:'Electrical',
   engine:'Engine', body:'Body', aircon:'Aircon', registration:'LTO registration', insurance:'Insurance', repair:'Repair', other:'Other' };
-function isFleetAdmin(){ return ['admin','manager'].includes(state.me?.role) && !state.me.company; }  // admins, and managers covering all companies
+function isFleetAdmin(){ return ['admin','manager'].includes(state.me?.role) && allCos(); }  // admins, and managers covering all companies
 // Areas & rates (trip rates, drop fees, delivery charges): supervisor and up, or anyone marked "Sees costs & rates"
 function canSeeRates(){ return canSeeCosts(); }
 state.fleetSub = 'trucks';
@@ -2665,7 +2678,7 @@ async function loadFleet(){
   $('fleet-body').innerHTML = '<div class="muted" style="padding:20px;text-align:center"><span class="spin"></span></div>';
   try {
     await loadRefData();
-    const mine = c => !state.me.company || (c || []).includes(state.me.company);   // no company = all companies
+    const mine = c => coversAny(c);   // pools serving any of this person's companies
     state.pools = state.ref.pools.filter(p => mine(p.companies));
     state.trucks = state.ref.trucks.filter(t => state.pools.some(p => p.id === t.pool_id));
     renderFleetSub();
@@ -3004,7 +3017,7 @@ async function renderFuel(){
     try { await withRetry('Deleting', () => sb.from('truck_fuel_logs').delete().eq('id', b.dataset.delFuel)); renderFuel(); } catch {}
   }));
 }
-function myTrucks(){ return (state.ref.trucks || []).filter(t => t.status !== 'retired' && (!state.me.company || state.ref.poolById[t.pool_id]?.companies.includes(state.me.company))); }
+function myTrucks(){ return (state.ref.trucks || []).filter(t => t.status !== 'retired' && coversAny(state.ref.poolById[t.pool_id]?.companies)); }
 function openFuelForm(onDone){
   const ts = myTrucks();
   if (!ts.length) return toast('No trucks available', 'error');
@@ -3243,7 +3256,7 @@ async function loadUsers(){
       <td><b>${esc(u.name || '—')}</b>${u.id === state.me.id ? ' <span class="ft">(you)</span>' : ''}${u.title ? `<div class="ft">${esc(u.title)}</div>` : ''}</td>
       <td>${esc(u.email)}</td>
       <td>${esc(ROLE_LABEL[u.role] || u.role)}</td>
-      <td>${esc(u.company || 'All companies')}</td>
+      <td>${esc((u.companies && u.companies.length ? u.companies : u.company ? [u.company] : null)?.join(' · ') || 'All companies')}</td>
       <td>${esc((u.schedule_steps || []).map(k => ({ review:'Review', confirm:'Confirm', approve:'Approve' })[k]).join(', ') || '—')}</td>
       <td><span class="pill ${u.active ? 'st-on' : 'st-off'}">${u.active ? 'Active' : 'Switched off'}</span>${u.signature_url ? ' <span class="ft" title="Has a saved signature">✍</span>' : ''}
         ${isAdmin() && (u.schedule_steps || []).length || isAdmin() && ['admin','manager','dispatcher'].includes(u.role) ? `<br><button class="lnk" data-pc-reset="${esc(u.id)}" data-nm="${esc(u.name || u.email)}">Reset signing passcode</button>` : ''}</td>
@@ -3568,12 +3581,12 @@ async function loadDash(){
 ['d-sc-per', 'd-sc-co', 'd-sc-cat'].forEach(id => $(id).addEventListener('change', () => renderDashScorecard()));
 $('d-sc-open').addEventListener('click', () => {
   $('rp-preset').value = $('d-sc-per').value; applyPreset(); $('rp-cmp').value = 'ly';
-  if (!state.me.company) $('rp-company').value = $('d-sc-co').value;
+  if (!soleCo()) $('rp-company').value = $('d-sc-co').value;
   state.rpTab = 'overview'; state.rpPresetCat = $('d-sc-cat').value; switchView('reports');
 });
 async function renderDashScorecard(){
   if (!state.me || state.me.role === 'field') return;
-  $('d-sc-co').classList.toggle('hidden', !!state.me.company);
+  $('d-sc-co').classList.toggle('hidden', !!soleCo());
   $('d-sc-open').classList.toggle('hidden', !canSeeCosts());
   const today = localDate(), per = $('d-sc-per').value, first = today.slice(0, 8) + '01';
   const latest = await latestDataDate() || today;
@@ -3589,7 +3602,7 @@ async function renderDashScorecard(){
   try {
     const [jobs, hist, monthly] = await Promise.all([loadJobRowsRange(lo, today), loadHistory(lo, today).catch(() => []), loadMonthly(lo, today)]);
     if (token !== state.dscToken) return;
-    const co = state.me.company || $('d-sc-co').value, cat = $('d-sc-cat').value;
+    const co = soleCo() || $('d-sc-co').value, cat = $('d-sc-cat').value;
     const types = new Map(); hist.forEach(h => { if (h.customer_type) types.set(custKey(h.customer), custTypeCode(h.customer_type)); });
     let recs = [...histRecords(hist), ...jobRecords(jobs.rows, types, jobs.trips)];
     if (co) recs = recs.filter(r => r.company === co);
@@ -3995,7 +4008,7 @@ function cmpRange(from, to, mode){
 async function loadReports(){
   if ($('rp-preset').value === 'latest' || !$('rp-from').value){ await latestDataDate(); applyPreset(); }
   const admin = ['admin', 'manager'].includes(state.me.role);
-  $('rp-company-wrap').classList.toggle('hidden', !!state.me.company);
+  $('rp-company-wrap').classList.toggle('hidden', !!soleCo());
   $('rp-body').style.opacity = .6;
   if (!$('rp-body').innerHTML) $('rp-body').innerHTML = '<div class="muted" style="padding:20px;text-align:center"><span class="spin"></span></div>';
   const from = $('rp-from').value, to = $('rp-to').value, cmp = cmpRange(from, to, $('rp-cmp').value);
@@ -4008,7 +4021,7 @@ async function loadReports(){
     if (token !== state.rpToken) return;
     const cal = await fetchAll('Loading calendar', () => sb.from('job_calendar').select('*').gte('day', cmp && cmp.from < from ? cmp.from : from).lte('day', to));
     const seen = new Set(state.ref.calendar.map(c => c.id)); cal.forEach(c => { if (!seen.has(c.id)) state.ref.calendar.push(c); });
-    const co = $('rp-company').value || state.me.company || '';
+    const co = $('rp-company').value || soleCo() || '';
     const histTypes = new Map(); [...histPrev, ...hist].forEach(h => { if (h.customer_type) histTypes.set(custKey(h.customer), custTypeCode(h.customer_type)); });
     const pick = rs => co ? rs.filter(r => r.company === co) : rs;
     state.reportRows = pick(cur.rows);
@@ -4372,7 +4385,7 @@ function renderLrReach(body, V){
 /* ----- Tab: Monthly figures (admin/manager): total sales, volume, budget, targets ----- */
 async function renderMonthlyFigures(target){
   const body = target || $('rd-monthly'), L = state.lr || { co: '', to: localDate(), from: localDate() };
-  const cos = state.me.company ? [state.me.company] : ['WCLI', 'MSSI', 'CWLI'];
+  const cos = allCos() ? ['WCLI', 'MSSI', 'CWLI'] : myCompanies();
   const co = state.mfCo && cos.includes(state.mfCo) ? state.mfCo : (L.co || cos[0]);
   const yr = state.mfYear || L.to.slice(0, 4);
   const rows = await loadMonthly(`${yr}-01-01`, `${yr}-12-31`);
@@ -4500,7 +4513,7 @@ function buildHistoryRows(parsed, sales, company){
   return out;
 }
 async function openHistoryImport(onDone){
-  const cos = state.me.company ? [state.me.company] : ['WCLI', 'MSSI', 'CWLI'];
+  const cos = allCos() ? ['WCLI', 'MSSI', 'CWLI'] : myCompanies();
   openOverlay(`<div class="sheet" role="dialog" aria-modal="true">
     <div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>Import Excel history</h2></div>
     <div class="sheet-b" style="max-width:900px">
@@ -4709,7 +4722,7 @@ function dayStatusHtml(date, label, pool){
 function renderDaybar(){
   if (!state.me) return;
   const today = localDate(), tomorrow = addDays(today, 1);
-  const mine = (state.ref.pools || []).filter(p => !state.me.company || p.companies.includes(state.me.company));   // only this user's own pools
+  const mine = (state.ref.pools || []).filter(p => coversAny(p.companies));   // only this user's own pools
   const pool = mine.find(p => p.coding_enabled) || mine[0] || null;
   const parts = [dayStatusHtml(today, 'Today', pool)];
   if (holidayOn(tomorrow, pool?.id) || (pool?.coding_enabled && codingSuspension(tomorrow, pool?.id))) parts.push(dayStatusHtml(tomorrow, 'Tomorrow', pool));
@@ -4761,7 +4774,7 @@ async function openContacts(){
   openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><span class="spin"></span></div>`); bindClose();
   let rows; try { rows = await fetchAll('Loading numbers', () => sb.from('job_contacts').select('*').eq('active', true).order('sort_order').order('name')); } catch { closeOverlay(); return; }
   const tel = p => p.replace(/[^\d+]/g, ''), edit = isDispatcher();
-  const cos = state.me.company ? [state.me.company] : COMPANIES;
+  const cos = myCompanies();
   document.querySelector('#overlay .modal').innerHTML = `
     <h2>Emergency &amp; useful numbers</h2>
     <div class="ft">Tap a number to call.</div>
@@ -4769,13 +4782,13 @@ async function openContacts(){
     ${Object.entries(CT_CAT).map(([k, l]) => { const rs = rows.filter(r => r.category === k); return rs.length ? `<div class="ct-h">${l}</div><ul class="ct-list">${rs.map(r => `<li>
         <div class="nm"><b>${esc(r.name)}</b><div class="ft">${esc([r.area, r.company, r.notes].filter(Boolean).join(' · '))}</div></div>
         <a class="call" href="tel:${esc(tel(r.phone))}">${esc(r.phone)}</a>
-        ${edit && (!state.me.company || r.company === state.me.company) ? `<button class="x" data-del-ct="${esc(r.id)}" aria-label="Remove ${esc(r.name)}">×</button>` : ''}</li>`).join('')}</ul>` : ''; }).join('')}
+        ${edit && coversCo(r.company) ? `<button class="x" data-del-ct="${esc(r.id)}" aria-label="Remove ${esc(r.name)}">×</button>` : ''}</li>`).join('')}</ul>` : ''; }).join('')}
     ${edit ? `<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:500">Add a number</summary>
       <form class="form" id="ctf" style="margin-top:10px">
         <div class="grid2"><label class="f">Name *<input class="i" name="name" required placeholder="e.g. Dispatch base — Pasig Plant"></label>
           <label class="f">Phone *<input class="i" name="phone" required inputmode="tel" placeholder="0917 000 0000"></label></div>
         <div class="grid2"><label class="f">Type<select class="i" name="category">${Object.entries(CT_CAT).map(([k, l]) => `<option value="${k}" ${k === 'company' ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-          <label class="f">Shown to<select class="i" name="company">${state.me.company ? '' : '<option value="">Everyone</option>'}${cos.map(c => `<option>${c}</option>`).join('')}</select></label></div>
+          <label class="f">Shown to<select class="i" name="company">${allCos() ? '<option value="">Everyone</option>' : ''}${cos.map(c => `<option>${c}</option>`).join('')}</select></label></div>
         <div class="grid2"><label class="f">Area<input class="i" name="area" placeholder="e.g. Cebu, North Luzon"></label><label class="f">Note<input class="i" name="notes"></label></div>
         <div class="row-btns" style="justify-content:flex-end;margin:0"><button class="btn primary" type="submit">Add</button></div>
       </form></details>` : ''}
@@ -5467,14 +5480,14 @@ async function renderNotify(){
   } catch { $('set-body').innerHTML = '<div class="card empty">Could not load settings.</div>'; return; }
   state.ref.agents = agents; state.ref.agentById = Object.fromEntries(agents.map(a => [a.id, a])); state.ref.notify = cfg;
   const on = (x, l) => `<span class="tag ${x ? 'ok' : ''}">${l}: ${x ? 'on' : 'not set up'}</span>`;
-  const mine = agents.filter(a => !state.me.company || !a.company || a.company === state.me.company);
+  const mine = agents.filter(a => !a.company || coversCo(a.company));
   $('set-body').innerHTML = `
     <div class="card pad rp-sec nt-agents"><h3>Sales agents</h3>
       <div class="ft" style="margin-bottom:10px">Pick the agent on each job. When the driver saves the result (delivered, partial, refused), reports a problem or a delay, the agent gets it by every channel we have for them. ${on(true, 'Google Chat')} ${on(cfg?.email_enabled, 'Email')} ${on(cfg?.sms_enabled, 'SMS')}</div>
       ${mine.length ? `<div class="ds-wrap"><table class="ds-tbl ag-tbl"><thead><tr><th>Name</th><th>Company</th><th>Email</th><th>Mobile</th><th>Google Chat</th><th></th></tr></thead><tbody>
         ${mine.map(a => `<tr class="${a.active ? '' : 'retired'}" style="${a.active ? '' : 'opacity:.55'}"><td><b>${esc(a.name)}</b>${a.active ? '' : ' <span class="tag">off</span>'}</td><td>${esc(a.company || 'All')}</td>
           <td>${esc(a.email || '—')}</td><td>${esc(a.phone || '—')}</td><td>${a.chat_webhook ? '✓ connected' : '—'}</td>
-          <td>${!state.me.company || a.company === state.me.company ? `<button class="btn" data-edit-agent="${esc(a.id)}">Edit</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`
+          <td>${coversCo(a.company) ? `<button class="btn" data-edit-agent="${esc(a.id)}">Edit</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`
         : '<div class="muted">No agents yet. Add the sales agents so they get delivery updates.</div>'}
     </div>
     ${isAdmin() ? `<div class="card pad rp-sec nt-msg"><h3>Company Chat spaces &amp; daily summary</h3>
@@ -5532,7 +5545,7 @@ async function renderNotify(){
     </div>` : `<div class="card pad rp-sec nt-msg"><div class="ft">Company Chat spaces, email and SMS are set up by a HATID admin.</div></div>`}`;
   document.querySelectorAll(agentsView ? '#set-body .nt-msg' : '#set-body .nt-agents').forEach(el => el.remove());
   if (!agentsView) bindSmsMode(cfg);
-  $('btn-new-agent')?.addEventListener('click', () => openAgentForm(null, state.me.company, () => { closeOverlay(); renderNotify(); }));
+  $('btn-new-agent')?.addEventListener('click', () => openAgentForm(null, soleCo(), () => { closeOverlay(); renderNotify(); }));
   document.querySelectorAll('[data-edit-agent]').forEach(b => b.addEventListener('click', () => openAgentForm(agents.find(a => a.id === b.dataset.editAgent), null, () => { closeOverlay(); renderNotify(); })));
   document.querySelectorAll('.nc-f').forEach(f => f.addEventListener('submit', async e => {
     e.preventDefault(); const btn = f.querySelector('[type=submit]');
@@ -5727,7 +5740,7 @@ function openAgentForm(a, company, done){
     <h2>${a ? 'Edit agent' : 'Add a sales agent'}</h2>
     <form class="form" id="agf">
       <div class="grid2"><label class="f">Name *<input class="i" name="name" required value="${esc(a?.name || '')}"></label>
-        <label class="f">Company<select class="i" name="company">${state.me.company ? '' : '<option value="">All companies</option>'}${cos.map(c => `<option ${(a ? a.company : company) === c ? 'selected' : ''}>${c}</option>`).join('')}</select></label></div>
+        <label class="f">Company<select class="i" name="company">${allCos() ? '<option value="">All companies</option>' : ''}${cos.map(c => `<option ${(a ? a.company : company) === c ? 'selected' : ''}>${c}</option>`).join('')}</select></label></div>
       <div class="grid2"><label class="f">Email<input class="i" type="email" name="email" value="${esc(a?.email || '')}" placeholder="name@company.com"></label>
         <label class="f">Mobile (for SMS)<input class="i" name="phone" inputmode="tel" value="${esc(a?.phone || '')}" placeholder="0917 000 0000"></label></div>
       <label class="f">Google Chat webhook <span class="ft">— optional</span><input class="i" name="chat_webhook" value="${esc(a?.chat_webhook || '')}" placeholder="https://chat.googleapis.com/v1/spaces/…"></label>
@@ -6227,14 +6240,14 @@ async function openThread(id){
 /* ---------- Daily summary (office, supervisors, managers) ---------- */
 ['dash-daily','sc-daily','rp-daily'].forEach(id => $(id)?.addEventListener('click', () => openDailySummary(localDate())));
 async function openDailySummary(date, company){
-  company = state.me.company || company || '';
+  company = soleCo() || company || '';
   openOverlay(`<div class="sheet" role="dialog" aria-modal="true">
     <div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>Daily delivery summary</h2>
       <button class="btn" id="ds-print">Print</button><button class="btn" id="ds-csv">CSV</button>${isDispatcher() ? '<button class="btn" id="ds-send">Send to Chat / email</button>' : ''}</div>
     <div class="sheet-b" style="max-width:1100px">
       <div class="card toolbar no-print" style="border:1px solid var(--line)">
         <label class="f">Date<input class="i" type="date" id="ds-date" value="${esc(date)}"></label>
-        ${state.me.company ? '' : `<label class="f">Company<select class="i" id="ds-co"><option value="">All</option>${COMPANIES.map(c => `<option ${c === company ? 'selected' : ''}>${c}</option>`).join('')}</select></label>`}
+        ${soleCo() ? '' : `<label class="f">Company<select class="i" id="ds-co"><option value="">All</option>${myCompanies().map(c => `<option ${c === company ? 'selected' : ''}>${c}</option>`).join('')}</select></label>`}
       </div>
       <div id="ds-body"><div class="muted" style="padding:20px;text-align:center"><span class="spin"></span></div></div>
     </div></div>`);
@@ -6393,7 +6406,7 @@ async function renderCalendar(){
   document.querySelectorAll('[data-apply]').forEach(b => b.addEventListener('click', () => openCalForm(notices.find(x => x.id === b.dataset.apply))));
 }
 function openCalForm(notice){
-  const pools = state.ref.pools.filter(p => !state.me.company || p.companies.includes(state.me.company));
+  const pools = state.ref.pools.filter(p => coversAny(p.companies));
   openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true">
     <h2>${notice ? 'Apply advisory' : 'Add a day'}</h2>
     ${notice ? `<div class="ft" style="margin-bottom:10px"><a href="${esc(notice.url)}" target="_blank" rel="noopener">${esc(notice.title)}</a> · ${esc(notice.source)}</div>` : ''}
@@ -6402,7 +6415,7 @@ function openCalForm(notice){
       <div class="grid2"><label class="f">Type<select class="i" name="kind"><option value="coding_suspension" ${notice ? 'selected' : ''}>Coding suspension only</option><option value="holiday" ${notice ? '' : 'selected'}>Holiday / non-working day</option></select></label>
         <label class="f">Coding that day<select class="i" name="scope"><option value="all">Suspended all day</option><option value="am">Morning (7–10 AM) suspended</option><option value="pm">Afternoon (5–8 PM) suspended</option><option value="none">Still in force</option></select></label></div>
       <label class="f">Name *<input class="i" name="name" required value="${esc(notice ? 'MMDA: number coding suspended' : '')}" placeholder="e.g. Special non-working day (Proclamation No. …)"></label>
-      <div class="grid2"><label class="f">Applies to<select class="i" name="pool">${state.me.company ? '' : '<option value="">Everywhere</option>'}${pools.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></label>
+      <div class="grid2"><label class="f">Applies to<select class="i" name="pool">${allCos() ? '<option value="">Everywhere</option>' : ''}${pools.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></label>
         <label class="f">Source link<input class="i" name="url" value="${esc(notice?.url || '')}" placeholder="MMDA post, proclamation…"></label></div>
       <div class="row-btns" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Save</button></div>
     </form></div>`);
@@ -6624,7 +6637,7 @@ async function schedulesNeedingMe(list){
   const { data } = await sb.from('delivery_schedule_signoffs').select('schedule_id, revision').eq('signed_by', state.me.id).in('schedule_id', pend.map(s => s.id));
   return pend.filter(s => !(data || []).some(x => x.schedule_id === s.id && x.revision === s.revision));
 }
-function myPools(){ return (state.ref.pools || []).filter(p => !state.me.company || p.companies.includes(state.me.company)); }
+function myPools(){ return (state.ref.pools || []).filter(p => coversAny(p.companies)); }
 
 $('sc-open').addEventListener('click', () => $('sc-date').value ? openSchedule($('sc-pool').value, $('sc-date').value) : toast('Pick the delivery date', 'error'));
 async function loadSched(){
@@ -6701,7 +6714,7 @@ async function openSchedule(poolId, date){
   if (stepNow && !my.includes(stepNow)) notes.push(`Waiting for the ${SCHED_STEPS.find(x => x[0] === stepNow)[2].toLowerCase()} to ${STEP_VERB[stepNow].toLowerCase()} and sign.`);
   if (editable && !content.length) notes.push('No trucks have jobs on this date yet. Confirm jobs on the Dispatch board first.');
   if (!inFlow && isDispatcher() && !view.can_prepare) notes.push(`This pool serves ${(pool?.companies || []).join(' and ')}, so its schedule is prepared by staff covering all those companies.`);
-  if (!view.full_view) notes.push(`Showing ${state.me.company} drops only.`);
+  if (!view.full_view) notes.push(`Showing ${myCompanies().join(' and ')} drops only.`);
 
   document.querySelector('#overlay .sheet').innerHTML = `
     <div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>Delivery schedule · ${fmtDate(date)}</h2>${schedPill(status)}<button class="btn no-print" id="sf-print">Print</button></div>
