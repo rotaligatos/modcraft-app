@@ -355,6 +355,8 @@ table.rates td:first-child{min-width:180px}
 .chart .xh{stroke:var(--viz-muted);stroke-width:1;stroke-dasharray:2 3}
 .rp-filters .f{min-width:130px}
 .rp-more{display:none}
+.print-only{display:none}
+@media print{.print-only{display:inline}}
 @media (max-width:600px){
   .rp-filters{display:grid;grid-template-columns:1fr 1fr;gap:8px}
   .rp-filters .f{min-width:0} .rp-filters .f .i{width:100%}
@@ -905,6 +907,8 @@ const EVENT_TO_STATUS = {scheduled:'scheduled',rejected:'rejected',dispatched:'d
 const FLEET_LABEL = {company_owned:'Company owned',internal:'Internal (employee)','3pl':'3PL',courier:'Courier',borrowed:'Borrowed (subsidiary)'};
 const POWERTRAIN = { diesel:'Diesel', gasoline:'Gasoline', hybrid:'Hybrid', electric:'Electric' };
 const AVAIL_REASON = { maintenance:'Under maintenance', breakdown:'Broken down', driver_absent:'Driver absent', not_available:'Not available', other:'Other' };
+const ISSUE_TYPE = { breakdown:'Truck breakdown', accident:'Accident', traffic_violation:'Traffic violation / apprehension', wrong_items:'Wrong or missing items',
+  damaged:'Damaged items', site_refused:'Site refused / can’t unload', other:'Other problem' };
 const OUTCOME_LABEL = { full:'Delivered — all received', partial:'Partial — some returned', returned:'Refused — all returned (backload)' };
 const DELAY_REASON = { site_not_ready:'Site not ready', client_absent:'Receiver not available', access:'No access / gate pass / permit', unloading:'Waiting to unload',
   traffic:'Traffic / road closure', truck:'Truck problem', weather:'Weather', other:'Other' };
@@ -1045,6 +1049,11 @@ function codingWarning(truck, date, destId){
   const makati = /makati/i.test(destInfo(destId)?.dest.name || '');
   return `${truck.plate_no} is coding on ${DAY_SHORT[st.day]}s (plate ends in ${digit}): off the road in Metro Manila ${hours}` +
     (makati && !st.pmOnly ? '. Makati: 7 AM–7 PM with no window — can’t deliver there today' : st.pmOnly ? '' : ' — leave from 10 AM');
+}
+/* Target departure for a trip: the time set on the trip sheet, else — for the truck's first trip — the pool's leave-by time */
+function tripTarget(truck, date, n, row, firstTrip){
+  if (row?.target_time) return String(row.target_time).slice(0, 5);
+  return +n === +(firstTrip ?? 1) && truck ? dispatchTarget(truck, date).hm : null;
 }
 /* Departure target for a truck's first trip on a date: pool target, or the coding target when it's held until 10 AM */
 function dispatchTarget(truck, date){
@@ -1420,7 +1429,7 @@ function odooToJob(t){
   const dm = F('Scheduled Date').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/), di = F('Scheduled Date').match(/(\d{4})-(\d{2})-(\d{2})/);
   const date = di ? `${di[1]}-${di[2]}-${di[3]}` : dm ? `${dm[3]}-${dm[1].padStart(2, '0')}-${dm[2].padStart(2, '0')}` : null;
   const dt = odooNorm(F('Delivery Type'));
-  const job_type = /pick/.test(dt) ? 'pickup' : /install/.test(dt) ? (/deliver/.test(dt) ? 'both' : 'installation') : /back ?load|return/.test(dt) ? 'backload' : 'delivery';
+  const job_type = /transfer/.test(dt) ? 'transfer' : /pick/.test(dt) ? 'pickup' : /install/.test(dt) ? (/deliver/.test(dt) ? 'both' : 'installation') : /back ?load|return/.test(dt) ? 'backload' : 'delivery';
   const PH = /(\+?63\s?9\d{2}[\s-]?\d{3}[\s-]?\d{4}|0\s?9\d{2}[\s-]?\d{3}[\s-]?\d{4})/;
   let contact = F('Contact Person'), phone = F('Contact Number');
   const cl = instr.split('\n').find(x => /contact(\s*(person|no\.?|number|#))?\s*[:\-]/i.test(x)) || '';   // "Contact Person: …", not "kindly contact client"
@@ -1758,7 +1767,7 @@ function openNewJob(){
       <label class="f">Destination *<select class="i" name="destination_id" id="nj-dest" required>${destOptions(cos[0])}</select></label>
       <div class="ft" id="nj-dest-info"></div>
       <div class="grid2">
-        <label class="f">Job type<select class="i" name="job_type"><option>delivery</option><option>installation</option><option>both</option><option>pickup</option><option value="backload">backload (return load)</option></select></label>
+        <label class="f">Job type<select class="i" name="job_type"><option>delivery</option><option>installation</option><option>both</option><option>pickup</option><option value="backload">backload (return load)</option><option value="transfer">transfer (branch / warehouse)</option></select></label>
         <label class="f">Requested date<input class="i" type="date" name="scheduled_date" id="nj-date"></label>
       </div>
       <div class="f">Boards (pieces per thickness, 4×8) <span class="ft">— for the weight</span></div>
@@ -2499,9 +2508,9 @@ async function openFieldJob(id){
   const sig = $('fx-sig') ? makeSignaturePad($('fx-sig')) : null;
   if ($('fx-sig-clear')) $('fx-sig-clear').addEventListener('click', () => sig.clear());
 
-  const submit = async (evType, btn) => {
-    let notes = $('fx-notes').value.trim();
-    if (evType === 'issue' && !notes){ notes = prompt('Describe the issue:') || ''; if (!notes) return; }
+  const submit = async (evType, btn, opts = {}) => {
+    let notes = opts.notes ?? $('fx-notes').value.trim();
+    if (evType === 'issue' && !notes) return;
     let oc = null;
     if (evType === 'completed'){
       oc = readOutcome(job, 'fo');
@@ -2518,7 +2527,7 @@ async function openFieldJob(id){
     }
     btn.innerHTML = '<span class="spin"></span> Saving…';
     try {
-      const extra = { ...geoFields(geo) };
+      const extra = { ...geoFields(geo), ...(opts.issue_type ? { issue_type: opts.issue_type } : {}) };
       if (photoBlob) extra.photo_url = await uploadMedia(job.id, photoBlob, 'photo.jpg', 'image/jpeg');
       if (sig && !sig.isEmpty()) extra.signature_url = await uploadMedia(job.id, await sig.toBlob(), 'signature.png', 'image/png');
       if (oc) await completeJob(job, oc, notes, extra);
@@ -2530,13 +2539,25 @@ async function openFieldJob(id){
           if (now > tgt.hm) n = [n, `Left at ${fmtHM(now)} — after the ${fmtHM(tgt.hm)} target`].filter(Boolean).join('\n');
         }
         await logEvent(job.id, evType, n, extra);
+        if (evType === 'dispatched' && job.truck_id)   // the trip's departure time for the dispatch report
+          sb.rpc('job_trip_update', { p_date: job.scheduled_date, p_truck: job.truck_id, p_trip: job.trip_no || 1, p_patch: { departed: true } }).then(() => {}, () => {});
       }
       toast(oc ? 'Delivery result saved — base notified' : evType === 'issue' ? 'Problem reported — base notified' : 'Saved', 'ok');
       refreshAfterChange(job.id);
     } catch { btn.disabled = false; btn.textContent = label; }
   };
   if ($('fx-next')) $('fx-next').addEventListener('click', e => submit(next[0], e.currentTarget));
-  if ($('fx-issue')) $('fx-issue').addEventListener('click', e => submit('issue', e.currentTarget));
+  if ($('fx-issue')) $('fx-issue').addEventListener('click', e => {
+    const b = e.currentTarget; if (b.nextElementSibling?.classList.contains('is-ask')) return;
+    b.insertAdjacentHTML('afterend', `<div class="is-ask warnbox"><b>What happened?</b>
+      <label class="f" style="margin-top:6px">Problem<select class="i" data-is>${Object.entries(ISSUE_TYPE).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></label>
+      <label class="f" style="margin-top:6px">Details *<textarea class="i" data-is-n rows="2" placeholder="What happened, where, what's needed">${esc($('fx-notes').value.trim())}</textarea></label>
+      <div class="row-btns" style="margin-top:8px"><button class="btn" data-is-x>Cancel</button><button class="btn bad" data-is-go>Send report</button></div></div>`);
+    const box = b.nextElementSibling;
+    box.querySelector('[data-is-x]').addEventListener('click', () => box.remove());
+    box.querySelector('[data-is-go]').addEventListener('click', ev => { const n = box.querySelector('[data-is-n]').value.trim(); if (!n){ box.querySelector('[data-is-n]').focus(); return toast('Describe the problem', 'error'); }
+      const t = box.querySelector('[data-is]').value; submit('issue', ev.currentTarget, { issue_type: t, notes: `${ISSUE_TYPE[t]}: ${n}` }); });
+  });
   if ($('fx-delay')) $('fx-delay').addEventListener('click', () => openDelayModal(job, () => openFieldJob(job.id)));
 }
 
@@ -2694,6 +2715,14 @@ function openTruckForm(t){
         <label class="f">Rate class<select class="i" name="truck_class" id="tf-class">${classOpts(v.pool_id)}</select></label>
         <label class="f">Status<select class="i" name="status">${Object.entries(TRUCK_STATUS).map(([k, l]) => `<option value="${k}" ${k === v.status ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div>
+      <div id="tf-run" class="hidden" style="border:1px solid var(--line);border-radius:10px;padding:10px 12px">
+        <div class="f" style="color:var(--ink);font-weight:600">Running cost (company-run trucks) <span class="ft">— for transport cost in Reports; only people who see costs</span></div>
+        <div class="grid2" style="margin-top:6px">
+          <label class="f">Driver + helper per duty day (₱)<input class="i" type="number" min="0" step="0.01" id="tf-crew" placeholder="e.g. 1,650"></label>
+          <label class="f">Fixed cost per month (₱) <span class="ft">— insurance, registration, amortization</span><input class="i" type="number" min="0" step="0.01" id="tf-fixed" placeholder="e.g. 18,000"></label>
+        </div>
+        <div class="ft">Each trip gets the day’s crew cost split across that day’s trips, plus the month’s fixed cost split across the month’s trips — on top of fuel and maintenance. This is the “other fees” part of the logistics report.</div>
+      </div>
       <div class="step-note">Load per trip uses the 90% loading standard. Company-run and borrowed trucks are costed from fuel and maintenance logs; in-house truckers and 3PLs by the trip-rate table. Borrowed trucks always ask the dispatcher to confirm they're free. Retire a truck instead of deleting it so past jobs keep their history.</div>
       <div class="row-btns" style="justify-content:flex-end">
         <button type="button" class="btn" data-close>Cancel</button>
@@ -2711,6 +2740,10 @@ function openTruckForm(t){
     $('tf-ev').textContent = pt === 'electric' ? 'Electric: exempt from number coding (EVIDA). Drivers get charging-station links, and long round trips are flagged against the range.'
       : pt === 'hybrid' ? 'Hybrid: exempt from number coding (EVIDA).' : ''; };
   f.powertrain.addEventListener('change', evNote); evNote();
+  const canRun = canSeeCosts() && ['admin', 'manager'].includes(state.me.role);
+  const runToggle = () => $('tf-run').classList.toggle('hidden', !canRun || f.uses_trip_rates.checked);
+  f.uses_trip_rates.addEventListener('change', runToggle); f.fleet_type.addEventListener('change', runToggle); runToggle();
+  if (canRun && t) sb.from('truck_cost_rates').select('*').eq('truck_id', t.id).maybeSingle().then(({ data }) => { if (data){ $('tf-crew').value = data.crew_cost_per_day ?? ''; $('tf-fixed').value = data.fixed_cost_per_month ?? ''; } }, () => {});
   f.addEventListener('submit', async e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(f).entries());
@@ -2724,8 +2757,12 @@ function openTruckForm(t){
       default_driver: fd.default_driver.trim() || null, default_helper: fd.default_helper.trim() || null, contact_no: fd.contact_no.trim() || null };
     const btn = f.querySelector('[type=submit]'); btn.disabled = true;
     try {
+      let id = t?.id;
       if (t) await withRetry('Saving truck', () => sb.from('trucks').update(row).eq('id', t.id));
-      else await withRetry('Adding truck', () => sb.from('trucks').insert(row));
+      else { const { data } = await withRetry('Adding truck', () => sb.from('trucks').insert(row).select('id').single()); id = data?.id; }
+      if (canRun && id && !row.uses_trip_rates && ($('tf-crew').value !== '' || $('tf-fixed').value !== ''))
+        await withRetry('Saving running cost', () => sb.from('truck_cost_rates').upsert({ truck_id: id, crew_cost_per_day: $('tf-crew').value === '' ? null : Number($('tf-crew').value),
+          fixed_cost_per_month: $('tf-fixed').value === '' ? null : Number($('tf-fixed').value), updated_at: new Date().toISOString(), updated_by: state.me.id }));
       toast(t ? 'Truck updated' : 'Truck added', 'ok'); closeOverlay(); loadFleet();
     } catch { btn.disabled = false; }
   });
@@ -3471,7 +3508,7 @@ async function renderDashScorecard(){
     if (token !== state.dscToken) return;
     const co = state.me.company || $('d-sc-co').value, cat = $('d-sc-cat').value;
     const types = new Map(); hist.forEach(h => { if (h.customer_type) types.set(custKey(h.customer), custTypeCode(h.customer_type)); });
-    let recs = [...histRecords(hist), ...jobRecords(jobs.rows, types)];
+    let recs = [...histRecords(hist), ...jobRecords(jobs.rows, types, jobs.trips)];
     if (co) recs = recs.filter(r => r.company === co);
     if (cat) recs = recs.filter(r => r.cat === cat);
     const ctx = { monthly, companies: co ? [co] : null, companyWide: !cat };
@@ -3563,7 +3600,7 @@ const LATE_DISPATCH = { ld_documentation:'Documentation problem', ld_quality:'Qu
 const DISPATCH_BUCKETS = ['On time', '1–10 min', '11–20 min', '21–30 min', '31–40 min', '41–50 min', '51–60 min', 'Over 1 hr'];
 const DISPATCH_GRACE = 10;       // minutes: departures up to 10 min after the target still count as on time (the report's OTS %)
 const bucketIdx = m => m == null || isNaN(m) ? null : m <= 0 ? 0 : m <= 10 ? 1 : m <= 20 ? 2 : m <= 30 ? 3 : m <= 40 ? 4 : m <= 50 ? 5 : m <= 60 ? 6 : 7;
-const ERR_TYPES = { inc:'Incomplete delivery', ret:'Returned / backload', brk:'Breakdown or site issue', vio:'Traffic violation', late:'Late dispatch' };
+const ERR_TYPES = { inc:'Incomplete delivery', ret:'Returned / backload', brk:'Breakdown / accident', vio:'Traffic violation', oth:'Wrong or damaged items / site problem', late:'Late dispatch' };
 const REGION_OF = { 'NCR':'NCR', 'METRO MANILA':'NCR', 'RIZAL':'CALABARZON', 'CAVITE':'CALABARZON', 'LAGUNA':'CALABARZON', 'BATANGAS':'CALABARZON', 'QUEZON':'CALABARZON',
   'BULACAN':'Central Luzon', 'PAMPANGA':'Central Luzon', 'TARLAC':'Central Luzon', 'NUEVA ECIJA':'Central Luzon', 'BATAAN':'Central Luzon', 'ZAMBALES':'Central Luzon', 'AURORA':'Central Luzon',
   'PANGASINAN':'Ilocos', 'LA UNION':'Ilocos', 'ILOCOS NORTE':'Ilocos', 'ILOCOS SUR':'Ilocos', 'BENGUET':'CAR', 'ABRA':'CAR', 'ISABELA':'Cagayan Valley', 'CAGAYAN':'Cagayan Valley', 'NUEVA VIZCAYA':'Cagayan Valley', 'QUIRINO':'Cagayan Valley',
@@ -3605,8 +3642,20 @@ async function loadJobRowsRange(from, to){
   fuel.forEach(f => fleetCost[f.truck_id] = (fleetCost[f.truck_id] || 0) + Number(f.amount));
   maint.forEach(m => fleetCost[m.truck_id] = (fleetCost[m.truck_id] || 0) + Number(m.cost));
   all.forEach(r => { if (r.status === 'completed' && r.truck_id) doneCount[r.truck_id] = (doneCount[r.truck_id] || 0) + 1; });
-  const rows = all.map(r => ({ ...r, fleet_alloc: r.status === 'completed' && fleetCost[r.truck_id] && doneCount[r.truck_id] ? fleetCost[r.truck_id] / doneCount[r.truck_id] : 0 }));
-  return { rows, fuel, maint, fleetCost, doneCount };
+  let trips = [], rates = [];
+  try { trips = await fetchAll('Loading trips', () => sb.from('job_trips').select('*').gte('trip_date', from).lte('trip_date', to)); } catch {}
+  if (canSeeCosts()) try { const { data } = await sb.from('truck_cost_rates').select('*'); rates = Array.isArray(data) ? data : []; } catch {}
+  // Company-run trucks: crew cost per duty day + fixed monthly cost per working day (Mon–Sat), split across that day's deliveries
+  const rateBy = new Map(rates.map(r => [r.truck_id, r])), dayJobs = {};
+  const LIVE = ['completed', 'dispatched', 'in_progress', 'issue'];
+  all.forEach(r => { if (r.truck_id && rateBy.has(r.truck_id) && LIVE.includes(r.status)) (dayJobs[r.truck_id + '|' + r.scheduled_date] ??= []).push(r.id); });
+  const runAlloc = {};
+  Object.entries(dayJobs).forEach(([k, ids]) => { const [tid, d] = k.split('|'), rt = rateBy.get(tid), ym = d.slice(0, 7);
+    const workDays = [...Array(daysInMonth(ym))].filter((_, i) => new Date(`${ym}-${String(i + 1).padStart(2, '0')}T00:00:00`).getDay() !== 0).length;
+    const dayCost = Number(rt.crew_cost_per_day || 0) + Number(rt.fixed_cost_per_month || 0) / workDays;
+    ids.forEach(id => runAlloc[id] = dayCost / ids.length); });
+  const rows = all.map(r => ({ ...r, fleet_alloc: (r.status === 'completed' && fleetCost[r.truck_id] && doneCount[r.truck_id] ? fleetCost[r.truck_id] / doneCount[r.truck_id] : 0) + (runAlloc[r.id] || 0), run_alloc: runAlloc[r.id] || 0 }));
+  return { rows, fuel, maint, fleetCost, doneCount, trips, rates };
 }
 async function loadHistory(from, to){
   state.histCache ??= {};
@@ -3635,7 +3684,7 @@ function histRecords(hist){
       tc: h.total_tc == null ? null : Number(h.total_tc), cap: trip ? Number(h.capacity_kg) || null : null,
       ctype: custTypeCode(h.customer_type) || (isAffiliateName(h.customer) ? 'affiliate' : 'regular'), sp: spName(h.salesperson),
       bkt, lapse: trip && h.lapse_min != null ? Number(h.lapse_min) : null, reason: h.late_reason || null,
-      err: { inc: Number(h.incomplete) > 0, ret: Number(h.returned) > 0, brk: Number(h.breakdown) > 0, vio: Number(h.traffic_violation) > 0, late: trip && late },
+      err: { inc: Number(h.incomplete) > 0, ret: Number(h.returned) > 0, brk: Number(h.breakdown) > 0, vio: Number(h.traffic_violation) > 0, oth: false, late: trip && late },
       sales: h.sales_amt == null ? null : Number(h.sales_amt), release: h.release_method || '' };
   });
 }
@@ -3644,8 +3693,12 @@ function bucketFromText(t){
   if (!s.trim()) return null; if (/on.?time/.test(s)) return 0; if (/over|>\s*1/.test(s)) return 7; if (/51|1\s*hr/.test(s)) return 6;
   const m = s.match(/(\d+)\s*-\s*(\d+)/); return m ? bucketIdx(Number(m[2])) : null;
 }
-function jobRecords(rows, histTypes){
+const boardsCbm = bp => Object.entries(bp || {}).reduce((a, [g, n]) => a + 1.2192 * 2.4384 * Number(g) / 1000 * (Number(n) || 0), 0);   // 4×8 sheets
+const OTHER_ISSUES = ['wrong_items', 'damaged', 'site_refused'];
+function jobRecords(rows, histTypes, tripsTbl = []){
   const live = rows.filter(r => LIVE_JOB.includes(r.status) && r.scheduled_date);
+  const tripBy = new Map(tripsTbl.map(x => [x.truck_id + '|' + x.trip_date + '|' + x.trip_no, x]));
+  const firstTrip = {}; live.forEach(r => { if (r.truck_id){ const k = r.truck_id + '|' + r.scheduled_date; firstTrip[k] = Math.min(firstTrip[k] ?? 99, r.trip_no || 1); } });
   // first departure per truck-day (first trip) vs the dispatch target, like the report's DISPATCH TIME vs TDT
   const firstDep = {};
   live.filter(r => r.truck_id && r.dispatched_at).forEach(r => {
@@ -3659,13 +3712,17 @@ function jobRecords(rows, histTypes){
     const tripKey = r.truck_id ? `h|${r.truck_id}|${r.scheduled_date}|${r.trip_no || 1}` : `h|job|${r.id}`;
     const trip = seenTrip.has(tripKey) ? 0 : 1; seenTrip.add(tripKey);
     const t = state.ref.truckById?.[r.truck_id], tk = r.truck_id ? truckKeyName(r.truck_label, r.plate_no) : { key:'UNASSIGNED', name:'Unassigned' };
-    let bkt = null, lapse = null, reason = null;
+    let bkt = null, lapse = null, reason = null, outAt = null, outSrc = null;
+    const tr = r.truck_id ? tripBy.get(r.truck_id + '|' + r.scheduled_date + '|' + (r.trip_no || 1)) : null;
     const fd = r.truck_id && firstDep[r.truck_id + '|' + r.scheduled_date];
-    if (trip && fd && fd.trip === (r.trip_no || 1) && t){
-      const tgt = dispatchTarget(t, r.scheduled_date);
-      lapse = dayManila(fd.at) === r.scheduled_date ? minsOf(hmManila(fd.at)) - minsOf(tgt.hm) : minsOf('23:59') - minsOf(tgt.hm);
-      bkt = bucketIdx(lapse); reason = fd.reason || null;
+    if (trip && t){
+      outAt = tr?.gps_left_at || tr?.departed_at || (fd && fd.trip === (r.trip_no || 1) ? fd.at : null);
+      outSrc = tr?.gps_left_at ? 'gps' : outAt ? 'button' : null;
+      const tg = tripTarget(t, r.scheduled_date, r.trip_no || 1, tr, firstTrip[r.truck_id + '|' + r.scheduled_date]);
+      if (outAt && tg){ lapse = dayManila(outAt) === r.scheduled_date ? minsOf(hmManila(outAt)) - minsOf(tg) : minsOf('23:59') - minsOf(tg); bkt = bucketIdx(lapse); }
+      reason = tr?.late_reason || (fd && fd.trip === (r.trip_no || 1) ? fd.reason : null) || null;
     }
+    const itypes = r.issue_types || [];
     const prov = provName(r.province);
     const cost = canSeeCosts() ? Number(r.standard_cost || 0) + Number(r.actual_cost || 0) + Number(r.fleet_alloc || 0) : null;
     const ctype = r.customer_type || (isAffiliateName(r.client_name) ? 'affiliate' : histTypes?.get(custKey(r.client_name))) || 'regular';
@@ -3673,8 +3730,13 @@ function jobRecords(rows, histTypes){
       kg: Number(r.estimated_weight_kg) || 0, truck: tk.key, truckName: tk.name, cat: fleetCat(r.fleet_type),
       province: prov || 'No destination', muni: r.destination_name || '', region: REGION_OF[prov] || (prov ? 'Other' : 'No destination'),
       tc: cost, cap: trip ? Number(r.truck_capacity_kg) || null : null, ctype, sp: spName(r.agent_name),
-      bkt, lapse, reason, err: { inc: r.delivery_outcome === 'partial', ret: r.delivery_outcome === 'returned', brk: Number(r.issue_count) > 0, vio: false, late: bkt != null && bkt >= 2 },
-      sales: r.order_value == null ? null : Number(r.order_value), release: r.job_type || '' };
+      bkt, lapse, reason, outAt, outSrc, ticket: tr?.ticket_no || null, target: trip && t ? tripTarget(t, r.scheduled_date, r.trip_no || 1, tr, firstTrip[r.truck_id + '|' + r.scheduled_date]) : null,
+      err: { inc: r.delivery_outcome === 'partial', ret: r.delivery_outcome === 'returned', vio: itypes.includes('traffic_violation'),
+        brk: itypes.some(x => x === 'breakdown' || x === 'accident') || (Number(r.issue_count) > 0 && !itypes.length),
+        oth: itypes.some(x => OTHER_ISSUES.includes(x)), late: bkt != null && bkt >= 2 },
+      sales: r.order_value == null ? null : Number(r.order_value), release: r.job_type || '', status: r.status,
+      cbm: boardsCbm(r.board_pcs), docs: (r.doc_refs || []).map(x => x.ref).filter(x => x && x.toUpperCase() !== String(r.quotation_serial || '').toUpperCase()).join(', '),
+      hasRun: r.run_alloc > 0, uses_trip_rates: r.uses_trip_rates, fleetType: r.fleet_type };
   });
 }
 
@@ -3715,13 +3777,18 @@ function lrAgg(recs, ctx){
     const fleet = fleets.length ? sum(fleets, m => m.fleet_capacity_kg) : fleetFallbackKg();
     capDen += fleet * mDays;
     ms.filter(m => m.capacity_target != null).forEach(m => { capTgtSum += Number(m.capacity_target); capTgtN++; });
-    const cb = ms.filter(m => m.total_cbm != null && m.delivered_cbm != null);
-    if (cb.length){ cbmD += sum(cb, m => m.delivered_cbm) * Math.min(1, cover); cbmT += sum(cb, m => m.total_cbm) * Math.min(1, cover); cbmN++; }
+    const cb = ms.filter(m => m.total_cbm != null);
+    if (cb.length){
+      const entered = cb.filter(m => m.delivered_cbm != null);
+      const appCbm = sum(recs.filter(r => r.date.startsWith(ym) && r.cbm), r => r.cbm);   // HATID: board volume of delivered orders
+      cbmD += entered.length ? sum(entered, m => m.delivered_cbm) * Math.min(1, cover) : appCbm;
+      cbmT += sum(cb, m => m.total_cbm) * Math.min(1, cover); cbmN++;
+    }
   });
   const allSalesMonths = months.length > 0 && salesMonths === months.length;
   return {
     recs, orders: recs.length, trips: trips.length, customers: new Set(recs.map(r => custKey(r.customer)).filter(Boolean)).size,
-    kg, days: days.size, avgDailyKg: days.size ? kg / days.size : null, kgPerTrip: trips.length ? kg / trips.length : null,
+    kg, cbm: sum(recs, r => r.cbm || 0), days: days.size, avgDailyKg: days.size ? kg / days.size : null, kgPerTrip: trips.length ? kg / trips.length : null,
     tc, tcPerTrip: tc != null && trips.length ? tc / trips.length : null, tcPerKg: tc != null && kg ? tc / kg : null,
     sales, salesOrders: salesRecs.length, tcPctDelivered: sales && tcOnSales != null ? tcOnSales / sales : null,
     totalSales: allSalesMonths && ctx.companyWide && ctx.salesOk !== false ? totalSales : null,
@@ -3863,8 +3930,8 @@ async function loadReports(){
     state.reportRows = pick(cur.rows);
     state.reportFleet = cur;
     state.lr = { from, to, cmp, co, monthly,
-      recs: pick([...histRecords(hist), ...jobRecords(cur.rows, histTypes)]),
-      prevRecs: cmp ? pick([...histRecords(histPrev), ...jobRecords(prev.rows, histTypes)]) : null,
+      recs: pick([...histRecords(hist), ...jobRecords(cur.rows, histTypes, cur.trips)]),
+      prevRecs: cmp ? pick([...histRecords(histPrev), ...jobRecords(prev.rows, histTypes, prev.trips)]) : null,
       histRows: hist.length };
   } catch { $('rp-body').style.opacity = 1; return; }
   $('rp-body').style.opacity = 1;
@@ -3949,6 +4016,7 @@ function renderLrOverview(body, V){
         ${kpi2('OTIF', pct1(A.otif), { delta: d('otif', true, 'pts'), sub: `${fmtN(A.errOrders)} of ${fmtN(A.orders)} orders had an error` })}
         ${A.volRate != null ? kpi2('Dispatched volume', pct(A.volRate), { delta: d('volRate', true, 'pts'), sub: 'delivered CBM ÷ total sales CBM' }) : ''}
       </div></div>
+    ${lrReadiness(V)}
     <div class="card pad rp-sec"><div class="chart-h"><div><h3>What the numbers say</h3><div class="ft">Automatic analysis of this period${B ? ' ' + esc(lbl) : ''} — read with the notes on data coverage</div></div></div>
       ${ins.length ? `<ul class="insights">${ins.map(x => `<li><span class="ic ${x.c}" aria-hidden="true">${esc(x.i)}</span><div><div>${x.t}</div>${x.s ? `<div class="ft">${x.s}</div>` : ''}</div></li>`).join('')}</ul>` : '<div class="muted">Not enough data for analysis yet.</div>'}
     </div>
@@ -3988,6 +4056,33 @@ function lrCoverageNotes(V){
   if (canSeeCosts() && V.A.tcPctSales == null && V.ctx.companyWide) notes.push('Total sales are missing for some months in this period, so TC % uses the value of delivered orders instead. Add them in Monthly figures.');
   if (V.L.co === '' && r.some(x => x.src === 'excel')) notes.push('The Excel history covers the company it was imported for; HATID data covers every company you can see.');
   return notes.length ? `<div class="note">${notes.map(esc).join('<br>')}</div>` : '';
+}
+
+/* ----- Report readiness: what HATID records are still missing for this period (so the report can come from the app alone) ----- */
+function lrReadiness(V){
+  const h = V.recs.filter(r => r.src === 'hatid'); if (!h.length) return '';
+  const cost = canSeeCosts(), trips = h.filter(r => r.trip), items = [];
+  const add = (n, total, what, fix) => items.push({ n, total, what, fix });
+  add(trips.filter(t => !t.outAt).length, trips.length, 'trips with no departure time', 'Trip sheet › “Trip N departed”, or connect the truck’s tracker so HATID records when it leaves the Home Base');
+  add(trips.filter(t => !t.target).length, trips.length, 'trips with no target departure time', 'Trip sheet › “Leave by” for 2nd and later trips (trip 1 uses the pool’s leave-by time)');
+  add(trips.filter(t => t.bkt != null && t.bkt >= 2 && !t.reason).length, trips.filter(t => t.bkt != null && t.bkt >= 2).length, 'late trips with no reason', 'Asked when “Trip departed” is pressed late; for GPS departures, pick it on the trip sheet');
+  add(h.filter(r => !r.kg).length, h.length, 'deliveries with no weight', 'Job › boards and other items, or the DR weights in Document references');
+  add(h.filter(r => !r.sp).length, h.length, 'deliveries with no salesperson', 'Job › client contact › Sales agent (add missing agents in Fleet › Agents & alerts)');
+  add(h.filter(r => r.status === 'completed' && !r.docs).length, h.filter(r => r.status === 'completed').length, 'completed deliveries with no DR / SI no.', 'Driver enters it with the delivery result, or Job › Document references');
+  if (cost){
+    add(h.filter(r => !(r.sales > 0)).length, h.length, 'deliveries with no order value', 'Job › Order value (filled from the Odoo ticket)');
+    const noRun = [...new Set(h.filter(r => ['company_owned', 'borrowed'].includes(r.fleetType) && !r.uses_trip_rates && !r.hasRun).map(r => r.truckName))];
+    add(noRun.length, [...new Set(h.filter(r => ['company_owned', 'borrowed'].includes(r.fleetType) && !r.uses_trip_rates).map(r => r.truckName))].length, `company-run trucks with no running cost${noRun.length ? ' (' + noRun.join(', ') + ')' : ''}`, 'Fleet › Trucks › Edit › Running cost (crew per day, fixed per month)');
+    add(trips.filter(t => !t.tc).length, trips.length, 'trips with no transport cost yet', 'Trip rates for the destination (Fleet › Areas & rates), or fuel / maintenance / running cost for company trucks');
+    const miss = monthsIn(V.L.from, V.L.to).filter(ym => !(V.L.monthly || []).some(m => m.month.startsWith(ym) && m.total_sales != null && (!V.L.co || m.company === V.L.co)));
+    add(miss.length, monthsIn(V.L.from, V.L.to).length, `months with no total sales${miss.length ? ' (' + miss.map(m => new Date(m + '-01T00:00:00').toLocaleDateString('en-PH', { month:'short', year:'numeric' })).join(', ') + ')' : ''}`, 'Reports › Monthly figures (needed for TC % of sales)');
+  }
+  const gps = trips.filter(t => t.outSrc === 'gps').length;
+  const gaps = items.filter(x => x.n > 0), ok = items.filter(x => !x.n && x.total);
+  return `<details class="card pad rp-sec" ${gaps.length ? 'open' : ''}><summary style="cursor:pointer"><h3 style="display:inline">Report readiness</h3>
+      <span class="ft"> — ${gaps.length ? `${gaps.length} thing${gaps.length > 1 ? 's' : ''} missing in HATID for this period` : 'HATID has everything this report needs for this period'} · departure times from GPS on ${gps} of ${trips.length} trips</span></summary>
+    <ul class="insights" style="margin-top:10px">${gaps.map(x => `<li><span class="ic warn" aria-hidden="true">!</span><div><div><b>${fmtN(x.n)}</b>${x.total ? ` of ${fmtN(x.total)}` : ''} ${esc(x.what)}</div><div class="ft">Fix: ${esc(x.fix)}</div></div></li>`).join('')}
+      ${ok.length ? `<li><span class="ic good" aria-hidden="true">✓</span><div><div>Complete: ${ok.map(x => esc(x.what.replace(/^(trips|deliveries|completed deliveries|late trips|company-run trucks|months) with no /, '').replace(/ \(.*\)$/, ''))).join(' · ')}</div></div></li>` : ''}</ul></details>`;
 }
 
 /* ----- Analysis: plain-language findings, most important first ----- */
@@ -4494,6 +4589,7 @@ function exportCsv(){
   const cols = [['date','Delivery date'],['src','Source',r => r.src === 'hatid' ? 'HATID' : 'Excel'],['company','Company'],['so','SO / reference'],['customer','Customer'],['ctype','Customer category',r => CUST_CAT[r.ctype] || ''],
     ['sp','Salesperson'],['truckName','Truck'],['cat','Truck type',r => TRUCK_CAT[r.cat] || ''],['province','Province'],['muni','City / municipality'],['region','Region'],
     ['trip','Trip count'],['kg','Weight kg'],['cap','Truck capacity kg'],...(cost ? [['tc','Transport cost'],['sales','Order value']] : []),
+    ['ticket','Trip ticket'],['target','Target departure'],['outAt','Departed',r => r.outAt ? hmManila(r.outAt) + (r.outSrc === 'gps' ? ' (GPS)' : '') : ''],['docs','DR / SI no.'],['cbm','CBM',r => r.cbm ? r.cbm.toFixed(3) : ''],
     ['lapse','Dispatch minutes vs target'],['bkt','Dispatch',r => r.bkt == null ? '' : DISPATCH_BUCKETS[r.bkt]],['reason','Late reason',r => LATE_DISPATCH[r.reason] || r.reason || ''],
     ['err','Errors',r => Object.keys(ERR_TYPES).filter(k => r.err[k]).map(k => ERR_TYPES[k]).join('; ')]];
   csvDownload(cols, recs, `hatid-logistics_${$('rp-from').value}_to_${$('rp-to').value}.csv`);
@@ -4639,11 +4735,20 @@ async function openTripSheet(date, truckId = ''){
       <label class="f no-print">Truck<select class="i" id="ts-truck"><option value="">All trucks</option></select></label>
       <div id="ts-body"><div class="muted"><span class="spin"></span></div></div></div></div>`);
   bindClose();
-  $('ts-print').addEventListener('click', () => window.print());
+  $('ts-print').addEventListener('click', async () => {
+    // printed trip sheets carry their trip ticket numbers
+    const keys = [...document.querySelectorAll('[data-tk]')].filter(el => !el.dataset.no).map(el => el.dataset.tk.split('|'));
+    if (keys.length && !state.me.role.match(/viewer|field/)){ try { for (const [tid, n] of keys) await sb.rpc('job_trip_update', { p_date: date, p_truck: tid, p_trip: +n, p_patch: {} }); } catch {}
+      await openTripSheet(date, truckId); }
+    window.print();
+  });
   $('ts-date').addEventListener('change', e => openTripSheet(e.target.value, $('ts-truck').value));
-  let jobs;
+  let jobs, tripRows = [];
   try { ({ data: jobs } = await withRetry('Loading trip sheet', () => sb.from('jobs').select('*').eq('scheduled_date', date).not('truck_id', 'is', null)
       .in('status', ['scheduled','dispatched','in_progress','completed','issue']).order('created_at'))); } catch { $('ts-body').innerHTML = '<div class="card empty">Could not load the trip sheet.</div>'; return; }
+  try { const { data } = await sb.from('job_trips').select('*').eq('trip_date', date); tripRows = Array.isArray(data) ? data : []; } catch {}
+  const tripRow = (tid, n) => tripRows.find(r => r.truck_id === tid && r.trip_no === +n);
+  const office = ['admin', 'manager', 'dispatcher'].includes(state.me.role);
   const trucks = [...new Set(jobs.map(j => j.truck_id))].map(id => state.ref.truckById[id]).filter(Boolean).sort((a, b) => a.label.localeCompare(b.label));
   $('ts-truck').innerHTML = '<option value="">All trucks</option>' + trucks.map(t => `<option value="${esc(t.id)}" ${t.id === truckId ? 'selected' : ''}>${esc(t.label)}</option>`).join('');
   $('ts-truck').onchange = e => openTripSheet(date, e.target.value);
@@ -4660,9 +4765,12 @@ async function openTripSheet(date, truckId = ''){
       ${trips.map(n => {
         const stops = tj.filter(j => (j.trip_no || 1) === n).sort((a, b) => km(a) - km(b) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
         const w = sum(stops, j => j.estimated_weight_kg), pcs = sum(stops, j => boardsPcs(j.board_pcs)), loaded = stops.filter(j => j.loaded_at).length;
-        const waiting = stops.filter(j => j.status === 'scheduled');
+        const waiting = stops.filter(j => j.status === 'scheduled'), tr = tripRow(t.id, n), tg = tripTarget(t, date, n, tr, trips[0]);
+        const out = tr?.gps_left_at || tr?.departed_at, lateBy = out && tg ? minsOf(hmManila(out)) - minsOf(tg) : null;
         return `<div class="ts-trip">
-          <div class="ts-trip-h"><div><b>Trip ${n}</b> <span class="ft">· ${stops.length} stop${stops.length > 1 ? 's' : ''} · ${Math.round(w).toLocaleString('en-PH')} / ${Number(t.max_weight_kg).toLocaleString('en-PH')} kg · ${pcs} boards · loaded <span data-lc="${esc(t.id)}|${n}">${loaded}</span>/${stops.length}</span></div>
+          <div class="ts-trip-h"><div><b>Trip ${n}</b>${tr?.ticket_no ? ` <span class="mono" data-tk="${esc(t.id)}|${n}" data-no="1">#${esc(tr.ticket_no)}</span>` : `<span data-tk="${esc(t.id)}|${n}"></span>`} <span class="ft">· ${stops.length} stop${stops.length > 1 ? 's' : ''} · ${Math.round(w).toLocaleString('en-PH')} / ${Number(t.max_weight_kg).toLocaleString('en-PH')} kg · ${pcs} boards · loaded <span data-lc="${esc(t.id)}|${n}">${loaded}</span>/${stops.length}</span>
+              <div class="ft" style="margin-top:3px">Leave by ${office && !out ? `<input class="i no-print" type="time" style="width:auto;display:inline-block;padding:2px 6px" data-tgt="${esc(t.id)}|${n}" value="${esc(tg || '')}" aria-label="Trip ${n} target departure"><span class="print-only">${tg ? fmtHM(tg) : '—'}</span>` : `<b>${tg ? fmtHM(tg) : '—'}</b>`}
+                ${out ? ` · <b>left ${fmtHM(hmManila(out))}</b>${tr?.gps_left_at ? ' (GPS)' : ''}${lateBy != null ? (lateBy > DISPATCH_GRACE ? ` <span style="color:var(--bad)">${lateBy} min late${tr?.late_reason ? ' — ' + esc(LATE_DISPATCH[tr.late_reason]) : ''}</span>${!tr?.late_reason && office ? ` <select class="i no-print" style="width:auto;display:inline-block;padding:2px 6px" data-lr="${esc(t.id)}|${n}" aria-label="Reason trip ${n} left late"><option value="">Why late? — pick a reason</option>${Object.entries(LATE_DISPATCH).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>` : ''}` : ' <span style="color:var(--ok)">on time</span>') : ''}${tr?.gps_back_at ? ` · back ${fmtHM(hmManila(tr.gps_back_at))} (GPS)` : ''}` : ''}</div></div>
             ${waiting.length ? `<button class="btn primary no-print" data-depart="${esc(t.id)}|${n}">Trip ${n} departed</button>` : ''}</div>
           ${stops.map((j, i) => `<div class="stop">
             <span class="no">${i + 1}</span>
@@ -4688,13 +4796,24 @@ async function openTripSheet(date, truckId = ''){
     } catch { c.checked = !c.checked; }
     c.disabled = false;
   }));
+  document.querySelectorAll('[data-lr]').forEach(sel => sel.addEventListener('change', async () => {
+    if (!sel.value) return; const [tid, n] = sel.dataset.lr.split('|'); sel.disabled = true;
+    try { await withRetry('Saving reason', () => sb.rpc('job_trip_update', { p_date: date, p_truck: tid, p_trip: +n, p_patch: { late_reason: sel.value } }), 1); toast('Late reason saved', 'ok'); openTripSheet(date, truckId); }
+    catch { sel.disabled = false; }
+  }));
+  document.querySelectorAll('[data-tgt]').forEach(inp => inp.addEventListener('change', async () => {
+    const [tid, n] = inp.dataset.tgt.split('|'); inp.disabled = true;
+    try { await withRetry('Saving target time', () => sb.rpc('job_trip_update', { p_date: date, p_truck: tid, p_trip: +n, p_patch: { target_time: inp.value || '' } }), 1); toast(`Trip ${n}: leave by ${inp.value ? fmtHM(inp.value) : '—'}`, 'ok'); openTripSheet(date, truckId); }
+    catch { inp.disabled = false; }
+  }));
   document.querySelectorAll('[data-depart]').forEach(b => b.addEventListener('click', async () => {
     const [tid, n] = b.dataset.depart.split('|'), t = state.ref.truckById[tid];
     const stops = jobs.filter(j => j.truck_id === tid && (j.trip_no || 1) === +n && j.status === 'scheduled');
-    const tgt = dispatchTarget(t, date), now = hmManila(Date.now());
-    // Only a truck's first departure of the day is measured against the target (on-time dispatch)
-    const firstOut = !jobs.some(j => j.truck_id === tid && (j.dispatched_at || ['dispatched','in_progress','completed','issue'].includes(j.status))) && +n === Math.min(...jobs.filter(j => j.truck_id === tid).map(j => j.trip_no || 1));
-    const late = firstOut && date === localDate() && minsOf(now) - minsOf(tgt.hm) > DISPATCH_GRACE;
+    const truckTrips = [...new Set(jobs.filter(j => j.truck_id === tid).map(j => j.trip_no || 1))].sort((a, b) => a - b);
+    const tg = tripTarget(t, date, +n, tripRow(tid, n), truckTrips[0]), now = hmManila(Date.now());
+    const tgt = { hm: tg };
+    // Every trip with a target time is measured (on-time dispatch); trip 1 defaults to the pool's leave-by time
+    const late = !!tg && date === localDate() && minsOf(now) - minsOf(tg) > DISPATCH_GRACE;
     const go = async reason => {
       const notLoaded = stops.filter(j => !j.loaded_at).length;
       if (notLoaded && !confirm(`${notLoaded} stop${notLoaded > 1 ? 's are' : ' is'} not ticked as loaded. Mark the trip departed anyway?`)) return;
@@ -4704,6 +4823,7 @@ async function openTripSheet(date, truckId = ''){
           await withRetry('Updating job', () => sb.from('jobs').update({ status: 'dispatched' }).eq('id', j.id));
           await logEvent(j.id, 'dispatched', `Trip ${n} departed${late ? ` at ${fmtHM(now)} — ${minsOf(now) - minsOf(tgt.hm)} min after the ${fmtHM(tgt.hm)} target (${LATE_DISPATCH[reason] || 'no reason'})` : ''}`, reason ? { delay_reason: reason } : undefined);
         }
+        try { await sb.rpc('job_trip_update', { p_date: date, p_truck: tid, p_trip: +n, p_patch: { departed: true, ...(reason ? { late_reason: reason } : {}) } }); } catch {}
         toast(`Trip ${n} marked departed`, 'ok'); openTripSheet(date, truckId);
       } catch { b.disabled = false; }
     };
@@ -4729,7 +4849,8 @@ function outcomeFormHtml(job, p){
     <div id="${p}-rcv" class="hidden">${lines.length ? `<div class="ft" style="margin-top:8px">How many did the client accept? The rest comes back to the plant.</div>
       <div class="rcv">${lines.map(x => `<span>${esc(x.label)} <span class="ft">of ${x.qty}</span></span><input class="i" type="number" min="0" max="${x.qty}" step="1" inputmode="numeric" data-rk="${x.k}" value="${x.qty}" aria-label="${esc(x.label)} accepted">`).join('')}</div>`
       : '<div class="ft" style="margin-top:6px">No item list on this job — write what came back in the notes.</div>'}</div>
-    <label class="f" style="margin-top:8px">Received by<input class="i" id="${p}-rby" placeholder="Name of the person who received"></label>`;
+    <label class="f" style="margin-top:8px">Received by<input class="i" id="${p}-rby" placeholder="Name of the person who received"></label>
+    <label class="f" style="margin-top:8px">DR / SI no. <span class="ft">— from the signed delivery receipt</span><input class="i" id="${p}-dr" placeholder="e.g. DR 012345" autocomplete="off"></label>`;
 }
 function bindOutcome(p){
   document.querySelectorAll(`[name="${p}-oc"]`).forEach(r => r.addEventListener('change', () => $(`${p}-rcv`).classList.toggle('hidden', r.value !== 'partial' || !r.checked)));
@@ -4745,7 +4866,7 @@ function readOutcome(job, p){
   });
   if (v === 'partial' && lines.length && lines.every(x => (x.g != null ? rec.boards[x.g] : rec.items[x.i]) === x.qty))
     return { error: 'Every quantity is full — choose “All received”, or lower what the client accepted.' };
-  return { outcome: v, received: rec, received_by_name: $(`${p}-rby`)?.value.trim() || null };
+  return { outcome: v, received: rec, received_by_name: $(`${p}-rby`)?.value.trim() || null, dr: ($(`${p}-dr`)?.value || '').trim().toUpperCase() || null };
 }
 function returnedList(job){
   if (!job.received || !job.delivery_outcome || job.delivery_outcome === 'full') return [];
@@ -4771,7 +4892,12 @@ function siteLink(lat, lon, label = 'Open in Maps'){ return `<a target="_blank" 
 async function completeJob(job, oc, notes, extra = {}){
   // a precise delivery geotag becomes the job's exact site (used for pins, and for the next delivery to this address)
   const site = extra.lat != null && (extra.accuracy_m || 0) <= 150 ? { site_lat: extra.lat, site_lon: extra.lon, site_source: 'delivered', site_accuracy_m: extra.accuracy_m, site_at: new Date().toISOString() } : {};
-  await withRetry('Updating job', () => sb.from('jobs').update({ status: 'completed', delivery_outcome: oc.outcome, received: oc.received, received_by_name: oc.received_by_name, ...site }).eq('id', job.id));
+  let refs = {};
+  if (oc.dr){   // add the DR / SI number to the job's document references (kept with the SO)
+    try { const { data } = await sb.from('jobs').select('doc_refs').eq('id', job.id).single(); const cur = Array.isArray(data?.doc_refs) ? data.doc_refs : [];
+      if (!cur.some(r => String(r.ref || '').toUpperCase() === oc.dr)) refs = { doc_refs: [...cur, { ref: oc.dr, remarks: 'Delivery receipt' }] }; } catch {}
+  }
+  await withRetry('Updating job', () => sb.from('jobs').update({ status: 'completed', delivery_outcome: oc.outcome, received: oc.received, received_by_name: oc.received_by_name, ...site, ...refs }).eq('id', job.id));
   await logEvent(job.id, 'completed', [outcomeNote(job, oc), notes].filter(Boolean).join('\n'), extra);
 }
 function openCompleteModal(job){
