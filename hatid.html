@@ -2408,13 +2408,32 @@ async function loadField(){
   } catch { $('fd-list').innerHTML = '<div class="empty">Could not load jobs.</div>'; return; }
   const order = { in_progress:0, dispatched:1, issue:2, scheduled:3, completed:4 };
   data.sort((a, b) => order[a.status] - order[b.status]);
-  $('fd-list').innerHTML = data.length ? data.map(j => `
+  const myTruck = state.me.role === 'field' && date >= localDate() ? await myTruckCardHtml(date, data) : '';
+  $('fd-list').innerHTML = myTruck + (data.length ? data.map(j => `
     <button class="card fjob" data-id="${esc(j.id)}">
       <div class="l1"><span class="client">${esc(j.client_name || j.quotation_serial)}</span>${pill(j.status)}</div>
       <div class="addr">${esc(j.address || 'No address on file')}</div>
       <div class="meta"><span class="mono">${esc(j.quotation_serial)}</span><span>${esc(j.job_type || '')}</span><span>${kg(j.estimated_weight_kg)}</span><span>${j.trucks ? esc(j.trucks.label) : 'No truck'}${j.trip_no ? ' · trip ' + j.trip_no : ''}</span>${j.loaded_at ? '<span style="color:var(--ok)">✓ loaded</span>' : ''}${j.delivery_outcome && j.delivery_outcome !== 'full' ? `<span class="tag bad">${esc(OUTCOME_LABEL[j.delivery_outcome])}</span>` : ''}</div>
-    </button>`).join('') : '<div class="card empty">No jobs scheduled for this day.</div>';
+    </button>`).join('') : '<div class="card empty">No jobs scheduled for this day.</div>');
   document.querySelectorAll('.fjob').forEach(b => b.addEventListener('click', () => openFieldJob(b.dataset.id)));
+  $('mt-sel')?.addEventListener('change', async e => {
+    const v = e.target.value; e.target.disabled = true;
+    try { await withRetry('Saving your truck', () => sb.rpc('job_truck_driver_set', { p_day: date, p_truck: v || null, p_staff: null }), 1);
+      toast(v ? `You're on ${state.ref.truckById[v]?.label || 'that truck'} today` : 'Truck cleared', 'ok'); loadField(); } catch { e.target.disabled = false; }
+  });
+}
+
+/* Driver: which truck am I on today — links this phone's tracker to the truck, so its departure is timed by GPS from the first minute */
+async function myTruckCardHtml(date, jobs){
+  let mine = null;
+  try { const { data } = await sb.from('job_truck_drivers').select('truck_id').eq('day', date).eq('staff_id', state.me.id).maybeSingle(); mine = data?.truck_id || null; } catch {}
+  const ids = [...new Set([...jobs.map(j => j.truck_id).filter(Boolean), ...(mine ? [mine] : [])])];
+  const opts = ids.map(id => state.ref.truckById[id]).filter(Boolean);
+  if (!opts.length) return '';
+  return `<div class="card" style="padding:14px;margin-bottom:10px;${mine ? '' : 'border-left:4px solid var(--warn)'}">
+    <label class="f" style="color:var(--ink);font-weight:600">🚚 My truck ${date === localDate() ? 'today' : 'on ' + fmtDate(date).replace(/<[^>]+>/g, '')}
+      <select class="i" id="mt-sel"><option value="">— Choose your truck —</option>${opts.map(t => `<option value="${esc(t.id)}" ${t.id === mine ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></label>
+    <div class="ft" style="margin-top:4px">${mine ? 'Your phone times this truck’s trips from the moment it leaves the base — keep Traccar Client on and the phone charged.' : 'Pick it before you leave the base, so your phone’s GPS records the departure time.'}</div></div>`;
 }
 
 async function openFieldJob(id){
@@ -3424,7 +3443,8 @@ async function loadDash(){
         if (mins != null && mins <= 15) return;
         seenT.add(d.truck_id);
         const t = state.ref.truckById[d.truck_id];
-        items.unshift({ c:'bad', i:'📍', t:`${t?.label || 'Truck'} · tracker silent`, s: `${fresh ? `No GPS signal for ${mins >= 90 ? Math.round(mins / 60) + ' h' : mins + ' min'} (last ${fmtTime(fresh)}${d.last_battery != null ? `, battery ${Math.round(d.last_battery)}%` : ''})` : 'No GPS signal yet today'} — ${open.length} delivery${open.length > 1 ? ' stops' : ''} today. Check the in-truck phone: charged, Traccar running, location on.`, job: open[0].id });
+        const who = trk.find(x => x.truck_id === d.truck_id && x.kind === 'driver')?.driver_name;
+        items.unshift({ c:'bad', i:'📍', t:`${t?.label || 'Truck'} · tracker silent${who ? ` (${who}’s phone)` : ''}`, s: `${fresh ? `No GPS signal for ${mins >= 90 ? Math.round(mins / 60) + ' h' : mins + ' min'} (last ${fmtTime(fresh)}${d.last_battery != null ? `, battery ${Math.round(d.last_battery)}%` : ''})` : 'No GPS signal yet today'} — ${open.length} delivery${open.length > 1 ? ' stops' : ''} today. Check the ${who ? 'driver’s' : 'in-truck'} phone: charged, Traccar running, location on.`, job: open[0].id });
       });
     }
   } catch {}
@@ -4086,9 +4106,9 @@ function lrReadiness(V){
   const h = V.recs.filter(r => r.src === 'hatid'); if (!h.length) return '';
   const cost = canSeeCosts(), trips = h.filter(r => r.trip), items = [];
   const add = (n, total, what, fix) => items.push({ n, total, what, fix });
-  add(trips.filter(t => !t.outAt && t.tracked).length, trips.filter(t => t.tracked).length, 'trips on tracked trucks with no GPS departure', 'Check the in-truck phone: charged, Traccar running, location on — and the Home Base pin on the gate (Map)');
-  add(trips.filter(t => !t.outAt && !t.tracked).length, trips.filter(t => !t.tracked).length, 'trips with no departure time', 'Mount a dedicated tracker phone in the truck (Fleet › Trucks › 📍 Tracker); until then, “Trip N departed” on the trip sheet');
-  add(trips.filter(t => t.outSrc === 'manual').length, trips.length, 'trips timed only by the button (not verified)', 'Mount a dedicated tracker phone in each truck — Fleet › Trucks › 📍 Tracker');
+  add(trips.filter(t => !t.outAt && t.tracked).length, trips.filter(t => t.tracked).length, 'trips on tracked trucks with no GPS departure', 'Check the driver’s phone: charged, Traccar Client on, location on — and the Home Base pin on the gate (Map)');
+  add(trips.filter(t => !t.outAt && !t.tracked).length, trips.filter(t => !t.tracked).length, 'trips with no departure time', 'Set the driver on the trip sheet (or the driver picks “My truck today” in Field) with Traccar Client on their phone; until then, “Trip N departed”');
+  add(trips.filter(t => t.outSrc === 'manual').length, trips.length, 'trips timed only by the button (not verified)', 'Drivers set up Traccar Client once (HATID › Field) and pick “My truck today” each morning');
   add(trips.filter(t => t.earlyTap != null && t.earlyTap > DISPATCH_GRACE).length, trips.filter(t => t.earlyTap != null).length, 'trips where “departed” was tapped before the truck actually left', 'Dispatch & OTIF › Late dispatch by truck shows which trucks; GPS time is what counts');
   add(trips.filter(t => !t.target).length, trips.length, 'trips with no target departure time', 'Trip sheet › “Leave by” for 2nd and later trips (trip 1 uses the pool’s leave-by time)');
   add(trips.filter(t => t.bkt != null && t.bkt >= 2 && !t.reason).length, trips.filter(t => t.bkt != null && t.bkt >= 2).length, 'late trips with no reason', 'Asked when “Trip departed” is pressed late; for GPS departures, pick it on the trip sheet');
@@ -4244,7 +4264,7 @@ function renderLrDispatch(body, V){
     <div class="card pad rp-sec"><h3>Dispatch & OTIF</h3><div class="ft" style="margin-bottom:10px">Departure vs target time per trip, and orders delivered without an error</div>
       <div class="kpis">
         ${kpi2('On-time dispatch (OTS)', pct(A.onTimeDisp), { delta: B ? deltaHtml(A.onTimeDisp, B.onTimeDisp, true, 'pts', V.cmpLabel) : '', sub: `${fmtN(A.dispTrips)} trips timed` })}
-        ${kpi2('GPS-verified on-time', pct(A.onTimeGps), { sub: A.dispGps ? `${fmtN(A.dispGps)} trips timed by the truck’s GPS · ${fmtN(A.dispManual)} by button only` : 'No GPS-timed trips yet — mount a phone in each truck' })}
+        ${kpi2('GPS-verified on-time', pct(A.onTimeGps), { sub: A.dispGps ? `${fmtN(A.dispGps)} trips timed by the truck’s GPS · ${fmtN(A.dispManual)} by button only` : 'No GPS-timed trips yet — drivers set up Traccar Client and pick “My truck today”' })}
         ${kpi2('Tapped “departed” early', fmtN(A.earlyTaps), { sub: A.earlyTaps ? `the truck left ${fmtN(A.earlyTapAvg)} min later on average` : 'button matches the GPS', cls: A.earlyTaps ? 'up-bad' : '' })}
         ${kpi2('Late trips', fmtN(A.lateTrips), { delta: B ? deltaHtml(A.lateTrips, B.lateTrips, false, 'rel', V.cmpLabel) : '', sub: `more than ${DISPATCH_GRACE} min after target` })}
         ${kpi2('Average delay when late', avgLate == null ? '—' : fmtN(avgLate) + ' min')}
@@ -4774,12 +4794,14 @@ async function openTripSheet(date, truckId = ''){
   let jobs, tripRows = [];
   try { ({ data: jobs } = await withRetry('Loading trip sheet', () => sb.from('jobs').select('*').eq('scheduled_date', date).not('truck_id', 'is', null)
       .in('status', ['scheduled','dispatched','in_progress','completed','issue']).order('created_at'))); } catch { $('ts-body').innerHTML = '<div class="card empty">Could not load the trip sheet.</div>'; return; }
+  const office = ['admin', 'manager', 'dispatcher'].includes(state.me.role);
   try { const { data } = await sb.from('job_trips').select('*').eq('trip_date', date); tripRows = Array.isArray(data) ? data : []; } catch {}
-  let trackers = [];
+  let trackers = [], drivers = [], fieldStaff = [];
   try { const { data } = await sb.rpc('job_tracker_status'); trackers = Array.isArray(data) ? data : []; } catch {}
+  try { const { data } = await sb.from('job_truck_drivers').select('*').eq('day', date); drivers = Array.isArray(data) ? data : []; } catch {}
+  if (office) try { const { data } = await sb.rpc('job_field_staff'); fieldStaff = Array.isArray(data) ? data : []; } catch {}
   const isTracked = tid => trackers.some(x => x.truck_id === tid);
   const tripRow = (tid, n) => tripRows.find(r => r.truck_id === tid && r.trip_no === +n);
-  const office = ['admin', 'manager', 'dispatcher'].includes(state.me.role);
   const trucks = [...new Set(jobs.map(j => j.truck_id))].map(id => state.ref.truckById[id]).filter(Boolean).sort((a, b) => a.label.localeCompare(b.label));
   $('ts-truck').innerHTML = '<option value="">All trucks</option>' + trucks.map(t => `<option value="${esc(t.id)}" ${t.id === truckId ? 'selected' : ''}>${esc(t.label)}</option>`).join('');
   $('ts-truck').onchange = e => openTripSheet(date, e.target.value);
@@ -4792,6 +4814,10 @@ async function openTripSheet(date, truckId = ''){
     return `<div class="card ts-truck">
       <div class="pool-h"><div><h3>${esc(t.label)}</h3><div class="ft">${esc([t.operator_name, FLEET_LABEL[t.fleet_type], t.powertrain !== 'diesel' ? POWERTRAIN[t.powertrain] : ''].filter(Boolean).join(' · '))}
         · leave by <b>${fmtHM(tgt.hm)}</b>${tgt.coded ? ' (coded today)' : ''}</div>
+        ${(() => { const drv = drivers.filter(x => x.truck_id === t.id).map(x => x.staff_id), dtr = trackers.filter(x => x.truck_id === t.id && x.kind === 'driver');
+          const names = drv.map(id => fieldStaff.find(f => f.id === id)?.name || dtr.find(x => x)?.driver_name || 'Driver');
+          return `<div class="ft">Driver: ${office ? `<select class="i no-print" style="width:auto;display:inline-block;padding:2px 6px" data-drv="${esc(t.id)}" aria-label="Driver of ${esc(t.label)}"><option value="">— not set —</option>${fieldStaff.map(f => `<option value="${esc(f.id)}" ${drv.includes(f.id) ? 'selected' : ''}>${esc(f.name || 'Driver')}</option>`).join('')}</select><span class="print-only">${esc(names.join(', ') || '—')}</span>` : `<b>${esc(names.join(', ') || '—')}</b>`}
+            ${drv.length && !dtr.length && !trackers.some(x => x.truck_id === t.id) ? ' <span style="color:var(--warn)">— driver’s phone tracker not set up (Field › Get Traccar Client)</span>' : ''}</div>`; })()}
         ${cw ? `<div class="ft" style="color:var(--warn)">⛔ ${esc(cw)}</div>` : ''}${av ? `<div class="ft" style="color:var(--bad)">Marked unavailable: ${esc(AVAIL_REASON[av.reason])}${av.note ? ' — ' + esc(av.note) : ''}</div>` : ''}</div></div>
       ${trips.map(n => {
         const stops = tj.filter(j => (j.trip_no || 1) === n).sort((a, b) => km(a) - km(b) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
@@ -4804,7 +4830,7 @@ async function openTripSheet(date, truckId = ''){
           <div class="ts-trip-h"><div><b>Trip ${n}</b>${tr?.ticket_no ? ` <span class="mono" data-tk="${esc(t.id)}|${n}" data-no="1">#${esc(tr.ticket_no)}</span>` : `<span data-tk="${esc(t.id)}|${n}"></span>`} <span class="ft">· ${stops.length} stop${stops.length > 1 ? 's' : ''} · ${Math.round(w).toLocaleString('en-PH')} / ${Number(t.max_weight_kg).toLocaleString('en-PH')} kg · ${pcs} boards · loaded <span data-lc="${esc(t.id)}|${n}">${loaded}</span>/${stops.length}</span>
               <div class="ft" style="margin-top:3px">Leave by ${office && !out ? `<input class="i no-print" type="time" style="width:auto;display:inline-block;padding:2px 6px" data-tgt="${esc(t.id)}|${n}" value="${esc(tg || '')}" aria-label="Trip ${n} target departure"><span class="print-only">${tg ? fmtHM(tg) : '—'}</span>` : `<b>${tg ? fmtHM(tg) : '—'}</b>`}
                 ${out ? ` · <b>left ${fmtHM(hmManila(out))}</b>${tr?.gps_left_at ? ' (GPS)' : ''}${lateBy != null ? (lateBy > DISPATCH_GRACE ? ` <span style="color:var(--bad)">${lateBy} min late${tr?.late_reason ? ' — ' + esc(LATE_DISPATCH[tr.late_reason]) : ''}</span>${!tr?.late_reason && office ? ` <select class="i no-print" style="width:auto;display:inline-block;padding:2px 6px" data-lr="${esc(t.id)}|${n}" aria-label="Reason trip ${n} left late"><option value="">Why late? — pick a reason</option>${Object.entries(LATE_DISPATCH).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>` : ''}` : ' <span style="color:var(--ok)">on time</span>') : ''}${tr?.gps_back_at ? ` · back ${fmtHM(hmManila(tr.gps_back_at))} (GPS)` : ''}` : ''}
-                ${trk ? ` · <span class="tag info">📍 GPS-timed</span>` : ` · <span class="tag">Manual time — no tracker in this truck</span>`}
+                ${trk ? ` · <span class="tag info">📍 GPS-timed</span>` : ` · <span class="tag">Manual time — set the driver (with their phone tracker) or an in-truck phone</span>`}
                 ${trk && tr?.departed_at && !tr?.gps_left_at ? `<div style="color:var(--warn)">Marked on the road at ${fmtHM(hmManila(tr.departed_at))} — waiting for the GPS to see the truck leave the base</div>` : ''}
                 ${early != null && early > DISPATCH_GRACE ? `<div style="color:var(--bad)">⚠ “Departed” was tapped at ${fmtHM(hmManila(tr.departed_at))}, ${early} min before the truck actually left (GPS ${fmtHM(hmManila(tr.gps_left_at))})</div>` : ''}</div></div>
             ${waiting.length ? `<button class="btn primary no-print" data-depart="${esc(t.id)}|${n}" data-trk="${trk ? 1 : ''}">${trk ? `Trip ${n} on the road` : `Trip ${n} departed`}</button>` : ''}</div>
@@ -4831,6 +4857,14 @@ async function openTripSheet(date, truckId = ''){
       if (el) el.textContent = jobs.filter(x => x.truck_id === j.truck_id && (x.trip_no || 1) === (j.trip_no || 1) && x.loaded_at).length;
     } catch { c.checked = !c.checked; }
     c.disabled = false;
+  }));
+  document.querySelectorAll('[data-drv]').forEach(sel => sel.addEventListener('change', async () => {
+    const tid = sel.dataset.drv, prev = drivers.filter(x => x.truck_id === tid).map(x => x.staff_id); sel.disabled = true;
+    try {
+      for (const sid of prev) if (sid !== sel.value) await sb.rpc('job_truck_driver_set', { p_day: date, p_truck: null, p_staff: sid });
+      if (sel.value) await withRetry('Assigning driver', () => sb.rpc('job_truck_driver_set', { p_day: date, p_truck: tid, p_staff: sel.value }), 1);
+      toast(sel.value ? 'Driver assigned — their phone now times this truck' : 'Driver cleared', 'ok'); openTripSheet(date, truckId);
+    } catch { sel.disabled = false; }
   }));
   document.querySelectorAll('[data-lr]').forEach(sel => sel.addEventListener('change', async () => {
     if (!sel.value) return; const [tid, n] = sel.dataset.lr.split('|'); sel.disabled = true;
@@ -5635,8 +5669,9 @@ async function openTracker(t){
   if (!t) return;
   openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" style="max-width:640px">
     <h2>📍 Tracker — ${esc(t.label)}</h2>
-    <div class="ft">A <b>dedicated phone that stays in this truck</b> sends its location to HATID every minute using the free <b>Traccar Client</b> app — even with the screen off. It shows on <b>HATID › Map</b>, and it is what makes this truck <b>GPS-timed</b>: the dispatch time is taken from the moment the truck drives out of the Home Base, not from anyone tapping “departed”. HATID keeps the location only on days this truck has deliveries.</div>
-    <div class="step-note" style="margin-top:8px"><b>For an honest dispatch time:</b> use a company phone that isn’t handed to the driver · mount it on the dashboard and keep it on the 12 V charger · set a screen lock only the office knows · allow location “All the time” and battery “Unrestricted”. If it goes quiet on a delivery day, the Dashboard shows “tracker silent”.</div>
+    <div class="ft"><b>Usually you don’t need this:</b> the <b>driver’s own phone</b> is the tracker. Each driver sets up Traccar Client once from <b>HATID › Field</b>, and picks “My truck today” each morning (or the dispatcher sets the driver on the trip sheet). That makes the truck <b>GPS-timed</b>: the dispatch time is when it drives out of the Home Base, not when anyone taps “departed”.
+      <br>Add a phone here only if a phone <b>stays in this truck</b> (e.g. a company phone on the dashboard) — useful for trucks whose drivers change often.</div>
+    <div class="step-note" style="margin-top:8px"><b>Keeping it honest:</b> the departure only counts when the phone is outside the base on two readings and moving at vehicle speed, so walking out with the phone doesn’t work. If the tracker goes quiet on a delivery day, the Dashboard shows “tracker silent”, and a tapped “departed” without GPS is reported as manual (unverified).</div>
     <div id="tk-list" style="margin-top:10px"><span class="spin"></span></div>
     <div class="row-btns" style="margin-top:10px"><input class="i" id="tk-label" placeholder="Phone name, e.g. Mang Jun’s phone" style="flex:1"><button class="btn primary" id="tk-add">+ Add phone</button></div>
     <div id="tk-setup"></div>
