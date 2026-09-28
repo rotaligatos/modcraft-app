@@ -12380,3 +12380,23 @@ with no handler · retired-status string sweep · Schedule page on `DEMO_PROJS` 
 `QT-W00000136.R1` · phone order_pause · Stage 2 lock parity while paused · Michael Delos Reyes signature ·
 unlock-reconciliation ~60s · `qApproved`/`qClientApproved` coupling · MSSI commission OFF ·
 `samplesofcuttinglist/` is client data — never commit · distinct app icons for PMES/KEYSTONE/CC.
+
+## What was changed on 2026-09-28 (session — per-item MRF receipt, Extra board requests, Command Center rework)
+- **PMES receipt checked item by item** (PMES `8547ead`, migration `pmes_mr_receive_per_item_check`): `adm_mr_lines`
+  gained `receive_condition` (ok/short/damaged), `receive_note`, `receive_photo`, `receive_checked_by/at`.
+  `pmes_mr_receive` enforces: OK only if the full processed qty arrived; Short/Damaged need a note; Damaged needs a photo
+  that exists in private bucket **`pmes-receipts`** under `<mr_id>/<line_id>/` (upload: materials role or supervisor+;
+  read: PMES users, KEYSTONE users, Modcraft admin tier; no delete). An MRF not yet processed by KEYSTONE says so.
+- **Boards & cutting easier to reach**: job sub-tab renamed "Boards & cutting"; Overview card + Materials page buttons
+  (`goToBoards(jobId,'bdInspect'|'bdOptimize')`).
+- **"Board requests" → "Extra board requests"** in KEYSTONE (`Keystone` commit after `9a48324`) and PMES, with a
+  "what this is for" note. KEYSTONE Material requests now label each MRF **First issue** vs **Extra boards** (with the
+  request's reason) and show PMES's per-line check (OK/Short/Damaged, note, View photo). Extra board requests show the MRF raised.
+- **Command Center rework** (`701771a`): People first, then one main tab per app — Modcraft (Users · Sign-in check ·
+  Change log), PMES (Users · Approval delegation · Change log), KEYSTONE (Users · Change log), HATID (Users · Change log).
+  Lists are read-only rows + one Edit form (same save functions/DB writes as before); search, company filter, show inactive
+  on every list; change log filtered per app (`LOG_APPS`). Old `?tab=` links still land (`hatid`, `deleg`, `log` mapped).
+
+# OPEN — updated 2026-09-28
+Same as the 2026-09-27 list, except: the Command Center rework is DONE. Test job QT-T00000001 / MR-260926-W934 is
+still waiting for KEYSTONE "Confirm processed" before the PMES per-item check can be walked.
