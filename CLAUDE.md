@@ -12452,3 +12452,37 @@ fix in Usage · 15 orders with no handler · retired-status string sweep · Sche
 ticket `a0cea6f8` · mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on hold) · `QT-W00000136.R1` · phone
 order_pause · Stage 2 lock parity while paused · Michael Delos Reyes signature · unlock-reconciliation ~60s · `qApproved`/`qClientApproved`
 coupling · MSSI commission OFF · `samplesofcuttinglist/` is client data — never commit · distinct app icons for PMES/KEYSTONE/CC.
+
+## What was changed on 2026-09-28/29 (session — app headers, app icons, PMES schedule rework)
+Other repos: PMES (`rotaligatos/PMES`, local `Desktop/Modcraft Product Manufacturing Execution System (PMES)/modcraft-pmes-app`),
+KEYSTONE (`rotaligatos/Keystone`, local `Desktop/Admin App`). All pushed and confirmed live.
+- **Headers like HATID**: big name + meaning underneath. PMES "Product Manufacturing Execution System" (current screen beside it);
+  KEYSTONE "Purchasing & Production Release" (old grey pill replaced, id `envPill` kept); Command Center "COMMAND CENTER" +
+  "World Class Laminate, Inc. · who may use Modcraft, PMES, KEYSTONE & HATID".
+- **App icons** (Rommel's Gemini art; generated with headless Chromium canvas — no image lib installed):
+  PMES = cabinet with check badge (tight crop, clamp stub at left edge); KEYSTONE = gold arch + red keystone (WCLI red #D8302F,
+  gold #FDB913, black), background removed for Windows/Android/browser, dark-backed for Apple (Apple can't do transparent) and
+  Android maskable. Both apps gained favicon-16/32, apple-mobile-web-app-* and msapplication tags. Installed apps keep the old icon
+  until reinstalled. Command Center icon still the Modcraft placeholder.
+- **PMES Schedule Gantt** (`screens-planboard.js`, CSS in `index.html`): per Job Order TWO lines — Plan and Actual (first to last
+  piece done; running = to today); a colour per process with a key; a day shared by processes shows as stripes; Finish column =
+  plan finish + projected finish from the PACE of piece-steps done per working day (days late/early). `pbJobHead` is now unused.
+- **Scheduler rules** (`schedule.js`, tests in `schedule.test.js`, all pass), stated by Rommel:
+  - capacity per day = daily capacity ÷ shifts_per_day × that day's shifts (work calendar); a day FILLS to capacity — the next
+    Job Order takes the spare the same day.
+  - a process may start the day the process before it STARTS, can't finish before it.
+  - after HPL/MHPL lamination: next process starts the day after lamination's FIRST day (24 h cure), finishes no earlier than the
+    day after lamination's last day (my addition — not explicitly confirmed). CURE takes no days (the cure is built into lamination).
+  - Cutting and Special cutting are different machines, either order, can run at the same time; neither waits for the other.
+    NOT a "pair" (Rommel objected to the word). Dates are a recommendation — the planner reviews per JO (Edit dates).
+- **Delay alert**: one line above an affected JO's plan when an earlier-approved JO sharing a process is behind and the capacity
+  re-plan (`PB.data.rec`) finishes this JO later than planned. Change plan (fills recommended dates → Save → re-approval) or
+  Keep original plan (recorded in new table `pmes_schedule_decisions`, RLS: PMES read, rank ≥18 insert with own email; asked
+  again only if the projected finish gets later). ⚠ The alert's date comes from the capacity re-plan; the Finish column's
+  projection comes from pace — they can differ.
+- Lessons: stop asking questions whose answer the user already gave; shell heredocs/`node -e` with quotes broke 3× again —
+  write patch scripts with the Write tool; GitHub push dropped once (retry loop).
+
+# OPEN — updated 2026-09-29
+Same as the 2026-09-28 list, plus: Rommel to confirm the "finishes no earlier than the day after lamination's last day" rule;
+Command Center icon (still placeholder); check the new Gantt/delay alert on real JOs once schedules exist.
