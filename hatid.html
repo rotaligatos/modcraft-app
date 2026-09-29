@@ -180,6 +180,7 @@ table.ct td:nth-child(2){white-space:nowrap;width:1%;color:var(--muted)}
 .thumbs button{position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:999px;border:0;background:var(--bad);color:#fff;cursor:pointer;line-height:22px;padding:0}
 .ask-wrap{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center}
 .ask-wrap .scrim{position:absolute;inset:0;z-index:0}.ask-wrap .modal{position:relative;left:auto;top:auto;transform:none;z-index:1}
+.eco td{vertical-align:top}.eco tr.best td{background:#e8f7ee}
 #pv-bar{position:sticky;top:0;z-index:30;background:#fff4d6;color:#5a4300;border-bottom:1px solid #e8c766;padding:8px 14px;font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 #pv-bar #pv-mode{margin-left:auto}#pv-bar .btn{font-size:13px;padding:6px 10px}
 .who b{display:block;font-weight:600}
@@ -756,6 +757,7 @@ table.ut tr.off td{color:var(--muted)}
       <button class="subtab" data-sub="fuel" role="tab">Fuel</button>
       <button class="subtab" data-sub="maint" role="tab">Maintenance</button>
       <button class="subtab" data-sub="calendar" role="tab">Holidays &amp; coding</button>
+      <button class="subtab" data-sub="courier" role="tab">Grab / Lalamove</button>
     </div>
     <div id="fleet-body"></div>
   </main>
@@ -973,7 +975,7 @@ const OUTCOME_LABEL = { full:'Delivered — all received', partial:'Partial — 
 const DELAY_REASON = { site_not_ready:'Site not ready', client_absent:'Receiver not available', access:'No access / gate pass / permit', unloading:'Waiting to unload',
   traffic:'Traffic / road closure', truck:'Truck problem', weather:'Weather', other:'Other' };
 const EVENT_LABEL = { proposed:'Proposed', scheduled:'Scheduled', rejected:'Rejected', dispatched:'Departed', arrived:'Arrived on site', completed:'Delivery result', issue:'Problem reported', delay:'Delay',
-  load_confirmed:'Pre-departure confirmed (locked)', load_unlocked:'Pre-departure unlocked', load_concern:'Load concern' };
+  note:'Note', load_confirmed:'Pre-departure confirmed (locked)', load_unlocked:'Pre-departure unlocked', load_concern:'Load concern' };
 const ACTOR_ROLE = { field:'driver/crew', dispatcher:'dispatcher', manager:'manager', admin:'admin', viewer:'office' };
 const CH_LABEL = { chat:'Google Chat', email:'Email', sms:'SMS' };
 const OB_STATUS = { pending:'Sending…', sending:'Sending…', sent:'Sent', failed:'Failed', skipped:'Not sent' };
@@ -1021,13 +1023,14 @@ async function loadRefData(){
     fetchAll('Loading availability', () => sb.from('truck_availability').select('*').gte('date_to', since).order('date_from')),
     fetchAll('Loading advisories', () => sb.from('job_coding_notices').select('*').eq('status', 'new').order('published_at', { ascending: false })),
   ]);
-  let agents = [], notify = null;
+  let agents = [], notify = null, courier = [];
+  try { courier = (await sb.from('job_courier_vehicles').select('*').order('sort_order')).data || []; } catch {}
   if (isDispatcher()){
     try { [agents, notify] = await Promise.all([fetchAll('Loading agents', () => sb.from('job_agents').select('*').order('name')),
       sb.from('job_notify_settings').select('*').eq('id', true).maybeSingle().then(r => r.data)]); } catch {}
   }
   const byId = a => Object.fromEntries(a.map(x => [x.id, x]));
-  state.ref = { pools, groups, zones, dests, rates, brackets, gauges, trucks, calendar, avail, notices, agents, notify, agentById: byId(agents),
+  state.ref = { pools, groups, zones, dests, rates, brackets, gauges, trucks, calendar, avail, notices, agents, notify, courier, agentById: byId(agents),
     poolById: byId(pools), groupById: byId(groups), zoneById: byId(zones), destById: byId(dests), truckById: byId(trucks) };
 }
 function poolsForCompany(company){ return state.ref.pools.filter(p => p.companies.includes(company)); }
@@ -1560,7 +1563,7 @@ function renderJobs(){
       <td class="c-date">${fmtDate(j.scheduled_date)}${j.special_trip ? ' <span class="tag info">Special</span>' : ''}</td>
       <td class="c-type">${esc(j.job_type || '—')}</td>
       <td class="c-weight">${kg(j.estimated_weight_kg)}</td>
-      <td class="c-truck">${j.trucks ? esc(j.trucks.label) : '<span class="muted">Unassigned</span>'}${j.trip_no ? ` <span class="ft">· trip ${j.trip_no}</span>` : ''}</td>
+      <td class="c-truck">${j.courier_vehicle_id ? `${courierById(j.courier_vehicle_id)?.service === 'grab' ? '🟢' : '🟠'} ${esc(courierLabel(courierById(j.courier_vehicle_id)))}` : j.trucks ? esc(j.trucks.label) : '<span class="muted">Unassigned</span>'}${j.trip_no ? ` <span class="ft">· trip ${j.trip_no}</span>` : ''}</td>
       <td>${pill(j.status)}${j.delivery_outcome && j.delivery_outcome !== 'full' ? ` <span class="tag bad">${j.delivery_outcome === 'partial' ? 'Partial' : 'Returned'}</span>` : ''}</td>
     </tr>`).join('');
   document.querySelectorAll('#jobs-body tr.row').forEach(r => r.addEventListener('click', () => openJob(r.dataset.id)));
@@ -2275,7 +2278,9 @@ async function suggestForJob(job, date, destId){
   if (!p) { const u = plan.unplaced.find(x => x.job.id === job.id); return { ctx, best: null, reason: u?.reason }; }
   const b = plan.bins.find(x => x.key === p.key), [truck_id, trip] = p.key.split('|');
   const mates = b.fixed.length + b.planned.length - 1;
-  return { ctx, best: { truck_id, trip_no: +trip, label: b.t.label, kgAfter: b.kg, max: b.cap,
+  const without = [...b.dests]; const di = without.lastIndexOf(destId); if (di >= 0) without.splice(di, 1);
+  const addCost = tripCost(b.truck, b.dests, date) - (without.length ? tripCost(b.truck, without, date) : 0);
+  return { ctx, best: { truck_id, trip_no: +trip, label: b.t.label, kgAfter: b.kg, max: b.cap, mates, addCost: addCost || null, company: !b.truck.uses_trip_rates,
     why: `${mates ? `rides with ${mates} other drop${mates === 1 ? '' : 's'} going the same way` : 'own trip'} · trip ${Math.round(b.kg / (b.cap || 1) * 100)}% full${canSeeCosts() ? ` · trip cost ${costTxt(tripCost(b.truck, b.dests, date))}` : ''}` } };
 }
 
@@ -2386,7 +2391,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
         ${job.delivery_outcome ? `<dt>Result</dt><dd><b style="color:${job.delivery_outcome === 'full' ? 'var(--ok)' : 'var(--bad)'}">${esc(OUTCOME_LABEL[job.delivery_outcome])}</b>${job.received_by_name ? `<div class="ft">Received by ${esc(job.received_by_name)}</div>` : ''}
           ${returnedList(job).length ? `<div class="ft">Coming back: ${esc(returnedList(job).map(x => `${x.back} × ${x.label}`).join(', '))}</div>` : ''}</dd>` : ''}
         ${job.redelivery_of ? `<dt>Redelivery</dt><dd><a href="#" data-open-job="${esc(job.redelivery_of)}">Open the original delivery</a></dd>` : ''}
-        <dt>Truck / trip</dt><dd>${job.trucks ? esc(job.trucks.label) + ` <span class="ft">${esc(FLEET_LABEL[job.trucks.fleet_type]||'')}${job.trip_no ? ' · trip ' + job.trip_no : ''}</span>` + (dispatcher ? ` <button class="lnk" id="dr-where">📍 Where is the truck?</button>` : '') : '<span class="muted">Unassigned</span>'}</dd>
+        <dt>${job.courier_vehicle_id ? 'Delivered by' : 'Truck / trip'}</dt><dd>${job.courier_vehicle_id ? courierRowHtml(job) : job.trucks ? esc(job.trucks.label) + ` <span class="ft">${esc(FLEET_LABEL[job.trucks.fleet_type]||'')}${job.trip_no ? ' · trip ' + job.trip_no : ''}</span>` + (dispatcher ? ` <button class="lnk" id="dr-where">📍 Where is the truck?</button>` : '') : '<span class="muted">Unassigned</span>'}</dd>
         ${canSeeCosts() ? `<dt>Trip cost</dt><dd>${tripCostText(job, rep)}</dd>` : ''}
         ${job.order_value != null && canSeeCosts() ? `<dt>Order value</dt><dd>${peso(job.order_value)}${br ? `<div class="ft">Customer delivery charge (proposal): ${peso(br.charge)} · ${esc(br.label)}</div>` : ''}</dd>` : ''}
         ${job.override_reason ? `<dt>Override</dt><dd><div style="color:var(--warn)">${esc((job.rule_warnings || []).join(' '))}</div><div class="ft">Reason: ${esc(job.override_reason)}</div></dd>` : ''}
@@ -2396,7 +2401,8 @@ function renderDrawer(job, events, costs = [], rep = {}){
         <dt>Notes</dt><dd style="white-space:pre-wrap">${esc(job.notes || '—')}</dd>
       </dl>
 
-      ${dispatcher && (needsConfirm || canReassign) ? `
+      ${dispatcher && ['proposed','scheduled'].includes(job.status) && !job.courier_vehicle_id ? economyHtml(job) : ''}
+      ${dispatcher && (needsConfirm || canReassign) && !job.courier_vehicle_id ? `
       <div class="section" id="confirm-sec">
         <h4>${needsConfirm ? 'Confirm schedule' : 'Change date / truck'}</h4>
         <div class="grid2">
@@ -2465,6 +2471,9 @@ function renderDrawer(job, events, costs = [], rep = {}){
   if ($('dr-agent')) $('dr-agent').addEventListener('click', () => openAgentPick(job));
   if ($('dr-onmap')) $('dr-onmap').addEventListener('click', e => { e.preventDefault(); closeOverlay(); state.mapDate = job.scheduled_date; state.mapDrop = job.id; switchView('map'); });
   if ($('dr-where')) $('dr-where').addEventListener('click', () => { closeOverlay(); state.mapFocus = job.truck_id; switchView('map'); });
+  $('dr-cb-edit')?.addEventListener('click', () => openCourierBooking(job, job.courier_vehicle_id, kmTo(job).km));
+  $('dr-cb-clear')?.addEventListener('click', () => clearCourier(job));
+  if ($('eco-out')){ fillEconomy(job); ['cf-date','cf-dest'].forEach(id => $(id)?.addEventListener('change', () => fillEconomy(job))); }
   if ($('dr-msgs')) $('dr-msgs').addEventListener('click', () => { closeOverlay(); state.msgOpen = job.id; switchView('msgs'); });
   if ($('dr-contact')) $('dr-contact').addEventListener('click', () => openClientContact(job, () => openJob(job.id)));
   bindOutboxRetry(() => openJob(job.id));
@@ -2643,7 +2652,7 @@ async function loadField(){
   try { state.field = await fetchFieldData(date); } catch { $('fd-list').innerHTML = '<div class="empty">Could not load jobs.</div>'; return; }
   const data = state.field.jobs;
   const order = { in_progress:0, dispatched:1, issue:2, scheduled:3, completed:4 };
-  const loose = data.filter(j => !j.truck_id).sort((a, b) => order[a.status] - order[b.status]);
+  const loose = data.filter(j => !j.truck_id && !j.courier_vehicle_id).sort((a, b) => order[a.status] - order[b.status]);
   const myTruck = state.me.role === 'field' && date >= localDate() ? await myTruckCardHtml(date, data) : '';
   const trips = fieldTrips(state.field);
   $('fd-list').innerHTML = myTruck + (data.length ? trips.map(tripCardHtml).join('') + (loose.length ? `<div class="f" style="margin:12px 2px 6px;font-weight:600">No truck assigned yet</div>` + loose.map(j => `
@@ -3237,6 +3246,171 @@ function simReorder(){
   closeOverlay(); loadField();
 }
 
+/* ===== Grab / Lalamove (Rommel 2026-09-29) =====
+   "Why would I use a truck for 1 edge band tape if I can use a motorcycle." Each job shows the cheapest sensible ways to
+   deliver it — joining a truck trip, a truck trip of its own, or a Grab / Lalamove vehicle the load fits in — with the cost
+   as % of the order's sales. The dispatcher decides and books in the Grab / Lalamove app, then records the booking here.
+   Fares are estimates from the vehicle list (Fleet › Grab / Lalamove) until real bookings refine them; the actual fare
+   typed per booking is what the reports count (as a courier fee when the company pays). */
+const COURIER_SVC = { grab: 'Grab', lalamove: 'Lalamove' };
+const ROAD_FACTOR = 1.35;   // straight-line → road distance, for a fare estimate
+const courierById = id => (state.ref.courier || []).find(v => v.id === id);
+const courierLabel = v => v ? `${COURIER_SVC[v.service] || v.service} ${v.name}` : 'Grab / Lalamove';
+function hasBoards(job){ return boardsPcs(job.board_pcs) > 0 || (job.items || []).some(it => it.g != null); }
+function kmTo(job, destId = job.destination_id){
+  const d = state.ref.destById?.[destId];
+  if (d?.km_from_plant) return { km: Number(d.km_from_plant), how: 'from the destination list' };
+  const pool = (state.ref.pools || []).find(p => (p.companies || []).includes(job.company) && p.base_lat != null);
+  if (pool && job.site_lat != null){
+    const R = 6371, rad = x => x * Math.PI / 180, dLa = rad(job.site_lat - pool.base_lat), dLo = rad(job.site_lon - pool.base_lon);
+    const a = Math.sin(dLa / 2) ** 2 + Math.cos(rad(pool.base_lat)) * Math.cos(rad(job.site_lat)) * Math.sin(dLo / 2) ** 2;
+    return { km: Math.round(2 * R * Math.asin(Math.sqrt(a)) * ROAD_FACTOR * 10) / 10, how: 'map distance × 1.35 for roads' };
+  }
+  return { km: null, how: 'no distance — type it' };
+}
+const courierFare = (v, km) => Math.round(Math.max(Number(v.min_fare) || 0, (Number(v.base_fare) || 0) + (Number(v.per_km) || 0) * (km || 0)));
+function courierFits(job){
+  const w = Number(job.estimated_weight_kg || 0), b = hasBoards(job);
+  return (state.ref.courier || []).filter(v => v.active && Number(v.max_kg) >= w && (!b || v.boards))
+    .sort((a, b2) => Number(a.max_kg) - Number(b2.max_kg) || a.sort_order - b2.sort_order);
+}
+const pctOf = (cost, sales) => sales ? `${(cost / sales * 100).toFixed(cost / sales < 0.1 ? 1 : 0)}% of sales` : '';
+
+/* The "cheapest way to deliver" panel in the job drawer */
+function economyHtml(job){ return `<div class="section" id="eco-sec"><h4>💡 Cheapest way to deliver</h4><div id="eco-out"><div class="muted"><span class="spin"></span> Comparing truck and Grab / Lalamove…</div></div></div>`; }
+async function fillEconomy(job){
+  const box = $('eco-out'); if (!box) return;
+  const date = $('cf-date')?.value || job.scheduled_date, destId = $('cf-dest')?.value || job.destination_id;
+  const sales = canSeeCosts() && job.order_value ? Number(job.order_value) : null;
+  const rows = [];
+  if (date && destId){
+    try { const s = await suggestForJob(job, date, destId);
+      if (s.best){ rows.push({ kind: 'truck', label: `${s.best.mates ? 'Join' : 'Own trip on'} ${s.best.label} · trip ${s.best.trip_no}`, cost: s.best.addCost,
+        note: s.best.mates ? `rides with ${s.best.mates} other drop${s.best.mates > 1 ? 's' : ''} going that way — only the extra drop cost` : 'a trip of its own' + (s.best.company ? ' (company truck — costed with the trip-rate table as a yardstick)' : '') }); }
+      else rows.push({ kind: 'truck', label: 'Truck', cost: null, note: s.reason || 'no truck trip fits this date' });
+    } catch { rows.push({ kind: 'truck', label: 'Truck', cost: null, note: 'could not work out the truck options' }); }
+  } else rows.push({ kind: 'truck', label: 'Truck', cost: null, note: 'pick a date and destination to compare trucks' });
+  const dist = kmTo(job, destId), km = state.ecoKm?.[job.id] ?? dist.km;
+  const fits = courierFits(job);
+  fits.forEach(v => rows.push({ kind: 'courier', v, label: courierLabel(v), cost: km != null ? courierFare(v, km) : null,
+    note: `${Number(v.max_kg).toLocaleString('en-PH')} kg${v.boards ? ' · takes 4×8 boards' : ''}${v.verified ? '' : ' · fare is an estimate'}` }));
+  const priced = rows.filter(r => r.cost != null).sort((a, b) => a.cost - b.cost);
+  const best = priced[0];
+  const w = Number(job.estimated_weight_kg || 0);
+  box.innerHTML = `<div class="ft" style="margin-bottom:6px">${kg(w)}${hasBoards(job) ? ' · has 4×8 boards' : ' · no boards'} · ${km != null ? `${km} km (${esc(dist.how)})` : 'distance unknown'}
+      <button type="button" class="lnk" id="eco-km">${km != null ? 'Change km' : 'Type the km'}</button>${sales ? ` · order ${peso(sales)}` : ''}</div>
+    <table class="mini eco"><tbody>${[...priced, ...rows.filter(r => r.cost == null)].map(r => `<tr class="${r === best ? 'best' : ''}">
+      <td>${r.kind === 'courier' ? (r.v.service === 'grab' ? '🟢' : '🟠') : '🚚'} <b>${esc(r.label)}</b>${r === best ? ' <span class="tag ok">cheapest</span>' : ''}<div class="ft">${esc(r.note)}</div></td>
+      <td class="num">${r.cost != null ? (canSeeCosts() || r.kind === 'courier' ? peso(r.cost) : '—') : '—'}${r.cost != null && sales ? `<div class="ft">${pctOf(r.cost, sales)}</div>` : ''}</td>
+      <td class="num">${r.kind === 'courier' ? `<button class="btn" data-book="${esc(r.v.id)}">Book</button>` : ''}</td></tr>`).join('')}</tbody></table>
+    ${!fits.length ? `<div class="ft" style="margin-top:6px">No Grab / Lalamove vehicle in the list fits ${kg(w)}${hasBoards(job) ? ' with 4×8 boards' : ''}.</div>` : ''}
+    <div class="ft" style="margin-top:6px">Pick what’s practical — urgency, the client, whether a truck is going anyway. Grab / Lalamove: book in their app, then “Book” here to record it.</div>`;
+  $('eco-km').addEventListener('click', () => { const v = prompt('Road distance in km from the plant to the client', km ?? ''); if (v == null) return;
+    const n = Number(v); if (!(n > 0)) return toast('Type the km as a number', 'error'); (state.ecoKm ||= {})[job.id] = n;
+    // remember it on the destination (when it has no km yet), so the next job there is priced straight away
+    const d = state.ref.destById?.[destId];
+    if (d && !d.km_from_plant) sb.from('delivery_destinations').update({ km_from_plant: n }).eq('id', d.id).then(r => { if (!r?.error) d.km_from_plant = n; }, () => {});
+    fillEconomy(job); });
+  box.querySelectorAll('[data-book]').forEach(b => b.addEventListener('click', () => openCourierBooking(job, b.dataset.book, km)));
+}
+
+/* Record a Grab / Lalamove booking on the job */
+function openCourierBooking(job, vehicleId, km){
+  const fits = courierFits(job), all = (state.ref.courier || []).filter(v => v.active);
+  const cur = courierById(vehicleId || job.courier_vehicle_id) || fits[0];
+  const est = v => km != null ? courierFare(v, km) : '';
+  const back = () => openJob(job.id);
+  openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true"><h2>🛵 Grab / Lalamove — <span class="mono">${esc(job.quotation_serial)}</span></h2>
+    <div class="ft">Book in the Grab or Lalamove app first, then record it here. The job leaves the truck plan; the office records the delivery result.</div>
+    <div class="form" style="margin-top:8px">
+      <label class="f">Vehicle<select class="i" id="cb-v">${all.map(v => `<option value="${esc(v.id)}" ${v.id === cur?.id ? 'selected' : ''}>${esc(courierLabel(v))} — up to ${Number(v.max_kg)} kg${v.boards ? ', boards OK' : ''}${fits.includes(v) ? '' : ' (load may not fit)'}</option>`).join('')}</select></label>
+      <div class="grid2"><label class="f">Booking / order no.<input class="i" id="cb-ref" value="${esc(job.courier_ref || '')}" placeholder="From the app"></label>
+        <label class="f">Actual fare (₱)<input class="i" id="cb-fare" type="number" min="0" step="1" inputmode="decimal" value="${esc(job.courier_fare ?? est(cur) ?? '')}"></label></div>
+      <div class="ft" id="cb-est">${km != null && cur ? `Estimate for ${km} km: ${peso(est(cur))} — type what the app charged.` : ''}</div>
+      <div class="grid2"><label class="f">Who pays<select class="i" id="cb-pay"><option value="company" ${job.courier_paid_by !== 'client' ? 'selected' : ''}>Company</option><option value="client" ${job.courier_paid_by === 'client' ? 'selected' : ''}>Client</option></select></label>
+        <label class="f">Tracking link <span class="ft">— optional</span><input class="i" id="cb-track" value="${esc(job.courier_track_url || '')}" placeholder="Share link from the app"></label></div>
+      ${!job.scheduled_date ? `<label class="f">Delivery date<input class="i" type="date" id="cb-date" value="${esc(localDate())}"></label>` : ''}
+      <div class="row-btns" style="justify-content:flex-end"><button class="btn" id="cb-x">Back</button><button class="btn ok" id="cb-ok">Save booking</button></div></div></div>`);
+  $('cb-x').addEventListener('click', back); document.querySelector('#overlay .scrim').addEventListener('click', back);
+  $('cb-v').addEventListener('change', e => { const v = courierById(e.target.value); if (km != null && v){ $('cb-est').textContent = `Estimate for ${km} km: ${peso(est(v))} — type what the app charged.`; if (!job.courier_fare) $('cb-fare').value = est(v); } });
+  $('cb-ok').addEventListener('click', async e => {
+    const v = courierById($('cb-v').value), fare = $('cb-fare').value === '' ? null : Number($('cb-fare').value), ref = $('cb-ref').value.trim();
+    const track = $('cb-track').value.trim();
+    if (!ref) return toast('Type the booking number from the app', 'error');
+    if (fare == null || !(fare >= 0)) return toast('Type the fare the app charged', 'error');
+    if (track && !/^https?:\/\//i.test(track)) return toast('The tracking link should start with https://', 'error');
+    const b = e.currentTarget; b.disabled = true;
+    const paid = $('cb-pay').value, date = $('cb-date')?.value || job.scheduled_date;
+    const patch = { courier_vehicle_id: v.id, courier_ref: ref, courier_fare: fare, courier_paid_by: paid, courier_track_url: track || null,
+      courier_booked_at: job.courier_booked_at || new Date().toISOString(), truck_id: null, trip_no: null, drop_seq: null, scheduled_date: date,
+      ...(job.status === 'proposed' ? { status: 'scheduled' } : {}) };
+    try {
+      await withRetry('Saving the booking', () => sb.from('jobs').update(patch).eq('id', job.id));
+      // the fare is the delivery cost when the company pays (one courier-fee line per job, kept in step with the booking)
+      const { data: old } = await sb.from('job_costs').select('id, notes').eq('job_id', job.id).eq('category', 'courier_fee');
+      for (const c of (old || []).filter(c => /^Grab|^Lalamove/.test(c.notes || ''))) await withRetry('Updating cost', () => sb.from('job_costs').delete().eq('id', c.id));
+      if (paid === 'company' && fare > 0) await withRetry('Saving the fare', () => sb.from('job_costs').insert({ job_id: job.id, category: 'courier_fee', amount: fare, notes: `${courierLabel(v)} · booking ${ref}` }));
+      await logEvent(job.id, job.status === 'proposed' ? 'scheduled' : 'note', `Booked on ${courierLabel(v)} — booking ${ref}, fare ${peso(fare)} paid by ${paid === 'client' ? 'the client' : 'the company'}${track ? '\nTracking: ' + track : ''}`);
+      toast(`Booked on ${courierLabel(v)}`, 'ok'); back();
+    } catch { b.disabled = false; }
+  });
+}
+async function clearCourier(job){
+  if (!confirm('Take this job off Grab / Lalamove and plan it on a truck again?')) return;
+  try {
+    await withRetry('Saving', () => sb.from('jobs').update({ courier_vehicle_id: null, courier_ref: null, courier_fare: null, courier_paid_by: null, courier_track_url: null, courier_booked_at: null }).eq('id', job.id));
+    const { data: old } = await sb.from('job_costs').select('id, notes').eq('job_id', job.id).eq('category', 'courier_fee');
+    for (const c of (old || []).filter(c => /^Grab|^Lalamove/.test(c.notes || ''))) await sb.from('job_costs').delete().eq('id', c.id);
+    await logEvent(job.id, 'note', 'Grab / Lalamove booking removed — back to truck planning');
+    toast('Back to truck planning — pick a truck and trip', 'ok'); openJob(job.id);
+  } catch {}
+}
+function courierRowHtml(job){
+  const v = courierById(job.courier_vehicle_id);
+  return `${job.courier_vehicle_id ? `${v?.service === 'grab' ? '🟢' : '🟠'} <b>${esc(courierLabel(v))}</b> <span class="ft">booking ${esc(job.courier_ref || '—')} · ${job.courier_fare != null ? peso(job.courier_fare) : 'fare —'} · paid by ${job.courier_paid_by === 'client' ? 'client' : 'company'}</span>
+    ${job.courier_track_url ? ` · <a href="${esc(job.courier_track_url)}" target="_blank" rel="noopener">Track</a>` : ''}
+    ${isDispatcher() && !['completed','rejected'].includes(job.status) ? ` <button class="lnk" id="dr-cb-edit">Edit</button> <button class="lnk" id="dr-cb-clear">Use a truck instead</button>` : ''}` : ''}`;
+}
+
+/* ----- Fleet › Grab / Lalamove: the vehicle list ----- */
+async function renderCouriers(){
+  const admin = ['admin','manager'].includes(state.me.role);
+  setFleetHead('Grab and Lalamove vehicles HATID can suggest: what each carries and its fare (base + per km, with a minimum). Check fares against a real booking and tick “Checked”.',
+    admin ? '<button class="btn primary" id="cv-new">+ Add vehicle</button>' : '');
+  let list = [];
+  try { list = (await withRetry('Loading vehicles', () => sb.from('job_courier_vehicles').select('*').order('sort_order'))).data || []; } catch {}
+  state.ref.courier = list;
+  $('fleet-body').innerHTML = `<div class="card pad"><div class="ds-wrap"><table class="ds-tbl cv-tbl"><thead><tr><th>Service</th><th>Vehicle</th><th class="num">Max kg</th><th>4×8 boards</th><th class="num">Base ₱</th><th class="num">Per km ₱</th><th class="num">Minimum ₱</th><th>Checked</th><th>Notes</th><th></th></tr></thead><tbody>
+    ${list.map(v => `<tr data-cv="${esc(v.id)}" style="${v.active ? '' : 'opacity:.55'}">
+      <td>${esc(COURIER_SVC[v.service])}</td><td>${admin ? `<input class="i" data-f="name" value="${esc(v.name)}">` : esc(v.name)}</td>
+      ${['max_kg','base_fare','per_km','min_fare'].reduce((h, f, i) => h + (i === 1 ? `<td>${admin ? `<input type="checkbox" data-f="boards" ${v.boards ? 'checked' : ''}>` : v.boards ? 'Yes' : 'No'}</td>` : '') +
+        `<td class="num">${admin ? `<input class="i num" type="number" min="0" step="0.5" data-f="${f}" value="${esc(v[f])}" style="width:90px">` : esc(v[f])}</td>`, '')}
+      <td>${admin ? `<input type="checkbox" data-f="verified" ${v.verified ? 'checked' : ''}>` : v.verified ? '✓' : 'estimate'}</td>
+      <td>${admin ? `<input class="i" data-f="notes" value="${esc(v.notes || '')}">` : esc(v.notes || '')}</td>
+      <td>${admin ? `<label class="ft" style="white-space:nowrap"><input type="checkbox" data-f="active" ${v.active ? 'checked' : ''}> in use</label>` : ''}</td></tr>`).join('')}
+    </tbody></table></div>
+    ${admin ? '<div class="row-btns" style="justify-content:flex-end"><button class="btn primary" id="cv-save">Save changes</button></div>' : ''}
+    <div class="ft" style="margin-top:8px">Fare estimate = base + per km × road distance, never below the minimum. The distance comes from the destination list (km from plant) or the map. The fares prefilled on 29 Sep 2026 are rough estimates — correct them from your next bookings.</div></div>`;
+  if (!admin) return;
+  $('cv-new').addEventListener('click', async () => {
+    const svc = prompt('Service: type grab or lalamove', 'lalamove'); if (!svc || !COURIER_SVC[svc.trim().toLowerCase()]) return;
+    const name = prompt('Vehicle name (e.g. Pickup, 6-wheel truck)'); if (!name) return;
+    try { await withRetry('Adding', () => sb.from('job_courier_vehicles').insert({ service: svc.trim().toLowerCase(), name: name.trim(), max_kg: 20, sort_order: (list.at(-1)?.sort_order || 0) + 10 })); renderCouriers(); } catch {}
+  });
+  $('cv-save').addEventListener('click', async e => {
+    const b = e.currentTarget; b.disabled = true;
+    try {
+      for (const tr of document.querySelectorAll('[data-cv]')){
+        const row = {}; tr.querySelectorAll('[data-f]').forEach(i => { row[i.dataset.f] = i.type === 'checkbox' ? i.checked : i.type === 'number' ? Number(i.value || 0) : i.value.trim(); });
+        if (!row.name) throw toast('Every vehicle needs a name', 'error');
+        if (!(row.max_kg > 0)) throw toast(`${row.name}: max kg must be more than 0`, 'error');
+        await withRetry('Saving ' + row.name, () => sb.from('job_courier_vehicles').update({ ...row, updated_at: new Date().toISOString() }).eq('id', tr.dataset.cv));
+      }
+      toast('Saved', 'ok'); renderCouriers();
+    } catch { b.disabled = false; }
+  });
+}
+
 async function uploadMedia(jobId, blob, name, type){
   const path = `${jobId}/${Date.now()}-${name}`;
   await withRetry('Uploading ' + name.split('.')[0], () => sb.storage.from(MEDIA_BUCKET).upload(path, blob, { contentType: type, upsert: false }));
@@ -3298,7 +3472,7 @@ async function loadFleet(){
 function renderFleetSub(){
   if (state.fleetSub === 'areas' && !canSeeRates()) state.fleetSub = 'trucks';
   document.querySelectorAll('#screen-fleet .subtab').forEach(b => { b.classList.toggle('active', b.dataset.sub === state.fleetSub); if (b.dataset.sub === 'areas') b.classList.toggle('hidden', !canSeeRates()); });
-  const subs = { trucks: renderTrucks, areas: renderAreas, fuel: renderFuel, maint: renderMaint, calendar: renderCalendar };
+  const subs = { trucks: renderTrucks, areas: renderAreas, fuel: renderFuel, maint: renderMaint, calendar: renderCalendar, courier: renderCouriers };
   if (!subs[state.fleetSub]){ state.fleetSub = 'trucks'; document.querySelectorAll('#screen-fleet .subtab').forEach(b => b.classList.toggle('active', b.dataset.sub === 'trucks')); }
   subs[state.fleetSub]();
 }
