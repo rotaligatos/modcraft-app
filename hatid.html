@@ -148,6 +148,8 @@ table.ct td:nth-child(2){white-space:nowrap;width:1%;color:var(--muted)}
 @media (max-width:760px){.no-desk{display:inline-flex}.msg-wrap{grid-template-columns:1fr}.msg-wrap.open .msg-list{display:none}.msg-wrap:not(.open) .msg-thread{display:none}.bub{max-width:92%}}
 .spacer{flex:1}
 .who{font-size:13px;opacity:.9;text-align:right;line-height:1.2}
+#pv-bar{position:sticky;top:0;z-index:30;background:#fff4d6;color:#5a4300;border-bottom:1px solid #e8c766;padding:8px 14px;font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+#pv-bar .btn{margin-left:auto}
 .who b{display:block;font-weight:600}
 .btn-ghost-h.bad{background:rgba(179,38,30,.85);border-color:rgba(255,255,255,.4)}
 .btn-ghost-h{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);color:inherit;border-radius:8px;padding:6px 10px;cursor:pointer}
@@ -600,8 +602,10 @@ table.ut tr.off td{color:var(--muted)}
   <button class="btn-ghost-h hidden" id="modem-chip" title="SMS modem">📶 SMS modem</button>
   <button class="btn-ghost-h bell hidden" id="btn-bell" title="Notifications" aria-label="Notifications">🔔<span class="n hidden" id="bell-n"></span></button>
   <button class="btn-ghost-h hidden" id="btn-sos" title="Emergency &amp; useful numbers" aria-label="Emergency numbers">☎<span class="sos-txt"> Emergency</span></button>
+  <button class="btn-ghost-h hidden" id="btn-drvview" title="See HATID the way a driver sees it">👁 Driver view</button>
   <button class="btn-ghost-h hidden" id="btn-signout">Sign out</button>
 </header>
+<div id="pv-bar" class="hidden" role="status"><span><b>👁 Driver view</b> — what drivers see. Preview only: nothing you tap is saved.</span><button class="btn" id="pv-exit">Exit driver view</button></div>
 <div id="daybar" class="hidden" aria-live="polite"><div class="in" id="daybar-in"></div></div>
 
 <!-- LOGIN -->
@@ -1142,6 +1146,7 @@ async function withRetry(label, fn, tries = 3){
       return res;
     } catch (e){
       last = e;
+      if (e?.code === 'PREVIEW'){ toast('Driver view is a preview — nothing was saved', 'ok'); throw e; }
       // A refusal from a business rule or a permission check won't change on retry — show it straight away
       if (['P0001','42501','23505','23514'].includes(e?.code)){ toast(`${label}: ${e.message}`, 'error'); throw e; }
       if (i < tries - 1) await sleep(500 * 2 ** i);
@@ -1150,6 +1155,39 @@ async function withRetry(label, fn, tries = 3){
   toast(`${label} failed after ${tries} attempts: ${last?.message || last}`, 'error');
   throw last;
 }
+
+/* ===== Driver view (preview) — Rommel 2026-09-29 =====
+   An admin or manager can see HATID exactly as a driver does, to check it. While it is on, this page
+   acts as a field-crew user: the driver screens, buttons and forms all show, but every save is stopped
+   here in the browser (nothing reaches the database), so real jobs, trucks and trackers are never
+   touched. Reading still uses the admin's own access, so all companies' jobs show. */
+const PV_READ_RPC = new Set(['job_schedule_view','job_passcode_status','job_tracker_status','job_field_staff','job_truck_load','job_history','job_history_summary',
+  'job_monthly_get','job_modem_status','job_sms_gateway_status','job_mail_gateway_status','job_customer_type_guess','job_schedule_confirm_preview',
+  'job_modem_heartbeat','job_modem_claim','job_modem_done','job_modem_inbound','job_modem_release']);   // the SMS modem keeps working in the background
+const pvBlocked = () => { const r = { data: null, error: { code: 'PREVIEW', message: 'Driver view is a preview' } };
+  const t = { then: (a, b) => Promise.resolve(r).then(a, b) }; ['select','eq','in','single','maybeSingle','order','limit','match','is','neq','gte','lte'].forEach(k => t[k] = () => t); return t; };
+{
+  const _rpc = sb.rpc.bind(sb), _from = sb.from.bind(sb), _st = sb.storage.from.bind(sb.storage);
+  sb.rpc = (fn, ...a) => state.preview && !PV_READ_RPC.has(fn) ? pvBlocked() : _rpc(fn, ...a);
+  sb.from = t => { const q = _from(t); if (!state.preview) return q; ['insert','update','upsert','delete'].forEach(m => { q[m] = () => pvBlocked(); }); return q; };
+  sb.storage.from = b => { const x = _st(b); if (!state.preview) return x; x.upload = async () => { throw { code: 'PREVIEW', message: 'Driver view is a preview' }; }; return x; };
+}
+function canPreview(){ return ['admin','manager'].includes((state.realMe || state.me)?.role); }
+function startDriverView(){
+  if (!canPreview() || state.preview) return;
+  state.realMe = state.me;
+  state.me = { ...state.me, role: 'field', schedule_steps: [], can_see_costs: false, signature_url: null };
+  state.preview = { truck: null };
+  closeOverlay(); setHeader(); $('pv-bar').classList.remove('hidden');
+  $('fd-date').value = localDate(); switchView('field');
+}
+function stopDriverView(){
+  if (!state.preview) return;
+  state.me = state.realMe; state.realMe = null; state.preview = null;
+  closeOverlay(); $('pv-bar').classList.add('hidden'); setHeader(); switchView('dash');
+}
+$('btn-drvview').addEventListener('click', startDriverView);
+$('pv-exit').addEventListener('click', stopDriverView);
 
 function show(id){ ['screen-login','screen-noaccess','screen-board','screen-field','screen-fleet','screen-dash','screen-reports','screen-users','screen-settings','screen-sched','screen-msgs','screen-map'].forEach(s => $(s).classList.toggle('hidden', s !== id)); }
 function closeOverlay(){ $('overlay').innerHTML = ''; document.body.style.overflow = ''; }
@@ -1226,7 +1264,7 @@ sb.auth.onAuthStateChange((_evt, session) => {
   const uid = session?.user?.id || null;
   if (uid === bootedFor) return;
   bootedFor = uid;
-  if (!uid){ state.me = null; setHeader(); closeOverlay(); show('screen-login'); return; }
+  if (!uid){ state.me = null; state.preview = null; state.realMe = null; $('pv-bar').classList.add('hidden'); setHeader(); closeOverlay(); show('screen-login'); return; }
   setTimeout(() => boot(session.user), 0);
 });
 
@@ -1266,6 +1304,7 @@ function setHeader(fallbackEmail){
   $('btn-signout').classList.toggle('hidden', !me && !fallbackEmail);
   $('btn-sos').classList.toggle('hidden', !me);
   $('btn-bell').classList.toggle('hidden', !me);
+  $('btn-drvview').classList.toggle('hidden', !me || !canPreview() || !!state.preview);
   if (!me){ $('daybar').classList.add('hidden'); stopRealtime(); stopNotifications(); }
   $('tabs').classList.toggle('hidden', !me || !(isDispatcher() || isViewer()));
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('hidden', isViewer() && t.dataset.view !== 'sched'));
@@ -2417,10 +2456,11 @@ function traccarConfigLink(ident){
 async function renderTrackCard(force){
   const box = $('fd-track'); if (!box || state.me?.role !== 'field') { if (box) box.innerHTML = ''; return; }
   let me;
-  try { me = (await sb.rpc('job_tracker_mine')).data; } catch {}
+  if (state.preview) me = { ident: 'HATID-…', last_seen_at: null };   // each driver gets their own code; nothing is created in preview
+  else try { me = (await sb.rpc('job_tracker_mine')).data; } catch {}
   if (!me) { box.innerHTML = ''; return; }
   const working = me.last_seen_at && Date.now() - new Date(me.last_seen_at) < 3 * 864e5;
-  let hidden = false; try { hidden = localStorage.getItem('hatid-track-hide') === '1'; } catch {}
+  let hidden = false; try { hidden = !state.preview && localStorage.getItem('hatid-track-hide') === '1'; } catch {}
   if (working && !force){
     box.innerHTML = `<div class="card track-ok">📍 Tracker working · last signal ${esc(ago(me.last_seen_at))}${me.battery != null ? ` · 🔋${Math.round(me.battery)}%` : ''} <button class="lnk" id="tk-again">Set up again</button></div>`;
     $('tk-again').addEventListener('click', () => renderTrackCard(true)); return;
@@ -2443,7 +2483,8 @@ async function renderTrackCard(force){
     <div class="row-btns"><button class="btn" id="tk-check">↻ Check — is it working?</button><button class="lnk" id="tk-later">Later</button></div>
   </div>`;
   document.querySelectorAll('#fd-track [data-copy]').forEach(b => b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copy); toast('Copied', 'ok'); } catch { toast('Copy failed — select the text instead', 'error'); } });
-  $('tk-check').addEventListener('click', async () => { const r = (await sb.rpc('job_tracker_mine')).data;
+  if (state.preview){ $('tk-connect').removeAttribute('href'); $('tk-connect').addEventListener('click', () => toast('Driver view is a preview — on a driver’s phone this opens Traccar and links it', 'ok')); }
+  $('tk-check').addEventListener('click', async () => { if (state.preview) return toast('Driver view is a preview — this checks the driver’s own tracker', 'ok'); const r = (await sb.rpc('job_tracker_mine')).data;
     if (r?.last_seen_at && Date.now() - new Date(r.last_seen_at) < 10 * 60000){ toast('Tracker is working ✓', 'ok'); renderTrackCard(); }
     else toast('No signal from the tracker yet — check the service is ON and location is allowed “All the time”', 'error'); });
   $('tk-later').addEventListener('click', () => { try { localStorage.setItem('hatid-track-hide', '1'); } catch {} renderTrackCard(); });
@@ -2470,7 +2511,9 @@ async function loadField(){
     </button>`).join('') : '<div class="card empty">No jobs scheduled for this day.</div>');
   document.querySelectorAll('.fjob').forEach(b => b.addEventListener('click', () => openFieldJob(b.dataset.id)));
   $('mt-sel')?.addEventListener('change', async e => {
-    const v = e.target.value; e.target.disabled = true;
+    const v = e.target.value;
+    if (state.preview){ state.preview.truck = v || null; toast('Preview — a driver’s choice links their phone’s GPS to that truck', 'ok'); return loadField(); }
+    e.target.disabled = true;
     try { await withRetry('Saving your truck', () => sb.rpc('job_truck_driver_set', { p_day: date, p_truck: v || null, p_staff: null }), 1);
       toast(v ? `You're on ${state.ref.truckById[v]?.label || 'that truck'} today` : 'Truck cleared', 'ok'); loadField(); } catch { e.target.disabled = false; }
   });
@@ -2479,7 +2522,8 @@ async function loadField(){
 /* Driver: which truck am I on today — links this phone's tracker to the truck, so its departure is timed by GPS from the first minute */
 async function myTruckCardHtml(date, jobs){
   let mine = null;
-  try { const { data } = await sb.from('job_truck_drivers').select('truck_id').eq('day', date).eq('staff_id', state.me.id).maybeSingle(); mine = data?.truck_id || null; } catch {}
+  if (state.preview) mine = state.preview.truck;
+  else try { const { data } = await sb.from('job_truck_drivers').select('truck_id').eq('day', date).eq('staff_id', state.me.id).maybeSingle(); mine = data?.truck_id || null; } catch {}
   const ids = [...new Set([...jobs.map(j => j.truck_id).filter(Boolean), ...(mine ? [mine] : [])])];
   const opts = ids.map(id => state.ref.truckById[id]).filter(Boolean);
   if (!opts.length) return '';
