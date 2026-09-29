@@ -24989,7 +24989,7 @@ function confirmUnsavedThen(callback){
   // initQuotation seeds both with a default cabinet — so this prompted on every open.
   var touched=!_pristineQuotSig||_quotContentSig()!==_pristineQuotSig;
   var hasWork=(qSerial||qDraftKey)&&!qSaved&&!qLocked&&touched;
-  if(!hasWork){callback();return;}
+  if(!hasWork){_afterPendingSave(callback);return;}
   // Use the custom unsaved modal (native confirm() is blocked in Google Sites iframe)
   window._unsavedCallback=callback;
   openModal('ov-unsaved');
@@ -24997,8 +24997,8 @@ function confirmUnsavedThen(callback){
 function unsavedSaveAndContinue(){
   closeModal('ov-unsaved');
   saveDraftS1();
-  if(window._unsavedCallback) window._unsavedCallback();
-  window._unsavedCallback=null;
+  var cb=window._unsavedCallback; window._unsavedCallback=null;
+  if(cb) _afterPendingSave(cb);   // wait until the save has taken this quotation, not the next
 }
 function unsavedDiscardAndContinue(){
   closeModal('ov-unsaved');
@@ -33893,11 +33893,16 @@ function gSaveQuotation(opts){
   opts=opts||{};
   if(opts.checkConflict && qLoadedSavedAt && qSerialCommitted){
     var _serial=qBaseSerial||qSerial;
+    _saveConflictCheckPending=true;
     loadQuotationJson(_serial,function(remote){
+      _saveConflictCheckPending=false;
+      var w=_conflictWaiters; _conflictWaiters=[];
       if(remote && remote.savedAt && remote.savedAt!==qLoadedSavedAt){
         _showSaveConflictModal(remote,_serial);
+        if(w.length) showToast('Resolve the save conflict first, then try again.');
       } else {
         _gSaveQuotationCore();
+        w.forEach(function(f){ _afterPendingSave(f); });
       }
     });
     return;
@@ -33956,6 +33961,15 @@ function _cleanupPrevSerialRows(currentSerial){
 // so a second save still happens; it just does not mint a second number.
 var _quotRowWrite={};           // {serial: Promise} — serialises the Quotations row write per serial
 var _serialClaimWaiters=null;   // null = nothing in flight; array = saves waiting on the claim
+// Runs fn once any save already under way has captured the quotation on screen. Leaving the
+// quotation (new, open another, export an order) before that point used to hand the save — and
+// its freshly claimed number — to whatever quotation replaced it.
+var _saveConflictCheckPending=false, _conflictWaiters=[];
+function _afterPendingSave(fn){
+  if(_serialClaimWaiters){ _serialClaimWaiters.push(fn); return; }
+  if(_saveConflictCheckPending){ _conflictWaiters.push(fn); return; }
+  fn();
+}
 function _serialClaimSettled(){
   var w=_serialClaimWaiters; _serialClaimWaiters=null;
   if(!w||!w.length) return;
@@ -34000,9 +34014,20 @@ function _gSaveQuotationCore(){
         try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
         return;
       }
-      _claimSerialAtomic(_serialPrefix(),function(newSerial){
+      // The claim is async. If the quotation on screen is replaced while it is in flight (Save &
+      // continue → new quotation / order export), the number must NOT land on the new one: that is
+      // how QT-M00000179 (a WCL Subsidiary job) got an M — the previous Direct draft's claim came
+      // back 5 s later and was stamped onto it (2026-09-29). Prefix and draft are fixed at start.
+      var _claimPrefix=_serialPrefix(), _claimDraft=qDraftKey;
+      _claimSerialAtomic(_claimPrefix,function(newSerial){
+        if(newSerial && qDraftKey!==_claimDraft){
+          _pendingSerialSet(_claimPrefix,newSerial);      // kept for the next save of that series
+          console.warn('[serial] '+newSerial+' returned after the quotation changed — not applied');
+          _serialClaimSettled();
+          return;
+        }
         if(newSerial){
-          _pendingSerialSet(_serialPrefix(),newSerial);   // held until a row exists
+          _pendingSerialSet(_claimPrefix,newSerial);   // held until a row exists
           _acceptClaimedSerial(claimSerial,newSerial,false);
           qSerialCommitted=true;
           try{ _proceedSaveQuotation(); } finally { _serialClaimSettled(); }
@@ -34105,7 +34130,13 @@ function _fallbackSerialCheck(claimSerial){
   // No claim service configured. A draft carries no number, so there is nothing to collision-check
   // — mint one. _resolveSerialCollision takes the next counter value and verifies it is genuinely
   // free in the Quotations sheet before returning it, retrying if not.
+  var _claimDraft=qDraftKey;
   _resolveSerialCollision(claimSerial).then(function(newSerial){
+    if(qDraftKey!==_claimDraft){   // the quotation changed while this was in flight — see above
+      console.warn('[serial] '+newSerial+' returned after the quotation changed — not applied');
+      _serialClaimSettled();
+      return;
+    }
     if(!/^QT-[WCM]\d+$/.test(newSerial||'')){
       // Refuse rather than write a row with no key. A failed save can be retried; a row filed
       // under an empty serial is the mess this whole change exists to prevent.

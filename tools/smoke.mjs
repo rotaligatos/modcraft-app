@@ -1640,6 +1640,37 @@ const PROFILES = {
           }
         }, { known: { proceedCalled: true, claimCalled: false, committed: true },
              unknown: { proceedCalledSync: false, claimCalled: true } });
+      /* 2026-09-29, QT-M00000179: "Save & continue" on a Direct MSSI draft, then an order export
+         opened a WCL-Subsidiary draft. The first save's claim (prefix M) came back 5 s later and was
+         stamped onto the NEW draft. A claim must only land on the quotation that asked for it, and
+         leaving a quotation must wait until an in-flight save has taken it. */
+      check('Serial claim never lands on a quotation opened while it was in flight', () => {
+        const w = window;
+        const saved = { gToken: w.gToken, gUser: w.gUser, qSerial: w.qSerial, qDraftKey: w.qDraftKey,
+          qSerialCommitted: w.qSerialCommitted, url: w.SERIAL_CLAIM_URL, claim: w._claimSerialAtomic,
+          proceed: w._proceedSaveQuotation, waiters: w._serialClaimWaiters, seen: Object.assign({}, w._quotRowSeen),
+          get: w._pendingSerialGet, set: w._pendingSerialSet };
+        let pending = null, proceeded = 0, order = [];
+        try {
+          w.gToken = 't'; w.gUser = { email: 't@x', name: 'T' }; w.SERIAL_CLAIM_URL = 'x';
+          w._serialClaimWaiters = null; w._quotRowSeen = {};
+          w._pendingSerialGet = () => ''; w._pendingSerialSet = () => {};
+          w._claimSerialAtomic = (p, cb) => { pending = cb; };
+          w._proceedSaveQuotation = () => { proceeded++; order.push('save'); };
+          w.qSerial = ''; w.qSerialCommitted = false; w.qDraftKey = 'DRAFT-aaaaaa';
+          w._gSaveQuotationCore();
+          w._afterPendingSave(() => order.push('continue'));
+          const deferred = order.length === 0;
+          w.qDraftKey = 'DRAFT-bbbbbb';           // another quotation replaced it
+          pending('QT-M00000999');
+          return { deferred, applied: w.qSerial === 'QT-M00000999', proceeded, order: order.join(',') };
+        } finally {
+          w.gToken = saved.gToken; w.gUser = saved.gUser; w.qSerial = saved.qSerial; w.qDraftKey = saved.qDraftKey;
+          w.qSerialCommitted = saved.qSerialCommitted; w.SERIAL_CLAIM_URL = saved.url; w._claimSerialAtomic = saved.claim;
+          w._proceedSaveQuotation = saved.proceed; w._serialClaimWaiters = saved.waiters; w._quotRowSeen = saved.seen;
+          w._pendingSerialGet = saved.get; w._pendingSerialSet = saved.set;
+        }
+      }, { deferred: true, applied: false, proceeded: 0, order: 'continue' });
       /* Rommel, 2026-08-19: the printed area/type/lump rows showed RAW fabrication cost while the
          printed Fabrication subtotal already included contingency, buffer, discount buffer and
          outsource markup as one aggregate — a client manually adding the visible rows landed
