@@ -12486,3 +12486,11 @@ KEYSTONE (`rotaligatos/Keystone`, local `Desktop/Admin App`). All pushed and con
 # OPEN — updated 2026-09-29
 Same as the 2026-09-28 list, plus: Rommel to confirm the "finishes no earlier than the day after lamination's last day" rule;
 Command Center icon (still placeholder); check the new Gantt/delay alert on real JOs once schedules exist.
+
+## What was changed on 2026-09-29 (session 2 — PMES Schedule practice mode, lamination-last finish)
+PMES `8d6bfec` (live). Schedule → "▶ Practice with sample Job Orders": six sample JOs built in the browser from
+the real scheduler (finished / behind plan / pushed by that delay with the delay alert / waiting for manager /
+ending on lamination / draft). Buttons work on the sample only; work calendar refused; no database reads or writes.
+Rommel on lamination: once cured, boards go where the JO says next (cut to size, client pick-up, turnover to WCL).
+Rule kept; when nothing follows lamination the Gantt finish reads "Ready after cure" = day after its last day.
+Command Center icon: Gemini prompt given to Rommel; still the Modcraft placeholder until he supplies art.
