@@ -4894,6 +4894,37 @@ const PROFILES = {
           const id = jo.parts[0].barcodes[0];
           return /^[A-Z0-9-]+-[A-Z]+-[A-Z0-9_]+-[A-Z]+-\d\d\/\d\d$/.test(id) ? 'clean' : id;
         }, 'clean');
+        // Review simulation 2026-09-30 (14 real client lists, 115k-SKU catalogue) found these five.
+        check('Review 1: a glued >25mm panel does not trip the "list did not arrive intact" alarm', () => {
+          const a = window._cutListToAnalysis({ panels: [{ group: 'I', part: 'Worktop', mat: 'Real White PB 4x8 2F (18mm, Matte)', th: 36,
+            L: 2400, W: 600, qty: 1, ebt: '1L' }], hpl: [], hardware: [], totals: { rows: 1, pieces: 1 } });
+          return { comps: a.components.length, ok: a._integrity.ok };
+        }, { comps: 2, ok: true });
+        check('Review 2: "warm white" suggests Warm White, never Italian White or a do-not-use SKU', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = ['Italian White PB 4x8 2F (18mm, Stipple)', 'White Oak Laminated Plywood 4x8 2F (do not use, Stipple)',
+            'Warm White PB 4x8 2F (18mm, Crosscut)', 'Warm White PB MR 4x8 18mm 2F (Matte)'].map((n) => ({ name: n, unit: 'pc', price: 100 }));
+          try { return w.CLR.suggestFor({ key: 'rv2-' + Date.now(), text: '18mm WARM WHITE, MFC, DOUBLE FACE, STIPPLE FINISH', thk: 18, faces: 2 })[0]; }
+          finally { w.dbMaterials = keep; }
+        }, 'Warm White PB 4x8 2F (18mm, Crosscut)');
+        check('Review 3: a tape thickness the client wrote comes first', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = ['Cherry SL 1mmx22mm Matte PVC Premium Edgeband', 'Cherry SL 2mmx22mm Matte PVC Premium Edgeband']
+            .map((n) => ({ name: n, unit: 'lm', price: 20 }));
+          try { return w.CLR.suggestTape({ key: 'tape:rv3-' + Date.now(), text: '2mm light cherry matt', gloss: false })[0]; }
+          finally { w.dbMaterials = keep; }
+        }, 'Cherry SL 2mmx22mm Matte PVC Premium Edgeband');
+        check('Review 4: an HPL build on plywood never suggests a laminated plywood as its raw board', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = [{ name: 'Triplestar Plywood 2F Chestnut Stripe 18mm Stipple', unit: 'pc', price: 1500 }];
+          try { return w.CLR.suggestFor({ key: 'rv4-' + Date.now(), text: '18MM PLYWOOD RAW BOARD / HPL WALNUT', thk: 18, faces: 0 }).length; }
+          finally { w.dbMaterials = keep; }
+        }, 0);
+        check('Review 5: "EBT ON ALL EGDES" (a real client typo) bands all four edges', () => {
+          const r = window.CLR.readClientSheet([['Part', 'Material', 'Length', 'Width', 'Qty', 'Thk', 'Edge'], ['Door', 'PB WHITE', 600, 400, 1, 18, 'SILKY OFF-WHITE EBT ON ALL EGDES']]);
+          const row = r.rows[0];
+          return { code: row.code, issues: row.issues };
+        }, { code: '4S', issues: [] });
         check('Codes: a client code reads as words, and suggestions keep colour, thickness and faces', () => {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = ['Acacia PB 4x8 1F (15mm, Matte)', 'Alder/White MDF 4x8 1F (15mm, Matte)',

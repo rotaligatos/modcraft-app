@@ -18087,7 +18087,7 @@ function _cutListToAnalysis(cl,order){
     if(lam){
       for(var lb=2;lb<=lam.boards;lb++) comps.push(Object.assign({},baseComp,{
         name:String(pn.part||'')+' (board '+lb+' of '+lam.boards+')', ebt:'', edgeTape:'', grooving:'',
-        notes:'glued to '+String(pn.part||'')+' — laminated build, see the first board'}));
+        notes:'glued to '+String(pn.part||'')+' — laminated build, see the first board',_gluedExtra:true}));
     }
   }
   if(facesUnknown) warn.push(facesUnknown+' panel'+(facesUnknown===1?' has':'s have')
@@ -18109,8 +18109,10 @@ function _cutListToAnalysis(cl,order){
      It flags and still imports, deliberately: refusing the import on a false
      positive would strand a real job at exactly the busiest moment. */
   var t=(cl&&cl.totals)||{};
-  var gotRows=comps.length;
-  var gotPieces=0; for(var gp=0;gp<comps.length;gp++) gotPieces+=(+comps[gp].qty||0);
+  // The extra boards of a glued (>25mm) panel are one client row, so they are not counted
+  // against what the client sent — otherwise every glued worktop raised a false alarm.
+  var gotRows=0, gotPieces=0;
+  for(var gp=0;gp<comps.length;gp++){ if(comps[gp]._gluedExtra) continue; gotRows++; gotPieces+=(+comps[gp].qty||0); }
   var mismatch=[];
   if(t.rows!==undefined   && +t.rows   !== gotRows)   mismatch.push('the client sent '+t.rows+' rows, this parsed '+gotRows);
   if(t.pieces!==undefined && +t.pieces !== gotPieces) mismatch.push('the client sent '+t.pieces+' pieces, this parsed '+gotPieces);
@@ -35656,9 +35658,9 @@ var MCL=(function(){
       } else if(svcNeedsLm(sv)){
         h+='<span style="'+chip+'">'+esc(svcBase(sv))
           +' <input type="number" min="0" step="0.1" value="'+esc(svcLm(sv))+'" placeholder="?"'
-          +' title="linear metres — priced per lm" style="width:50px;font-size:11px;padding:0 3px;'
+          +' title="Linear metres for the WHOLE row (all pieces together) — priced per lm" style="width:50px;font-size:11px;padding:0 3px;'
           +'border:.5px solid var(--border);border-radius:4px;font-family:inherit"'
-          +' oninput="MCL.setLm('+i+','+s+',this.value)"> lm'
+          +' oninput="MCL.setLm('+i+','+s+',this.value)"> lm total'
           +' <a href="#" style="color:var(--coral);text-decoration:none" title="Remove"'
           +' onclick="MCL.removeSvc('+i+','+s+');return false">×</a></span>';
       } else {
@@ -36571,7 +36573,7 @@ function readClientSheet(aoa, force) {
         // number = one edge. Only counted when every number matches this piece's L or W,
         // so a stray figure can never band an edge the piece does not have.
         const nums = (edgeRaw.match(/'(\d+(?:\.\d+)?)'/g) || []).map(s => +s.replace(/'/g, ''));
-        if (/all edges|all sides/i.test(edgeRaw)) { eL = 2; eW = 2; edgeOk = true; }
+        if (/all (edges|egdes|sides|around)/i.test(edgeRaw)) { eL = 2; eW = 2; edgeOk = true; }   // "EGDES": a real client typo
         else if (nums.length && nums.every(n => n === L || n === W)) {
           eL = Math.min(2, nums.filter(n => n === L).length);
           eW = Math.min(2, nums.filter(n => n === W && n !== L).length);
@@ -36865,7 +36867,11 @@ function linesToAoa(lines) {
     try{
       var cat=(typeof _prodEdgeTapeCatalog==='function')?_prodEdgeTapeCatalog():[];
       var need=readClientMat(t.text).colours;
-      var cands=(typeof _prodFindCatalogMatches==='function')?_prodFindCatalogMatches(need.join(' ')+' edgeband',cat,80):[];
+      var tapeMm=function(n){ var mm=String(n||'').match(/(\d*\.?\d+)\s*mm\s*x/i); return mm?+mm[1]:0; };
+      var wm=String(t.text||'').match(/(\d*\.?\d+)\s*mm\b/i), wantMm=wm?+wm[1]:0;
+      // The whole edge-band catalogue (a few hundred), not a top-80 of a fuzzy search, so the right
+      // thickness is never cut off before scoring.
+      var cands=cat.filter(function(c){ return c&&c.name&&!/do not use|discontinued/i.test(c.name); });
       var seen={}, pool=[];
       cands.forEach(function(c){
         if(!c||!c.name||seen[c.name]) return;
@@ -36876,7 +36882,11 @@ function linesToAoa(lines) {
         var x=OTHER_COLOURS.filter(function(w){ return need.indexOf(w)<0&&low.indexOf(w)>=0; }).length*2
           +(/\//.test(c.name)?2:0)+(/x\s*22\s*mm/i.test(c.name)?0:1)+(/(^|[^.\d])1\s*mm/i.test(c.name)?0:0.5)
           +(/floor sample/i.test(c.name)?3:0)
-          +(/gloss/i.test(c.name)!==!!t.gloss?3:0);
+          +(/gloss/i.test(c.name)!==!!t.gloss?3:0)
+          // A thickness the client wrote ("2mm light cherry") decides the price and the bander,
+          // so a tape of another thickness comes after every tape of the right one.
+          +(wantMm&&tapeMm(c.name)!==wantMm?4:0)
+          +(/matt/i.test(t.text)&&!/matt/i.test(c.name)?1:0);
         seen[c.name]=1; pool.push({n:c.name,x:x,i:pool.length});
       });
       pool.sort(function(a,b){ return a.x-b.x||a.i-b.i; });
@@ -36969,6 +36979,8 @@ function linesToAoa(lines) {
           var low=c.name.toLowerCase();
           if(subRe&&!subRe.test(low)) return;
           if(OTHER_COLOURS.some(function(w){ return low.indexOf(w)>=0; })||/laminated|melamine|edge|hpl/.test(low)) return;
+          // A raw board has no face and no finish: "Plywood 2F Chestnut Stripe … Stipple" is laminated.
+          if(/\b[12]\s*f\b|stipple|matte?\b|crosscut|supermatte|woodgrain|softwood|hardwood|do not use/.test(low)) return;
           var d=(typeof _prodParseMaterialDescriptor==='function')?_prodParseMaterialDescriptor(c.name):{};
           if(th&&d.thickness!==th) return;
           if(!/\bmr\b/i.test(m.text)&&/\bmr\b/.test(low)) return;   // moisture-resistant only when asked
@@ -36979,7 +36991,19 @@ function linesToAoa(lines) {
         list.hpl=true; ST.sugg[m.key]=list; return list;
       }
       var q=rd.colours.concat(rd.shades,rd.subs,rd.tex).join(' ')+(th?' '+th+'mm':'')+(faces?' '+faces+'F':'');
-      var cands=(typeof _prodFindCatalogMatches==='function')?_prodFindCatalogMatches(q,getMatSource(),120):[];
+      // Every catalogue board is considered, not a top-N of a fuzzy search: with the full ~115k-SKU
+      // catalogue the right board ("Warm White PB … 18mm") could rank outside the top 120 and never be
+      // offered, leaving a wrong colour first. The colour and thickness filters below are cheap, so
+      // only boards that could be right reach the scoring.
+      var cands=[];
+      (getMatSource()||[]).forEach(function(c){
+        if(!c||!c.name) return;
+        var lw=c.name.toLowerCase().replace(/grey/g,'gray');
+        if(!rd.colours.every(function(w){ return lw.indexOf(w)>=0; })) return;
+        if(/do not use|floor sample|discontinued|phase ?out/.test(lw)) return;
+        if(th){ var tm=lw.match(/(\d+(?:\.\d+)?)\s*mm/); if(tm&&+tm[1]!==th) return; }
+        cands.push(c);
+      });
       var seen={}, pool=[];
       cands.forEach(function(c){
         if(!c||!c.name||seen[c.name]) return;
@@ -36994,10 +37018,11 @@ function linesToAoa(lines) {
         // offering one would quote a coloured board plus HPL on top.
         if(rd.hpl&&(OTHER_COLOURS.some(function(w){ return low.indexOf(w)>=0; })||/laminated|melamine/.test(low))) return;
         var subOf=String(d.substrate||'').toLowerCase().replace(/-mr$/,'');
+        var lowWords=low.split(/[^a-z]+/);
         // Words in the SKU's colour that the client did not write (Segatto Coffee/Warm White for
         // "warm white") push it down, so the plain board comes first when it exists.
         // (Known colours are already counted below; this catches names the colour list does not know.)
-        var extraWords=String(d.colorText||'').toLowerCase().split(/[^a-z]+/).filter(function(w){
+        var extraWords=String(d.colorText||'').toLowerCase().replace(/\[[^\]]*\]/g,' ').split(/[^a-z]+/).filter(function(w){
           return w.length>2&&OTHER_COLOURS.indexOf(w)<0&&!SHADE_WORDS[w]&&rd.shades.indexOf(w)<0;
         }).length;
         var x=extraWords
@@ -37005,13 +37030,28 @@ function linesToAoa(lines) {
           +(/\//.test(c.name)?2:0)+(faces&&!d.faces?1:0)
           +(rd.subs.length&&rd.subs.indexOf(subOf)<0?1.5:0)
           +rd.tex.filter(function(w){ return low.indexOf(w==='matte'?'matt':w)<0; }).length
-          +rd.shades.filter(function(w){ return low.indexOf(w)<0; }).length*0.5
+          // A shade is part of the colour: "warm white" is not Italian White or Real White. A shade the
+          // client named that the SKU lacks, or one the SKU has that the client did not name, ranks it down.
+          +rd.shades.filter(function(w){ return low.indexOf(w)<0; }).length*2
+          +Object.keys(SHADE_WORDS).filter(function(w){ return rd.shades.indexOf(w)<0&&lowWords.indexOf(w)>=0; }).length
+          +(/^\s*\[/.test(c.name)?0.5:0)
+          // Unasked specialities come after the ordinary board: moisture-resistant, HDF or plywood
+          // when no substrate was named, and board sizes other than the standard 4x8.
+          +(/\bmr\b/.test(low)&&!/\bmr\b/i.test(m.text)?1.5:0)
+          +(!rd.subs.length&&subOf==='hdf'?1:0)+(!rd.subs.length&&subOf==='plywood'?0.5:0)
+          +(/\b\d\s*x\s*\d\b/.test(low)&&!/4\s*x\s*8/.test(low)?1:0)
           +(/gloss/.test(low)&&rd.tex.indexOf('gloss')<0?3:0)
           +(rd.hpl&&!/\braw\b/.test(low)?0.5:0);
         seen[c.name]=1; pool.push({n:c.name,x:x,i:pool.length});
       });
-      pool.sort(function(a,b){ return a.x-b.x||a.i-b.i; });
-      pool.slice(0,3).forEach(function(p){ list.push(p.n); });
+      pool.sort(function(a,b){ return a.x-b.x||a.n.length-b.n.length||a.i-b.i; });
+      // Three different boards, not three textures of the same one: the first of each colour name,
+      // then the rest in order if there are fewer than three colours.
+      var byCol={}, picked=[];
+      pool.forEach(function(p){ var ck=String(((typeof _prodParseMaterialDescriptor==='function')?_prodParseMaterialDescriptor(p.n):{}).colorText||p.n).toLowerCase().trim();
+        if(!byCol[ck]&&picked.length<3){ byCol[ck]=1; picked.push(p.n); } });
+      pool.forEach(function(p){ if(picked.length<3&&picked.indexOf(p.n)<0) picked.push(p.n); });
+      picked.forEach(function(n){ list.push(n); });
       if(lam) list.lam=true;
       if(rd.hpl) list.hpl=true;
     }catch(e){}
