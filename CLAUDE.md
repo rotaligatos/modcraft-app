@@ -12493,5 +12493,4 @@ the real scheduler (finished / behind plan / pushed by that delay with the delay
 ending on lamination / draft). Buttons work on the sample only; work calendar refused; no database reads or writes.
 Rommel on lamination: once cured, boards go where the JO says next (cut to size, client pick-up, turnover to WCL).
 Rule kept; when nothing follows lamination the Gantt finish reads "Ready after cure" = day after its last day.
-Command Center icon: Gemini prompt given to Rommel; still the Modcraft placeholder until he supplies ar
-t.
+Command Center icon: Gemini prompt given to Rommel; still the Modcraft placeholder until he supplies art.
