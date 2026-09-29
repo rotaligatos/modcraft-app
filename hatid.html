@@ -150,7 +150,7 @@ table.ct td:nth-child(2){white-space:nowrap;width:1%;color:var(--muted)}
 .spacer{flex:1}
 .who{font-size:13px;opacity:.9;text-align:right;line-height:1.2}
 #pv-bar{position:sticky;top:0;z-index:30;background:#fff4d6;color:#5a4300;border-bottom:1px solid #e8c766;padding:8px 14px;font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-#pv-bar .btn{margin-left:auto}
+#pv-bar #pv-mode{margin-left:auto}#pv-bar .btn{font-size:13px;padding:6px 10px}
 .who b{display:block;font-weight:600}
 .btn-ghost-h.bad{background:rgba(179,38,30,.85);border-color:rgba(255,255,255,.4)}
 .btn-ghost-h{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25);color:inherit;border-radius:8px;padding:6px 10px;cursor:pointer}
@@ -606,7 +606,7 @@ table.ut tr.off td{color:var(--muted)}
   <button class="btn-ghost-h hidden" id="btn-drvview" title="See HATID the way a driver sees it" aria-label="Driver view">👁<span class="sos-txt"> Driver view</span></button>
   <button class="btn-ghost-h hidden" id="btn-signout">Sign out</button>
 </header>
-<div id="pv-bar" class="hidden" role="status"><span><b>👁 Driver view</b> — what drivers see. Preview only: nothing you tap is saved.</span><button class="btn" id="pv-exit">Exit driver view</button></div>
+<div id="pv-bar" class="hidden" role="status"><span id="pv-msg"></span><button class="btn" id="pv-mode"></button><button class="btn" id="pv-reset">↺ Start over</button><button class="btn" id="pv-exit">Exit driver view</button></div>
 <div id="daybar" class="hidden" aria-live="polite"><div class="in" id="daybar-in"></div></div>
 
 <!-- LOGIN -->
@@ -1167,24 +1167,114 @@ const PV_READ_RPC = new Set(['job_schedule_view','job_passcode_status','job_trac
   'job_modem_heartbeat','job_modem_claim','job_modem_done','job_modem_inbound','job_modem_release']);   // the SMS modem keeps working in the background
 const pvBlocked = () => { const r = { data: null, error: { code: 'PREVIEW', message: 'Driver view is a preview' } };
   const t = { then: (a, b) => Promise.resolve(r).then(a, b) }; ['select','eq','in','single','maybeSingle','order','limit','match','is','neq','gte','lte'].forEach(k => t[k] = () => t); return t; };
+/* Practice run: sample deliveries live only in this browser tab (SIM). The driver screens read and
+   write them exactly as they would the real tables, so every button works end to end — Departed,
+   Arrived, delivery result, problems, delays, expenses, fuel, trip sheet — without touching real data. */
+const SIM_TABLES = ['jobs','job_events','job_costs','job_truck_drivers','job_trips','truck_fuel_logs'];
+let SIM = null;
+function simQuery(t){
+  const q = { t, f: [], op: 'select', ord: [], lim: null, one: null, want: '*', rows: null, patch: null };
+  const rowsOf = () => SIM[t] || (SIM[t] = []);
+  const match = r => q.f.every(fn => fn(r));
+  const withTrucks = r => q.want.includes('trucks(') ? { ...r, trucks: r.truck_id ? state.ref.truckById?.[r.truck_id] || null : null } : r;
+  const api = {
+    select(c){ if (q.op === 'select') q.want = c || '*'; else q.back = true; return api; },
+    eq(k, v){ q.f.push(r => r[k] === v); return api; }, neq(k, v){ q.f.push(r => r[k] !== v); return api; },
+    in(k, v){ q.f.push(r => v.includes(r[k])); return api; }, is(k, v){ q.f.push(r => (r[k] ?? null) === v); return api; },
+    not(k, o, v){ q.f.push(r => !(o === 'is' ? (r[k] ?? null) === v : r[k] === v)); return api; },
+    gte(k, v){ q.f.push(r => r[k] >= v); return api; }, lte(k, v){ q.f.push(r => r[k] <= v); return api; },
+    gt(k, v){ q.f.push(r => r[k] > v); return api; }, lt(k, v){ q.f.push(r => r[k] < v); return api; },
+    order(k, o){ q.ord.push([k, o?.ascending !== false]); return api; }, limit(n){ q.lim = n; return api; }, range(a, b){ q.rng = [a, b]; return api; },
+    single(){ q.one = 'single'; return api; }, maybeSingle(){ q.one = 'maybe'; return api; },
+    insert(r){ q.op = 'insert'; q.rows = Array.isArray(r) ? r : [r]; return api; }, upsert(r){ q.op = 'upsert'; q.rows = Array.isArray(r) ? r : [r]; return api; },
+    update(p){ q.op = 'update'; q.patch = p; return api; }, delete(){ q.op = 'delete'; return api; },
+    then(ok, no){ return Promise.resolve().then(run).then(ok, no); },
+  };
+  function run(){
+    const rows = rowsOf(), now = new Date().toISOString();
+    let out;
+    if (q.op === 'insert' || q.op === 'upsert'){
+      out = q.rows.map(r => { const x = { id: r.id || 'sim-' + Math.random().toString(36).slice(2, 10), created_at: now, created_by: state.me?.id, ...r };
+        if (t === 'job_events'){ x.actor_name ??= state.me?.name || 'Driver'; x.actor_role ??= 'field'; }
+        const i = q.op === 'upsert' ? rows.findIndex(y => y.id === x.id || (t === 'job_truck_drivers' && y.day === x.day && y.staff_id === x.staff_id)) : -1;
+        if (i >= 0) rows[i] = { ...rows[i], ...x }; else rows.push(x); return x; });
+    } else if (q.op === 'update'){ out = rows.filter(match); out.forEach(r => Object.assign(r, q.patch, t === 'jobs' ? { updated_at: now } : {})); }
+    else if (q.op === 'delete'){ out = rows.filter(match); SIM[t] = rows.filter(r => !match(r)); }
+    else {
+      out = rows.filter(match).map(withTrucks);
+      q.ord.slice().reverse().forEach(([k, asc]) => out.sort((a, b) => (a[k] > b[k] ? 1 : a[k] < b[k] ? -1 : 0) * (asc ? 1 : -1)));
+      if (q.rng) out = out.slice(q.rng[0], q.rng[1] + 1); if (q.lim != null) out = out.slice(0, q.lim);
+    }
+    out = JSON.parse(JSON.stringify(out));
+    if (q.one) return out.length || q.one === 'maybe' ? { data: out[0] || null, error: null } : { data: null, error: { message: 'Not found', code: 'PGRST116' } };
+    return { data: q.op === 'select' || q.back ? out : null, error: null };
+  }
+  return api;
+}
+function simRpc(fn, a){
+  if (fn === 'job_trip_update'){
+    const rows = SIM.job_trips || (SIM.job_trips = []);
+    let r = rows.find(x => x.trip_date === a.p_date && x.truck_id === a.p_truck && x.trip_no === a.p_trip);
+    if (!r){ r = { id: 'sim-trip-' + rows.length, trip_date: a.p_date, truck_id: a.p_truck, trip_no: a.p_trip, ticket_no: `#${a.p_date.slice(5,7)}${a.p_date.slice(0,4)}${a.p_date.slice(8,10)}-90${rows.length + 1}`, tracked: false }; rows.push(r); }
+    const p = a.p_patch || {};
+    if (p.departed) r.departed_at = r.departed_at || new Date().toISOString();
+    if ('target' in p) r.target_time = p.target; if ('late_reason' in p) r.late_reason = p.late_reason;
+    return Promise.resolve({ data: r, error: null });
+  }
+  if (fn === 'job_truck_driver_set'){ state.preview.truck = a.p_truck || null; return Promise.resolve({ data: null, error: null }); }
+  return null;
+}
+function simSeed(){
+  const today = localDate(), mine = (state.ref.trucks || []).filter(t => t.status !== 'retired' && coversAny(state.ref.poolById?.[t.pool_id]?.companies));
+  const tA = mine[0] || null, tB = mine[1] || mine[0] || null;
+  const co = c => (state.ref.poolById?.[c?.pool_id]?.companies || myCompanies())[0] || 'WCLI';
+  const base = (i, t, o) => ({ id: 'sim-job-' + i, quotation_serial: 'QT-PRACTICE-00' + i, company: co(t), job_type: 'delivery', scheduled_date: today, status: 'scheduled',
+    truck_id: t?.id || null, trip_no: 1, created_at: new Date(Date.now() - (10 - i) * 60000).toISOString(), agent_id: null, loaded_at: null, delivery_outcome: null, ...o });
+  SIM = { job_events: [], job_costs: [], job_truck_drivers: [], job_trips: [], truck_fuel_logs: [], jobs: [
+    base(1, tA, { client_name: 'Sample: Acme Builders', address: '2944 Hen. G. del Pilar St., Bangkal, Makati', site_lat: 14.5568, site_lon: 121.0211, drop_seq: 1, estimated_weight_kg: 850,
+      board_pcs: { '18': 20, '6': 10 }, items: [{ desc: 'Edge band 1mm (roll)', qty: 4, unit: 'rolls' }], doc_refs: [{ ref: 'S50901', remarks: 'Full Released' }],
+      client_contact_name: 'Engr. Santos', client_phone: '0917 000 0001', notes: 'PRACTICE — call the site before arriving. Gate pass at the guard house.' }),
+    base(2, tA, { client_name: 'Sample: Cruz Cabinetry', address: 'Brgy. Dolores, San Fernando, Pampanga', site_lat: 15.0343, site_lon: 120.6849, drop_seq: 2, estimated_weight_kg: 1200,
+      board_pcs: { '18': 36 }, items: [{ desc: 'Hinges', qty: 40, unit: 'pcs' }], doc_refs: [{ ref: 'S50902', remarks: 'Partial Released' }],
+      client_contact_name: 'Mr. Cruz', client_phone: '0917 000 0002', notes: 'PRACTICE — unload at the back warehouse.' }),
+    base(3, tB, { client_name: 'Sample: Rivera Interiors', address: 'Brgy. Kapitolyo, Pasig City', site_lat: 14.5714, site_lon: 121.0584, drop_seq: 1, estimated_weight_kg: 600,
+      board_pcs: { '18': 12, '25': 4 }, items: [], doc_refs: [{ ref: 'S50903', remarks: 'Full Released' }], client_contact_name: 'Ms. Rivera', client_phone: '0917 000 0003',
+      notes: 'PRACTICE — 2nd floor, no elevator.', status: 'scheduled' }),
+  ] };
+  state.preview && (state.preview.truck = null);
+}
 {
   const _rpc = sb.rpc.bind(sb), _from = sb.from.bind(sb), _st = sb.storage.from.bind(sb.storage);
-  sb.rpc = (fn, ...a) => state.preview && !PV_READ_RPC.has(fn) ? pvBlocked() : _rpc(fn, ...a);
-  sb.from = t => { const q = _from(t); if (!state.preview) return q; ['insert','update','upsert','delete'].forEach(m => { q[m] = () => pvBlocked(); }); return q; };
-  sb.storage.from = b => { const x = _st(b); if (!state.preview) return x; x.upload = async () => { throw { code: 'PREVIEW', message: 'Driver view is a preview' }; }; return x; };
+  sb.rpc = (fn, ...a) => { if (state.preview?.sim){ const r = simRpc(fn, a[0] || {}); if (r) return r; }
+    return state.preview && !PV_READ_RPC.has(fn) ? pvBlocked() : _rpc(fn, ...a); };
+  sb.from = t => { if (state.preview?.sim && SIM_TABLES.includes(t)) return simQuery(t);
+    const q = _from(t); if (!state.preview) return q; ['insert','update','upsert','delete'].forEach(m => { q[m] = () => pvBlocked(); }); return q; };
+  sb.storage.from = b => { const x = _st(b); if (!state.preview) return x;
+    x.upload = async p => { if (state.preview.sim) return { data: { path: p }, error: null }; throw { code: 'PREVIEW', message: 'Driver view is a preview' }; };
+    if (state.preview.sim){ const su = x.createSignedUrl?.bind(x); x.createSignedUrl = async (p, s) => /^sim-/.test(p) ? { data: { signedUrl: 'about:blank' }, error: null } : su(p, s); }
+    return x; };
 }
 function canPreview(){ return ['admin','manager'].includes((state.realMe || state.me)?.role); }
 function startDriverView(){
   if (!canPreview() || state.preview) return;
   state.realMe = state.me;
   state.me = { ...state.me, role: 'field', schedule_steps: [], can_see_costs: false, signature_url: null };
-  state.preview = { truck: null };
-  closeOverlay(); setHeader(); $('pv-bar').classList.remove('hidden');
+  state.preview = { truck: null, sim: true }; simSeed();
+  closeOverlay(); setHeader(); pvBar(); $('pv-bar').classList.remove('hidden');
   $('fd-date').value = localDate(); switchView('field');
 }
+function pvBar(){
+  const sim = state.preview?.sim;
+  $('pv-msg').innerHTML = sim ? '<b>👁 Driver view · Practice run</b> — sample deliveries for today. Tap through a driver’s day; it all stays on this screen — nothing is saved and nobody is notified.'
+    : '<b>👁 Driver view · Real jobs</b> — today’s actual deliveries as a driver sees them. View only: taps are not saved.';
+  $('pv-mode').textContent = sim ? 'Show real jobs (view only)' : 'Practice with sample jobs';
+  $('pv-reset').classList.toggle('hidden', !sim);
+}
+$('pv-mode').addEventListener('click', () => { if (!state.preview) return; state.preview.sim = !state.preview.sim; if (state.preview.sim) simSeed(); state.preview.truck = null; closeOverlay(); pvBar(); $('fd-date').value = localDate(); loadField(); });
+$('pv-reset').addEventListener('click', () => { if (!state.preview?.sim) return; simSeed(); closeOverlay(); $('fd-date').value = localDate(); loadField(); toast('Practice run reset — all sample deliveries are back at the start', 'ok'); });
 function stopDriverView(){
   if (!state.preview) return;
-  state.me = state.realMe; state.realMe = null; state.preview = null;
+  state.me = state.realMe; state.realMe = null; state.preview = null; SIM = null;
   closeOverlay(); $('pv-bar').classList.add('hidden'); setHeader(); switchView('dash');
 }
 $('btn-drvview').addEventListener('click', startDriverView);
@@ -2461,7 +2551,7 @@ async function renderTrackCard(force){
   else try { me = (await sb.rpc('job_tracker_mine')).data; } catch {}
   if (!me) { box.innerHTML = ''; return; }
   const working = me.last_seen_at && Date.now() - new Date(me.last_seen_at) < 3 * 864e5;
-  let hidden = false; try { hidden = !state.preview && localStorage.getItem('hatid-track-hide') === '1'; } catch {}
+  let hidden = false; try { hidden = state.preview ? true : localStorage.getItem('hatid-track-hide') === '1'; } catch {}
   if (working && !force){
     box.innerHTML = `<div class="card track-ok">📍 Tracker working · last signal ${esc(ago(me.last_seen_at))}${me.battery != null ? ` · 🔋${Math.round(me.battery)}%` : ''} <button class="lnk" id="tk-again">Set up again</button></div>`;
     $('tk-again').addEventListener('click', () => renderTrackCard(true)); return;
@@ -2614,7 +2704,7 @@ async function openFieldJob(id){
     catch { c.checked = !c.checked; }
     c.disabled = false;
   });
-  if (job.status === 'in_progress'){ bindOutcome('fo'); getGeo(8000).then(g => { const el = $('fx-geo'); if (el) el.innerHTML = g.error ? `<span class="warn">📍 ${esc(g.error)}</span>` : `📍 Location ready (±${Math.round(g.acc)} m) — it’s saved with the delivery result`; }); }
+  if (job.status === 'in_progress'){ bindOutcome('fo'); getGeo(8000).then(g => { const el = $('fx-geo'); if (el) el.innerHTML = g.error && state.preview?.sim ? '📍 Practice: no GPS on this computer — the site’s location will be used' : g.error ? `<span class="warn">📍 ${esc(g.error)}</span>` : `📍 Location ready (±${Math.round(g.acc)} m) — it’s saved with the delivery result`; }); }
 
   let photoBlob = null;
   $('fx-photo').addEventListener('change', async e => {
@@ -2639,7 +2729,8 @@ async function openFieldJob(id){
     let geo = null;
     if (evType === 'completed'){   // the delivery result must carry the phone's location
       btn.innerHTML = '<span class="spin"></span> Getting your location…';
-      geo = await getGeo();
+      geo = await getGeo(state.preview?.sim ? 4000 : 20000);
+      if (geo.error && state.preview?.sim) geo = { lat: job.site_lat ?? 14.6, lon: job.site_lon ?? 121.0, acc: 20 };   // practice on a PC without GPS
       if (geo.error){ btn.disabled = false; btn.textContent = label; return toast(geo.error, 'error'); }
     }
     btn.innerHTML = '<span class="spin"></span> Saving…';
@@ -2659,7 +2750,7 @@ async function openFieldJob(id){
         if (evType === 'dispatched' && job.truck_id)   // the trip's departure time for the dispatch report
           sb.rpc('job_trip_update', { p_date: job.scheduled_date, p_truck: job.truck_id, p_trip: job.trip_no || 1, p_patch: { departed: true } }).then(() => {}, () => {});
       }
-      toast(oc ? 'Delivery result saved — base notified' : evType === 'issue' ? 'Problem reported — base notified' : 'Saved', 'ok');
+      toast((oc ? 'Delivery result saved — base notified' : evType === 'issue' ? 'Problem reported — base notified' : 'Saved') + (state.preview?.sim ? ' (practice — nobody was actually notified)' : ''), 'ok');
       refreshAfterChange(job.id);
     } catch { btn.disabled = false; btn.textContent = label; }
   };
