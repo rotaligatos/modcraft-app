@@ -899,6 +899,7 @@ table.ut tr.off td{color:var(--muted)}
       <button class="subtab" data-rt="trips" role="tab">Trips &amp; cost</button>
       <button class="subtab" data-rt="dispatch" role="tab">Dispatch &amp; OTIF</button>
       <button class="subtab" data-rt="reach" role="tab">Reach &amp; customers</button>
+      <button class="subtab" data-rt="quality" role="tab">Checks &amp; quality</button>
       <button class="subtab" data-rt="jobs" role="tab">HATID jobs</button>
     </div>
     <div id="rp-body"></div>
@@ -4834,6 +4835,74 @@ function lrFillFilters(){
   opts('rp-sp', count('sp').sort().map(k => [k, k]));
   opts('rp-ctype', Object.entries(CUST_CAT).filter(([k]) => all.some(r => r.ctype === k)));
 }
+const DRV_START = '2026-09-29';   // driver workflow (checklist, pre-departure lock) went live
+/* ----- Tab: Checks & quality (2026-09-29) — truck checklists, pre-departure compliance, delivery quality concerns, Grab / Lalamove ----- */
+async function renderQualityReport(){
+  const L = state.lr, body = $('rp-body'); if (!L) return;
+  body.innerHTML = '<div class="card pad"><span class="spin"></span> Loading checks and quality…</div>';
+  const co = L.co || null, cost = canSeeCosts();
+  let checks = [], trips = [], jobs = [], evs = [], courier = [];
+  try {
+    [checks, trips, jobs, courier] = await Promise.all([
+      fetchAll('Loading truck checklists', () => sb.from('job_truck_checks').select('*').gte('day', L.from).lte('day', L.to).order('day')),
+      fetchAll('Loading trips', () => sb.from('job_trips').select('trip_date, truck_id, trip_no, load_locked_at, departed_at, gps_left_at, return_sent_at, back_at, gps_back_at').gte('trip_date', L.from).lte('trip_date', L.to)),
+      fetchAll('Loading delivery results', () => { let q = sb.from('jobs').select('id, quotation_serial, client_name, company, scheduled_date, delivery_outcome, received, truck_id, order_value').gte('scheduled_date', L.from).lte('scheduled_date', L.to).in('delivery_outcome', ['partial','returned']); return co ? q.eq('company', co) : q; }),
+      fetchAll('Loading Grab / Lalamove', () => { let q = sb.from('jobs').select('id, quotation_serial, client_name, company, scheduled_date, status, courier_vehicle_id, courier_fare, courier_paid_by, order_value').gte('scheduled_date', L.from).lte('scheduled_date', L.to).not('courier_vehicle_id', 'is', null); return co ? q.eq('company', co) : q; }),
+    ]);
+    evs = await fetchAll('Loading load concerns and unlocks', () => sb.from('job_events').select('job_id, event_type, notes, created_at, actor_name').in('event_type', ['load_concern','load_unlocked']).gte('created_at', L.from + 'T00:00:00+08:00').lte('created_at', L.to + 'T23:59:59+08:00'));
+  } catch { body.innerHTML = '<div class="card empty">Could not load checks and quality.</div>'; return; }
+  courier = courier.filter(j => j.courier_vehicle_id);
+  const truckOk = id => !co || (state.ref.poolById?.[state.ref.truckById?.[id]?.pool_id]?.companies || []).includes(co);
+  checks = checks.filter(c => truckOk(c.truck_id)); trips = trips.filter(t => truckOk(t.truck_id));
+  const tl = id => state.ref.truckById?.[id]?.label || 'Truck';
+  // truck checklists
+  const failItems = {}; checks.forEach(c => (c.results || []).filter(x => x.v === 'bad').forEach(x => { failItems[x.label] = (failItems[x.label] || 0) + 1; }));
+  const byTruck = {}; checks.forEach(c => { const t = byTruck[c.truck_id] ||= { n: 0, fail: 0 }; t.n++; if (c.fails) t.fail++; });
+  const companyTrucks = (state.ref.trucks || []).filter(t => t.fleet_type === 'company_owned' && t.status === 'active' && truckOk(t.id));
+  // pre-departure
+  const left = trips.filter(t => t.trip_date >= DRV_START && (t.departed_at || t.gps_left_at)), locked = left.filter(t => t.load_locked_at && (!t.gps_left_at || t.load_locked_at <= t.gps_left_at));
+  const noCheck = left.filter(t => !t.load_locked_at);
+  const unlocks = evs.filter(e => e.event_type === 'load_unlocked'), concerns = evs.filter(e => e.event_type === 'load_concern');
+  const uniq = (list, k) => [...new Map(list.map(x => [k(x), x])).values()];
+  // quality at the client
+  const REASON = typeof RET_REASON !== 'undefined' ? RET_REASON : {};
+  const byReason = {}, qa = [];
+  jobs.forEach(j => { const rs = Object.values(j.received?.reasons || {}); const set = [...new Set(rs.length ? rs : ['unrecorded'])];
+    set.forEach(r => { byReason[r] = (byReason[r] || 0) + 1; });
+    if (set.some(r => QA_REASONS.includes(r))) qa.push({ j, set }); });
+  // Grab / Lalamove
+  const cv = id => courierById(id);
+  const byVeh = {}; courier.forEach(j => { const k = courierLabel(cv(j.courier_vehicle_id)); const x = byVeh[k] ||= { n: 0, co: 0, cl: 0, sales: 0, fareCo: 0 };
+    x.n++; if (j.courier_paid_by === 'client') x.cl += Number(j.courier_fare || 0); else { x.co += Number(j.courier_fare || 0); if (j.order_value){ x.sales += Number(j.order_value); x.fareCo += Number(j.courier_fare || 0); } } });
+  const cSum = Object.values(byVeh).reduce((a, x) => ({ n: a.n + x.n, co: a.co + x.co, cl: a.cl + x.cl, sales: a.sales + x.sales, fareCo: a.fareCo + x.fareCo }), { n: 0, co: 0, cl: 0, sales: 0, fareCo: 0 });
+  const pct = (a, b) => b ? Math.round(a / b * 100) + '%' : '—';
+  body.innerHTML = `
+    <div class="kpis" style="margin-bottom:14px">
+      ${kpi('Truck checklists', checks.length, `${checks.filter(c => c.fails).length} with items not OK · ${companyTrucks.length} company trucks`)}
+      ${kpi('Pre-departure confirmed', pct(locked.length, left.length), `${locked.length} of ${left.length} trips since 29 Sep · ${noCheck.length} left without`, noCheck.length ? 'warn' : '')}
+      ${kpi('Quality concerns', qa.length, `${jobs.length} deliveries with returns · ${concerns.length} load concerns at the plant`, qa.length ? 'warn' : '')}
+      ${kpi('Grab / Lalamove', cSum.n, cost ? `${peso(cSum.co)} company-paid${cSum.sales ? ' · ' + (cSum.fareCo / cSum.sales * 100).toFixed(1) + '% of those sales' : ''}` : 'bookings')}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:14px;align-items:start">
+      <div class="card pad"><h3 style="margin-top:0">Truck checklist — items not OK</h3>
+        ${Object.keys(failItems).length ? simpleTable(['Item', 'Times not OK'], Object.entries(failItems).sort((a, b) => b[1] - a[1]).map(([k, n]) => [k, n])) : '<div class="muted">No failed items in this period.</div>'}
+        <h3>By truck</h3>${Object.keys(byTruck).length ? simpleTable(['Truck', 'Checklists', 'With items not OK'], Object.entries(byTruck).map(([id, x]) => [tl(id), x.n, x.fail])) : '<div class="muted">No checklists in this period.</div>'}
+        ${checks.filter(c => c.fails).length ? `<h3>Latest failures</h3>${simpleTable(['Day', 'Truck', 'Not OK', 'By'], checks.filter(c => c.fails).slice(-8).reverse().map(c => [c.day, tl(c.truck_id), (c.results || []).filter(x => x.v === 'bad').map(x => x.label + (x.note ? ' — ' + x.note : '')).join('; '), c.actor_name || '']))}` : ''}</div>
+      <div class="card pad"><h3 style="margin-top:0">Pre-departure</h3>
+        ${simpleTable(['', 'Trips'], [['Left the base', left.length], ['Confirmed and locked before leaving', locked.length], ['Left without a confirmed check', noCheck.length], ['Unlocked by the supervisor', uniq(unlocks, e => e.notes + e.created_at.slice(0, 16)).length], ['Load concerns reported at the plant', concerns.length]])}
+        ${noCheck.length ? `<h3>Left without a check</h3>${simpleTable(['Day', 'Truck', 'Trip'], noCheck.slice(-10).reverse().map(t => [t.trip_date, tl(t.truck_id), t.trip_no]))}` : ''}
+        ${unlocks.length ? `<h3>Unlocks</h3>${simpleTable(['When', 'Reason'], uniq(unlocks, e => e.notes + e.created_at.slice(0, 16)).slice(-8).reverse().map(e => [fmtTime(e.created_at), (e.notes || '').replace(/ — the driver must.*$/, '')]))}` : ''}</div>
+      <div class="card pad"><h3 style="margin-top:0">Why items came back</h3>
+        ${Object.keys(byReason).length ? simpleTable(['Reason', 'Deliveries'], Object.entries(byReason).sort((a, b) => b[1] - a[1]).map(([r, n]) => [r === 'unrecorded' ? 'No reason recorded (before 29 Sep)' : REASON[r] || r, n])) : '<div class="muted">No partial or refused deliveries in this period.</div>'}
+        ${qa.length ? `<h3>Quality concerns (sent to QA + Warehouse)</h3>${simpleTable(['Date', 'SO / client', 'Reason'], qa.slice(-12).reverse().map(x => [x.j.scheduled_date, `${x.j.quotation_serial} · ${x.j.client_name || ''}`, x.set.map(r => REASON[r] || r).join(', ')]))}` : ''}</div>
+      <div class="card pad"><h3 style="margin-top:0">Grab / Lalamove</h3>
+        ${Object.keys(byVeh).length ? simpleTable(cost ? ['Vehicle', 'Bookings', 'Company-paid', 'Client-paid', 'Fare % of sales'] : ['Vehicle', 'Bookings'],
+            Object.entries(byVeh).sort((a, b) => b[1].n - a[1].n).map(([k, x]) => cost ? [k, x.n, peso(x.co), peso(x.cl), x.sales ? (x.fareCo / x.sales * 100).toFixed(1) + '%' : '—'] : [k, x.n]))
+          : '<div class="muted">No Grab / Lalamove bookings in this period.</div>'}
+        <div class="ft" style="margin-top:6px">Company-paid fares are counted in transport cost (Trips &amp; cost) as courier fees.</div></div>
+    </div>`;
+}
+
 function renderReports(){
   document.querySelectorAll('#rp-tabs .subtab').forEach(b => b.classList.toggle('active', b.dataset.rt === (state.rpTab || 'overview')));
   if (!state.lr) return;
@@ -4841,6 +4910,7 @@ function renderReports(){
   $('rp-clear').classList.toggle('hidden', !Object.keys(f).length);
   if (!document.querySelector('.rp-filters').classList.contains('open')) $('rp-more').textContent = Object.keys(f).length ? `More filters (${Object.keys(f).length})` : 'More filters';
   if (tab === 'jobs') return renderJobsReport(state.reportRows || []);
+  if (tab === 'quality') return renderQualityReport();
   const L0 = state.lr, recs = lrApply(L0.recs, f);
   // Like-for-like: when deliveries stop before the end of the period (history imported up to a date, or today),
   // measure both periods only up to the last day that has data.
@@ -7485,10 +7555,10 @@ async function loadSched(){
   // dates that already have confirmed deliveries but no schedule prepared yet
   let todo = [];
   try {
-    const { data: js } = await sb.from('jobs').select('scheduled_date, truck_id').gte('scheduled_date', localDate()).lte('scheduled_date', addDays(localDate(), 14))
-      .in('status', ['scheduled','dispatched','in_progress','issue']).not('truck_id', 'is', null);
+    const { data: js } = await sb.from('jobs').select('scheduled_date, truck_id, courier_vehicle_id, company').gte('scheduled_date', localDate()).lte('scheduled_date', addDays(localDate(), 14))
+      .in('status', ['scheduled','dispatched','in_progress','issue']).or('truck_id.not.is.null,courier_vehicle_id.not.is.null');
     const have = new Set(rows.map(s => s.pool_id + '|' + s.delivery_date)), cnt = {};
-    (js || []).forEach(j => { const pid = state.ref.truckById?.[j.truck_id]?.pool_id; if (!pid || !pools.some(p => p.id === pid)) return; const k = pid + '|' + j.scheduled_date; if (!have.has(k)) cnt[k] = (cnt[k] || 0) + 1; });
+    (js || []).forEach(j => { const pid = j.truck_id ? state.ref.truckById?.[j.truck_id]?.pool_id : [...(state.ref.pools || [])].sort((a, b) => a.name.localeCompare(b.name)).find(p => (p.companies || []).includes(j.company))?.id; if (!pid || !pools.some(p => p.id === pid)) return; const k = pid + '|' + j.scheduled_date; if (!have.has(k)) cnt[k] = (cnt[k] || 0) + 1; });
     todo = Object.entries(cnt).map(([k, n]) => { const [pool_id, delivery_date] = k.split('|'); return { pool_id, delivery_date, n }; }).sort((a, b) => a.delivery_date.localeCompare(b.delivery_date));
   } catch {}
   $('sc-body').innerHTML = todo.map(t => `<tr data-sched="${esc(t.pool_id)}|${esc(t.delivery_date)}" style="cursor:pointer">
@@ -7538,7 +7608,7 @@ async function openSchedule(poolId, date){
   const notes = [];
   if (stepNow && my.includes(stepNow) && signedThis) notes.push('You already signed this revision — this step needs a different person.');
   if (stepNow && !my.includes(stepNow)) notes.push(`Waiting for the ${SCHED_STEPS.find(x => x[0] === stepNow)[2].toLowerCase()} to ${STEP_VERB[stepNow].toLowerCase()} and sign.`);
-  if (editable && !content.length) notes.push('No trucks have jobs on this date yet. Confirm jobs on the Dispatch board first.');
+  if (editable && !content.length) notes.push('No deliveries confirmed on this date yet. Confirm jobs on the Dispatch board first (a truck, or a Grab / Lalamove booking).');
   if (!inFlow && isDispatcher() && !view.can_prepare) notes.push(`This pool serves ${(pool?.companies || []).join(' and ')}, so its schedule is prepared by staff covering all those companies.`);
   if (!view.full_view) notes.push(`Showing ${myCompanies().join(' and ')} drops only.`);
 
@@ -7627,12 +7697,16 @@ function schedFormHtml(pool, date, content, signs, urls, editable, form, s){
         <td>${r.ref ? `<span class="ref">${esc(r.ref)}</span>` : ''}</td><td>${esc(r.remarks || '')}</td>
         <td class="w">${r.weight != null && r.weight !== '' ? Number(r.weight).toLocaleString('en-PH') : ri === 0 && !(dr.doc_refs || []).some(x => x.weight) && dr.weight ? Number(dr.weight).toLocaleString('en-PH') : ''}</td>${ri === 0 ? ctl : ''}</tr>`).join('');
     }).join('');
+    if (sec.courier) return `<div class="sec"><table><tr class="hd">
+        <td class="k">Delivered by:</td><td class="v">${sec.service === 'grab' ? '🟢' : '🟠'} ${esc(sec.label)}</td><td class="k">Booking no.:</td><td class="v">${esc(sec.booking || '—')}</td></tr>
+      <tr class="hd"><td class="k">Rider tracking:</td><td>${sec.track ? `<a href="${esc(sec.track)}" target="_blank" rel="noopener">${esc(sec.track.replace(/^https?:\/\//, '').slice(0, 40))}</a>` : '—'}</td><td class="k">Fare paid by:</td><td class="v">${sec.paid_by === 'client' ? 'Client' : 'Company'} <span class="k" style="margin-left:14px">Weight:</span> ${Number(sec.total_weight || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}</td></tr></table>
+      <table class="drops"><thead><tr><th>Drop No.</th><th>Customer</th><th>Address</th><th>Sales agent</th><th>Doc. reference</th><th>Remarks</th><th class="w">Weight</th>${editable ? '<th class="no-print"></th>' : ''}</tr></thead><tbody>${rows}</tbody></table></div>`;
     return `<div class="sec"><table><tr class="hd">
         <td class="k">Truck (plate):</td><td class="v">${esc(sec.label)}</td><td class="k">Driver:</td><td class="v">${inp('driver', sec.driver, 'Driver')}</td></tr>
       <tr class="hd"><td class="k">Contact no.:</td><td>${inp('contact_no', sec.contact_no, 'Contact no.')} ${sec.wheels ? `(${sec.wheels} wheels)` : ''} ${sec.coded ? '<span class="coding">CODING</span>' : ''}</td><td class="k">Helper:</td><td class="v">${inp('helper', sec.helper, 'Helper')}</td></tr>
       <tr class="hd"><td class="k">Trip no.:</td><td><span class="trip-tag">${ordinal(sec.trip_no)} Trip</span></td><td class="k">Capacity:</td><td class="v">${sec.capacity ? Number(sec.capacity).toLocaleString('en-PH') : '—'} <span class="k" style="margin-left:14px">Total weight:</span> <span class="${over ? 'over' : ''}">${Number(sec.total_weight || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}${over ? ' ⚠ over capacity' : ''}</span></td></tr></table>
       <table class="drops"><thead><tr><th>Drop No.</th><th>Customer</th><th>Address</th><th>Sales agent</th><th>Doc. reference</th><th>Remarks</th><th class="w">Weight</th>${editable ? '<th class="no-print"></th>' : ''}</tr></thead><tbody>${rows}</tbody></table></div>`;
-  }).join('') || '<div style="padding:18px;text-align:center;color:#666">No trucks have jobs on this date.</div>';
+  }).join('') || '<div style="padding:18px;text-align:center;color:#666">No deliveries on this date.</div>';
   const sig = `<table class="signs"><tr>${SCHED_STEPS.map(([k, lab, role]) => { const x = signs.find(y => y.step === k);
     return `<td><div class="lab">${lab}:</div>${x ? `${urls[k] ? `<img src="${esc(urls[k])}" alt="Signature of ${esc(x.signer_name)}">` : '<div style="height:42px"></div>'}<div class="nm">${esc(x.signer_name)}</div><div class="tt">${esc(x.signer_title || role)}</div><div class="when">${esc(fmtTime(x.signed_at))}</div>`
       : `<div style="height:42px"></div><div class="tt" style="color:#888">${esc(role)}</div>`}</td>`; }).join('')}</tr></table>`;
