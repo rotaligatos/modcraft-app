@@ -12525,5 +12525,8 @@ catalogue — person picks.
   upload now finds columns by HEADER (`panelColMap`), so old-order files, new-order files, the MSSI website's copy
   and any column order all import; a file with no Length/Width column is refused naming it. The template's
   Hardware sheet gained the Cabinet column. The template was rewritten with openpyxl (compressed, 31KB→10KB;
-  only an empty metadata part dropped; all 3 dropdowns kept). ⚠ The MSSI website still has its OWN copy of the
-  template and reads by position — it is unchanged and still works; update both together if its order changes.
+  only an empty metadata part dropped; all 3 dropdowns kept). The MSSI website (own repo, no remote) got the same:
+  grid/preview/template order, header-based upload (`panelColMap`), template rebuilt by `tools/build_template.js`
+  (needs `npm i --no-save xlsx crc-32` in Modcraft — they were missing from node_modules).
+- Cutting List grid widths: set via a `<colgroup>` (a second `style=""` on a `<th>` is ignored — why Material
+  never widened). Material 26%; Th/Qty ~50px; L/W 74px.
