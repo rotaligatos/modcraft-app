@@ -12543,3 +12543,34 @@ catalogue — person picks.
   (order + cutting list; no files). Found + fixed: the Job Order sent a piece to drilling whenever ANY piece
   had the same part name ("Side panel" in every cabinet). Website holes now carry `area` (cabinet) and
   `_joBuild` matches name AND cabinet; AI-read hole schedules (no cabinet) still match by name.
+
+# OPEN — updated 2026-09-30 (session end) — THIS IS THE AUTHORITATIVE LIST
+> Supersedes every OPEN list above; the 2026-09-30 session entry above has the detail.
+
+## Done this session (do not redo)
+Command Center icon (option 3, `icons/command-center/`) · cutting-list review on all 16 samples (suggestion
+ranking, glued-board false alarm, tape thickness, raw-plywood HPL, EGDES, cache-by-count) · client codes MP /
+B. WALNUT / LENGTH NONE · cutting-list column order on screen + template + header-based upload (Modcraft AND
+MSSI website) · column widths · website→Modcraft end to end + real test order (filed, verified, deleted) ·
+HPL build SKUs resolve · drilling route matched by cabinet.
+
+## Closed by Rommel's decision — do not re-raise
+No board-edge trim (bander trims) · no spare-board allowance (estimator's judgement; quotation has buffers) ·
+Studio Tille C11 "259" is the client's error.
+
+## Waiting
+- **MSSI website is not deployed** — its column-order/header-upload changes are committed in its local repo
+  only (no remote). Until published, clients downloading from the website get the old template (still imports fine).
+- Website hardware is free text → hardware lines arrive flagged for a catalogue pick (by design).
+- Test data from 2026-09-27 (`QT-T00000001` / `JO-T00000001-1` / MR-260926-W934 / `_e2e_fixture`) — still
+  waiting for Rommel's "delete the test job".
+
+## Carried forward, unchanged
+Rotate the Wufoo API key (security clock) · Storage `quotations` bucket readable by any signed-in user of any
+app · Command Center phase 4 (sign-in from DB) after a clean shadow log · printed cut sequence misses the extra
+waste crosscut around a defect · confirm Supabase egress fix in Usage · 15 orders with no handler ·
+retired-status string sweep · Schedule page on `DEMO_PROJS` · Orders 8834/8840 · ticket `a0cea6f8` ·
+mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on hold) · `QT-W00000136.R1` ·
+phone order_pause · Stage 2 lock parity while paused · Michael Delos Reyes signature · unlock-reconciliation
+~60s · `qApproved`/`qClientApproved` coupling · MSSI commission OFF · `samplesofcuttinglist/` is client data —
+never commit · PMES/KEYSTONE default work week, capacity, staff emails, suppliers (Rommel's).
