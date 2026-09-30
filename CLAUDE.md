@@ -12516,5 +12516,7 @@ Decisions from Rommel (2026-09-30) — do not re-ask:
 - Client codes: **MP = Marine Plywood** (VALERA), **B. WALNUT = Bologna Walnut** (LIMSHEN),
   **LENGTH NONE = no edge** (ARBAU) — all built into the reader.
 - Studio Tille C11 "along '259'" on a 267×130 piece is the CLIENT's error (EBT is along 267) — the flag is correct.
-Still open: plant Q3/Q4 (spare boards per material). "Dark gray" (LIMSHEN) has no plain board in the
+- **No spare-board allowance in the board count** — spares are the estimator's judgement; the quotation
+  already carries buffers, so adding more here would bloat it. (Plant Q3/Q4 closed.)
+Still open: nothing from the plant list. "Dark gray" (LIMSHEN) has no plain board in the
 catalogue — person picks.
