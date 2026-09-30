@@ -35492,7 +35492,9 @@ var MCL=(function(){
   // Same 12/7/4-column schema the MSSI website's own downloadable template uses
   // (portal.html's XL_PANEL_HDR/XL_HPL_HDR/XL_HW_HDR) — a filled-in website
   // template and one filled in from here are interchangeable either way.
-  var XL_PANEL_HDR=['Group (cabinet/area)','Part','Material SKU','Length (mm)','Width (mm)','Thickness (mm)','Qty','Edge Band','Edge Material','Grain (L/W)','Services','Remarks'];
+  // Same order as the screen (team's request, 2026-09-30). Uploads find columns by header, so files
+  // made from the older order (Length, Width, Thickness, Qty) still import.
+  var XL_PANEL_HDR=['Group (cabinet/area)','Part','Material SKU','Thickness (mm)','Qty','Length (mm)','Width (mm)','Edge Band','Edge Material','Grain (L/W)','Services','Remarks'];
   var XL_HPL_HDR=['Substrate SKU','HPL Finish SKU','Faces (1F/2F)','Length (mm)','Width (mm)','Qty','Cut to size (Y/N)'];
   // 'Cabinet' is appended LAST, never inserted: every column is read by position, so a file
   // made from the older 4-column template still imports with nothing shifted.
@@ -35984,8 +35986,8 @@ var MCL=(function(){
       XLSX.utils.book_append_sheet(wb,ws,name);
     }
     add([XL_PANEL_HDR,
-      ['Kitchen — Base Cabinet 1','Side panel','Real White PB 4x8 2F (18mm, Matte)',720,560,18,2,'1L 1S','Bamboo .5mmx22mm Matte PVC Premium Edgeband','L','Boring 35mm (Hinges) x 4 holes',''],
-      ['Kitchen — Base Cabinet 1','Door','Walnut 259 PB 4x8 2F (18mm, Matte)',716,296,18,2,'4S','Bamboo .5mmx22mm Matte PVC Premium Edgeband','L','','']],
+      ['Kitchen — Base Cabinet 1','Side panel','Real White PB 4x8 2F (18mm, Matte)',18,2,720,560,'1L 1S','Bamboo .5mmx22mm Matte PVC Premium Edgeband','L','Boring 35mm (Hinges) x 4 holes',''],
+      ['Kitchen — Base Cabinet 1','Door','Walnut 259 PB 4x8 2F (18mm, Matte)',18,2,716,296,'4S','Bamboo .5mmx22mm Matte PVC Premium Edgeband','L','','']],
       'Cutting List');
     add([XL_HPL_HDR,['Raw Boards 4x8 18mm MDF','Pure white 4x8 0.7mm HPL','2F',1220,2440,4,'N']],'HPL Lamination');
     add([XL_HW_HDR,['Overlay hinge',4,'pcs','2 per door','Cabinet 1']],'Hardware');
@@ -36009,6 +36011,44 @@ var MCL=(function(){
   // freely, columns may not be moved — every cell is read by position, so one
   // inserted column shifts everything after it with nothing on screen to say
   // so. The header row is checked and named rather than assumed correct.
+  // Header → column map for the Cutting List sheet. row(raw) returns the row rearranged into the
+  // fixed internal order [group, part, material, length, width, thickness, qty, edge band,
+  // edge material, grain, services, remarks], so the reading code below never depends on where a
+  // column sits in the file. Checked most-specific first ("Edge Material" before "Edge Band" and
+  // "Material"). A header row that names almost nothing is read in the old fixed order.
+  var PANEL_FIELDS=[
+    {k:7+1,  re:/edgemat|tape/},               // 8 edge material
+    {k:7,    re:/edgeband|^edges?$|ebt|edgecode/},
+    {k:0,    re:/group|cabinet|area/},
+    {k:1,    re:/^part|component/},
+    {k:2,    re:/material|sku/},
+    {k:5,    re:/thick|^th$|^thk$/},
+    {k:6,    re:/^qty|quantity|^pcs$/},
+    {k:3,    re:/length|^len$/},
+    {k:4,    re:/width/},
+    {k:9,    re:/grain/},
+    {k:10,   re:/service/},
+    {k:11,   re:/remark|note/}];
+  var PANEL_NAMES=['Group (cabinet/area)','Part','Material SKU','Length (mm)','Width (mm)','Thickness (mm)','Qty',
+                   'Edge Band','Edge Material','Grain (L/W)','Services','Remarks'];
+  function panelColMap(hdr){
+    var pos={}, found=0;
+    (hdr||[]).forEach(function(h,ci){
+      var n=String(h==null?'':h).toLowerCase().replace(/[^a-z]/g,'');
+      if(!n) return;
+      for(var f=0;f<PANEL_FIELDS.length;f++){
+        var fd=PANEL_FIELDS[f];
+        if(pos[fd.k]==null&&fd.re.test(n)){ pos[fd.k]=ci; found++; return; }
+      }
+    });
+    if(found<3){      // no recognisable header — the old fixed order
+      return {ok:true,missing:[],legacy:true,row:function(r){ return r; }};
+    }
+    var missing=[3,4].filter(function(k){ return pos[k]==null; }).map(function(k){ return PANEL_NAMES[k]; });
+    return {ok:!missing.length,missing:missing,legacy:false,pos:pos,
+      row:function(r){ if(!r) return r; var o=[]; for(var k=0;k<12;k++) o[k]=pos[k]!=null?r[pos[k]]:undefined; return o; }};
+  }
+
   function uploadExcel(inputEl){
     var file=inputEl.files&&inputEl.files[0]; if(!file) return;
     if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); inputEl.value=''; return; }
@@ -36018,21 +36058,20 @@ var MCL=(function(){
         var wb=XLSX.read(new Uint8Array(ev.target.result),{type:'array'});
         var sheet=function(n){ var s=wb.Sheets[n]; return s?XLSX.utils.sheet_to_json(s,{header:1,blankrows:false}):null; };
         var panelsSheet=sheet('Cutting List')||XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,blankrows:false});
+        // Columns are found by their HEADER, not their position, so a file in any column order
+        // imports correctly — the older template (Length, Width, Thickness, Qty), the current one
+        // (Thickness, Qty, Length, Width) and the MSSI website's copy alike.
         var headerWarn='';
-        if(panelsSheet&&panelsSheet.length){
-          var want=XL_PANEL_HDR.map(function(h){ return String(h).toLowerCase().replace(/[^a-z]/g,''); });
-          var got=(panelsSheet[0]||[]).map(function(h){ return String(h==null?'':h).toLowerCase().replace(/[^a-z]/g,''); });
-          for(var wi=0;wi<want.length;wi++){
-            if(got[wi]!==want[wi]){
-              headerWarn='⚠ The columns do not match the template — check column '+(wi+1)
-                +' ("'+XL_PANEL_HDR[wi]+'"). Rows can be added freely, but columns must not be moved or inserted.';
-              break;
-            }
-          }
+        var cm=panelsSheet&&panelsSheet.length?panelColMap(panelsSheet[0]):null;
+        if(cm&&cm.missing.length){
+          headerWarn='⚠ The columns do not match the template — no column headed '
+            +cm.missing.map(function(m){ return '"'+m+'"'; }).join(', ')
+            +'. Keep the header row from the downloaded template; columns may be in any order.';
         }
         var newPanels=[], unknown=0, ebUnknown=[];
-        if(panelsSheet&&panelsSheet.length>1){
-          panelsSheet.slice(1).forEach(function(r){
+        if(panelsSheet&&panelsSheet.length>1&&cm&&cm.ok){
+          panelsSheet.slice(1).forEach(function(raw){
+            var r=cm.row(raw);
             if(!r||(!r[3]&&!r[4])) return;         // no length or width at all — nothing to import
             var p=blankPanel();
             if(r[0]) p.group=String(r[0]);
@@ -36077,7 +36116,7 @@ var MCL=(function(){
           });
         }
         if(!newPanels.length&&!newHpl.length&&!newHw.length){
-          showToast('No rows found — please use the downloaded template.'); inputEl.value=''; return;
+          showToast(headerWarn||'No rows found — please use the downloaded template.'); inputEl.value=''; return;
         }
         // Uploading REPLACES the grid, same as the website's own import — but not
         // silently over real typed work. The 10-row blank starting scaffold has
@@ -36112,7 +36151,7 @@ var MCL=(function(){
   return {
     build:build, afterRender:afterRender,
     onCellPaste:onCellPaste, onCellKey:onCellKey,
-    downloadTemplate:downloadTemplate, uploadExcel:uploadExcel,
+    downloadTemplate:downloadTemplate, uploadExcel:uploadExcel, _panelColMap:panelColMap,
     setGrain:function(v){ S.grain=v; },
     setGroupBy:function(v){ S.groupBy=v; rerender(); },
     // One stored value (prodSettings.machineType) with two entry points — this and the machines

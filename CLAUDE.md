@@ -12520,3 +12520,10 @@ Decisions from Rommel (2026-09-30) — do not re-ask:
   already carries buffers, so adding more here would bloat it. (Plant Q3/Q4 closed.)
 Still open: nothing from the plant list. "Dark gray" (LIMSHEN) has no plain board in the
 catalogue — person picks.
+- **Cutting list column order (team's request):** Cabinet, Part, Material, Th, Qty, Length, Width — on screen,
+  in block paste (`PASTE_COLS`), and in `Cutting-List-Template.xlsx` (+ `XL_PANEL_HDR`, fallback copy). The Excel
+  upload now finds columns by HEADER (`panelColMap`), so old-order files, new-order files, the MSSI website's copy
+  and any column order all import; a file with no Length/Width column is refused naming it. The template's
+  Hardware sheet gained the Cabinet column. The template was rewritten with openpyxl (compressed, 31KB→10KB;
+  only an empty metadata part dropped; all 3 dropdowns kept). ⚠ The MSSI website still has its OWN copy of the
+  template and reads by position — it is unchanged and still works; update both together if its order changes.

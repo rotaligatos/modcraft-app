@@ -80,7 +80,7 @@ const dl = await page.evaluate(async () => {
   return { ok: true, size: buf.length, sheets: wb.SheetNames,
            panelHeader: window.XLSX.utils.sheet_to_json(wb.Sheets['Cutting List'], { header: 1 })[0] };
 });
-step('template file fetches and parses as a real workbook', dl.ok && dl.size > 10000, JSON.stringify({ size: dl.size, sheets: dl.sheets }));
+step('template file fetches and parses as a real workbook', dl.ok && dl.size > 5000, JSON.stringify({ size: dl.size, sheets: dl.sheets }));
 step('template "Cutting List" header matches MCL\'s own XL_PANEL_HDR', dl.ok && dl.panelHeader && dl.panelHeader[0] === 'Group (cabinet/area)' && dl.panelHeader.length === 12, JSON.stringify(dl.panelHeader));
 
 // Also drive the REAL button + REAL Playwright download event, not just fetch().
@@ -154,7 +154,7 @@ const uploadResult = await page.evaluate(async () => {
 // width (matching the website's own converter); the Filler row here has a length
 // but no width, so it is imported and left for _cutListToAnalysis's own tripwire
 // to flag rather than being silently dropped.
-step('upload replaced the 10-row scaffold with all 4 parsed rows (none dropped)', uploadResult.panelCount === 4, 'got ' + uploadResult.panelCount);
+step('an OLD-order file (Length, Width, Thickness, Qty) still imports: all 4 rows (none dropped)', uploadResult.panelCount === 4, 'got ' + uploadResult.panelCount);
 const p0 = uploadResult.panels[0] || {};
 step('row 1 parsed correctly (material, dims, qty, edge code, edge tape, remark)',
   p0.mat === 'Real White PB 4x8 2F (18mm, Matte)' && p0.L === 720 && p0.W === 560 && p0.qty === 2 && p0.ebt === '1L 1S' && p0.emat === 'Bamboo .5mm PVC Edgeband' && p0.remark === 'hinge side is the left edge',
@@ -185,32 +185,41 @@ const doorFlag = analysis.flagged.find(c => c.name === 'Door');
 step('a clean, fully-specified row (Door) is NOT flagged', !!(doorFlag && !doorFlag.needsReview), JSON.stringify(doorFlag));
 console.log('  all rows: ' + JSON.stringify(analysis.flagged, null, 2).split('\n').join('\n  '));
 
-// ---- 4. Header-mismatch warning: a client who moved a column gets told, not silently mis-read ----
-const headerWarn = await page.evaluate(async () => {
-  const XLSX = window.XLSX;
-  const wb = XLSX.utils.book_new();
-  const rows = [['Part','Group (cabinet/area)','Material SKU','Length (mm)','Width (mm)','Thickness (mm)','Qty','Edge Band','Edge Material','Grain (L/W)','Services','Remarks'], // columns 1&2 swapped
-                ['Side panel','Kitchen 1','Real White PB 4x8 2F (18mm, Matte)',720,560,18,2,'','','','','']];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Cutting List');
-  const arrayBuf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
-  const file = new File([arrayBuf], 'moved-columns.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const input = document.createElement('input'); input.type = 'file';
-  const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files;
-  document.body.appendChild(input);
-
-  const toasts = [];
-  const savedToast = window.showToast;
-  window.showToast = (m) => { toasts.push(m); if (savedToast) try { savedToast(m); } catch (e) {} };
-  const savedConfirm = window.confirm;
-  window.confirm = () => true;
-  window.MCL.uploadExcel(input);
-  await new Promise(r => setTimeout(r, 300));
-  window.confirm = savedConfirm;
-  window.showToast = savedToast;
-  input.remove();
-  return toasts;
+// ---- 4. Columns are read by HEADER (2026-09-30): new order, any order, and a missing column warns ----
+async function uploadRows(rows, name) {
+  return page.evaluate(async ({ rows, name }) => {
+    const XLSX = window.XLSX;
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Cutting List');
+    const file = new File([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], name);
+    const input = document.createElement('input'); input.type = 'file';
+    const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files;
+    const toasts = [], savedToast = window.showToast, savedConfirm = window.confirm;
+    window.showToast = (m) => { toasts.push(m); };
+    window.confirm = () => true;
+    window.MCL.state().panels = window.MCL.state().panels.slice(0, 0).concat(Array.from({ length: 10 }, () => window.MCL.blankPanel()));
+    window.MCL.uploadExcel(input);
+    await new Promise(r => setTimeout(r, 400));
+    window.confirm = savedConfirm; window.showToast = savedToast;
+    const p = window.MCL.state().panels[0];
+    return { toasts, count: window.MCL.state().panels.length, p: { group: p.group, part: p.part, mat: p.mat, th: p.th, qty: p.qty, L: p.L, W: p.W, ebt: p.ebt, grain: p.grain } };
+  }, { rows, name });
+}
+const want = { group: 'Kitchen 1', part: 'Side panel', mat: 'Real White PB 4x8 2F (18mm, Matte)', th: 18, qty: 3, L: 720, W: 560, ebt: '1L 1S', grain: 'L' };
+const tplHdr = await page.evaluate(async () => {
+  const r = await fetch('Cutting-List-Template.xlsx', { cache: 'no-store' });
+  const wb = window.XLSX.read(new Uint8Array(await r.arrayBuffer()), { type: 'array' });
+  return window.XLSX.utils.sheet_to_json(wb.Sheets['Cutting List'], { header: 1 })[0];
 });
-step('a moved column is caught and named, not silently misread', headerWarn.some(t => /columns do not match/i.test(t) && /column 1/i.test(t)), JSON.stringify(headerWarn));
+step('template columns are in the team\'s order: Group, Part, Material, Thickness, Qty, Length, Width…',
+  JSON.stringify(tplHdr.slice(0, 7)) === JSON.stringify(['Group (cabinet/area)','Part','Material SKU','Thickness (mm)','Qty','Length (mm)','Width (mm)']), JSON.stringify(tplHdr));
+const newOrder = await uploadRows([tplHdr, ['Kitchen 1','Side panel','Real White PB 4x8 2F (18mm, Matte)',18,3,720,560,'1L 1S','','L','','']], 'new-order.xlsx');
+step('a file in the NEW template order imports every field correctly', newOrder.count === 1 && JSON.stringify(newOrder.p) === JSON.stringify(want) && !newOrder.toasts.some(t => /do not match/.test(t)), JSON.stringify(newOrder));
+const scrambled = await uploadRows([['Qty','Width (mm)','Edge Band','Part','Material SKU','Grain (L/W)','Length (mm)','Group (cabinet/area)','Thickness (mm)'],
+  [3,560,'1L 1S','Side panel','Real White PB 4x8 2F (18mm, Matte)','L',720,'Kitchen 1',18]], 'scrambled.xlsx');
+step('columns in ANY order (and some left out) are read by their headers', scrambled.count === 1 && JSON.stringify(scrambled.p) === JSON.stringify(want), JSON.stringify(scrambled));
+const noLen = await uploadRows([['Group (cabinet/area)','Part','Material SKU','Thickness (mm)','Qty','Width (mm)'], ['Kitchen 1','Side panel','X',18,3,560]], 'no-length.xlsx');
+step('a file with no Length column is refused with a warning naming it, not misread', noLen.toasts.some(t => /Length \(mm\)/.test(t)), JSON.stringify(noLen.toasts));
 
 // ---- 6. Paste a block of cells (feels-like-Excel) ---------------------------------
 const pasteResult = await page.evaluate(() => {

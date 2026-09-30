@@ -4933,6 +4933,15 @@ const PROFILES = {
             return w.lookupInSource(w.getMatSource(), 'Zz Board').price;
           } finally { w.dbMaterials = keep; }
         }, 250);
+        check('Upload reads columns by header: old order, new order, any order; no Length column is refused', () => {
+          const m = window.MCL._panelColMap, row = (h, r) => { const c = m(h); return c.ok ? c.row(r).slice(0, 7) : c.missing; };
+          const want = ['G', 'P', 'M', 720, 560, 18, 3];
+          return [
+            row(['Group (cabinet/area)', 'Part', 'Material SKU', 'Length (mm)', 'Width (mm)', 'Thickness (mm)', 'Qty'], ['G', 'P', 'M', 720, 560, 18, 3]),
+            row(['Group (cabinet/area)', 'Part', 'Material SKU', 'Thickness (mm)', 'Qty', 'Length (mm)', 'Width (mm)'], ['G', 'P', 'M', 18, 3, 720, 560]),
+            row(['Qty', 'Width (mm)', 'Edge Material', 'Part', 'Material SKU', 'Length (mm)', 'Group', 'Thickness (mm)'], [3, 560, 'tape', 'P', 'M', 720, 'G', 18]),
+            row(['Group', 'Part', 'Material SKU', 'Thickness (mm)', 'Qty', 'Width (mm)'], ['G', 'P', 'M', 18, 3, 560])];
+        }, [['G', 'P', 'M', 720, 560, 18, 3], ['G', 'P', 'M', 720, 560, 18, 3], ['G', 'P', 'M', 720, 560, 18, 3], ['Length (mm)']]);
         // Client codes confirmed by Rommel 2026-09-30.
         check('Codes 2: MP = marine plywood, B. WALNUT = Bologna Walnut, LENGTH NONE = no edge', () => {
           const w = window, keep = w.dbMaterials;
