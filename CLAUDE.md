@@ -12530,3 +12530,11 @@ catalogue — person picks.
   (needs `npm i --no-save xlsx crc-32` in Modcraft — they were missing from node_modules).
 - Cutting List grid widths: set via a `<colgroup>` (a second `style=""` on a `<th>` is ignored — why Material
   never widened). Material 26%; Th/Qty ~50px; L/W 74px.
+- **Website → Modcraft end to end (2026-09-30):** a list uploaded on the website, collected exactly as the
+  order stores it (`collectCutlist`), run through Modcraft's order path (`_cutListToAnalysis` → analysis →
+  summary → Job Order). No order filed (0 inserts). All figures matched hand counts. Fixed: an HPL build's
+  raw board and HPL sheet (exact SKUs the client picked) now arrive RESOLVED (`hplSku` on the component,
+  grouped like `catalogName`); a plywood substrate with no priced raw board arrives as
+  "Marine Plywood Nmm (raw)" outsourced. Only a PRICED Price-DB item counts as the raw board (the built-in
+  unpriced "Marine Plywood 18mm" must not). Harness kept in scratch (reads the website folder).
+  Website hardware is free text, so hardware lines still arrive flagged for a catalogue pick — by design.

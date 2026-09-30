@@ -4942,6 +4942,21 @@ const PROFILES = {
             row(['Qty', 'Width (mm)', 'Edge Material', 'Part', 'Material SKU', 'Length (mm)', 'Group', 'Thickness (mm)'], [3, 560, 'tape', 'P', 'M', 720, 'G', 18]),
             row(['Group', 'Part', 'Material SKU', 'Thickness (mm)', 'Qty', 'Width (mm)'], ['G', 'P', 'M', 18, 3, 560])];
         }, [['G', 'P', 'M', 720, 560, 18, 3], ['G', 'P', 'M', 720, 560, 18, 3], ['G', 'P', 'M', 720, 560, 18, 3], ['Length (mm)']]);
+        check('Website HPL build: raw board and HPL sheet arrive resolved; raw plywood arrives outsourced', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = [{ name: 'Raw Boards 4x8 18mm MDF', unit: 'pc', price: 900 }, { name: 'Coastal Green 4x8 0.7mm HPL', unit: 'pc', price: 1500 },
+            { name: 'Zz filler', unit: 'pc', price: 1 }];
+          try {
+            const a = w._cutListToAnalysis({ panels: [
+              { group: 'V', part: 'Door', mat: 'Coastal Green 4x8 0.7mm HPL on Raw Boards 4x8 18mm MDF · 2F', th: 18, L: 700, W: 400, qty: 2, ebt: '' },
+              { group: 'V', part: 'Side', mat: 'Coastal Green 4x8 0.7mm HPL on Marine Plywood 18mm · 1F', th: 18, L: 800, W: 550, qty: 2, ebt: '' }],
+              hpl: [{ sub: 'Raw Boards 4x8 18mm MDF', fin: 'Coastal Green 4x8 0.7mm HPL', faces: '2F' },
+                    { sub: 'Marine Plywood 18mm', fin: 'Coastal Green 4x8 0.7mm HPL', faces: '1F' }], hardware: [] }, { id: 'T1' });
+            const comps = a.components.map((c) => w._prodNormalizeComponent ? w._prodNormalizeComponent(c) : c);
+            w.prodBuildSummary({ components: comps, _bom: w.prodComputeBom(comps), _services: {}, hardware: [] });
+            return w.prodState.summary.materials.map((m) => m.name + (m.needsReview ? ' FLAG' : '') + (m.outsource ? ' OUT' : ''));
+          } finally { w.dbMaterials = keep; }
+        }, ['Raw Boards 4x8 18mm MDF', 'Coastal Green 4x8 0.7mm HPL', 'Marine Plywood 18mm (raw) OUT', 'Coastal Green 4x8 0.7mm HPL']);
         // Client codes confirmed by Rommel 2026-09-30.
         check('Codes 2: MP = marine plywood, B. WALNUT = Bologna Walnut, LENGTH NONE = no edge', () => {
           const w = window, keep = w.dbMaterials;

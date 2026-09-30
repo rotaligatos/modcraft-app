@@ -17882,7 +17882,7 @@ function _cutListToAnalysis(cl,order){
     var L=+pn.L||0, W=+pn.W||0;
     var label=String(pn.mat||'').trim();
     var b=builds[label];
-    var material='', color='', faces=0, catalogName='';
+    var material='', color='', faces=0, catalogName='', hplSku='';
     if(b){
       var subName=String(b.sub).split(' — ')[0].trim();
       material=_webMatFamily(b.sub)||subName;
@@ -17898,6 +17898,18 @@ function _cutListToAnalysis(cl,order){
       notes.push((/\bhpl\b/i.test(color)?color:'HPL '+color)+' laminated onto '+subName+' ('+b.faces+'F)');
       var subSku=String(b.sub).split(' — ')[1]; if(subSku) notes.push('substrate SKU '+subSku.trim());
       var finSku=String(b.fin).split(' — ')[1]; if(finSku) notes.push('HPL SKU '+finSku.trim());
+      // The client picked both from the catalogue on the website, so they arrive resolved instead of
+      // being searched for again (end-to-end run 2026-09-30: both came through flagged). A plywood
+      // substrate with no raw board in the Price Database is bought in (Rommel, 2026-09-26).
+      // The Price Database only, and priced: the built-in starter list has an unpriced "Marine
+      // Plywood 18mm" that would otherwise count as found and quote the board at zero.
+      var _src=(typeof dbMaterials!=='undefined'&&dbMaterials&&dbMaterials.length)?dbMaterials:[];
+      var _subX=(typeof lookupInSource==='function')?lookupInSource(_src,subName):null;
+      if(_subX&&!(+_subX.price>0)) _subX=null;
+      var _finX=(typeof lookupInSource==='function')?lookupInSource(_src,color):null;
+      if(_subX) catalogName=_subX.name;
+      else if(/ply/i.test(subName)&&!pn.outsource) pn.outsource='Marine Plywood '+(+pn.th||18)+'mm (raw)';
+      if(_finX) hplSku=_finX.name;
     } else {
       var cut=label.lastIndexOf(' — ');
       var mname=cut>=0?label.slice(0,cut).trim():label;
@@ -18080,7 +18092,7 @@ function _cutListToAnalysis(cl,order){
       colorB:'', textureB:'',
       thickness:lam?lam.bt:th, length:L, width:W, qty:rowQty,
       faces:lam?1:faces, grain:gr||jobGrain,
-      ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName,
+      ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName, hplSku:hplSku,
       outsourceName:String(pn.outsource||''),
       needsReview:review.length>0, reviewNote:review.join('; '),
       notes:notes.join(' · ')
@@ -39809,7 +39821,7 @@ function _prodNormalizeComponent(c){
     width:+c.width||0,qty:+c.qty||1,faces:+c.faces||0,
     grain:(c.grain==='length'||c.grain==='width')?c.grain:'none',
     ebt:String(c.ebt||''),edgeTape:String(c.edgeTape||''),grooving:String(c.grooving||''),
-    specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),
+    specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),hplSku:String(c.hplSku||''),
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||'')
   };
 }
@@ -40790,6 +40802,9 @@ function prodComputeBom(comps){
     var on=c.outsourceName||'';
     if(groups[key].outsourceName===undefined) groups[key].outsourceName=on;
     else if(groups[key].outsourceName!==on) groups[key].outsourceName='';
+    var hs=c.hplSku||'';
+    if(groups[key].hplSku===undefined) groups[key].hplSku=hs;
+    else if(groups[key].hplSku!==hs) groups[key].hplSku='';
     var qty=c.qty||1;
     groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*qty;
     var ar=c.area||'General';
@@ -40814,7 +40829,7 @@ function prodComputeBom(comps){
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,faces:g.faces,
-      colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,catalogName:g.catalogName||'',outsourceName:g.outsourceName||'',
+      colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,catalogName:g.catalogName||'',outsourceName:g.outsourceName||'',hplSku:g.hplSku||'',
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
@@ -40933,7 +40948,14 @@ function prodBuildSummary(result) {
       // takes 2 HPL sheets, a 1F board takes 1 — laminated as whole boards, then cut. This used to
       // be the panels' area in sqm against a per-sheet price, billing each square metre as a sheet.
       var hplSheets=(bm.boardsNeeded||0)*(bm.faces===2?2:1);
-      mats.push(catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,hplSheets,'pc',bm.texture));
+      var hrow=catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,hplSheets,'pc',bm.texture);
+      var hpk=bm.hplSku&&typeof lookupInSource==='function'?lookupInSource(dbMaterials,bm.hplSku):null;
+      if(hpk){   // the exact HPL sheet the client picked — resolved on arrival, candidates kept
+        hrow.name=hpk.name; hrow.unit=hpk.unit||'pc'; hrow.price=hpk.price||0; hrow.custom=false;
+        hrow.needsReview=false; hrow.reviewNote='';
+        if(hrow.matchCandidates.indexOf(hpk.name)<0) hrow.matchCandidates.unshift(hpk.name);
+      }
+      mats.push(hrow);
       // Substrate determines WHICH lamination service — reuse the same field parser built for
       // catalog matching so "Plywood"/"PB"/"MDF"/"PB-MR"/"MDF-MR" are recognized regardless of how
       // the AI phrased the material string.
