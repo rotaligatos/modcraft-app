@@ -12494,3 +12494,27 @@ ending on lamination / draft). Buttons work on the sample only; work calendar re
 Rommel on lamination: once cured, boards go where the JO says next (cut to size, client pick-up, turnover to WCL).
 Rule kept; when nothing follows lamination the Gantt finish reads "Ready after cure" = day after its last day.
 Command Center icon: Gemini prompt given to Rommel; still the Modcraft placeholder until he supplies art.
+
+## What was changed on 2026-09-30 (session — cutting list review simulation)
+Review: all 16 sample lists + a typed list exercising every earlier direction, driven through the real
+import → analysis → layout → Job Order, against the 115,563-SKU `WCLI SKU Items with SRP.xlsx` (stand-in for
+the live catalogue — the public catalogue RPCs time out/are revoked, so a local export is the practical source).
+Every row and piece arrived; area, edge banding (+5%) and grooving match the clients' own totals; all earlier
+rules held. Harness kept OUT of the repo (reads client files) — scratch copy only.
+Fixed (`7dcc5cc` + follow-up), each with a smoke check proven to fail on the old code:
+- Glued >25mm panels tripped "THIS LIST DID NOT ARRIVE INTACT" (extra board counted as a row) — `_gluedExtra`.
+- SKU suggestions scored only the top 120 fuzzy matches → wrong colour first ("warm white" → Italian White),
+  a "do not use" SKU offered. Now all boards of that colour+thickness are scored; shade mismatch ranks down;
+  do-not-use/floor samples excluded; MR/HDF/non-4x8 only when asked; 3 different colours offered.
+- Tape suggestions follow the client's thickness (2mm) and shade; whole tape catalogue scored.
+- HPL on plywood suggested a laminated plywood as raw board, hiding the Outsource: Marine Plywood button.
+- "EBT ON ALL EGDES" (client typo) = 4S. Typed grooving box reads "lm total" (row total, unlike holes/panel).
+- `getMatSource`/`getHwSource` were cached by ROW COUNT only: a Price DB reload with the same count
+  (price/name change) kept serving the old list. Now also keyed on the array itself.
+Decisions from Rommel (2026-09-30) — do not re-ask:
+- **No board-edge trim**: the edge bander trims; nothing to model. (Plant question 6 closed.)
+- Client codes: **MP = Marine Plywood** (VALERA), **B. WALNUT = Bologna Walnut** (LIMSHEN),
+  **LENGTH NONE = no edge** (ARBAU) — all built into the reader.
+- Studio Tille C11 "along '259'" on a 267×130 piece is the CLIENT's error (EBT is along 267) — the flag is correct.
+Still open: plant Q3/Q4 (spare boards per material). "Dark gray" (LIMSHEN) has no plain board in the
+catalogue — person picks.

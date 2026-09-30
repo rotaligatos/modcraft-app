@@ -4925,6 +4925,26 @@ const PROFILES = {
           const row = r.rows[0];
           return { code: row.code, issues: row.issues };
         }, { code: '4S', issues: [] });
+        check('Price DB reload with the same row count serves the new prices, not the old list', () => {
+          const w = window, keep = w.dbMaterials;
+          try {
+            w.dbMaterials = [{ name: 'Zz Board', unit: 'pc', price: 100 }]; w.getMatSource();
+            w.dbMaterials = [{ name: 'Zz Board', unit: 'pc', price: 250 }];
+            return w.lookupInSource(w.getMatSource(), 'Zz Board').price;
+          } finally { w.dbMaterials = keep; }
+        }, 250);
+        // Client codes confirmed by Rommel 2026-09-30.
+        check('Codes 2: MP = marine plywood, B. WALNUT = Bologna Walnut, LENGTH NONE = no edge', () => {
+          const w = window, keep = w.dbMaterials;
+          w.dbMaterials = ['Warm White PB 4x8 1F (18mm, Matte)', 'DuraSave Plywood 1F Warm White 18mm',
+            'Marino Walnut PB 4x8 1F (18mm, Matte)', 'Bologna Walnut PB 4x8 1F (18mm, Matte)'].map((n) => ({ name: n, unit: 'pc', price: 100 }));
+          try {
+            const mp = w.CLR.suggestFor({ key: 'c2a-' + Date.now(), text: 'MP18 WARM WHITE', thk: 18, faces: 0 })[0];
+            const bw = w.CLR.suggestFor({ key: 'c2b-' + Date.now(), text: 'B. WALNUT', thk: 18, faces: 0 })[0];
+            const r = w.CLR.readClientSheet([['Part', 'Material', 'Length', 'Width', 'Qty', 'Thk', 'Edge'], ['Filler', 'STIPPLE', 700, 100, 1, 18, 'LENGTH NONE']]);
+            return { mp, bw, code: r.rows[0].code, issues: r.rows[0].issues };
+          } finally { w.dbMaterials = keep; }
+        }, { mp: 'DuraSave Plywood 1F Warm White 18mm', bw: 'Bologna Walnut PB 4x8 1F (18mm, Matte)', code: '', issues: [] });
         check('Codes: a client code reads as words, and suggestions keep colour, thickness and faces', () => {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = ['Acacia PB 4x8 1F (15mm, Matte)', 'Alder/White MDF 4x8 1F (15mm, Matte)',
