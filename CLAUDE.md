@@ -12538,3 +12538,8 @@ catalogue — person picks.
   "Marine Plywood Nmm (raw)" outsourced. Only a PRICED Price-DB item counts as the raw board (the built-in
   unpriced "Marine Plywood 18mm" must not). Harness kept in scratch (reads the website folder).
   Website hardware is free text, so hardware lines still arrive flagged for a catalogue pick — by design.
+- **Real test order through the website (2026-09-30, Rommel approved):** MSSI-260930-6380 filed by the real
+  "Send order" button, stored row read back from `order_cutting_lists`, converted by Modcraft — then DELETED
+  (order + cutting list; no files). Found + fixed: the Job Order sent a piece to drilling whenever ANY piece
+  had the same part name ("Side panel" in every cabinet). Website holes now carry `area` (cabinet) and
+  `_joBuild` matches name AND cabinet; AI-read hole schedules (no cabinet) still match by name.

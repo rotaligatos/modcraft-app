@@ -4957,6 +4957,13 @@ const PROFILES = {
             return w.prodState.summary.materials.map((m) => m.name + (m.needsReview ? ' FLAG' : '') + (m.outsource ? ' OUT' : ''));
           } finally { w.dbMaterials = keep; }
         }, ['Raw Boards 4x8 18mm MDF', 'Coastal Green 4x8 0.7mm HPL', 'Marine Plywood 18mm (raw) OUT', 'Coastal Green 4x8 0.7mm HPL']);
+        check('Job Order: only the cabinet whose panel has holes goes to drilling, not every "Side panel"', () => {
+          const a = window._cutListToAnalysis({ panels: [
+            { group: 'Base 1', part: 'Side panel', mat: 'PB WHITE', th: 18, L: 720, W: 560, qty: 2, ebt: '', svcs: ['Boring 35mm (Hinges) × 2 holes'] },
+            { group: 'Vanity', part: 'Side panel', mat: 'PB WHITE', th: 18, L: 800, W: 550, qty: 2, ebt: '', svcs: [] }], hpl: [], hardware: [] });
+          const jo = window._joBuild({ components: a.components, hardware: [], holeSchedule: a.holeSchedule, extraServices: [] }, { joNumber: 'JO-T-H1' });
+          return jo.parts.map((p) => p.route.indexOf('DRL') >= 0);
+        }, [true, false]);
         // Client codes confirmed by Rommel 2026-09-30.
         check('Codes 2: MP = marine plywood, B. WALNUT = Bologna Walnut, LENGTH NONE = no edge', () => {
           const w = window, keep = w.dbMaterials;
