@@ -221,9 +221,10 @@ const pasteResult = await page.evaluate(() => {
   // Simulate pasting a 3-row, 5-column TSV block (as if copied from a real
   // spreadsheet: Material | Th | L | W | Qty) starting at row 0's Material cell,
   // exactly the way MCL.onCellPaste is wired to the 'mat' column.
-  const tsv = 'Real White PB 4x8 2F (18mm, Matte)\t18\t720\t560\t2\n' +
-              'Walnut 259 PB 4x8 2F (18mm, Matte)\t18\t716\t296\t2\n' +
-              'Bleached Chestnut PB 4x8 1F (18mm, Crosscut)\t12\t400\t300\t1';
+  // Screen order since 2026-09-30: Material | Th | Qty | L | W
+  const tsv = 'Real White PB 4x8 2F (18mm, Matte)\t18\t2\t720\t560\n' +
+              'Walnut 259 PB 4x8 2F (18mm, Matte)\t18\t2\t716\t296\n' +
+              'Bleached Chestnut PB 4x8 1F (18mm, Crosscut)\t12\t1\t400\t300';
   const fakeEvent = {
     clipboardData: { getData: () => tsv },
     preventDefault: () => {}
