@@ -602,6 +602,7 @@ table.ut tr.off td{color:var(--muted)}
   .card{box-shadow:none}
 }
 
+.fjob.gated{opacity:.45;filter:grayscale(1);cursor:not-allowed}
 /* pick-up mode */
 .btn.sm{padding:5px 10px;font-size:13px}
 .pk-home-l{flex-direction:row!important;align-items:center;gap:6px;font-size:13px;color:var(--muted)}.pk-home-l select{padding:5px 8px}
@@ -2500,6 +2501,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
         ${job.odoo_ticket ? `<dt>Odoo ticket</dt><dd>${esc(job.odoo_ticket)}</dd>` : ''}
         <dt>Doc. references</dt><dd>${(job.doc_refs || []).length ? (job.doc_refs || []).map(r => `<span class="mono">${esc(r.ref)}</span>${r.remarks ? ' — ' + esc(r.remarks) : ''}${r.weight ? ` · ${kg(r.weight)}` : ''}`).join('<br>') : '<span class="muted">None yet</span>'}
           ${dispatcher && job.status !== 'rejected' ? ` <button class="lnk" id="dr-refs">Edit</button>` : ''}</dd>
+        <dt>DR / SI no.</dt><dd><span class="mono">${esc(job.dr_no || '—')}</span>${dispatcher && !['rejected','completed'].includes(job.status) ? ` <button class="lnk" id="dr-no">${job.dr_no ? 'Edit' : 'Add'}</button> <span class="ft">the driver sees it on the delivery form</span>` : ''}</dd>
         <dt>Contents</dt><dd style="font-size:14px">${contentsHtml(job)}${job.loaded_at ? `<div class="ft" style="color:var(--ok)">✓ Loaded ${fmtTime(job.loaded_at)}</div>` : job.truck_id && ['scheduled'].includes(job.status) ? '<div class="ft">Not yet ticked as loaded</div>' : ''}</dd>
         ${job.delivery_outcome ? `<dt>Result</dt><dd><b style="color:${job.delivery_outcome === 'full' ? 'var(--ok)' : 'var(--bad)'}">${esc(OUTCOME_LABEL[job.delivery_outcome])}</b>${job.received_by_name ? `<div class="ft">Received by ${esc(job.received_by_name)}</div>` : ''}
           ${returnedList(job).length ? `<div class="ft">Coming back: ${esc(returnedList(job).map(x => `${x.back} × ${x.label}`).join(', '))}</div>` : ''}</dd>` : ''}
@@ -2591,6 +2593,8 @@ function renderDrawer(job, events, costs = [], rep = {}){
   if ($('dr-contact')) $('dr-contact').addEventListener('click', () => openClientContact(job, () => openJob(job.id)));
   bindOutboxRetry(() => openJob(job.id));
   if ($('dr-refs')) $('dr-refs').addEventListener('click', () => openDocRefs(job, () => openJob(job.id)));
+  $('dr-no')?.addEventListener('click', async () => { const v = prompt('DR / SI no. for this delivery (the driver sees it on the delivery form):', job.dr_no || ''); if (v === null) return;
+    try { await withRetry('Saving', () => sb.from('jobs').update({ dr_no: v.trim().toUpperCase() || null }).eq('id', job.id)); toast('DR / SI no. saved', 'ok'); openJob(job.id); } catch {} });
   if ($('dr-redeliver')) $('dr-redeliver').addEventListener('click', async e => { const b = e.currentTarget; b.disabled = true; if (!(await createRedelivery(job))) b.disabled = false; });
   document.querySelectorAll('[data-open-job]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openJob(a.dataset.openJob); }));
   document.querySelectorAll('[data-del-cost]').forEach(b => b.addEventListener('click', async () => {
@@ -2822,7 +2826,7 @@ async function openFieldJob(id){
   if (job.truck_id && job.scheduled_date){ trip = tripOf(job); if (!trip){ try { state.field = await fetchFieldData(job.scheduled_date); trip = tripOf(job); } catch {} } }
   const ts = trip ? tripState(trip) : null;
   const outOfOrder = ts && job.status === 'dispatched' && ts.next && ts.next.id !== job.id && !['in_progress','issue'].includes(ts.next.status);
-  let next = { scheduled:['dispatched','Departed / On the way'], dispatched:['arrived','Arrived on site'], in_progress:['completed','Save delivery result'], issue:['arrived','Resume — on site'] }[job.status];
+  let next = { scheduled:['dispatched','Departed / On the way'], dispatched:['arrived','Arrived on site'], in_progress:['completed','✅ Delivery complete'], issue:['arrived','Resume — on site'] }[job.status];
   if (trip && job.status === 'scheduled') next = ts.locked ? ['trip', `🚚 Depart — start trip ${trip.trip_no}`] : ['predep', 'Pre-departure check first'];
   if (outOfOrder) next = null;
   const closed = job.status === 'completed';
@@ -2935,7 +2939,7 @@ async function openFieldJob(id){
       if (oc && dvPhotos?.length){ const paths = []; for (let i = 0; i < dvPhotos.length; i++){ btn.innerHTML = `<span class="spin"></span> Uploading photo ${i + 1} of ${dvPhotos.length}…`; paths.push(await uploadMedia(job.id, dvPhotos[i].blob, `photo-${i + 1}.jpg`, 'image/jpeg')); }
         extra.photo_url = paths[0]; extra.photo_urls = paths; btn.innerHTML = '<span class="spin"></span> Saving…'; }
       if (sig && !sig.isEmpty()) extra.signature_url = await uploadMedia(job.id, await sig.toBlob(), 'signature.png', 'image/png');
-      if (oc) await completeJob(job, oc, notes, extra);
+      if (oc){ await completeJob(job, oc, notes, extra); return showDeliveryDone(job, oc); }
       else {
         await withRetry('Updating job', () => sb.from('jobs').update({ status: EVENT_TO_STATUS[evType] }).eq('id', job.id));
         let n = notes;
@@ -3038,7 +3042,9 @@ function tripCardHtml(t){
     + (req ? `<div class="${req.status === 'declined' ? 'warnbox' : 'infobox'}">${req.status === 'pending' ? `⏳ Waiting for base to approve going to <b>${esc(t.jobs.find(j => j.id === req.job_id)?.client_name || 'that drop')}</b> first (${esc(ORDER_REASON[req.reason] || req.reason)})`
         : req.status === 'approved' ? `✅ Base approved — <b>${esc(t.jobs.find(j => j.id === req.job_id)?.client_name || 'that drop')}</b> is now next${req.response_note ? ': ' + esc(req.response_note) : ''}`
         : `⛔ Base declined — keep the order${req.response_note ? ': ' + esc(req.response_note) : ''}`}</div>` : '');
-  const drops = t.jobs.map((j, i) => `<button class="card fjob drop ${s.departed && j === s.next ? 'next' : ''}" data-id="${esc(j.id)}">
+  const gated = !s.departed && !s.locked && s.open.length;   // drops open only after the pre-departure check is confirmed
+  const drops = (gated ? '<div class="ft" style="margin:6px 2px">🔒 The drops open after you finish and confirm the pre-departure check.</div>' : '')
+    + t.jobs.map((j, i) => `<button class="card fjob drop ${s.departed && j === s.next ? 'next' : ''}${gated ? ' gated' : ''}" data-id="${esc(j.id)}"${gated ? ' disabled aria-disabled="true"' : ''}>
       <div class="l1"><span class="dno">${i + 1}</span><span class="client">${esc(j.client_name || j.quotation_serial)}</span>${s.departed && j === s.next ? '<span class="tag info">Next</span>' : ''}${pill(j.status)}</div>
       <div class="addr">${esc(j.address || 'No address on file')}</div>
       <div class="meta"><span>Drop ${i + 1} of ${t.jobs.length}</span><span class="mono">${esc(j.quotation_serial)}</span><span>${kg(j.estimated_weight_kg)}</span>${j.load_check?.all ? '<span style="color:var(--ok)">✓ load checked</span>' : ''}${j.delivery_outcome && j.delivery_outcome !== 'full' ? `<span class="tag bad">${esc(OUTCOME_LABEL[j.delivery_outcome])}</span>` : ''}</div>
@@ -3260,7 +3266,9 @@ function deliverFormHtml(job){
     : `<div class="oc">${Object.entries(OUTCOME_LABEL).map(([k, l]) => `<label class="opt"><input type="radio" name="dv-oc" value="${k}"><span>${l}</span></label>`).join('')}</div>
       <div class="dv-r hidden" id="dv-r-all" style="margin-top:6px">${reasonSel('all')}</div>`}
     <label class="f" style="margin-top:8px">Received by<input class="i" id="dv-rby" placeholder="Name of the person who received"></label>
-    <label class="f" style="margin-top:8px">DR / SI no. <span class="ft">— from the signed delivery receipt</span><input class="i" id="dv-dr" placeholder="e.g. DR 012345" autocomplete="off"></label>
+    ${(() => { const pre = job.dr_no || (job.doc_refs || []).find(r => /delivery receipt/i.test(r.remarks || ''))?.ref || '';
+      return pre ? `<div class="f" style="margin-top:8px">DR / SI no. <span class="ft">— filled in by base</span><div style="display:flex;gap:8px;align-items:center"><b class="mono" style="font-size:16px" id="dv-dr-t">${esc(pre)}</b><button class="lnk" type="button" id="dv-dr-edit">Different on the receipt?</button></div><input class="i hidden" id="dv-dr" value="${esc(pre)}" autocomplete="off" aria-label="DR / SI no."></div>`
+        : `<label class="f" style="margin-top:8px">DR / SI no. <span class="ft">— base hasn’t entered it; copy it from the signed receipt</span><input class="i" id="dv-dr" placeholder="e.g. DR 012345" autocomplete="off"></label>`; })()}
     <div class="f" style="margin-top:10px;color:var(--ink);font-weight:600">Photos * <span class="ft" id="dv-pc">— ${MIN_PHOTOS} to ${MAX_PHOTOS} (0 taken)</span></div>
     <div class="ft" id="dv-ph">The items unloaded, the items at the delivery spot, and the signed DR. If something is wrong, show the affected items.</div>
     <div class="thumbs" id="dv-th"></div>
@@ -3271,6 +3279,7 @@ function bindDeliver(job){
   const sync = () => document.querySelectorAll('.dv-row').forEach(r => { const x = lines.find(l => l.k === r.dataset.dk), q = Number(r.querySelector('.dv-q').value);
     r.querySelector('.dv-r').classList.toggle('hidden', !(q < x.qty)); r.classList.toggle('short', q < x.qty); });
   document.querySelectorAll('.dv-q').forEach(i => i.addEventListener('input', sync));
+  $('dv-dr-edit')?.addEventListener('click', () => { $('dv-dr').classList.remove('hidden'); $('dv-dr').focus(); $('dv-dr-edit').remove(); });
   $('dv-all').addEventListener('click', () => { document.querySelectorAll('.dv-q').forEach(i => { i.value = i.max; }); document.querySelectorAll('[name="dv-oc"]').forEach(r => { r.checked = r.value === 'full'; }); $('dv-r-all')?.classList.add('hidden'); sync(); });
   $('dv-none').addEventListener('click', () => { document.querySelectorAll('.dv-q').forEach(i => { i.value = 0; }); document.querySelectorAll('[name="dv-oc"]').forEach(r => { r.checked = r.value === 'returned'; }); $('dv-r-all')?.classList.remove('hidden'); sync();
     const first = document.querySelector('.dv-row .rs'); if (first) first.focus(); });
@@ -6550,6 +6559,46 @@ function getGeo(ms = 20000){
 }
 function geoFields(g){ return g && g.lat != null ? { lat: g.lat, lon: g.lon, accuracy_m: Math.round(g.acc || 0), location: `SRID=4326;POINT(${g.lon} ${g.lat})` } : {}; }
 function siteLink(lat, lon, label = 'Open in Maps'){ return `<a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${lat},${lon}">${label}</a>`; }
+/* After "Delivery complete": a done screen. The driver can report a concern about this stop (base, the agent and — for
+   quality problems — QA are told; the delivery stays completed), then taps Done to leave. */
+function showDeliveryDone(job, oc){
+  const bad = oc.outcome !== 'full';
+  openOverlay(`<div class="sheet" role="dialog" aria-modal="true"><div class="sheet-h"><h2>${esc(job.client_name || job.quotation_serial)}</h2>${pill('completed')}</div>
+    <div class="sheet-b">
+      <div class="card" style="padding:18px;text-align:center"><div style="font-size:44px">✅</div><h2 style="margin:4px 0">Delivery complete</h2>
+        <div style="font-weight:600;color:${bad ? 'var(--bad)' : 'var(--ok)'}">${esc(OUTCOME_LABEL[oc.outcome] || '')}</div>
+        <div class="ft" style="margin-top:4px">Base${job.agent_id ? ' and the sales agent were' : ' was'} told${oc.quality ? ', and QA + Warehouse about the quality concern' : ''}${state.preview?.sim ? ' (practice — nobody was actually told)' : ''}.</div></div>
+      <div class="card" style="padding:14px"><div class="f" style="color:var(--ink);font-weight:600">Anything else to report about this stop?</div>
+        <div class="ft">e.g. the client complained, an item was damaged after unloading, the site was hard to reach.</div>
+        <div id="dd-sent"></div>
+        <button class="btn bad big" id="dd-report" style="margin-top:8px">⚠ Report a concern</button>
+        <div id="dd-form"></div></div>
+      <button class="btn primary big" id="dd-done">Done</button>
+    </div></div>`);
+  $('dd-done').addEventListener('click', () => refreshAfterChange(job.id));
+  $('dd-report').addEventListener('click', () => {
+    $('dd-report').classList.add('hidden');
+    $('dd-form').innerHTML = `<div class="warnbox" style="margin-top:8px"><label class="f">What kind of concern<select class="i" id="dd-type">${Object.entries(ISSUE_TYPE).map(([k, v]) => `<option value="${k}"${k === 'other' ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+      <label class="f" style="margin-top:6px">Details *<textarea class="i" id="dd-notes" rows="3" placeholder="What happened"></textarea></label>
+      <label class="btn" style="margin-top:6px;display:inline-flex;gap:6px">📷 Photo (optional)<input type="file" accept="image/*" capture="environment" id="dd-ph" hidden></label> <span class="ft" id="dd-phn"></span>
+      <div class="row-btns" style="margin-top:8px"><button class="btn" id="dd-x">Cancel</button><button class="btn bad" id="dd-go">Send to base</button></div></div>`;
+    let ph = null;
+    $('dd-ph').addEventListener('change', async e => { const f = e.target.files[0]; if (f){ ph = await shrinkImage(f); $('dd-phn').textContent = '1 photo'; } });
+    $('dd-x').addEventListener('click', () => { $('dd-form').innerHTML = ''; $('dd-report').classList.remove('hidden'); });
+    $('dd-go').addEventListener('click', async e => {
+      const n = $('dd-notes').value.trim(); if (!n){ $('dd-notes').focus(); return toast('Say what happened', 'error'); }
+      const t = $('dd-type').value, b = e.currentTarget; b.disabled = true;
+      try {
+        const extra = { issue_type: t };
+        if (ph) extra.photo_url = await uploadMedia(job.id, ph, 'concern.jpg', 'image/jpeg');
+        await logEvent(job.id, 'issue', `After delivery — ${ISSUE_TYPE[t]}: ${n}`, extra);
+        $('dd-sent').insertAdjacentHTML('beforeend', `<div class="okbox" style="margin-top:8px">✓ Sent: ${esc(ISSUE_TYPE[t])} — ${esc(n)}</div>`);
+        $('dd-form').innerHTML = ''; $('dd-report').classList.remove('hidden'); $('dd-report').textContent = '⚠ Report another concern';
+        toast('Concern sent to base', 'ok');
+      } catch { b.disabled = false; }
+    });
+  });
+}
 async function completeJob(job, oc, notes, extra = {}){
   // a precise delivery geotag becomes the job's exact site (used for pins, and for the next delivery to this address)
   const site = extra.lat != null && (extra.accuracy_m || 0) <= 150 ? { site_lat: extra.lat, site_lon: extra.lon, site_source: 'delivered', site_accuracy_m: extra.accuracy_m, site_at: new Date().toISOString() } : {};
@@ -6558,7 +6607,7 @@ async function completeJob(job, oc, notes, extra = {}){
     try { const { data } = await sb.from('jobs').select('doc_refs').eq('id', job.id).single(); const cur = Array.isArray(data?.doc_refs) ? data.doc_refs : [];
       if (!cur.some(r => String(r.ref || '').toUpperCase() === oc.dr)) refs = { doc_refs: [...cur, { ref: oc.dr, remarks: 'Delivery receipt' }] }; } catch {}
   }
-  await withRetry('Updating job', () => sb.from('jobs').update({ status: 'completed', delivery_outcome: oc.outcome, received: oc.received, received_by_name: oc.received_by_name, ...site, ...refs }).eq('id', job.id));
+  await withRetry('Updating job', () => sb.from('jobs').update({ status: 'completed', delivery_outcome: oc.outcome, received: oc.received, received_by_name: oc.received_by_name, ...(oc.dr ? { dr_no: oc.dr } : {}), ...site, ...refs }).eq('id', job.id));
   await logEvent(job.id, 'completed', [outcomeNote(job, oc), notes].filter(Boolean).join('\n'), extra);
 }
 function openCompleteModal(job){
