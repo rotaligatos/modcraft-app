@@ -12581,3 +12581,12 @@ never commit · PMES/KEYSTONE default work week, capacity, staff emails, supplie
   only draw while a `lg_*` tab is open. ⚠ Any NEW KEYSTONE view must write via `VIEW(_vs)`, not `el('view')`.
   Also: Command Center "Who signs" no longer retries HATID forever when it can't be reached.
   Worth a look: Release Queue query `adm_v_release_queue` takes ~3.5 s for 300 rows.
+- **KEYSTONE Logistics "missing FROM-clause entry for table j" (2026-09-30):** HATID project
+  (`nssviuuagtlvxjvvvagt`) function `job_ks_feed`, 'trucks' block read `job_pool_of(j.truck_id, j.company)`
+  with no `j` in that query (copied from the jobs block by another session). Now `t.pool_id`. Migration
+  `fix_job_ks_feed_trucks_pool_id`. All 5 feed parts (overview/schedule/job/trail/messages) verified.
+- **KEYSTONE Release Queue was MISSING approved jobs:** it fetched the top 300 quotations by value and filtered
+  approved ones in the browser → only 98 of 119 approved showed. Now `.or(fq_client_approved,iq_client_approved)`
+  server-side, no 300 cap (81 KB vs 201 KB), and the last list is drawn instantly from `QCACHE` while it refreshes
+  (`drawQueuePage`; unchanged data is not redrawn). Reopening: ~50 ms. DB time for the view is ~0.2 s.
+  ⚠ When measuring KEYSTONE in a background Chrome window, timers are throttled to 1 s — use awaits, not setInterval.
