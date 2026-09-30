@@ -12574,3 +12574,10 @@ mobilization-zero-after-unlock · the two habits · "By cabinet type" print (on 
 phone order_pause · Stage 2 lock parity while paused · Michael Delos Reyes signature · unlock-reconciliation
 ~60s · `qApproved`/`qClientApproved` coupling · MSSI commission OFF · `samplesofcuttinglist/` is client data —
 never commit · PMES/KEYSTONE default work week, capacity, staff emails, suppliers (Rommel's).
+- **KEYSTONE tabs "not working" (2026-09-30, Keystone `ebfe0e0`):** every page loaded its data and then wrote
+  #view with no check the person was still there, so a slow page (Dashboard, Release Queue ~3.5 s) finished
+  after a tab click and overwrote the chosen tab. Fixed with a draw ticket: `render._seq`, each view captures
+  `_vs` and writes via `VIEW(_vs)` (stale → throwaway div); Logistics helpers `lgFail/lgDrawSched/lgDrawMsgs`
+  only draw while a `lg_*` tab is open. ⚠ Any NEW KEYSTONE view must write via `VIEW(_vs)`, not `el('view')`.
+  Also: Command Center "Who signs" no longer retries HATID forever when it can't be reached.
+  Worth a look: Release Queue query `adm_v_release_queue` takes ~3.5 s for 300 rows.
