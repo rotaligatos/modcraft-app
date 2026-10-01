@@ -2080,8 +2080,8 @@ const PROFILES = {
       if (typeof window._buildPrintBodyCore === 'function')
         check('_buildPrintBodyCore: Fabrication subtotal + GRAND TOTAL blank the unit-count cell in itemized mode', () => {
           const src = window._buildPrintBodyCore.toString();
-          const fabRowMatch = /Fabrication subtotal<\/td><td[^>]*>'\+\(isItemizedMode\?'—':fmtUnits\(totU\)\)\+'/.test(src);
-          const grandRowMatch = /GRAND TOTAL'[\s\S]{0,140}?<td[^>]*>'\+\(isItemizedMode\?'—':fmtUnits\(totU\)\)\+'/.test(src);
+          const fabRowMatch = /Fabrication subtotal<\/td><td[^>]*>'\+\(isItemizedMode\?'—':fmtUnits\(qFabMode==='services'\?_printUnits\(\):totU\)\)\+'/.test(src);
+          const grandRowMatch = /GRAND TOTAL'[\s\S]{0,140}?<td[^>]*>'\+\(isItemizedMode\?'—':fmtUnits\(qFabMode==='services'\?_printUnits\(\):totU\)\)\+'/.test(src);
           // Neither row may fall back to the old unconditional fmtUnits(totU) call anywhere in
           // their own cell -- would silently reprint the bogus figure whenever isItemizedMode.
           const noUnconditionalFabCall = !/Fabrication subtotal<\/td><td[^>]*>'\+fmtUnits\(totU\)\+'/.test(src);
@@ -4517,6 +4517,23 @@ const PROFILES = {
             return r;
           } finally { w.qHomeCompany = sv.home; w.currentUserCompany = sv.cu; }
         }, { cwl: true, wcl: false, direct: false, notMssi: false, bothStages: true });
+      /* 2026-10-01: printout "No. of Units" in cutting-list mode was the sum of service quantities
+         (lm + holes): 125.58 lm + 88.99 lm printed as 214.57 units. Must be the carcass count. */
+      if (typeof window.buildPrintRows === 'function')
+        check('printout units in cutting-list mode = carcass count, not service quantities', () => {
+          const w = window, sv = { areas: w.qAreas, mode: w.qFabMode, cc: w.qCarcassUnitCount };
+          try {
+            w.qFabMode = 'services';
+            w.qAreas = [{ name: 'Area 1', items: [], hwItems: [], matItems: [], svcItems: [{ svcIdx: 0, qty: 125.58 }, { svcIdx: 0, qty: 88.99 }] }];
+            const r = {};
+            w.qCarcassUnitCount = 3;
+            const lump = w.buildPrintRows('lump', null, null), area = w.buildPrintRows('area', null, null);
+            r.lump3 = lump.indexOf('>3<') >= 0; r.area3 = area.indexOf('>3<') >= 0;
+            r.no214 = lump.indexOf('214.57') < 0 && area.indexOf('214.57') < 0;
+            w.qCarcassUnitCount = 0; r.blank = w._printUnits();
+            return r;
+          } finally { w.qAreas = sv.areas; w.qFabMode = sv.mode; w.qCarcassUnitCount = sv.cc; }
+        }, { lump3: true, area3: true, no214: true, blank: '—' });
       /* 2026-10-01: materials margin in cutting-list mode was gated on isDirectClient(), so a CWLI
          Subsidiary quotation BILLED for its materials showed none of their margin (QT-C00000018). */
       if (typeof window._fabMaterialMarginTotal === 'function')
