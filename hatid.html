@@ -1757,7 +1757,7 @@ function renderJobs(){
       <td class="c-date">${fmtDate(j.scheduled_date)}${j.special_trip ? ' <span class="tag info">Special</span>' : ''}</td>
       <td class="c-type">${esc(j.job_type || '—')}</td>
       <td class="c-weight">${kg(j.estimated_weight_kg)}</td>
-      <td class="c-truck">${j.courier_vehicle_id ? `${courierById(j.courier_vehicle_id)?.service === 'grab' ? '🟢' : '🟠'} ${esc(courierLabel(courierById(j.courier_vehicle_id)))}` : j.trucks ? esc(j.trucks.label) : '<span class="muted">Unassigned</span>'}${j.trip_no ? ` <span class="ft">· trip ${j.trip_no}</span>` : ''}</td>
+      <td class="c-truck">${j.courier_vehicle_id ? `${courierById(j.courier_vehicle_id)?.service === 'grab' ? '🟢' : '🟠'} ${esc(courierLabel(courierById(j.courier_vehicle_id)))}${j.courier_ref ? '' : ' <span class="tag warn">to book</span>'}` : j.trucks ? esc(j.trucks.label) : '<span class="muted">Unassigned</span>'}${j.trip_no ? ` <span class="ft">· trip ${j.trip_no}</span>` : ''}</td>
       <td>${pill(j.status)}${prepMark(j)}${j.delivery_outcome && j.delivery_outcome !== 'full' ? ` <span class="tag bad">${j.delivery_outcome === 'partial' ? 'Partial' : 'Returned'}</span>` : ''}</td>
     </tr>`).join('');
   document.querySelectorAll('#jobs-body tr.row').forEach(r => r.addEventListener('click', () => openJob(r.dataset.id)));
@@ -2595,6 +2595,8 @@ async function dpLoad(DP){
     }
     ctx.recount = true;
   }
+  try { DP.couriers = ((await sb.from('jobs').select('id, quotation_serial, client_name, company, destination_id, estimated_weight_kg, status, courier_vehicle_id, courier_ref, courier_fare, courier_paid_by')
+    .eq('scheduled_date', DP.date).not('courier_vehicle_id', 'is', null).in('status', LIVE_ON_TRUCK)).data || []).filter(j => (pool?.companies || []).includes(j.company)); } catch { DP.couriers = []; }
   DP.blocked = all.filter(j => !j.destination_id).map(j => ({ job: j, reason: 'No destination — open the ticket and pick one' }));
   DP.ctx = ctx; DP.pool = pool;
   Object.assign(DP, planDay(ctx, all.filter(j => j.destination_id)));
@@ -2680,12 +2682,18 @@ function dpRender(DP){
   const idle = DP.ctx.load.filter(t => !used.some(b => b.t.truck_id === t.truck_id));
   const idleHtml = idle.length ? `<div class="card pad"><h3>Not used <span class="ft">— drag a drop onto a truck to start a trip</span></h3>${idle.map(t => { const tr = state.ref.truckById[t.truck_id] || t, w = ruleWarnings({ job: {}, date: DP.date, destId: null, truck: tr, tripLoad: null }).filter(x => !/No destination/.test(x));
       const first = DP.bins.find(x => x.t.truck_id === t.truck_id);
-      return `<ol class="dp-drops dp-spare" ${first ? `data-dp-bin="${esc(first.key)}"` : ''}><li class="dp-ph">🚚 <b>${esc(t.label)}</b> · ${Math.round(t.max_weight_kg).toLocaleString('en-PH')} kg${w.length ? ` — <span style="color:var(--warn)">${esc(w[0])}</span>` : ' — available'}</li></ol>`; }).join('')}</div>` : '';
+      return `<ol class="dp-drops dp-spare" ${first ? `data-dp-bin="${esc(first.key)}"` : ''}><li class="dp-ph">🚚 <b>${esc(t.label)}</b> <span class="ft">${esc(FLEET_LABEL[tr.fleet_type || t.fleet_type] || '')}</span> · ${Math.round(t.max_weight_kg).toLocaleString('en-PH')} kg${w.length ? ` — <span style="color:var(--warn)">${esc(w[0])}</span>` : ' — available'}</li></ol>`; }).join('')}</div>` : '';
+  const cz = DP.couriers || [], hiredT = [...new Set(DP.ctx.load.map(t => ({ ...t, ...(state.ref.truckById[t.truck_id] || {}) })).filter(t => t.fleet_type !== 'company_owned').map(t => t.operator_name || t.label.split(' · ').pop()))];
+  const courierHtml = `<div class="card pad dp-cz"><h3>🛵 Grab / Lalamove <span class="ft">— drag a drop here to send it by courier instead of a truck</span></h3>
+    <ol class="dp-drops dp-spare" data-dp-bin="@courier">${cz.map(j => { const v = courierById(j.courier_vehicle_id);
+      return `<li class="fixed"><span class="dp-h off">${v?.service === 'grab' ? '🟢' : '🟠'}</span><span class="dp-d"><a href="#" data-dp-open="${esc(j.id)}" class="mono">${esc(j.quotation_serial)}</a> ${esc(j.client_name || '')}<span class="ft"> · ${esc(destLabel(j.destination_id))} · ${kg(j.estimated_weight_kg)} · ${esc(courierLabel(v))}${j.courier_ref ? ' · booking ' + esc(j.courier_ref) : ''}</span>${j.courier_ref ? '' : ' <span class="tag warn">to book</span>'}</span></li>`; }).join('')}
+      <li class="dp-ph">Drop here — opens the booking form with the fare estimate</li></ol>
+    ${hiredT.length ? `<div class="ft" style="margin-top:6px">Other truckers (${esc(hiredT.slice(0, 4).join(', '))}${hiredT.length > 4 ? '…' : ''}) are trucks in this pool — drag onto them above or under “Not used”.</div>` : ''}</div>`;
   DP.unplaced.forEach(u => { u.job._why = u.reason; });
   const un = DP.unplaced.length ? `<div class="card pad warnbox"><h3 style="margin-top:0">Not planned — drag onto a trip, or open it to decide</h3><ol class="dp-drops" data-dp-bin="">${DP.unplaced.map(u => row(u.job, 0, null)).join('')}</ol></div>`
     : `<ol class="dp-drops dp-spare dp-later" data-dp-bin=""><li class="dp-ph">Drop here to leave a drop for later</li></ol>`;
   const empty = !used.length && !DP.unplaced.length ? `<div class="card empty">Nothing to plan on ${fmtDate(DP.date)} for ${esc(DP.pool?.name || 'this pool')}.</div>` : '';
-  $('dp-body').innerHTML = summary + (DP.view === 'map' ? '<div id="dp-map" class="dp-map"></div>' : '') + empty + un + `<div class="dp-cols"><div>${trucks}${idleHtml}</div><div>${byArea}<div class="card pad ft">Plan rules: no drop limit — truck capacity, the route and cost decide. A drop joins a trip when it lies on the way to the trip's last drop — adding at most <b>${routeAllow(DP.poolId)} km</b> compared with going straight there${['admin','manager'].includes(state.me?.role) ? ` <button class="lnk" id="dp-allow">change</button>` : ''}. Drag drops to reorder or move them — your call wins. <span class="ft">· planner v3 (drag &amp; drop)</span>${used.some(b => !b.info.known) ? ' <br>Some drops have no map pin yet, so their trips are grouped by delivery area instead.' : ''}</div></div></div>`;
+  $('dp-body').innerHTML = summary + (DP.view === 'map' ? '<div id="dp-map" class="dp-map"></div>' : '') + empty + un + `<div class="dp-cols"><div>${trucks}${idleHtml}${courierHtml}</div><div>${byArea}<div class="card pad ft">Plan rules: no drop limit — truck capacity, the route and cost decide. A drop joins a trip when it lies on the way to the trip's last drop — adding at most <b>${routeAllow(DP.poolId)} km</b> compared with going straight there${['admin','manager'].includes(state.me?.role) ? ` <button class="lnk" id="dp-allow">change</button>` : ''}. Drag drops to reorder or move them — your call wins. <span class="ft">· planner v4 (drag &amp; drop · Lalamove)</span>${used.some(b => !b.info.known) ? ' <br>Some drops have no map pin yet, so their trips are grouped by delivery area instead.' : ''}</div></div></div>`;
   $('dp-view').textContent = DP.view === 'map' ? '☰ List' : '🗺 Map';
   const nNew = sum(used, b => b.planned.filter(j => !j._was).length), nMv = sum(used, b => b.planned.filter(j => j._was).length) + DP.unplaced.filter(u => u.job._was).length;
   const n = nNew + nMv + Object.keys(DP.seq).length;
@@ -2726,6 +2734,15 @@ function dpMove(DP, id, key, at){
   toast(`${j.quotation_serial} → ${to.t.label} trip ${to.trip_no}: ${to.cap ? Math.round(to.kg / to.cap * 100) : 0}% full${canSeeCosts() ? ` · ${dc >= 0 ? '+' : '−'}${peso(Math.abs(dc))}` : ''}${w.length ? ' · ⚠ ' + w[0] : rc?.off ? ' · ⚠ off the way' : ''}`, w.length || rc?.off ? 'error' : 'ok');
   dpRender(DP);
 }
+/* Divert a drop to Grab / Lalamove: opens the booking form; back in the planner afterwards */
+async function dpCourier(DP, j){
+  if (!$('dp-go').disabled && !confirm('You have changes in the planner that are not confirmed yet. They will be re-planned after this. Continue?')) return;
+  let job = j;
+  try { job = (await withRetry('Loading the ticket', () => sb.from('jobs').select('*').eq('id', j.id).single())).data || j; } catch { return; }
+  if (!['proposed','scheduled'].includes(job.status)) return toast('This drop is already on the road', 'error');
+  const back = () => openPlanTrucks(DP.date, DP.poolId);
+  openCourierBooking(job, courierFits(job)[0]?.id, kmTo(job).km, back);
+}
 /* Drag & drop (mouse and touch): grab ⠿, drop on a trip (or between drops), on a free truck, or on "leave for later" */
 function dpDrag(DP, e, li){
   e.preventDefault();
@@ -2752,6 +2769,7 @@ function dpDrag(DP, e, li){
     if (target === null) return;
     const f = dpFind(DP, id);
     if (!f) return;
+    if (target === '@courier') return dpCourier(DP, f.j);
     if (!target && !f.b) return;   // already "later"
     dpMove(DP, id, target, at);
   };
@@ -3825,13 +3843,13 @@ async function fillEconomy(job){
 }
 
 /* Record a Grab / Lalamove booking on the job */
-function openCourierBooking(job, vehicleId, km){
+function openCourierBooking(job, vehicleId, km, onBack){
   const fits = courierFits(job), all = (state.ref.courier || []).filter(v => v.active);
   const cur = courierById(vehicleId || job.courier_vehicle_id) || fits[0];
   const est = v => km != null ? courierFare(v, km) : '';
-  const back = () => openJob(job.id);
+  const back = onBack || (() => openJob(job.id));
   openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true"><h2>🛵 Grab / Lalamove — <span class="mono">${esc(job.quotation_serial)}</span></h2>
-    <div class="ft">Book in the Grab or Lalamove app first, then record it here. The job leaves the truck plan; the office records the delivery result.</div>
+    <div class="ft">Book in the Grab or Lalamove app, then record it here. Not booked yet? Leave the booking no. blank — it's saved as <b>to book</b> and you fill in the booking later from the ticket. The job leaves the truck plan.</div>
     <div class="form" style="margin-top:8px">
       <label class="f">Vehicle<select class="i" id="cb-v">${all.map(v => `<option value="${esc(v.id)}" ${v.id === cur?.id ? 'selected' : ''}>${esc(courierLabel(v))} — up to ${Number(v.max_kg)} kg${v.boards ? ', boards OK' : ''}${fits.includes(v) ? '' : ' (load may not fit)'}</option>`).join('')}</select></label>
       <div class="grid2"><label class="f">Booking / order no.<input class="i" id="cb-ref" value="${esc(job.courier_ref || '')}" placeholder="From the app"></label>
@@ -3846,12 +3864,12 @@ function openCourierBooking(job, vehicleId, km){
   $('cb-ok').addEventListener('click', async e => {
     const v = courierById($('cb-v').value), fare = $('cb-fare').value === '' ? null : Number($('cb-fare').value), ref = $('cb-ref').value.trim();
     const track = $('cb-track').value.trim();
-    if (!ref) return toast('Type the booking number from the app', 'error');
-    if (fare == null || !(fare >= 0)) return toast('Type the fare the app charged', 'error');
+    if (ref && (fare == null || !(fare >= 0))) return toast('Type the fare the app charged', 'error');
+    if (fare != null && !(fare >= 0)) return toast('The fare should be a number', 'error');
     if (track && !/^https?:\/\//i.test(track)) return toast('The tracking link should start with https://', 'error');
     const b = e.currentTarget; b.disabled = true;
     const paid = $('cb-pay').value, date = $('cb-date')?.value || job.scheduled_date;
-    const patch = { courier_vehicle_id: v.id, courier_ref: ref, courier_fare: fare, courier_paid_by: paid, courier_track_url: track || null,
+    const patch = { courier_vehicle_id: v.id, courier_ref: ref || null, courier_fare: fare, courier_paid_by: paid, courier_track_url: track || null,
       courier_booked_at: job.courier_booked_at || new Date().toISOString(), truck_id: null, trip_no: null, drop_seq: null, scheduled_date: date,
       ...(job.status === 'proposed' ? { status: 'scheduled' } : {}) };
     try {
@@ -3859,9 +3877,10 @@ function openCourierBooking(job, vehicleId, km){
       // the fare is the delivery cost when the company pays (one courier-fee line per job, kept in step with the booking)
       const { data: old } = await sb.from('job_costs').select('id, notes').eq('job_id', job.id).eq('category', 'courier_fee');
       for (const c of (old || []).filter(c => /^Grab|^Lalamove/.test(c.notes || ''))) await withRetry('Updating cost', () => sb.from('job_costs').delete().eq('id', c.id));
-      if (paid === 'company' && fare > 0) await withRetry('Saving the fare', () => sb.from('job_costs').insert({ job_id: job.id, category: 'courier_fee', amount: fare, notes: `${courierLabel(v)} · booking ${ref}` }));
-      await logEvent(job.id, job.status === 'proposed' ? 'scheduled' : 'note', `Booked on ${courierLabel(v)} — booking ${ref}, fare ${peso(fare)} paid by ${paid === 'client' ? 'the client' : 'the company'}${track ? '\nTracking: ' + track : ''}`);
-      toast(`Booked on ${courierLabel(v)}`, 'ok'); back();
+      if (ref && paid === 'company' && fare > 0) await withRetry('Saving the fare', () => sb.from('job_costs').insert({ job_id: job.id, category: 'courier_fee', amount: fare, notes: `${courierLabel(v)} · booking ${ref}` }));
+      await logEvent(job.id, job.status === 'proposed' ? 'scheduled' : 'note', ref ? `Booked on ${courierLabel(v)} — booking ${ref}, fare ${peso(fare)} paid by ${paid === 'client' ? 'the client' : 'the company'}${track ? '\nTracking: ' + track : ''}`
+        : `Diverted to ${courierLabel(v)} — booking to follow${fare != null ? ` (estimate ${peso(fare)})` : ''}, paid by ${paid === 'client' ? 'the client' : 'the company'}`);
+      toast(ref ? `Booked on ${courierLabel(v)}` : `Diverted to ${courierLabel(v)} — to book`, 'ok'); back();
     } catch { b.disabled = false; }
   });
 }
@@ -3877,7 +3896,7 @@ async function clearCourier(job){
 }
 function courierRowHtml(job){
   const v = courierById(job.courier_vehicle_id);
-  return `${job.courier_vehicle_id ? `${v?.service === 'grab' ? '🟢' : '🟠'} <b>${esc(courierLabel(v))}</b> <span class="ft">booking ${esc(job.courier_ref || '—')} · ${job.courier_fare != null ? peso(job.courier_fare) : 'fare —'} · paid by ${job.courier_paid_by === 'client' ? 'client' : 'company'}</span>
+  return `${job.courier_vehicle_id ? `${v?.service === 'grab' ? '🟢' : '🟠'} <b>${esc(courierLabel(v))}</b>${job.courier_ref ? '' : ' <span class="tag warn">to book</span>'} <span class="ft">booking ${esc(job.courier_ref || '—')} · ${job.courier_fare != null ? peso(job.courier_fare) : 'fare —'} · paid by ${job.courier_paid_by === 'client' ? 'client' : 'company'}</span>
     ${job.courier_track_url ? ` · <a href="${esc(job.courier_track_url)}" target="_blank" rel="noopener">Track</a>` : ''}
     ${isDispatcher() && !['completed','rejected'].includes(job.status) ? ` <button class="lnk" id="dr-cb-edit">Edit</button> <button class="lnk" id="dr-cb-clear">Use a truck instead</button>` : ''}` : ''}`;
 }
@@ -6153,11 +6172,11 @@ async function renderQualityReport(){
       fetchAll('Loading truck checklists', () => sb.from('job_truck_checks').select('*').gte('day', L.from).lte('day', L.to).order('day')),
       fetchAll('Loading trips', () => sb.from('job_trips').select('trip_date, truck_id, trip_no, load_locked_at, departed_at, gps_left_at, return_sent_at, back_at, gps_back_at').gte('trip_date', L.from).lte('trip_date', L.to)),
       fetchAll('Loading delivery results', () => { let q = sb.from('jobs').select('id, quotation_serial, client_name, company, scheduled_date, delivery_outcome, received, truck_id, order_value').gte('scheduled_date', L.from).lte('scheduled_date', L.to).in('delivery_outcome', ['partial','returned']); return co ? q.eq('company', co) : q; }),
-      fetchAll('Loading Grab / Lalamove', () => { let q = sb.from('jobs').select('id, quotation_serial, client_name, company, scheduled_date, status, courier_vehicle_id, courier_fare, courier_paid_by, order_value').gte('scheduled_date', L.from).lte('scheduled_date', L.to).not('courier_vehicle_id', 'is', null); return co ? q.eq('company', co) : q; }),
+      fetchAll('Loading Grab / Lalamove', () => { let q = sb.from('jobs').select('id, quotation_serial, client_name, company, scheduled_date, status, courier_vehicle_id, courier_ref, courier_fare, courier_paid_by, order_value').gte('scheduled_date', L.from).lte('scheduled_date', L.to).not('courier_vehicle_id', 'is', null); return co ? q.eq('company', co) : q; }),
     ]);
     evs = await fetchAll('Loading load concerns and unlocks', () => sb.from('job_events').select('job_id, event_type, notes, created_at, actor_name').in('event_type', ['load_concern','load_unlocked']).gte('created_at', L.from + 'T00:00:00+08:00').lte('created_at', L.to + 'T23:59:59+08:00'));
   } catch { body.innerHTML = '<div class="card empty">Could not load checks and quality.</div>'; return; }
-  courier = courier.filter(j => j.courier_vehicle_id);
+  courier = courier.filter(j => j.courier_vehicle_id && j.courier_ref);   // diverted but not yet booked: no real fare yet
   const truckOk = id => !co || (state.ref.poolById?.[state.ref.truckById?.[id]?.pool_id]?.companies || []).includes(co);
   checks = checks.filter(c => truckOk(c.truck_id)); trips = trips.filter(t => truckOk(t.truck_id));
   const tl = id => state.ref.truckById?.[id]?.label || 'Truck';
