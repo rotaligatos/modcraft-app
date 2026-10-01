@@ -4363,7 +4363,7 @@ async function loadPkRole(view){
     html = (mgr ? sec('Late tickets — your OK', 'Past the cut-off. Allow to let them queue (recorded, not counted in promptness).', late.map(o => oRow(o, `<button class="btn primary sm" data-pkm="allow" data-id="${esc(o.id)}">Allow</button>`)), { todo: 1, empty: 'No late tickets 👍' }) : '')
       + sec('SI to accept', 'Sales Support sent the SI — accept and start getting it out. Work in queue-number order.', V('notified').map(v => vRow(v, B('primary', 'accept', v.id, 'Accept SI'))), { todo: 1, empty: 'No SI waiting 👍' })
       + sec('Getting it out — mark ready', 'When everything is out and checked, mark it ready; Logistics is told.', V('accepted').map(v => vRow(v, B('primary', 'ready', v.id, 'Ready for loading'))), { todo: 1, empty: 'Nothing being prepared' })
-      + sec('To prepare — today and tomorrow', 'Tick each item as it’s prepared, before the client comes. Overdue dates are in red.', prep.map(o => oRow(o, B('', 'prep', o.id, 'Tick items'))), { todo: 1, empty: 'Everything is prepared 👍' })
+      + sec('To prepare — today and tomorrow', 'Tick each item as it’s prepared, before the client comes. Overdue dates are in red.', prep.map(o => oRow(o, B('', 'prep', o.id, 'Tick items') + B('primary', 'allprep', o.id, '✓ All prepared'))), { todo: 1, empty: 'Everything is prepared 👍' })
       + sec('Prepared — waiting for the client', '', done.map(o => oRow(o)), { empty: 'None' })
       + sec('With Logistics', '', V('ready').map(v => vRow(v, '', 'ready for loading')), { empty: 'None' });
     sub = 'Prepare items, accept the SI, mark ready.';
@@ -4386,10 +4386,13 @@ async function loadPkRole(view){
   document.querySelectorAll('#pkm-body [data-pkm]').forEach(b => b.addEventListener('click', async e => { e.stopPropagation(); const id = b.dataset.id, a = b.dataset.pkm;
     if (a === 'si') return openPkVisit(id);
     if (a === 'load') return openPkLoad(id);
-    if (a === 'prep') return openPkOrder(id);
+    if (a === 'prep') return openPkOrder(id, { prep: true });
+    if (a === 'allprep'){ const o = state.pkOrders.find(x => x.id === id); const vals = {};
+      (o?.lines || []).filter(l => l.want && Number(l.qty) > Number(l.taken)).forEach(l => { vals[l.i] = true; });
+      b.disabled = true; try { await pkRpc('Saving', 'pk_set_lines', { p_order: id, p_field: 'prep', p_vals: vals }); toast(`${o.so_no}: all items prepared`, 'ok'); loadPk(state.view); } catch { b.disabled = false; } return; }
     if (a === 'accept' || a === 'ready') return pkAction(a, id);
     if (a === 'allow'){ b.disabled = true; try { await pkRpc('Allowing', 'pk_allow_late', { p_order: id }); toast('Allowed — it can be queued now', 'ok'); loadPk(state.view); } catch { b.disabled = false; } } }));
-  document.querySelectorAll('#pkm-body .pkm-row').forEach(r => r.addEventListener('click', e => { if (e.target.closest('button,input')) return; r.dataset.pkv ? openPkVisit(r.dataset.pkv) : openPkOrder(r.dataset.pko); }));
+  document.querySelectorAll('#pkm-body .pkm-row').forEach(r => r.addEventListener('click', e => { if (e.target.closest('button,input')) return; r.dataset.pkv ? openPkVisit(r.dataset.pkv) : openPkOrder(r.dataset.pko, { prep: view === 'pk-wh' }); }));
 }
 
 /* ---------- Queue ---------- */
@@ -4526,10 +4529,10 @@ async function openPkVisit(id){
   $('pkv-cancel')?.addEventListener('click', async () => { const r = prompt('Why cancel this queue number? (e.g. client left, wrong SO)'); if (!r) return;
     try { await pkRpc('Cancelling', 'pk_cancel_visit', { p_visit: v.id, p_reason: r }); closeOverlay(); loadPk(state.view); } catch {} });
 }
-function pkLinesTable(o, edit){
+function pkLinesTable(o, edit, prepEdit = false){   // prepared ticks only from the Warehouse view (Rommel: redundant elsewhere)
   const ls = (o.lines || []);
   if (!ls.length) return '<div class="ft">No item lines on this ticket.</div>';
-  const canW = edit && pkCan('sales_support') && ['open','balance','in_queue'].includes(o.status), canP = edit && pkCan('warehouse') && ['open','balance','in_queue'].includes(o.status);
+  const canW = edit && pkCan('sales_support') && ['open','balance','in_queue'].includes(o.status), canP = edit && prepEdit && pkCan('warehouse') && ['open','balance','in_queue'].includes(o.status);
   return `<div class="tbl-wrap"><table class="rt ut pk-lines"><thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Picked up</th><th>Client takes</th><th>Prepared</th></tr></thead><tbody>
     ${ls.map(l => { const left = Number(l.qty) - Number(l.taken);
       return `<tr class="${left <= 0 ? 'off' : ''}"><td>${esc(l.desc)}</td><td class="num">${esc(fmtQty(l.qty))} ${esc(l.unit || '')}</td><td class="num">${Number(l.taken) ? esc(fmtQty(l.taken)) : '—'}</td>
@@ -4613,7 +4616,7 @@ async function loadPkTickets(){
       <td>${p.n ? `${p.prep}/${p.n}` : '—'}</td><td>${esc(PK_OST[o.status])}</td><td>${esc(PK_SITE[o.site])} · ${esc(o.company)}</td></tr>`; }).join('') || '<tr><td colspan="8" class="muted">No pick-up tickets for these filters.</td></tr>';
   document.querySelectorAll('#pkt-body [data-pko]').forEach(r => r.addEventListener('click', () => openPkOrder(r.dataset.pko)));
 }
-async function openPkOrder(id){
+async function openPkOrder(id, opt = {}){
   openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true"><span class="spin"></span></div>`); bindClose();
   let o, evs;
   try { [{ data: o }, { data: evs }] = await Promise.all([withRetry('Loading', () => sb.from('pk_orders').select('*').eq('id', id).single()), sb.from('pk_events').select('*').eq('order_id', id).order('created_at')]); } catch { closeOverlay(); return; }
@@ -4627,7 +4630,7 @@ async function openPkOrder(id){
       ${o.prepared_at ? `<dt>Prepared</dt><dd>${fmtTime(o.prepared_at)} · ${esc(o.prepared_name || '')}</dd>` : ''}
       ${o.late_allowed_at ? `<dt>Late — allowed</dt><dd>${fmtTime(o.late_allowed_at)} · ${esc(o.late_allowed_name || '')} <span class="ft">(recorded, not counted in promptness)</span></dd>` : ''}
       ${o.instructions ? `<dt>Instructions</dt><dd style="white-space:pre-wrap">${esc(o.instructions)}</dd>` : ''}</dl>
-    ${pkLinesTable(o, edit)}
+    ${pkLinesTable(o, edit, !!opt.prep)}
     ${evs.length ? `<details style="margin-top:6px"><summary class="ft">History (${evs.length})</summary>${evs.map(e => `<div class="ft">${fmtTime(e.created_at)} · ${esc(e.kind.replace(/_/g, ' '))}${e.notes ? ' — ' + esc(e.notes) : ''} · ${esc(e.actor_name || '')}</div>`).join('')}</details>` : ''}
     <div class="row-btns" style="justify-content:flex-end;flex-wrap:wrap">
       ${pkLate(o) && !o.late_allowed_at && o.status === 'open' && pkCan('wh_manager') ? '<button class="btn" id="pko-allow">Allow late ticket</button>' : ''}
