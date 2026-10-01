@@ -2010,6 +2010,12 @@ function upCell(v){
     return v.getHours() || v.getMinutes() || v.getSeconds() ? `${d} ${p2(v.getHours())}:${p2(v.getMinutes())}:${p2(v.getSeconds())}` : d; }   // keep the time (ticket "Created on")
   return String(v).trim();
 }
+function upNoSoMsg(r){   // tickets in the file with an empty Sales Order column
+  if (!r.noSo) return '';
+  return `<b>${r.noSo} ticket${r.noSo === 1 ? '' : 's'} in the file ha${r.noSo === 1 ? 's' : 've'} no Sales Order${r.grouped ? ', Customer or items' : ''} — skipped.</b> `
+    + (r.grouped ? 'The list was <b>grouped</b> in Odoo (rows like “Pickup (5)”), and a grouped export can come out with the Sales Order columns empty. Remove the <b>Group By</b> (use a <b>Filter</b> instead), tick the tickets and export again.'
+      : 'Link the ticket to its Sales Order in Odoo, then export again.');
+}
 function parseTicketRows(rows){
   const known = new Set([...Object.values(UP_TICKET), ...Object.values(UP_LINE)].flat());
   const hi = rows.slice(0, 15).findIndex(r => r.filter(c => known.has(upKey(c)) || /\/(name|description|quantity|product_uom_qty)$/.test(upKey(c))).length >= 2);
@@ -2018,9 +2024,14 @@ function parseTicketRows(rows){
   if (col['Ref. Sales Order'] == null && col._name == null) return { error: 'This file has no sales order column. Export from Odoo › Helpdesk › Tickets with the HATID template, or use the HATID Excel template.' };
   const first = c => Array.isArray(c) ? c[0] : c;
   const keyCol = first(col._id ?? col['Ref. Sales Order'] ?? col._name);
-  const out = []; let cur = null;
+  const out = []; let cur = null, grouped = 0, noSo = 0;
+  const tCols = ['Delivery Type', 'Salesperson', 'Scheduled Date'].map(f => first(col[f])).filter(i => i != null);
   for (const r of rows.slice(hi + 1)){
+    // Odoo grouped export: a heading row like "Pickup (5)" with nothing else on it — skip
+    const filled = r.map(upCell).filter(Boolean);
+    if (filled.length === 1 && /^.+\(\d+\)$/.test(filled[0])){ grouped++; continue; }
     const k = upCell(r[keyCol]);
+    if (!k && tCols.some(i => upCell(r[i]))){ noSo++; cur = null; continue; }   // a ticket row with no Sales Order — can't be used
     if (k && (!cur || k !== cur.key)){
       cur = { key: k, fields: {}, lines: [], ticket: null, total: null }; out.push(cur);
       for (const [f, i] of Object.entries(col)) cur.fields[f] = Array.isArray(i) ? (i.map(x => upCell(r[x])).find(Boolean) || '') : upCell(r[i]);
@@ -2037,7 +2048,7 @@ function parseTicketRows(rows){
     }
   }
   const any = f => out.some(t => (t.fields[f] || '').trim());   // a column counts only if it has data
-  return { tickets: out, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson') };
+  return { tickets: out, grouped, noSo, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson') };
 }
 function openJobUpload(){
   const cos = myCompanies();
@@ -2086,6 +2097,7 @@ function openJobUpload(){
   const render = () => {
     const P = parsed, miss = [!P.hasLines && 'order lines (items)', !P.hasClient && 'customer name', !P.hasAgent && 'salesperson', !P.hasCompany && 'company'].filter(Boolean);
     $('up-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${P.tickets.length} delivery ticket${P.tickets.length === 1 ? '' : 's'} found.
+      ${P.noSo ? `<div class="warn">${upNoSoMsg(P)}</div>` : ''}
       ${P.pickups?.length ? `<div class="warn"><b>${P.pickups.length} Pick-up ticket${P.pickups.length === 1 ? '' : 's'} left out</b> (${esc(P.pickups.join(', '))}) — only delivery tickets are uploaded here. Upload ${P.pickups.length === 1 ? 'it' : 'them'} in <b>Pick-up mode › Pick-up tickets</b>.</div>` : ''}
       ${miss.length ? `<div class="warn">This file has no ${miss.join(', ')} — ${!P.hasLines ? 'jobs will have no item list. ' : ''}Add them to the Odoo export (<button class="lnk" id="up-how2">how</button>) or fill them in after.</div>` : ''}</div>
       <div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th><input type="checkbox" id="up-all" aria-label="Select all"></th><th>SO / client</th><th>Date</th><th>Destination *</th><th>Sales agent</th><th>Load</th><th>Check</th></tr></thead><tbody>
@@ -2141,7 +2153,7 @@ function openJobUpload(){
       const rows = X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
       const r = parseTicketRows(rows);
       if (r.error){ $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(r.error)}</div>`; return; }
-      if (!r.tickets.length){ $('up-out').innerHTML = '<div class="imp-sum warn" style="margin-top:10px">No tickets in this file.</div>'; return; }
+      if (!r.tickets.length){ $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${upNoSoMsg(r) || 'No tickets in this file.'}</div>`; return; }
       const isPk = t => odooToJob(t).job_type === 'pickup';
       r.pickups = r.tickets.filter(isPk).map(t => t.ticket?.so || t.key); r.tickets = r.tickets.filter(t => !isPk(t));
       if (!r.tickets.length){ $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px"><b>Nothing added — ${r.pickups.length === 1 ? 'this is a Pick-up ticket' : `all ${r.pickups.length} tickets are Pick-ups`}</b> (${esc(r.pickups.join(', '))}). Only delivery tickets go here; upload pick-ups in <b>Pick-up mode › Pick-up tickets</b>.</div>`; return; }
@@ -4620,6 +4632,7 @@ async function openPkUpload(){
   const render = () => {
     const rows = R.rows;
     $('pku-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${rows.length} pick-up ticket${rows.length === 1 ? '' : 's'} found.
+      ${R.r.noSo ? `<div class="warn">${upNoSoMsg(R.r)}</div>` : ''}
       ${R.other.length ? `<div class="warn"><b>${R.other.length} delivery ticket${R.other.length === 1 ? '' : 's'} left out</b> (${esc(R.other.join(', '))}) — only pick-up tickets are loaded here. Upload ${R.other.length === 1 ? 'it' : 'them'} in <b>Delivery mode › Delivery tickets</b>.</div>` : ''}
       ${rows.some(x => x.P.created_est) ? `<div class="warn">No <b>Created on</b> column — the cut-off can’t be checked from the ticket time (<button class="lnk" id="pku-how">how to add it</button>). Scheduled tickets are timed as now.</div>` : ''}</div>
       <div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th><input type="checkbox" id="pku-all" aria-label="Select all" checked></th><th>SO / client</th><th>Type</th><th>Pick-up date</th><th>Site</th><th>Items</th><th>Check</th></tr></thead><tbody>
@@ -4676,9 +4689,10 @@ async function openPkUpload(){
       const wb = X.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
       const r = parseTicketRows(X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' }));
       if (r.error){ $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(r.error)}</div>`; return; }
+      if (!r.tickets.length){ $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${upNoSoMsg(r) || 'No tickets in this file.'}</div>`; return; }
       const all = r.tickets.map(pkFromRow), pk = all.filter(P => P.kind), other = all.filter(P => !P.kind).map(P => P.so_no || '?');
       if (!pk.length){ $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px"><b>Nothing to load — ${all.length ? `no pick-up tickets in this file` : 'no tickets in this file'}</b>${other.length ? ` (${esc(other.join(', '))} ${other.length === 1 ? 'is a delivery ticket' : 'are delivery tickets'} — upload in Delivery mode › Delivery tickets)` : ''}.</div>`; return; }
-      R = { tickets: pk, other }; await build();
+      R = { tickets: pk, other, r }; await build();
     } catch (err) { $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(err?.message || 'Could not read the file')}</div>`; }
   });
   $('pku-go').addEventListener('click', async e => {
