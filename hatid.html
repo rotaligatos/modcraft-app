@@ -2425,7 +2425,7 @@ function planBins(ctx){
     for (const x of tripLoads(t)){
       const key = `${t.truck_id}|${x.trip_no}`, fixed = ctx.fixed[key] || [];
       bins.push({ key, t, truck, trip_no: x.trip_no, cap: Number(t.max_weight_kg) || 0, capPcs: Number(t.max_pieces) || 0,
-        kg: Number(x.kg) || 0, pcs: Number(x.pcs) || 0, fixed, planned: [],
+        kg: ctx.recount ? sum(fixed, j => j.estimated_weight_kg) : Number(x.kg) || 0, pcs: ctx.recount ? sum(fixed, j => boardsPcs(j.board_pcs)) : Number(x.pcs) || 0, fixed, planned: [],
         dests: fixed.map(j => j.destination_id).filter(Boolean) });
     }
   }
@@ -2546,7 +2546,7 @@ async function openPlanTrucks(date, poolId){
     <div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>📋 Day planner</h2>
       <select class="i" id="dp-date" style="width:auto" aria-label="Delivery date"></select>
       <select class="i" id="dp-pool" style="width:auto" aria-label="Pool"></select>
-      <span class="dp-tools"><button class="btn" id="dp-view">🗺 Map</button><button class="btn" id="dp-auto" title="Re-plan the drops for scheduling (confirmed ones stay)">✨ Re-plan</button>
+      <span class="dp-tools"><button class="btn" id="dp-view">🗺 Map</button><button class="btn" id="dp-auto" title="Re-plan only the drops for scheduling — drops already on trucks stay">✨ Re-plan new</button><button class="btn" id="dp-all" title="Re-plan everything that hasn't left yet, including drops already on trucks">↻ Re-plan all</button>
       <button class="btn ok" id="dp-go" disabled>Confirm</button><button class="btn" id="dp-sched">Prepare schedule →</button></span></div>
     <div class="sheet-b dp-b" id="dp-body"><div class="muted" style="padding:14px"><span class="spin"></span> Planning…</div></div></div>`);
   bindClose();
@@ -2572,7 +2572,9 @@ async function openPlanTrucks(date, poolId){
   try { await dpLoad(DP); } catch (e) { $('dp-body').innerHTML = `<div class="card empty">Could not plan this day. ${esc(e?.message || '')}</div>`; return; }
   dpRender(DP);
   $('dp-view').onclick = () => { DP.view = DP.view === 'map' ? 'list' : 'map'; dpRender(DP); };
-  $('dp-auto').onclick = async () => { DP.moved.clear(); DP.seq = {}; await dpLoad(DP); dpRender(DP); toast('Re-planned', 'ok'); };
+  $('dp-auto').onclick = async () => { DP.all = false; DP.moved.clear(); DP.seq = {}; await dpLoad(DP); dpRender(DP); toast(dpNewCount(DP) ? 'Re-planned the drops for scheduling' : 'No drops for scheduling on this day — use “Re-plan all” to re-plan the drops already on trucks', dpNewCount(DP) ? 'ok' : 'error'); };
+  $('dp-all').onclick = async () => { DP.all = true; DP.moved.clear(); DP.seq = {}; await dpLoad(DP); dpRender(DP); const m = sum(DP.bins, b => b.planned.filter(j => j._was).length);
+    toast(m ? `Re-planned everything — ${m} drop${m === 1 ? '' : 's'} would change truck/trip (shown as “moved”). Confirm to apply, or close to discard.` : 'Re-planned everything — the current trucks are already the best fit', 'ok'); };
   $('dp-go').onclick = e => dpConfirm(DP, e.currentTarget);
   dpPins(DP);   // fill missing destination pins in the background, then re-plan
 }
@@ -2581,9 +2583,24 @@ async function dpLoad(DP){
   ctx.load = ctx.load.filter(t => t.pool_id === DP.poolId);
   const { data } = await withRetry('Loading tickets', () => sb.from('jobs').select('*').eq('status', 'proposed').eq('scheduled_date', DP.date));
   const all = (data || []).filter(j => (pool?.companies || []).includes(j.company) && j.job_type !== 'pickup');
+  // "Re-plan all": drops already on trucks that haven't left (trip not locked) are planned again; where they end up elsewhere they show as "moved"
+  if (DP.all){
+    const locked = new Set((await sb.from('job_trips').select('truck_id, trip_no, load_locked_at, departed_at').eq('trip_date', DP.date)).data?.filter(r => r.load_locked_at || r.departed_at).map(r => `${r.truck_id}|${r.trip_no}`) || []);
+    const poolTrucks = new Set(ctx.load.map(t => t.truck_id));
+    for (const [k, js] of Object.entries(ctx.fixed)){
+      if (!poolTrucks.has(k.split('|')[0]) || locked.has(k)) continue;
+      const free = js.filter(j => j.status === 'scheduled'); if (!free.length) continue;
+      ctx.fixed[k] = js.filter(j => j.status !== 'scheduled');
+      free.forEach(j => { j._was = k; all.push(j); });
+    }
+    ctx.recount = true;
+  }
   DP.blocked = all.filter(j => !j.destination_id).map(j => ({ job: j, reason: 'No destination — open the ticket and pick one' }));
   DP.ctx = ctx; DP.pool = pool;
   Object.assign(DP, planDay(ctx, all.filter(j => j.destination_id)));
+  DP.bins.forEach(b => { b.planned.filter(j => j._was === b.key).forEach(j => { b.planned = b.planned.filter(x => x !== j); b.fixed.push(j); delete j._was; }); });   // stayed on its own trip
+  DP.unplaced = DP.unplaced.filter(u => { const j = u.job, home = j._was && DP.bins.find(b => b.key === j._was); if (!home) return true;   // couldn't re-plan it: it stays where it was
+    home.fixed.push(j); home.kg += Number(j.estimated_weight_kg || 0); home.pcs += boardsPcs(j.board_pcs); home.dests.push(j.destination_id); delete j._was; return false; });
   DP.unplaced.push(...DP.blocked);
   DP.bins.forEach(b => dpOrder(DP, b));
 }
@@ -2597,6 +2614,7 @@ function dpOrder(DP, b){
   // a trip that already left keeps its order
   if (b.fixed.some(j => j.status !== 'scheduled')) b.order = [...all].sort((x, y) => (x.drop_seq ?? 999) - (y.drop_seq ?? 999));
 }
+const dpNewCount = DP => sum(DP.bins, b => b.planned.filter(j => !j._was).length) + DP.unplaced.filter(u => u.job.status === 'proposed').length;
 function dpTripInfo(DP, b){
   const base = poolBase(b.t.pool_id), pts = b.order.map(ptOf), known = base && pts.length && pts.every(Boolean);
   const r = known ? routeExcess(base, pts) : null, off = known && r.excess > routeAllow(b.t.pool_id) + 0.5;
@@ -2667,7 +2685,7 @@ function dpRender(DP){
   const un = DP.unplaced.length ? `<div class="card pad warnbox"><h3 style="margin-top:0">Not planned — drag onto a trip, or open it to decide</h3><ol class="dp-drops" data-dp-bin="">${DP.unplaced.map(u => row(u.job, 0, null)).join('')}</ol></div>`
     : `<ol class="dp-drops dp-spare dp-later" data-dp-bin=""><li class="dp-ph">Drop here to leave a drop for later</li></ol>`;
   const empty = !used.length && !DP.unplaced.length ? `<div class="card empty">Nothing to plan on ${fmtDate(DP.date)} for ${esc(DP.pool?.name || 'this pool')}.</div>` : '';
-  $('dp-body').innerHTML = summary + (DP.view === 'map' ? '<div id="dp-map" class="dp-map"></div>' : '') + empty + un + `<div class="dp-cols"><div>${trucks}${idleHtml}</div><div>${byArea}<div class="card pad ft">Plan rules: no drop limit — truck capacity, the route and cost decide. A drop joins a trip when it lies on the way to the trip's last drop — adding at most <b>${routeAllow(DP.poolId)} km</b> compared with going straight there${['admin','manager'].includes(state.me?.role) ? ` <button class="lnk" id="dp-allow">change</button>` : ''}. Drag drops to reorder or move them — your call wins.${used.some(b => !b.info.known) ? ' <br>Some drops have no map pin yet, so their trips are grouped by delivery area instead.' : ''}</div></div></div>`;
+  $('dp-body').innerHTML = summary + (DP.view === 'map' ? '<div id="dp-map" class="dp-map"></div>' : '') + empty + un + `<div class="dp-cols"><div>${trucks}${idleHtml}</div><div>${byArea}<div class="card pad ft">Plan rules: no drop limit — truck capacity, the route and cost decide. A drop joins a trip when it lies on the way to the trip's last drop — adding at most <b>${routeAllow(DP.poolId)} km</b> compared with going straight there${['admin','manager'].includes(state.me?.role) ? ` <button class="lnk" id="dp-allow">change</button>` : ''}. Drag drops to reorder or move them — your call wins. <span class="ft">· planner v3 (drag &amp; drop)</span>${used.some(b => !b.info.known) ? ' <br>Some drops have no map pin yet, so their trips are grouped by delivery area instead.' : ''}</div></div></div>`;
   $('dp-view').textContent = DP.view === 'map' ? '☰ List' : '🗺 Map';
   const nNew = sum(used, b => b.planned.filter(j => !j._was).length), nMv = sum(used, b => b.planned.filter(j => j._was).length) + DP.unplaced.filter(u => u.job._was).length;
   const n = nNew + nMv + Object.keys(DP.seq).length;
