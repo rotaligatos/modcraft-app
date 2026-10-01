@@ -12558,6 +12558,10 @@ HPL build SKUs resolve · drilling route matched by cabinet.
 No board-edge trim (bander trims) · no spare-board allowance (estimator's judgement; quotation has buffers) ·
 Studio Tille C11 "259" is the client's error.
 
+## Also done 2026-09-30 (after the list above was written)
+Command Center 'Who signs' HATID retry loop · KEYSTONE tabs overwritten by slow pages (draw ticket `VIEW(_vs)`) ·
+KEYSTONE Logistics SQL error (HATID `job_ks_feed`) · KEYSTONE Release Queue missing 21 approved jobs + faster.
+
 ## Waiting
 - **MSSI website is not deployed** — its column-order/header-upload changes are committed in its local repo
   only (no remote). Until published, clients downloading from the website get the old template (still imports fine).
