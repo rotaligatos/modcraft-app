@@ -1016,7 +1016,7 @@ body.tv-mode header,body.tv-mode #daybar{display:none!important}
   <main>
     <div class="fleet-head">
       <div><h2 style="margin:0">Pick-up tickets</h2><div class="muted" style="font-size:14px">Scheduled (3 PM cut-off, day before) and same-day (11 AM) pick-ups from Odoo, and walk-ins</div></div>
-      <div class="row-btns" style="margin:0"><span class="pk-home-slot"></span><button class="btn primary" id="pkt-paste">⬇ Paste ticket</button><button class="btn" id="pkt-walkin">＋ Walk-in</button></div>
+      <div class="row-btns" style="margin:0"><span class="pk-home-slot"></span><button class="btn primary" id="pkt-upload">⬆ Upload tickets</button><button class="btn" id="pkt-paste">⬇ Paste ticket</button><button class="btn" id="pkt-walkin">＋ Walk-in</button></div>
     </div>
     <div class="card toolbar" style="border:1px solid var(--line);margin-bottom:14px;flex-wrap:wrap">
       <label class="f">From<input class="i" type="date" id="pkt-from"></label><label class="f">To<input class="i" type="date" id="pkt-to"></label>
@@ -1976,6 +1976,7 @@ const UP_TICKET = {
   'Contact Person': ['x_studio_contact_person', 'contact person'],
   'Contact Number': ['x_studio_contact_number', 'contact number', 'mobile', 'contact mobile'],
   'Client Email': ['partner_email', 'client email', 'email'],
+  'Created on': ['create_date', 'created on', 'ticket created', 'created'],
   'Order Total': ['sale_order_id/amount_total', 'sales order/total', 'order total', 'order value'],
   '_name': ['name', 'subject', 'ticket'],
   '_id': ['id', 'ticket id', 'external id'],
@@ -2005,7 +2006,8 @@ function upColumns(headers){
 }
 function upCell(v){
   if (v == null) return '';
-  if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  if (v instanceof Date){ const d = `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`, p2 = n => String(n).padStart(2, '0');
+    return v.getHours() || v.getMinutes() || v.getSeconds() ? `${d} ${p2(v.getHours())}:${p2(v.getMinutes())}:${p2(v.getSeconds())}` : d; }   // keep the time (ticket "Created on")
   return String(v).trim();
 }
 function parseTicketRows(rows){
@@ -4458,7 +4460,7 @@ async function openPkLoad(id){
 /* ---------- Tickets ---------- */
 async function loadPkTickets(){
   const from = $('pkt-from').value || ($('pkt-from').value = localDate()), to = $('pkt-to').value || ($('pkt-to').value = addDays(localDate(), 14));
-  $('pkt-paste').classList.toggle('hidden', !pkCan('sales_support')); $('pkt-walkin').classList.toggle('hidden', !pkCan('sales_support'));
+  $('pkt-paste').classList.toggle('hidden', !pkCan('sales_support')); $('pkt-upload').classList.toggle('hidden', !pkCan('sales_support')); $('pkt-walkin').classList.toggle('hidden', !pkCan('sales_support'));
   await pkSettings();
   let q = sb.from('pk_orders').select('*').order('pickup_date').order('uploaded_at').limit(500);
   const st = $('pkt-status').value;
@@ -4581,6 +4583,117 @@ async function openPkPaste(){
     document.querySelectorAll('.pkp-w').forEach(c => { P.lines[c.dataset.i].want = c.checked; });
     try { await pkRpc('Loading the ticket', 'pk_upload', { p: { ...P, company: $('pkp-co').value, site: $('pkp-site').value, mssi_qt: $('pkp-mssi').checked } });
       toast(`${P.so_no} loaded`, 'ok'); closeOverlay(); loadPk(state.view); } catch { e.target.disabled = false; } });
+}
+/* Upload many pick-up tickets at once — the same Odoo export (HATID template) as Delivery mode, plus “Created on” for the cut-off */
+function pkCreatedOf(v){   // "2026-09-30 14:05:00", "09/30/2026 14:05:00" or "… 2:05 PM" (Manila time) → ISO; null when there's no time
+  const s = String(v || '').trim(); if (!s) return null;
+  const d = s.match(/(\d{4})-(\d{2})-(\d{2})/) || (m => m && [m[0], m[3], m[1].padStart(2, '0'), m[2].padStart(2, '0')])(s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/));
+  const t = s.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M)?/i); if (!d || !t) return null;
+  let h = Number(t[1]); if (t[4]){ if (/pm/i.test(t[4]) && h < 12) h += 12; if (/am/i.test(t[4]) && h === 12) h = 0; }
+  const x = new Date(`${d[1]}-${d[2]}-${d[3]}T${String(h).padStart(2, '0')}:${t[2]}:${t[3] || '00'}+08:00`); return isNaN(x) ? null : x.toISOString();
+}
+function pkFromRow(t){
+  const F = k => (t.fields[k] || '').trim(), j = odooToJob(t), dt = odooNorm(F('Delivery Type'));
+  const kind = /same ?day/.test(dt) ? 'same_day' : /pick/.test(dt) ? 'scheduled' : null;
+  const at = pkCreatedOf(F('Created on'));
+  return { so_no: (j.so || '').toUpperCase(), ticket_no: t.ticket?.no || null, client: j.client || '', salesperson: F('Salesperson') || null, company: j.company, kind,
+    pickup_date: j.date, ticket_created_at: at || new Date().toISOString(), created_est: !at, instructions: F('Delivery Instructions') || null, deliveryType: F('Delivery Type'),
+    lines: t.lines.filter(l => (l.desc || '').trim() && Number(l.qty) > 0 && !/^site\s*:/i.test(l.desc)).map(l => ({ desc: l.desc.replace(/\s+/g, ' ').trim(), qty: l.qty, unit: l.unit, amount: l.subtotal || 0, want: true })) };
+}
+async function openPkUpload(){
+  await pkSettings();
+  const cos = state.me.companies || ['WCLI','MSSI','CWLI'];
+  openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true" style="max-width:none;width:min(1180px,96vw)">
+    <h2 style="margin-top:0">Upload pick-up tickets</h2>
+    <div class="ft">Choose an <b>Odoo Helpdesk ticket export</b> (.xlsx) — the same <b>HATID</b> export template as Delivery mode. Only <b>pick-up</b> tickets are loaded; delivery tickets in the file are left out.</div>
+    <details class="imp" id="pku-guide" style="margin-top:10px"><summary>How to export from Odoo</summary><div style="font-size:13px;line-height:1.6;margin-top:6px">
+      Odoo › <b>Helpdesk › Tickets</b> › list view › tick the pick-up tickets › <b>⚙ Action → Export</b> › template <b>HATID</b> › <b>Export</b>, then choose the file below.<br>
+      <b>Once:</b> add <b>Created on</b> to the HATID export template (search “Created on” on the left, add it, save the template). HATID needs it to check the <b>3 PM cut-off</b> — without it the created time is taken as now and shown as <i>estimated</i>.<br>
+      No HATID template yet? Delivery mode › Delivery tickets › ⬆ Upload tickets has the full steps.</div></details>
+    <div class="grid2" style="margin-top:10px">
+      <label class="f">File<input class="i" type="file" id="pku-file" accept=".xlsx,.xls,.csv"></label>
+      <label class="f">Company for tickets that don’t say<select class="i" id="pku-co">${cos.map(c => `<option>${c}</option>`).join('')}</select></label></div>
+    <div id="pku-out"></div>
+    <div class="row-btns" style="justify-content:flex-end;margin-top:10px"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pku-go" disabled>Load tickets</button></div></div>`);
+  bindClose();
+  let R = null;
+  const render = () => {
+    const rows = R.rows;
+    $('pku-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${rows.length} pick-up ticket${rows.length === 1 ? '' : 's'} found.
+      ${R.other.length ? `<div class="warn"><b>${R.other.length} delivery ticket${R.other.length === 1 ? '' : 's'} left out</b> (${esc(R.other.join(', '))}) — only pick-up tickets are loaded here. Upload ${R.other.length === 1 ? 'it' : 'them'} in <b>Delivery mode › Delivery tickets</b>.</div>` : ''}
+      ${rows.some(x => x.P.created_est) ? `<div class="warn">No <b>Created on</b> column — the cut-off can’t be checked from the ticket time (<button class="lnk" id="pku-how">how to add it</button>). Scheduled tickets are timed as now.</div>` : ''}</div>
+      <div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th><input type="checkbox" id="pku-all" aria-label="Select all" checked></th><th>SO / client</th><th>Type</th><th>Pick-up date</th><th>Site</th><th>Items</th><th>Check</th></tr></thead><tbody>
+      ${rows.map((x, i) => { const P = x.P, w = [];
+        if (!x.co) w.push(`Company ${P.company} isn’t yours`);
+        if (!P.so_no) w.push('No SO number');
+        if (!x.date) w.push(P.pickup_date ? `Date ${P.pickup_date} has passed — set a date` : 'No pick-up date — set one');
+        if (x.dup) w.push(x.dup);
+        if (!P.lines.length) w.push('No items in the file');
+        const on = x.co && x.date ? pkOnTime({ ...P, company: x.co, pickup_date: x.date }) : true;
+        return `<tr data-pku="${i}"><td><input type="checkbox" data-pku-pick ${x.pick ? 'checked' : ''} ${x.lock ? 'disabled' : ''} aria-label="Load this ticket"></td>
+          <td><b class="mono">${esc(P.so_no || '—')}</b>${P.ticket_no ? ` <span class="ft">#${esc(P.ticket_no)}</span>` : ''}<div>${esc(P.client || '—')}</div><div class="ft">${esc(P.salesperson || '')}${x.co ? ' · ' + esc(x.co) : ''}</div></td>
+          <td>${esc(PK_KIND[P.kind])}<div class="ft">created ${esc(fmtTime(P.ticket_created_at))}${P.created_est ? ' (est.)' : ''}</div>${on ? '' : '<span class="tag bad">past cut-off</span>'}</td>
+          <td><input class="i" type="date" data-pku-date value="${esc(x.date)}" style="min-width:130px"></td>
+          <td><select class="i" data-pku-site>${Object.entries(PK_SITE).map(([k, n]) => `<option value="${k}"${k === x.site ? ' selected' : ''}>${n}</option>`).join('')}</select>
+            <label class="chk" style="font-size:12px;margin-top:4px"><input type="checkbox" data-pku-mssi ${x.mssi ? 'checked' : ''}> MSSI quotation</label></td>
+          <td class="ft">${P.lines.length ? `<details class="up-items"><summary>${P.lines.some(l => !l.want) ? `<b style="color:var(--warn)">${P.lines.filter(l => l.want).length} of ${P.lines.length} items</b> · partial` : `${P.lines.length} item${P.lines.length === 1 ? '' : 's'}`} ✎</summary>
+              ${P.lines.map((l, k) => `<label class="loadck" style="margin-top:3px;font-size:12px"><input type="checkbox" data-pku-it="${k}" ${l.want ? 'checked' : ''}> ${esc(fmtQty(l.qty))} ${esc(l.unit || '')} × ${esc(l.desc)}</label>`).join('')}
+              <div style="font-size:11px">Untick what the client won’t pick up this time.</div></details>` : '0 items'}</td>
+          <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : x.reload ? 'Loaded before — will be replaced' : '✓ Ready'}${!on && !w.length ? '<div>Needs the Warehouse Manager’s OK to queue</div>' : ''}</td></tr>`; }).join('')}
+      </tbody></table></div>`;
+    $('pku-how')?.addEventListener('click', () => { $('pku-guide').open = true; });
+    const sync = () => { const n = rows.filter(x => x.pick).length; $('pku-go').disabled = !n; $('pku-go').textContent = n ? `Load ${n} ticket${n === 1 ? '' : 's'}` : 'Load tickets'; };
+    document.querySelectorAll('tr[data-pku]').forEach(tr => { const x = rows[+tr.dataset.pku];
+      tr.querySelector('[data-pku-pick]').addEventListener('change', e => { x.pick = e.target.checked; sync(); });
+      tr.querySelector('[data-pku-date]').addEventListener('change', e => { x.date = e.target.value; if (x.date && !x.lock && x.co && x.P.so_no) x.pick = true; render(); });
+      tr.querySelector('[data-pku-site]').addEventListener('change', e => { x.site = e.target.value; });
+      tr.querySelector('[data-pku-mssi]').addEventListener('change', e => { x.mssi = e.target.checked; });
+      tr.querySelectorAll('[data-pku-it]').forEach(c => c.addEventListener('change', () => { const L = x.P.lines;
+        L[+c.dataset.pkuIt].want = c.checked; if (!L.some(l => l.want)){ L[+c.dataset.pkuIt].want = true; c.checked = true; return toast('Keep at least one item', 'error'); }
+        tr.querySelector('.up-items summary').innerHTML = L.some(l => !l.want) ? `<b style="color:var(--warn)">${L.filter(l => l.want).length} of ${L.length} items</b> · partial ✎` : `${L.length} items ✎`; })); });
+    $('pku-all').addEventListener('change', e => { rows.forEach(x => { if (!x.lock) x.pick = e.target.checked && !!x.date; }); render(); });
+    sync();
+  };
+  const build = async () => {
+    const co0 = $('pku-co').value;
+    R.rows = R.tickets.map(P => { const co = P.company ? (cos.includes(P.company) ? P.company : null) : co0;
+      const date = P.pickup_date && P.pickup_date >= localDate() ? P.pickup_date : '';
+      return { P, co, date, site: pkSite(), mssi: false, lock: !co || !P.so_no, pick: !!co && !!P.so_no && !!date }; });
+    const sos = [...new Set(R.rows.map(x => x.P.so_no).filter(Boolean))];
+    if (sos.length) try {
+      const { data } = await sb.from('pk_orders').select('so_no, status').in('so_no', sos).neq('status', 'cancelled');
+      (data || []).forEach(o => R.rows.filter(x => x.P.so_no === o.so_no.toUpperCase()).forEach(x => { if (o.status === 'open') x.reload = true;
+        else { x.dup = `Already in HATID (${o.status.replace(/_/g, ' ')})`; x.lock = true; x.pick = false; } }));
+    } catch {}
+    render();
+  };
+  $('pku-co').addEventListener('change', () => { if (R) build(); });
+  $('pku-file').addEventListener('change', async e => {
+    const file = e.target.files[0]; if (!file) return;
+    $('pku-out').innerHTML = '<div class="muted" style="padding:14px"><span class="spin"></span> Reading…</div>';
+    try {
+      const X = await loadXlsx();
+      const wb = X.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      const r = parseTicketRows(X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' }));
+      if (r.error){ $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(r.error)}</div>`; return; }
+      const all = r.tickets.map(pkFromRow), pk = all.filter(P => P.kind), other = all.filter(P => !P.kind).map(P => P.so_no || '?');
+      if (!pk.length){ $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px"><b>Nothing to load — ${all.length ? `no pick-up tickets in this file` : 'no tickets in this file'}</b>${other.length ? ` (${esc(other.join(', '))} ${other.length === 1 ? 'is a delivery ticket' : 'are delivery tickets'} — upload in Delivery mode › Delivery tickets)` : ''}.</div>`; return; }
+      R = { tickets: pk, other }; await build();
+    } catch (err) { $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(err?.message || 'Could not read the file')}</div>`; }
+  });
+  $('pku-go').addEventListener('click', async e => {
+    const b = e.currentTarget, picked = R.rows.filter(x => x.pick);
+    const noDate = picked.filter(x => !x.date); if (noDate.length) return toast(`Set a pick-up date for ${noDate.map(x => x.P.so_no).join(', ')}`, 'error');
+    b.disabled = true; b.innerHTML = '<span class="spin"></span> Loading…';
+    const ok = [], bad = [];
+    for (const x of picked){
+      try { await pkRpc('Loading ' + x.P.so_no, 'pk_upload', { p: { ...x.P, company: x.co, pickup_date: x.date, site: x.site, mssi_qt: x.mssi } }); ok.push(x.P.so_no); }
+      catch (err) { bad.push(x.P.so_no); }
+    }
+    if (!bad.length){ toast(`${ok.length} pick-up ticket${ok.length === 1 ? '' : 's'} loaded`, 'ok'); closeOverlay(); loadPk(state.view); return; }
+    R.rows = R.rows.filter(x => !ok.includes(x.P.so_no)); render();
+    toast(`${ok.length} loaded · not loaded: ${bad.join(', ')} — see the message, fix and try again`, 'error');
+  });
 }
 async function openPkWalkin(){
   await pkSettings();
@@ -9278,7 +9391,7 @@ $('pk-site').addEventListener('change', () => { state.pkSite = $('pk-site').valu
 $('pk-arrive').addEventListener('click', pkArriveSelected);
 $('pk-walkin').addEventListener('click', openPkWalkin); $('pkt-walkin').addEventListener('click', openPkWalkin);
 $('pk-tv').addEventListener('click', () => window.open(location.pathname + '?tv=' + pkSite(), '_blank', 'noopener'));
-$('pkt-paste').addEventListener('click', openPkPaste);
+$('pkt-paste').addEventListener('click', openPkPaste); $('pkt-upload').addEventListener('click', openPkUpload);
 ['pkt-from','pkt-to','pkt-status','pkt-site'].forEach(id => $(id).addEventListener('change', loadPkTickets)); $('pkt-q').addEventListener('input', () => { clearTimeout(state.pkQ); state.pkQ = setTimeout(loadPkTickets, 250); });
 ['pkr-from','pkr-to','pkr-co','pkr-site'].forEach(id => $(id).addEventListener('change', loadPkReport));
 // Installable on phones ("Add to Home screen"). The shared worker caches nothing — see sw.js.
