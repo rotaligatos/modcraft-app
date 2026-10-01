@@ -4517,6 +4517,26 @@ const PROFILES = {
             return r;
           } finally { w.qHomeCompany = sv.home; w.currentUserCompany = sv.cu; }
         }, { cwl: true, wcl: false, direct: false, notMssi: false, bothStages: true });
+      /* 2026-10-01: materials margin in cutting-list mode was gated on isDirectClient(), so a CWLI
+         Subsidiary quotation BILLED for its materials showed none of their margin (QT-C00000018). */
+      if (typeof window._fabMaterialMarginTotal === 'function')
+        check('materials margin follows whether materials are billed (CWLI yes, WCLI no)', () => {
+          const w = window, ct = document.getElementById('cl-type'), cs = document.getElementById('cl-company-sel');
+          const sv = { areas: w.qAreas, mode: w.qFabMode, chg: w.qChargeMatHw, t: ct && ct.value, c: cs && cs.value, opts: cs && cs.innerHTML };
+          try {
+            if (!ct || !cs) return 'missing fields';
+            w.qFabMode = 'services'; w.qChargeMatHw = null;
+            w.qAreas = [{ name: 'A', items: [], svcItems: [], hwItems: [], matItems: [{ name: 'Board', qty: 10, price: 1000 }] }];
+            cs.innerHTML = '<option>Cebu World Laminate, Inc.</option><option>World Class Laminate, Inc.</option>';
+            ct.value = 'Subsidiary'; cs.value = 'Cebu World Laminate, Inc.';
+            const r = { cwl: Math.round(w._fabMaterialMarginTotal()) };
+            cs.value = 'World Class Laminate, Inc.'; r.wcl = Math.round(w._fabMaterialMarginTotal());
+            ct.value = 'Direct'; r.direct = Math.round(w._fabMaterialMarginTotal());
+            ct.value = 'Subsidiary'; cs.value = 'Cebu World Laminate, Inc.'; w.qChargeMatHw = false;
+            r.cwlNotCharged = Math.round(w._fabMaterialMarginTotal());
+            return r;
+          } finally { w.qAreas = sv.areas; w.qFabMode = sv.mode; w.qChargeMatHw = sv.chg; if (cs) { cs.innerHTML = sv.opts; cs.value = sv.c; } if (ct) ct.value = sv.t; }
+        }, { cwl: 3000, wcl: 0, direct: 3000, cwlNotCharged: 0 });
       /* 2026-09-24 egress: whole tables were re-downloaded every 45-60 s and the free 5 GB/month
          ran out in about a week. A poll must ask "changed?" first and reuse what it has. */
       if (typeof window._supaCachedSelect === 'function')
