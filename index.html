@@ -1177,7 +1177,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
       <div class="card" id="outsource-rates-card" style="display:none;border-color:#fcd34d">
         <div class="card-head" style="background:var(--wash-amber);border-color:#fcd34d">
           <h3 style="color:var(--orange-ink)"><i class="ti ti-truck-delivery"></i>Outsource pricing rates</h3>
-          <button class="btn" onclick="resetOutRates()" style="font-size:11px;padding:3px 8px;color:var(--orange-ink);border-color:#fcd34d"><i class="ti ti-refresh"></i>Reset</button>
+          <button class="btn" id="out-rates-reset" onclick="resetOutRates()" style="font-size:11px;padding:3px 8px;color:var(--orange-ink);border-color:#fcd34d"><i class="ti ti-refresh"></i>Reset</button>
         </div>
         <div class="card-body">
           <div class="g3">
@@ -5034,6 +5034,20 @@ function resetPinFields(id) {
 function checkPin(val) { return val==="1234"; } // keep for legacy non-modal use
 
 // ── PIN enrollment & approval routing ────────────────────────────────────────
+// Users below Manager who may still change a quotation's outsource markup/contingency/buffer.
+// Manager, Director and Admin always may. Emails, trimmed + lower-case. Saved in CONFIG.
+var OUT_RATE_EDITORS = [];
+function _canEditOutRates(){
+  if(currentRole==='Manager'||currentRole==='Director'||currentRole==='Admin') return true;
+  var me=String((gUser&&gUser.email)||'').trim().toLowerCase();
+  return !!me && OUT_RATE_EDITORS.indexOf(me)>=0;
+}
+function _toggleOutRateEditor(email,on){
+  var e=String(email||'').trim().toLowerCase(); if(!e) return;
+  var i=OUT_RATE_EDITORS.indexOf(e);
+  if(on&&i<0) OUT_RATE_EDITORS.push(e);
+  if(!on&&i>=0) OUT_RATE_EDITORS.splice(i,1);
+}
 var APPR_ROUTING = {}; // { company: { nonvat: email, discount: email, override: email, premium: email } }
 var _pinModalApprover = null; // {name, email, pinHash, pinSalt} — set before opening any approval modal
 
@@ -8557,6 +8571,7 @@ function getAreaOutsourceSubtotal(a) {
   return 0;
 }
 function onOutRateChange(field,val) {
+  if(!_canEditOutRates()){ showToast('Only Managers and up, or users authorized in Settings → Approval Routing, can change outsource rates.'); initOutRatesCard(); return; }
   var v=parseFloat(val);
   if(field==='markup') qOutMarkup=(isNaN(v)?null:v);
   else if(field==='contingency') qOutContingency=(isNaN(v)?null:v);
@@ -8565,6 +8580,7 @@ function onOutRateChange(field,val) {
   recalc();
 }
 function resetOutRates() {
+  if(!_canEditOutRates()){ showToast('Only Managers and up, or users authorized in Settings → Approval Routing, can change outsource rates.'); return; }
   qOutMarkup=null; qOutContingency=null; qOutBuffer=null;
   var m=el('out-markup-inp'), c=el('out-contingency-inp'), b=el('out-buffer-inp');
   if(m) m.value=CF.outMarkup;
@@ -8578,13 +8594,17 @@ function updateOutRatesCard() {
   if(m&&m.value==='') m.value=CF.outMarkup;
   if(c&&c.value==='') c.value=CF.outContingency;
   if(b&&b.value==='') b.value=CF.outBuffer;
+  var _can=_canEditOutRates();
+  [m,c,b].forEach(function(x){ if(x) x.disabled=!_can; });
+  var _rb=el('out-rates-reset'); if(_rb) _rb.style.display=_can?'':'none';
   var h=el('out-rates-hint'); if(!h) return;
+  var _lock=_can?'':' &nbsp;·&nbsp; <span style="color:var(--text2)"><i class="ti ti-lock"></i> Managers and up, or authorized users, can change these</span>';
   var isCustom=(qOutMarkup!==null||qOutContingency!==null||qOutBuffer!==null);
   if(isCustom) {
     var rates=getOutRates();
-    h.innerHTML='<span style="color:var(--orange-ink)"><i class="ti ti-edit"></i> Custom rates active</span> &nbsp;·&nbsp; defaults: markup '+CF.outMarkup+'%, contingency '+CF.outContingency+'%, buffer '+CF.outBuffer+'%';
+    h.innerHTML='<span style="color:var(--orange-ink)"><i class="ti ti-edit"></i> Custom rates active</span> &nbsp;·&nbsp; defaults: markup '+CF.outMarkup+'%, contingency '+CF.outContingency+'%, buffer '+CF.outBuffer+'%'+_lock;
   } else {
-    h.innerHTML='<span style="color:var(--text2)">Using default rates from Settings.</span>';
+    h.innerHTML='<span style="color:var(--text2)">Using default rates from Settings.</span>'+_lock;
   }
 }
 function initOutRatesCard() {
@@ -33282,6 +33302,7 @@ function _collectAppSettings(){
     chatWebhookUrl:(el('s-chat-webhook')?el('s-chat-webhook').value.trim():CHAT_WEBHOOK_URL)||CHAT_WEBHOOK_URL||'',
     serialClaimUrl:(el('s-serial-claim')?el('s-serial-claim').value.trim():SERIAL_CLAIM_URL)||SERIAL_CLAIM_URL||'',
     approvalRouting: JSON.parse(JSON.stringify(APPR_ROUTING)),
+    outRateEditors: OUT_RATE_EDITORS.slice(),
     notedThreshold: JSON.parse(JSON.stringify(NOTED_THRESHOLD)),
     minChargeExcl: JSON.parse(JSON.stringify(MIN_CHARGE_EXCL)),
     mtoMaterials: mtoMaterialNames.slice(),
@@ -33414,6 +33435,10 @@ function _applyAppSettings(s){
     for(var _ntc in s.notedThreshold){
       if(s.notedThreshold.hasOwnProperty(_ntc)) NOTED_THRESHOLD[_ntc]=s.notedThreshold[_ntc];
     }
+  }
+  if(Array.isArray(s.outRateEditors)){
+    OUT_RATE_EDITORS=s.outRateEditors.map(function(e){return String(e||'').trim().toLowerCase();}).filter(Boolean);
+    if(typeof updateOutRatesCard==='function') updateOutRatesCard();
   }
   if(s.approvalRouting&&typeof s.approvalRouting==='object'){
     for(var _arc in s.approvalRouting){
@@ -43195,7 +43220,19 @@ function renderApprovalRoutingSettings(){
     }
     h+='</tr>';
   }
+  var _orPool=sheetUsers.filter(function(u){return u.active&&u.email&&u.pos!=='Manager'&&u.pos!=='Director'&&u.pos!=='Admin';})
+    .slice().sort(function(a,b){return String(a.name||'').localeCompare(String(b.name||''));});
   h+='</tbody></table></div>'
+    +'<div style="padding:12px;background:var(--wash-amber);border:.5px solid #f5d78e;border-radius:8px;margin-top:16px">'
+    +'<div style="font-weight:600;font-size:13px;margin-bottom:3px"><i class="ti ti-truck-delivery"></i> Outsource rates — authorized users</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:9px">Who may change a quotation\'s outsource markup, contingency and buffer. Managers, Directors and Admins always can; tick anyone else who should.</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:6px 18px">'
+    +(_orPool.length?_orPool.map(function(u){
+        var e=String(u.email).trim().toLowerCase();
+        return '<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer"><input type="checkbox"'+(OUT_RATE_EDITORS.indexOf(e)>=0?' checked':'')
+          +' onchange="_toggleOutRateEditor(\''+e.replace(/'/g,"\\'")+'\',this.checked)">'+escHtml(u.name||e)+' <span style="color:var(--text2)">('+escHtml(u.pos||'')+')</span></label>';
+      }).join(''):'<span style="font-size:12px;color:var(--text2)">No other active users.</span>')
+    +'</div></div>'
     +'<div style="margin-top:14px"><button class="btn btn-primary" onclick="gSaveAppSettings()"><i class="ti ti-device-floppy"></i> Save Settings</button></div>'
     +'</div></div>';
   w.innerHTML=h;
