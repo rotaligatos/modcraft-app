@@ -110,6 +110,13 @@ table.ct td:nth-child(2){white-space:nowrap;width:1%;color:var(--muted)}
 .dp-map{height:420px;border-radius:12px;overflow:hidden;margin-bottom:12px;position:relative;border:1px solid var(--line)}
 .dp-pin{width:24px;height:24px;border-radius:50%;color:#fff;font:600 12px/24px system-ui;text-align:center;border:2px solid #fff;box-shadow:0 1px 4px #0006;cursor:default}
 .dp-pin.base{background:#fff;font-size:16px;line-height:22px}
+.dp-h{cursor:grab;touch-action:none;user-select:none;color:var(--muted);font-size:18px;padding:2px 4px;flex:none} .dp-h.off{cursor:default;font-size:12px}
+.dp-drops li.dragging{opacity:.35} .dp-drops li.moved{background:var(--warn-soft)} .dp-drops li.fixed .dp-d{opacity:.8}
+.dp-ghost{position:fixed;left:0;top:0;z-index:99;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 20px #0003;list-style:none;display:flex;gap:8px;align-items:center;padding:6px 8px;font-size:14px}
+.dp-line{height:3px;background:var(--c,#2563eb);border-radius:2px;margin:2px 0}
+.dp-drops.over{outline:2px dashed #2563eb;outline-offset:2px;border-radius:6px}
+.dp-spare{margin:6px 0 0} .dp-ph{display:block!important;border:1px dashed var(--line);border-radius:8px;padding:8px 10px!important;color:var(--muted);font-size:13px}
+.dp-later{margin-bottom:12px}
 @media (max-width:640px){ .dp-drops li{flex-wrap:wrap} .dp-act{width:100%;justify-content:flex-end} .dp-act select{max-width:none;flex:1} .dp-th .pl-bar{min-width:80px} .dp-tools{margin-left:0} .sheet-b.dp-b{padding:10px} .dp-trip{padding:6px 8px} } .dp-map-note{position:absolute;right:8px;bottom:8px;background:#fffd;padding:3px 8px;border-radius:6px;font-size:12px}
 .pl-day h3{margin:0 0 8px;font-size:15px}
 .pl-trip{border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:0 0 8px;background:var(--surface)}
@@ -2433,7 +2440,8 @@ function ruleOk(cache, job, b, ctx){   // rules that don't depend on the load (a
 }
 /* ----- Route sense (Rommel 2026-10-01): a drop may ride a trip when it lies on the way to the trip's last (farthest) drop.
    Points: the job's site pin, else its destination's pin. Road km ≈ straight line × 1.35. */
-const ROUTE_ALLOW_KM = 10, ROUTE_ALLOW_PCT = 0.4, ROUTE_KM_COST = 25;   // allowed detour beyond the straight run to the last drop; ₱ per extra km when comparing
+const ROUTE_KM_COST = 25;   // ₱ per extra km when comparing trips
+const routeAllow = poolId => { const v = state.ref.poolById?.[poolId]?.route_detour_km; return v == null ? 3 : Number(v); };   // km a drop may add vs going straight to the last drop (per pool)
 function ptOf(j){
   if (j.site_lat != null && j.site_lon != null) return { lat: +j.site_lat, lon: +j.site_lon };
   const d = state.ref.destById?.[j.destination_id]; return d && d.lat != null ? { lat: +d.lat, lon: +d.lon } : null;
@@ -2459,7 +2467,7 @@ function routeCheck(job, b){
   const base = poolBase(b.t.pool_id), p = ptOf(job), pts = binPts(b);
   if (!base || !p || !pts) return null;                                   // no pins → fall back to delivery areas
   const before = routeExcess(base, pts), after = routeExcess(base, [...pts, p]);
-  const allow = Math.max(ROUTE_ALLOW_KM, after.far * ROUTE_ALLOW_PCT);
+  const allow = routeAllow(b.t.pool_id);
   return { ok: after.excess <= allow, add: after.excess - before.excess, excess: after.excess, allow, km: after.km };
 }
 /* Cost of adding this job to bin b; `rest` = kg of this area still waiting (to size a new trip well) */
@@ -2591,7 +2599,7 @@ function dpOrder(DP, b){
 }
 function dpTripInfo(DP, b){
   const base = poolBase(b.t.pool_id), pts = b.order.map(ptOf), known = base && pts.length && pts.every(Boolean);
-  const r = known ? routeExcess(base, pts) : null, off = known && r.excess > Math.max(ROUTE_ALLOW_KM, r.far * ROUTE_ALLOW_PCT);
+  const r = known ? routeExcess(base, pts) : null, off = known && r.excess > routeAllow(b.t.pool_id) + 0.5;
   const areas = [...new Set(b.order.map(j => destInfo(j.destination_id)?.zone?.name).filter(Boolean))];
   const fixedCost = tripCost(b.truck, b.fixed.map(j => j.destination_id).filter(Boolean), DP.date);
   const cost = tripCost(b.truck, b.dests, DP.date);
@@ -2637,54 +2645,100 @@ function dpRender(DP){
     </tbody></table></div>` : '';
   // by truck
   const byTruck = {}; used.forEach(b => (byTruck[b.t.truck_id] ??= []).push(b));
-  const moveOpts = (j, cur) => DP.bins.filter(b => (b.t.pool_companies || []).includes(j.company)).map(b => {
-      const after = b === cur ? b.kg : b.kg + Number(j.estimated_weight_kg || 0);
-      return `<option value="${esc(b.key)}" ${b === cur ? 'selected' : ''}>${esc(b.t.label)} · trip ${b.trip_no} — ${b.cap ? Math.round(after / b.cap * 100) : 0}%${b.order.length ? '' : ' (empty)'}</option>`; }).join('')
-    + '<option value="">— leave for later —</option>';
-  const tripCard = b => { const I = b.info, p = b.cap ? Math.round(b.kg / b.cap * 100) : 0, locked = b.fixed.some(j => j.status !== 'scheduled');
+  const row = (j, i, b) => { const isNew = b ? b.planned.includes(j) && !j._was : true, moved = !!j._was, go = !['scheduled','proposed'].includes(j.status), can = !go;
+    return `<li class="${isNew && b ? 'new' : ''}${moved ? ' moved' : ''}${can ? '' : ' fixed'}" data-dp-j="${esc(j.id)}">${can ? '<span class="dp-h" title="Drag to reorder or move to another trip" aria-label="Drag">⠿</span>' : '<span class="dp-h off" title="Already on the road">🔒</span>'}<span class="dp-n">${b ? i + 1 : '•'}</span>
+      <span class="dp-d"><a href="#" data-dp-open="${esc(j.id)}" class="mono">${esc(j.quotation_serial)}</a> ${esc(j.client_name || '')}<span class="ft"> · ${esc(destLabel(j.destination_id))} · ${kg(j.estimated_weight_kg)}${Number(j.estimated_weight_kg) ? '' : ' ⚠'}</span> ${prepMark(j)}${isNew && b ? ' <span class="tag info">new</span>' : ''}${moved ? ' <span class="tag warn">moved</span>' : ''}${go ? ` ${pill(j.status)}` : ''}${!b && j._why ? `<div class="ft" style="color:var(--warn)">${esc(j._why)}</div>` : ''}</span></li>`; };
+  const tripCard = b => { const I = b.info, p = b.cap ? Math.round(b.kg / b.cap * 100) : 0;
     return `<div class="dp-trip" style="--c:${b.color}">
       <div class="dp-th"><b>Trip ${b.trip_no}</b><span class="pl-bar"><i class="${ratioClass(b.kg / (b.cap || 1))}" style="width:${Math.min(100, p)}%"></i></span>
         <span class="ft">${Math.round(b.kg).toLocaleString('en-PH')} / ${Math.round(b.cap).toLocaleString('en-PH')} kg · <b>${p}%</b>${b.capPcs ? ` · ${b.pcs}/${b.capPcs} boards` : ''} · ${b.order.length} drop${b.order.length === 1 ? '' : 's'}${I.known ? ` · ≈${Math.round(I.km)} km out` : ''}${costs ? ` · ${costTxt(I.cost)}` : ''}</span></div>
       <div class="dp-areas">${I.areas.map(a => `<span class="tag">${esc(a)}</span>`).join(' ')}</div>
       ${I.warns.length ? `<div class="dp-warn">${I.warns.map(w => `<div>⚠ ${esc(w)}</div>`).join('')}</div>` : ''}
-      <ol class="dp-drops">${b.order.map((j, i) => { const isNew = b.planned.includes(j), go = j.status !== 'scheduled' && j.status !== 'proposed';
-        return `<li class="${isNew ? 'new' : ''}"><span class="dp-n">${i + 1}</span>
-          <span class="dp-d"><a href="#" data-dp-open="${esc(j.id)}" class="mono">${esc(j.quotation_serial)}</a> ${esc(j.client_name || '')}<span class="ft"> · ${esc(destLabel(j.destination_id))} · ${kg(j.estimated_weight_kg)}${Number(j.estimated_weight_kg) ? '' : ' ⚠'}</span> ${prepMark(j)}${isNew ? ' <span class="tag info">new</span>' : go ? ` ${pill(j.status)}` : ''}</span>
-          <span class="dp-act no-print">${locked ? '' : `<button class="lnk" data-dp-up="${esc(b.key)}|${i}" ${i ? '' : 'disabled'} aria-label="Earlier">↑</button><button class="lnk" data-dp-dn="${esc(b.key)}|${i}" ${i < b.order.length - 1 ? '' : 'disabled'} aria-label="Later">↓</button>`}
-            ${isNew ? `<select class="i" data-dp-mv="${esc(j.id)}" aria-label="Move ${esc(j.quotation_serial)}">${moveOpts(j, b)}</select>` : ''}</span></li>`; }).join('')}</ol></div>`; };
+      <ol class="dp-drops" data-dp-bin="${esc(b.key)}">${b.order.map((j, i) => row(j, i, b)).join('')}</ol></div>`; };
   const trucks = Object.values(byTruck).map(bs => { const t = bs[0].t, tr = bs[0].truck, st = codingStatus(tr, DP.date);
-    return `<div class="card dp-truck"><div class="dp-tt"><b>${esc(t.label)}</b> <span class="ft">${esc(FLEET_LABEL[t.fleet_type] || t.fleet_type)}${st.coded ? ' · <b style="color:var(--warn)">coding</b>' : ''}</span></div>${bs.map(tripCard).join('')}</div>`; }).join('');
+    const spare = DP.bins.find(x => x.t.truck_id === t.truck_id && !x.order.length);
+    return `<div class="card dp-truck"><div class="dp-tt"><b>${esc(t.label)}</b> <span class="ft">${esc(FLEET_LABEL[t.fleet_type] || t.fleet_type)}${st.coded ? ' · <b style="color:var(--warn)">coding</b>' : ''}</span></div>${bs.map(tripCard).join('')}
+      ${spare ? `<ol class="dp-drops dp-spare" data-dp-bin="${esc(spare.key)}"><li class="dp-ph">Drop here for trip ${spare.trip_no}</li></ol>` : ''}</div>`; }).join('');
   const idle = DP.ctx.load.filter(t => !used.some(b => b.t.truck_id === t.truck_id));
-  const idleHtml = idle.length ? `<div class="card pad"><h3>Not used</h3><div class="ft">${idle.map(t => { const tr = state.ref.truckById[t.truck_id] || t, w = ruleWarnings({ job: {}, date: DP.date, destId: null, truck: tr, tripLoad: null }).filter(x => !/No destination/.test(x));
-      return `<div>🚚 <b>${esc(t.label)}</b> · ${Math.round(t.max_weight_kg).toLocaleString('en-PH')} kg${w.length ? ` — <span style="color:var(--warn)">${esc(w[0])}</span>` : ' — available'}</div>`; }).join('')}</div></div>` : '';
-  const un = DP.unplaced.length ? `<div class="card pad warnbox"><h3 style="margin-top:0">Not planned — decide by hand</h3><table class="ct"><tbody>${DP.unplaced.map(u => `<tr><td><a href="#" data-dp-open="${esc(u.job.id)}" class="mono">${esc(u.job.quotation_serial)}</a></td><td>${esc(u.job.client_name || '—')}</td><td class="ft">${esc(destLabel(u.job.destination_id))}</td><td class="num">${kg(u.job.estimated_weight_kg)}</td><td class="ft">${esc(u.reason || '')}</td>
-      <td><select class="i" data-dp-mv="${esc(u.job.id)}" aria-label="Put on a trip"><option value="">— put on a trip —</option>${DP.bins.filter(b => (b.t.pool_companies || []).includes(u.job.company)).map(b => `<option value="${esc(b.key)}">${esc(b.t.label)} · trip ${b.trip_no} — ${b.cap ? Math.round((b.kg + Number(u.job.estimated_weight_kg || 0)) / b.cap * 100) : 0}%</option>`).join('')}</select></td></tr>`).join('')}</tbody></table></div>` : '';
+  const idleHtml = idle.length ? `<div class="card pad"><h3>Not used <span class="ft">— drag a drop onto a truck to start a trip</span></h3>${idle.map(t => { const tr = state.ref.truckById[t.truck_id] || t, w = ruleWarnings({ job: {}, date: DP.date, destId: null, truck: tr, tripLoad: null }).filter(x => !/No destination/.test(x));
+      const first = DP.bins.find(x => x.t.truck_id === t.truck_id);
+      return `<ol class="dp-drops dp-spare" ${first ? `data-dp-bin="${esc(first.key)}"` : ''}><li class="dp-ph">🚚 <b>${esc(t.label)}</b> · ${Math.round(t.max_weight_kg).toLocaleString('en-PH')} kg${w.length ? ` — <span style="color:var(--warn)">${esc(w[0])}</span>` : ' — available'}</li></ol>`; }).join('')}</div>` : '';
+  DP.unplaced.forEach(u => { u.job._why = u.reason; });
+  const un = DP.unplaced.length ? `<div class="card pad warnbox"><h3 style="margin-top:0">Not planned — drag onto a trip, or open it to decide</h3><ol class="dp-drops" data-dp-bin="">${DP.unplaced.map(u => row(u.job, 0, null)).join('')}</ol></div>`
+    : `<ol class="dp-drops dp-spare dp-later" data-dp-bin=""><li class="dp-ph">Drop here to leave a drop for later</li></ol>`;
   const empty = !used.length && !DP.unplaced.length ? `<div class="card empty">Nothing to plan on ${fmtDate(DP.date)} for ${esc(DP.pool?.name || 'this pool')}.</div>` : '';
-  $('dp-body').innerHTML = summary + (DP.view === 'map' ? '<div id="dp-map" class="dp-map"></div>' : '') + empty + un + `<div class="dp-cols"><div>${trucks}${idleHtml}</div><div>${byArea}<div class="card pad ft">Plan rules: no drop limit — truck capacity, the route and cost decide. A drop joins a trip when it lies on the way to the trip's last drop (up to ≈${ROUTE_ALLOW_KM} km or ${Math.round(ROUTE_ALLOW_PCT * 100)}% of the run extra). Move or reorder anything — your call wins.${used.some(b => !b.info.known) ? ' <br>Some drops have no map pin yet, so their trips are grouped by delivery area instead.' : ''}</div></div></div>`;
+  $('dp-body').innerHTML = summary + (DP.view === 'map' ? '<div id="dp-map" class="dp-map"></div>' : '') + empty + un + `<div class="dp-cols"><div>${trucks}${idleHtml}</div><div>${byArea}<div class="card pad ft">Plan rules: no drop limit — truck capacity, the route and cost decide. A drop joins a trip when it lies on the way to the trip's last drop — adding at most <b>${routeAllow(DP.poolId)} km</b> compared with going straight there${['admin','manager'].includes(state.me?.role) ? ` <button class="lnk" id="dp-allow">change</button>` : ''}. Drag drops to reorder or move them — your call wins.${used.some(b => !b.info.known) ? ' <br>Some drops have no map pin yet, so their trips are grouped by delivery area instead.' : ''}</div></div></div>`;
   $('dp-view').textContent = DP.view === 'map' ? '☰ List' : '🗺 Map';
-  const n = sum(used, b => b.planned.length) + Object.keys(DP.seq).length;
-  $('dp-go').disabled = !n; $('dp-go').textContent = sum(used, b => b.planned.length) ? `Confirm ${sum(used, b => b.planned.length)} drop${sum(used, b => b.planned.length) === 1 ? '' : 's'}` : n ? 'Save order' : 'Confirm';
+  const nNew = sum(used, b => b.planned.filter(j => !j._was).length), nMv = sum(used, b => b.planned.filter(j => j._was).length) + DP.unplaced.filter(u => u.job._was).length;
+  const n = nNew + nMv + Object.keys(DP.seq).length;
+  $('dp-go').disabled = !n; $('dp-go').textContent = nNew || nMv ? `Confirm ${[nNew ? `${nNew} new` : '', nMv ? `${nMv} moved` : ''].filter(Boolean).join(' + ')}` : n ? 'Save order' : 'Confirm';
   // actions
   document.querySelectorAll('[data-dp-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openJob(a.dataset.dpOpen); }));
-  const swap = (key, i, d) => { const b = DP.bins.find(x => x.key === key), o = b.order.map(j => j.id); [o[i], o[i + d]] = [o[i + d], o[i]]; DP.seq[key] = o; dpOrder(DP, b); dpRender(DP); };
-  const kI = v => { const c = v.lastIndexOf('|'); return [v.slice(0, c), +v.slice(c + 1)]; };
-  document.querySelectorAll('[data-dp-up]').forEach(x => x.addEventListener('click', () => { const [k, i] = kI(x.dataset.dpUp); swap(k, i, -1); }));
-  document.querySelectorAll('[data-dp-dn]').forEach(x => x.addEventListener('click', () => { const [k, i] = kI(x.dataset.dpDn); swap(k, i, 1); }));
-  document.querySelectorAll('[data-dp-mv]').forEach(sel => sel.addEventListener('change', () => dpMove(DP, sel.dataset.dpMv, sel.value)));
+  document.querySelectorAll('#dp-body .dp-h:not(.off)').forEach(h => h.addEventListener('pointerdown', e => dpDrag(DP, e, h.closest('li'))));
+  $('dp-allow')?.addEventListener('click', async () => { const v = prompt('How many km may a drop add to a trip, compared with going straight to its last drop? (e.g. 3)', routeAllow(DP.poolId)); if (v === null) return;
+    try { await pkRpc('Saving', 'job_pool_set_detour', { p_pool: DP.poolId, p_km: Number(v) }); state.ref.poolById[DP.poolId].route_detour_km = Number(v); DP.moved.clear(); DP.seq = {}; await dpLoad(DP); dpRender(DP); toast(`On-route allowance: ${v} km — re-planned`, 'ok'); } catch {} });
   if (DP.view === 'map') dpMap(DP, used);
 }
-function dpMove(DP, id, key){
-  let job = null, from = DP.bins.find(b => b.planned.some(j => j.id === id));
-  if (from){ job = from.planned.find(j => j.id === id); const c0 = tripCost(from.truck, from.dests, DP.date); removeFromBin(from, job); from._d = tripCost(from.truck, from.dests, DP.date) - c0; delete DP.seq[from.key]; dpOrder(DP, from); }
-  else { const u = DP.unplaced.find(x => x.job.id === id); job = u?.job; DP.unplaced = DP.unplaced.filter(x => x.job.id !== id); }
-  if (!job) return;
-  if (!key){ DP.unplaced.push({ job, reason: 'Left for later' }); dpRender(DP); return toast(`${job.quotation_serial} left for later`, 'ok'); }
+function dpFind(DP, id){
+  for (const b of DP.bins){ const j = b.planned.find(x => x.id === id) || b.fixed.find(x => x.id === id); if (j) return { b, j, fixed: b.fixed.includes(j) }; }
+  const u = DP.unplaced.find(x => x.job.id === id); return u ? { b: null, j: u.job } : null;
+}
+/* Move a drop to bin `key` ('' = leave for later) at position `at` (index in that trip's order) */
+function dpMove(DP, id, key, at){
+  const f = dpFind(DP, id); if (!f) return;
+  const { j } = f, from = f.b;
+  if (from && from.key === key){   // reorder inside the same trip
+    const o = from.order.map(x => x.id).filter(x => x !== id); o.splice(Math.min(at ?? o.length, o.length), 0, id); DP.seq[key] = o; dpOrder(DP, from); return dpRender(DP);
+  }
+  let c0 = 0;
+  if (from){ c0 = tripCost(from.truck, from.dests, DP.date);
+    if (f.fixed){ from.fixed = from.fixed.filter(x => x.id !== id); from.kg -= Number(j.estimated_weight_kg || 0); from.pcs -= boardsPcs(j.board_pcs); const k = from.dests.lastIndexOf(j.destination_id); if (k >= 0) from.dests.splice(k, 1); j._was = j._was || from.key; }
+    else removeFromBin(from, j);
+    c0 = tripCost(from.truck, from.dests, DP.date) - c0;
+    if (DP.seq[from.key]) DP.seq[from.key] = DP.seq[from.key].filter(x => x !== id); dpOrder(DP, from); }
+  else DP.unplaced = DP.unplaced.filter(x => x.job.id !== id);
+  if (!key){ if (j._was && f.fixed !== undefined && !from?.planned) {} DP.unplaced.push({ job: j, reason: 'Left for later' }); dpRender(DP); return toast(`${j.quotation_serial} left for later`, 'ok'); }
   const to = DP.bins.find(b => b.key === key), c1 = tripCost(to.truck, to.dests, DP.date);
-  addToBin(to, job); delete DP.seq[to.key]; dpOrder(DP, to); DP.moved.add(id);
-  const dc = tripCost(to.truck, to.dests, DP.date) - c1 + (from?._d || 0);
-  const w = ruleWarnings({ job, date: DP.date, destId: job.destination_id, truck: to.truck, tripLoad: { trip_no: to.trip_no, kg: to.kg - Number(job.estimated_weight_kg || 0), pcs: to.pcs - boardsPcs(job.board_pcs) } });
-  toast(`${job.quotation_serial} → ${to.t.label} trip ${to.trip_no}: ${to.cap ? Math.round(to.kg / to.cap * 100) : 0}% full${canSeeCosts() ? ` · ${dc >= 0 ? '+' : '−'}${peso(Math.abs(dc))}` : ''}${w.length ? ' · ⚠ ' + w[0] : ''}`, w.length ? 'error' : 'ok');
+  addToBin(to, j); DP.moved.add(id);
+  if (j._was === to.key){ to.planned = to.planned.filter(x => x.id !== id); to.fixed.push(j); delete j._was; }   // moved back home
+  const o = (to.order || []).map(x => x.id).filter(x => x !== id); o.splice(Math.min(at ?? o.length, o.length), 0, id); DP.seq[to.key] = o; dpOrder(DP, to);
+  const dc = tripCost(to.truck, to.dests, DP.date) - c1 + c0;
+  const w = ruleWarnings({ job: j, date: DP.date, destId: j.destination_id, truck: to.truck, tripLoad: { trip_no: to.trip_no, kg: to.kg - Number(j.estimated_weight_kg || 0), pcs: to.pcs - boardsPcs(j.board_pcs) } }).filter(x => !/trip rate/.test(x));
+  const rc = to.order.length > 1 ? dpTripInfo(DP, to) : null;
+  toast(`${j.quotation_serial} → ${to.t.label} trip ${to.trip_no}: ${to.cap ? Math.round(to.kg / to.cap * 100) : 0}% full${canSeeCosts() ? ` · ${dc >= 0 ? '+' : '−'}${peso(Math.abs(dc))}` : ''}${w.length ? ' · ⚠ ' + w[0] : rc?.off ? ' · ⚠ off the way' : ''}`, w.length || rc?.off ? 'error' : 'ok');
   dpRender(DP);
+}
+/* Drag & drop (mouse and touch): grab ⠿, drop on a trip (or between drops), on a free truck, or on "leave for later" */
+function dpDrag(DP, e, li){
+  e.preventDefault();
+  const id = li.dataset.dpJ, r = li.getBoundingClientRect(), ghost = li.cloneNode(true), scroller = li.closest('.sheet');
+  ghost.className += ' dp-ghost'; ghost.style.width = r.width + 'px'; document.body.appendChild(ghost);
+  li.classList.add('dragging');
+  const line = document.createElement('div'); line.className = 'dp-line';
+  let target = null, at = 0, raf = 0, lastY = e.clientY;
+  const place = (x, y) => {
+    ghost.style.transform = `translate(${x - 20}px, ${y - 18}px)`;
+    const el = document.elementFromPoint(x, y), ol = el && el.closest('.dp-drops');
+    document.querySelectorAll('.dp-drops.over').forEach(o => o.classList.remove('over'));
+    if (!ol || !document.getElementById('dp-body')?.contains(ol) || ol.dataset.dpBin === undefined){ target = null; line.remove(); return; }
+    ol.classList.add('over'); target = ol.dataset.dpBin;
+    const items = [...ol.querySelectorAll('li[data-dp-j]')].filter(x => x !== li);
+    at = items.findIndex(x => { const b = x.getBoundingClientRect(); return y < b.top + b.height / 2; }); if (at < 0) at = items.length;
+    if (items.length){ const ref = items[at]; ref ? ol.insertBefore(line, ref) : ol.appendChild(line); } else ol.appendChild(line);
+  };
+  const auto = () => { if (!scroller) return; const h = innerHeight; if (lastY < 80) scroller.scrollTop -= 14; else if (lastY > h - 80) scroller.scrollTop += 14; raf = requestAnimationFrame(auto); };
+  const move = ev => { lastY = ev.clientY; place(ev.clientX, ev.clientY); };
+  const up = () => {
+    removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); cancelAnimationFrame(raf);
+    ghost.remove(); line.remove(); li.classList.remove('dragging'); document.querySelectorAll('.dp-drops.over').forEach(o => o.classList.remove('over'));
+    if (target === null) return;
+    const f = dpFind(DP, id);
+    if (!f) return;
+    if (!target && !f.b) return;   // already "later"
+    dpMove(DP, id, target, at);
+  };
+  addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up);
+  place(e.clientX, e.clientY); raf = requestAnimationFrame(auto);
 }
 async function dpConfirm(DP, btn){
   const used = DP.bins.filter(b => b.order.length), list = [];
@@ -2692,13 +2746,16 @@ async function dpConfirm(DP, btn){
     const touched = b.planned.length || DP.seq[b.key];
     if (!touched) continue;
     for (const [i, j] of b.order.entries()){
-      if (b.planned.includes(j)){
+      if (b.planned.includes(j) && j._was){
+        list.push({ j, b, seq: i + 1, isNew: false, moved: true });
+      } else if (b.planned.includes(j)){
         const w = ruleWarnings({ job: j, date: DP.date, destId: j.destination_id, truck: b.truck, tripLoad: { trip_no: b.trip_no, kg: b.kg - Number(j.estimated_weight_kg || 0), pcs: b.pcs - boardsPcs(j.board_pcs) } }).filter(x => !/trip rate/.test(x));
         if (w.length && !confirm(`${j.quotation_serial} on ${b.t.label} trip ${b.trip_no}: ${w[0]}\n\nConfirm it anyway?`)) return;
         list.push({ j, b, seq: i + 1, isNew: true, warn: w[0] || null });
       } else if (j.status === 'scheduled' && (j.drop_seq ?? null) !== i + 1) list.push({ j, b, seq: i + 1, isNew: false });
     }
   }
+  DP.unplaced.filter(u => u.job.status === 'scheduled' && u.job._was).forEach(u => list.push({ j: u.job, unassign: true }));
   if (!list.length) return toast('Nothing to save', 'error');
   btn.disabled = true; let done = 0;
   for (const x of list){
@@ -2706,6 +2763,9 @@ async function dpConfirm(DP, btn){
     try {
       if (x.isNew) await setStatus(x.j, 'scheduled', `Confirmed for ${DP.date} on ${x.b.t.label}, trip ${x.b.trip_no}, drop ${x.seq} (Day planner, by ${state.me.name || state.me.email})${x.warn ? ' — ' + x.warn : ''}`,
         { truck_id: x.b.t.truck_id, trip_no: x.b.trip_no, drop_seq: x.seq, rule_warnings: x.warn ? [x.warn] : null, override_reason: x.warn ? 'Confirmed in the Day planner' : null });
+      else if (x.unassign){ await setStatus(x.j, 'proposed', 'Taken off its trip in the Day planner — for scheduling again', { truck_id: null, trip_no: null, drop_seq: null }); }
+      else if (x.moved){ await withRetry('Moving drop', () => sb.from('jobs').update({ truck_id: x.b.t.truck_id, trip_no: x.b.trip_no, drop_seq: x.seq }).eq('id', x.j.id));
+        await logEvent(x.j.id, 'rescheduled', `Moved to ${x.b.t.label}, trip ${x.b.trip_no}, drop ${x.seq} (Day planner, by ${state.me.name || state.me.email})`); }
       else await withRetry('Saving drop order', () => sb.from('jobs').update({ drop_seq: x.seq }).eq('id', x.j.id));
       done++;
     } catch { break; }
