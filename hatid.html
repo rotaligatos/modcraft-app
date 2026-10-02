@@ -1974,13 +1974,24 @@ async function fillFromOdoo(f, txt, addItem, refresh){
   const render = dup => { out.innerHTML = `<div class="imp-sum"><b>Filled from ${esc(j.ticket || 'the ticket')}.</b>${dup}
     ${ok.length ? `<ul>${ok.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}${warn.length ? `<ul class="warn">${warn.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>`; };
   render('');
+  f._allDone = null;
   if (j.so){
-    try {
-      const [a, b] = await Promise.all([sb.from('jobs').select('id, status, scheduled_date').eq('quotation_serial', j.so).limit(3),
-        sb.from('jobs').select('id, status, scheduled_date').contains('doc_refs', [{ ref: j.so }]).limit(3)]);
-      const seen = [...(a.data || []), ...(b.data || [])].filter((x, i, arr) => arr.findIndex(y => y.id === x.id) === i);
-      if (seen.length) render(` <div class="warn" style="margin-top:4px">⚠ ${esc(j.so)} already has ${seen.length === 1 ? 'a job' : seen.length + ' jobs'} (${seen.map(x => esc(x.status) + (x.scheduled_date ? ' ' + esc(x.scheduled_date) : '')).join(', ')}). Only create another for a second delivery of the same SO.</div>`);
-    } catch {}
+    // same SO already in HATID (earlier delivery / pick-up) → load only what's left, like the upload does
+    let h = null; try { h = (await soHistory([j.so]))[j.so.toUpperCase()]; } catch {}
+    if (h){
+      const hist = h.past.join(' · ');
+      if (!j.items.length || h.noItems){ render(` <div class="warn" style="margin-top:4px">⚠ ${esc(j.so)} is already in HATID (${esc(hist)}) — no item list to compare. Check it isn’t a duplicate before creating.</div>`); return; }
+      const L = soLeft(h, j.items), gone = j.items.filter((_, k) => L[k].left <= 0);
+      if (gone.length === j.items.length){
+        f._allDone = `Everything on ${j.so} was already delivered or is on a job (${hist})`;
+        render(` <div class="warn" style="margin-top:4px"><b>⚠ ${esc(f._allDone)}.</b> Nothing to create.</div>`); return; }
+      const balNote = `Balance of ${j.so} — earlier: ${hist}. Only what’s left is loaded.`;
+      $('nj-items').innerHTML = '';
+      j.items.forEach((it, k) => { if (L[k].left > 0) addItem({ ...it, qty: L[k].left }, true); });
+      syncBoardsFromItems(f); if (f.notes) f.notes.value = [balNote, j.notes].filter(Boolean).join('\n'); refresh();
+      const done = j.items.map((it, k) => L[k].cov ? `${fmtQty(L[k].cov)} of ${fmtQty(it.qty)} × ${it.desc}${L[k].left > 0 ? '' : ' (all)'}` : null).filter(Boolean);
+      render(` <div class="warn" style="margin-top:4px"><b>↺ ${esc(balNote)}</b><div class="ft">Already delivered / on a job: ${done.map(esc).join('; ')}</div></div>`);
+    }
   }
 }
 
@@ -2365,6 +2376,7 @@ function openNewJob(){
   f.addEventListener('submit', async e => {
     e.preventDefault();
     if (f._pickup) return toast(`${f._pickup} is a Pick-up ticket — upload it in Pick-up mode › Pick-up tickets`, 'error');
+    if (f._allDone) return toast(f._allDone + ' — nothing to create', 'error');
     const fd = Object.fromEntries(new FormData(e.target).entries());
     if (fd.job_type === 'pickup') return toast('Pick-ups are handled in Pick-up mode › Pick-up tickets, not as deliveries', 'error');
     for (const k in fd) if (fd[k] === '') fd[k] = null;
