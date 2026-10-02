@@ -1436,7 +1436,8 @@ function simQuery(t){
   const q = { t, f: [], op: 'select', ord: [], lim: null, one: null, want: '*', rows: null, patch: null };
   const rowsOf = () => SIM[t] || (SIM[t] = []);
   const match = r => q.f.every(fn => fn(r));
-  const withTrucks = r => q.want.includes('trucks(') ? { ...r, trucks: r.truck_id ? state.ref.truckById?.[r.truck_id] || null : null } : r;
+  const withTrucks = r => q.want.includes('pk_visit_orders(') ? { ...r, pk_visit_orders: (SIM.pk_visit_orders || []).filter(x => x.visit_id === r.id) }
+    : q.want.includes('trucks(') ? { ...r, trucks: r.truck_id ? state.ref.truckById?.[r.truck_id] || null : null } : r;
   const api = {
     select(c, o){ if (o?.head) q.head = true; if (q.op === 'select') q.want = c || '*'; else q.back = true; return api; },
     contains(k, v){ q.f.push(r => { const a = r[k]; if (Array.isArray(v)) return Array.isArray(a) && v.every(x => a.some(y => x && typeof x === 'object' ? Object.keys(x).every(kk => y?.[kk] === x[kk]) : y === x));
@@ -1481,7 +1482,7 @@ function simQuery(t){
   return api;
 }
 function simRpc(fn, a){
-  { const d = simDeliveryRpc(fn, a); if (d) return d; }
+  { const d = simDeliveryRpc(fn, a) || (state.preview?.practice ? simPickupRpc(fn, a) : null); if (d) return d; }
   if (fn === 'job_trip_update'){
     const rows = SIM.job_trips || (SIM.job_trips = []);
     let r = rows.find(x => x.trip_date === a.p_date && x.truck_id === a.p_truck && x.trip_no === a.p_trip);
@@ -1603,7 +1604,7 @@ function prAs(k, view){
   const p = PR_AS[k]; PR.persona = k;
   state.me = { ...state.realMe, id: 'practice-' + k, name: `${p.en} (practice)`, email: 'practice@hatid', role: p.role, pickup_role: p.pickup_role || null, pickup_site: 'plant1',
     schedule_steps: p.steps || [], companies: null, company: null, can_see_costs: p.role === 'manager', signature_url: null, pk_home: null };
-  state.mode = 'delivery'; state.field = null;
+  state.mode = p.mode || 'delivery'; state.field = null; if (p.mode === 'pickup') state.pkSite = 'plant1';
   closeOverlay(); setHeader(); switchView(view || p.home);
 }
 
@@ -1661,9 +1662,9 @@ function prTicketText(tk){
   const row = it => [tk.so, tk.client, it.desc, agent, Number(it.qty).toFixed(3), '0.00', Number(it.qty).toFixed(3), Number(it.qty).toFixed(3), '0.000', it.unit, '100.00', (it.qty * 100).toFixed(2), ''].join('\t');
   return ['Tickets', `${tk.so} (#9${tk.so.slice(-3)})`, tk.so, 'Team', 'Scheduling', 'Assigned to', '', 'Sales Support', 'Payment Status', 'FULLY PAID', 'Priority', 'Type', 'Tags',
     'Company', CO_NAME[c.co] || c.co, 'Ref. Sales Order', tk.so, 'CUSTOMER NAME', tk.client, 'Salesperson', agent, 'Customer Name', 'SI Reference:', 'Close date', 'Ticket Details',
-    'Contact Person', 'Contact Number', 'Delivery Address', 'Fulfillment Status', 'Full Released', 'Delivery Type', 'Delivery', 'Delivery Instructions', `Delivery: ${tk.so}`,
-    `Delivery Address: ${c.addr(c.dest)}`, 'Contact Person: Mr. Santos: 0917 000 0001', '', 'Terms: CBD (fully paid)', 'Ticket Date', 'Scheduled Date', `${d[1]}/${d[2]}/${d[0]} 09:00:00`,
-    'Actual Delivery Date', 'Order Line', 'Loaded', ...tk.items.map(row), 'Ticket created'].join('\n');
+    'Contact Person', 'Contact Number', 'Delivery Address', 'Fulfillment Status', 'Full Released', 'Delivery Type', tk.type || 'Delivery', 'Delivery Instructions', `${tk.type === 'Pickup' ? 'Pick-up' : 'Delivery'}: ${tk.so}`,
+    `Delivery Address: ${c.addr(c.dest)}`, 'Contact Person: Mr. Santos: 0917 000 0001', '', 'Terms: CBD (fully paid)', 'Ticket Date', 'Scheduled Date', tk.sched || `${d[1]}/${d[2]}/${d[0]} 09:00:00`,
+    'Actual Delivery Date', 'Order Line', 'Loaded', ...tk.items.map(row), ...(tk.log ? [tk.log, 'Open chat', agent, '- 1 day ago'] : []), 'Ticket created'].join('\n');
 }
 function prPaste(sel, text){ const t = document.querySelector(sel); if (!t) return; t.value = text; t.dispatchEvent(new Event('input', { bubbles: true })); }
 const prJ = so => SIM?.jobs.find(j => j.quotation_serial === so && !j.redelivery_of) || null;
@@ -2070,7 +2071,7 @@ function prStart(id){
   else state.me = state.realMe;
   state.preview = { sim: true, practice: true, truck: null };
   SIM = { jobs: [], job_events: [], job_costs: [], job_truck_drivers: [], job_trips: [], truck_fuel_logs: [], job_truck_checks: [], job_trip_notices: [],
-    delivery_schedules: [], delivery_schedule_signoffs: [], delivery_schedule_events: [], truck_crews: [], files: {} };
+    delivery_schedules: [], delivery_schedule_signoffs: [], delivery_schedule_events: [], truck_crews: [], files: {}, pk_orders: [], pk_visits: [], pk_visit_orders: [], pk_events: [] };
   PR.ctx = prCtx();
   if (!PR.ctx){ state.me = state.realMe; state.realMe = null; state.preview = null; SIM = null; return toast('Practice needs at least one active truck and destination set up in Fleet', 'error'); }
   PR.sc = sc; sc._steps = null; PR.tk = null;
@@ -2194,7 +2195,9 @@ document.addEventListener('click', e => {
 const prRoleKeys = () => { const m = state.realMe || state.me || {}; const k = new Set();
   if (['admin','manager'].includes(m.role)) ['ss','disp','wh','drv','sup','mgr'].forEach(x => k.add(x));
   if (m.role === 'dispatcher') k.add('disp'); if (m.role === 'field') k.add('drv');
-  if (m.pickup_role === 'sales_support') k.add('ss'); if (['warehouse','wh_manager'].includes(m.pickup_role)) k.add('wh');
+  if (m.pickup_role === 'sales_support') ['ss','pss'].forEach(x => k.add(x)); if (['warehouse','wh_manager'].includes(m.pickup_role)) ['wh','pwh'].forEach(x => k.add(x));
+  if (m.pickup_role === 'wh_manager') k.add('pwm'); if (m.pickup_role === 'logistics') k.add('plg');
+  if (['admin','manager'].includes(m.role)) ['pss','pwh','pwm','plg'].forEach(x => k.add(x));
   if ((m.schedule_steps || []).some(s => ['review','confirm'].includes(s))) k.add('sup'); if ((m.schedule_steps || []).includes('approve')) k.add('mgr');
   return k; };
 async function openPracticeHub(){
@@ -2209,13 +2212,14 @@ async function openPracticeHub(){
       <button class="btn ${rec ? 'primary' : ''}" data-pr-go="${s.id}" ${off ? 'disabled title="Set up Grab / Lalamove vehicles in Fleet first"' : ''}>${d ? (L ? 'Ulitin' : 'Again') : (L ? 'Simulan' : 'Start')}</button></div>`; };
   const del = PR_SC.filter(s => s.mode === 'delivery'), e2e = del.filter(s => s.who.length > 2), rest = del.filter(s => s.who.length <= 2).sort((a, b) => (b.who.some(k => mine.has(k)) - a.who.some(k => mine.has(k))));
   const doneN = del.filter(s => PR.done[s.id]).length;
+  const pk = PR_SC.filter(s => s.mode === 'pickup').sort((a, b) => (b.who.length > 2) - (a.who.length > 2) || (b.who.some(k => mine.has(k)) - a.who.some(k => mine.has(k)))), pkN = pk.filter(s => PR.done[s.id]).length;
   openOverlay(`<div class="scrim" data-close></div><div class="modal pr-hub" role="dialog" aria-modal="true">
     <div class="chart-h" style="margin:0"><h2 style="margin:0">🎓 ${L ? 'Practice' : 'Practice'}</h2><div class="seg" role="group" aria-label="Language"><button data-prl="en" class="${L ? '' : 'on ok'}">English</button><button data-prl="tl" class="${L ? 'on ok' : ''}">Taglish</button></div></div>
     <div class="ft" style="margin:4px 0 10px">${L ? 'Gamitin ang totoong HATID screens na may sample data. Walang mase-save at walang masasabihan. May gabay sa bawat step.' : 'Use the real HATID screens with sample data. Nothing is saved and nobody is notified. A guide shows each step.'}
       ${PR.on ? `<br><b>${L ? 'Naka-practice ka ngayon.' : 'You are in practice now.'}</b> <button class="lnk" id="pr-hub-exit">${L ? 'Lumabas sa practice' : 'Exit practice'}</button>` : ''}</div>
     <h3 style="margin:8px 0 4px">🚚 Delivery <span class="ft">· ${doneN}/${del.length} ${L ? 'tapos' : 'done'}</span></h3>
     ${e2e.map(card).join('')}${rest.map(card).join('')}
-    <h3 style="margin:14px 0 4px">🏬 Pick-up</h3><div class="ft">${L ? 'Susunod na — ginagawa pa.' : 'Coming next.'}</div>
+    <h3 style="margin:14px 0 4px">🏬 Pick-up <span class="ft">· ${pkN}/${pk.length} ${L ? 'tapos' : 'done'}</span></h3>${pk.map(card).join('')}
     <div class="row-btns" style="justify-content:space-between;margin-top:12px">${prBoss() ? `<button class="btn" id="pr-team">👥 ${L ? 'Progress ng team' : 'Team progress'}</button>` : '<span></span>'}<button class="btn" data-close>${L ? 'Isara' : 'Close'}</button></div></div>`);
   bindClose();
   document.querySelectorAll('[data-prl]').forEach(b => b.addEventListener('click', async () => { const v = b.dataset.prl; if (v === PR.lang) return;
@@ -2242,6 +2246,256 @@ async function openPracticeTeam(){
   bindClose();
   document.querySelectorAll('[data-pr-res]').forEach(b => b.addEventListener('click', async () => { b.disabled = true; try { const r = await prRpc('job_training_resolve', { p_id: b.dataset.prRes }); if (r.error) throw r.error; b.closest('tr').remove(); } catch { b.disabled = false; } }));
 }
+/* ----- Pick-up practice: the pk_* functions played on the sample data (mirror the database functions) ----- */
+function simPickupRpc(fn, a){
+  if (!SIM || !/^pk_/.test(fn)) return null;
+  const ok = d => Promise.resolve({ data: d, error: null }), fail = m => Promise.resolve({ data: null, error: { code: 'P0001', message: m } });
+  const now = new Date().toISOString(), who = state.me?.name || 'Practice', day = localDate();
+  ['pk_orders','pk_visits','pk_visit_orders','pk_events'].forEach(t => { SIM[t] ||= []; });
+  const O = id => SIM.pk_orders.find(o => o.id === id), V = id => SIM.pk_visits.find(v => v.id === id);
+  const log = (order_id, visit_id, kind, notes) => SIM.pk_events.push({ id: newId(), order_id, visit_id, kind, notes: notes || null, actor_name: who, created_at: new Date().toISOString() });
+  const can = (...r) => pkCan(...r);
+  const set = co => state.pkSet?.[co] || {};
+  const onTime = (kind, date, created, co) => kind === 'walkin' ? true : kind === 'scheduled'
+    ? !!created && new Date(created) <= new Date(`${addDays(date, -1)}T${(set(co).cut_sched || '15:00:00').slice(0, 8).padEnd(8, ':00')}+08:00`)
+    : kind === 'same_day' ? new Date() <= new Date(`${date}T${(set(co).cut_same || '11:00:00').slice(0, 8).padEnd(8, ':00')}+08:00`) : null;
+  const prepCheck = o => { const w = (o.lines || []).filter(l => l.want && Number(l.qty) > Number(l.taken)); const all = w.length > 0 && w.every(l => l.prep);
+    o.prepared_at = all ? (o.prepared_at || now) : null; o.prepared_name = all ? (o.prepared_name || who) : null; };
+  switch (fn){
+    case 'pk_upload': {
+      const p = a.p || {}, co = String(p.company || '').toUpperCase(), kind = p.kind;
+      if (!can('sales_support')) return fail('Only Sales Support can load pick-up tickets.');
+      if (!String(p.so_no || '').trim()) return fail('The SO number is missing.');
+      const date = kind === 'walkin' ? day : p.pickup_date; if (!date) return fail('The pick-up date is missing.');
+      const on = onTime(kind, date, p.ticket_created_at, co); if (on == null) return fail('Unknown pick-up type.');
+      const old = SIM.pk_orders.find(o => o.so_no.toUpperCase() === String(p.so_no).trim().toUpperCase() && o.status !== 'cancelled');
+      const lines = (p.lines || []).map((x, n) => { const taken = Math.min(sum((old?.lines || []).filter(l => String(l.desc).trim().toLowerCase() === String(x.desc).trim().toLowerCase()), l => l.taken), Number(x.qty || 0));
+        const plan = x.plan != null && Number(x.plan) > 0 && Number(x.plan) < Number(x.qty || 0) - taken ? Number(x.plan) : undefined;
+        return { i: n, desc: x.desc, qty: Number(x.qty || 0), unit: x.unit || null, amount: Number(x.amount || 0), want: x.want !== false && Number(x.qty || 0) > taken, prep: false, taken, ...(plan != null ? { plan } : {}) }; });
+      const f = { company: co, site: p.site || state.me.pickup_site || 'plant1', kind, ticket_no: p.ticket_no || null, client_name: p.client || old?.client_name || '', salesperson: p.salesperson || null,
+        pickup_date: date, ticket_created_at: kind === 'walkin' ? now : p.ticket_created_at || null, created_est: !!p.created_est, on_time: on, mssi_qt: !!p.mssi_qt,
+        instructions: p.instructions || null, lines, status: 'open', no_show_at: null, late_allowed_at: null, late_allowed_name: null, prepared_at: null, prepared_name: null, updated_at: now };
+      if (old){
+        if (old.status === 'in_queue') return fail(`SO ${old.so_no} is in the queue right now — finish that pick-up first.`);
+        if (old.status === 'done') return fail(`SO ${old.so_no} was already fully picked up.`);
+        if (!lines.some(l => l.want)) return fail(`Nothing left to pick up on SO ${old.so_no} — every item was already picked up.`);
+        Object.assign(old, f); log(old.id, null, 'reloaded', old.status === 'balance' ? 'New ticket for the balance — already picked-up items kept' : 'Ticket loaded again'); return ok(old.id);
+      }
+      const o = { id: newId(), so_no: String(p.so_no).trim().toUpperCase(), uploaded_at: now, uploaded_by: state.me.id, uploaded_name: who, missed_count: 0, ...f };
+      SIM.pk_orders.push(o); log(o.id, null, 'uploaded', on ? null : 'Past the cut-off — needs the Warehouse Manager’s OK to queue'); return ok(o.id);
+    }
+    case 'pk_set_lines': {
+      if (!['want','prep','plan'].includes(a.p_field)) return fail('bad field');
+      if (!can(...(a.p_field === 'prep' ? ['warehouse'] : ['sales_support']))) return fail(a.p_field === 'prep' ? 'Only the warehouse can tick lines as prepared.' : 'Only Sales Support can change what the client will pick up.');
+      const o = O(a.p_order); if (!o) return fail('Ticket not found.'); if (['done','no_show','cancelled'].includes(o.status)) return fail('This ticket is closed.');
+      o.lines.forEach(l => { if (!(String(l.i) in (a.p_vals || {}))) return; const v = a.p_vals[l.i];
+        if (a.p_field === 'plan'){ const left = l.qty - l.taken; if (v === '' || v == null || Number(v) >= left) delete l.plan; else if (Number(v) <= 0){ delete l.plan; l.want = false; } else { l.plan = Number(v); l.want = true; } }
+        else l[a.p_field] = v === true || v === 'true'; });
+      o.updated_at = now; prepCheck(o); return ok({ ...o });
+    }
+    case 'pk_set_date': {
+      const o = O(a.p_order); if (!o) return fail('Ticket not found.');
+      if (!['open','no_show'].includes(o.status)) return fail('The date can only be changed before the client arrives.');
+      if (!a.p_date || a.p_date < day) return fail('Pick a date from today on.');
+      const was = o.pickup_date; o.on_time = o.kind === 'scheduled' ? onTime('scheduled', a.p_date, o.ticket_created_at, o.company) : o.on_time;
+      Object.assign(o, { pickup_date: a.p_date, status: 'open', no_show_at: null, updated_at: now }); log(o.id, null, 'rescheduled', `Pick-up date ${fmtDay(was)} → ${fmtDay(a.p_date)}` + (a.p_reason ? ' — ' + a.p_reason : '')); return ok(null);
+    }
+    case 'pk_allow_late': { if (!can('wh_manager')) return fail('Only the Warehouse Manager (or delegate) can allow a late ticket.'); const o = O(a.p_order); if (!o) return fail('Ticket not found.');
+      Object.assign(o, { late_allowed_at: now, late_allowed_name: who }); log(o.id, null, 'late_allowed', 'Late ticket allowed — recorded, not counted in promptness'); return ok(null); }
+    case 'pk_cancel': { const o = O(a.p_order); if (!o || !['open','balance','no_show'].includes(o.status)) return fail('Only a ticket that isn’t in the queue can be cancelled.'); o.status = 'cancelled'; o.closed_at = now; log(o.id, null, 'cancelled', a.p_reason); return ok(null); }
+    case 'pk_arrive': {
+      if (!can('sales_support')) return fail('Only Sales Support can log a client’s arrival.');
+      const os = (a.p_orders || []).map(O); if (!os.length || os.some(x => !x)) return fail('Pick the SO(s) the client came for.');
+      for (const o of os){ if (!['open','balance'].includes(o.status)) return fail(`SO ${o.so_no} is ${o.status.replace('_', ' ')}.`);
+        if (o.status === 'open' && !o.on_time && !o.late_allowed_at) return fail(`SO ${o.so_no} was loaded past the cut-off. The Warehouse Manager has to allow it first.`); }
+      if (new Set(os.map(o => o.site)).size > 1) return fail('The SOs are for different sites.');
+      const site = os[0].site, ser = a.p_courier ? 'R' : os[0].mssi_qt ? 'M' : 'C';
+      const n = Math.max(0, ...SIM.pk_visits.filter(v => v.site === site && v.queue_day === day && v.series === ser).map(v => v.queue_no)) + 1;
+      const bal = os.every(o => o.status === 'balance'), cnt = os.some(o => o.status === 'open' && o.on_time), walk = os.every(o => o.kind === 'walkin');
+      const v = { id: newId(), site, company: os[0].company, series: ser, queue_day: day, queue_no: n, label: (site === 'annex' ? 'AX' : 'P1') + '-' + (ser === 'C' ? '' : ser) + String(n).padStart(3, '0'),
+        client_name: (a.p_client || '').trim() || os[0].client_name, courier: !!a.p_courier, is_balance: bal, counted: cnt && !bal, walkin: walk, status: 'waiting',
+        arrived_at: now, arrived_name: who, so_count: os.length, photo_urls: [] };
+      SIM.pk_visits.push(v); os.forEach(o => { SIM.pk_visit_orders.push({ visit_id: v.id, order_id: o.id, si_no: null, taken: [], sales: null, counted: o.status === 'open' && o.on_time });
+        Object.assign(o, { status: 'in_queue', missed_first: null, missed_last: null, missed_count: 0, updated_at: now }); });
+      log(null, v.id, 'arrived', v.label + (v.courier ? ' (Grab / Lalamove rider)' : '')); return ok({ ...v });
+    }
+    case 'pk_set_si': { const v = V(a.p_visit); if (!v || !['waiting','notified'].includes(v.status)) return fail('The SI can only be changed before the warehouse accepts it.');
+      const vo = SIM.pk_visit_orders.find(x => x.visit_id === v.id && x.order_id === a.p_order); if (vo) vo.si_no = String(a.p_si || '').trim().toUpperCase() || null; return ok(null); }
+    case 'pk_step': {
+      const v = V(a.p_visit); if (!v) return fail('Queue number not found.'); if (['done','cancelled'].includes(v.status)) return fail(`${v.label} is already ${v.status === 'done' ? 'released' : 'cancelled'}.`);
+      const vos = SIM.pk_visit_orders.filter(x => x.visit_id === v.id), s = a.p_step;
+      if (s === 'notify'){ if (!can('sales_support')) return fail('Only Sales Support can notify the warehouse.'); if (vos.some(x => !x.si_no)) return fail('Enter the SI number for every SO first.');
+        Object.assign(v, { status: 'notified', notified_at: v.notified_at || now, notified_name: who }); }
+      else if (s === 'accept'){ if (!can('warehouse')) return fail('Only the warehouse can accept the SI.'); if (!v.notified_at) return fail('Sales Support hasn’t sent the SI yet.');
+        Object.assign(v, { status: 'accepted', accepted_at: v.accepted_at || now, accepted_name: who }); }
+      else if (s === 'ready'){ if (!can('warehouse')) return fail('Only the warehouse can mark the order ready.'); if (!v.accepted_at) return fail('Accept the SI first.');
+        Object.assign(v, { status: 'ready', ready_at: v.ready_at || now, ready_name: who }); }
+      else if (s === 'loaded'){
+        if (!can('logistics')) return fail('Only Logistics can release the items.'); if (!v.ready_at) return fail('The warehouse hasn’t marked it ready yet.');
+        if (!((a.p_photos || []).length >= 3 && a.p_photos.length <= 5)) return fail('Take 3 to 5 photos of the loaded items.');
+        for (const vo of vos){ const o = O(vo.order_id), tin = (a.p_taken || {})[o.id], tk = [];
+          o.lines.forEach(l => { const left = l.qty - l.taken, q = Math.max(0, Math.min(left, tin ? Number(tin[l.i] || 0) : l.want ? (l.plan ?? left) : 0));
+            l.taken += q; delete l.plan; if (q > 0) tk.push({ i: l.i, qty: q }); });
+          const leftAny = o.lines.some(l => l.qty > l.taken);
+          Object.assign(o, { status: leftAny ? 'balance' : 'done', closed_at: leftAny ? null : now, updated_at: now }); vo.taken = tk;
+          if (leftAny) log(o.id, v.id, 'balance', 'Items left for a later pick-up'); }
+        const min = Math.round((Date.now() - new Date(v.arrived_at)) / 6000) / 10, tgt = Number(set(v.company).target_min ?? 15);
+        Object.assign(v, { status: 'done', loaded_at: now, loaded_name: who, photo_urls: a.p_photos, minutes: min, per_so: Math.round(min / Math.max(1, v.so_count) * 10) / 10, target_min: tgt,
+          within: min / Math.max(1, v.so_count) <= tgt });
+      } else return fail('unknown step ' + s);
+      log(null, v.id, s, null); return ok({ ...v });
+    }
+    case 'pk_cancel_visit': { const v = V(a.p_visit); if (!v) return fail('Queue number not found.'); v.status = 'cancelled';
+      SIM.pk_visit_orders.filter(x => x.visit_id === v.id).forEach(x => { const o = O(x.order_id); if (o && o.status === 'in_queue') o.status = o.lines.some(l => l.taken > 0) ? 'balance' : 'open'; });
+      log(null, v.id, 'cancelled', a.p_reason); return ok(null); }
+    case 'pk_concern': log(a.p_order || null, a.p_visit || null, 'concern', `${a.p_kind}: ${a.p_notes}`); return ok(null);
+    case 'pk_tv': return ok({ site: a.p_site, visits: SIM.pk_visits.filter(v => v.site === a.p_site && v.queue_day === day && !['done','cancelled'].includes(v.status)).map(v => ({ label: v.label, series: v.series, status: v.status })) });
+    case 'pk_tc': return ok(null);
+    case 'pk_set_home': return ok(null);
+  }
+  return fail('Not available in practice');
+}
+// pick-up personas
+Object.assign(PR_AS, {
+  pss: { icon: '🧾', en: 'Sales Support', tl: 'Sales Support', role: 'pickup', pickup_role: 'sales_support', home: 'pk-ss', mode: 'pickup' },
+  pwh: { icon: '📦', en: 'Warehouse', tl: 'Warehouse', role: 'pickup', pickup_role: 'warehouse', home: 'pk-wh', mode: 'pickup' },
+  pwm: { icon: '🗝', en: 'Warehouse Manager', tl: 'Warehouse Manager', role: 'pickup', pickup_role: 'wh_manager', home: 'pk-wh', mode: 'pickup' },
+  plg: { icon: '🚛', en: 'Logistics', tl: 'Logistics', role: 'pickup', pickup_role: 'logistics', home: 'pk-lg', mode: 'pickup' },
+});
+// a pick-up ticket as it comes out of Odoo (created yesterday 10 AM = on time; created today = late)
+function prPkTicket(tk){
+  const d = PR.ctx.today.split('-');
+  return prTicketText({ ...tk, type: tk.type || 'Pickup', sched: `${d[1]}/${d[2]}/${d[0]} 10:00:00`, log: tk.late ? 'Today' : 'Yesterday' });
+}
+function prPkOrder(o){
+  const c = PR.ctx, now = new Date().toISOString(), lines = (o.items || prItems(['board','edge','hinge'])).map((it, i) => ({ i, desc: it.desc, qty: it.qty, unit: it.unit, amount: it.qty * 100, want: true, prep: false, taken: 0 }));
+  return { id: newId(), company: c.co, site: 'plant1', kind: o.kind || 'scheduled', so_no: o.so, ticket_no: '9' + o.so.slice(-3), client_name: o.client, salesperson: c.agent?.name || 'Sample Agent',
+    pickup_date: o.date || c.today, ticket_created_at: new Date(Date.now() - 26 * 3600e3).toISOString(), created_est: false, on_time: o.on_time ?? true, mssi_qt: false,
+    instructions: o.instructions || 'PRACTICE — client will bring a small van.', lines, status: 'open', uploaded_at: now, uploaded_name: 'Sales Support (practice)', missed_count: 0, ...(o.x || {}) };
+}
+const prPk = so => SIM?.pk_orders?.find(o => o.so_no === so) || null;
+const prPkV = so => { const o = prPk(so); const vo = o && (SIM.pk_visit_orders || []).filter(x => x.order_id === o.id).pop(); return vo ? SIM.pk_visits.find(v => v.id === vo.visit_id) : null; };
+const PKS = {
+  ssPaste: (tk, partial) => [
+    { id: 'pk-open', as: 'pss', el: '#pkm-paste', done: () => !!$('pkp-txt'),
+      say: T('You are **Sales Support** (pick-up). A client will pick up an order. Tap **⬇ Paste ticket** to load the Odoo pick-up ticket.',
+             'Ikaw ang **Sales Support** (pick-up). May client na kukuha ng order. I-tap ang **⬇ Paste ticket** para i-load ang Odoo pick-up ticket.'),
+      why: T('Loading the ticket early lets the warehouse prepare the items before the client comes — that’s how we stay within the 15-minute target.',
+             'Kapag maaga na-load ang ticket, maihahanda ng warehouse ang items bago dumating ang client — iyan ang paraan para pasok sa 15-minute target.') },
+    { id: 'pk-paste', el: '#pkp-txt', act: { label: T('Paste the sample ticket', 'I-paste ang sample ticket'), fn: () => prPaste('#pkp-txt', prPkTicket(tk)) }, done: () => !!document.querySelector('#pkp-prev .pkp-w'),
+      say: T('Paste the whole ticket page — including the log on the right (“Ticket created”). For practice, tap **Paste the sample ticket**.',
+             'I-paste ang buong ticket page — kasama ang log sa kanan (“Ticket created”). Para sa practice, i-tap ang **Paste the sample ticket**.'),
+      why: T('HATID reads when the ticket was created from that log. A scheduled pick-up must be ticketed by 3 PM the day before — otherwise it’s late.',
+             'Binabasa ng HATID sa log kung kailan ginawa ang ticket. Ang scheduled pick-up ay dapat naka-ticket bago mag-3 PM ng araw bago — kung hindi, late ito.') },
+    partial ? { id: 'pk-less', el: () => document.querySelector('#pkp-prev .pkp-q')?.closest('tr'), done: () => Number(document.querySelector('#pkp-prev .pkp-q')?.value) > 0 && Number(document.querySelector('#pkp-prev .pkp-q')?.value) < 10,
+      say: T('The client’s car can carry only part of the boards. In the last box of the boards line, type **4** (of 10).', 'Kaunti lang ang kaya ng kotse ng client. Sa huling box ng boards, i-type ang **4** (sa 10).'),
+      why: T('The rest stays on the SO as a **balance** for a later pick-up or delivery.', 'Ang natira ay mananatili sa SO bilang **balance** para sa susunod na pick-up o delivery.') } : null,
+    { id: 'pk-load', el: '#pkp-go', done: () => !!prPk(tk.so),
+      say: T('Check the date, company and items, then tap **Load ticket**.', 'I-check ang petsa, company at items, tapos i-tap ang **Load ticket**.') },
+  ].filter(Boolean),
+  whPrep: so => [
+    { id: 'pk-wh', as: 'pwh', el: () => document.querySelector(`#pkm-body [data-pkm=allprep][data-id="${prPk(so)?.id}"]`)?.closest('.pkm-row'), free: true, done: () => !!prPk(so)?.prepared_at,
+      say: T('You are the **Warehouse**. Under **To prepare**, get the items out and tap **✓ All prepared** (or **Tick items** for part).',
+             'Ikaw ang **Warehouse**. Sa **To prepare**, ilabas ang items at i-tap ang **✓ All prepared** (o **Tick items** kung iilan lang).'),
+      why: T('Prepared before the client arrives = one tap later (“Accept & ready”), and the client waits less.', 'Kapag prepared na bago dumating ang client, isang tap na lang mamaya (“Accept & ready”), at mas maikli ang hintay.') },
+  ],
+  arrive: so => [
+    { id: 'pk-tick', as: 'pss', el: () => document.querySelector(`.pk-sel[value="${prPk(so)?.id}"]`)?.closest('.pkm-row'), done: () => !!document.querySelector(`.pk-sel[value="${prPk(so)?.id}"]:checked`),
+      say: T('The client is at the counter. Under **Expected today**, tick their SO.', 'Nasa counter na ang client. Sa **Expected today**, i-tick ang SO nila.') },
+    { id: 'pk-arr', el: '#pkm-arrive', done: () => !!$('pka-go'), say: T('Tap **＋ Client arrived**.', 'I-tap ang **＋ Client arrived**.') },
+    { id: 'pk-num', el: '#pka-go', done: () => !!prPkV(so), say: T('Tap **Give queue number** — the timer starts now.', 'I-tap ang **Give queue number** — magsisimula na ang timer.'),
+      why: T('The clock runs from arrival until Logistics takes the photos. The target is 15 minutes per SO.', 'Tumatakbo ang oras mula pagdating hanggang kumuha ng photos ang Logistics. 15 minuto kada SO ang target.') },
+    { id: 'pk-si', el: '#pkn-si', done: () => !!document.querySelector('#overlay .pk-si'),
+      say: () => T(`Give the client number **${prPkV(so)?.label || ''}**. Then tap **Enter SI now**.`, `Ibigay sa client ang number na **${prPkV(so)?.label || ''}**. Tapos i-tap ang **Enter SI now**.`) },
+    { id: 'pk-si2', el: '#overlay .modal', free: true, done: () => prPkV(so)?.status === 'notified',
+      say: T('Type the SI number from Odoo (practice: any, e.g. **SI 1001**), then **Save SI & notify warehouse**.', 'I-type ang SI number galing Odoo (practice: kahit ano, hal. **SI 1001**), tapos **Save SI & notify warehouse**.') },
+  ],
+  whAccept: so => ({ id: 'pk-acc', as: 'pwh', el: () => document.querySelector(`#pkm-body [data-pkm=acceptready][data-id="${prPkV(so)?.id}"], #pkm-body [data-pkm=accept][data-id="${prPkV(so)?.id}"]`), done: () => prPkV(so)?.status === 'ready',
+    say: T('Back as the **Warehouse**: the SI arrived. It’s all prepared, so tap **✓ Accept & ready** — one tap.', 'Balik bilang **Warehouse**: dumating na ang SI. Prepared na lahat kaya i-tap ang **✓ Accept & ready** — isang tap lang.'),
+    why: T('Not all prepared? Tap **Accept SI**, get the rest out, then **Ready for loading**. Logistics is told when it’s ready.', 'Hindi pa prepared lahat? I-tap ang **Accept SI**, ilabas ang natira, tapos **Ready for loading**. Sasabihan ang Logistics kapag ready na.') }),
+  load: so => [
+    { id: 'pk-lg', as: 'plg', el: () => document.querySelector(`#pkm-body [data-pkm=load][data-id="${prPkV(so)?.id}"]`), done: () => !!$('pkl-go'),
+      say: T('You are **Logistics**. Under **Ready to load**, tap **Load & photos**.', 'Ikaw ang **Logistics**. Sa **Ready to load**, i-tap ang **Load & photos**.') },
+    { id: 'pk-lg2', el: '#overlay .modal', free: true, done: () => prPkV(so)?.status === 'done',
+      say: T('Check the quantity actually loaded, add 3–5 photos (practice: **Use 3 sample photos**), then **Released — stop the clock**.', 'I-check ang dami na naisakay talaga, maglagay ng 3–5 photo (practice: **Use 3 sample photos**), tapos **Released — stop the clock**.'),
+      why: T('Anything not loaded stays on the SO as a balance. The time per SO is checked against the 15-minute target.', 'Ang hindi naisakay ay mananatili sa SO bilang balance. Ikukumpara ang oras kada SO sa 15-minute target.') },
+  ],
+};
+PR_SC.push(
+  { id: 'p-e2e', mode: 'pickup', who: ['pss','pwh','plg'], mins: 8,
+    title: T('Full pick-up, start to finish', 'Buong pick-up, simula hanggang dulo'), desc: T('Sales Support → Warehouse → Sales Support → Warehouse → Logistics.', 'Sales Support → Warehouse → Sales Support → Warehouse → Logistics.'),
+    seed: () => { PR.tk = { so: 'S80001', client: 'Sample: Mendoza Cabinets', items: prItems(['board','edge','hinge']) }; },
+    steps: () => [...PKS.ssPaste(PR.tk), ...PKS.whPrep('S80001'), ...PKS.arrive('S80001'), PKS.whAccept('S80001'), ...PKS.load('S80001'),
+      { id: 'pk-end', next: true, el: () => [...document.querySelectorAll('#pkm-body .pkm-row')].find(r => r.textContent.includes(prPkV('S80001')?.label || '§')),
+        say: () => T(`Released in **${prPkV('S80001')?.per_so ?? '—'} min**. Promptness shows how many were served within the target.`, `Na-release sa loob ng **${prPkV('S80001')?.per_so ?? '—'} min**. Makikita sa Promptness kung ilan ang pasok sa target.`) }] },
+  { id: 'p-ss-partial', mode: 'pickup', who: ['pss'], mins: 3,
+    title: T('Partial pick-up by quantity', 'Partial pick-up ayon sa dami'), desc: T('The client takes only part now; the rest is a balance.', 'Bahagi lang ang kukunin ngayon; ang natira ay balance.'),
+    seed: () => { PR.tk = { so: 'S80002', client: 'Sample: Aquino Hardware', items: prItems(['board','edge']) }; },
+    steps: () => [...PKS.ssPaste(PR.tk, true),
+      { id: 'pk-tag', el: () => [...document.querySelectorAll('#pkm-body .pkm-row')].find(r => r.textContent.includes('S80002')), next: true,
+        say: T('See **Partial · by qty**? The warehouse prepares 4, Logistics’ load form starts at 4, and 6 stay as a balance. To change it later: Pick-up tickets › open the ticket › **This time**.',
+               'Nakita ang **Partial · by qty**? 4 ang ihahanda ng warehouse, 4 ang nakalagay sa load form ng Logistics, at 6 ang balance. Para palitan: Pick-up tickets › buksan ang ticket › **This time**.') }] },
+  { id: 'p-late', mode: 'pickup', who: ['pss','pwm'], mins: 3,
+    title: T('Late ticket — Warehouse Manager’s OK', 'Late na ticket — OK ng Warehouse Manager'), desc: T('Ticketed after the cut-off; the manager allows it.', 'Na-ticket lampas sa cut-off; papayagan ng manager.'),
+    seed: () => { PR.tk = { so: 'S80003', client: 'Sample: Bautista Builders', items: prItems(['edge','hinge']), late: true }; },
+    steps: () => [...PKS.ssPaste(PR.tk),
+      { id: 'pk-lt', el: () => [...document.querySelectorAll('#pkm-body .pkm-row')].find(r => r.textContent.includes('S80003') && /needs OK/.test(r.textContent)), next: true,
+        say: T('The ticket was made today, after yesterday’s 3 PM cut-off, so it’s **Late · needs OK**. It can’t be checked in until the Warehouse Manager allows it.',
+               'Ginawa ang ticket ngayong araw, lampas sa 3 PM cut-off kahapon, kaya **Late · needs OK**. Hindi ito maipapasok sa queue hangga’t hindi pinapayagan ng Warehouse Manager.') },
+      { id: 'pk-allow', as: 'pwm', el: () => document.querySelector(`#pkm-body [data-pkm=allow][data-id="${prPk('S80003')?.id}"]`), done: () => !!prPk('S80003')?.late_allowed_at,
+        say: T('You are the **Warehouse Manager**. Under **Late tickets — your OK**, tap **Allow**.', 'Ikaw ang **Warehouse Manager**. Sa **Late tickets — your OK**, i-tap ang **Allow**.'),
+        why: T('Allowed late tickets are served and recorded, but not counted in promptness.', 'Ang mga pinayagang late ticket ay sine-serve at nire-record, pero hindi kasama sa promptness.') },
+      { id: 'pk-lt2', as: 'pss', el: () => document.querySelector(`.pk-sel[value="${prPk('S80003')?.id}"]`)?.closest('.pkm-row'), next: true,
+        say: T('Back as **Sales Support**: it’s **Late · allowed** — you can check the client in when they arrive.', 'Balik bilang **Sales Support**: **Late · allowed** na — puwede mo nang i-check in ang client pagdating.') }] },
+  { id: 'p-walkin', mode: 'pickup', who: ['pss'], mins: 2,
+    title: T('Walk-in client', 'Walk-in na client'), desc: T('No ticket yet — create the SO, give a number at once.', 'Wala pang ticket — gumawa ng SO, bigyan agad ng number.'),
+    seed: () => {},
+    steps: () => [
+      { id: 'pw-open', as: 'pss', el: '#pkm-walk', done: () => !!$('pkw-go'),
+        say: T('A client walks in without a ticket. Create the SO in Odoo, then tap **＋ Walk-in**.', 'May dumating na client na walang ticket. Gumawa ng SO sa Odoo, tapos i-tap ang **＋ Walk-in**.') },
+      { id: 'pw-fill', el: '#overlay .modal', free: true, act: { label: T('Fill in a sample walk-in', 'Lagyan ng sample'), fn: () => { $('pkw-so').value = 'S80004'; $('pkw-cl').value = 'Sample: Walk-in Client';
+          const d = document.querySelector('#pkw-lines [data-f=desc]'); if (d){ d.value = 'Soft-close Hinges'; d.dispatchEvent(new Event('input')); } const q = document.querySelector('#pkw-lines [data-f=qty]'); if (q){ q.value = 10; q.dispatchEvent(new Event('input')); } } },
+        done: () => !!prPkV('S80004'),
+        say: T('Type the SO no., client and items (practice: **Fill in a sample walk-in**), then **Save & give queue number**.', 'I-type ang SO no., client at items (practice: **Lagyan ng sample**), tapos **Save & give queue number**.'),
+        why: T('For a walk-in the clock starts when you save — there’s no ticket to prepare from.', 'Sa walk-in, magsisimula ang oras pag-save — walang ticket na mapaghahandaan.') },
+      { id: 'pw-done', el: '#pkn-si', next: true, say: T('Give the number, then enter the SI as usual (**Enter SI now**).', 'Ibigay ang number, tapos ilagay ang SI gaya ng dati (**Enter SI now**).') }] },
+  { id: 'p-missed', mode: 'pickup', who: ['pss'], mins: 2,
+    title: T('Client didn’t come — rebook', 'Hindi dumating ang client — i-rebook'), desc: T('Missed pick-ups stay listed until picked up or cancelled.', 'Nakalista ang missed pick-up hangga’t hindi nakukuha o kinakansela.'),
+    seed: () => { SIM.pk_orders = [prPkOrder({ so: 'S80005', client: 'Sample: Villanueva Interiors', date: addDays(PR.ctx.today, -2), x: { status: 'no_show', no_show_at: new Date().toISOString(), missed_first: addDays(PR.ctx.today, -2), missed_last: addDays(PR.ctx.today, -2), missed_count: 1 } })]; },
+    steps: () => [
+      { id: 'pm-list', as: 'pss', el: () => [...document.querySelectorAll('#pkm-body .pkm-row')].find(r => r.textContent.includes('S80005')), done: () => !!$('pko-date'),
+        say: T('**Missed — not picked up yet** lists clients who didn’t come, with how many days ago. Tap the SO.', 'Nakalista sa **Missed — not picked up yet** ang mga hindi dumating at ilang araw na. I-tap ang SO.'),
+        why: T('Every missed pick-up stays here — and on the 6:30 PM report to the agent — until it’s picked up or cancelled.', 'Nandito ang bawat missed pick-up — at sa 6:30 PM report sa agent — hangga’t hindi nakukuha o kinakansela.') },
+      { id: 'pm-date', el: '#pko-date', done: () => !!$('pkd-ok'), say: T('The agent called the client. Tap **📅 Change date**.', 'Natawagan ng agent ang client. I-tap ang **📅 Change date**.') },
+      { id: 'pm-save', el: '#overlay .modal', free: true, done: () => prPk('S80005')?.status === 'open',
+        say: T('Pick the new date (e.g. tomorrow), then **Save date**.', 'Piliin ang bagong petsa (hal. bukas), tapos **Save date**.') },
+      { id: 'pm-done', el: () => [...document.querySelectorAll('#pkm-body .pkm-row')].find(r => r.textContent.includes('S80005') && /rebooked/.test(r.textContent)), next: true,
+        say: T('It now shows **rebooked** — still listed until the client actually picks it up.', 'Naka-**rebooked** na — nakalista pa rin hangga’t hindi talaga nakukuha ng client.') }] },
+  { id: 'p-wh', mode: 'pickup', who: ['pwh'], mins: 3,
+    title: T('Warehouse: prepare and accept the SI', 'Warehouse: maghanda at tanggapin ang SI'), desc: T('Prepare ahead; accept & ready in one tap.', 'Maghanda nang maaga; accept & ready sa isang tap.'),
+    seed: () => { const a = prPkOrder({ so: 'S80006', client: 'Sample: Cruz Kitchens' }), b = prPkOrder({ so: 'S80007', client: 'Sample: Del Rosario', items: prItems(['edge','handle']) });
+      b.lines.forEach(l => { l.prep = true; }); b.prepared_at = new Date().toISOString(); b.status = 'in_queue';
+      const v = { id: newId(), site: 'plant1', company: PR.ctx.co, series: 'C', queue_day: PR.ctx.today, queue_no: 1, label: 'P1-001', client_name: b.client_name, courier: false, is_balance: false, counted: true, walkin: false,
+        status: 'notified', arrived_at: new Date(Date.now() - 4 * 60000).toISOString(), arrived_name: 'Sales Support (sample)', notified_at: new Date(Date.now() - 2 * 60000).toISOString(), so_count: 1, photo_urls: [] };
+      SIM.pk_orders = [a, b]; SIM.pk_visits = [v]; SIM.pk_visit_orders = [{ visit_id: v.id, order_id: b.id, si_no: 'SI 2001', taken: [], counted: true }]; },
+    steps: () => [
+      { id: 'pw-acc', as: 'pwh', el: () => document.querySelector('#pkm-body [data-pkm=acceptready]'), done: () => prPkV('S80007')?.status === 'ready',
+        say: T('You are the **Warehouse**. **P1-001** is at the counter and its SI arrived. Everything was prepared ahead, so tap **✓ Accept & ready**.', 'Ikaw ang **Warehouse**. Nasa counter ang **P1-001** at dumating na ang SI. Prepared na lahat kaya i-tap ang **✓ Accept & ready**.') },
+      { id: 'pw-prep', el: () => document.querySelector(`#pkm-body [data-pkm=prep][data-id="${prPk('S80006')?.id}"]`), done: () => !!document.querySelector('#overlay .pk-p'),
+        say: T('Next client: S80006 comes later today. Tap **Tick items** to prepare it line by line.', 'Susunod na client: mamaya pa ang S80006. I-tap ang **Tick items** para ihanda isa-isa.') },
+      { id: 'pw-prep2', el: '#overlay .modal', free: true, done: () => !!prPk('S80006')?.prepared_at,
+        say: T('Tick each item as it’s prepared, then **Save ticks**.', 'I-tick ang bawat item na handa na, tapos **Save ticks**.') },
+      { id: 'pw-end', next: true, say: T('Done. Prepared orders show **prepared 3/3** on Sales Support’s list too.', 'Tapos. Makikita rin sa listahan ng Sales Support ang **prepared 3/3**.') }] },
+  { id: 'p-lg', mode: 'pickup', who: ['plg'], mins: 2,
+    title: T('Logistics: load and release', 'Logistics: magkarga at mag-release'), desc: T('Record what was loaded, photos, stop the clock.', 'I-record ang naisakay, photos, itigil ang oras.'),
+    seed: () => { const b = prPkOrder({ so: 'S80008', client: 'Sample: Ramos Furniture', items: prItems(['board','edge']) }); b.lines.forEach(l => { l.prep = true; }); b.status = 'in_queue';
+      const v = { id: newId(), site: 'plant1', company: PR.ctx.co, series: 'C', queue_day: PR.ctx.today, queue_no: 2, label: 'P1-002', client_name: b.client_name, courier: false, is_balance: false, counted: true, walkin: false,
+        status: 'ready', arrived_at: new Date(Date.now() - 9 * 60000).toISOString(), notified_at: new Date(Date.now() - 7 * 60000).toISOString(), accepted_at: new Date(Date.now() - 5 * 60000).toISOString(), ready_at: new Date(Date.now() - 60000).toISOString(), so_count: 1, photo_urls: [] };
+      SIM.pk_orders = [b]; SIM.pk_visits = [v]; SIM.pk_visit_orders = [{ visit_id: v.id, order_id: b.id, si_no: 'SI 2002', taken: [], counted: true }]; },
+    steps: () => [...PKS.load('S80008').map((s, i) => i === 0 ? { ...s, say: T('You are **Logistics**. **P1-002** is ready. Tap **Load & photos**.', 'Ikaw ang **Logistics**. Ready na ang **P1-002**. I-tap ang **Load & photos**.') } : s),
+      { id: 'pl-end', next: true, say: T('Released. If anything wasn’t loaded, the SO now shows as a **balance**.', 'Na-release na. Kung may hindi naisakay, **balance** na ang SO.') }] },
+);
+
 $('btn-practice').addEventListener('click', openPracticeHub);
 window.__PR = PR;   // for the automated scenario tests
 
@@ -5392,11 +5646,12 @@ async function openPkLoad(id){
       </tbody></table></div></div>`).join('')}
     <div class="sub" style="margin-top:8px"><b>Photos of the loaded items</b> <span class="ft">3 to 5</span></div>
     <div class="thumbs" id="pkl-th"></div>
-    <label class="btn" style="margin-top:6px">📷 Add photo<input type="file" accept="image/*" capture="environment" multiple id="pkl-ph" hidden></label>
+    <label class="btn" style="margin-top:6px">📷 Add photo<input type="file" accept="image/*" capture="environment" multiple id="pkl-ph" hidden></label>${state.preview?.practice ? ' <button type="button" class="btn" id="pkl-sample" style="margin-top:6px">🖼 Use 3 sample photos (practice)</button>' : ''}
     <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pkl-go">Released — stop the clock</button></div>`;
   bindClose();
   const draw = () => { $('pkl-th').innerHTML = photos.map((p, i) => `<span class="th"><img src="${p.url}" alt="Photo ${i + 1}"><button class="lnk" data-rm="${i}" aria-label="Remove photo ${i + 1}">✕</button></span>`).join('');
     document.querySelectorAll('#pkl-th [data-rm]').forEach(b => b.addEventListener('click', () => { photos.splice(Number(b.dataset.rm), 1); draw(); })); };
+  $('pkl-sample')?.addEventListener('click', async () => { for (const b of await prSamplePhotos()){ if (photos.length >= 5) break; photos.push({ blob: b, url: URL.createObjectURL(b) }); } draw(); });
   $('pkl-ph').addEventListener('change', async e => { for (const f of e.target.files){ if (photos.length >= 5){ toast('5 photos at most', 'error'); break; }
     const blob = await shrinkImage(f); photos.push({ blob, url: URL.createObjectURL(blob) }); } e.target.value = ''; draw(); });
   $('pkl-go').addEventListener('click', async e => {
