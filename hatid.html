@@ -2075,6 +2075,46 @@ function parseTicketRows(rows){
   const any = f => out.some(t => (t.fields[f] || '').trim());   // a column counts only if it has data
   return { tickets: out, grouped, noSo, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson') };
 }
+/* ---- What already happened on an SO (Rommel 2026-10-02): sales agents raise a NEW Odoo ticket with the same SO for the
+   balance ("full delivery / full pick-up of the remaining balance"). So an upload doesn't stop at "already in HATID": it looks
+   at every earlier delivery job and pick-up ticket for that SO and works out, per item (same description), what was already
+   delivered / picked up and what is already on a job that hasn't finished. Only what's left is loaded. */
+const soKey = d => String(d || '').toLowerCase().replace(/\s+/g, ' ').trim();
+async function soHistory(sos){
+  sos = [...new Set(sos.filter(Boolean).map(x => x.toUpperCase()))];
+  const H = {}; if (!sos.length) return H;
+  const get = so => H[so] ??= { done: {}, busy: {}, pkTaken: {}, pkBusy: {}, past: [], jobs: [], noItems: false };   // done/busy = delivery jobs; pk* = pick-up ticket
+  const cols = 'id, quotation_serial, doc_refs, status, items, delivery_outcome, received, scheduled_date, completed_at, job_type';
+  const [jr, pr, ...refs] = await Promise.all([
+    sb.from('jobs').select(cols).in('quotation_serial', sos).neq('status', 'rejected'),
+    sb.from('pk_orders').select('id, so_no, status, lines, pickup_date, closed_at').in('so_no', sos).neq('status', 'cancelled'),
+    ...sos.map(async so => { const r = await sb.from('jobs').select(cols).contains('doc_refs', [{ ref: so }]).neq('status', 'rejected'); return (r?.data || []).map(j => ({ ...j, _so: so })); })]);   // jobs that carry the SO as a document ref (e.g. from ModCraft)
+  const seen = new Set(), all = [...(jr?.data || []).map(j => ({ ...j, _so: String(j.quotation_serial || '').toUpperCase() })), ...refs.flat()].filter(j => j && !seen.has(j.id + j._so) && seen.add(j.id + j._so));
+  for (const j of all){ const h = get(j._so), its = j.items || [];
+    h.jobs.push(j); if (!its.length) h.noItems = true;
+    const fin = j.status === 'completed', rec = j.received || {};
+    its.forEach((it, i) => { const k = soKey(it.desc), q = Number(it.qty || 0);
+      if (fin){ const got = j.delivery_outcome === 'full' || rec.items?.[i] == null ? (j.delivery_outcome === 'returned' ? 0 : q) : Math.min(q, Number(rec.items[i]) || 0); h.done[k] = (h.done[k] || 0) + got; }
+      else h.busy[k] = (h.busy[k] || 0) + q; });
+    const dd = j.scheduled_date || String(j.completed_at || '').slice(0, 10);
+    h.past.push(fin ? `delivered${dd ? ' ' + fmtDay(dd) : ''}${j.delivery_outcome && j.delivery_outcome !== 'full' ? ' (partial)' : ''}`
+      : `${STATUS_LABEL[j.status] || j.status}${j.scheduled_date ? ' ' + fmtDay(j.scheduled_date) : ''}`); }
+  for (const o of pr?.data || []){ const h = get(o.so_no.toUpperCase()); h.pk = o;
+    (o.lines || []).forEach(l => { const k = soKey(l.desc), t = Number(l.taken || 0), q = Number(l.qty || 0);
+      h.pkTaken[k] = (h.pkTaken[k] || 0) + t;
+      if (['open','in_queue'].includes(o.status) && l.want && q > t) h.pkBusy[k] = (h.pkBusy[k] || 0) + (q - t); });
+    h.past.push(o.status === 'done' ? `picked up${o.closed_at ? ' ' + fmtDay(String(o.closed_at).slice(0, 10)) : ''}` : o.status === 'balance' ? 'partly picked up (balance)' : `pick-up ${PK_OST[o.status] || o.status}`); }
+  return H;
+}
+/* Per item of the new ticket: how much is already covered (done + on an unfinished job) and what is left */
+function soLeft(h, items, opt = {}){   // opt.pk: loading the pick-up ticket itself (its own open lines are replaced, not "busy")
+  const used = {}, usedJ = {};   // the same description can appear twice on a ticket — spend the covered qty in order
+  return items.map(it => { const k = soKey(it.desc), q = Number(it.qty || 0), jobs = (h.done[k] || 0) + (h.busy[k] || 0);
+    const pool = jobs + (h.pkTaken[k] || 0) + (opt.pk ? 0 : (h.pkBusy[k] || 0)) - (used[k] || 0), cov = Math.max(0, Math.min(q, pool));
+    const covJ = Math.max(0, Math.min(q, jobs - (usedJ[k] || 0)));   // covered by delivery jobs only
+    used[k] = (used[k] || 0) + cov; usedJ[k] = (usedJ[k] || 0) + covJ;
+    return { cov, covJ, left: q - cov }; });
+}
 function nextWorkDay(){ let d = addDays(localDate(), 1); while (isoDow(d) === 7 || (state.ref.calendar || []).some(c => c.day === d && c.kind === 'holiday' && !c.pool_id)) d = addDays(d, 1); return d; }
 function openJobUpload(){
   const cos = myCompanies();
@@ -2135,14 +2175,16 @@ function openJobUpload(){
         else if (x.was && x.date !== x.was) w.push(`Ticket date ${fmtDay(x.was)} has passed — moved to ${fmtDay(x.date)}, check it`);
         if (!j.contact && !j.phone) w.push('No contact person/number');
         if (x.dup) w.push(`⚠ ${x.dup}`);
+        if (x.bal) w.push(`↺ ${x.bal}`);
         if (!j.items.length) w.push('No items');
-        return `<tr data-up="${i}"><td><input type="checkbox" data-up-pick ${x.pick ? 'checked' : ''} ${x.co ? '' : 'disabled'} aria-label="Create this job"></td>
+        return `<tr data-up="${i}"><td><input type="checkbox" data-up-pick ${x.pick ? 'checked' : ''} ${x.co && !x.full ? '' : 'disabled'} aria-label="Create this job"></td>
           <td><b class="mono">${esc(j.so || '—')}</b>${j.ticket && j.ticket !== j.so ? ` <span class="ft">${esc(j.ticket)}</span>` : ''}<div>${esc(j.client || '—')}</div><div class="ft">${esc(j.address || 'no address')}</div></td>
           <td><input class="i" type="date" data-up-date value="${esc(x.date)}" style="min-width:130px"></td>
           <td><select class="i" data-up-dest ${x.co ? '' : 'disabled'}>${x.co ? destOptions(x.co, x.dest) : ''}</select></td>
           <td><select class="i" data-up-agent ${x.co ? '' : 'disabled'}>${x.co ? agentOptions(x.co, x.agent) : ''}</select></td>
-          <td class="ft">${j.items.length ? `<details class="up-items"><summary>${x.held?.size ? `<b style="color:var(--warn)">${j.items.length - x.held.size} of ${j.items.length} items</b> · partial` : `${j.items.length} item${j.items.length === 1 ? '' : 's'}`} ✎</summary>
-              ${j.items.map((it, k) => `<label class="loadck" style="margin-top:3px;font-size:12px"><input type="checkbox" data-up-it="${k}" ${x.held?.has(k) ? '' : 'checked'}> ${esc(fmtQty(it.qty))} × ${esc(it.desc)}</label>`).join('')}
+          <td class="ft">${j.items.length ? `<details class="up-items"><summary>${x.bal ? `<b style="color:var(--warn)">Balance: ${j.items.length - (x.held?.size || 0)} of ${j.items.length} items left</b>` : x.held?.size ? `<b style="color:var(--warn)">${j.items.length - x.held.size} of ${j.items.length} items</b> · partial` : `${j.items.length} item${j.items.length === 1 ? '' : 's'}`} ✎</summary>
+              ${j.items.map((it, k) => { const L = x.left?.[k], gone = x.lockHeld && L && L.left <= 0;
+                return `<label class="loadck${gone ? ' off' : ''}" style="margin-top:3px;font-size:12px${gone ? ';opacity:.5;text-decoration:line-through' : ''}"><input type="checkbox" data-up-it="${k}" ${x.held?.has(k) ? '' : 'checked'} ${gone ? 'disabled' : ''}> ${L && L.cov && L.left > 0 ? `<b>${esc(fmtQty(L.left))}</b> of ${esc(fmtQty(it.qty))}` : esc(fmtQty(it.qty))} × ${esc(it.desc)}${gone ? ' — already delivered / on a job' : L && L.cov && L.left > 0 ? ` <span class="ft">(${esc(fmtQty(L.cov))} already delivered / on a job)</span>` : ''}</label>`; }).join('')}
               <div style="font-size:11px">Untick what isn’t on this delivery — it stays as a balance.</div></details>` : '0 items'}${nb ? `<br>${nb} boards · ${Math.round(boardsKg(j.boards))} kg` : ''}</td>
           <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '✓ Ready'}</td></tr>`; }).join('')}
       </tbody></table></div>`;
@@ -2160,15 +2202,14 @@ function openJobUpload(){
     sync();
   };
   const dupCheck = async () => {
-    const sos = [...new Set(parsed.jobs.map(x => x.j.so).filter(Boolean))];
-    if (!sos.length) return;
-    try {
-      const [a, ...b] = await Promise.all([sb.from('jobs').select('quotation_serial, status').in('quotation_serial', sos),
-        ...sos.map(so => sb.from('jobs').select('id, status').contains('doc_refs', [{ ref: so }]).limit(1).then(r => ({ so, n: (r.data || []).length })))]);
-      const has = new Set([...(a.data || []).map(x => x.quotation_serial), ...b.filter(x => x.n).map(x => x.so)]);
-      parsed.jobs.forEach(x => { if (has.has(x.j.so)){ x.dup = `${x.j.so} already has a job`; x.pick = false; } });
-      render();
-    } catch {}
+    let H = {}; try { H = await soHistory(parsed.jobs.map(x => x.j.so)); } catch { return; }
+    parsed.jobs.forEach(x => { const h = H[(x.j.so || '').toUpperCase()]; if (!h) return;
+      x.hist = h.past.join(' · ');
+      if (!x.j.items.length || h.noItems){ x.dup = `${x.j.so} is already in HATID (${x.hist}) — no item list to compare, check before creating`; x.pick = false; return; }
+      const L = soLeft(h, x.j.items); x.left = L; x.held = new Set(L.map((r, k) => r.left <= 0 ? k : -1).filter(k => k >= 0)); x.lockHeld = true;
+      if (x.held.size === x.j.items.length){ x.dup = `Everything on ${x.j.so} was already delivered or is on a job (${x.hist})`; x.pick = false; x.full = true; }
+      else x.bal = `Balance of ${x.j.so} — earlier: ${x.hist}. Only what’s left is loaded.`; });
+    render();
   };
   $('up-co').addEventListener('change', () => { if (parsed) { build(); dupCheck(); } });
   $('up-file').addEventListener('change', async e => {
@@ -2191,9 +2232,11 @@ function openJobUpload(){
     const b = e.currentTarget, picked = parsed.jobs.filter(x => x.pick);
     const noDest = picked.filter(x => !x.dest); if (noDest.length) return toast(`Pick a destination for ${noDest.map(x => x.j.so).join(', ')}`, 'error');
     const rows = picked.map(x => { const j0 = x.j, phone = j0.phone && isPhMobile(j0.phone) ? j0.phone : null;
-      const keep = j0.items.filter((_, k) => !x.held?.has(k)), bal = j0.items.filter((_, k) => x.held?.has(k));
+      const left = k => x.left?.[k] ? x.left[k].left : Number(j0.items[k].qty || 0);
+      const keep = j0.items.map((it, k) => ({ ...it, qty: left(k) })).filter((it, k) => !x.held?.has(k) && it.qty > 0);
+      const bal = j0.items.filter((it, k) => x.held?.has(k) && !(x.lockHeld && x.left?.[k]?.left <= 0));   // unticked by hand = left for later
       const boards = {}; keep.forEach(it => { if (it.g != null) boards[it.g] = (boards[it.g] || 0) + Number(it.qty || 0); });
-      const j = { ...j0, items: keep, boards: x.held?.size ? boards : j0.boards };
+      const j = { ...j0, items: keep, boards: x.held?.size || x.bal ? boards : j0.boards, notes: x.bal ? [x.bal, j0.notes].filter(Boolean).join('\n') : j0.notes };
       return { id: newId(), quotation_serial: (j.so || j.ticket || 'ODOO').toUpperCase(), company: x.co, client_name: j.client || null, agent_id: x.agent || null,
         client_contact_name: j.contact || null, client_phone: phone, client_email: /@/.test(j.email || '') ? j.email.trim().toLowerCase() : null,
         destination_id: x.dest, job_type: j.job_type, scheduled_date: x.date || null, board_pcs: j.boards, items: j.items,
@@ -4806,9 +4849,10 @@ async function openPkUpload(){
           <td><select class="i" data-pku-site>${Object.entries(PK_SITE).map(([k, n]) => `<option value="${k}"${k === x.site ? ' selected' : ''}>${n}</option>`).join('')}</select>
             <label class="chk" style="font-size:12px;margin-top:4px"><input type="checkbox" data-pku-mssi ${x.mssi ? 'checked' : ''}> MSSI quotation</label></td>
           <td class="ft">${P.lines.length ? `<details class="up-items"><summary>${P.lines.some(l => !l.want) ? `<b style="color:var(--warn)">${P.lines.filter(l => l.want).length} of ${P.lines.length} items</b> · partial` : `${P.lines.length} item${P.lines.length === 1 ? '' : 's'}`} ✎</summary>
-              ${P.lines.map((l, k) => `<label class="loadck" style="margin-top:3px;font-size:12px"><input type="checkbox" data-pku-it="${k}" ${l.want ? 'checked' : ''}> ${esc(fmtQty(l.qty))} ${esc(l.unit || '')} × ${esc(l.desc)}</label>`).join('')}
+              ${P.lines.map((l, k) => { const L = x.left?.[k];
+                return `<label class="loadck" style="margin-top:3px;font-size:12px${l._gone ? ';opacity:.5;text-decoration:line-through' : ''}"><input type="checkbox" data-pku-it="${k}" ${l.want ? 'checked' : ''} ${l._gone ? 'disabled' : ''}> ${L && L.cov && L.left > 0 ? `<b>${esc(fmtQty(L.left))}</b> of ` : ''}${esc(fmtQty(l.qty))} ${esc(l.unit || '')} × ${esc(l.desc)}${l._gone ? ' — already delivered / picked up' : L && L.cov && L.left > 0 ? ` <span class="ft">(${esc(fmtQty(L.cov))} already done)</span>` : ''}</label>`; }).join('')}
               <div style="font-size:11px">Untick what the client won’t pick up this time.</div></details>` : '0 items'}</td>
-          <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : x.reload ? 'Loaded before — will be replaced' : '✓ Ready'}${!on && !w.length ? '<div>Needs the Warehouse Manager’s OK to queue</div>' : ''}</td></tr>`; }).join('')}
+          <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : x.bal ? `<span style="color:var(--warn)">↺ ${esc(x.bal)}</span>` : x.reload ? 'Loaded before — will be replaced' : '✓ Ready'}${!on && !w.length ? '<div>Needs the Warehouse Manager’s OK to queue</div>' : ''}</td></tr>`; }).join('')}
       </tbody></table></div>`;
     $('pku-how')?.addEventListener('click', () => { $('pku-guide').open = true; });
     const sync = () => { const n = rows.filter(x => x.pick).length; $('pku-go').disabled = !n; $('pku-go').textContent = n ? `Load ${n} ticket${n === 1 ? '' : 's'}` : 'Load tickets'; };
@@ -4834,12 +4878,16 @@ async function openPkUpload(){
     R.rows = R.tickets.map(P => { const co = P.company ? (cos.includes(P.company) ? P.company : null) : co0;
       const past = P.pickup_date && P.pickup_date < localDate(), date = !P.pickup_date ? '' : past ? localDate() : P.pickup_date;   // a passed date → today (flagged)
       return { P, co, date, was: past ? P.pickup_date : null, site: pkSite(), mssi: false, lock: !co || !P.so_no, pick: !!co && !!P.so_no && !!date }; });
-    const sos = [...new Set(R.rows.map(x => x.P.so_no).filter(Boolean))];
-    if (sos.length) try {
-      const { data } = await sb.from('pk_orders').select('so_no, status').in('so_no', sos).neq('status', 'cancelled');
-      (data || []).forEach(o => R.rows.filter(x => x.P.so_no === o.so_no.toUpperCase()).forEach(x => { if (o.status === 'open') x.reload = true;
-        else { x.dup = `Already in HATID (${o.status.replace(/_/g, ' ')})`; x.lock = true; x.pick = false; } }));
-    } catch {}
+    let H = {}; try { H = await soHistory(R.rows.map(x => x.P.so_no)); } catch {}
+    R.rows.forEach(x => { const h = H[x.P.so_no]; if (!h) return;
+      x.hist = h.past.join(' · ');
+      if (h.pk?.status === 'in_queue'){ x.dup = `In the queue right now (${x.hist}) — finish that pick-up first`; x.lock = true; x.pick = false; return; }
+      if (h.pk?.status === 'open' && !h.jobs.length) x.reload = true;
+      if (!x.P.lines.length) { if (h.pk || h.jobs.length) x.bal = `Already in HATID: ${x.hist} — no item list to compare`; return; }
+      const L = soLeft(h, x.P.lines, { pk: true }); x.left = L;
+      x.P.lines.forEach((l, k) => { if (L[k].left <= 0){ l.want = false; l._gone = true; } });
+      if (L.every(r => r.left <= 0)){ x.dup = `Nothing left on ${x.P.so_no} — everything was already delivered / picked up or is on a job (${x.hist})`; x.lock = true; x.pick = false; }
+      else if (L.some(r => r.cov > 0) || (h.pk && h.pk.status !== 'open')) x.bal = `Balance of ${x.P.so_no} — earlier: ${x.hist}. Only what’s left is loaded.`; });
     render();
   };
   $('pku-co').addEventListener('change', () => { if (R) build(); });
@@ -4863,7 +4911,8 @@ async function openPkUpload(){
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Loading…';
     const ok = [], bad = [];
     for (const x of picked){
-      try { await pkRpc('Loading ' + x.P.so_no, 'pk_upload', { p: { ...x.P, company: x.co, pickup_date: x.date, site: x.site, mssi_qt: x.mssi } }); ok.push(x.P.so_no); }
+      const lines = x.P.lines.map((l, k) => ({ desc: l.desc, qty: Math.max(0, Number(l.qty) - (x.left?.[k]?.covJ || 0)), unit: l.unit, amount: l.amount, want: l.want && !l._gone })).filter(l => l.qty > 0 || !x.left);
+      try { await pkRpc('Loading ' + x.P.so_no, 'pk_upload', { p: { ...x.P, lines, company: x.co, pickup_date: x.date, site: x.site, mssi_qt: x.mssi } }); ok.push(x.P.so_no); }
       catch (err) { bad.push(x.P.so_no); }
     }
     if (!bad.length){ toast(`${ok.length} pick-up ticket${ok.length === 1 ? '' : 's'} loaded`, 'ok'); closeOverlay(); loadPk(state.view); return; }
