@@ -81,7 +81,7 @@ nav button .n{font-size:11px;opacity:.75;margin-left:4px}
 <body>
 <header>
   <img src="wcli-logo.jpg" alt="World Class Laminate, Inc." title="World Class Laminate, Inc." style="height:40px;width:auto">
-  <div class="brand-t"><span class="brand-n">COMMAND CENTER</span><span class="brand-s">World Class Laminate, Inc. · who may use Modcraft, PMES, KEYSTONE &amp; HATID</span></div>
+  <div class="brand-t"><span class="brand-n">COMMAND CENTER</span><span class="brand-s">World Class Laminate, Inc. · who may use Modcraft, PMES, KEYSTONE, HATID &amp; ShelfSync</span></div>
   <nav id="nav"></nav>
   <div class="who" id="who"></div>
   <img src="rtmo-logo.png" alt="RTmo Digital Solutions" title="RTmo Digital Solutions" style="height:40px;width:auto;background:#fff;border-radius:7px;padding:2px 6px">
@@ -103,6 +103,8 @@ nav button .n{font-size:11px;opacity:.75;margin-left:4px}
      KEYSTONE  — admin staff. keystone_users + capabilities (adm_user_caps).
      PMES      — production staff. pmes_users: operator / supervisor / manager / admin,
                  operators optionally limited to stations.
+     ShelfSync — Modern Trade depots (promodisers + Plant). Same design as HATID: shelfsync_users here is the
+                 master; after each save this page asks ShelfSync (shelfsync-staff-sync) to apply it.
      HATID — logistics dispatch (runs on the Social-Content-Manager project). jobboard_users here is
                  the master list; after each save this page asks HATID (job-staff-sync) to apply
                  it, which checks with Modcraft that the caller is an Admin/Director.
@@ -133,7 +135,7 @@ var JB_STEPS=[['review','Review'],['confirm','Confirm'],['approve','Approve']];
 var JB_SYNC_URL='https://nssviuuagtlvxjvvvagt.supabase.co/functions/v1/job-staff-sync';
 
 var _qTab=new URLSearchParams(location.search).get('tab');
-var ME=null, TAB=({sign:'sign',hatid:'jb',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],caps:[],stages:[],log:[],shadow:[]};
+var ME=null, TAB=({sign:'sign',hatid:'jb',shelfsync:'ss',ss:'ss',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],ss:[],caps:[],stages:[],log:[],shadow:[]};
 // Company filter across every list ('' = all, 'none' = no company set). Keys: wcl / mssi / cwl.
 var CO_FILTER='';
 try{ CO_FILTER=sessionStorage.getItem('cc_co')||''; }catch(e){}
@@ -288,16 +290,20 @@ async function loadAll(){
     supa.from('user_access_log').select('*').order('at',{ascending:false}).limit(300),
     supa.from('user_shadow_log').select('id,at,email,ok,diffs,build').order('at',{ascending:false}).limit(1000),
     supa.from('pmes_delegations').select('*').order('starts_at',{ascending:false}).limit(200),
-    supa.from('jobboard_users').select('*').order('active',{ascending:false}).order('name')
+    supa.from('jobboard_users').select('*').order('active',{ascending:false}).order('name'),
+    supa.from('shelfsync_users').select('*').order('active',{ascending:false}).order('name')
   ]);
+  // The ShelfSync list is added by its own setup script; until then its tab says so instead of an error on every page.
+  SS.missing=!!(q[9].error&&/shelfsync_users|does not exist|schema cache/i.test(q[9].error.message||''));
+  if(SS.missing) q[9]={data:[],error:null};
   var bad=q.filter(function(x){return x.error});
   if(bad.length) toast('Some lists could not load: '+bad[0].error.message);
   D.modcraft=q[0].data||[]; D.ks=q[1].data||[]; D.pmes=q[2].data||[];
-  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[]; D.deleg=q[7].data||[]; D.jb=q[8].data||[];
+  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[]; D.deleg=q[7].data||[]; D.jb=q[8].data||[]; D.ss=q[9].data||[];
 }
 
 function drawNav(){
-  var cnt={mc:D.modcraft,pmes:D.pmes,ks:D.ks,jb:D.jb};
+  var cnt={mc:D.modcraft,pmes:D.pmes,ks:D.ks,jb:D.jb,ss:D.ss};
   el('nav').innerHTML=MAIN.map(function(t){
     var l=cnt[t[0]], n=l?l.filter(function(r){return r.active!==false&&passCo(r.company)}).length:null;
     return '<button class="'+(TAB===t[0]?'on':'')+'" onclick="setMain(\''+t[0]+'\')">'+t[1]+(n!=null?'<span class="n">'+n+'</span>':'')+'</button>'}).join('')
@@ -312,7 +318,7 @@ function draw(){
   else if(sub==='log') fn=function(){return viewLog(TAB)};
   else if(sub==='shadow') fn=mcShadowCard;
   else if(sub==='deleg') fn=viewDeleg;
-  else fn={mc:viewMc,pmes:viewPmes,ks:viewKs,jb:viewJb}[TAB];
+  else fn={mc:viewMc,pmes:viewPmes,ks:viewKs,jb:viewJb,ss:viewSs}[TAB];
   var nav=subs.length?'<div class="subnav">'+subs.map(function(x){return '<button class="'+(x[0]===sub?'on':'')+'" onclick="setSub(\''+x[0]+'\')">'+x[1]+'</button>'}).join('')+'</div>':'';
   try{ el('root').innerHTML=nav+fn(); applyLF(); }catch(e){ fatal('This view failed: '+esc(e.message)); console.error(e); }
 }
@@ -376,32 +382,39 @@ function viewPeople(){
   var map={};
   function add(list,key){list.forEach(function(r){var e=norm(r.email);if(!e)return;
     map[e]=map[e]||{email:e,name:''};map[e][key]=r;if(!map[e].name&&r.name)map[e].name=r.name})}
-  add(D.modcraft,'mc'); add(D.ks,'ks'); add(D.pmes,'pm'); add(D.jb,'jb');
+  add(D.modcraft,'mc'); add(D.ks,'ks'); add(D.pmes,'pm'); add(D.jb,'jb'); add(D.ss,'ss');
   var rows=Object.keys(map).map(function(k){return map[k]}).filter(function(p){
-      var cos=[p.mc&&p.mc.company,p.ks&&p.ks.company,p.pm&&p.pm.company,p.jb&&p.jb.company].filter(Boolean);
+      var cos=[p.mc&&p.mc.company,p.ks&&p.ks.company,p.pm&&p.pm.company,p.jb&&p.jb.company,p.ss&&ssCoFull(p.ss.company)].filter(Boolean);
       if(!CO_FILTER) return true;
       return CO_FILTER==='none'?!cos.length:cos.some(function(c){ return coKey(c)===CO_FILTER; });
     }).sort(function(a,b){return (a.name||a.email).localeCompare(b.name||b.email)});
   var act=function(l){return l.filter(function(r){return r.active!==false}).length};
   return '<div class="card"><span class="stat"><b>'+act(D.modcraft)+'</b>Modcraft</span>'+
-    '<span class="stat"><b>'+act(D.ks)+'</b>KEYSTONE</span><span class="stat"><b>'+act(D.pmes)+'</b>PMES</span><span class="stat"><b>'+act(D.jb)+'</b>HATID</span>'+
+    '<span class="stat"><b>'+act(D.ks)+'</b>KEYSTONE</span><span class="stat"><b>'+act(D.pmes)+'</b>PMES</span><span class="stat"><b>'+act(D.jb)+'</b>HATID</span><span class="stat"><b>'+act(D.ss)+'</b>ShelfSync</span>'+
     '<p class="sub" style="margin-top:10px">One row per person across every app. Modcraft users are edited in the <b>Modcraft</b> tab (it writes the User Roles sheet Modcraft signs in from). '+
-    'Use the buttons to give someone KEYSTONE, PMES or HATID access.</p></div>'+
-    '<div class="card">'+listBar('','')+'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Modcraft</th><th>KEYSTONE</th><th>PMES</th><th>HATID</th><th></th></tr></thead><tbody>'+
+    'Use the buttons to give someone KEYSTONE, PMES, HATID or ShelfSync access.</p></div>'+
+    '<div class="card">'+listBar('','')+'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Modcraft</th><th>KEYSTONE</th><th>PMES</th><th>HATID</th><th>ShelfSync</th><th></th></tr></thead><tbody>'+
     rows.map(function(p){
       var ksAdm=p.ks&&(p.ks.role==='Admin'||p.ks.role==='Director');
-      var anyOn=[p.mc,p.ks,p.pm,p.jb].some(function(r){return r&&r.active!==false});
+      var anyOn=[p.mc,p.ks,p.pm,p.jb,p.ss].some(function(r){return r&&r.active!==false});
       return '<tr'+sAttr([p.name,p.email,p.mc&&p.mc.role,p.ks&&p.ks.role,p.pm&&p.pm.role,p.jb&&p.jb.role,p.mc&&p.mc.company,p.ks&&p.ks.company],!anyOn)+'><td>'+esc(p.name||'—')+'</td><td class="mono">'+esc(p.email)+'</td>'+
         '<td>'+rolePill(p.mc,p.mc&&(p.mc.role==='Admin'||p.mc.role==='Director'))+'</td>'+
-        '<td>'+rolePill(p.ks,ksAdm)+'</td><td>'+rolePill(p.pm,p.pm&&p.pm.role==='admin')+'</td><td>'+rolePill(p.jb,p.jb&&p.jb.role==='admin')+'</td><td style="white-space:nowrap">'+
+        '<td>'+rolePill(p.ks,ksAdm)+'</td><td>'+rolePill(p.pm,p.pm&&p.pm.role==='admin')+'</td><td>'+rolePill(p.jb,p.jb&&p.jb.role==='admin')+'</td><td>'+(p.ss?rolePill({role:ssRoleLabel(p.ss.role),active:p.ss.active},ssIsAdmin(p.ss)):rolePill(null))+'</td><td style="white-space:nowrap">'+
         (!p.ks?'<button class="btn" onclick="quickAdd(\'ks\',\''+esc(p.email)+'\')">+ KEYSTONE</button> ':'')+
         (!p.pm?'<button class="btn" onclick="quickAdd(\'pmes\',\''+esc(p.email)+'\')">+ PMES</button> ':'')+
-        (!p.jb?'<button class="btn" onclick="quickAdd(\'jb\',\''+esc(p.email)+'\')">+ HATID</button>':'')+
+        (!p.jb?'<button class="btn" onclick="quickAdd(\'jb\',\''+esc(p.email)+'\')">+ HATID</button> ':'')+
+        (!p.ss?'<button class="btn" onclick="quickAdd(\'ss\',\''+esc(p.email)+'\')">+ ShelfSync</button>':'')+
         '</td></tr>'}).join('')+'</tbody></table></div></div>';
 }
 function quickAdd(app,email){
   var mc=D.modcraft.find(function(u){return norm(u.email)===email})||{};
   TAB=app; SUB[app]='users'; ED[app]='add'; drawNav(); draw();
+  if(app==='ss'){ var box=el('ss-new'); if(!box) return;
+    var fe=box.querySelector('.f-email'), fn=box.querySelector('.f-name'); fe.value=email; if(mc.name) fn.value=mc.name;
+    var k=coKey(mc.company); if(k==='cwl'||k==='wcl') box.querySelector('.f-co').value=k==='cwl'?'CWLI':'WCLI';
+    // Someone already on the Modcraft list is Plant staff, not an agency promodiser
+    box.querySelector('.f-role').value='ppic'; ssRoleChanged(box.querySelector('.f-role'));
+    fn.focus(); fn.scrollIntoView({block:'center'}); return; }
   var pre={ks:'ks',pmes:'pm',jb:'jb'}[app];
   var f=el(pre+'NewEmail'); if(f){f.value=email;}
   var n=el(pre+'NewName'); if(n&&mc.name){n.value=mc.name;}
@@ -923,12 +936,200 @@ async function jbSyncAll(){
   JB.busy=false; JB.staff=null; await refresh();
 }
 
+
+/* ── ShelfSync users (Modern Trade: depot promodisers + the Plant) ─────────────
+   shelfsync_users here is the master. Saving writes it (logged, last-admin guarded) and then asks
+   ShelfSync to apply the change (shelfsync-staff-sync on the ShelfSync project). That function checks
+   this page's sign-in with Modcraft (cc_me().allowed) before it changes anything — the HATID design.
+   Promodisers are agency staff: their Google account may be personal Gmail. Someone without Google gets
+   a temporary password, shown here once. Remove takes them off this list and switches off their ShelfSync
+   access; their login (which may serve other apps) and their sales/requests history stay. */
+var SS_SYNC_URL='https://nssviuuagtlvxjvvvagt.supabase.co/functions/v1/shelfsync-staff-sync';
+var SS_APP_URL='https://rotaligatos.github.io/modcraft-app/shelfsync/';
+var SS_ROLES=[['promodiser','Promodiser (agency)'],['ppic','PPIC'],['scm','Supply Chain Manager'],['plant_mgr','Plant Manager'],['smd','Sales & Marketing Director'],['md','Managing Director'],['admin','Admin']];
+var SS_COS=[['WCLI','WCLI'],['CWLI','CWLI']], SS_PLANTS=[['PASIG','Pasig Plant'],['CEBU','Cebu Plant']];
+var SS_PERMS=[['sell','Record sales'],['count','Stock count'],['request','Request stock'],['receive','Confirm deliveries'],['other_depots','See same-chain branches in region'],
+  ['movements','Stock card, damage / return / pull-out'],['messages','Messages with the Plant'],['documents','Send documents'],['reports','Submit depot reports']];
+var SS={staff:null,depots:null,loading:false,busy:false,msg:null,err:''};
+function ssRoleLabel(r){ var x=SS_ROLES.find(function(k){return k[0]===r}); return x?x[1]:(r||''); }
+function ssIsAdmin(u){ return u.role==='admin'||(u.extra_roles||[]).indexOf('admin')>=0; }
+function ssCoFull(c){ return c==='CWLI'?COMPANIES[2]:c==='WCLI'?COMPANIES[0]:''; }
+async function ssCall(body){
+  var s=await supa.auth.getSession(); var tok=s.data.session&&s.data.session.access_token;
+  if(!tok) throw new Error('Signed out — reload and sign in again.');
+  var res=await fetch(SS_SYNC_URL,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+tok},body:JSON.stringify(body)});
+  var j={}; try{ j=await res.json(); }catch(e){}
+  if(!res.ok) throw new Error(j.error||j.message||('ShelfSync answered '+res.status));
+  return j;
+}
+async function ssLoadStatus(){
+  if(SS.loading) return; SS.loading=true; SS.err='';
+  try{ var r=await ssCall({action:'status'}); SS.staff={}; (r.staff||[]).forEach(function(x){ SS.staff[norm(x.email)]=x; }); SS.depots=r.depots||[]; }
+  catch(e){ SS.err='Could not read ShelfSync: '+e.message; }
+  SS.loading=false; if(TAB==='ss') draw();
+}
+function ssState(u){
+  if(!SS.staff) return SS.loading?'<span class="muted">checking…</span>':'—';
+  var s=SS.staff[norm(u.email)];
+  if(!s) return u.active?'<span class="pill p-off">no login yet</span>':'<span class="pill p-none">none</span>';
+  var ex=function(a){return (a||[]).slice().sort().join(',')}, off=function(p){return SS_PERMS.filter(function(k){return p&&p[k[0]]===false}).map(function(k){return k[0]}).join(',')};
+  var same=s.role===u.role&&ex(s.extra_roles)===ex((u.extra_roles||[]).filter(function(r){return r!==u.role}))&&(s.status==='active')===!!u.active
+    &&(s.company_id||null)===(u.company||null)&&(s.plant_id||null)===(u.plant||null)&&(s.depot_code||null)===(u.depot_code||null)
+    &&(s.access_expires||null)===(u.access_until||null)&&(s.full_name||'')===(u.name||'')&&off(s.perms)===off(u.perms)&&(s.require_passkey!==false)===(u.require_passkey!==false);
+  return (same?'<span class="pill p-on">in sync</span>':'<span class="pill p-off">out of sync</span>')
+    +(s.passkeys?' <span class="muted" title="Face ID / fingerprint set up on '+s.passkeys+' device(s)">🔒'+s.passkeys+'</span>':'');
+}
+function ssPassCo(u){ if(!CO_FILTER) return true; return CO_FILTER==='none'?!u.company:coKey(ssCoFull(u.company))===CO_FILTER; }
+function ssOpts(list,cur,blank){ return (blank!=null?'<option value="">'+blank+'</option>':'')+list.map(function(k){return '<option value="'+k[0]+'"'+((cur||'')===k[0]?' selected':'')+'>'+esc(k[1])+'</option>'}).join(''); }
+function ssDepotField(cur){
+  if(SS.depots&&SS.depots.length){
+    var known=SS.depots.some(function(d){return d.code===cur});
+    return '<select class="f-depot" style="width:100%"><option value="">— none (Plant user) —</option>'
+      +(cur&&!known?'<option value="'+esc(cur)+'" selected>'+esc(cur)+' (not in ShelfSync)</option>':'')
+      +SS.depots.map(function(d){return '<option value="'+esc(d.code)+'"'+(d.code===cur?' selected':'')+'>'+esc(d.code+' — '+d.name)+'</option>'}).join('')+'</select>';
+  }
+  return '<input class="f-depot" value="'+esc(cur||'')+'" placeholder="Depot code, e.g. WIL-QAV" style="width:100%">';
+}
+function ssForm(u,isNew){
+  u=u||{role:'promodiser',company:'WCLI',perms:{},require_passkey:true,active:true,extra_roles:[]};
+  return '<div class="grid-add ss-form">'
+    +(isNew?fld('Google account (email)','<input class="f-email" placeholder="name@… or name@gmail.com" style="width:100%">'):'')
+    +fld('Name','<input class="f-name" value="'+esc(u.name||'')+'" style="width:100%">')
+    +fld('Role','<select class="f-role" style="width:100%" onchange="ssRoleChanged(this)">'+ssOpts(SS_ROLES,u.role)+'</select>')
+    +fld('Company','<select class="f-co" style="width:100%">'+ssOpts(SS_COS,u.company,'—')+'</select>')
+    +fld('Plant (Plant users)','<select class="f-plant" style="width:100%">'+ssOpts(SS_PLANTS,u.plant,'—')+'</select>')
+    +fld('Depot (promodisers)',ssDepotField(u.depot_code))
+    +fld('Agency','<input class="f-agency" value="'+esc(u.agency||'')+'" style="width:100%" placeholder="Promodisers">')
+    +fld('Mobile','<input class="f-mobile" value="'+esc(u.mobile||'')+'" style="width:100%">')
+    +fld('Access until (optional)','<input class="f-until" type="date" value="'+esc(u.access_until||'')+'" style="width:100%">')
+    +fld('Notes','<input class="f-notes" value="'+esc(u.notes||'')+'" style="width:100%">')
+    +'</div><div class="sub" style="margin-top:10px">Also holds these roles <span class="muted">(each approval step only accepts its own role — a stand-in gets the extra role)</span></div><div>'
+    +SS_ROLES.filter(function(k){return k[0]!=='promodiser'}).map(function(k){return '<label class="chk"><input type="checkbox" class="f-xr" value="'+k[0]+'"'+((u.extra_roles||[]).indexOf(k[0])>=0?' checked':'')+'>'+esc(k[1])+'</label>'}).join('')+'</div>'
+    +'<div class="ss-perms"'+(u.role==='promodiser'?'':' style="display:none"')+'><div class="sub" style="margin-top:10px">What this promodiser may do</div><div>'
+    +SS_PERMS.map(function(k){return '<label class="chk"><input type="checkbox" class="f-perm" value="'+k[0]+'"'+(u.perms&&u.perms[k[0]]===false?'':' checked')+'>'+esc(k[1])+'</label>'}).join('')+'</div></div>'
+    +'<div style="margin-top:10px"><label class="chk"><input type="checkbox" class="f-pk"'+(u.require_passkey!==false?' checked':'')+'>Face ID / fingerprint required for sign-in and requests</label>'
+    +(isNew?'<label class="chk"><input type="checkbox" class="f-pw">Also create a password (no Google account)</label>':'<label class="chk"><input type="checkbox" class="f-act"'+(u.active?' checked':'')+'>Active (can sign in)</label>')+'</div>';
+}
+function ssRoleChanged(sel){ var root=sel.closest('.card'); var pr=root.querySelector('.ss-perms'); if(pr) pr.style.display=sel.value==='promodiser'?'':'none'; }
+function ssReadForm(root,role){
+  var g=function(c){var x=root.querySelector('.'+c);return x?x.value.trim():''};
+  var perms={}; [].forEach.call(root.querySelectorAll('input.f-perm'),function(c){ if(!c.checked) perms[c.value]=false; });
+  return {name:g('f-name'),role:role,extra_roles:picked(root,'f-xr').filter(function(r){return r!==role}),company:g('f-co')||null,plant:g('f-plant')||null,
+    depot_code:g('f-depot')||null,agency:g('f-agency')||null,mobile:g('f-mobile')||null,access_until:g('f-until')||null,notes:g('f-notes')||null,
+    perms:role==='promodiser'?perms:{},require_passkey:!!(root.querySelector('.f-pk')||{}).checked};
+}
+function ssCheck(row){
+  if(!row.name) return 'Enter the name.';
+  if(row.role==='promodiser'&&!row.depot_code) return 'A promodiser needs a depot.';
+  if(row.role==='promodiser'&&(row.extra_roles||[]).length) return 'A promodiser can’t also hold Plant roles.';
+  if(row.role!=='promodiser'&&!row.company) return 'Choose the company.';
+  return '';
+}
+function ssCopyPw(){ if(!SS.msg) return; var t='ShelfSync login\nApp: '+SS_APP_URL+'\nEmail: '+SS.msg.email+'\nPassword: '+SS.msg.pw;
+  (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){toast('Copied');},function(){toast('Copy failed — select the text instead');}); }
+async function ssAfterSave(email,withPw){
+  // The list is saved; now ShelfSync. If this step fails the row shows "out of sync" and Sync fixes it.
+  try{
+    var r=await ssCall({action:'sync',email:email,with_password:!!withPw});
+    if(/^refused/.test(r.status||'')) toast(email+': '+r.status+' — saved here; fix it and save again.');
+    else if(r.password){ SS.msg={title:'Added to ShelfSync',email:r.email,pw:r.password}; await supa.rpc('cc_log_shelfsync',{p_email:r.email,p_action:'ShelfSync login created (password)'}); }
+    else if(r.status==='login created'){ SS.msg={title:'Added to ShelfSync',text:r.email+' can now open ShelfSync and tap “Continue with Google” with that account.'}; await supa.rpc('cc_log_shelfsync',{p_email:r.email,p_action:'ShelfSync login created'}); }
+    else toast(email+': '+r.status);
+  }catch(e){ toast('Saved here, but ShelfSync was not updated: '+e.message+' — use Sync.'); }
+  SS.staff=null;
+}
+async function saveSs(i){
+  var u=D.ss[i], root=el('ss-'+i), role=root.querySelector('.f-role').value, patch=ssReadForm(root,role);
+  patch.active=root.querySelector('.f-act').checked;
+  var bad=ssCheck(patch); if(bad) return toast(bad);
+  if(u.active&&!patch.active&&!confirm('Switch off '+(u.name||u.email)+'’s ShelfSync access? Their login for other apps is not affected.')) return;
+  SS.busy=true; draw();
+  var r=await supa.from('shelfsync_users').update(patch).eq('email',u.email).select();
+  if(r.error||!r.data||!r.data.length){ SS.busy=false; draw(); return toast(r.error?dbErr(r.error):'Not saved — the database refused the change.'); }
+  await ssAfterSave(u.email,false);
+  SS.busy=false; ED.ss=null; await refresh();
+}
+async function addSs(){
+  var root=el('ss-new'), e=norm(root.querySelector('.f-email').value); if(!validEmail(e)) return toast('Enter a valid email.');
+  var role=root.querySelector('.f-role').value, row=ssReadForm(root,role); row.email=e;
+  var bad=ssCheck(row); if(bad) return toast(bad);
+  var withPw=root.querySelector('.f-pw').checked;
+  SS.busy=true; draw();
+  var r=await supa.from('shelfsync_users').insert(row);
+  if(r.error){ SS.busy=false; draw(); return toast(dbErr(r.error)); }
+  await ssAfterSave(e,withPw);
+  SS.busy=false; ED.ss=null; await refresh();
+}
+async function ssSyncAll(){
+  if(!confirm('Apply the whole ShelfSync list to ShelfSync now?')) return;
+  SS.busy=true; draw();
+  try{
+    var r=await ssCall({action:'sync_all'});
+    var made=(r.results||[]).filter(function(x){return x.status==='login created';}), bad=(r.results||[]).filter(function(x){return /^error|^refused/.test(x.status);});
+    for(var k=0;k<made.length;k++) await supa.rpc('cc_log_shelfsync',{p_email:made[k].email,p_action:'ShelfSync login created'});
+    SS.msg={title:'Sync finished',text:(r.results||[]).length+' checked'+(made.length?'; newly added (Continue with Google): '+made.map(function(x){return x.email;}).join(', '):'')
+      +(bad.length?'; problems: '+bad.map(function(x){return x.email+' ('+x.status+')';}).join(', '):'')
+      +((r.not_on_list||[]).length?'; in ShelfSync but not on this list (left alone): '+r.not_on_list.map(function(x){return x.email;}).join(', '):'')};
+  }catch(e){ toast('Sync failed: '+e.message); }
+  SS.busy=false; SS.staff=null; await refresh();
+}
+async function ssResetKeys(i){ var u=D.ss[i];
+  if(!confirm('Reset '+(u.name||u.email)+'’s Face ID / fingerprint? Use this for a lost or replaced phone. They set it up again at their next sign-in.')) return;
+  try{ var r=await ssCall({action:'reset_passkeys',email:norm(u.email)}); await supa.rpc('cc_log_shelfsync',{p_email:u.email,p_action:'ShelfSync Face ID / fingerprint reset'}); toast(r.status); }
+  catch(e){ toast(e.message); }
+  SS.staff=null; draw(); }
+async function ssNewPassword(i){ var u=D.ss[i];
+  if(!confirm('Make a new temporary password for '+u.email+'?\n\nThis login may also be used for other apps on the same system (e.g. HATID) — the new password applies there too.')) return;
+  try{ var r=await ssCall({action:'set_password',email:norm(u.email)}); await supa.rpc('cc_log_shelfsync',{p_email:u.email,p_action:'ShelfSync password reset'});
+    SS.msg={title:'New password',email:r.email,pw:r.password}; draw(); }
+  catch(e){ toast(e.message); } }
+function removeSs(i){ var u=D.ss[i]; _removeRow('shelfsync_users',u,'ShelfSync',async function(){
+  try{ var r=await ssCall({action:'remove',email:norm(u.email)}); toast(u.email+': '+r.status); }
+  catch(e){ toast('Removed from the list, but ShelfSync was not updated: '+e.message+' — use Sync.'); }
+  SS.staff=null; }); }
+function viewSs(){
+  if(SS.missing) return '<div class="card"><h2 style="margin-top:0">ShelfSync is not set up yet</h2><p class="sub">The ShelfSync user list has not been added to the database. Run <span class="mono">supabase/command_center_modcraft.sql</span> (in the ShelfSync package) in the Modcraft project’s SQL Editor, then reload this page.</p></div>';
+  if(SS.staff===null&&!SS.loading&&!SS.err) setTimeout(ssLoadStatus,0);
+  var e=ED.ss, form='';
+  if(e==='add') form=editCard('ss-new','Add a ShelfSync user',ssForm(null,true),'addSs()','ss');
+  else if(e!=null&&D.ss[e]){
+    var u=D.ss[e];
+    form=editCard('ss-'+e,'Edit '+esc(u.name||u.email)+' <span class="mono muted">'+esc(u.email)+'</span>',ssForm(u,false)
+      +'<div class="flex" style="gap:6px;margin-top:10px"><button class="btn" onclick="ssResetKeys('+e+')">Reset Face ID / fingerprint</button><button class="btn" onclick="ssNewPassword('+e+')">New temporary password</button></div>',
+      'saveSs('+e+')','ss','removeSs('+e+')','Remove from ShelfSync');
+  }
+  var msg=SS.msg?'<div class="card" style="border:2px solid var(--accent)"><h2>'+esc(SS.msg.title)+'</h2>'
+      +(SS.msg.pw?'<p class="sub">Send these to the person privately. The password is shown only now.</p>'
+        +'<div class="mono" style="font-size:15px;line-height:1.8;padding:8px 12px;background:var(--card2);border-radius:8px">App: '+esc(SS_APP_URL)+'<br>Email: '+esc(SS.msg.email)+'<br>Password: '+esc(SS.msg.pw)+'</div>'
+        +'<button class="btn" style="margin-top:8px" onclick="ssCopyPw()">Copy</button> ':'<p class="sub">'+esc(SS.msg.text||'')+'</p>')
+      +'<button class="btn primary" style="margin-top:8px" onclick="SS.msg=null;draw()">Done</button></div>':'';
+  var extra='<button class="btn" '+(SS.busy?'disabled':'')+' onclick="ssSyncAll()">'+(SS.busy?'Working…':'Sync everyone to ShelfSync')+'</button>'
+    +'<button class="btn" onclick="SS.staff=null;SS.err=\'\';draw()">Check again</button>'
+    +'<a class="btn" style="text-decoration:none" href="'+esc(SS_APP_URL)+'" target="_blank" rel="noopener">Open ShelfSync ↗</a>';
+  return msg+'<div class="card"><p class="sub" style="margin:0"><b>Promodiser</b>: agency staff at one depot — sells, counts, requests stock, reports; never sees dashboards, planning or AI. '
+    +'<b>PPIC → Supply Chain Manager → Plant Manager (noted) → Sales &amp; Marketing Director → Managing Director</b>: the replenishment approval chain; each step only accepts its own role. '
+    +'<b>Admin</b>: ShelfSync setup (depots, items, prices, shelf space, rules). Sign-in is with Google (personal Gmail works); saving updates ShelfSync at once.</p>'
+    +(SS.err?'<div class="note err" style="margin-top:8px">'+esc(SS.err)+' <button class="btn" onclick="SS.err=\'\';SS.staff=null;draw()">Try again</button></div>':'')+'</div>'
+    +form+'<div class="card">'+listBar("openEd('ss','add')",'+ Add user',extra)
+    +'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role</th><th>Depot / plant</th><th>Agency</th><th>Until</th><th>Status</th><th>In ShelfSync</th><th></th></tr></thead><tbody>'
+    +D.ss.map(function(u,i){
+      if(!ssPassCo(u)) return '';
+      var roles=[ssRoleLabel(u.role)].concat((u.extra_roles||[]).map(ssRoleLabel));
+      var where=u.depot_code?u.depot_code:u.plant?(SS_PLANTS.find(function(k){return k[0]===u.plant})||[0,u.plant])[1]:'—';
+      var perms=SS_PERMS.filter(function(k){return u.perms&&u.perms[k[0]]===false}).length;
+      return '<tr'+sAttr([u.name,u.email,roles.join(' '),u.company,u.depot_code,u.plant,u.agency,u.notes],!u.active)+(u.active?'':' class="off"')+'><td><b>'+esc(u.name||'—')+'</b></td><td class="mono">'+esc(u.email)+'</td>'
+        +'<td>'+esc(u.company||'—')+'</td><td>'+rolePill({role:roles.join(' · '),active:u.active},ssIsAdmin(u))+'</td><td>'+esc(where)+'</td>'
+        +'<td>'+esc(u.agency||'—')+(perms?'<div class="sub">'+perms+' feature'+(perms>1?'s':'')+' off</div>':'')+'</td><td class="mono">'+esc(u.access_until||'—')+'</td>'
+        +'<td>'+actPill(u.active)+'</td><td style="white-space:nowrap">'+ssState(u)+'</td><td><button class="btn" '+(SS.busy?'disabled ':'')+'onclick="openEd(\'ss\','+i+')">Edit</button></td></tr>'}).join('')
+    +'</tbody></table></div></div>';
+}
+
 /* ── Change log ───────────────────────────────────────────────────────────── */
 function diffText(b,a){
   if(!b&&!a) return '';
   if(!b) return 'added as '+esc(a.role);
   if(!a) return 'removed';
-  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id','pin_set','title','schedule_steps','can_see_costs'];
+  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id','pin_set','title','schedule_steps','can_see_costs','extra_roles','plant','depot_code','agency','mobile','access_until','perms','require_passkey'];
   var out=keys.filter(function(k){return JSON.stringify(b[k])!==JSON.stringify(a[k])}).map(function(k){
     return esc(k)+': '+esc(JSON.stringify(b[k]))+' → '+esc(JSON.stringify(a[k]))});
   return out.join(' · ')||'no field change';
@@ -936,12 +1137,12 @@ function diffText(b,a){
 /* ── Layout (Rommel 2026-09-27): People first, then ONE main tab per app, each with its own sub-tabs.
    Lists are read-only rows; one Edit opens a form for that person. Search, company filter and
    "show inactive" on every list. The change log lives inside each app, showing only that app. */
-var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['sign','Who signs']];
+var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['ss','ShelfSync'],['sign','Who signs']];
 var SUBS={people:[],sign:[],mc:[['users','Users'],['shadow','Sign-in check'],['log','Change log']],
   pmes:[['users','Users'],['deleg','Approval delegation'],['log','Change log']],
-  ks:[['users','Users'],['log','Change log']],jb:[['users','Users'],['log','Change log']]};
-var LOG_APPS={mc:['MODCRAFT','MODCRAFT-SHEET'],pmes:['PMES'],ks:['KEYSTONE'],jb:['HATID','JOBBOARD']};
-var SUB={}, ED={pmes:null,ks:null,jb:null}, LQ='', SHOW_OFF=false;
+  ks:[['users','Users'],['log','Change log']],jb:[['users','Users'],['log','Change log']],ss:[['users','Users'],['log','Change log']]};
+var LOG_APPS={mc:['MODCRAFT','MODCRAFT-SHEET'],pmes:['PMES'],ks:['KEYSTONE'],jb:['HATID','JOBBOARD'],ss:['SHELFSYNC']};
+var SUB={}, ED={pmes:null,ks:null,jb:null,ss:null}, LQ='', SHOW_OFF=false;
 function setMain(t){ TAB=t; LQ=''; drawNav(); draw(); }
 function setSub(s){ SUB[TAB]=s; LQ=''; draw(); }
 function curSub(){ var s=SUBS[TAB]||[]; if(!s.length) return ''; if(!SUB[TAB]||!s.some(function(x){return x[0]===SUB[TAB]})) SUB[TAB]=s[0][0]; return SUB[TAB]; }
@@ -983,7 +1184,7 @@ async function _removeRow(table,u,app,after){
   if(r.error) return toast(dbErr(r.error));
   if(!r.data||!r.data.length) return toast('Not removed — the database refused the change.');
   if(after) await after();
-  toast('Removed '+u.email+' from '+app); ED[{pmes_users:'pmes',keystone_users:'ks',jobboard_users:'jb'}[table]]=null; await refresh();
+  toast('Removed '+u.email+' from '+app); ED[{pmes_users:'pmes',keystone_users:'ks',jobboard_users:'jb',shelfsync_users:'ss'}[table]]=null; await refresh();
 }
 function removePmes(i){ _removeRow('pmes_users',D.pmes[i],'PMES'); }
 function removeKs(i){ var u=D.ks[i]; _removeRow('keystone_users',u,'KEYSTONE',async function(){ await supa.from('adm_user_caps').delete().eq('email',u.email); }); }

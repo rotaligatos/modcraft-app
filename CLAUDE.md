@@ -12594,3 +12594,16 @@ never commit · PMES/KEYSTONE default work week, capacity, staff emails, supplie
   server-side, no 300 cap (81 KB vs 201 KB), and the last list is drawn instantly from `QCACHE` while it refreshes
   (`drawQueuePage`; unchanged data is not redrawn). Reopening: ~50 ms. DB time for the view is ~0.2 s.
   ⚠ When measuring KEYSTONE in a background Chrome window, timers are throttled to 1 s — use awaits, not setInterval.
+
+## What was changed on 2026-10-03 (session — ShelfSync added to the Command Center, app published)
+- **Command Center › ShelfSync** (Users · Change log), People column + "+ ShelfSync". Same design as HATID:
+  `shelfsync_users` (Modcraft project) is the master; each save calls `shelfsync-staff-sync` on the SCM project
+  (nssviuuagtlvxjvvvagt) with the admin's own Modcraft token (checked via `cc_me`), which applies it to `ss_profiles`.
+  Never deletes or bans (logins are shared with HATID/SCM); switch off = `status suspended`. Log app = `SHELFSYNC`
+  (`cc_log_shelfsync`). Simulation: `node tools/sim_cc_shelfsync.mjs`.
+- **ShelfSync app published at `/shelfsync/`** (`rotaligatos.github.io/modcraft-app/shelfsync/`) — a build copy of the
+  ShelfSync project's `dist/` (source lives outside this repo). Own scope + own worker (caches only its own shell).
+  Google sign-in = GIS + `shelfsync-google-signin` on SCM (deployed 2026-10-03, with `shelfsync-staff-sync`).
+- ⚠ NOT YET RUN: `shelfsync_users` migration on Modcraft and ShelfSync `schema.sql`/`storage.sql` on SCM — the
+  Supabase migration tool was cancelled 3×. Until run, the Command Center tab shows "ShelfSync is not set up yet"
+  and nobody can sign in to ShelfSync.
