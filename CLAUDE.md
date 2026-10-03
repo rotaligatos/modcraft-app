@@ -12723,3 +12723,11 @@ MSSI website admin moves into the Command Center (Rommel). Database (test `test_
   changing it in the workflow, `LIBS` in ShelfSync's `src/20-data.js`, and ShelfSync's `sw.js`.
 - **ShelfSync routine refresh** (`730d275`): small tables in full, big ones only what changed; full load about once a day.
   Details in ShelfSync's README / `SHELFSYNC_CONTEXT.md` (Desktop\Shelfsync is the source; `shelfsync/` here is a build copy).
+
+## What was changed on 2026-10-04 (session 3 — Orders: website TEST orders kept out of the queue)
+- `pending_orders.is_test` (set by the DB from Command Center › Website › Test account) is now read (PENDING_ORDER_COLS).
+  `_splitTestOrders()` keeps test orders in `testOrders`, OUT of `pendingOrders` — so the queue, badge and every count
+  built from pendingOrders exclude them. Orders shows "N test orders hidden · Show them"; shown ones carry a TEST pill.
+  Choice remembered per browser (`localStorage mc_show_test_orders`). Hidden test orders still get cutting-list totals.
+- Verified: smoke 207/207 identical to before (run in the cloud container — the device VM cannot download the browser);
+  in-page check: hidden queue 2 real + badge 2 + notice; Show → 3 with TEST pill; Hide → back to 2. No page errors.
