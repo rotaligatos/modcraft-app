@@ -6182,7 +6182,9 @@ function renderTrucks(){
   const showRetired = state.showRetired;
   $('fleet-body').innerHTML = `<label class="f" style="flex-direction:row;align-items:center;gap:8px;margin:0 0 12px"><input type="checkbox" id="fl-retired" ${showRetired ? 'checked' : ''}> Show retired trucks</label>` +
     (state.pools.length ? state.pools.map(p => {
-    const ts = state.trucks.filter(t => t.pool_id === p.id && (showRetired || t.status !== 'retired'));
+    const ts = state.trucks.filter(t => t.pool_id === p.id && !truckRemoved(t) && (showRetired || t.status !== 'retired'));
+    const gone = state.trucks.filter(t => t.pool_id === p.id && truckRemoved(t));
+    const canRm = ['admin', 'manager'].includes(state.me?.role);
     const act = state.trucks.filter(t => t.pool_id === p.id && t.status === 'active');
     const trips = act.reduce((s, t) => s + t.trips_per_day, 0), kgDay = act.reduce((s, t) => s + Number(t.max_weight_kg) * t.trips_per_day, 0);
     return `<div class="card pool-card">
@@ -6201,10 +6203,17 @@ function renderTrucks(){
         <span class="c-sub"><span class="pill st-${esc(t.status)}">${TRUCK_STATUS[t.status]}</span>${av ? `<div class="ft" style="color:var(--bad)">Today: ${esc(AVAIL_REASON[av.reason])}</div>` : upcoming ? `<div class="ft">${upcoming} day-off entr${upcoming > 1 ? 'ies' : 'y'} ahead</div>` : ''}</span>
         <span class="c-act" style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn" data-avail="${esc(t.id)}">Availability</button><button class="btn" data-tracker="${esc(t.id)}">📍 Tracker</button><button class="btn" data-edit-truck="${esc(t.id)}">Edit</button></span>
       </div>`; }).join('')}` : '<div class="empty" style="padding:20px">No trucks in this pool yet.</div>'}
+      ${gone.length ? `<details style="margin-top:10px"><summary class="ft" style="cursor:pointer">Sold / decommissioned (${gone.length}) — out of the app, records kept</summary>
+        ${gone.map(t => `<div class="trk trk6 retired"><span><b>${esc(t.label)}</b></span>
+          <span class="c-sub">${esc(t.plate_no || 'No plate')}</span>
+          <span class="c-sub">${esc(TRUCK_REMOVE_REASON[t.removed_reason] || 'Removed')} · ${esc(fmtDate(String(t.removed_at).slice(0, 10)))}${t.removed_by ? ` · by ${esc(t.removed_by)}` : ''}</span>
+          <span class="c-sub" style="grid-column:span 2">${esc(t.removed_note || '')}</span>
+          <span class="c-act">${canRm ? `<button class="btn" data-restore-truck="${esc(t.id)}">Restore</button>` : ''}</span></div>`).join('')}</details>` : ''}
     </div>`; }).join('') : '<div class="card empty">No logistics pools yet.</div>');
   $('fl-retired').addEventListener('change', e => { state.showRetired = e.target.checked; renderTrucks(); });
   $('btn-new-truck').addEventListener('click', () => openTruckForm(null));
   if ($('btn-new-pool')) $('btn-new-pool').addEventListener('click', () => openPoolForm(null));
+  document.querySelectorAll('[data-restore-truck]').forEach(b => b.addEventListener('click', () => restoreTruck(state.trucks.find(t => t.id === b.dataset.restoreTruck))));
   document.querySelectorAll('[data-edit-truck]').forEach(b => b.addEventListener('click', () => openTruckForm(state.trucks.find(t => t.id === b.dataset.editTruck))));
   document.querySelectorAll('[data-avail]').forEach(b => b.addEventListener('click', () => openAvail(state.ref.truckById[b.dataset.avail])));
   document.querySelectorAll('[data-tracker]').forEach(b => b.addEventListener('click', () => openTracker(state.ref.truckById[b.dataset.tracker] || state.trucks.find(t => t.id === b.dataset.tracker))));
@@ -6271,7 +6280,7 @@ function openTruckForm(t){
         </div>
         <div class="ft">Each trip gets the day’s crew cost split across that day’s trips, plus the month’s fixed cost split across the month’s trips — on top of fuel and maintenance. This is the “other fees” part of the logistics report.</div>
       </div>
-      <div class="step-note">Load per trip uses the 90% loading standard. Company-run and borrowed trucks are costed from fuel and maintenance logs; in-house truckers and 3PLs by the trip-rate table. Borrowed trucks always ask the dispatcher to confirm they're free. A truck can be deleted only if it was never used; once it has deliveries, trips or logs, retire it instead so that history stays.</div>
+      <div class="step-note">Load per trip uses the 90% loading standard. Company-run and borrowed trucks are costed from fuel and maintenance logs; in-house truckers and 3PLs by the trip-rate table. Borrowed trucks always ask the dispatcher to confirm they're free. Delete truck asks why: a truck with no records is deleted for good; a sold or decommissioned truck that has deliveries, trips or logs leaves the app but keeps those records.</div>
       <div class="row-btns" style="justify-content:flex-end">
         ${t && ['admin', 'manager'].includes(state.me?.role) ? '<button type="button" class="btn" id="tf-delete" style="margin-right:auto;color:var(--bad)">Delete truck</button>' : ''}
         <button type="button" class="btn" data-close>Cancel</button>
@@ -6293,7 +6302,7 @@ function openTruckForm(t){
   const runToggle = () => $('tf-run').classList.toggle('hidden', !canRun || f.uses_trip_rates.checked);
   f.uses_trip_rates.addEventListener('change', runToggle); f.fleet_type.addEventListener('change', runToggle); runToggle();
   if (canRun && t) sb.from('truck_cost_rates').select('*').eq('truck_id', t.id).maybeSingle().then(({ data }) => { if (data){ $('tf-crew').value = data.crew_cost_per_day ?? ''; $('tf-fixed').value = data.fixed_cost_per_month ?? ''; } }, () => {});
-  if ($('tf-delete')) $('tf-delete').addEventListener('click', () => deleteTruck(t));
+  if ($('tf-delete')) $('tf-delete').addEventListener('click', () => openRemoveTruck(t));
   f.addEventListener('submit', async e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(f).entries());
@@ -6318,29 +6327,68 @@ function openTruckForm(t){
   });
 }
 
-/* Delete a truck — only one with no history. The database refuses anything that carries jobs, trips,
-   fuel/maintenance logs, checklists or GPS readings (a plain delete would cascade them away), and we offer
-   Retire instead, which keeps the history and takes the truck out of planning. */
-async function deleteTruck(t){
+/* Removing a truck (Rommel, 2026-10-03): Delete asks WHY first.
+   - Needs an update or correction → nothing removed; back to Edit.
+   - Entered by mistake / duplicate → deleted for good, only if it holds no records.
+   - Sold / Decommissioned → deleted for good if it holds no records; if it does, it is taken out of the app
+     (every list, picker, planning and KEYSTONE) and its records are KEPT — past jobs and reports still name it.
+   A truck that holds records always keeps them. The database decides (job_truck_remove), since a plain
+   delete would cascade away trips, GPS readings and checklists. */
+const TRUCK_REMOVE_REASON = { sold:'Sold', decommissioned:'Decommissioned' };
+function truckRemoved(t){ return !!t?.removed_at; }
+function openRemoveTruck(t){
   if (!t) return;
-  if (!confirm(`Delete ${t.label}?\n\nThis removes the truck for good. It only works for a truck with no deliveries, trips, fuel or maintenance logs.`)) return;
-  const btn = $('tf-delete'); if (btn) btn.disabled = true;
-  const { data, error } = await sb.rpc('job_truck_delete', { p_truck: t.id });
-  if (error){
-    if (btn) btn.disabled = false;
-    const msg = error.message || '';
-    const missing = error.code === 'PGRST202' || (/job_truck_delete/.test(msg) && /not find|does not exist/i.test(msg));
-    return toast(missing ? 'Deleting trucks is not switched on yet — the database step still needs to be run.' : (error.message || 'Could not delete the truck'), 'error');
-  }
-  if (data?.deleted){ toast(`${t.label} deleted`, 'ok'); closeOverlay(); loadFleet(); return; }
-  const used = (data?.used || []).join(', ');
-  if (t.status === 'retired'){ if (btn) btn.disabled = false; return toast(`${t.label} can’t be deleted — it has ${used}. It is already retired, which keeps that history.`, 'error'); }
-  if (confirm(`${t.label} can’t be deleted — it has ${used}.\n\nRetire it instead? It stays in past jobs and reports but is no longer offered for planning.`)){
-    try {
-      await withRetry('Retiring truck', () => sb.from('trucks').update({ status: 'retired' }).eq('id', t.id));
-      toast(`${t.label} retired`, 'ok'); closeOverlay(); loadFleet();
-    } catch { if (btn) btn.disabled = false; }
-  } else if (btn) btn.disabled = false;
+  const opt = (v, title, sub) => `<label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:10px;cursor:pointer">
+      <input type="radio" name="rt-why" value="${v}" style="margin-top:3px"><span><b>${title}</b><div class="ft">${sub}</div></span></label>`;
+  openOverlay(`<div class="scrim" data-close></div>
+  <div class="modal" role="dialog" aria-modal="true">
+    <h2>Remove ${esc(t.label)}?</h2>
+    <div class="ft" style="margin-bottom:10px">Why is this truck going? A truck that already has deliveries, trips or logs keeps those records whatever you choose.</div>
+    <div style="display:grid;gap:8px">
+      ${opt('correction', 'Just needs an update or correction', 'Nothing is removed — you go back to Edit to fix the details.')}
+      ${opt('mistake', 'Entered by mistake or a duplicate', 'Deleted for good. Only possible if it has no records.')}
+      ${opt('sold', 'Sold', 'Taken out of the app. Its past records stay.')}
+      ${opt('decommissioned', 'Decommissioned / no longer in use', 'Taken out of the app. Its past records stay.')}
+    </div>
+    <label class="f hidden" id="rt-note-wrap" style="margin-top:10px">Note <span class="ft">— optional, e.g. buyer or date sold</span><input class="i" id="rt-note" maxlength="200"></label>
+    <div id="rt-msg" class="note hidden" style="margin-top:10px"></div>
+    <div class="row-btns" style="justify-content:flex-end;margin-top:12px">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" class="btn primary" id="rt-go" disabled>Continue</button>
+    </div>
+  </div>`);
+  bindClose();
+  const go = $('rt-go'), msg = $('rt-msg');
+  const why = () => document.querySelector('#overlay input[name=rt-why]:checked')?.value;
+  const say = (text, bad) => { msg.textContent = text; msg.classList.remove('hidden'); msg.style.background = bad ? 'var(--bad-soft)' : ''; };
+  document.querySelectorAll('#overlay input[name=rt-why]').forEach(r => r.addEventListener('change', () => {
+    const w = why(); go.disabled = !w; msg.classList.add('hidden');
+    $('rt-note-wrap').classList.toggle('hidden', !TRUCK_REMOVE_REASON[w]);
+    go.textContent = w === 'correction' ? 'Go to Edit' : w === 'mistake' ? 'Delete truck' : 'Remove from the app';
+  }));
+  go.addEventListener('click', async () => {
+    const w = why(); if (!w) return;
+    if (w === 'correction'){ closeOverlay(); openTruckForm(t); return; }
+    go.disabled = true;
+    const { data, error } = await sb.rpc('job_truck_remove', { p_truck: t.id, p_reason: w, p_note: $('rt-note').value || null });
+    if (error){
+      go.disabled = false;
+      const m = error.message || '';
+      const missing = error.code === 'PGRST202' || (/job_truck_remove/.test(m) && /not find|does not exist/i.test(m));
+      return say(missing ? 'Removing trucks is not switched on yet — the database step still needs to be run.' : (m || 'Could not remove the truck.'), true);
+    }
+    const used = (data?.used || []).join(', ');
+    if (data?.result === 'deleted'){ toast(`${t.label} deleted`, 'ok'); closeOverlay(); loadFleet(); return; }
+    if (data?.result === 'removed'){ toast(`${t.label} removed from the app — its records (${used}) are kept`, 'ok'); closeOverlay(); loadFleet(); return; }
+    if (data?.result === 'refused'){ go.disabled = false; return say(`${t.label} can’t be deleted — it has ${used}. If it was sold or is no longer used, choose Sold or Decommissioned: it leaves the app and the records stay.`, true); }
+    go.disabled = false; say('Something unexpected came back — nothing was changed.', true);
+  });
+}
+async function restoreTruck(t){
+  if (!t || !confirm(`Bring ${t.label} back into the app?\n\nIt returns as Retired; set it to Active in Edit if it is back in service.`)) return;
+  const { error } = await sb.rpc('job_truck_restore', { p_truck: t.id });
+  if (error) return toast(error.message || 'Could not restore the truck', 'error');
+  toast(`${t.label} is back (Retired)`, 'ok'); loadFleet();
 }
 
 /* ---------- Areas & rates ---------- */
