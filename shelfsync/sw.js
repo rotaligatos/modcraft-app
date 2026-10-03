@@ -1,5 +1,5 @@
 // ShelfSync service worker: app shell works offline; data calls always go to the network.
-const VERSION = "shelfsync-v2";
+const VERSION = "shelfsync-v3";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/co-wcli.png", "./icons/co-wcli-mark.png", "./icons/co-cwli.png", "./icons/co-cwli-mark.png", "./icons/rtmo.png",
   "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"];
 self.addEventListener("install", e => {
@@ -13,7 +13,8 @@ self.addEventListener("fetch", e => {
   if (e.request.method !== "GET" || url.hostname.endsWith("supabase.co") || url.pathname.includes("/functions/")) return; // never cache data/API
   // pages: network first so updates arrive; fall back to cache offline
   if (e.request.mode === "navigate") {
-    e.respondWith(fetch(e.request).then(r => { const c = r.clone(); caches.open(VERSION).then(x => x.put("./index.html", c)); return r; })
+    // cache:"no-cache" = always ask the server (GitHub Pages lets browsers keep the page 10 min otherwise)
+    e.respondWith(fetch(e.request.url, { cache: "no-cache", credentials: "same-origin" }).then(r => { const c = r.clone(); caches.open(VERSION).then(x => x.put("./index.html", c)); return r; })
       .catch(() => caches.match("./index.html")));
     return;
   }
