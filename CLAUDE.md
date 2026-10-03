@@ -12654,3 +12654,15 @@ Rommel: there was no setting for who may use the Command Center or at what level
 - Simulation: ShelfSync `tools/sim_company_access.mjs` (demo data, all pass). Desktop\Shelfsync synced.
 - Next for Rommel: upload the CWLI depot file to Desktop\Shelfsync; then load depots (company CWLI; plant
   CEBU for Cebu, PASIG outside Cebu) → items/prices/stock → promodisers → Sync everyone → pilot.
+
+## What was changed on 2026-10-03 (session 4 — CWLI data files, branches per promodiser, branding, `d4af116`)
+- **CWLI import files** built from Rommel's "Modern Trade CWLI" workbooks into Desktop\Shelfsync\CWLI import
+  (7 files + READ ME FIRST). Client data — NEVER into this repo; build scripts stay on the Desktop.
+  Not imported yet (Rommel imports via ShelfSync Admin › Import data). Promodiser emails still needed.
+- **Promodiser with several branches:** `ss_profiles.depot_ids` (SCM, `multi_depot.sql`, RUN) — every depot
+  rule uses `ss_is_my_depot()`. Modcraft `shelfsync_users.depot_codes`; `shelfsync-staff-sync` v3 maps codes
+  → ids. Command Center › ShelfSync: "Home depot" + "Also handles". App: branch picker in the top bar.
+- **Branding:** company logo by user (promodiser = branch's company; plant = their companies; Admin/MD both;
+  sign-in = last used on the device), "Made by RTmo Digital Solutions" on sign-in / plant menu / account menu.
+  Logos in `shelfsync/icons/co-*.png`, `rtmo.png`; worker cache `shelfsync-v2`. Used the repo's corrected RTmo
+  artwork, not the uploaded one (its tagline is garbled).
