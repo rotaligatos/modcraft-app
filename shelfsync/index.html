@@ -996,14 +996,33 @@ Engine.updateStocks = ({ rows }) => rows.forEach(r => { const s = idx.stock(r.de
    A full load runs at sign-in, on "Refresh data" and every 30 minutes when the app is in use; in between only what changed
    is fetched (new sales, stock that moved, requests that changed), so a sale doesn't re-download the whole network. */
 async function loadScript(src) {
-  return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("Could not load " + src)); document.head.appendChild(s); });
+  return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => { s.remove(); rej(new Error("Could not load " + src)); }; document.head.appendChild(s); });
 }
-/* Excel reader: SheetJS 0.20.3 from SheetJS's own CDN (0.18.5 on cdnjs has known file-parsing flaws; used only if the new one can't load) */
-async function loadXLSX() {
-  if (window.XLSX) return;
-  try { await loadScript("https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"); }
-  catch (e) { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"); }
+/* Libraries: the copy published with the app first (vendor/, same address as the app, so a blocked or slow CDN doesn't
+   stop sign-in), then the public CDN (local preview, or a deploy that couldn't fetch the copy). Same versions both ways.
+   The deploy fetches vendor/ (see the modcraft-app deploy workflow); sw.js keeps the same list. */
+const LIBS = {
+  supabase: { ok: () => !!window.supabase, urls: ["vendor/supabase.min.js", "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"] },
+  webauthn: { ok: () => !!window.SimpleWebAuthnBrowser, urls: ["vendor/simplewebauthn-browser.umd.min.js", "https://unpkg.com/@simplewebauthn/browser@13.1.0/dist/bundle/index.umd.min.js"] },
+  qrcode: { ok: () => !!window.Html5Qrcode, urls: ["vendor/html5-qrcode.min.js", "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"] },
+  chart: { ok: () => !!window.Chart, urls: ["vendor/chart.umd.min.js", "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"] },
+  // Excel reader: SheetJS 0.20.3 (0.18.5 on cdnjs has known file-parsing flaws; last resort only)
+  xlsx: { ok: () => !!window.XLSX, urls: ["vendor/xlsx.full.min.js", "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js", "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"] },
+};
+const LIB_LOADING = {};
+function loadLib(name) {
+  const lib = LIBS[name];
+  if (lib.ok()) return Promise.resolve();
+  return LIB_LOADING[name] || (LIB_LOADING[name] = (async () => {
+    let err = null;
+    for (const u of lib.urls) {
+      try { await loadScript(u); if (lib.ok()) return; err = new Error(u + " loaded but did not set up " + name); }
+      catch (e) { err = e; }
+    }
+    throw err;
+  })().finally(() => { delete LIB_LOADING[name]; }));
 }
+async function loadXLSX() { await loadLib("xlsx"); }
 /* Setup › Connection may only point at a Supabase project (never another host) */
 function liveConfig() {
   const c = LS.get("shelfsync-config") || {}, out = { ...CONFIG };
@@ -1015,7 +1034,7 @@ async function initLive() {
   if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) return false;
   MODE = "live";
   try {
-    if (!window.supabase) await loadScript("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js");
+    await loadLib("supabase");
     // own storage key: ShelfSync's sign-in is separate from HATID's on the same site
     SB = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, { auth: { persistSession: true, storageKey: "shelfsync-auth", autoRefreshToken: true } });
   } catch (e) { SB = null; console.warn("Supabase library not available", e); }
@@ -1789,7 +1808,7 @@ function render() {
   if (!after) return;
   // charts: the chart library loads only on pages that draw charts (promodisers never download it)
   if (document.querySelector("#main canvas") && !window.Chart) {
-    loadScript(CHART_URL).then(() => { if (ME && UI.route === route) rerender({ keepInputs: true }); })
+    loadLib("chart").then(() => { if (ME && UI.route === route) rerender({ keepInputs: true }); })
       .catch(() => document.querySelectorAll("#main canvas").forEach(c => { c.outerHTML = '<div class="empty small">Charts need a connection.</div>'; }));
     return;
   }
@@ -1801,7 +1820,6 @@ function updateBadge() {
   let n = 0; try { n = isPromo() ? S.requests.filter(r => myDepotIds().includes(r.depot_id) && r.status === "dispatched").length + failed.length : myQueue().length; } catch (e) {}
   (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
 }
-const CHART_URL = "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js";
 /* keepInputs: a background refresh (new message, sync finished) keeps whatever the person is typing */
 function captureInputs() {
   const out = [];
@@ -1931,7 +1949,7 @@ const deviceLabel = () => { const ua = navigator.userAgent;
 const Bio = {
   has(uid) { return (S.passkeys || []).some(k => k.user_id === (uid || (ME && ME.id))); },
   required() { return bioPolicy().actions && !!ME && ME.require_passkey !== false; },
-  async lib() { if (!window.SimpleWebAuthnBrowser) await loadScript("https://unpkg.com/@simplewebauthn/browser@13.1.0/dist/bundle/index.umd.min.js"); return window.SimpleWebAuthnBrowser; },
+  async lib() { await loadLib("webauthn"); return window.SimpleWebAuthnBrowser; },
   /* sheet with a button: WebAuthn must start from a tap (Safari) */
   prompt({ title, body, button, run }) {
     return new Promise((resolve, reject) => {
@@ -3777,7 +3795,7 @@ const App = {
     if (UI.scanner) { try { await UI.scanner.stop(); } catch (e) {} UI.scanner = null; box.innerHTML = ""; return; }
     box.innerHTML = `<div id="scanner"></div><div class="row between" style="margin-top:6px"><p class="small faint">Point the camera at each barcode. Items are added as they're scanned.</p><button class="btn small" onclick="App.camera()">Stop camera</button></div>`;
     try {
-      if (!window.Html5Qrcode) await loadScript("https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js");
+      await loadLib("qrcode");
       const sc = new Html5Qrcode("scanner"); UI.scanner = sc; let last = "", lastAt = 0;
       // keeps scanning: each barcode adds one; the same barcode again within 2 seconds is ignored (camera sees it twice)
       await sc.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 260, height: 120 } }, code => {

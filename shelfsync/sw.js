@@ -1,17 +1,23 @@
 // ShelfSync service worker: the app and its libraries work offline; data calls always go to the network.
 // A new version installs in the background and waits until the person taps "Reload" in the app.
-const VERSION = "shelfsync-v4";
+const VERSION = "shelfsync-v5";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/co-wcli.png", "./icons/co-wcli-mark.png",
   "./icons/co-cwli.png", "./icons/co-cwli-mark.png", "./icons/rtmo.png"];
-// libraries from CDNs: stored at install when reachable, never allowed to break the install
-const LIBS = ["https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js",
-  "https://unpkg.com/@simplewebauthn/browser@13.1.0/dist/bundle/index.umd.min.js",
-  "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js",
-  "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"];
+// libraries: the copy published with the app (vendor/), else the CDN — same list as LIBS in src/20-data.js.
+// Stored at install when reachable; never allowed to break the install. The Excel reader is left to load on use.
+const LIBS = [
+  ["./vendor/supabase.min.js", "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"],
+  ["./vendor/simplewebauthn-browser.umd.min.js", "https://unpkg.com/@simplewebauthn/browser@13.1.0/dist/bundle/index.umd.min.js"],
+  ["./vendor/html5-qrcode.min.js", "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"],
+  ["./vendor/chart.umd.min.js", "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"]];
+const isScript = r => r && r.ok && !/text\/html/i.test(r.headers.get("content-type") || "");
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(VERSION).then(async c => {
     await c.addAll(SHELL);
-    await Promise.all(LIBS.map(u => fetch(u, { mode: "cors" }).then(r => r.ok ? c.put(u, r) : null).catch(() => null)));
+    await Promise.all(LIBS.map(async ([own, cdn]) => {
+      try { const r = await fetch(own, { cache: "no-cache" }); if (isScript(r)) return c.put(own, r); } catch (e) {}
+      try { const r = await fetch(cdn, { mode: "cors" }); if (r.ok) return c.put(cdn, r); } catch (e) {}
+    }));
   }));
 });
 self.addEventListener("message", e => { if (e.data === "skip-waiting") self.skipWaiting(); });
@@ -31,7 +37,8 @@ self.addEventListener("fetch", e => {
   }
   // icons, libraries: from the phone first, network otherwise (good responses only are kept)
   e.respondWith(caches.match(e.request).then(hit => hit || fetch(e.request).then(r => {
-    if (r.ok && (url.origin === location.origin || /cdnjs|jsdelivr|unpkg|sheetjs|fonts\.(googleapis|gstatic)/.test(url.hostname))) {
+    if (r.ok && (url.origin === location.origin || /cdnjs|jsdelivr|unpkg|sheetjs|fonts\.(googleapis|gstatic)/.test(url.hostname))
+        && !(e.request.destination === "script" && !isScript(r))) {
       const c = r.clone(); caches.open(VERSION).then(x => x.put(e.request, c));
     }
     return r;
