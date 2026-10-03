@@ -16105,8 +16105,16 @@ function _apprSigObjectFor(email){
 // per-minute quota shared with everything else the app does -- saturating it makes the USER's own
 // save fail, which is exactly what happened when this first shipped.
 var APPR_APPLY_PER_POLL=2;
+// Attempts per request id, kept per browser. A decision that cannot be carried onto its quotation
+// (state too large for the Sheet, a save that keeps failing) was retried every poll forever,
+// downloading the whole quotation each minute: QT-C00000016 (~600 KB) was fetched dozens of times a
+// day on 2026-10-03 for an approval from 14 September. Three tries, then it is left for a person.
+var APPR_APPLY_MAX_TRIES=3, APPR_APPLY_TRIES_KEY='mc_appr_apply_tries';
+function _apprApplyTries(){ try{ return JSON.parse(localStorage.getItem(APPR_APPLY_TRIES_KEY)||'{}')||{}; }catch(e){ return {}; } }
+function _apprApplyTriesSet(o){ try{ localStorage.setItem(APPR_APPLY_TRIES_KEY,JSON.stringify(o)); }catch(e){} }
 function _apprApplyRemoteDecisions(){
   if(!gToken) return;
+  var tries=_apprApplyTries();
   var budget=APPR_APPLY_PER_POLL;
   NOTIFS.forEach(function(n){
     if(budget<=0) return;
@@ -16158,6 +16166,7 @@ function _apprApplyRemoteDecisions(){
       payload={reqId:n.reqId,serial:n.serial,type:'signature',sigSlot:n.sigSlot,sigValue:sig,ctx:n.ctx,
                by:n.by,approverEmail:n.approverEmail};
     }
+    if((tries[n.reqId]||0)>=APPR_APPLY_MAX_TRIES) return;
     budget--;
     n.applied=true;   // optimistic: one missed apply we can see in the log beats a retry loop
     _persistApprovedFieldToQuotation(payload,function(ok){
@@ -16169,8 +16178,13 @@ function _apprApplyRemoteDecisions(){
         // wrong one. Provenance is passed down instead of logged separately, so one decision
         // leaves one line.
       } else {
-        n.applied=false;   // genuinely failed — let the next poll try again
-        console.warn('[approval] could not apply the phone decision for '+n.serial);
+        n.applied=false;   // genuinely failed — let the next poll try again, up to the limit
+        var t=_apprApplyTries(); t[n.reqId]=(t[n.reqId]||0)+1; _apprApplyTriesSet(t);
+        console.warn('[approval] could not apply the phone decision for '+n.serial+' (try '+t[n.reqId]+' of '+APPR_APPLY_MAX_TRIES+')');
+        if(t[n.reqId]===APPR_APPLY_MAX_TRIES){
+          try{ logActivity('An approved '+(APPR_TYPE_LABELS[n.type]||n.type)+' could not be carried onto this quotation automatically after '
+            +APPR_APPLY_MAX_TRIES+' tries. Open the quotation and check it before relying on it.', n.serial); }catch(e4){}
+        }
       }
     },'a phone');
   });
@@ -35074,12 +35088,28 @@ function _writeLogEntry(e){
       .catch(function(){}));
   }
   if(e.needSupa && typeof supaReady==='function' && supaReady()){
-    jobs.push(supa.from('activity_log').insert({user_email:e.email||null,action:e.action,serial:e.serial||null,
-        attachments:(e.att&&e.att.length)?e.att:null})
-      .then(function(r){ if(!r.error) owe.supa=false; })
+    // The database only accepts a line from the account the browser is connected as. An entry
+    // queued under another person on a shared machine (or written before this browser connected)
+    // can never pass that check, so it was retried every 2 minutes forever: on 2026-10-03 the two
+    // shared designer machines sent ~2,200 rejected writes a day. Such an entry is written under the
+    // connected account and says whose it was; the Sheet copy keeps the original name.
+    var sessEmail=String((supaSession&&supaSession.user&&supaSession.user.email)||'').trim().toLowerCase();
+    var who=String(e.email||'').trim().toLowerCase();
+    var row={user_email:e.email||null,action:e.action,serial:e.serial||null,attachments:(e.att&&e.att.length)?e.att:null};
+    if(sessEmail && who!==sessEmail){ row.user_email=sessEmail; row.action='['+(e.email||'signed-in user unknown')+' on this device] '+e.action; }
+    jobs.push(supa.from('activity_log').insert(row)
+      .then(function(r){ if(!r.error) owe.supa=false; else e.supaFails=(e.supaFails||0)+1; })
       .catch(function(){}));
   }
-  return Promise.all(jobs).then(function(){ return owe; });
+  return Promise.all(jobs).then(function(){
+    // A write refused five times is not a passing network fault. Stop retrying it once the Sheet
+    // holds the line, so a permanent refusal cannot turn into an endless stream of requests.
+    if(owe.supa && !owe.sheets && (e.supaFails||0)>=5){
+      console.warn('[log] activity line refused by the database 5 times — kept in the Sheet only:',e.action);
+      owe.supa=false;
+    }
+    return owe;
+  });
 }
 function flushLogOutbox(){
   var a=_logOutboxLoad(); if(!a.length) return Promise.resolve(0);
