@@ -12666,3 +12666,8 @@ Rommel: there was no setting for who may use the Command Center or at what level
   sign-in = last used on the device), "Made by RTmo Digital Solutions" on sign-in / plant menu / account menu.
   Logos in `shelfsync/icons/co-*.png`, `rtmo.png`; worker cache `shelfsync-v2`. Used the repo's corrected RTmo
   artwork, not the uploaded one (its tagline is garbled).
+- **Same day, two fixes** (`5f982f4`, `7599ba2`): the RTmo footer made the side menu taller than short pages,
+  which stretched to match (header pushed down, filter buttons as circles) — `.plant-layout{align-items:start}`,
+  check `shelfsync/tools/sim_page_layout.mjs`. And the ShelfSync worker fetched the page through GitHub Pages'
+  10-minute browser cache, so a refresh showed the old copy — navigations now use `cache:"no-cache"` (sw v3).
+  Google sign-in only works from the published address; opening the Desktop copy (file://) gets "Access blocked".
