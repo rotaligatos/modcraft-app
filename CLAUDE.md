@@ -12635,3 +12635,8 @@ Rommel: there was no setting for who may use the Command Center or at what level
   stays Owner; 4 on the list). ShelfSync **Sync everyone** run from the Command Center: `ss_profiles` now
   has Rommel (admin + plant_mgr, WCLI/PASIG). **No depots yet (`ss_depots` = 0)** — promodisers need a
   depot before they can be added. Next: add depots in ShelfSync (Admin setup), then promodisers here.
+- **ShelfSync working folder (Rommel, 2026-10-03):** `C:\Users\WCLI Rommel\Desktop\Shelfsync` on his PC holds the
+  ShelfSync source (`shelfsync/`) and `SHELFSYNC_CONTEXT.md` (= `shelfsync/README.md`). Put every ShelfSync
+  update there (and the notes), then copy `dist/` into this repo's `shelfsync/` to publish. Updated to the current
+  version 2026-10-03; old copy kept as `_backup-before-2026-10-03.tgz`. The folder does not allow deletes by
+  default — extract with `tar --overwrite`.
