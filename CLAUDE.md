@@ -12631,3 +12631,7 @@ Rommel: there was no setting for who may use the Command Center or at what level
   edit / remove; Managers see it read-only. Header shows your level. Simulation `tools/sim_cc_access.mjs`.
 - ⚠ A new Command Center feature must gate on `cc_can_manage()` (or `cc_is_owner()`), never
   `app_is_admin_tier()` — that now means "Modcraft admin", not "may use the Command Center".
+- **2026-10-03 later:** Rommel added his Yahoo account as a Command Center **Manager** (company account
+  stays Owner; 4 on the list). ShelfSync **Sync everyone** run from the Command Center: `ss_profiles` now
+  has Rommel (admin + plant_mgr, WCLI/PASIG). **No depots yet (`ss_depots` = 0)** — promodisers need a
+  depot before they can be added. Next: add depots in ShelfSync (Admin setup), then promodisers here.
