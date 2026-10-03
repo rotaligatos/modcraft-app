@@ -12671,3 +12671,21 @@ Rommel: there was no setting for who may use the Command Center or at what level
   check `shelfsync/tools/sim_page_layout.mjs`. And the ShelfSync worker fetched the page through GitHub Pages'
   10-minute browser cache, so a refresh showed the old copy — navigations now use `cache:"no-cache"` (sw v3).
   Google sign-in only works from the published address; opening the Desktop copy (file://) gets "Access blocked".
+
+## What was changed on 2026-10-04 (session — signed-in clients are not staff: `supabase_lock_staff_tables.sql`, RUN)
+Found while planning the Command Center website controls. Google sign-in was opened to outside clients for the MSSI
+portal, so `authenticated` no longer means staff. Proven by impersonation (rolled back) BEFORE the fix: any Google
+account could UPDATE all 67 price_services rows and read/write price_materials, price_hardware, settings,
+cabinet_templates, mapping_audit; read adm_settings, tickets, quotation_states, board_layouts, draft job openings and
+22 pending_orders with a blank source_company. No outsider had signed in (all 10 auth users were staff).
+Reverse fault: a signed-in NON-staff client could not file an order, cutting list or attachment (only anon + staff
+had insert paths) — invisible whenever staff tested.
+- `app_is_internal()` = email active on ANY staff list (users, keystone_users, pmes_users, cc_access,
+  shelfsync_users, jobboard_users).
+- RESTRICTIVE policy "staff only" on price_materials/hardware/services, settings, cabinet_templates, mapping_audit,
+  adm_settings, tickets, quotation_states, board_layouts. pending_orders: clients SELECT own/company only; UPDATE/DELETE
+  staff only. job_openings: drafts staff only. Clients may INSERT orders, cutting lists, order-attachments (same checks as anon).
+- Test `test_lock_staff_tables.sql` (raises at the end, saves nothing): 29 staff x 22 tables = 638 counts, 0 changed.
+  Live check after: outsider sees only catalogue_*; cannot update prices; client files order+list+file, sees only own.
+- ⚠ A NEW staff table must get the same "staff only" restrictive policy — `authenticated` includes clients now.
+- ⚠ A new staff app with its own user list must be added to `app_is_internal()`, or its users lose these tables.
