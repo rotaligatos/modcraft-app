@@ -12604,6 +12604,7 @@ never commit · PMES/KEYSTONE default work week, capacity, staff emails, supplie
 - **ShelfSync app published at `/shelfsync/`** (`rotaligatos.github.io/modcraft-app/shelfsync/`) — a build copy of the
   ShelfSync project's `dist/` (source lives outside this repo). Own scope + own worker (caches only its own shell).
   Google sign-in = GIS + `shelfsync-google-signin` on SCM (deployed 2026-10-03, with `shelfsync-staff-sync`).
-- ⚠ NOT YET RUN: `shelfsync_users` migration on Modcraft and ShelfSync `schema.sql`/`storage.sql` on SCM — the
-  Supabase migration tool was cancelled 3×. Until run, the Command Center tab shows "ShelfSync is not set up yet"
-  and nobody can sign in to ShelfSync.
+- ✅ DATABASES INSTALLED 2026-10-03 (via the Supabase SQL editor; the migration tool was cancelled 3×):
+  Modcraft `shelfsync_users` (2 policies, 3 triggers, Rommel seeded as admin + plant_mgr); SCM ShelfSync
+  `schema.sql`+`storage.sql` (34 `ss_` tables, all RLS on, bucket `shelfsync-docs`). `ss_profiles` is empty until
+  someone presses **Sync everyone** in Command Center › ShelfSync — nobody can sign in to ShelfSync before that.
