@@ -1026,12 +1026,13 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
 <section id="screen-settings" class="hidden">
   <main>
     <div class="fleet-head">
-      <div><h2 style="margin:0">Settings</h2><div class="muted" style="font-size:14px" id="set-sub">One-time setup — messaging, sales agents, report data and users</div></div>
+      <div><h2 style="margin:0">Settings</h2><div class="muted" style="font-size:14px" id="set-sub">One-time setup — messaging, sales agents, trucking rates, report data and users</div></div>
       <div class="row-btns" style="margin:0" id="set-actions"></div>
     </div>
     <div class="subtabs" role="tablist" id="set-tabs">
       <button class="subtab" data-set="messaging" role="tab">Messaging (email &amp; SMS)</button>
       <button class="subtab" data-set="agents" role="tab">Sales agents</button>
+      <button class="subtab" data-set="rates" role="tab">Trucking rates</button>
       <button class="subtab" data-set="reportdata" role="tab">Report data</button>
       <button class="subtab" data-set="pickup" role="tab">Pick-up</button>
       <button class="subtab" data-set="users" role="tab">Users</button>
@@ -6319,7 +6320,7 @@ function renderAreas(){
   state.areasPool = pools.some(p => p.id === state.areasPool) ? state.areasPool : pools[0].id;
   const pool = state.ref.poolById[state.areasPool];
   setFleetHead('Delivery groups and their days, areas, destinations and trip rates. Rate changes keep history by effective date.',
-    '<button class="btn" id="btn-rate-tpl">⬇ Excel template</button><button class="btn" id="btn-rate-up">⬆ Upload rates</button><button class="btn primary" id="btn-new-dest">+ Add destination</button>');
+    '<button class="btn" id="btn-rate-tpl">⬇ Excel template</button><button class="btn" id="btn-rate-up">⬆ Upload rate file</button><button class="btn primary" id="btn-new-dest">+ Add destination</button>');
   const groups = state.ref.groups.filter(g => g.pool_id === pool.id);
   const classes = classesForPool(pool.id);
   const hasBrackets = poolHasBrackets(pool.id);
@@ -9024,7 +9025,7 @@ $('modem-chip').addEventListener('click', () => { if (canSettings()){ state.setS
 document.querySelectorAll('#set-tabs .subtab').forEach(b => b.addEventListener('click', () => { state.setSub = b.dataset.set; renderSettings(); }));
 function setSetHead(sub, actions = ''){ $('set-sub').textContent = sub; $('set-actions').innerHTML = actions; }
 function renderSettings(){
-  const allowed = ['agents', 'reportdata', 'pickup', ...(isAdmin() ? ['messaging', 'users'] : [])];
+  const allowed = ['agents', ...(canSeeRates() ? ['rates'] : []), 'reportdata', 'pickup', ...(isAdmin() ? ['messaging', 'users'] : [])];
   if (!allowed.includes(state.setSub)) state.setSub = isAdmin() ? 'messaging' : 'agents';
   document.querySelectorAll('#set-tabs .subtab').forEach(b => { b.classList.toggle('active', b.dataset.set === state.setSub); b.classList.toggle('hidden', !allowed.includes(b.dataset.set)); });
   const body = $('set-body');
@@ -9033,6 +9034,7 @@ function renderSettings(){
   if (state.setSub === 'users'){ body.innerHTML = ''; body.appendChild(uw); uw.style.padding = '0'; uw.querySelector('.fleet-head')?.classList.add('hidden'); setSetHead('Who can use HATID, their role and company — managed in the Command Center', '<a class="btn primary" href="https://rotaligatos.github.io/modcraft-app/command-center.html?tab=hatid" target="_blank" rel="noopener">Manage in Command Center ↗</a>'); loadUsers(); return; }
   if (uw.parentElement === body) $('screen-users').appendChild(uw);
   if (state.setSub === 'messaging' || state.setSub === 'agents') return renderNotify();
+  if (state.setSub === 'rates') return renderRateSettings();
   if (state.setSub === 'reportdata') return renderReportData();
   if (state.setSub === 'pickup') return renderPkSettings();
 }
@@ -10071,11 +10073,15 @@ const FEE_ROWS = [['second_drop_fee', '2nd drop'], ['third_drop_fee', '3rd drop'
 const normTxt = s => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 function classHeader(c){ return 'Rate: ' + (c === 'standard' ? 'Standard' : TRUCK_CLASS[c] || c); }
 function classFromHeader(h){
-  const n = String(h).replace(/^\s*rate\s*[:\-–]?\s*/i, '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  if (!n || /^(standard|trip_rate|standard_per_trip_rate|per_trip)$/.test(n)) return 'standard';
-  if (/^(10_?wheeler|ten_?wheeler)$/.test(n)) return 'ten_wheeler';
+  // "Rate: Elf" → elf · "Rate per Trip (PHP)" / "Trip rate" / "Rate: Standard" → standard · "10-Wheeler" → ten_wheeler
+  const n = String(h ?? '').toLowerCase().replace(/^\s*rate\s*[:\-–]?\s*/, '').replace(/\(.*?\)/g, ' ').replace(/₱/g, ' ')
+    .replace(/\b(per|trip|php|amount|pesos?|rate)\b/g, ' ').trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!n || n === 'standard') return 'standard';
+  if (/^(10_?wheeler|ten_?wheeler|10w)$/.test(n)) return 'ten_wheeler';
   return n;
 }
+/* a rate column headed with just the truck class (BONGO, ELF, FORWARD, 10 WHEELER) — the truckers' own rate letters do this */
+function isClassHeader(h){ return /^(standard|bongo|elf|forward|(10|ten)[\s-]?wheeler)$/.test(normTxt(String(h ?? '').replace(/\(.*?\)/g, ' '))); }
 function poolHasBrackets(poolId){ return state.ref.brackets.some(b => state.ref.zoneById[state.ref.destById[b.destination_id]?.zone_id]?.pool_id === poolId); }
 function poolDests(poolId){ return state.ref.dests.filter(d => state.ref.zoneById[d.zone_id]?.pool_id === poolId); }
 function rateSheetAoa(pool){
@@ -10094,107 +10100,203 @@ async function downloadRateTemplate(pool){
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['Fee', 'Amount (₱)'], ...FEE_ROWS.map(([k, l]) => [l, Number(pool[k] || 0)])]), 'Fees');
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([
     ['How to update rates'], [''],
+    ['You can upload either this file or the trucker\'s own rate letter as it arrives (province headings, a "Rate per Trip" column and the drop fees at the bottom are all understood).'], [''],
     ['1. This file already has the current rates. Change the amounts that changed; add new destinations as new rows.'],
     ['2. Keep the header row. Columns starting with "Rate:" are truck classes (e.g. Rate: Standard, Rate: Elf). Add a column for a new class.'],
     ['3. Delivery group and Area group destinations for scheduling. A new group or area name is created automatically.'],
     ['4. Leave a rate blank to keep the current one. Amounts can be typed with or without ₱ and commas.'],
     ['5. Note: text shown to dispatchers (e.g. "check rate with trucker"). Type - to clear an existing note; leave blank to keep it.'],
     ['6. The Fees sheet holds the drop and backload fees added on top of the farthest drop (admins and managers only).'],
-    ['7. In the HATID: Fleet › Areas & rates › Upload rates. Pick the date the new rates take effect, check the preview, then apply.'],
+    ['7. In HATID: Settings › Trucking rates (or Fleet › Areas & rates) › Upload rate file. Pick the company, check the preview, then apply.'],
     ['   Older rates are kept, so past jobs keep the rate that applied on their date.'],
     ['8. No file? Copy the rows from Excel or Google Sheets (header row included) and paste them into the same window.']]), 'Instructions');
   X.writeFile(wb, `HATID-rates_${pool.name.replace(/[^\w-]+/g, '-')}_${localDate()}.xlsx`);
 }
 function parseNum(v){ if (v == null || String(v).trim() === '') return null; const n = Number(String(v).replace(/[₱,\s]|php/gi, '')); return isNaN(n) ? NaN : n; }
+const isNumCell = v => { const n = parseNum(v); return n != null && !Number.isNaN(n); };
+/* Drop and backload fees, from the Fees sheet or a terms block at the bottom of a rate letter */
+function feeKey(label){
+  const l = normTxt(label);
+  if (/back\s*-?\s*load/.test(l)) return 'backload_fee';
+  if (/succeed|thereafter|each drop after|after the 3rd|4th/.test(l)) return 'succeeding_drop_fee';
+  if (/(2nd|second)\s*drop/.test(l)) return 'second_drop_fee';
+  if (/(3rd|third)\s*drop/.test(l)) return 'third_drop_fee';
+  return null;
+}
+/* "Effectivity Date: September 21, 2026 | Origin: …" → 2026-09-21 */
+function effectiveFromText(t){
+  const m = String(t ?? '').match(/effectiv\w*(?:\s+date)?\s*[:\-–]?\s*([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}\/\d{4})/i);
+  if (!m) return null;
+  const d = new Date(m[1].replace('.', ''));
+  return isNaN(d) ? null : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/* Reads HATID's own template AND the truckers' rate letters: title lines and an effectivity date above the header,
+   province headings ("PROVINCE OF RIZAL"), the header repeated under each heading, a single "Rate per Trip" column,
+   and a terms block at the bottom with the drop/backload fees. */
 function parseRateTable(aoa){
-  const out = { rows: [], errors: [], classes: [] };
+  const out = { rows: [], errors: [], classes: [], fees: null, effective: null, terms: [], headings: 0 };
   const hi = aoa.findIndex(r => (r || []).some(c => normTxt(c) === 'destination'));
+  for (const r of aoa.slice(0, hi < 0 ? 15 : hi)) for (const c of r || []) out.effective ??= effectiveFromText(c);
   if (hi < 0){ out.errors.push('No header row with a “Destination” column. Keep the template’s header row.'); return out; }
   const head = aoa[hi].map(h => String(h ?? '').trim()), col = {};
   head.forEach((h, i) => {
     const n = normTxt(h);
     if (/^(delivery )?group$/.test(n)) col.group = i; else if (n === 'area') col.area = i; else if (n === 'destination') col.destination = i;
     else if (n === 'province') col.province = i; else if (/^km/.test(n)) col.km = i; else if (/^notes?$/.test(n)) col.note = i;
-    else if (/^rate\b/.test(n)){ (col.rates ??= []).push([i, classFromHeader(h)]); }
+    else if (/^rate\b/.test(n) || isClassHeader(h)){ (col.rates ??= []).push([i, classFromHeader(h)]); }
     else if (/^charge\b/.test(n)){ const k = /full/.test(n) ? 'full_truckload' : /below|under/.test(n) ? 'below_30k' : /50/.test(n) ? 'from_50k' : /30/.test(n) ? 'from_30k' : null; if (k) (col.br ??= []).push([i, k]); }
   });
-  if (!col.rates?.length) out.errors.push('No rate columns found — rate columns must start with “Rate:” (e.g. Rate: Standard).');
-  out.classes = (col.rates || []).map(r => r[1]);
+  if (!col.rates?.length) out.errors.push('No rate columns found — rate columns must start with “Rate:” (e.g. Rate: Standard) or be named after the truck class.');
+  out.classes = [...new Set((col.rates || []).map(r => r[1]))];
   const cell = (r, i) => i == null ? '' : String(r[i] ?? '').trim();
+  const fees = {};
+  let heading = '';
   aoa.slice(hi + 1).forEach((r, k) => {
     if (!r || r.every(c => String(c ?? '').trim() === '')) return;
     const line = hi + k + 2, dest = cell(r, col.destination);
-    if (!dest){ out.errors.push(`Row ${line}: no destination — skipped.`); return; }
-    const row = { line, group: cell(r, col.group), area: cell(r, col.area), destination: dest, province: cell(r, col.province), km: '', note: cell(r, col.note), rates: {}, brackets: {} };
+    if (normTxt(dest) === 'destination') return;                              // header repeated under a heading
+    if (!dest){
+      const texts = r.map(c => String(c ?? '').trim()).filter(Boolean);
+      const label = texts.find(t => !isNumCell(t)) || '', num = [...r].reverse().find(isNumCell), fk = feeKey(label);
+      if (fk && num != null){ fees[fk] = String(parseNum(num)); return; }     // 2nd/3rd/succeeding drop, backload
+      if (num == null){                                                       // a heading line
+        if (!/condition|term|remark|note/i.test(label)){ heading = label; out.headings++; }
+        return;
+      }
+      out.terms.push(`${label.replace(/[:\s]+$/, '')}: ${peso(parseNum(num))}`);   // e.g. Board Transfer — not something HATID stores
+      return;
+    }
+    const row = { line, group: cell(r, col.group), area: cell(r, col.area), destination: dest, province: cell(r, col.province), heading, km: '', note: cell(r, col.note), rates: {}, brackets: {} };
     const km = parseNum(cell(r, col.km)); if (Number.isNaN(km)) out.errors.push(`Row ${line} (${dest}): km “${cell(r, col.km)}” isn't a number — ignored.`); else if (km != null) row.km = String(km);
     for (const [i, c] of col.rates || []){ const v = parseNum(r[i]); if (Number.isNaN(v)) out.errors.push(`Row ${line} (${dest}): ${classHeader(c)} “${r[i]}” isn't a number — skipped.`); else if (v != null) row.rates[c] = String(v); }
     for (const [i, k] of col.br || []){ const v = parseNum(r[i]); if (v != null && !Number.isNaN(v)) row.brackets[k] = String(v); }
     if (!Object.keys(row.brackets).length) delete row.brackets;
     out.rows.push(row);
   });
+  out.fees = Object.keys(fees).length ? fees : null;
   return out;
 }
 function parseFees(aoa){
   const fees = {};
-  (aoa || []).forEach(r => { const l = normTxt(r?.[0]), v = parseNum(r?.[1]); if (v == null || Number.isNaN(v)) return;
-    const k = /after|succeed|each/.test(l) ? 'succeeding_drop_fee' : /2nd|second/.test(l) ? 'second_drop_fee' : /3rd|third/.test(l) ? 'third_drop_fee' : /backload/.test(l) ? 'backload_fee' : null;
-    if (k) fees[k] = String(v); });
+  (aoa || []).forEach(r => { const texts = (r || []).map(c => String(c ?? '').trim()).filter(Boolean);
+    const k = feeKey(texts.find(t => !isNumCell(t)) || ''), v = [...(r || [])].reverse().find(isNumCell);
+    if (k && v != null) fees[k] = String(parseNum(v)); });
   return Object.keys(fees).length ? fees : null;
 }
 function parsePasted(text){
   return text.replace(/\r/g, '').split('\n').map(l => l.split('\t').map(c => c.replace(/^"(.*)"$/s, '$1')));
 }
-/* Same matching as the database: destination name + province (ignoring case and spacing); name alone when no province is given and it's unique */
-function matchDest(poolId, row){
-  const ds = poolDests(poolId), n = normTxt(row.destination), p = normTxt(row.province);
-  const exact = ds.find(d => normTxt(d.name) === n && normTxt(d.province) === p);
-  if (exact || p) return exact || null;
-  const byName = ds.filter(d => normTxt(d.name) === n);
-  return byName.length === 1 ? byName[0] : null;
+const nameKey = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+function editDistance(a, b){
+  if (Math.abs(a.length - b.length) > 2) return 9;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++){
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
 }
-function ratePreview(pool, parsed, eff){
-  const res = { newDest: 0, updDest: 0, changed: [], same: 0, newClasses: [], newAreas: new Set(), newGroups: new Set() };
+/* "PROVINCE OF QUEZON (SOUTH)" → Quezon · "PROVINCE OF CAGAYAN VALLEY" → Cagayan — using the provinces the pool already has */
+function provinceFromHeading(poolId, h){
+  const n = normTxt(String(h ?? '').replace(/\(.*?\)/g, ' ').replace(/^\s*province\s+of\s+/i, ''));
+  if (!n) return '';
+  const provs = [...new Set(poolDests(poolId).map(d => d.province).filter(Boolean))];
+  return provs.find(p => normTxt(p) === n) || provs.filter(p => n.includes(normTxt(p))).sort((a, b) => b.length - a.length)[0]
+    || n.replace(/\b\w/g, c => c.toUpperCase());
+}
+/* Destination in HATID for a row: name + province (ignoring case and spacing). When the trucker spells it differently —
+   spacing around "/", a cut-off name, a letter or two swapped — a single close match in the same province is used and shown for checking. */
+function matchDest(poolId, row){
+  const ds = poolDests(poolId), n = normTxt(row.destination), p = normTxt(row.province), k = nameKey(row.destination);
+  const inProv = p ? ds.filter(d => normTxt(d.province) === p) : ds;
+  const exact = inProv.find(d => normTxt(d.name) === n);
+  if (exact) return { d: exact, how: 'exact' };
+  if (!p){ const byName = ds.filter(d => normTxt(d.name) === n); if (byName.length) return { d: byName.length === 1 ? byName[0] : null, how: byName.length === 1 ? 'exact' : null }; }
+  const same = inProv.filter(d => nameKey(d.name) === k);
+  if (same.length === 1) return { d: same[0], how: 'spacing' };
+  if (k.length < 5) return { d: null, how: null };
+  const near = inProv.filter(d => { const dk = nameKey(d.name);
+    return (dk.length >= 6 && k.length >= 6 && (dk.startsWith(k) || k.startsWith(dk))) || editDistance(dk, k) <= 2; });
+  return near.length === 1 ? { d: near[0], how: 'spelling' } : { d: null, how: null };
+}
+/* What actually goes to the database for each row. Matched destinations are sent under HATID's own name and keep their
+   current group and area (a rate letter has neither — sending none would move every destination to "Other").
+   A new destination is filed under the area most destinations of its province already use. */
+function resolveRateRows(pool, parsed){
+  return parsed.rows.map(r => {
+    const province = r.province || (r.heading ? provinceFromHeading(pool.id, r.heading) : '');
+    const m = matchDest(pool.id, { destination: r.destination, province });
+    const send = { group: r.group, area: r.area, destination: r.destination, province, km: r.km, note: r.note, rates: r.rates, ...(r.brackets ? { brackets: r.brackets } : {}) };
+    if (m.d){
+      const i = destInfo(m.d.id);
+      send.destination = m.d.name; send.province = m.d.province || '';
+      if (!r.group && !r.area){ send.group = i?.group?.name || ''; send.area = i?.zone?.name || ''; }
+    } else if (!r.group && !r.area){
+      const cnt = {};
+      poolDests(pool.id).filter(d => province && normTxt(d.province) === normTxt(province)).forEach(d => { cnt[d.zone_id] = (cnt[d.zone_id] || 0) + 1; });
+      const z = state.ref.zoneById[Object.entries(cnt).sort((a, b) => b[1] - a[1])[0]?.[0]];
+      if (z){ send.area = z.name; send.group = state.ref.groupById[z.group_id]?.name || ''; }
+      else { send.group = 'Other'; send.area = province ? 'Other ' + province : 'Other'; }
+    }
+    return { row: r, d: m.d, how: m.how, send };
+  });
+}
+function ratePreview(pool, parsed, eff, resolved){
+  const res = { newDest: 0, updDest: 0, changed: [], same: 0, newClasses: [], newAreas: new Set(), newGroups: new Set(), respelt: [], newDests: [] };
   const known = new Set([...classesForPool(pool.id), ...state.ref.trucks.map(t => t.truck_class)]);
   res.newClasses = parsed.classes.filter(c => !known.has(c));
   const zones = state.ref.zones.filter(z => z.pool_id === pool.id), groups = state.ref.groups.filter(g => g.pool_id === pool.id);
-  for (const r of parsed.rows){
-    const d = matchDest(pool.id, r);
-    d ? res.updDest++ : res.newDest++;
-    const g = r.group || 'Other', a = r.area || r.group || 'Other';
-    if (!groups.some(x => normTxt(x.name) === normTxt(g))) res.newGroups.add(g);
-    if (!zones.some(x => normTxt(x.name) === normTxt(a))) res.newAreas.add(a);
-    for (const [c, v] of Object.entries(r.rates)){
+  for (const x of resolved){
+    const d = x.d, s = x.send;
+    if (d){ res.updDest++; if (x.how === 'spelling') res.respelt.push({ file: x.row.destination, hatid: d.name, province: d.province || '' }); }
+    else { res.newDest++; res.newDests.push(`${s.destination}${s.province ? ', ' + s.province : ''} → ${s.area || s.group || 'Other'}`); }
+    const g = s.group || 'Other', a = s.area || s.group || 'Other';
+    if (!groups.some(z => normTxt(z.name) === normTxt(g))) res.newGroups.add(g);
+    if (!zones.some(z => normTxt(z.name) === normTxt(a))) res.newAreas.add(a);
+    for (const [c, v] of Object.entries(s.rates)){
       const cur = d ? rateFor(d.id, c, eff) : null, nv = Number(v);
       if (cur && Number(cur.rate) === nv){ res.same++; continue; }
       const pct = cur ? (nv - Number(cur.rate)) / Number(cur.rate) : null;
-      res.changed.push({ dest: r.destination + (r.province ? ', ' + r.province : ''), cls: c, cur: cur ? Number(cur.rate) : null, nv, pct, isNew: !d, flag: pct != null && Math.abs(pct) > 0.2 });
+      res.changed.push({ dest: s.destination + (s.province ? ', ' + s.province : ''), cls: c, cur: cur ? Number(cur.rate) : null, nv, pct, isNew: !d, flag: pct != null && Math.abs(pct) > 0.2 });
     }
   }
   return res;
 }
-function openRateImport(pool){
+/* Pools this person can update (each pool's rate card serves one or more companies) */
+function ratePools(){ return (state.ref.pools || []).filter(p => coversAny(p.companies)); }
+function openRateImport(pool, onDone){
+  const pools = ratePools();
+  if (!pools.length) return toast('No rate pools for your company', 'error');
+  if (!pools.some(p => p.id === pool?.id)) pool = pools[0];
   openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true">
-    <h2>Update rates — ${esc(pool.name)}</h2>
-    <div class="ft" style="margin-bottom:10px">Use the Excel template (it already has the current rates), or paste rows copied from Excel with the header row. Nothing changes until you apply.</div>
+    <h2>Upload trucking rates</h2>
+    <div class="ft" style="margin-bottom:10px">Upload the trucker's rate file as it arrives, or HATID's own template. Province headings, a “Rate per Trip” column, the effectivity date and the drop fees at the bottom are all read. Nothing changes until you apply.</div>
     <div class="form">
       <div class="grid2">
-        <label class="f">Excel or CSV file<input class="i" type="file" id="ri-file" accept=".xlsx,.xls,.csv"></label>
+        <label class="f">Company / rate pool *<select class="i" id="ri-pool">${pools.map(p => `<option value="${esc(p.id)}" ${p.id === pool.id ? 'selected' : ''}>${esc(p.name)} — ${esc((p.companies || []).join(', '))}</option>`).join('')}</select></label>
         <label class="f">New rates take effect from *<input class="i" type="date" id="ri-eff" value="${localDate()}"></label>
       </div>
-      <label class="f">…or paste from Excel<textarea class="i" id="ri-paste" rows="4" placeholder="Delivery group&#9;Area&#9;Destination&#9;Province&#9;km&#9;Rate: Standard …"></textarea></label>
+      <div class="grid2">
+        <label class="f">Excel or CSV file<input class="i" type="file" id="ri-file" accept=".xlsx,.xls,.csv"></label>
+        <div class="ft" id="ri-effnote" style="align-self:end"></div>
+      </div>
+      <label class="f">…or paste from Excel<textarea class="i" id="ri-paste" rows="3" placeholder="Delivery group&#9;Area&#9;Destination&#9;Province&#9;km&#9;Rate: Standard …"></textarea></label>
       <label class="f" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink)"><input type="checkbox" id="ri-deact"> Switch off destinations that aren't in this file</label>
-      <div class="row-btns" style="margin:0"><button class="btn" id="ri-tpl">⬇ Download template with current rates</button><button class="btn primary" id="ri-check">Check</button></div>
+      <div class="row-btns" style="margin:0"><button class="btn" id="ri-tpl">⬇ Download current rates (Excel)</button><button class="btn primary" id="ri-check">Check</button></div>
       <div id="ri-prev"></div>
       <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn ok hidden" id="ri-apply">Apply changes</button></div>
     </div></div>`);
   bindClose();
-  let parsed = null, fees = null;
-  $('ri-tpl').addEventListener('click', () => downloadRateTemplate(pool));
-  ['ri-file','ri-paste','ri-eff'].forEach(id => $(id).addEventListener('input', () => { parsed = null; $('ri-apply').classList.add('hidden'); }));
-  $('ri-file').addEventListener('change', () => { parsed = null; $('ri-apply').classList.add('hidden'); });
+  let parsed = null, fees = null, resolved = null, effByUser = false;
+  const curPool = () => state.ref.poolById[$('ri-pool').value];
+  const reset = () => { parsed = null; resolved = null; $('ri-apply').classList.add('hidden'); };
+  $('ri-tpl').addEventListener('click', () => downloadRateTemplate(curPool()));
+  ['ri-file','ri-paste'].forEach(id => $(id).addEventListener('input', reset));
+  ['ri-file','ri-pool'].forEach(id => $(id).addEventListener('change', () => { reset(); $('ri-prev').innerHTML = ''; }));
+  $('ri-eff').addEventListener('input', () => { effByUser = true; reset(); $('ri-effnote').textContent = ''; });
   $('ri-check').addEventListener('click', async () => {
-    const file = $('ri-file').files[0], text = $('ri-paste').value.trim(), eff = $('ri-eff').value;
-    if (!eff) return toast('Pick the date the rates take effect', 'error');
+    const file = $('ri-file').files[0], text = $('ri-paste').value.trim(), pool = curPool();
     if (!file && !text) return toast('Choose a file or paste the rows', 'error');
     $('ri-prev').innerHTML = '<span class="spin"></span>'; $('ri-apply').classList.add('hidden');
     try {
@@ -10202,22 +10304,32 @@ function openRateImport(pool){
         const X = await loadXlsx(), wb = X.read(await file.arrayBuffer(), { type: 'array' });
         const rs = wb.Sheets[wb.SheetNames.find(n => /rate/i.test(n)) || wb.SheetNames[0]];
         parsed = parseRateTable(X.utils.sheet_to_json(rs, { header: 1, raw: false, defval: '' }));
-        const fs = wb.SheetNames.find(n => /fee/i.test(n)); fees = fs ? parseFees(X.utils.sheet_to_json(wb.Sheets[fs], { header: 1, raw: false, defval: '' })) : null;
-      } else { parsed = parseRateTable(parsePasted(text)); fees = null; }
+        const fs = wb.SheetNames.find(n => /fee/i.test(n));
+        fees = { ...(parsed.fees || {}), ...((fs && parseFees(X.utils.sheet_to_json(wb.Sheets[fs], { header: 1, raw: false, defval: '' }))) || {}) };
+      } else { parsed = parseRateTable(parsePasted(text)); fees = { ...(parsed.fees || {}) }; }
+      if (!Object.keys(fees).length) fees = null;
     } catch (e){ $('ri-prev').innerHTML = ''; return toast(e.message || 'Could not read the file', 'error'); }
-    const p = ratePreview(pool, parsed, eff);
+    if (parsed.effective && !effByUser){ $('ri-eff').value = parsed.effective; $('ri-effnote').textContent = `Effectivity date read from the file: ${fmtDate(parsed.effective)}`; }
+    const eff = $('ri-eff').value;
+    if (!eff){ $('ri-prev').innerHTML = ''; return toast('Pick the date the rates take effect', 'error'); }
+    resolved = resolveRateRows(pool, parsed);
+    const p = ratePreview(pool, parsed, eff, resolved);
     const feeChanges = fees ? FEE_ROWS.filter(([k]) => fees[k] != null && Number(fees[k]) !== Number(pool[k])).map(([k, l]) => `${l}: ${peso(pool[k])} → ${peso(Number(fees[k]))}`) : [];
     const flagged = p.changed.filter(x => x.flag).length;
     $('ri-prev').innerHTML = `
       <div class="kpis" style="margin-top:4px">
-        ${kpi('Destinations in file', parsed.rows.length, `${p.updDest} existing · ${p.newDest} new`)}
+        ${kpi('Destinations in file', parsed.rows.length, `${p.updDest} matched · ${p.newDest} new`)}
         ${kpi('Rates changing', p.changed.filter(x => !x.isNew).length, `${p.same} unchanged`)}
         ${kpi('New rates', p.changed.filter(x => x.isNew || x.cur == null).length, 'new destination or class')}
         ${kpi('Big changes', flagged, 'more than 20% up or down', flagged ? 'up-bad' : '')}
       </div>
-      ${p.newGroups.size || p.newAreas.size ? `<div class="note" style="margin-top:10px">New ${p.newGroups.size ? `groups: ${esc([...p.newGroups].join(', '))}` : ''}${p.newGroups.size && p.newAreas.size ? ' · ' : ''}${p.newAreas.size ? `areas: ${esc([...p.newAreas].join(', '))}` : ''} — they'll be created. New groups deliver Mon–Fri until you change their days.</div>` : ''}
+      ${eff < localDate() ? `<div class="note" style="margin-top:10px">These rates start on ${esc(fmtDate(eff))}, which is in the past. Deliveries dated from then on will be costed at the new rates; earlier ones keep the old rates.</div>` : ''}
+      ${p.respelt.length ? `<div class="note"><b>${p.respelt.length} destination${p.respelt.length > 1 ? 's' : ''} spelt differently in the file</b> — matched to HATID's name, please check:<br>${p.respelt.map(x => `“${esc(x.file)}” → <b>${esc(x.hatid)}</b>${x.province ? ', ' + esc(x.province) : ''}`).join('<br>')}</div>` : ''}
+      ${p.newDests.length ? `<div class="note"><b>${p.newDests.length} new destination${p.newDests.length > 1 ? 's' : ''}</b> (not found in HATID — check the spelling if one should have matched):<br>${p.newDests.slice(0, 30).map(esc).join('<br>')}${p.newDests.length > 30 ? '<br>…' : ''}</div>` : ''}
+      ${p.newGroups.size || p.newAreas.size ? `<div class="note">New ${p.newGroups.size ? `groups: ${esc([...p.newGroups].join(', '))}` : ''}${p.newGroups.size && p.newAreas.size ? ' · ' : ''}${p.newAreas.size ? `areas: ${esc([...p.newAreas].join(', '))}` : ''} — they'll be created. New groups deliver Mon–Fri until you change their days.</div>` : ''}
       ${p.newClasses.length ? `<div class="note">New truck class${p.newClasses.length > 1 ? 'es' : ''}: ${esc(p.newClasses.join(', '))}. Set a truck's rate class to use ${p.newClasses.length > 1 ? 'them' : 'it'} (Fleet › Trucks).</div>` : ''}
       ${feeChanges.length ? `<div class="note">Fees: ${esc(feeChanges.join(' · '))}${isFleetAdmin() ? '' : ' — only admins and managers can change fees; these will be skipped.'}</div>` : ''}
+      ${parsed.terms.length ? `<div class="note">Also in the file, not stored in HATID: ${esc(parsed.terms.join(' · '))}</div>` : ''}
       ${parsed.errors.length ? `<div class="note" style="background:var(--bad-soft)"><b>${parsed.errors.length} problem${parsed.errors.length > 1 ? 's' : ''}</b><br>${parsed.errors.slice(0, 12).map(esc).join('<br>')}${parsed.errors.length > 12 ? '<br>…' : ''}</div>` : ''}
       ${p.changed.length ? `<div class="prev-tbl" style="margin-top:10px"><table class="rt"><thead><tr><th>Destination</th><th>Class</th><th>Now</th><th>New</th><th>Change</th></tr></thead><tbody>
         ${p.changed.sort((a, b) => (b.flag - a.flag) || Math.abs(b.pct || 0) - Math.abs(a.pct || 0)).slice(0, 400).map(x => `<tr><td>${esc(x.dest)}${x.isNew ? ' <span class="tag info">new</span>' : ''}</td><td>${esc(x.cls === 'standard' ? 'Standard' : TRUCK_CLASS[x.cls] || x.cls)}</td>
@@ -10226,18 +10338,41 @@ function openRateImport(pool){
     $('ri-apply').classList.toggle('hidden', !parsed.rows.length);
   });
   $('ri-apply').addEventListener('click', async e => {
-    if (!parsed?.rows.length) return;
-    const deact = $('ri-deact').checked;
+    if (!parsed?.rows.length || !resolved) return;
+    const pool = curPool(), deact = $('ri-deact').checked;
     if (deact && !confirm('Destinations not in this file will be switched off (hidden when creating jobs). Continue?')) return;
     const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spin"></span> Applying…';
     try {
       const { data } = await withRetry('Applying rates', () => sb.rpc('job_import_rates', { p_pool: pool.id, p_effective: $('ri-eff').value,
-        p_rows: parsed.rows.map(({ line, ...r }) => r), p_fees: fees, p_deactivate_missing: deact, p_source: `Upload ${localDate()} by ${state.me.name || state.me.email}` }));
+        p_rows: resolved.map(x => x.send), p_fees: isFleetAdmin() ? fees : null, p_deactivate_missing: deact,
+        p_source: `${($('ri-file').files[0]?.name || 'Pasted rows').slice(0, 80)} — uploaded ${localDate()} by ${state.me.name || state.me.email}` }));
       closeOverlay();
-      toast(`Rates updated: ${data.rates_changed} changed, ${data.rates_unchanged} unchanged, ${data.destinations_created} new destinations${data.fees_updated ? ', fees updated' : ''}${data.deactivated ? `, ${data.deactivated} switched off` : ''}`, 'ok');
-      loadFleet();
+      toast(`${pool.name}: ${data.rates_changed} rates changed, ${data.rates_unchanged} unchanged, ${data.destinations_created} new destinations${data.fees_updated ? ', fees updated' : ''}${data.deactivated ? `, ${data.deactivated} switched off` : ''}`, 'ok');
+      if (onDone){ try { await loadRefData(); } catch {} onDone(); } else loadFleet();
     } catch { b.disabled = false; b.textContent = 'Apply changes'; }
   });
+}
+/* Settings › Trucking rates — one card per rate pool: what's in force now, and the upload */
+function renderRateSettings(){
+  setSetHead('Trucking rate cards per company. Upload the trucker’s rate file and HATID updates the trip rates from the effectivity date; older rates stay for past deliveries.');
+  const pools = ratePools();
+  if (!pools.length){ $('set-body').innerHTML = '<div class="card empty">No rate pools for your company.</div>'; return; }
+  $('set-body').innerHTML = pools.map(p => {
+    const ds = poolDests(p.id).filter(d => d.active), ids = new Set(ds.map(d => d.id));
+    const rs = state.ref.rates.filter(r => ids.has(r.destination_id));
+    const latest = rs.reduce((a, r) => !a || r.effective_from > a.effective_from ? r : a, null);
+    const priced = ds.filter(d => classesForPool(p.id).some(c => rateFor(d.id, c))).length;
+    return `<div class="card pad rp-sec"><div class="chart-h"><div><h3>${esc(p.name)}</h3><div class="ft">Companies: ${esc((p.companies || []).join(', '))} · from ${esc(p.origin_name || 'plant')}</div></div>
+      <div class="row-btns" style="margin:0"><button class="btn" data-rs-tpl="${esc(p.id)}">⬇ Current rates</button><button class="btn primary" data-rs-up="${esc(p.id)}">⬆ Upload rate file</button></div></div>
+      <div class="kpis">
+        ${kpi('Destinations priced', `${priced} / ${ds.length}`, esc(classesForPool(p.id).map(c => c === 'standard' ? 'Standard' : TRUCK_CLASS[c] || c).join(', ')))}
+        ${kpi('Latest rates from', latest ? fmtDate(latest.effective_from) : '—', latest?.source ? esc(String(latest.source).slice(0, 60)) : '')}
+        ${kpi('2nd / 3rd / after', `${peso(p.second_drop_fee)} / ${peso(p.third_drop_fee)} / ${peso(p.succeeding_drop_fee)}`, 'drop fees')}
+        ${kpi('Backload', peso(p.backload_fee), 'per trip')}
+      </div></div>`;
+  }).join('') + `<div class="ft" style="margin:4px 2px">To see or edit single destinations, go to Fleet › Areas &amp; rates.</div>`;
+  document.querySelectorAll('[data-rs-up]').forEach(b => b.addEventListener('click', () => openRateImport(state.ref.poolById[b.dataset.rsUp], renderRateSettings)));
+  document.querySelectorAll('[data-rs-tpl]').forEach(b => b.addEventListener('click', () => downloadRateTemplate(state.ref.poolById[b.dataset.rsTpl])));
 }
 
 /* ===== Delivery schedule (form FO-LGTS-02) and its approval chain =====
