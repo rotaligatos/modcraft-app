@@ -12708,3 +12708,14 @@ MSSI website admin moves into the Command Center (Rommel). Database (test `test_
   Switches (status banner, message), Change log. Driven headless against a stand-in client: every button made the right call.
 - Portal side lives in the MSSI Webpage repo (banners, refuses before upload, plain-language refusal).
 - Open: ModCraft does not yet hide `is_test` orders from its queue — add a filter there.
+
+## What was changed on 2026-10-03/04 (session — ShelfSync review fixes published, libraries, lighter refresh)
+- **ShelfSync review-fixes build published** (`0df6c11`) after `review_fixes.sql` was run on SCM and `shelfsync-passkey`
+  was deployed (first time; allowed origin defaults to `https://rotaligatos.github.io`).
+- **⚠ This repo's deploy workflow now has a step "ShelfSync libraries (shelfsync/vendor)"** (`6d01969`, `b7fd12f`): it fetches
+  pinned supabase-js 2.45.4, @simplewebauthn/browser 13.1.0, html5-qrcode 2.3.8, chart.js 4.4.1 and SheetJS 0.20.3 with
+  npm into `shelfsync/vendor/` before the Pages upload. `continue-on-error: true` — it can never block a Modcraft deploy; a
+  miss shows as a check-run warning and ShelfSync falls back to the CDN. `vendor/` is not in git. Changing a version means
+  changing it in the workflow, `LIBS` in ShelfSync's `src/20-data.js`, and ShelfSync's `sw.js`.
+- **ShelfSync routine refresh** (`730d275`): small tables in full, big ones only what changed; full load about once a day.
+  Details in ShelfSync's README / `SHELFSYNC_CONTEXT.md` (Desktop\Shelfsync is the source; `shelfsync/` here is a build copy).
