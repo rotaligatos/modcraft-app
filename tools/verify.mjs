@@ -17,7 +17,7 @@ function gate(label, args) {
   const r = spawnSync('node', args, { stdio: 'inherit' });
   return r.status === 0;
 }
-const g1 = gate('gate 1 · collisions + parse', ['tools/check-collisions.mjs', 'index.html', 'approve.html']);
+const g1 = gate('gate 1 · collisions + parse', ['tools/check-collisions.mjs', 'index.html', 'approve.html', 'hatid.html']);
 const g2 = gate('gate 2 · headless smoke · index.html',   ['tools/smoke.mjs', 'index.html']);
 const g3 = gate('gate 3 · headless smoke · approve.html', ['tools/smoke.mjs', 'approve.html']);
 const ok = g1 && g2 && g3;
