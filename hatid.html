@@ -736,6 +736,21 @@ body.tv-mode header,body.tv-mode #daybar{display:none!important}
 .tv-xmas .tv-call{background:radial-gradient(circle at 50% 40%,#14532d 0%,#0b2a1c 70%)}.tv-xmas .tv-call-h::before{content:'🎄 '}.tv-xmas .tv-call-h::after{content:' 🎄'}
 #tv-greet{color:#f1c40f;font-weight:600}
 @media (prefers-reduced-motion:reduce){#tv-snow{display:none}.tv-call{animation:none}}
+.cam{position:fixed;inset:0;z-index:1000;background:#000;color:#fff;display:flex;flex-direction:column}
+.cam-v{flex:1;min-height:0;width:100%;object-fit:contain;background:#000}
+.cam-top{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;background:linear-gradient(#000a,#0000)}
+.cam-n{font-weight:700;font-size:16px}
+.cam-b{background:rgba(255,255,255,.16);color:#fff;border:0;border-radius:999px;min-width:48px;min-height:48px;padding:0 14px;font-size:18px;font-weight:600}
+.cam-b:disabled{opacity:.4}.cam-side{font-size:15px;min-width:110px}.cam-use{background:#1f9d55}
+.cam-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 16px calc(18px + env(safe-area-inset-bottom));background:#000}
+.cam-shut{width:76px;height:76px;border-radius:50%;border:5px solid #fff;background:#fff;box-shadow:inset 0 0 0 4px #000;flex:none}
+.cam-shut:active{transform:scale(.94)}.cam-shut:disabled{opacity:.35}
+.cam-thumbs{display:flex;gap:8px;overflow-x:auto;padding:0 12px;background:#000;min-height:0}
+.cam-thumbs:not(:empty){padding:8px 12px}
+.cam-t{position:relative;flex:none}.cam-t img{width:64px;height:64px;object-fit:cover;border-radius:8px;display:block}
+.cam-t button{position:absolute;top:-6px;right:-6px;width:26px;height:26px;border-radius:50%;border:0;background:#c0392b;color:#fff;font-size:13px;line-height:26px;padding:0}
+.cam-msg{position:absolute;top:40%;left:16px;right:16px;text-align:center;background:rgba(255,255,255,.1);border-radius:12px;padding:16px;font-size:16px}
+.cam-flash .cam-v{opacity:.3}
 @media (max-width:700px){.tv-cols{grid-template-columns:1fr}.tv-n{font-size:40px}.tv-call-h{font-size:22px}.tv-call-so{font-size:32px}.tv-call-go{font-size:18px}}
 /* toast */
 #toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:60;display:flex;flex-direction:column;gap:8px;width:min(460px,calc(100% - 24px))}
@@ -6211,6 +6226,82 @@ async function uploadMedia(jobId, blob, name, type){
   const path = `${jobId}/${Date.now()}-${name}`;
   await withRetry('Uploading ' + name.split('.')[0], () => sb.storage.from(MEDIA_BUCKET).upload(path, blob, { contentType: type, upsert: false }));
   return path;
+}
+
+/* ---------- In-app camera ----------
+   Every photo field marked capture="environment" opens a live camera inside HATID instead of the phone's file picker
+   (the picker ignores "camera" in many browsers and in Viber/Messenger's built-in browser). Rear camera, big shutter,
+   several shots where the field allows several, then the photos go into the same field as if picked — so every existing
+   photo handler keeps working unchanged. "From phone" still opens the normal picker. No camera / camera blocked → normal picker. */
+let camBypass = false;
+document.addEventListener('click', e => {
+  const inp = e.target;
+  if (!(inp instanceof HTMLInputElement) || inp.type !== 'file' || !inp.hasAttribute('capture')) return;
+  if (camBypass) { camBypass = false; return; }
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof DataTransfer === 'undefined') return;
+  e.preventDefault(); openCamera(inp);
+}, true);
+
+async function openCamera(inp){
+  const many = inp.multiple, shots = [];
+  let stream = null, facing = 'environment';
+  const ov = document.createElement('div'); ov.className = 'cam'; ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-label', 'Camera');
+  ov.innerHTML = `<video class="cam-v" playsinline muted autoplay></video>
+    <div class="cam-msg hidden"></div>
+    <div class="cam-top"><button type="button" class="cam-b" data-cam="close" aria-label="Close camera">✕</button>
+      <span class="cam-n"></span><button type="button" class="cam-b" data-cam="flip" aria-label="Switch camera">🔄</button></div>
+    <div class="cam-thumbs"></div>
+    <div class="cam-bar"><button type="button" class="cam-b cam-side" data-cam="pick">📁 From phone</button>
+      <button type="button" class="cam-shut" data-cam="shot" aria-label="Take photo"></button>
+      <button type="button" class="cam-b cam-side cam-use" data-cam="use" disabled>Use</button></div>`;
+  document.body.appendChild(ov);
+  const v = ov.querySelector('video'), msg = ov.querySelector('.cam-msg'), use = ov.querySelector('[data-cam=use]');
+  const stop = () => { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; };
+  const close = () => { stop(); ov.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  const refresh = () => {
+    ov.querySelector('.cam-n').textContent = shots.length ? `${shots.length} photo${shots.length > 1 ? 's' : ''}` : '';
+    use.disabled = !shots.length; use.textContent = shots.length ? `Use ${shots.length}` : 'Use';
+    ov.querySelector('.cam-thumbs').innerHTML = shots.map((s, i) => `<span class="cam-t"><img src="${s.url}" alt="Photo ${i + 1}"><button type="button" data-del="${i}" aria-label="Remove photo ${i + 1}">✕</button></span>`).join('');
+  };
+  const start = async () => {
+    stop();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1440 } } });
+      v.srcObject = stream; await v.play().catch(() => {}); msg.classList.add('hidden');
+    } catch (err) {
+      msg.innerHTML = `${err && err.name === 'NotAllowedError' ? 'The camera is blocked for HATID. Allow it in the browser’s site settings, or' : 'No camera could be opened. You can still'} <b>choose photos from the phone</b>.`;
+      msg.classList.remove('hidden'); ov.querySelector('.cam-shut').disabled = true;
+    }
+  };
+  const finish = () => {
+    const dt = new DataTransfer(); shots.forEach(s => dt.items.add(s.file));
+    try { inp.files = dt.files; } catch {}
+    close(); inp.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  ov.addEventListener('click', async e => {
+    const d = e.target.closest('[data-del]'); if (d){ const s = shots.splice(+d.dataset.del, 1)[0]; URL.revokeObjectURL(s.url); refresh(); return; }
+    const b = e.target.closest('[data-cam]'); if (!b) return;
+    const act = b.dataset.cam;
+    if (act === 'close') return close();
+    if (act === 'flip'){ facing = facing === 'environment' ? 'user' : 'environment'; return start(); }
+    if (act === 'pick'){ close(); camBypass = true; inp.click(); return; }
+    if (act === 'use') return finish();
+    if (act === 'shot'){
+      if (!stream || !v.videoWidth) return;
+      if (many && shots.length >= 10) return toast('10 photos at most at a time', 'error');
+      const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+      c.getContext('2d').drawImage(v, 0, 0);
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', .88)); if (!blob) return;
+      const file = new File([blob], `photo-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+      ov.classList.add('cam-flash'); setTimeout(() => ov.classList.remove('cam-flash'), 150);
+      shots.push({ file, url: URL.createObjectURL(blob) });
+      if (!many) return finish();
+      refresh();
+    }
+  });
+  refresh(); start();
 }
 
 function shrinkImage(file, max = 1600){
