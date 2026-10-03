@@ -6271,8 +6271,9 @@ function openTruckForm(t){
         </div>
         <div class="ft">Each trip gets the day’s crew cost split across that day’s trips, plus the month’s fixed cost split across the month’s trips — on top of fuel and maintenance. This is the “other fees” part of the logistics report.</div>
       </div>
-      <div class="step-note">Load per trip uses the 90% loading standard. Company-run and borrowed trucks are costed from fuel and maintenance logs; in-house truckers and 3PLs by the trip-rate table. Borrowed trucks always ask the dispatcher to confirm they're free. Retire a truck instead of deleting it so past jobs keep their history.</div>
+      <div class="step-note">Load per trip uses the 90% loading standard. Company-run and borrowed trucks are costed from fuel and maintenance logs; in-house truckers and 3PLs by the trip-rate table. Borrowed trucks always ask the dispatcher to confirm they're free. A truck can be deleted only if it was never used; once it has deliveries, trips or logs, retire it instead so that history stays.</div>
       <div class="row-btns" style="justify-content:flex-end">
+        ${t && ['admin', 'manager'].includes(state.me?.role) ? '<button type="button" class="btn" id="tf-delete" style="margin-right:auto;color:var(--bad)">Delete truck</button>' : ''}
         <button type="button" class="btn" data-close>Cancel</button>
         <button type="submit" class="btn primary">${t ? 'Save' : 'Add truck'}</button>
       </div>
@@ -6292,6 +6293,7 @@ function openTruckForm(t){
   const runToggle = () => $('tf-run').classList.toggle('hidden', !canRun || f.uses_trip_rates.checked);
   f.uses_trip_rates.addEventListener('change', runToggle); f.fleet_type.addEventListener('change', runToggle); runToggle();
   if (canRun && t) sb.from('truck_cost_rates').select('*').eq('truck_id', t.id).maybeSingle().then(({ data }) => { if (data){ $('tf-crew').value = data.crew_cost_per_day ?? ''; $('tf-fixed').value = data.fixed_cost_per_month ?? ''; } }, () => {});
+  if ($('tf-delete')) $('tf-delete').addEventListener('click', () => deleteTruck(t));
   f.addEventListener('submit', async e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(f).entries());
@@ -6314,6 +6316,31 @@ function openTruckForm(t){
       toast(t ? 'Truck updated' : 'Truck added', 'ok'); closeOverlay(); loadFleet();
     } catch { btn.disabled = false; }
   });
+}
+
+/* Delete a truck — only one with no history. The database refuses anything that carries jobs, trips,
+   fuel/maintenance logs, checklists or GPS readings (a plain delete would cascade them away), and we offer
+   Retire instead, which keeps the history and takes the truck out of planning. */
+async function deleteTruck(t){
+  if (!t) return;
+  if (!confirm(`Delete ${t.label}?\n\nThis removes the truck for good. It only works for a truck with no deliveries, trips, fuel or maintenance logs.`)) return;
+  const btn = $('tf-delete'); if (btn) btn.disabled = true;
+  const { data, error } = await sb.rpc('job_truck_delete', { p_truck: t.id });
+  if (error){
+    if (btn) btn.disabled = false;
+    const msg = error.message || '';
+    const missing = error.code === 'PGRST202' || (/job_truck_delete/.test(msg) && /not find|does not exist/i.test(msg));
+    return toast(missing ? 'Deleting trucks is not switched on yet — the database step still needs to be run.' : (error.message || 'Could not delete the truck'), 'error');
+  }
+  if (data?.deleted){ toast(`${t.label} deleted`, 'ok'); closeOverlay(); loadFleet(); return; }
+  const used = (data?.used || []).join(', ');
+  if (t.status === 'retired'){ if (btn) btn.disabled = false; return toast(`${t.label} can’t be deleted — it has ${used}. It is already retired, which keeps that history.`, 'error'); }
+  if (confirm(`${t.label} can’t be deleted — it has ${used}.\n\nRetire it instead? It stays in past jobs and reports but is no longer offered for planning.`)){
+    try {
+      await withRetry('Retiring truck', () => sb.from('trucks').update({ status: 'retired' }).eq('id', t.id));
+      toast(`${t.label} retired`, 'ok'); closeOverlay(); loadFleet();
+    } catch { if (btn) btn.disabled = false; }
+  } else if (btn) btn.disabled = false;
 }
 
 /* ---------- Areas & rates ---------- */
