@@ -12709,6 +12709,10 @@ MSSI website admin moves into the Command Center (Rommel). Database (test `test_
 - Portal side lives in the MSSI Webpage repo (banners, refuses before upload, plain-language refusal).
 - Open: ModCraft does not yet hide `is_test` orders from its queue — add a filter there.
 
+- **2026-10-04 v2 (`supabase_cc_website_v2.sql`, RUN):** suspension now applies to staff accounts too (Rommel suspended his
+  Yahoo — a CC Manager — and nothing happened). Switches still exempt staff. Verified live (rolled back): suspended staff
+  refused, active staff allowed.
+
 ## What was changed on 2026-10-03/04 (session — ShelfSync review fixes published, libraries, lighter refresh)
 - **ShelfSync review-fixes build published** (`0df6c11`) after `review_fixes.sql` was run on SCM and `shelfsync-passkey`
   was deployed (first time; allowed origin defaults to `https://rotaligatos.github.io`).
