@@ -295,6 +295,8 @@ table.jobs tr.row:hover td{background:var(--surface-2)}
 
 /* capacity */
 .cap{padding:14px}
+.d-next{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;margin:6px 0 4px;border:1px solid var(--line);border-radius:10px;background:var(--soft,transparent)}
+.d-next:empty{display:none}
 .cap h3{margin:0 0 2px;font-size:15px}
 .cap-pool{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:14px 0 6px;font-weight:600}
 .truck{padding:8px 0;border-top:1px dashed var(--line)}
@@ -845,7 +847,7 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
       <div class="card stat s-issue" data-quick="issue"><div class="n" id="st-issue">–</div><div class="l">Issues</div></div>
     </div>
 
-    <div class="layout">
+    <div>
       <div class="card" style="overflow:hidden">
         <div class="toolbar">
           <label class="f">Status
@@ -882,13 +884,6 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
         <div class="empty hidden" id="jobs-empty">No jobs match these filters.</div>
       </div>
 
-      <aside class="card cap">
-        <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:8px">
-          <div><h3>Fleet capacity</h3><div class="ft">Committed load per truck</div></div>
-          <input class="i" type="date" id="cap-date" style="width:150px">
-        </div>
-        <div id="cap-body"></div>
-      </aside>
     </div>
   </main>
 </section>
@@ -1021,6 +1016,7 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
       </div>
       <div class="card pad cap">
         <div class="chart-h"><div><h3>Fleet load today</h3><div class="ft">Committed jobs and weight per active truck</div></div></div>
+        <div id="d-next" class="d-next"></div>
         <div id="d-cap"></div>
       </div>
       <div class="card pad">
@@ -2741,14 +2737,12 @@ function initFilters(){
   const today = localDate();
   $('f-from').value = addDays(today, -7);
   $('f-to').value = addDays(today, 30);
-  $('cap-date').value = today;
   $('fd-date').value = today;
   limitCoSelect('f-company', 'f-company-wrap'); limitCoSelect('d-sc-co'); limitCoSelect('rp-company', 'rp-company-wrap');
 }
 ['f-status','f-company','f-from','f-to'].forEach(id => $(id).addEventListener('change', loadBoard));
 $('f-q').addEventListener('input', renderJobs);
 $('btn-refresh').addEventListener('click', loadBoard);
-$('cap-date').addEventListener('change', loadCapacity);
 $('btn-new').addEventListener('click', openNewJob);
 $('btn-upload-jobs').addEventListener('click', openJobUpload);
 $('btn-plan').addEventListener('click', () => openPlanTrucks());
@@ -2780,7 +2774,6 @@ async function loadBoard(){
     renderJobs();
   } catch {}
   loadStats();
-  loadCapacity();
 }
 
 async function loadStats(){
@@ -2815,19 +2808,6 @@ async function fetchLoad(date){
   if (!date) return [];
   const { data } = await withRetry('Loading truck capacity', () => sb.rpc('job_truck_load', { p_date: date }));
   return data || [];
-}
-
-async function loadCapacity(){
-  const date = $('cap-date').value;
-  $('cap-body').innerHTML = '<div class="muted" style="padding:10px 0"><span class="spin"></span></div>';
-  let rows = [];
-  try { rows = await fetchLoad(date); } catch { $('cap-body').innerHTML = '<div class="muted">Could not load capacity.</div>'; return; }
-  if (!rows.length){ $('cap-body').innerHTML = '<div class="muted" style="padding:10px 0">No active trucks in your pool.</div>'; return; }
-  const pools = {};
-  rows.forEach(r => (pools[r.pool_name] ??= []).push(r));
-  $('cap-body').innerHTML = Object.entries(pools).map(([name, ts]) => `
-    <div class="cap-pool">${esc(name)} <span style="font-weight:400">· ${esc((ts[0].pool_companies||[]).join(' + '))}</span></div>
-    ${ts.map(t => truckMeter(t, date)).join('')}`).join('');
 }
 
 function ratioClass(r){ return r >= 1 ? 'full' : r >= .75 ? 'mid' : ''; }
@@ -6438,12 +6418,38 @@ async function restoreTruck(t){
 }
 
 /* ---------- Areas & rates ---------- */
+/* Fill every missing destination pin from OpenStreetMap (from the browser — OSM refuses cloud servers).
+   One lookup per second (OSM's rule); a result is kept only if it lies in the destination's province. */
+async function findMissingPins(btn){
+  if (state.dpPinning) return toast('Map pins are already being looked up', 'info');
+  const list = state.ref.dests.filter(d => d.lat == null && d.active !== false);
+  if (!list.length) return toast('Every destination has a map pin', 'ok');
+  if (!confirm(`Look up map pins for ${list.length} destination${list.length === 1 ? '' : 's'}?\n\nThis takes about ${Math.ceil(list.length * 1.1 / 60)} minute${list.length > 54 ? 's' : ''}. Keep HATID open; you can keep working in other tabs of the app.`)) return;
+  const norm = x => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  state.dpPinning = true; let n = 0, k = 0; const miss = [];
+  for (const d of list){
+    k++; if (btn?.isConnected){ btn.disabled = true; btn.textContent = `📍 Looking up ${k} of ${list.length}…`; }
+    const prov = norm(d.province);
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=3&countrycodes=ph&q=' + encodeURIComponent(`${d.name.split('/')[0].trim()}, ${d.province || ''}, Philippines`), { headers: { 'Accept-Language': 'en' } });
+      const a = r.ok ? await r.json() : [];
+      const hit = a.find(x => !prov || norm(x.display_name).includes(prov) || (prov === 'benguet' && /baguio/.test(norm(x.display_name))));
+      if (hit){ await sb.rpc('job_dest_set_pin', { p_dest: d.id, p_lat: +hit.lat, p_lon: +hit.lon }); d.lat = +hit.lat; d.lon = +hit.lon; n++; }
+      else miss.push(`${d.name}${d.province ? ', ' + d.province : ''}`);
+    } catch { miss.push(`${d.name}${d.province ? ', ' + d.province : ''}`); }
+    await new Promise(z => setTimeout(z, 1100));
+  }
+  state.dpPinning = false;
+  toast(`Map pins found for ${n} of ${list.length} destination${list.length === 1 ? '' : 's'}${miss.length ? ` — ${miss.length} not found (they'll be grouped by area)` : ''}`, miss.length ? 'info' : 'ok');
+  if (miss.length) console.info('HATID: no map pin found for', miss);
+  if (state.view === 'fleet' && state.fleetSub === 'areas') renderAreas();
+}
 function renderAreas(){
   const pools = state.pools; if (!pools.length){ $('fleet-body').innerHTML = '<div class="card empty">No logistics pools yet.</div>'; return; }
   state.areasPool = pools.some(p => p.id === state.areasPool) ? state.areasPool : pools[0].id;
   const pool = state.ref.poolById[state.areasPool];
   setFleetHead('Delivery groups and their days, areas, destinations and trip rates. Rate changes keep history by effective date.',
-    '<button class="btn" id="btn-rate-tpl">⬇ Excel template</button><button class="btn" id="btn-rate-up">⬆ Upload rate file</button><button class="btn primary" id="btn-new-dest">+ Add destination</button>');
+    `${state.ref.dests.some(d => d.lat == null && d.active !== false) ? `<button class="btn" id="btn-pins" title="Look up map pins for destinations that don't have one yet, so the Day planner can group drops by route">📍 Find missing map pins (${state.ref.dests.filter(d => d.lat == null && d.active !== false).length})</button>` : ''}<button class="btn" id="btn-rate-tpl">⬇ Excel template</button><button class="btn" id="btn-rate-up">⬆ Upload rate file</button><button class="btn primary" id="btn-new-dest">+ Add destination</button>`);
   const groups = state.ref.groups.filter(g => g.pool_id === pool.id);
   const classes = classesForPool(pool.id);
   const hasBrackets = poolHasBrackets(pool.id);
@@ -6484,6 +6490,7 @@ function renderAreas(){
   $('btn-new-dest').addEventListener('click', () => openDestForm(pool, null));
   $('btn-rate-tpl').addEventListener('click', () => downloadRateTemplate(pool));
   $('btn-rate-up').addEventListener('click', () => openRateImport(pool));
+  $('btn-pins')?.addEventListener('click', e => findMissingPins(e.currentTarget));
   $('btn-save-days').addEventListener('click', async e => {
     e.currentTarget.disabled = true;
     try {
@@ -7156,6 +7163,17 @@ async function loadDash(){
   $('d-alerts').innerHTML = items.length ? items.map((x, k) => `<li data-k="${k}"><span class="ic ${x.c}">${esc(x.i)}</span><div><div>${esc(x.t)}</div><div class="ft">${esc(x.s)}</div></div></li>`).join('')
     : '<li class="none">All clear — nothing needs attention.</li>';
   document.querySelectorAll('#d-alerts li[data-k]').forEach(li => li.addEventListener('click', () => { const x = items[+li.dataset.k]; if (x.sub) state.fleetSub = x.sub; if (x.setSub) state.setSub = x.setSub; x.sched ? openSchedule(...x.sched) : x.job ? openJob(x.job) : switchView(x.go); }));
+
+  // Next delivery day: what's waiting, straight into the Day planner
+  if ($('d-next')) (async () => {
+    const nd = nextWorkDay();
+    try {
+      const [p, s] = await Promise.all(['proposed', 'scheduled'].map(st => withRetry('Counting the next day', () => sb.from('jobs').select('id', { count: 'exact', head: true }).eq('status', st).eq('scheduled_date', nd)).then(r => r.count ?? 0)));
+      $('d-next').innerHTML = `<div><b>${fmtDate(nd)}</b><div class="ft">${p ? `<b style="color:var(--warn)">${p} for scheduling</b>` : 'Nothing waiting'} · ${s} on trucks</div></div>
+        ${isDispatcher() ? `<button class="btn ${p ? 'primary' : ''}" id="d-plan">📋 Plan ${p ? 'it' : 'the day'}</button>` : ''}`;
+      $('d-plan')?.addEventListener('click', () => openPlanTrucks(nd));
+    } catch { $('d-next').innerHTML = ''; }
+  })();
 
   // Fleet load today
   try {
@@ -8825,7 +8843,7 @@ function contentsHtml(j){
     `<tr><td class="q">${r.qty == null ? '' : esc(Number(r.qty).toLocaleString('en-PH', { maximumFractionDigits: 2 }))}</td><td>${esc(r.unit)}</td><td>${esc(r.desc)}</td></tr>`).join('')}</tbody></table>`;
 }
 function mapsLink(address, label = 'Open in Maps'){ return address ? `<a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}">${label}</a>` : ''; }
-$('btn-tripsheet').addEventListener('click', () => openTripSheet($('cap-date').value || localDate()));
+$('btn-tripsheet').addEventListener('click', () => openTripSheet(localDate()));
 $('fd-trips').addEventListener('click', () => openTripSheet($('fd-date').value || localDate()));
 
 async function openTripSheet(date, truckId = ''){
@@ -9597,7 +9615,7 @@ async function renderNotify(){
         <div class="grid2"><label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="sms_enabled" ${cfg?.sms_enabled ? 'checked' : ''}> Send SMS</label>
           <label class="f">SMS sender name <span class="ft">(only for Semaphore — not used with the Android phone)</span><input class="i" name="sms_sender" value="${esc(cfg?.sms_sender || '')}" maxlength="11" placeholder="Registered with Semaphore"></label></div>
         <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="daily_enabled" ${cfg?.daily_enabled !== false ? 'checked' : ''}> Send the daily summary once every truck is back at base (from 6 PM; at 10 PM at the latest, then a follow-up)</label>
-        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="drive_enabled" ${cfg?.drive_enabled ? 'checked' : ''}> Save delivery photos to Google Drive <span class="ft">— in the mail script account’s Drive: HATID Deliveries › company › date › SO – client. First copy the mail script again (step 2 above — it now also saves photos), paste it, redeploy it (Deploy → Manage deployments → edit → New version), and run <b>authorize</b> once to allow Drive.</span></label>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="drive_enabled" ${cfg?.drive_enabled ? 'checked' : ''}> Save delivery and pick-up photos to Google Drive <span class="ft">— in the mail script account’s Drive: HATID Deliveries › company › date › SO – client. First copy the mail script again (step 2 above — it now also saves photos), paste it, redeploy it (Deploy → Manage deployments → edit → New version), and run <b>authorize</b> once to allow Drive.</span></label>
         <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="sched_auto" ${cfg?.sched_auto ? 'checked' : ''}> Send schedule confirmations to clients and agents automatically as soon as a delivery schedule is approved</label>
         <div class="row-btns" style="margin:0;justify-content:flex-end"><button class="btn" type="submit">Save</button></div>
       </form>
@@ -9720,11 +9738,11 @@ function doPost(e) {
   }
 }
 
-// Delivery photos → this account's Google Drive: HATID Deliveries / company / date / SO – client / file
+// Photos → this account's Google Drive: HATID Deliveries (or HATID Pick-ups) / company / date / SO or queue no. – client / file
 function saveToDrive_(d) {
   const parts = String(d.path || '').split('/').map(function (x) { return x.trim(); }).filter(String);
   const name = parts.pop();
-  if (!name || !parts.length || parts[0] !== 'HATID Deliveries') return out_({ ok: false, error: 'bad path' });
+  if (!name || !parts.length || ['HATID Deliveries', 'HATID Pick-ups'].indexOf(parts[0]) < 0) return out_({ ok: false, error: 'bad path' });
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
   let folder = DriveApp.getRootFolder();
   try {
@@ -9738,7 +9756,7 @@ function saveToDrive_(d) {
 
 // Run this once from the editor (select "authorize" → Run) to allow sending mail and saving photos to Drive.
 function authorize() {
-  Logger.log('Drive folder for photos: ' + DriveApp.getRootFolder().getName() + ' / HATID Deliveries');
+  Logger.log('Drive folder for photos: ' + DriveApp.getRootFolder().getName() + ' / HATID Deliveries and HATID Pick-ups');
   Logger.log('Emails left today: ' + MailApp.getRemainingDailyQuota());
   Logger.log('This account can send as: ' + [Session.getActiveUser().getEmail()].concat(GmailApp.getAliases()).join(', '));
 }
