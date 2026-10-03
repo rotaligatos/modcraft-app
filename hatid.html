@@ -450,6 +450,7 @@ table.rates td:first-child{min-width:180px}
 .rm-tip{position:absolute;z-index:3;width:220px;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:8px 10px;font-size:13px;pointer-events:none}
 .rm-tip table{width:100%;border-collapse:collapse;margin-top:4px}.rm-tip td{padding:1px 0}.rm-tip td:last-child{text-align:right}
 .rm-tt{font-weight:600}
+.rm-figs table{width:100%;border-collapse:collapse;font-size:13px;margin:4px 0 10px}.rm-figs td{padding:2px 0;border-bottom:1px solid var(--line)}.rm-figs td:last-child{text-align:right}
 .rm-tip .up{color:var(--ok)}.rm-tip .dn{color:var(--bad)}
 .rm-side h4{margin:0 0 6px;font-size:14px}
 .rm-side h4 .ft{font-weight:400}
@@ -7357,7 +7358,13 @@ async function loadJobRowsRange(from, to){
     const workDays = [...Array(daysInMonth(ym))].filter((_, i) => new Date(`${ym}-${String(i + 1).padStart(2, '0')}T00:00:00`).getDay() !== 0).length;
     const dayCost = Number(rt.crew_cost_per_day || 0) + Number(rt.fixed_cost_per_month || 0) / workDays;
     ids.forEach(id => runAlloc[id] = dayCost / ids.length); });
-  const rows = all.map(r => ({ ...r, fleet_alloc: (r.status === 'completed' && fleetCost[r.truck_id] && doneCount[r.truck_id] ? fleetCost[r.truck_id] / doneCount[r.truck_id] : 0) + (runAlloc[r.id] || 0), run_alloc: runAlloc[r.id] || 0 }));
+  // Order lines (boards, edgeband…) for the reach map — job_report_v doesn't carry them. Delivered jobs only; never blocks the report.
+  const lines = {};
+  const lineIds = all.filter(r => LIVE.includes(r.status)).map(r => r.id);
+  for (let i = 0; i < lineIds.length; i += 200){
+    try { const { data } = await sb.from('jobs').select('id, items').in('id', lineIds.slice(i, i + 200)); (data || []).forEach(j => lines[j.id] = j.items || []); } catch {}
+  }
+  const rows = all.map(r => ({ ...r, items: lines[r.id] ?? null, fleet_alloc: (r.status === 'completed' && fleetCost[r.truck_id] && doneCount[r.truck_id] ? fleetCost[r.truck_id] / doneCount[r.truck_id] : 0) + (runAlloc[r.id] || 0), run_alloc: runAlloc[r.id] || 0 }));
   return { rows, fuel, maint, fleetCost, doneCount, trips, rates };
 }
 async function loadHistory(from, to){
@@ -7432,7 +7439,7 @@ function jobRecords(rows, histTypes, tripsTbl = []){
     const ctype = r.customer_type || (isAffiliateName(r.client_name) ? 'affiliate' : histTypes?.get(custKey(r.client_name))) || 'regular';
     return { src:'hatid', jobId: r.id, date: r.scheduled_date, company: r.company, tripKey, trip, so: r.quotation_serial, customer: r.client_name || '',
       kg: Number(r.estimated_weight_kg) || 0, truck: tk.key, truckName: tk.name, cat: fleetCat(r.fleet_type),
-      province: prov || 'No destination', muni: r.destination_name || '', region: REGION_OF[prov] || (prov ? 'Other' : 'No destination'),
+      province: prov || 'No destination', muni: r.destination_name || '', region: REGION_OF[prov] || (prov ? 'Other' : 'No destination'), items: r.items || null,
       tc: cost, cap: trip ? Number(r.truck_capacity_kg) || null : null, ctype, sp: spName(r.agent_name),
       bkt, lapse, reason, outAt, outSrc, ticket: tr?.ticket_no || null, tracked: !!tr?.tracked,
       earlyTap: trip && tr?.departed_at && tr?.gps_left_at ? Math.round((new Date(tr.gps_left_at) - new Date(tr.departed_at)) / 6e4) : null, target: trip && t ? tripTarget(t, r.scheduled_date, r.trip_no || 1, tr, firstTrip[r.truck_id + '|' + r.scheduled_date]) : null,
@@ -8078,7 +8085,32 @@ const RM_METRICS = {
   kg:        { label: 'Weight delivered', fmt: v => fmtT(v), unit: '' },
   customers: { label: 'Customers served', fmt: v => fmtN(v), unit: 'customers' },
   days:      { label: 'Delivery days', fmt: v => fmtN(v), unit: 'days', note: 'days with at least one delivery there — how often we go' },
+  boards:    { label: 'Boards — all', fmt: v => fmtN(v), unit: 'boards', lines: true },
+  ply:       { label: 'Boards — Plywood', fmt: v => fmtN(v), unit: 'boards', lines: true },
+  mdf:       { label: 'Boards — MDF', fmt: v => fmtN(v), unit: 'boards', lines: true },
+  pb:        { label: 'Boards — PB', fmt: v => fmtN(v), unit: 'boards', lines: true },
+  obd:       { label: 'Boards — other substrate', fmt: v => fmtN(v), unit: 'boards', lines: true },
+  eb:        { label: 'Edgeband (linear m)', fmt: v => fmtN(Math.round(v)) + ' m', unit: 'm', lines: true },
 };
+/* What an order line is, read from its description (WCLI names say it plainly: "Acacia MDF 4x8 1F (18mm, Crosscut)",
+   "Warm White 1mmx22mm Embossed PVC Premium Edgeband"). Boards: 4x8 / 6x8 / 2x8 sheets, or lines HATID already
+   marked with a thickness. Edgeband in metres when sold per metre; per-piece/roll lines are kept apart as rolls
+   (the length of a roll isn't on the order, so it is never guessed). */
+function rmItemKind(it){
+  const d = String(it?.desc || ''), u = String(it?.unit || '').trim().toLowerCase(), q = Number(it?.qty) || 0;
+  if (!q) return null;
+  if (/edge\s*-?band|\bedging\b|\be\/?b\b\s*tape/i.test(d)){
+    if (/^(l\.?\s?m\.?|lm|m|mtr|mtrs|meters?|metres?|lin\.?\s?m)$/.test(u)) return { k: 'eb', lm: q };
+    return { k: 'ebroll', rolls: q };
+  }
+  if (it.g != null || /\b[246]\s*x\s*8\b/i.test(d)){
+    if (u && !/^(pc|pcs|piece|pieces|sheet|sheets|unit|units|bd|bds|board|boards)$/.test(u)) return null;
+    const s = /marine|plywood|plyboard|\bply\b/i.test(d) ? 'ply' : /\bhdf\b/i.test(d) ? 'obd' : /mdf/i.test(d) ? 'mdf' : /\bpb\b|particle|chip ?board|\bmfc\b/i.test(d) ? 'pb' : 'obd';
+    const other = s !== 'obd' ? null : /\bhdf\b/i.test(d) ? 'HDF' : /\bhpl\b/i.test(d) ? 'HPL sheet' : /compact/i.test(d) ? 'Compact laminate' : /fib(er|re) ?cement/i.test(d) ? 'Fiber cement' : 'Other';
+    return { k: 'board', s, other, n: q };
+  }
+  return null;
+}
 const RM_VIEWS = { fit: null, ph: [116.8, 4.5, 126.7, 21.2], luzon: [119.4, 12.3, 124.5, 18.8], gma: [120.45, 13.75, 121.75, 15.25], vis: [121.7, 9.0, 126.3, 12.8], min: [121.8, 4.5, 126.7, 10.1] };
 const RM_VIEW_LABEL = { fit: 'Where we deliver', ph: 'Philippines', luzon: 'Luzon', gma: 'Metro Manila & nearby', vis: 'Visayas', min: 'Mindanao' };
 const RM_PROV_ALIAS = { MANDAUE: 'CEBU', OLONGAPO: 'ZAMBALES', DAET: 'CAMARINES NORTE' };
@@ -8135,9 +8167,14 @@ function rmPlace(G, prov, muni){
   const out = { key, town }; cache.set(ck, out); return out;
 }
 function rmAgg(rs){
-  const c = new Set(), d = new Set(); let kg = 0;
-  rs.forEach(r => { const k = custKey(r.customer); if (k) c.add(k); d.add(r.date); kg += r.kg || 0; });
-  return { orders: rs.length, customers: c.size, days: d.size, kg };
+  const c = new Set(), d = new Set(), oth = {}; let kg = 0, lined = 0;
+  const a = { boards: 0, ply: 0, mdf: 0, pb: 0, obd: 0, eb: 0, rolls: 0 };
+  rs.forEach(r => { const k = custKey(r.customer); if (k) c.add(k); d.add(r.date); kg += r.kg || 0;
+    if (!Array.isArray(r.items)) return; lined++;
+    r.items.forEach(it => { const x = rmItemKind(it); if (!x) return;
+      if (x.k === 'eb') a.eb += x.lm; else if (x.k === 'ebroll') a.rolls += x.rolls;
+      else { a.boards += x.n; a[x.s] += x.n; if (x.other) oth[x.other] = (oth[x.other] || 0) + x.n; } }); });
+  return { orders: rs.length, customers: c.size, days: d.size, kg, ...a, otherKinds: oth, lined };
 }
 function rmCollect(G, recs){
   const byProv = new Map(), byTown = new Map(), off = new Map();
@@ -8163,7 +8200,7 @@ async function renderReachMap(el, o){
   const allProv = Object.keys(G.provs).length;
   el.innerHTML = `<div class="rm">
     <div class="rm-bar">
-      <label class="f">Show<select class="i" data-rm="metric">${Object.entries(RM_METRICS).map(([k, m]) => `<option value="${k}" ${k === S.metric ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select></label>
+      <label class="f">Show<select class="i" data-rm="metric">${[['Deliveries', false], ['Products delivered', true]].map(([g, ln]) => `<optgroup label="${g}">${Object.entries(RM_METRICS).filter(([, m]) => !!m.lines === ln).map(([k, m]) => `<option value="${k}" ${k === S.metric ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</optgroup>`).join('')}</select></label>
       <div class="rm-chips" role="group" aria-label="Zoom">${Object.entries(RM_VIEW_LABEL).map(([k, l]) => `<button type="button" class="chip" data-rmv="${k}">${esc(l)}</button>`).join('')}</div>
       <label class="rm-chk"><input type="checkbox" data-rm="towns" ${S.towns ? 'checked' : ''}> Towns &amp; cities</label>
     </div>
@@ -8229,16 +8266,37 @@ function rmDelta(now, before){
   if (!before) return now ? '<span class="tag ok">new</span>' : '';
   const d = (now - before) / before; return `<span class="${d >= 0 ? 'up' : 'dn'}">${d >= 0 ? '▲' : '▼'} ${Math.abs(Math.round(d * 100))}%</span>`;
 }
+/* Figures for one place: delivery measures, then what was delivered (boards by substrate, edgeband) when any
+   delivery there carries order lines. b = the comparison period's figures (undefined = no comparison). */
+function rmFigs(a, b){
+  const row = (m, val) => { const M = RM_METRICS[m]; return `<tr><td>${esc(M.label)}</td><td><b>${esc(M.fmt(val ?? rmVal(a, m)))}</b> ${b !== undefined ? rmDelta(rmVal(a, m), b ? rmVal(b, m) : 0) : ''}</td></tr>`; };
+  let h = ['orders', 'kg', 'customers', 'days'].map(m => row(m)).join('');
+  if (a?.lined){
+    const subs = [['ply', 'Plywood'], ['mdf', 'MDF'], ['pb', 'PB'], ['obd', 'Other']].filter(([k]) => a[k]).map(([k, l]) => `${l} ${fmtN(a[k])}`).join(' · ');
+    const oth = Object.entries(a.otherKinds || {}).map(([k, n]) => `${k} ${fmtN(n)}`).join(', ');
+    h += `<tr><td>Boards</td><td><b>${fmtN(a.boards)}</b> ${b !== undefined ? rmDelta(a.boards, b ? b.boards : 0) : ''}</td></tr>`
+      + (subs ? `<tr><td colspan="2" class="ft">${esc(subs)}${oth && a.obd ? ` (other: ${esc(oth)})` : ''}</td></tr>` : '')
+      + `<tr><td>Edgeband</td><td><b>${esc(fmtN(Math.round(a.eb)))} m</b>${a.rolls ? ` + ${fmtN(a.rolls)} roll${a.rolls === 1 ? '' : 's'}` : ''}</td></tr>`
+      + (a.lined < a.orders ? `<tr><td colspan="2" class="ft">Products from ${fmtN(a.lined)} of ${fmtN(a.orders)} deliveries (HATID tickets; the Excel history has no item lines)</td></tr>` : '');
+  }
+  return `<table>${h}</table>`;
+}
 function rmTipProv(S, k){
   const p = S.G.provs[k], a = S.cur.prov.get(k), b = S.prev ? (S.prev.prov.get(k) || null) : undefined;
-  const lines = Object.entries(RM_METRICS).map(([m, M]) => `<tr><td>${esc(M.label)}</td><td><b>${esc(M.fmt(rmVal(a, m)))}</b> ${b !== undefined ? rmDelta(rmVal(a, m), b ? rmVal(b, m) : 0) : ''}</td></tr>`).join('');
-  return `<div class="rm-tt">${esc(p?.name || k)}</div><div class="ft">${esc(p?.region || '')}</div>${a ? `<table>${lines}</table>` : `<div>No deliveries in this period${b ? ` <span class="ft">(had ${esc(fmtN(b.orders))} orders ${esc(S.o.cmpLabel || 'before')})</span>` : ''}</div>`}<div class="ft">Click to zoom in</div>`;
+  return `<div class="rm-tt">${esc(p?.name || k)}</div><div class="ft">${esc(p?.region || '')}</div>${a ? rmFigs(a, b) : `<div>No deliveries in this period${b ? ` <span class="ft">(had ${esc(fmtN(b.orders))} orders ${esc(S.o.cmpLabel || 'before')})</span>` : ''}</div>`}<div class="ft">Click to zoom in</div>`;
 }
 function rmTipTown(S, i){
   const x = S.townList[i]; if (!x) return '';
-  const pb = S.prev?.town.find(y => y.t === x.t);
+  const pb = S.prev ? (S.prev.town.find(y => y.t === x.t)?.a || null) : undefined;
   return `<div class="rm-tt">${esc(x.t.name.replace(/^City of /, '') )}</div><div class="ft">${esc(S.G.provs[x.t.key]?.name || '')}${x.labels.length > 1 || (x.labels[0] && rmNorm(x.labels[0]) !== rmNorm(x.t.name)) ? ` · recorded as ${esc(x.labels.slice(0, 3).join('; '))}${x.labels.length > 3 ? '…' : ''}` : ''}</div>
-    <table>${Object.entries(RM_METRICS).map(([m, M]) => `<tr><td>${esc(M.label)}</td><td><b>${esc(M.fmt(rmVal(x.a, m)))}</b> ${S.prev ? rmDelta(rmVal(x.a, m), pb ? rmVal(pb.a, m) : 0) : ''}</td></tr>`).join('')}</table>`;
+    ${rmFigs(x.a, pb)}`;
+}
+/* When a product measure is shown, say where it comes from — and say so plainly when there is nothing to show. */
+function rmLinesNote(S){
+  if (!RM_METRICS[S.metric].lines) return '';
+  let lined = 0, all = 0, rolls = 0; S.cur.prov.forEach(a => { lined += a.lined; all += a.orders; rolls += a.rolls; });
+  if (!lined) return `<div class="note" style="margin-bottom:10px">No deliveries with order lines in this period. Boards and edgeband come from the items on HATID delivery tickets; the imported Excel history has weights only, no item lines.</div>`;
+  return `<div class="ft" style="margin-bottom:8px">From the items on ${fmtN(lined)} of ${fmtN(all)} deliveries (HATID tickets — the Excel history has no item lines).${S.metric === 'eb' && rolls ? ` Plus ${fmtN(rolls)} edgeband roll${rolls === 1 ? '' : 's'} sold by the piece, not counted in metres (the roll length isn’t on the order).` : ''}</div>`;
 }
 function rmSide(el){
   const S = el._rm, G = S.G, m = S.metric, M = RM_METRICS[m], side = el.querySelector('.rm-side'); if (!side) return;
@@ -8246,16 +8304,16 @@ function rmSide(el){
   const regions = new Map(); rows.forEach(x => { const r = G.provs[x.k]?.region || 'Other'; regions.set(r, (regions.get(r) || 0) + x.v); });
   if (S.focus){
     const towns = S.townList.filter(x => x.t.key === S.focus), a = S.cur.prov.get(S.focus);
-    side.innerHTML = `<div class="rm-h"><button class="btn" data-rm-back>← All provinces</button></div><h4>${esc(G.provs[S.focus]?.name || S.focus)}</h4>
-      ${a ? `<div class="ft">${Object.entries(RM_METRICS).map(([mm, MM]) => `${esc(MM.label)}: <b>${esc(MM.fmt(rmVal(a, mm)))}</b>`).join(' · ')}</div>` : '<div class="muted">No deliveries in this period.</div>'}
+    side.innerHTML = `<div class="rm-h"><button class="btn" data-rm-back>← All provinces</button></div>${rmLinesNote(S)}<h4>${esc(G.provs[S.focus]?.name || S.focus)}</h4>
+      ${a ? `<div class="rm-figs">${rmFigs(a)}</div>` : '<div class="muted">No deliveries in this period.</div>'}
       ${towns.length ? `<table class="rm-tbl"><thead><tr><th>Town / city</th><th>${esc(M.label)}</th></tr></thead><tbody>${towns.map(x => `<tr><td>${esc(x.t.name.replace(/^City of /, ''))}</td><td>${esc(M.fmt(rmVal(x.a, m)))}</td></tr>`).join('')}</tbody></table>` : ''}`;
     side.querySelector('[data-rm-back]').addEventListener('click', () => { S.focus = null; S.view = 'fit'; rmPaint(el); });
     return;
   }
   const ins = rmInsights(S, rows, tot);
-  side.innerHTML = `<h4>Top provinces <span class="ft">by ${esc(M.label.toLowerCase())}</span></h4>
+  side.innerHTML = `${rmLinesNote(S)}<h4>Top provinces <span class="ft">by ${esc(M.label.toLowerCase())}</span></h4>
     ${rows.length ? `<table class="rm-tbl"><tbody>${rows.slice(0, 10).map(x => `<tr data-rmk="${esc(x.k)}"><td>${esc(G.provs[x.k]?.name || x.k)}</td><td>${esc(M.fmt(x.v))}</td><td class="ft">${pct(x.v / tot)}</td></tr>`).join('')}</tbody></table>
-      <details><summary class="ft">By region (${regions.size})</summary><table class="rm-tbl">${[...regions].sort((a, b) => b[1] - a[1]).map(([r, v]) => `<tr><td>${esc(r)}</td><td>${esc(M.fmt(v))}</td><td class="ft">${pct(v / tot)}</td></tr>`).join('')}</table></details>` : '<div class="muted">No deliveries in this period.</div>'}
+      <details><summary class="ft">By region (${regions.size})</summary><table class="rm-tbl">${[...regions].sort((a, b) => b[1] - a[1]).map(([r, v]) => `<tr><td>${esc(r)}</td><td>${esc(M.fmt(v))}</td><td class="ft">${pct(v / tot)}</td></tr>`).join('')}</table></details>` : `<div class="muted">${M.lines && S.cur.prov.size ? 'Nothing to show for this measure in this period.' : 'No deliveries in this period.'}</div>`}
     ${ins.length ? `<h4>Reach &amp; opportunity</h4><ul class="rm-ins">${ins.map(t => `<li>${t}</li>`).join('')}</ul>` : ''}
     ${S.cur.off.length ? `<details><summary class="ft">${fmtN(S.cur.offN)} order${S.cur.offN === 1 ? '' : 's'} not on the map</summary><div class="ft" style="margin:4px 0">The town or province on these could not be matched. Fixing the name in the source (or the destination list) puts them on the map.</div>
       <table class="rm-tbl">${S.cur.off.slice(0, 15).map(x => `<tr><td>${esc(x.lbl)}</td><td>${fmtN(x.n)}</td></tr>`).join('')}</table></details>` : ''}`;
