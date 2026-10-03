@@ -8721,12 +8721,18 @@ async function createRedelivery(job){
    job-notify-send function delivers it by Google Chat, email or SMS, 3 attempts, then "Failed" with a Retry. */
 function agentsFor(company){ return (state.ref.agents || []).filter(a => a.active && (!a.company || !company || a.company === company)); }
 function agentOptions(company, sel){
-  return `<option value="">— none —</option>${agentsFor(company).map(a => `<option value="${esc(a.id)}" ${a.id === sel ? 'selected' : ''}>${esc(a.name)}${a.company ? ' · ' + esc(a.company) : ''}</option>`).join('')}`;
+  /* An archived or switched-off agent is not offered for new work, but a job that already names one
+     keeps that name in its picker — a <select> whose value is missing silently shows "— none —",
+     and the next save would wipe the agent off the record. */
+  const list = agentsFor(company), cur = sel && !list.some(a => a.id === sel) ? state.ref.agentById?.[sel] : null;
+  return `<option value="">— none —</option>${cur ? `<option value="${esc(cur.id)}" selected>${esc(cur.name)} (${cur.archived_at ? 'left' : 'off'})</option>` : ''}${list.map(a => `<option value="${esc(a.id)}" ${a.id === sel ? 'selected' : ''}>${esc(a.name)}${a.company ? ' · ' + esc(a.company) : ''}</option>`).join('')}`;
 }
+function agLeftDate(ts){ return ts ? new Date(ts).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}) : ''; }
 function agentReach(a){ return [a.chat_webhook ? 'Chat' : '', a.email ? 'email' : '', a.phone ? 'SMS' : ''].filter(Boolean).join(' · ') || 'no contact details'; }
 function agentText(id){
   if (!id) return '<span class="muted">None — only the base is notified</span>';
   const a = state.ref.agentById?.[id];
+  if (a?.archived_at) return `${esc(a.name)} <span class="tag">left${a.replaced_by && state.ref.agentById?.[a.replaced_by] ? ' — now ' + esc(state.ref.agentById[a.replaced_by].name) : ''}</span>`;
   return a ? `${esc(a.name)} <span class="ft">${esc(agentReach(a))}</span>` : '<span class="muted">Assigned</span>';
 }
 function notifyReady(ch){ return ch === 'chat' || !!state.ref.notify?.[ch + '_enabled']; }
@@ -9146,15 +9152,25 @@ async function renderNotify(){
   } catch { $('set-body').innerHTML = '<div class="card empty">Could not load settings.</div>'; return; }
   state.ref.agents = agents; state.ref.agentById = Object.fromEntries(agents.map(a => [a.id, a])); state.ref.notify = cfg;
   const on = (x, l) => `<span class="tag ${x ? 'ok' : ''}">${l}: ${x ? 'on' : 'not set up'}</span>`;
-  const mine = agents.filter(a => !a.company || coversCo(a.company));
+  const seen = agents.filter(a => !a.company || coversCo(a.company));
+  const mine = seen.filter(a => !a.archived_at), gone = seen.filter(a => a.archived_at);
+  const nChat = mine.filter(a => a.active && a.chat_webhook).length, nOn = mine.filter(a => a.active).length;
+  const replaces = id => gone.filter(o => o.replaced_by === id);
   $('set-body').innerHTML = `
     <div class="card pad rp-sec nt-agents"><h3>Sales agents</h3>
-      <div class="ft" style="margin-bottom:10px">Pick the agent on each job. When the driver saves the result (delivered, partial, refused), reports a problem or a delay, the agent gets it by every channel we have for them. ${on(true, 'Google Chat')} ${on(cfg?.email_enabled, 'Email')} ${on(cfg?.sms_enabled, 'SMS')}</div>
+      <div class="ft" style="margin-bottom:10px">Pick the agent on each job. When the driver saves the result (delivered, partial, refused), reports a problem or a delay, the agent gets it by every channel we have for them. <span class="tag ${nChat ? 'ok' : ''}">Google Chat: ${nChat} of ${nOn} agents</span> ${on(cfg?.email_enabled, 'Email')} ${on(cfg?.sms_enabled, 'SMS')}</div>
+      <div class="ft" style="margin-bottom:10px">A personal Chat link is optional — it needs a Google Chat space with that agent. Agents without one still get email and SMS, and every update also goes to the company's Chat space below.</div>
       ${mine.length ? `<div class="ds-wrap"><table class="ds-tbl ag-tbl"><thead><tr><th>Name</th><th>Company</th><th>Email</th><th>Mobile</th><th>Google Chat</th><th></th></tr></thead><tbody>
-        ${mine.map(a => `<tr class="${a.active ? '' : 'retired'}" style="${a.active ? '' : 'opacity:.55'}"><td><b>${esc(a.name)}</b>${a.active ? '' : ' <span class="tag">off</span>'}</td><td>${esc(a.company || 'All')}</td>
-          <td>${esc(a.email || '—')}</td><td>${esc(a.phone || '—')}</td><td>${a.chat_webhook ? '✓ connected' : '—'}</td>
+        ${mine.map(a => `<tr class="${a.active ? '' : 'retired'}" style="${a.active ? '' : 'opacity:.55'}"><td><b>${esc(a.name)}</b>${a.active ? '' : ' <span class="tag">off</span>'}${replaces(a.id).map(o => `<div class="ft">replaces ${esc(o.name)} (left ${esc(agLeftDate(o.archived_at))})</div>`).join('')}</td><td>${esc(a.company || 'All')}</td>
+          <td>${esc(a.email || '—')}</td><td>${esc(a.phone || '—')}</td><td>${a.chat_webhook ? '✓ connected' : '<span class="ft">not set</span>'}</td>
           <td>${coversCo(a.company) ? `<button class="btn" data-edit-agent="${esc(a.id)}">Edit</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`
         : '<div class="muted">No agents yet. Add the sales agents so they get delivery updates.</div>'}
+      ${gone.length ? `<details style="margin-top:12px"><summary class="ft" style="cursor:pointer">Agents who left (${gone.length}) — kept so past jobs still show their name</summary>
+        <div class="ds-wrap" style="margin-top:8px"><table class="ds-tbl"><thead><tr><th>Name</th><th>Company</th><th>Left</th><th>Taken over by</th><th></th></tr></thead><tbody>
+        ${gone.map(o => `<tr style="opacity:.75"><td><b>${esc(o.name)}</b>${o.archived_note ? `<div class="ft">${esc(o.archived_note)}</div>` : ''}</td><td>${esc(o.company || 'All')}</td>
+          <td>${esc(agLeftDate(o.archived_at))}${o.archived_by ? `<div class="ft">by ${esc(o.archived_by)}</div>` : ''}</td>
+          <td>${o.replaced_by && state.ref.agentById[o.replaced_by] ? esc(state.ref.agentById[o.replaced_by].name) : '<span class="ft">nobody yet</span>'}</td>
+          <td>${coversCo(o.company) ? `<button class="btn" data-restore-agent="${esc(o.id)}">Restore</button>` : ''}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
     </div>
     ${isAdmin() ? `<div class="card pad rp-sec nt-msg"><h3>Company Chat spaces &amp; daily summary</h3>
       <div class="ft" style="margin-bottom:10px">Optional. Every update for that company also goes to its Google Chat space (e.g. the sales or logistics space), including “returning to base”. The day's summary goes to the space and the emails listed once every truck is back at base (from 6 PM; at 10 PM at the latest, with a follow-up when the rest are back).
@@ -9220,6 +9236,7 @@ async function renderNotify(){
   if (!agentsView) bindSmsMode(cfg);
   $('btn-new-agent')?.addEventListener('click', () => openAgentForm(null, soleCo(), () => { closeOverlay(); renderNotify(); }));
   document.querySelectorAll('[data-edit-agent]').forEach(b => b.addEventListener('click', () => openAgentForm(agents.find(a => a.id === b.dataset.editAgent), null, () => { closeOverlay(); renderNotify(); })));
+  document.querySelectorAll('[data-restore-agent]').forEach(b => b.addEventListener('click', () => restoreAgent(agents.find(a => a.id === b.dataset.restoreAgent))));
   document.querySelectorAll('.nc-f').forEach(f => f.addEventListener('submit', async e => {
     e.preventDefault(); const btn = f.querySelector('[type=submit]');
     const url = f.chat_webhook.value.trim(), emails = f.daily_emails.value.split(/[,;\s]+/).map(x => x.trim().toLowerCase()).filter(Boolean);
@@ -9448,9 +9465,10 @@ function openAgentForm(a, company, done){
       <label class="f">Google Chat webhook <span class="ft">— optional</span><input class="i" name="chat_webhook" value="${esc(a?.chat_webhook || '')}" placeholder="https://chat.googleapis.com/v1/spaces/…"></label>
       <div class="step-note">For Google Chat: make a space with the agent (e.g. “Deliveries — ${esc(a?.name || 'Agent')}”), then <b>Apps &amp; integrations</b> → <b>Webhooks</b> → add “HATID” and paste the URL here. Any of email, mobile or Chat is enough; more is better.</div>
       ${a ? `<label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="active" ${a.active ? 'checked' : ''}> Active</label>` : ''}
-      <div class="row-btns" style="justify-content:flex-end"><button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn primary">${a ? 'Save' : 'Add agent'}</button></div>
+      <div class="row-btns" style="justify-content:flex-end">${a && coversCo(a.company) && isDispatcher() ? '<button type="button" class="btn" id="agf-remove" style="margin-right:auto">Remove or replace agent</button>' : ''}<button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn primary">${a ? 'Save' : 'Add agent'}</button></div>
     </form></div>`);
   bindClose();
+  $('agf-remove')?.addEventListener('click', () => openRemoveAgent(a));
   $('agf').addEventListener('submit', async e => {
     e.preventDefault(); const f = e.target, btn = f.querySelector('[type=submit]');
     const row = { name: f.name.value.trim(), company: f.company.value || null, email: f.email.value.trim().toLowerCase() || null,
@@ -9467,6 +9485,101 @@ function openAgentForm(a, company, done){
       toast(a ? 'Agent saved' : 'Agent added', 'ok'); done(data);
     } catch (err) { btn.disabled = false; if (err?.code === '23505') toast('An agent with this email is already set up (possibly under another company) — ask an admin', 'error'); }
   });
+}
+
+/* Removing a sales agent (Rommel, 2026-10-03): Remove asks WHY first, and an agent who leaves is
+   ARCHIVED, never deleted, so past jobs and pick-ups keep their name.
+   - Needs an update or correction → nothing removed; back to Edit.
+   - Entered by mistake / duplicate → deleted for good, only if no job or pick-up names them.
+   - Left, replaced → archived and linked to the new agent ("replaces …" shows under the new one);
+     open jobs and pick-ups move to the new agent. The new agent can be picked or added right here.
+   - Left, no replacement yet → archived; open jobs and pick-ups lose the agent so nothing is sent
+     to someone who left. Finished records keep the original agent either way.
+   The database decides (job_agent_remove). */
+function openRemoveAgent(a){
+  if (!a) return;
+  const peers = (state.ref.agents || []).filter(x => x.id !== a.id && x.active && !x.archived_at && (!x.company || x.company === a.company))
+    .sort((x, y) => x.name.localeCompare(y.name));
+  const opt = (v, title, sub) => `<label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:10px;cursor:pointer">
+      <input type="radio" name="ra-why" value="${v}" style="margin-top:3px"><span><b>${title}</b><div class="ft">${sub}</div></span></label>`;
+  openOverlay(`<div class="scrim" data-close></div>
+  <div class="modal" role="dialog" aria-modal="true">
+    <h2>Remove ${esc(a.name)}?</h2>
+    <div class="ft" style="margin-bottom:10px">Why is this agent going? Jobs and pick-ups already done keep ${esc(a.name)}'s name whatever you choose.</div>
+    <div style="display:grid;gap:8px">
+      ${opt('correction', 'Just needs an update or correction', 'Nothing is removed — you go back to Edit to fix the details.')}
+      ${opt('replaced', 'Left — someone new takes over', 'Archived. Their open jobs and pick-ups move to the new agent, who is shown as replacing them.')}
+      ${opt('left', 'Left — no replacement yet', 'Archived. Their open jobs and pick-ups are left without an agent, so no updates go to someone who left.')}
+      ${opt('mistake', 'Entered by mistake or a duplicate', 'Deleted for good. Only possible if no job or pick-up names them.')}
+    </div>
+    <label class="f hidden" id="ra-rep-wrap" style="margin-top:10px">Who takes over?
+      <select class="i" id="ra-rep"><option value="">— choose —</option>${peers.map(x => `<option value="${esc(x.id)}">${esc(x.name)}${x.company ? ' · ' + esc(x.company) : ' · All companies'}</option>`).join('')}<option value="__new">+ Add the new agent…</option></select>
+      <span class="ft">Only agents of ${esc(a.company || 'all companies')} can take over ${esc(a.company ? a.company + ' jobs' : 'these jobs')}.</span></label>
+    <label class="f hidden" id="ra-note-wrap" style="margin-top:10px">Note <span class="ft">— optional, e.g. last day or reason</span><input class="i" id="ra-note" maxlength="200"></label>
+    <div id="ra-msg" class="note hidden" style="margin-top:10px"></div>
+    <div class="row-btns" style="justify-content:flex-end;margin-top:12px">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" class="btn primary" id="ra-go" disabled>Continue</button>
+    </div>
+  </div>`);
+  bindClose();
+  const go = $('ra-go'), msg = $('ra-msg');
+  const why = () => document.querySelector('#overlay input[name=ra-why]:checked')?.value;
+  const say = (text, bad) => { msg.textContent = text; msg.classList.remove('hidden'); msg.style.background = bad ? 'var(--bad-soft)' : ''; };
+  const label = w => w === 'correction' ? 'Go to Edit' : w === 'mistake' ? 'Delete agent' : w === 'replaced' ? ($('ra-rep').value === '__new' ? 'Add the new agent' : 'Archive and hand over') : 'Archive agent';
+  const sync = () => {
+    const w = why(); msg.classList.add('hidden');
+    $('ra-rep-wrap').classList.toggle('hidden', w !== 'replaced');
+    $('ra-note-wrap').classList.toggle('hidden', w !== 'replaced' && w !== 'left');
+    go.disabled = !w || (w === 'replaced' && !$('ra-rep').value);
+    if (w) go.textContent = label(w);
+  };
+  document.querySelectorAll('#overlay input[name=ra-why]').forEach(r => r.addEventListener('change', sync));
+  $('ra-rep').addEventListener('change', sync);
+  const run = async (w, rep, note) => {
+    const { data, error } = await sb.rpc('job_agent_remove', { p_agent: a.id, p_reason: w, p_replacement: rep || null, p_note: note || null });
+    if (error){
+      const m = error.message || '';
+      const missing = error.code === 'PGRST202' || (/job_agent_remove/.test(m) && /not find|does not exist/i.test(m));
+      return { err: missing ? 'Removing agents is not switched on yet — the database step still needs to be run.' : (m || 'Could not remove the agent.') };
+    }
+    return { data };
+  };
+  const finish = data => {
+    const moved = (data.moved_jobs || 0) + (data.moved_pickups || 0);
+    const what = [data.moved_jobs ? `${data.moved_jobs} open job${data.moved_jobs === 1 ? '' : 's'}` : '', data.moved_pickups ? `${data.moved_pickups} open pick-up${data.moved_pickups === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+    if (data.result === 'deleted') toast(`${a.name} deleted`, 'ok');
+    else if (data.replacement) toast(`${a.name} archived — ${data.replacement} takes over${moved ? ` (${what} moved)` : ''}`, 'ok');
+    else toast(`${a.name} archived${moved ? ` — ${what} now have no agent` : ''}`, 'ok');
+    closeOverlay(); renderNotify();
+  };
+  go.addEventListener('click', async () => {
+    const w = why(); if (!w) return;
+    if (w === 'correction'){ closeOverlay(); openAgentForm(a, null, () => { closeOverlay(); renderNotify(); }); return; }
+    const note = $('ra-note').value.trim(), rep = $('ra-rep').value;
+    if (w === 'replaced' && rep === '__new'){
+      /* Add the newcomer first (same company), then hand over to them in the same step. */
+      closeOverlay();
+      openAgentForm(null, a.company, async created => {
+        const r = await run('replaced', created.id, note);
+        if (r.err){ toast(`${created.name} was added, but ${a.name} was not archived: ${r.err}`, 'error'); closeOverlay(); renderNotify(); return; }
+        finish(r.data);
+      });
+      return;
+    }
+    go.disabled = true;
+    const r = await run(w, w === 'replaced' ? rep : null, note);
+    if (r.err){ go.disabled = false; return say(r.err, true); }
+    if (r.data?.result === 'refused'){ go.disabled = false; return say(`${a.name} can't be deleted — ${(r.data.used || []).join(' and ')} name them. If they left, choose "Left" instead: they are archived and the records stay.`, true); }
+    if (r.data?.result === 'deleted' || r.data?.result === 'archived') return finish(r.data);
+    go.disabled = false; say('Something unexpected came back — nothing was changed.', true);
+  });
+}
+async function restoreAgent(a){
+  if (!a || !confirm(`Bring ${a.name} back as an active agent?\n\nJobs already moved to someone else stay with them — change those one by one if needed.`)) return;
+  const { error } = await sb.rpc('job_agent_restore', { p_agent: a.id });
+  if (error) return toast(error.message || 'Could not restore the agent', 'error');
+  toast(`${a.name} is back`, 'ok'); renderNotify();
 }
 
 /* ---------- Schedule confirmations: client + sales agent, once the schedule is approved ---------- */
