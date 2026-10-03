@@ -12640,3 +12640,17 @@ Rommel: there was no setting for who may use the Command Center or at what level
   update there (and the notes), then copy `dist/` into this repo's `shelfsync/` to publish. Updated to the current
   version 2026-10-03; old copy kept as `_backup-before-2026-10-03.tgz`. The folder does not allow deletes by
   default — extract with `tar --overwrite`.
+
+## What was changed on 2026-10-03 (session 3 — ShelfSync company access + split supply, `a7cf0ff`)
+- Depots split by company (WCLI / CWLI). **Staff see only their own company; supervisors and up can be
+  given more** (Command Center › ShelfSync › "Companies they see" → `shelfsync_users.companies` →
+  `shelfsync-staff-sync` v2 → `ss_profiles.companies`, own company excluded). **Admin + Managing Director
+  see and control everything** (`ss_sees_all()`). Enforced in the SCM DB (`company_access.sql`:
+  `ss_sees_company`, `ss_sees_depot`, `ss_supplies_request`, company-scoped announcements).
+- **Split supply** (Rommel: Cebu depots are supplied by CEBU today but may be covered by WCLI/Pasig in full
+  or part): each request line has `supply` jsonb (`{CEBU: 11, PASIG: 4}`, null = all from the main plant),
+  set when approving (PPIC/SCM) or re-split at dispatch (PPIC); must equal the approved qty. The other
+  plant's PPIC sees the request it supplies, read-only.
+- Simulation: ShelfSync `tools/sim_company_access.mjs` (demo data, all pass). Desktop\Shelfsync synced.
+- Next for Rommel: upload the CWLI depot file to Desktop\Shelfsync; then load depots (company CWLI; plant
+  CEBU for Cebu, PASIG outside Cebu) → items/prices/stock → promodisers → Sync everyone → pilot.
