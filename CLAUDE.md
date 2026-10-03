@@ -12689,3 +12689,22 @@ had insert paths) — invisible whenever staff tested.
   Live check after: outsider sees only catalogue_*; cannot update prices; client files order+list+file, sees only own.
 - ⚠ A NEW staff table must get the same "staff only" restrictive policy — `authenticated` includes clients now.
 - ⚠ A new staff app with its own user list must be added to `app_is_internal()`, or its users lose these tables.
+
+## What was changed on 2026-10-04 (session 2 — Command Center › Website: `supabase_cc_website.sql`, RUN)
+MSSI website admin moves into the Command Center (Rommel). Database (test `test_cc_website.sql`: 25/25 PASS, then applied):
+- `website_settings` (one row): accounts_open, cutting_list_open, service_requests_open, site_visits_open, maintenance,
+  public_message. Anyone reads; only cc_can_manage() changes. ENFORCED in the DB: restrictive insert policies on
+  pending_orders (anon + authenticated) via `website_accepts(order_kind)` — only kinds Cutting List / Service Request /
+  Site Visit; Wufoo and anything else never blocked. Staff (`app_is_internal()`) exempt so they can test while closed.
+  client_accounts insert refused while sign-ups closed EXCEPT an existing account (portal saves with upsert, and INSERT
+  policies are checked even on conflict) — `client_account_exists()`.
+- `website_client_flags` (email, status active|suspended, is_test, notes) — separate from client_accounts on purpose
+  (portal reads that with select(*); new columns would break it or leak staff notes). Suspended: no new orders, no
+  profile edits (can still sign in and read). `pending_orders.is_test` set by trigger from the flags, never by the client.
+- Functions (cc_can_manage gated): cc_website_clients(), cc_website_client_set(email,status,is_test,notes),
+  cc_website_client_orders(email) = what that client sees under My Orders. Portal: client_my_status().
+- Log: user_access_log app WEBSITE via `website_log_row()` (own function; the shared one maps unknown tables to KEYSTONE).
+- **command-center.html**: main tab **Website** (`?tab=website`) — Clients (status/test/notes, Orders = view as client),
+  Switches (status banner, message), Change log. Driven headless against a stand-in client: every button made the right call.
+- Portal side lives in the MSSI Webpage repo (banners, refuses before upload, plain-language refusal).
+- Open: ModCraft does not yet hide `is_test` orders from its queue — add a filter there.

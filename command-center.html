@@ -60,6 +60,7 @@ button.btn:disabled{opacity:.45;cursor:not-allowed}
 .note{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:10px}
 .note.warn{background:var(--wash-amber);color:var(--amber)}
 .note.err{background:var(--wash-coral);color:var(--coral)}
+.note.ok{background:var(--wash-teal,rgba(17,116,108,.10));color:var(--teal)}
 .grid-add{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;align-items:end}
 .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
 .muted{color:var(--text2)}
@@ -105,6 +106,8 @@ nav button .n{font-size:11px;opacity:.75;margin-left:4px}
                  operators optionally limited to stations.
      ShelfSync — Modern Trade depots (promodisers + Plant). Same design as HATID: shelfsync_users here is the
                  master; after each save this page asks ShelfSync (shelfsync-staff-sync) to apply it.
+     Website   — the MSSI client portal: client accounts (suspend / test account / staff notes) and the site
+                 switches (website_settings), both enforced by the database. See the Website section below.
      HATID — logistics dispatch (runs on the Social-Content-Manager project). jobboard_users here is
                  the master list; after each save this page asks HATID (job-staff-sync) to apply
                  it, which checks with Modcraft that the caller may use the Command Center (cc_me().allowed).
@@ -136,7 +139,7 @@ var JB_STEPS=[['review','Review'],['confirm','Confirm'],['approve','Approve']];
 var JB_SYNC_URL='https://nssviuuagtlvxjvvvagt.supabase.co/functions/v1/job-staff-sync';
 
 var _qTab=new URLSearchParams(location.search).get('tab');
-var ME=null, TAB=({sign:'sign',hatid:'jb',shelfsync:'ss',ss:'ss',access:'cc',cc:'cc',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],ss:[],cc:[],caps:[],stages:[],log:[],shadow:[]};
+var ME=null, TAB=({sign:'sign',hatid:'jb',shelfsync:'ss',ss:'ss',access:'cc',cc:'cc',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb',web:'web',website:'web'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],ss:[],cc:[],caps:[],stages:[],log:[],shadow:[]};
 // Company filter across every list ('' = all, 'none' = no company set). Keys: wcl / mssi / cwl.
 var CO_FILTER='';
 try{ CO_FILTER=sessionStorage.getItem('cc_co')||''; }catch(e){}
@@ -312,6 +315,7 @@ function drawNav(){
   el('nav').innerHTML=MAIN.map(function(t){
     var l=cnt[t[0]], n=l?l.filter(function(r){return r.active!==false&&passCo(r.company)}).length:null;
     if(t[0]==='cc') n=ccN;
+    if(t[0]==='web') n=WEB.clients?WEB.clients.length:null;
     return '<button class="'+(TAB===t[0]?'on':'')+'" onclick="setMain(\''+t[0]+'\')">'+t[1]+(n!=null?'<span class="n">'+n+'</span>':'')+'</button>'}).join('')
     +'<select onchange="setCo(this.value)" style="margin-left:6px" title="Show one company">'
     +[['','All companies']].concat(CO_KEYS,[['none','No company']]).map(function(o){
@@ -324,7 +328,7 @@ function draw(){
   else if(sub==='log') fn=function(){return viewLog(TAB)};
   else if(sub==='shadow') fn=mcShadowCard;
   else if(sub==='deleg') fn=viewDeleg;
-  else fn={mc:viewMc,pmes:viewPmes,ks:viewKs,jb:viewJb,ss:viewSs,cc:viewCc}[TAB];
+  else fn={mc:viewMc,pmes:viewPmes,ks:viewKs,jb:viewJb,ss:viewSs,cc:viewCc,web:viewWeb}[TAB];
   var nav=subs.length?'<div class="subnav">'+subs.map(function(x){return '<button class="'+(x[0]===sub?'on':'')+'" onclick="setSub(\''+x[0]+'\')">'+x[1]+'</button>'}).join('')+'</div>':'';
   try{ el('root').innerHTML=nav+fn(); applyLF(); }catch(e){ fatal('This view failed: '+esc(e.message)); console.error(e); }
 }
@@ -1150,9 +1154,9 @@ function viewSs(){
 /* ── Change log ───────────────────────────────────────────────────────────── */
 function diffText(b,a){
   if(!b&&!a) return '';
-  if(!b) return 'added as '+esc(a.role);
+  if(!b) return a.role!=null?'added as '+esc(a.role):diffText({},a);
   if(!a) return 'removed';
-  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id','pin_set','title','schedule_steps','can_see_costs','extra_roles','plant','depot_code','depot_codes','agency','mobile','access_until','perms','require_passkey','level','companies'];
+  var keys=['status','is_test','accounts_open','cutting_list_open','service_requests_open','site_visits_open','maintenance','public_message','name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id','pin_set','title','schedule_steps','can_see_costs','extra_roles','plant','depot_code','depot_codes','agency','mobile','access_until','perms','require_passkey','level','companies'];
   var out=keys.filter(function(k){return JSON.stringify(b[k])!==JSON.stringify(a[k])}).map(function(k){
     return esc(k)+': '+esc(JSON.stringify(b[k]))+' → '+esc(JSON.stringify(a[k]))});
   return out.join(' · ')||'no field change';
@@ -1160,12 +1164,12 @@ function diffText(b,a){
 /* ── Layout (Rommel 2026-09-27): People first, then ONE main tab per app, each with its own sub-tabs.
    Lists are read-only rows; one Edit opens a form for that person. Search, company filter and
    "show inactive" on every list. The change log lives inside each app, showing only that app. */
-var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['ss','ShelfSync'],['sign','Who signs'],['cc','Access']];
+var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['ss','ShelfSync'],['web','Website'],['sign','Who signs'],['cc','Access']];
 var SUBS={people:[],sign:[],mc:[['users','Users'],['shadow','Sign-in check'],['log','Change log']],
   pmes:[['users','Users'],['deleg','Approval delegation'],['log','Change log']],
-  ks:[['users','Users'],['log','Change log']],jb:[['users','Users'],['log','Change log']],ss:[['users','Users'],['log','Change log']],cc:[['users','Who may use this page'],['log','Change log']]};
-var LOG_APPS={mc:['MODCRAFT','MODCRAFT-SHEET'],pmes:['PMES'],ks:['KEYSTONE'],jb:['HATID','JOBBOARD'],ss:['SHELFSYNC'],cc:['COMMAND CENTER']};
-var SUB={}, ED={pmes:null,ks:null,jb:null,ss:null,cc:null}, LQ='', SHOW_OFF=false;
+  ks:[['users','Users'],['log','Change log']],jb:[['users','Users'],['log','Change log']],ss:[['users','Users'],['log','Change log']],web:[['clients','Clients'],['switches','Switches'],['log','Change log']],cc:[['users','Who may use this page'],['log','Change log']]};
+var LOG_APPS={mc:['MODCRAFT','MODCRAFT-SHEET'],pmes:['PMES'],ks:['KEYSTONE'],jb:['HATID','JOBBOARD'],ss:['SHELFSYNC'],cc:['COMMAND CENTER'],web:['WEBSITE']};
+var SUB={}, ED={pmes:null,ks:null,jb:null,ss:null,cc:null,web:null}, LQ='', SHOW_OFF=false;
 function setMain(t){ TAB=t; LQ=''; drawNav(); draw(); }
 function setSub(s){ SUB[TAB]=s; LQ=''; draw(); }
 function curSub(){ var s=SUBS[TAB]||[]; if(!s.length) return ''; if(!SUB[TAB]||!s.some(function(x){return x[0]===SUB[TAB]})) SUB[TAB]=s[0][0]; return SUB[TAB]; }
@@ -1441,6 +1445,137 @@ function viewJb(){
      Manager — manages users in every app; sees this list but cannot change it.
    Per-app and per-company limits are deliberately not here yet — Rommel will define them.
    The database refuses to leave the list without an active Owner; every change is in the change log. */
+/* ── Website — the MSSI client portal (added 2026-10-04) ──
+   Clients: everyone with a client account on the portal (client_accounts). Staff-side flags live in
+   website_client_flags (suspended / test account / notes) and are never shown to the client.
+   Switches: website_settings. The DATABASE refuses a closed form even if the page is bypassed; staff
+   signed in to the portal are exempt so they can test while it is closed; Wufoo is never affected.
+   Functions (each checks cc_can_manage): cc_website_clients, cc_website_client_set,
+   cc_website_client_orders. Database: supabase_cc_website.sql. Log app = WEBSITE. */
+var WEB={clients:null,settings:null,loading:false,err:'',missing:false,orders:null,ordersFor:null};
+var WEB_SW=[['accounts_open','New client sign-ups','New people can create a client account. Existing clients can always sign in and edit their profile.'],
+  ['cutting_list_open','Order + cutting list','The order form with the cutting list.'],
+  ['service_requests_open','Service requests',''],
+  ['site_visits_open','Site visit requests',''],
+  ['maintenance','Maintenance mode','Closes every website form at once. The pages stay visible.']];
+async function webLoad(){
+  WEB.loading=true; WEB.err='';
+  var q=await Promise.all([supa.rpc('cc_website_clients'), supa.from('website_settings').select('*').eq('id',1).maybeSingle()]);
+  WEB.loading=false;
+  var e=q[0].error||q[1].error;
+  if(e){
+    if(/cc_website_clients|website_settings|does not exist|schema cache/i.test(e.message||'')) WEB.missing=true; else WEB.err=e.message;
+    WEB.clients=[];
+  } else { WEB.missing=false; WEB.clients=q[0].data||[]; WEB.settings=q[1].data||null; }
+  drawNav(); if(TAB==='web') draw();
+}
+function viewWeb(){
+  if(WEB.clients===null&&!WEB.loading) setTimeout(webLoad,0);
+  if(WEB.missing) return '<div class="card"><h2 style="margin-top:0">Website controls are not set up yet</h2><p class="sub">Run <span class="mono">supabase_cc_website.sql</span> (Modcraft folder) in the Supabase SQL editor, then reload this page.</p></div>';
+  if(WEB.clients===null) return '<div class="card"><p class="sub">Loading website clients…</p></div>';
+  return curSub()==='switches'?webSwitches():webClients();
+}
+function webStatusPills(c){
+  return (c.status==='suspended'?'<span class="pill p-off">Suspended</span>':'<span class="pill p-on">Active</span>')
+    +(c.is_test?' <span class="pill p-none">Test</span>':'')
+    +(c.is_staff?' <span class="pill p-none" title="This email is also on a staff list">Staff</span>':'');
+}
+function webOrdersCard(){
+  var oc=WEB.clients[WEB.ordersFor], rows=WEB.orders;
+  return '<div class="card editcard" id="web-orders"><div class="flex"><h2 style="margin:0">What '+esc(oc.full_name||oc.email)+' sees under My Orders</h2>'
+    +'<button class="btn" style="margin-left:auto" onclick="WEB.ordersFor=null;WEB.orders=null;draw()">Close</button></div>'
+    +'<p class="sub">Their own orders plus their invited company’s — the same list the portal shows them. Read-only.</p>'
+    +(rows===null?'<p class="sub">Loading…</p>'
+      :'<div class="tbl-wrap"><table><thead><tr><th>Reference</th><th>Received</th><th>Type</th><th>Project</th><th>Status</th><th>Quotation</th><th>Files</th><th>Sent by</th></tr></thead><tbody>'
+      +(rows.length?rows.map(function(o){ var t=o.cutlist_totals||{};
+        return '<tr><td class="mono">'+esc(o.id)+(o.is_test?' <span class="pill p-none">Test</span>':'')+'</td>'
+          +'<td style="white-space:nowrap">'+fmt(o.received_at)+'</td>'
+          +'<td>'+esc(o.order_kind||'')+(t.pieces!=null?'<div class="sub">'+esc(t.pieces)+' pcs'+(t.area!=null?' · '+esc(t.area)+' m²':'')+'</div>':'')+'</td>'
+          +'<td>'+esc(o.project_name||'—')+'</td><td>'+esc(o.status||'')+'</td><td class="mono">'+esc(o.quotation_serial||'—')+'</td>'
+          +'<td>'+(o.files||0)+'</td><td class="mono">'+(o.is_mine?'them':esc(o.customer_email))+'</td></tr>'; }).join('')
+        :'<tr><td colspan="8" class="muted">No orders yet.</td></tr>')
+      +'</tbody></table></div>')
+    +'</div>';
+}
+function webClients(){
+  var e=ED.web, form='';
+  if(e!=null&&WEB.clients[e]){
+    var c=WEB.clients[e];
+    form=editCard('web-'+e,'Edit '+esc(c.full_name||c.email)+' <span class="mono muted">'+esc(c.email)+'</span>',
+      '<div class="grid-add">'
+      +fld('Status','<select class="f-status" style="width:100%"><option value="active"'+(c.status!=='suspended'?' selected':'')+'>Active</option>'
+        +'<option value="suspended"'+(c.status==='suspended'?' selected':'')+'>Suspended — cannot send orders or edit their profile</option></select>')
+      +fld('Staff notes (never shown to the client)','<input class="f-notes" style="width:100%" value="'+esc(c.notes||'')+'">')
+      +'</div><label class="chk" style="margin-top:10px"><input type="checkbox" class="f-test"'+(c.is_test?' checked':'')+'> Test account — every order from this email is marked TEST</label>',
+      'webSave('+e+')','web');
+  }
+  var ord=(WEB.ordersFor!=null&&WEB.clients[WEB.ordersFor])?webOrdersCard():'';
+  var extra='<button class="btn" onclick="WEB.clients=null;draw()">Refresh</button>';
+  return '<div class="card"><p class="sub" style="margin:0">Everyone with a client account on the MSSI portal. '
+    +'<b>Suspended</b>: can still sign in and see their orders, but the database refuses new orders and profile changes from that account. '
+    +'<b>Test</b>: orders from that email are marked TEST. '
+    +'<b>To test as a client</b>: sign in to the portal with a non-staff Google account, then mark it Test here. '
+    +'Notes stay here — the client never sees them.</p>'
+    +(WEB.err?'<div class="note err" style="margin:8px 0 0">'+esc(WEB.err)+'</div>':'')+'</div>'
+    +form+ord+'<div class="card">'+listBar('','',extra)
+    +'<div class="tbl-wrap"><table><thead><tr><th>Client</th><th>Email</th><th>Mobile</th><th>Kind</th><th>Signed up</th><th>Last sign-in</th><th>Orders</th><th>Status</th><th>Notes</th><th></th></tr></thead><tbody>'
+    +(WEB.clients.length?WEB.clients.map(function(c,i){
+      var off=c.status==='suspended';
+      return '<tr'+sAttr([c.full_name,c.email,c.company_name,c.client_company,c.segment,c.notes,c.status,c.is_test?'test':''],false)+(off?' class="off"':'')+'>'
+        +'<td><b>'+esc(c.full_name||'—')+'</b>'+((c.client_company||c.company_name)?'<div class="sub">'+esc(c.client_company||c.company_name)+(c.client_company?' · invited company':'')+'</div>':'')+'</td>'
+        +'<td class="mono">'+esc(c.email)+'</td><td class="mono">'+esc(c.mobile||'—')+'</td>'
+        +'<td>'+esc(c.segment||'—')+(c.lead_source?'<div class="sub">'+esc(c.lead_source)+'</div>':'')+'</td>'
+        +'<td style="white-space:nowrap">'+(c.created_at?fmt(c.created_at):'—')+'</td><td style="white-space:nowrap">'+(c.last_sign_in_at?fmt(c.last_sign_in_at):'—')+'</td>'
+        +'<td>'+(c.orders||0)+(c.last_order_at?'<div class="sub">last '+fmt(c.last_order_at)+'</div>':'')+'</td>'
+        +'<td style="white-space:nowrap">'+webStatusPills(c)+'</td><td>'+esc(c.notes||'—')+'</td>'
+        +'<td style="white-space:nowrap"><button class="btn" onclick="webOrders('+i+')">Orders</button> <button class="btn" onclick="openEd(\'web\','+i+')">Edit</button></td></tr>'; }).join('')
+      :'<tr><td colspan="10" class="muted">No client accounts yet.</td></tr>')
+    +'</tbody></table></div></div>';
+}
+async function webOrders(i){
+  WEB.ordersFor=i; WEB.orders=null; draw();
+  var r=await supa.rpc('cc_website_client_orders',{p_email:WEB.clients[i].email});
+  if(r.error){ WEB.ordersFor=null; draw(); return toast(dbErr(r.error)); }
+  WEB.orders=r.data||[]; draw();
+  var card=el('web-orders'); if(card) card.scrollIntoView({block:'start'});
+}
+async function webSave(i){
+  var c=WEB.clients[i], root=el('web-'+i);
+  var st=root.querySelector('.f-status').value, test=root.querySelector('.f-test').checked, notes=root.querySelector('.f-notes').value.trim();
+  if(st==='suspended'&&c.status!=='suspended'&&!confirm('Suspend '+c.email+'? They will not be able to send orders or change their profile until you set them back to Active.')) return;
+  var r=await supa.rpc('cc_website_client_set',{p_email:c.email,p_status:st,p_is_test:test,p_notes:notes});
+  if(r.error) return toast(dbErr(r.error));
+  toast('Saved '+c.email); ED.web=null; WEB.clients=null; await loadAll(); drawNav(); draw();
+}
+function webSwitches(){
+  var s=WEB.settings;
+  if(!s) return '<div class="card"><div class="note err">The switches row is missing. Re-run supabase_cc_website.sql.</div></div>';
+  var closed=WEB_SW.filter(function(k){ return k[0]==='maintenance'?s.maintenance:!s[k[0]]; });
+  var banner=s.maintenance?['err','Maintenance mode is ON — every website form is closed to the public.']
+    :closed.length?['warn','Partly closed: '+closed.map(function(k){return k[1]}).join(', ')+'.']:['ok','The website is fully open.'];
+  return '<div class="card"><div class="note '+banner[0]+'" style="margin:0 0 10px">'+esc(banner[1])+'</div>'
+    +'<p class="sub" style="margin:0">Enforced by the database: a closed form refuses submissions even if someone bypasses the page. '
+    +'<b>Staff signed in to the portal are exempt</b>, so you can keep testing while it is closed to the public. Wufoo orders are never affected.</p></div>'
+    +'<div class="card" id="web-sw">'
+    +WEB_SW.map(function(k){ var on=k[0]==='maintenance'?s.maintenance:s[k[0]];
+      return '<label class="chk" style="display:flex;white-space:normal;gap:10px;align-items:flex-start;padding:9px 0;margin:0;border-bottom:1px solid var(--line)">'
+        +'<input type="checkbox" class="f-sw" data-k="'+k[0]+'"'+(on?' checked':'')+' style="margin-top:2px">'
+        +'<span><b>'+esc(k[0]==='maintenance'?k[1]+' — on':k[1]+' — open')+'</b>'+(k[2]?'<div class="sub">'+esc(k[2])+'</div>':'')+'</span></label>'; }).join('')
+    +'<div style="margin-top:12px">'+fld('Message shown on the website while something is closed (optional)',
+      '<input class="f-msg" style="width:100%" value="'+esc(s.public_message||'')+'" placeholder="e.g. Online orders reopen on Monday. Call +63 898 600 6926 meanwhile.">')+'</div>'
+    +'<div class="flex" style="margin-top:12px;gap:8px"><button class="btn primary" onclick="webSaveSwitches()">Save switches</button>'
+    +'<span class="muted">Last changed '+(s.updated_at?fmt(s.updated_at)+(s.updated_by?' by '+esc(s.updated_by):''):'—')+'</span></div></div>';
+}
+async function webSaveSwitches(){
+  var root=el('web-sw'), patch={public_message:root.querySelector('.f-msg').value.trim()||null};
+  [].forEach.call(root.querySelectorAll('.f-sw'),function(cb){ patch[cb.getAttribute('data-k')]=cb.checked; });
+  if(patch.maintenance&&!WEB.settings.maintenance&&!confirm('Turn maintenance mode ON? Every website form closes to the public at once.')) return;
+  var r=await supa.from('website_settings').update(patch).eq('id',1).select();
+  if(r.error) return toast(dbErr(r.error));
+  if(!r.data||!r.data.length) return toast('Not saved — your account may not have Command Center access.');
+  WEB.settings=r.data[0]; toast('Switches saved'); await loadAll(); drawNav(); draw();
+}
+
 function ccIsOwner(){ return !!(ME&&ME.level==='owner'); }
 function ccLevelPill(l){ return l==='owner'?'<span class="pill p-on">Owner</span>':'<span class="pill p-none">Manager</span>'; }
 function ccForm(u){
