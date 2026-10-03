@@ -2557,6 +2557,22 @@ const PROFILES = {
           };
         }, { stageAssignPresent: true, togglesS1Wrap: true, togglesS2Wrap: true, togglesTabClasses: true,
              neverCallsInitFinalQuotation: true, refreshesBarAtEnd: true, realDomHooksExist: true });
+      /* 2026-10-03: a renumbered quotation must still be found by its OLD number in the Project
+         List (Rommel: "should still be traceable to the original number especially when searched
+         in the project"). The old numbers ride in Quotations column AC / prevSerials. */
+      check('Project List search finds a quotation by a previous number', () => {
+        const w = window;
+        const saved = { dirData: w.dirData, search: document.getElementById('dir-search').value, dsa: w.dirShowArchived };
+        w.dirShowArchived = true;
+        try {
+          w.dirData = [{ id:'QT-W00000999', baseSerial:'QT-W00000999', created:'2026-01-01T00:00:00Z', client:'Renumbered Co',
+            type:'Fabrication only', value:1, user:'T', status:'Draft', stage:'Initial', options:1, updatedAt:'2026-01-01T00:00:00Z',
+            agent:'', prevSerials:'QT-M00000888' }];
+          const s = document.getElementById('dir-search'); s.value = 'm00000888'; w.renderDirectoryTable();
+          const found = document.getElementById('dir-table').innerHTML.indexOf('QT-W00000999') >= 0;
+          return { found, prefixes: w._seriesPrefixFor('World Class Laminate, Inc.') + w._seriesPrefixFor('Module System and Services, Inc.') + w._seriesPrefixFor('Cebu World Laminates') };
+        } finally { w.dirData = saved.dirData; w.dirShowArchived = saved.dsa; document.getElementById('dir-search').value = saved.search; }
+      }, { found:true, prefixes:'WMC' });
       /* Rommel, 2026-08-19: "Add capability to search for the agent name." Agent was already
          captured on every quotation (cl-agent) and already searchable on the Orders queue, but
          never made it into the directory's own data at all -- not stored in the Quotations sheet
