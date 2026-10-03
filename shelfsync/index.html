@@ -1040,9 +1040,21 @@ async function initLive() {
   } catch (e) { SB = null; console.warn("Supabase library not available", e); }
   return true;
 }
-let SERVER = null, LAST_SYNC = {}, LAST_FULL = 0, LOADQ = Promise.resolve();
+let SERVER = null, LAST_SYNC = {}, LAST_FULL = 0, LAST_DEEP = 0, DEEP_SIG = "", LOADQ = Promise.resolve();
 const SINCE_DAYS = 200;
 const sinceIso = () => new Date(Date.now() - SINCE_DAYS * DAY).toISOString();
+const sinceMs = () => Date.now() - SINCE_DAYS * DAY;
+const OPEN_REQ = ["for_ppic", "for_scm", "for_plant_note", "for_smd", "for_md", "approved", "dispatched"];
+/* What a routine refresh (opening the app, every 30 minutes) downloads:
+   HIST_KEYS are the big tables. Between full loads only what changed since is fetched: their rows are only added, voided
+   or moved on by status, and each of those moves the time column the refresh reads (created_at / synced_at / updated_at).
+   DEEP_KEYS change only through an import or its undo, so they come with the full load.
+   Everything else is small and comes in full every time, as before.
+   A full load happens at the first sign-in on a phone, on "Refresh data", after an import, once a day, and when what
+   this person may see changes (their companies or branches, a new depot, an import undone). */
+const HIST_KEYS = ["stock", "sales", "movements", "lost_sales", "counts", "requests", "messages"];
+const DEEP_KEYS = ["monthly", "delivery_history"];
+const DEEP_EVERY = 20 * 3600e3;
 const N = v => v == null ? null : Number(v);
 async function pageAll(build, size = 1000, max = 150000) {
   const out = [];
@@ -1066,14 +1078,14 @@ const TABLES = {
   prices: { full: () => pageAll(() => SB.from("ss_prices").select("*").order("product_id").order("account_id")), map: r => ({ ...r, price: Number(r.price) }) },
   stock: { inc: "updated_at", key: s => s.depot_id + "|" + s.product_id,
     q: () => SB.from("ss_stock").select("*").order("depot_id").order("product_id"), map: s => ({ ...s, on_hand: Number(s.on_hand), min_display: Number(s.min_display || 0) }) },
-  movements: { inc: "created_at", synced: true, key: "id", q: () => SB.from("ss_movements").select("*").not("kind", "in", "(sale,void)").gte("created_at", sinceIso()).order("id"), map: m => ({ ...m, qty: Number(m.qty) }) },
-  sales: { inc: "created_at", key: "id", q: () => SB.from("ss_sales").select("*, ss_sale_lines(*)").gte("sold_at", sinceIso()).order("id"),
+  movements: { inc: "created_at", synced: true, key: "id", keep: r => inWindow(r.created_at), q: () => SB.from("ss_movements").select("*").not("kind", "in", "(sale,void)").gte("created_at", sinceIso()).order("id"), map: m => ({ ...m, qty: Number(m.qty) }) },
+  sales: { inc: "created_at", key: "id", keep: r => inWindow(r.sold_at), q: () => SB.from("ss_sales").select("*, ss_sale_lines(*)").gte("sold_at", sinceIso()).order("id"),
     map: ({ ss_sale_lines, ...s }) => ({ ...s, total_amount: Number(s.total_amount), _lines: (ss_sale_lines || []).map(l => ({ ...l, qty: Number(l.qty), unit_price: Number(l.unit_price) })) }) },
-  lost_sales: { inc: "created_at", synced: true, key: "id", q: () => SB.from("ss_lost_sales").select("*").gte("created_at", sinceIso()).order("id"), map: l => ({ ...l, qty: Number(l.qty) }) },
-  counts: { inc: "created_at", synced: true, key: "id", q: () => SB.from("ss_counts").select("*").gte("created_at", sinceIso()).order("id") },
-  requests: { inc: "updated_at", key: "id",
-    q: () => SB.from("ss_requests").select("*").or("status.in.(for_ppic,for_scm,for_plant_note,for_smd,for_md,approved,dispatched),updated_at.gte." + new Date(Date.now() - 400 * DAY).toISOString()).order("id") },
-  messages: { inc: "created_at", synced: true, key: "id",
+  lost_sales: { inc: "created_at", synced: true, key: "id", keep: r => inWindow(r.created_at), q: () => SB.from("ss_lost_sales").select("*").gte("created_at", sinceIso()).order("id"), map: l => ({ ...l, qty: Number(l.qty) }) },
+  counts: { inc: "created_at", synced: true, key: "id", keep: r => inWindow(r.created_at), q: () => SB.from("ss_counts").select("*").gte("created_at", sinceIso()).order("id") },
+  requests: { inc: "updated_at", key: "id", keep: r => OPEN_REQ.includes(r.status) || !r.updated_at || Date.parse(r.updated_at) >= Date.now() - 400 * DAY,
+    q: () => SB.from("ss_requests").select("*").or("status.in.(" + OPEN_REQ.join(",") + "),updated_at.gte." + new Date(Date.now() - 400 * DAY).toISOString()).order("id") },
+  messages: { inc: "created_at", synced: true, key: "id", cap: 3000,
     full: async () => (await pageAll(() => SB.from("ss_messages").select("*").order("created_at", { ascending: false }).order("id"), 1000, 3000)).reverse(),
     q: () => SB.from("ss_messages").select("*").order("created_at").order("id") },
   settings: { full: async () => chk(await SB.from("ss_settings").select("*")) },
@@ -1093,6 +1105,7 @@ const TABLES = {
   competitors: { full: async () => chk(await SB.from("ss_competitor_obs").select("*").order("created_at", { ascending: false }).limit(1000)), map: c => ({ ...c, price: N(c.price) }) },
   access_log: { admin: true, full: async () => chk(await SB.from("ss_access_log").select("*").order("created_at", { ascending: false }).limit(500)) }
 };
+const inWindow = t => !t || Date.parse(t) >= sinceMs();
 const maxOf = (rows, col, prev) => rows.reduce((m, r) => (r[col] && r[col] > m ? r[col] : m), prev || "");
 /* the column that says when a row reached the server: synced_at where the database has it (created_at may be the phone's time) */
 const incCol = k => { const T = TABLES[k]; return T.synced && SERVER && (SERVER[k] || []).some(r => "synced_at" in r) ? "synced_at" : T.inc; };
@@ -1127,22 +1140,30 @@ function mergeRows(list, rows, key) {
   return list;
 }
 async function pull(keys, mode) {
-  const res = {};
-  await Promise.all(keys.map(async k => { res[k] = await fetchTable(k, mode); }));
+  const res = {}, modeOf = typeof mode === "function" ? mode : () => mode;
+  await Promise.all(keys.map(async k => { res[k] = await fetchTable(k, modeOf(k)); }));
   const next = SERVER ? { ...SERVER } : {};
   for (const k of keys) {
     const T = TABLES[k], { rows } = res[k];
-    if (res[k].mode === "inc") next[k] = mergeRows((next[k] || []).slice(), rows, T.key);
+    if (res[k].mode === "inc") {
+      next[k] = mergeRows((next[k] || []).slice(), rows, T.key);
+      if (T.keep) next[k] = next[k].filter(T.keep);                                   // aged out of the window since the full load
+      if (T.cap && next[k].length > T.cap) next[k] = next[k].slice().sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).slice(-T.cap);
+    }
     else next[k] = rows;
     if (T.inc) { const col = res[k].col || (T.synced && rows.some(r => "synced_at" in r) ? "synced_at" : T.inc), prev = LAST_SYNC[k];
       LAST_SYNC[k] = maxOf(rows.map(r => ({ v: k === "sales" && r.voided_at && r.voided_at > (r[col] || "") ? r.voided_at : r[col] })), "v", res[k].mode === "inc" ? prev : "");
     }
   }
   if (keys.includes("requests")) {
-    const ids = res.requests.mode === "inc" ? res.requests.rows.map(r => r.id) : next.requests.map(r => r.id);
-    const det = await fetchRequestDetail(ids), touched = new Set(ids);
-    next.request_lines = (res.requests.mode === "inc" ? (next.request_lines || []).filter(l => !touched.has(l.request_id)) : []).concat(det.lines);
-    next.request_events = (res.requests.mode === "inc" ? (next.request_events || []).filter(e => !touched.has(e.request_id)) : []).concat(det.events);
+    // "what changed since" re-reads the last 30 s each time: lines and history only for requests that really moved on
+    const before = new Map(((SERVER && SERVER.requests) || []).map(r => [r.id, r]));
+    const moved = r => { const o = before.get(r.id); return !o || o.updated_at !== r.updated_at || o.status !== r.status; };
+    const ids = res.requests.mode === "inc" ? res.requests.rows.filter(moved).map(r => r.id) : next.requests.map(r => r.id);
+    const det = await fetchRequestDetail(ids), touched = new Set(ids), still = new Set(next.requests.map(r => r.id));
+    const kept = x => !touched.has(x.request_id) && still.has(x.request_id);
+    next.request_lines = (res.requests.mode === "inc" ? (next.request_lines || []).filter(kept) : []).concat(det.lines);
+    next.request_events = (res.requests.mode === "inc" ? (next.request_events || []).filter(kept) : []).concat(det.events);
   }
   SERVER = next;
 }
@@ -1181,11 +1202,26 @@ function rebuildS() {
 }
 const ALL_KEYS = Object.keys(TABLES);
 const serial = fnc => (LOADQ = LOADQ.then(fnc, fnc));
-/* full load (sign-in, Refresh data, every 30 minutes in use) */
-function loadLive(silent) {
+/* what this person may see: when it changes, everything is loaded again (rows for a newly visible depot are old, so
+   "what changed since" would never bring them; an undone import deleted rows) */
+function scopeSig(X) {
+  const me = ME && (X.users || []).find(p => p.id === ME.id) || ME || {};
+  return JSON.stringify([me.role, me.extra_roles || [], me.company_id, me.companies || [], me.plant_id, me.depot_id, me.depot_ids || [],
+    (X.depots || []).map(d => d.id + (d.company_id || "")).sort(), (X.imports || []).map(i => i.id + (i.undone_at ? "x" : "")).sort()]);
+}
+/* sign-in, opening the app, every 30 minutes in use: the small tables in full, the big ones only what changed.
+   deep = everything in full (first sign-in on this phone, "Refresh data", imports, once a day) */
+function loadLive(silent, deep) {
   return serial(async () => {
     if (!SB) throw new Error("No connection");
-    LAST_SYNC = {}; await pull(ALL_KEYS, "full"); LAST_FULL = Date.now();
+    const routine = !deep && SERVER && LAST_DEEP && Date.now() - LAST_DEEP < DEEP_EVERY;   // a table never seen yet still comes in full
+    let full = !routine;
+    if (routine) {
+      await pull(ALL_KEYS.filter(k => !DEEP_KEYS.includes(k)), k => HIST_KEYS.includes(k) ? "inc" : "full");
+      if (scopeSig(SERVER) !== DEEP_SIG) full = true;
+    }
+    if (full) { LAST_SYNC = {}; await pull(ALL_KEYS, "full"); LAST_DEEP = Date.now(); DEEP_SIG = scopeSig(SERVER); }
+    LAST_FULL = Date.now();
     rebuildS(); saveSnapshotSoon(true);
     if (!silent) render(); else rerender({ keepInputs: true });
   });
@@ -1202,7 +1238,7 @@ function refreshTables(keys, opts = {}) {
 }
 function refreshAfter(ops) {
   const keys = [].concat(...ops.map(o => OP_TABLES[o] || []));
-  if (ops.includes("undoImport")) return loadLive(true).catch(() => {});
+  if (ops.includes("undoImport")) return loadLive(true, true).catch(() => {});
   return refreshTables(keys).catch(e => console.warn("refresh", e));
 }
 /* data saved on this phone, so the app opens (and works) with no signal */
@@ -1210,14 +1246,14 @@ let snapTimer = null;
 function saveSnapshotSoon(now) {
   if (MODE !== "live" || !ME || !SERVER) return;
   clearTimeout(snapTimer);
-  snapTimer = setTimeout(() => IDB.set("snap-" + ME.id, { v: 2, at: Date.now(), server: SERVER, lastSync: LAST_SYNC, me: ME }), now ? 50 : 4000);
+  snapTimer = setTimeout(() => IDB.set("snap-" + ME.id, { v: 3, at: Date.now(), server: SERVER, lastSync: LAST_SYNC, lastDeep: LAST_DEEP, deepSig: DEEP_SIG, me: ME }), now ? 50 : 4000);
 }
 async function loadSnapshot(uid) {
   const x = uid && await IDB.get("snap-" + uid);
-  if (!x || x.v !== 2 || !x.server) return null;
+  if (!x || !(x.v === 2 || x.v === 3) || !x.server) return null;
   return x;
 }
-function useSnapshot(x) { SERVER = x.server; LAST_SYNC = x.lastSync || {}; SNAP_AT = x.at; rebuildS(); }
+function useSnapshot(x) { SERVER = x.server; LAST_SYNC = x.lastSync || {}; LAST_DEEP = x.lastDeep || 0; DEEP_SIG = x.deepSig || ""; SNAP_AT = x.at; rebuildS(); }
 let SNAP_AT = 0;
 /* =====================================================================
    DEMO DATA — sample depots, products and 150 days of simulated sales
@@ -1617,10 +1653,17 @@ function latestAi(depot_id, product_id) {
   const r = CACHE.aiIdx.get(depot_id + "|" + product_id);
   return r && (Date.now() - new Date(r.created_at)) < 21 * DAY ? r : null;
 }
-/* monthly sales rows across all history: [{depot_id, product_id, month:'YYYY-MM', created_by, units, amount, receipts}] */
+/* monthly sales rows across all history: [{depot_id, product_id, month:'YYYY-MM', created_by, units, amount, receipts}]
+   Live: months that start inside the downloaded sales (the last 200 days) are worked out from those sales, so they are
+   current to the last refresh; older months come from the server's monthly summary, which is loaded with the full load. */
 function monthlyRows() {
   if (CACHE.monthly) return CACHE.monthly;
-  if (MODE === "live" && S.monthly && S.monthly.length) return CACHE.monthly = S.monthly;
+  const recent = monthlyFromSales();
+  if (MODE !== "live" || !S.monthly || !S.monthly.length) return CACHE.monthly = recent;
+  const s = new Date(sinceMs()), cut = monthKey(new Date(s.getFullYear(), s.getMonth() + (s.getDate() === 1 && !s.getHours() && !s.getMinutes() ? 0 : 1), 1));
+  return CACHE.monthly = S.monthly.filter(r => r.month < cut).concat(recent.filter(r => r.month >= cut));
+}
+function monthlyFromSales() {
   const saleById = new Map(S.sales.map(s => [s.id, s])), m = new Map();
   S.sale_lines.forEach(l => {
     const s = saleById.get(l.sale_id); if (!s) return;
@@ -1628,7 +1671,7 @@ function monthlyRows() {
     let r = m.get(k); if (!r) { r = { depot_id: s.depot_id, product_id: l.product_id, month: monthKey(s.sold_at), created_by: s.created_by, units: 0, amount: 0, _r: new Set() }; m.set(k, r); }
     r.units += l.qty; r.amount += l.qty * l.unit_price; r._r.add(s.id);
   });
-  return CACHE.monthly = Array.from(m.values()).map(({ _r, ...r }) => ({ ...r, receipts: _r.size }));
+  return Array.from(m.values()).map(({ _r, ...r }) => ({ ...r, receipts: _r.size }));
 }
 /* encoded sales for depot × item within [from, to] (inclusive ISO dates) */
 function encodedBetween(depotIds, from, to) {
@@ -3575,7 +3618,7 @@ async function applyImport(kind, rows, filename) {
       for (const [d, ls] of Object.entries(by)) { const cid = uuid(); chk(await SB.from("ss_counts").insert({ id: cid, depot_id: d, note: "Opening balance import: " + filename, import_id: imp.id }));
         await ins("ss_count_lines", ls.map(l => ({ count_id: cid, product_id: l.product_id, counted_qty: l.qty }))); }
     }
-    await loadLive(true); return;
+    await loadLive(true, true); return;
   }
   // demo
   if (["items", "depots"].includes(kind)) S.imports.push(imp);
@@ -3708,7 +3751,7 @@ const App = {
   },
   async addDevice() { await busy(async () => { await Bio.enroll(); toast("Face ID / fingerprint is set up on this device"); rerender(); }); },
   theme() { const order = [undefined, "light", "dark"]; UI.theme = order[(order.indexOf(UI.theme) + 1) % 3]; applyTheme(); saveUI(); App.menu(); },
-  async refresh() { closeSheets(); try { await loadLive(true); toast("Data refreshed"); } catch (e) { toast(friendlyErr(e), true); } },
+  async refresh() { closeSheets(); try { await loadLive(true, true); toast("Data refreshed"); } catch (e) { toast(friendlyErr(e), true); } },
   install() { closeSheets(); deferredInstall.prompt(); deferredInstall.userChoice.finally(() => deferredInstall = null); },
   installHelp() {
     openSheet(`<div class="stack"><h2>Install ShelfSync</h2><div class="list small">
@@ -4339,7 +4382,7 @@ async function finishLogin(u, event) {
   Q.use(u.id);
   // open at once with the data saved on this phone, then bring it up to date
   const snap = await loadSnapshot(u.id);
-  if (snap) useSnapshot(snap); else { SERVER = {}; rebuildS(); }
+  if (snap) useSnapshot(snap); else { SERVER = {}; LAST_SYNC = {}; LAST_DEEP = 0; DEEP_SIG = ""; rebuildS(); }   // nothing of the last person carries over
   render(); if (!resume) window.scrollTo(0, 0);
   if (!SB || !navigator.onLine) { renderSync(); return; }
   if (!resume) SB.rpc("ss_touch", { p_event: event, p_agent: navigator.userAgent }).then(() => {}, () => {});
@@ -4406,7 +4449,7 @@ function startRealtime() {
 }
 function stopRealtime() { if (realtime && SB) { try { SB.removeChannel(realtime); } catch (e) {} } realtime = null; }
 /* while the app is open: what changed every 2 minutes, everything every 30 minutes (in between, only what changed) */
-const INC_KEYS = ["stock", "sales", "movements", "lost_sales", "counts", "requests", "messages"];
+const INC_KEYS = HIST_KEYS;
 let lastInc = 0;
 function tick() {
   if (MODE !== "live" || !ME || !SB || !navigator.onLine || document.visibilityState !== "visible") return;
