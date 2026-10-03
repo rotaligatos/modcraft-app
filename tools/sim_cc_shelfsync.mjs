@@ -64,12 +64,16 @@ let db=await page.evaluate(()=>__db);
 ok(!db.writes.some(w=>w.op==='insert'),'refused without a depot (promodiser needs a depot)');
 await box.locator('.f-depot').selectOption('WIL-QAV');
 await box.locator('input.f-perm[value="request"]').uncheck();
+ok(await box.locator('input.f-morec[value="WIL-QAV"]').count()===1,'"also handles" lists the depots');
+await box.locator('input.f-morec[value="AH-BAL"]').check();
+await box.locator('input.f-morec[value="WIL-QAV"]').check();   // same as home depot: must not be stored twice
 await box.locator('.f-pw').check();
 await page.evaluate(()=>addSs()); await page.waitForFunction(()=>!SS.busy);
 db=await page.evaluate(()=>__db);
 const ins=db.writes.find(w=>w.op==='insert');
 ok(ins&&ins.row.email==='promo.one@gmail.com','email trimmed and lower-cased');
 ok(ins&&ins.row.depot_code==='WIL-QAV'&&ins.row.role==='promodiser'&&ins.row.agency==='Agency X','role, depot, agency saved');
+ok(ins&&JSON.stringify(ins.row.depot_codes)==='["AH-BAL"]','second depot saved, home depot not repeated');
 ok(ins&&ins.row.perms.request===false&&Object.keys(ins.row.perms).length===1,'only the switched-off feature stored');
 ok(ins&&Array.isArray(ins.row.companies)&&ins.row.companies.length===0,'promodiser gets no extra companies');
 const sync=calls.find(c=>c.b.action==='sync');

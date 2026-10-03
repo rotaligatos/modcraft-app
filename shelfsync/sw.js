@@ -1,6 +1,6 @@
 // ShelfSync service worker: app shell works offline; data calls always go to the network.
-const VERSION = "shelfsync-v1";
-const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png",
+const VERSION = "shelfsync-v2";
+const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/co-wcli.png", "./icons/co-wcli-mark.png", "./icons/co-cwli.png", "./icons/co-cwli-mark.png", "./icons/rtmo.png",
   "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"];
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
