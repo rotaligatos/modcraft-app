@@ -1,26 +1,37 @@
-// ShelfSync service worker: app shell works offline; data calls always go to the network.
-const VERSION = "shelfsync-v3";
-const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/co-wcli.png", "./icons/co-wcli-mark.png", "./icons/co-cwli.png", "./icons/co-cwli-mark.png", "./icons/rtmo.png",
+// ShelfSync service worker: the app and its libraries work offline; data calls always go to the network.
+// A new version installs in the background and waits until the person taps "Reload" in the app.
+const VERSION = "shelfsync-v4";
+const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/co-wcli.png", "./icons/co-wcli-mark.png",
+  "./icons/co-cwli.png", "./icons/co-cwli-mark.png", "./icons/rtmo.png"];
+// libraries from CDNs: stored at install when reachable, never allowed to break the install
+const LIBS = ["https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js",
+  "https://unpkg.com/@simplewebauthn/browser@13.1.0/dist/bundle/index.umd.min.js",
+  "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js",
   "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"];
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then(async c => {
+    await c.addAll(SHELL);
+    await Promise.all(LIBS.map(u => fetch(u, { mode: "cors" }).then(r => r.ok ? c.put(u, r) : null).catch(() => null)));
+  }));
 });
+self.addEventListener("message", e => { if (e.data === "skip-waiting") self.skipWaiting(); });
 self.addEventListener("activate", e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== VERSION).map(k => caches.delete(k)))).then(() => self.clients.claim()));
 });
+const timeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
-  if (e.request.method !== "GET" || url.hostname.endsWith("supabase.co") || url.pathname.includes("/functions/")) return; // never cache data/API
-  // pages: network first so updates arrive; fall back to cache offline
+  if (e.request.method !== "GET" || url.hostname.endsWith("supabase.co") || url.pathname.includes("/functions/") || url.hostname === "accounts.google.com") return; // never cache data/API/sign-in
+  // the page: network first so updates arrive, but give up after 4 s on a weak signal and use the saved copy
   if (e.request.mode === "navigate") {
-    // cache:"no-cache" = always ask the server (GitHub Pages lets browsers keep the page 10 min otherwise)
-    e.respondWith(fetch(e.request.url, { cache: "no-cache", credentials: "same-origin" }).then(r => { const c = r.clone(); caches.open(VERSION).then(x => x.put("./index.html", c)); return r; })
+    e.respondWith(timeout(fetch(e.request.url, { cache: "no-cache", credentials: "same-origin" }), 4000)
+      .then(r => { if (r.ok) { const c = r.clone(); caches.open(VERSION).then(x => x.put("./index.html", c)); } return r.ok ? r : caches.match("./index.html").then(h => h || r); })
       .catch(() => caches.match("./index.html")));
     return;
   }
-  // static assets & CDN libraries: cache first
+  // icons, libraries: from the phone first, network otherwise (good responses only are kept)
   e.respondWith(caches.match(e.request).then(hit => hit || fetch(e.request).then(r => {
-    if (r.ok && (url.origin === location.origin || /cdnjs|jsdelivr|unpkg|fonts\.(googleapis|gstatic)/.test(url.hostname))) {
+    if (r.ok && (url.origin === location.origin || /cdnjs|jsdelivr|unpkg|sheetjs|fonts\.(googleapis|gstatic)/.test(url.hostname))) {
       const c = r.clone(); caches.open(VERSION).then(x => x.put(e.request, c));
     }
     return r;
