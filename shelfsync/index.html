@@ -405,8 +405,17 @@ const PERMS = [
 const rolesOf = u => u ? [u.role].concat(u.extra_roles || []) : [];
 const hasRole = (...rs) => !!ME && rs.some(r => rolesOf(ME).includes(r));
 const rolesLabel = u => rolesOf(u).map(r => ROLES[r]).join(" · ");
-/* PPIC / Plant Manager tied to one plant see only that plant (unless they also hold a company-wide role) */
-const plantScoped = () => !!ME && !!ME.plant_id && hasRole("ppic", "plant_mgr") && !hasRole("admin", "scm", "smd", "md");
+/* Companies a Plant user handles: their own + any ticked in Command Center › ShelfSync. Admin and Managing Director
+   see every company. The database enforces the same rule (ss_sees_depot), so this only keeps the screens tidy. */
+const seesAll = () => hasRole("admin", "md");
+const myCompanies = () => !ME ? [] : seesAll() ? (S.companies || []).map(c => c.id) : Array.from(new Set([ME.company_id].concat(ME.companies || []).filter(Boolean)));
+const inMyCompany = c => !!ME && ME.role !== "promodiser" && (seesAll() || myCompanies().includes(c));
+const companyScoped = () => !!ME && ME.role !== "promodiser" && !seesAll();
+const myCompanyList = () => (S.companies || []).filter(c => !companyScoped() || myCompanies().includes(c.id));
+/* a plant supplying part of a request (split supply) may see it */
+const suppliesMe = r => !!ME && !!ME.plant_id && (S.request_lines || []).some(l => l.request_id === r.id && l.supply && Number(l.supply[ME.plant_id]) > 0);
+const plantShort = id => ((idx.plant(id) || {}).name || id || "").replace(/ Plant$/, "");
+const supplyText = (l, r) => l.supply ? Object.entries(l.supply).filter(([, q]) => Number(q) > 0).map(([k, q]) => plantShort(k) + " " + fmt(Number(q))).join(" · ") : plantShort(r.plant_id);
 const can = p => !!ME && (ME.role !== "promodiser" || !ME.perms || ME.perms[p] !== false);
 const DOC_TYPES = { delivery_receipt: "Delivery receipt", count_sheet: "Stock count sheet", pullout_slip: "Pull-out slip", damage_photo: "Damage photo",
   sellout_report: "Retailer sell-out report", shelf_photo: "Shelf / display photo", other: "Other" };
@@ -463,11 +472,16 @@ function actingRole(r) {
   const st = CHAIN.find(c => c.status === r.status); if (!st || !st.role) return null;
   if (st.role === "promodiser") {                      // receiving: the depot's promodiser, or PPIC for depots without one
     if (ME.role === "promodiser") return ME.depot_id === r.depot_id && can("receive") ? "promodiser" : null;
-    return hasRole("ppic") && (!ME.plant_id || ME.plant_id === r.plant_id) ? "ppic" : null;
+    return hasRole("ppic") && inMyCompany(r.company_id) ? "ppic" : null;
   }
   if (!hasRole(st.role)) return null;
-  if (["ppic", "plant_mgr"].includes(st.role) && ME.plant_id && ME.plant_id !== r.plant_id) return null;
+  if (!inMyCompany(r.company_id)) return null;            // each person acts only for the companies they handle
   return st.role;
+}
+/* same rule as ss_clean_supply: real plants with qty > 0; null when everything comes from the usual plant */
+function cleanSupply(sup, main) {
+  const out = {}; Object.entries(sup || {}).forEach(([k, q]) => { q = Number(q); if (idx.plant(k) && q > 0) out[k] = q; });
+  const ks = Object.keys(out); return !ks.length || (ks.length === 1 && ks[0] === main) ? null : out;
 }
 /* ---------- local engine: same rules as the database triggers ---------- */
 function needConfirm(ref, confirm_id) {
@@ -549,7 +563,7 @@ const Engine = {
       if (r.created_by !== ME.id || !["for_ppic","for_scm"].includes(r.status)) throw new Error("Only the requester can cancel before Supply Chain review");
       nxt = "cancelled";
     } else if (!ar) {
-      throw new Error(!step || !step.role ? "This request is closed" : hasRole(step.role) ? "This request belongs to another plant" : "This request is waiting for " + ROLES[step.role]);
+      throw new Error(!step || !step.role ? "This request is closed" : hasRole(step.role) ? "This request belongs to a company you do not handle" : "This request is waiting for " + ROLES[step.role]);
     } else if (action === "reject") nxt = "rejected";
     else if (action === "return") { const i = chain.indexOf(r.status); if (i < 1) throw new Error("Cannot return from here"); nxt = chain[i-1]; }
     else if (action === "dispatch") {
@@ -575,7 +589,10 @@ const Engine = {
         const q = l.qty_received ?? l.qty_approved ?? l.qty_requested; if (q > 0) Engine.move(r.depot_id, l.product_id, q, "receipt", r.id, at, { ref_text: r.req_no }); });
       r.received_at = at;
     }
-    if (action === "approve" && ["ppic", "scm"].includes(ar) && lines) lines.forEach(l => { const rl = S.request_lines.find(x => x.id === l.id); if (rl) rl.qty_approved = l.qty_approved; });
+    if (action === "approve" && ["ppic", "scm"].includes(ar) && lines) lines.forEach(l => { const rl = S.request_lines.find(x => x.id === l.id); if (!rl) return;
+      if ("supply" in l) { rl.supply = cleanSupply(l.supply, r.plant_id); rl.qty_approved = rl.supply ? Object.values(rl.supply).reduce((a, b) => a + b, 0) : l.qty_approved; }
+      else rl.qty_approved = l.qty_approved; });
+    if (action === "dispatch" && lines) lines.forEach(l => { const rl = S.request_lines.find(x => x.id === l.id); if (rl && "supply" in l) rl.supply = cleanSupply(l.supply, r.plant_id); });
     const prev = r.status; r.status = nxt; r.updated_at = new Date().toISOString();
     S.request_events.push({ id: uuid(), request_id: r.id, actor_name: ME.full_name, actor_role: ar, action, from_status: prev, to_status: nxt, note, biometric: !!confirm_id, created_at: r.updated_at });
     return r;
@@ -984,8 +1001,8 @@ function buildDemo() {
     U("u-promo-d-alp", "Ana Lim", "ana.lim@agency.demo", "promodiser", "WCLI", { depot_id: "d-alp", agency: "Prime Promo Agency", status: "suspended" }),
     U("u-ppic-pasig", "Carla Mendoza", "carla.mendoza@wcli.demo", "ppic", "WCLI", { plant_id: "PASIG" }),
     U("u-ppic-cebu", "Rhea Tan", "rhea.tan@wcli.demo", "ppic", "CWLI", { plant_id: "CEBU" }),
-    U("u-scm", "Supply Chain Manager", "scm@wcli.demo", "scm", "WCLI"),
-    U("u-smd", "Sales & Marketing Director", "smd@wcli.demo", "smd", "WCLI"),
+    U("u-scm", "Supply Chain Manager", "scm@wcli.demo", "scm", "WCLI", { companies: ["CWLI"] }),
+    U("u-smd", "Sales & Marketing Director", "smd@wcli.demo", "smd", "WCLI", { companies: ["CWLI"] }),
     U("u-md", "Managing Director", "md@wcli.demo", "md", "WCLI"),
     U("u-admin", "Admin · Plant Manager", "admin@wcli.demo", "admin", "WCLI", { extra_roles: ["plant_mgr"] }),
   ];
@@ -1192,7 +1209,7 @@ const planChip = s => `<span class="chip ${PLAN_STATUS[s][1]}"><span class="dot"
 
 function scopeDepots(f) {
   return S.depots.filter(d => !d.is_consolidation_dc && (!f.company || d.company_id === f.company) && (!f.account || d.account_id === f.account) && (!f.depot || d.id === f.depot)
-    && (!plantScoped() || d.plant_id === ME.plant_id));
+    && (!companyScoped() || inMyCompany(d.company_id)));
 }
 function aggregate(f) {
   const key = "agg" + JSON.stringify(f); if (CACHE[key]) return CACHE[key];
@@ -1366,7 +1383,7 @@ function rerender() { if (!ME) return render(); const y = window.scrollY; const 
 
 function topbar() {
   const dp = ME.depot_id ? idx.depot(ME.depot_id) : null;
-  const ctxA = isPromo() ? (dp ? dp.name : "No depot assigned") : (ME.plant_id ? idx.plant(ME.plant_id).name : "All plants");
+  const ctxA = isPromo() ? (dp ? dp.name : "No depot assigned") : (seesAll() ? "All companies" : myCompanies().join(" · "));
   const ctxB = isPromo() ? (dp ? idx.account(dp.account_id).name + " · " + dp.company_id : "") : rolesLabel(ME);
   return `<header class="topbar"><div class="topbar-in">
     <div class="brand">${LOGO}<span>ShelfSync</span></div>
@@ -1398,7 +1415,7 @@ function plantRail() {
   return `<nav class="rail" aria-label="Plant sections">${plantItems().map(([k, l]) => k === "h" ? `<div class="rail-h">${esc(l)}</div>` :
     `<button ${UI.route === k ? 'aria-current="page"' : ""} onclick="App.go('${k}')">${esc(l)}${counts[k] ? `<span class="count">${counts[k]}</span>` : ""}</button>`).join("")}</nav>`;
 }
-const inMyPlant = depotId => { if (!plantScoped()) return true; const d = idx.depot(depotId); return d && d.plant_id === ME.plant_id; };
+const inMyPlant = depotId => { if (!companyScoped()) return true; const d = idx.depot(depotId); return !!d && inMyCompany(d.company_id); };
 
 /* =====================================================================
    SIGN-IN (email + password, then Face ID / fingerprint)
@@ -1802,7 +1819,7 @@ function chatView(depotId, promo) {
    ===================================================================== */
 function filtersBar(opts = {}) {
   const f = UI.f;
-  const comps = S.companies, accts = S.accounts.filter(a => S.depots.some(d => d.account_id === a.id && !d.is_consolidation_dc));
+  const comps = myCompanyList(), accts = S.accounts.filter(a => S.depots.some(d => d.account_id === a.id && !d.is_consolidation_dc));
   const deps = scopeDepots({ company: f.company, account: f.account });
   return `<div class="filters">
     <label class="f">Company<select class="in" id="f-co" onchange="App.setF('company',this.value)"><option value="">All</option>${comps.map(c => `<option value="${c.id}" ${f.company === c.id ? "selected" : ""}>${esc(c.id)}</option>`).join("")}</select></label>
@@ -1934,7 +1951,7 @@ const PLANT_ROUTES = {
 
   approvals: { view() {
     const tab = UI.apTab || "mine";
-    const base = S.requests.filter(r => !plantScoped() || r.plant_id === ME.plant_id);
+    const base = S.requests.filter(r => !companyScoped() || inMyCompany(r.company_id) || suppliesMe(r));
     const lists = { mine: myQueue(), open: base.filter(r => OPEN_STATUSES.includes(r.status) || ["approved", "dispatched"].includes(r.status)), done: base.filter(r => ["received", "rejected", "cancelled"].includes(r.status)) };
     const list = lists[tab].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 60);
     const sel = UI.apSel && S.requests.find(r => r.id === UI.apSel);
@@ -1953,13 +1970,13 @@ const PLANT_ROUTES = {
 
   depots: { view() {
     const co = UI.f.company || "";
-    const ds = S.depots.filter(d => (!co || d.company_id === co) && (!plantScoped() || d.plant_id === ME.plant_id));
+    const ds = S.depots.filter(d => (!co || d.company_id === co) && (!companyScoped() || inMyCompany(d.company_id)));
     const canEdit = hasRole("admin", "scm", "ppic");
     const sellable = ds.filter(d => !d.is_consolidation_dc);
     const prods = S.products.filter(p => !co || p.company_id === co);
     return `
       <div class="section-h"><div><div class="eyebrow">Network</div><h1>Depots & stock</h1></div>
-        <label class="f" style="min-width:150px">Company<select class="in" id="dp-co" onchange="App.setF('company',this.value)"><option value="">All</option>${S.companies.map(c => `<option value="${c.id}" ${co === c.id ? "selected" : ""}>${c.id}</option>`).join("")}</select></label></div>
+        <label class="f" style="min-width:150px">Company<select class="in" id="dp-co" onchange="App.setF('company',this.value)"><option value="">All</option>${myCompanyList().map(c => `<option value="${c.id}" ${co === c.id ? "selected" : ""}>${c.id}</option>`).join("")}</select></label></div>
       <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Depot</th><th>Account</th><th>Region</th><th>Plant</th><th>Delivery route</th><th>Space used</th><th class="r">Lead time (days)</th><th class="r">Actual avg</th><th class="r">Units</th><th class="r">Value at SRP</th></tr></thead><tbody>
       ${ds.map(d => { const st = S.stock.filter(s => s.depot_id === d.id), lt = leadTime(d), via = d.ship_via_depot_id ? idx.depot(d.ship_via_depot_id) : null;
         return `<tr><td><b>${esc(d.name)}</b><div class="small faint mono">${esc(d.code)}</div></td><td>${esc(idx.account(d.account_id).name)}</td><td>${esc(d.region || "—")}</td><td>${esc(idx.plant(d.plant_id).name)}</td>
@@ -1977,7 +1994,7 @@ const PLANT_ROUTES = {
   }},
 
   chat: { view() {
-    const ds = S.depots.filter(d => !d.is_consolidation_dc && (!plantScoped() || d.plant_id === ME.plant_id));
+    const ds = S.depots.filter(d => !d.is_consolidation_dc && (!companyScoped() || inMyCompany(d.company_id)));
     const last = id => S.messages.filter(m => m.kind === "chat" && m.depot_id === id).slice(-1)[0];
     const sorted = ds.slice().sort((a, b) => ((last(b) || {}).created_at || "").localeCompare((last(a) || {}).created_at || ""));
     UI.chatD = UI.chatD && idx.depot(UI.chatD) ? UI.chatD : sorted[0].id;
@@ -1988,7 +2005,7 @@ const PLANT_ROUTES = {
         <div class="stack">
           <div class="card flush"><div class="list">${sorted.map(d => { const m = last(d.id); return `<button style="border:0;background:${UI.chatD === d.id ? "var(--accent-soft)" : "none"};text-align:left;cursor:pointer;padding:11px 14px;width:100%" onclick="App.chatPick('${d.id}')"><div class="row between"><b>${esc(d.name)}</b><span class="small faint">${m ? dshort(m.created_at) : ""}</span></div><div class="small muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${m ? esc(m.sender_name + ": " + m.body) : "No messages yet"}</div></button>`; }).join("")}</div></div>
           ${canAnn ? `<div class="card stack-sm"><h2>Announcement to promodisers</h2>
-            <select class="in" id="ann-co"><option value="">All companies</option>${S.companies.map(c => `<option value="${c.id}">${c.id} promodisers</option>`).join("")}</select>
+            <select class="in" id="ann-co">${seesAll() ? '<option value="">All companies</option>' : ""}${myCompanyList().map(c => `<option value="${c.id}">${c.id} promodisers</option>`).join("")}</select>
             <textarea class="in" id="ann-body" placeholder="e.g. New price tags arrive with the next delivery"></textarea><button class="btn" onclick="App.announce()">Post announcement</button></div>` : ""}
         </div>
         ${chatView(UI.chatD, false)}
@@ -2015,6 +2032,9 @@ function approvalDetail(r) {
   const step = CHAIN.find(c => c.status === r.status);
   const actAs = actingRole(r), canAct = step && step.role && step.role !== "promodiser" && !!actAs;
   const canEditQty = canAct && ["for_ppic", "for_scm"].includes(r.status) && ["ppic", "scm"].includes(actAs);
+  // split supply: PPIC / Supply Chain while reviewing, PPIC again just before dispatch (same total)
+  const canSplit = canEditQty || (canAct && r.status === "approved" && actAs === "ppic");
+  const others = (S.plants || []).filter(p => p.id !== r.plant_id);
   const odooEditable = hasRole("ppic") && !["received", "rejected", "cancelled"].includes(r.status);
   const needOdoo = canAct && ((r.status === "for_ppic" && odooRule() === "ppic_review") || (r.status === "approved" && odooRule() !== "off"));
   const events = S.request_events.filter(e => e.request_id === r.id).sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -2025,14 +2045,15 @@ function approvalDetail(r) {
   return `<div class="card stack">
     <div class="row between"><div><div class="eyebrow">${r.origin === "ppic" ? "Raised by PPIC" : "Raised by promodiser"}</div><h2 class="mono" style="font-family:var(--f-mono)">${esc(r.req_no)}</h2></div>${statusChip(r.status)}</div>
     ${miniChain(r)}
-    <div class="small muted"><b>${esc(dp.name)}</b> · ${esc(idx.account(dp.account_id).name)} · ${esc(idx.plant(r.plant_id).name)}<br>${via ? "Deliver to " + esc(via.name) + " (consolidated, then to branch)" : "Direct delivery to depot"}${r.needed_by ? " · needed by " + dshort(r.needed_by) : ""}</div>
+    <div class="small muted"><b>${esc(dp.name)}</b> · ${esc(idx.account(dp.account_id).name)} · ${esc(dp.company_id || "")} · usually supplied by ${esc(idx.plant(r.plant_id).name)}<br>${via ? "Deliver to " + esc(via.name) + " (consolidated, then to branch)" : "Direct delivery to depot"}${r.needed_by ? " · needed by " + dshort(r.needed_by) : ""}</div>
     ${r.note ? `<div class="notice">${esc(r.note)}</div>` : ""}
-    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="r">On hand</th><th class="r">Avg/day</th><th class="r">Formula</th><th class="r">AI</th><th class="r">Requested</th><th class="r">Approved</th></tr></thead><tbody>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="r">On hand</th><th class="r">Avg/day</th><th class="r">Formula</th><th class="r">AI</th><th class="r">Requested</th><th class="r">Approved</th><th>Supplied from</th></tr></thead><tbody>
       ${lines.map(l => { const p = idx.product(l.product_id), x = plan[l.product_id], q = l.qty_approved ?? l.qty_requested; total += q * priceFor(p, dp);
         return `<tr><td style="min-width:200px">${prodCell(p)}</td><td class="r">${fmt(onHand(r.depot_id, p.id))}</td><td class="r">${x ? fmt(x.dbar, 2) : "—"}</td><td class="r">${x ? fmt(x.suggested + (open ? q : 0)) : "—"}</td>
         <td class="r">${x && x.ai ? `<b>${fmt(x.ai.ai_qty)}</b>` : l.qty_ai != null ? fmt(l.qty_ai) : "—"}</td><td class="r">${fmt(l.qty_requested)}</td>
-        <td class="r">${canEditQty ? `<input class="in qty" id="apq-${l.id}" type="number" min="0" value="${q}">` : l.qty_approved == null ? "—" : fmt(l.qty_approved)}</td></tr>`; }).join("")}
-      <tr><td colspan="6" class="r"><b>Value</b></td><td class="r"><b>${peso(total)}</b></td></tr>
+        <td class="r">${canEditQty ? `<input class="in qty" id="apq-${l.id}" type="number" min="0" value="${q}">` : l.qty_approved == null ? "—" : fmt(l.qty_approved)}</td>
+        <td style="min-width:140px">${canSplit && others.length ? `<div class="small muted">${esc(plantShort(r.plant_id))}: the rest</div>${others.map(o => `<label class="small" style="display:flex;gap:6px;align-items:center;margin-top:3px">from ${esc(plantShort(o.id))}<input class="in qty" id="aps-${l.id}-${o.id}" type="number" min="0" value="${l.supply && l.supply[o.id] ? Number(l.supply[o.id]) : ""}" placeholder="0" style="width:72px"></label>`).join("")}` : `<span class="small">${esc(supplyText(l, r))}</span>`}</td></tr>`; }).join("")}
+      <tr><td colspan="6" class="r"><b>Value</b></td><td class="r"><b>${peso(total)}</b></td><td></td></tr>
     </tbody></table></div>
     ${reasons.length ? `<div class="ai-note"><div class="eyebrow">AI advice</div>${reasons.map(x => `<div class="small"><b class="mono">${esc(x.p.sku)}</b> ${fmt(x.ai.ai_qty)}: ${esc(x.ai.reason)}</div>`).join("")}</div>` : ""}
     ${space.length ? `<div class="small muted">Shelf space at ${esc(dp.name)}: ${space.map(x => `${esc(x.category)} ${fmt(x.used)}/${fmt(x.cap)}${x.used > x.cap ? ' <b style="color:var(--crit)">over</b>' : ""}`).join(" · ")} <span class="faint">(on hand + pipeline, including this request)</span></div>` : ""}
@@ -2474,7 +2495,7 @@ function reportBuilder() {
         ${cfg.period === "custom" && cfg.type !== "inventory" ? `<label class="f">From<input class="in" id="rp-from" type="date" value="${esc(cfg.from)}" ${set("from")}></label><label class="f">To<input class="in" id="rp-to" type="date" value="${esc(cfg.to)}" ${set("to")}></label>` : ""}
       </div>
       <div class="filters">
-        <label class="f">Company<select class="in" id="rp-co" ${set("company")}>${opt("", "All", cfg.company)}${S.companies.map(c => opt(c.id, c.id, cfg.company)).join("")}</select></label>
+        <label class="f">Company<select class="in" id="rp-co" ${set("company")}>${opt("", "All", cfg.company)}${myCompanyList().map(c => opt(c.id, c.id, cfg.company)).join("")}</select></label>
         <label class="f">Account<select class="in" id="rp-ac" ${set("account")}>${opt("", "All accounts", cfg.account)}${accts.map(a => opt(a.id, a.name, cfg.account)).join("")}</select></label>
         <label class="f">Depot<select class="in" id="rp-dp" ${set("depot")}>${opt("", "All depots", cfg.depot)}${scopeDepots({ company: cfg.company, account: cfg.account }).map(x => opt(x.id, x.name, cfg.depot)).join("")}</select></label>
       </div>
@@ -3291,7 +3312,25 @@ const App = {
   async act(id, action) {
     const r = S.requests.find(x => x.id === id), note = val("ap-note").trim() || null, odoo = val("ap-odoo").trim();
     let lines = null;
-    if (action === "approve") { const ins = S.request_lines.filter(l => l.request_id === id).map(l => { const el = document.getElementById("apq-" + l.id); return el ? { id: l.id, qty_approved: Number(el.value) } : null; }).filter(Boolean); if (ins.length) lines = ins; }
+    if (action === "approve" || action === "dispatch") {
+      // approved quantity, and how much of it comes from another plant (split supply)
+      let bad = null;
+      const ins = S.request_lines.filter(l => l.request_id === id).map(l => {
+        const el = document.getElementById("apq-" + l.id), out = { id: l.id };
+        const total = el ? Number(el.value) : (l.qty_approved ?? l.qty_requested);
+        if (el && action === "approve") out.qty_approved = total;
+        const parts = (S.plants || []).filter(p => p.id !== r.plant_id).map(p => [p.id, document.getElementById("aps-" + l.id + "-" + p.id)]).filter(x => x[1]);
+        if (parts.length) {
+          const sup = {}; let other = 0;
+          parts.forEach(([k, inp]) => { const v = Number(inp.value || 0); if (v < 0 || isNaN(v)) bad = "Quantities can't be negative"; if (v > 0) { sup[k] = v; other += v; } });
+          if (other > total) bad = "Split supply is more than the approved quantity for " + ((idx.product(l.product_id) || {}).sku || "an item");
+          out.supply = other > 0 ? Object.assign({ [r.plant_id]: total - other }, sup) : null;
+        }
+        return Object.keys(out).length > 1 ? out : null;
+      }).filter(Boolean);
+      if (bad) return toast(bad, true);
+      if (ins.length) lines = ins;
+    }
     if (action === "reject" && !note) return toast("Add a remark explaining the rejection", true);
     if ($("#ap-odoo") && !odoo && ((r.status === "for_ppic" && odooRule() === "ppic_review") || (r.status === "approved" && odooRule() !== "off") && !r.odoo_ticket_ref)) return toast("Enter the Odoo ticket number first", true);
     const step = CHAIN.find(c => c.status === r.status);
