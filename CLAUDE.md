@@ -12608,3 +12608,26 @@ never commit · PMES/KEYSTONE default work week, capacity, staff emails, supplie
   Modcraft `shelfsync_users` (2 policies, 3 triggers, Rommel seeded as admin + plant_mgr); SCM ShelfSync
   `schema.sql`+`storage.sql` (34 `ss_` tables, all RLS on, bucket `shelfsync-docs`). `ss_profiles` is empty until
   someone presses **Sync everyone** in Command Center › ShelfSync — nobody can sign in to ShelfSync before that.
+
+## What was changed on 2026-10-03 (session 2 — Command Center access list: Owner / Manager)
+Rommel: there was no setting for who may use the Command Center or at what level. Decided: levels
+**Owner** and **Manager**; per-app and per-company limits deliberately NOT built yet (he will define them).
+- **Database** (`supabase_command_center_access.sql`, run on Modcraft via the SQL editor): table
+  **`cc_access`** (email, name, level owner|manager, active, notes); helpers `cc_level()`,
+  `cc_can_manage()`, `cc_is_owner()`. Read = anyone on the list; write = Owners only (RLS). Deferred
+  trigger refuses to leave no active Owner. Changes logged in `user_access_log` as app `COMMAND CENTER`.
+  Seeded with the three Admin/Directors as Owners (Rommel, Kathleen, IT admin) — nobody lost access.
+- `cc_me()` now returns `allowed = cc_can_manage()` + `level`. Because the HATID and ShelfSync sync
+  functions check `cc_me().allowed`, they follow the list automatically.
+- Every Command Center rule that used `app_is_admin_tier()` now uses `cc_can_manage()`: the user lists
+  (jobboard/shelfsync/keystone/pmes users, adm_user_caps), access + shadow logs, PMES delegations read,
+  and functions cc_log_jobboard / cc_log_sheet_change / cc_log_shelfsync / cc_pin_status /
+  pmes_delegate_create/revoke. **Kept Modcraft-admin access where Modcraft itself needs it**:
+  `users` policies and `cc_sync_user_pins` = `app_is_admin_tier() OR cc_can_manage()`;
+  ks_/pmes_rank checks unchanged. Unrelated Modcraft policies untouched.
+- Tested by impersonation (rolled back): manager gets in, sees the list, can't add/change it, can manage
+  app users; staff not on the list refused and sees no logs; owner can add; last-owner guard fires.
+- **Screen**: new main tab **Access** (Who may use this page · Change log; `?tab=access`). Owners add /
+  edit / remove; Managers see it read-only. Header shows your level. Simulation `tools/sim_cc_access.mjs`.
+- ⚠ A new Command Center feature must gate on `cc_can_manage()` (or `cc_is_owner()`), never
+  `app_is_admin_tier()` — that now means "Modcraft admin", not "may use the Command Center".

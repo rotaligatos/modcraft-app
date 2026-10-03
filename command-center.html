@@ -107,9 +107,10 @@ nav button .n{font-size:11px;opacity:.75;margin-left:4px}
                  master; after each save this page asks ShelfSync (shelfsync-staff-sync) to apply it.
      HATID — logistics dispatch (runs on the Social-Content-Manager project). jobboard_users here is
                  the master list; after each save this page asks HATID (job-staff-sync) to apply
-                 it, which checks with Modcraft that the caller is an Admin/Director.
+                 it, which checks with Modcraft that the caller may use the Command Center (cc_me().allowed).
 
-   Who may open this page: Modcraft Admin/Director (cc_me().allowed). Every change to the
+   Who may open this page: the people on Access (table cc_access; cc_me().allowed) — Owner = everything,
+   Manager = every app's users but not the Access list (2026-10-03; was Modcraft Admin/Director). Every change to the
    KEYSTONE, PMES and HATID lists is written to user_access_log by a database trigger, and the
    database refuses any change that would leave a list with no active admin.
    ───────────────────────────────────────────────────────────────────────────── */
@@ -135,7 +136,7 @@ var JB_STEPS=[['review','Review'],['confirm','Confirm'],['approve','Approve']];
 var JB_SYNC_URL='https://nssviuuagtlvxjvvvagt.supabase.co/functions/v1/job-staff-sync';
 
 var _qTab=new URLSearchParams(location.search).get('tab');
-var ME=null, TAB=({sign:'sign',hatid:'jb',shelfsync:'ss',ss:'ss',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],ss:[],caps:[],stages:[],log:[],shadow:[]};
+var ME=null, TAB=({sign:'sign',hatid:'jb',shelfsync:'ss',ss:'ss',access:'cc',cc:'cc',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],ss:[],cc:[],caps:[],stages:[],log:[],shadow:[]};
 // Company filter across every list ('' = all, 'none' = no company set). Keys: wcl / mssi / cwl.
 var CO_FILTER='';
 try{ CO_FILTER=sessionStorage.getItem('cc_co')||''; }catch(e){}
@@ -246,6 +247,8 @@ function validEmail(e){return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)}
 function dbErr(e){
   var m=(e&&e.message)||String(e);
   if(/At least one active admin/.test(m)) return 'Refused: that would leave the list with no active admin.';
+  if(/At least one active owner/.test(m)) return 'Refused: the Command Center must keep at least one active Owner.';
+  if(/row-level security|permission denied/i.test(m)) return 'Refused: only an Owner of the Command Center can do that.';
   if(e&&e.code==='23505') return 'That email is already on the list.';
   return m;
 }
@@ -261,9 +264,9 @@ async function boot(){
   var r=await supa.rpc('cc_me');
   if(r.error) return fatal('Could not check your account: '+esc(r.error.message));
   ME=r.data||{};
-  el('who').innerHTML='<b>'+esc(ME.name||ME.email)+'</b><br>'+esc(ME.email)+
+  el('who').innerHTML='<b>'+esc(ME.name||ME.email)+'</b>'+(ME.level?' <span class="pill '+(ME.level==='owner'?'p-on':'p-none')+'" title="Your Command Center level">'+(ME.level==='owner'?'Owner':'Manager')+'</span>':'')+'<br>'+esc(ME.email)+
     ' · <a href="#" onclick="supa.auth.signOut().then(function(){location.reload()});return false">Sign out</a>';
-  if(!ME.allowed) return fatal('<b>'+esc(ME.email)+'</b> is not a Modcraft Admin or Director, so the Command Center is closed to this account.');
+  if(!ME.allowed) return fatal('<b>'+esc(ME.email)+'</b> has not been given Command Center access. An Owner can add you under Command Center › Access.');
   await loadAll();
   drawNav(); draw();
   var cameBack=false; try{ cameBack=sessionStorage.getItem('cc_gconnect')==='1'; sessionStorage.removeItem('cc_gconnect'); }catch(e){}
@@ -291,7 +294,8 @@ async function loadAll(){
     supa.from('user_shadow_log').select('id,at,email,ok,diffs,build').order('at',{ascending:false}).limit(1000),
     supa.from('pmes_delegations').select('*').order('starts_at',{ascending:false}).limit(200),
     supa.from('jobboard_users').select('*').order('active',{ascending:false}).order('name'),
-    supa.from('shelfsync_users').select('*').order('active',{ascending:false}).order('name')
+    supa.from('shelfsync_users').select('*').order('active',{ascending:false}).order('name'),
+    supa.from('cc_access').select('*').order('active',{ascending:false}).order('level',{ascending:false}).order('name')
   ]);
   // The ShelfSync list is added by its own setup script; until then its tab says so instead of an error on every page.
   SS.missing=!!(q[9].error&&/shelfsync_users|does not exist|schema cache/i.test(q[9].error.message||''));
@@ -299,13 +303,15 @@ async function loadAll(){
   var bad=q.filter(function(x){return x.error});
   if(bad.length) toast('Some lists could not load: '+bad[0].error.message);
   D.modcraft=q[0].data||[]; D.ks=q[1].data||[]; D.pmes=q[2].data||[];
-  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[]; D.deleg=q[7].data||[]; D.jb=q[8].data||[]; D.ss=q[9].data||[];
+  D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[]; D.deleg=q[7].data||[]; D.jb=q[8].data||[]; D.ss=q[9].data||[]; D.cc=q[10].data||[];
 }
 
 function drawNav(){
   var cnt={mc:D.modcraft,pmes:D.pmes,ks:D.ks,jb:D.jb,ss:D.ss};
+  var ccN=D.cc.filter(function(r){return r.active!==false}).length;
   el('nav').innerHTML=MAIN.map(function(t){
     var l=cnt[t[0]], n=l?l.filter(function(r){return r.active!==false&&passCo(r.company)}).length:null;
+    if(t[0]==='cc') n=ccN;
     return '<button class="'+(TAB===t[0]?'on':'')+'" onclick="setMain(\''+t[0]+'\')">'+t[1]+(n!=null?'<span class="n">'+n+'</span>':'')+'</button>'}).join('')
     +'<select onchange="setCo(this.value)" style="margin-left:6px" title="Show one company">'
     +[['','All companies']].concat(CO_KEYS,[['none','No company']]).map(function(o){
@@ -318,7 +324,7 @@ function draw(){
   else if(sub==='log') fn=function(){return viewLog(TAB)};
   else if(sub==='shadow') fn=mcShadowCard;
   else if(sub==='deleg') fn=viewDeleg;
-  else fn={mc:viewMc,pmes:viewPmes,ks:viewKs,jb:viewJb,ss:viewSs}[TAB];
+  else fn={mc:viewMc,pmes:viewPmes,ks:viewKs,jb:viewJb,ss:viewSs,cc:viewCc}[TAB];
   var nav=subs.length?'<div class="subnav">'+subs.map(function(x){return '<button class="'+(x[0]===sub?'on':'')+'" onclick="setSub(\''+x[0]+'\')">'+x[1]+'</button>'}).join('')+'</div>':'';
   try{ el('root').innerHTML=nav+fn(); applyLF(); }catch(e){ fatal('This view failed: '+esc(e.message)); console.error(e); }
 }
@@ -1129,7 +1135,7 @@ function diffText(b,a){
   if(!b&&!a) return '';
   if(!b) return 'added as '+esc(a.role);
   if(!a) return 'removed';
-  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id','pin_set','title','schedule_steps','can_see_costs','extra_roles','plant','depot_code','agency','mobile','access_until','perms','require_passkey'];
+  var keys=['name','role','company','active','receive_all','stations','access_companies','notes','feature_access','delegate_to','delegate_active','include_in_kpi','require_pin','device_id','pin_set','title','schedule_steps','can_see_costs','extra_roles','plant','depot_code','agency','mobile','access_until','perms','require_passkey','level'];
   var out=keys.filter(function(k){return JSON.stringify(b[k])!==JSON.stringify(a[k])}).map(function(k){
     return esc(k)+': '+esc(JSON.stringify(b[k]))+' → '+esc(JSON.stringify(a[k]))});
   return out.join(' · ')||'no field change';
@@ -1137,12 +1143,12 @@ function diffText(b,a){
 /* ── Layout (Rommel 2026-09-27): People first, then ONE main tab per app, each with its own sub-tabs.
    Lists are read-only rows; one Edit opens a form for that person. Search, company filter and
    "show inactive" on every list. The change log lives inside each app, showing only that app. */
-var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['ss','ShelfSync'],['sign','Who signs']];
+var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['ss','ShelfSync'],['sign','Who signs'],['cc','Access']];
 var SUBS={people:[],sign:[],mc:[['users','Users'],['shadow','Sign-in check'],['log','Change log']],
   pmes:[['users','Users'],['deleg','Approval delegation'],['log','Change log']],
-  ks:[['users','Users'],['log','Change log']],jb:[['users','Users'],['log','Change log']],ss:[['users','Users'],['log','Change log']]};
-var LOG_APPS={mc:['MODCRAFT','MODCRAFT-SHEET'],pmes:['PMES'],ks:['KEYSTONE'],jb:['HATID','JOBBOARD'],ss:['SHELFSYNC']};
-var SUB={}, ED={pmes:null,ks:null,jb:null,ss:null}, LQ='', SHOW_OFF=false;
+  ks:[['users','Users'],['log','Change log']],jb:[['users','Users'],['log','Change log']],ss:[['users','Users'],['log','Change log']],cc:[['users','Who may use this page'],['log','Change log']]};
+var LOG_APPS={mc:['MODCRAFT','MODCRAFT-SHEET'],pmes:['PMES'],ks:['KEYSTONE'],jb:['HATID','JOBBOARD'],ss:['SHELFSYNC'],cc:['COMMAND CENTER']};
+var SUB={}, ED={pmes:null,ks:null,jb:null,ss:null,cc:null}, LQ='', SHOW_OFF=false;
 function setMain(t){ TAB=t; LQ=''; drawNav(); draw(); }
 function setSub(s){ SUB[TAB]=s; LQ=''; draw(); }
 function curSub(){ var s=SUBS[TAB]||[]; if(!s.length) return ''; if(!SUB[TAB]||!s.some(function(x){return x[0]===SUB[TAB]})) SUB[TAB]=s[0][0]; return SUB[TAB]; }
@@ -1184,7 +1190,7 @@ async function _removeRow(table,u,app,after){
   if(r.error) return toast(dbErr(r.error));
   if(!r.data||!r.data.length) return toast('Not removed — the database refused the change.');
   if(after) await after();
-  toast('Removed '+u.email+' from '+app); ED[{pmes_users:'pmes',keystone_users:'ks',jobboard_users:'jb',shelfsync_users:'ss'}[table]]=null; await refresh();
+  toast('Removed '+u.email+' from '+app); ED[{pmes_users:'pmes',keystone_users:'ks',jobboard_users:'jb',shelfsync_users:'ss',cc_access:'cc'}[table]]=null; await refresh();
 }
 function removePmes(i){ _removeRow('pmes_users',D.pmes[i],'PMES'); }
 function removeKs(i){ var u=D.ks[i]; _removeRow('keystone_users',u,'KEYSTONE',async function(){ await supa.from('adm_user_caps').delete().eq('email',u.email); }); }
@@ -1409,6 +1415,70 @@ function viewJb(){
         +'<td>'+esc(jbCoLabel(u))+'</td><td>'+rolePill({role:rl,active:u.active},u.role==='admin')+'</td><td>'+esc(u.title||'—')+'</td>'
         +'<td>'+tagList(steps)+'</td><td>'+(jbPkLabel(u)?esc(jbPkLabel(u)):'<span class="muted">—</span>')+'</td><td>'+(costs?'Yes':'<span class="muted">No</span>')+'</td><td>'+actPill(u.active)+'</td>'
         +'<td style="white-space:nowrap">'+jbState(u)+'</td><td><button class="btn" '+(JB.busy?'disabled ':'')+'onclick="openEd(\'jb\','+i+')">Edit</button></td></tr>'}).join('')
+    +'</tbody></table></div></div>';
+}
+
+/* ── Command Center access (Rommel 2026-10-03) ──
+   Who may use this page, and at what level. Kept in the database (cc_access), enforced there too:
+     Owner   — everything, including this list.
+     Manager — manages users in every app; sees this list but cannot change it.
+   Per-app and per-company limits are deliberately not here yet — Rommel will define them.
+   The database refuses to leave the list without an active Owner; every change is in the change log. */
+function ccIsOwner(){ return !!(ME&&ME.level==='owner'); }
+function ccLevelPill(l){ return l==='owner'?'<span class="pill p-on">Owner</span>':'<span class="pill p-none">Manager</span>'; }
+function ccForm(u){
+  u=u||{level:'manager',active:true};
+  return '<div class="grid-add">'
+    +(u.email?'':fld('Email','<input class="f-email" placeholder="name@worldclasslaminate.com.ph" style="width:100%">'))
+    +fld('Name','<input class="f-name" value="'+esc(u.name||'')+'" style="width:100%">')
+    +fld('Level','<select class="f-level" style="width:100%"><option value="manager"'+(u.level==='manager'?' selected':'')+'>Manager — manages users in every app</option>'
+      +'<option value="owner"'+(u.level==='owner'?' selected':'')+'>Owner — everything, including this list</option></select>')
+    +fld('Notes','<input class="f-notes" value="'+esc(u.notes||'')+'" style="width:100%">')
+    +'</div>'+(u.email?'<label class="chk" style="margin-top:10px"><input type="checkbox" class="f-act"'+(u.active!==false?' checked':'')+'> Active (may open the Command Center)</label>':'');
+}
+async function saveCc(i){
+  var u=D.cc[i], root=el('cc-'+i);
+  var patch={name:root.querySelector('.f-name').value.trim()||null, level:root.querySelector('.f-level').value,
+    notes:root.querySelector('.f-notes').value.trim()||null, active:root.querySelector('.f-act').checked};
+  var self=ME&&norm(ME.email)===norm(u.email);
+  if(self&&(patch.level!=='owner'||!patch.active)&&!confirm('This lowers your own access. You will no longer be able to change this list. Continue?')) return;
+  var r=await supa.from('cc_access').update(patch).eq('email',u.email).select();
+  if(r.error) return toast(dbErr(r.error));
+  if(!r.data||!r.data.length) return toast('Not saved — only an Owner can change this list.');
+  toast('Saved '+u.email); ED.cc=null;
+  if(self){ var m=await supa.rpc('cc_me'); if(!m.error) ME=m.data||ME; if(!ME.allowed) return location.reload(); }
+  await refresh();
+}
+async function addCc(){
+  var root=el('cc-new'), e=norm(root.querySelector('.f-email').value);
+  if(!validEmail(e)) return toast('Enter a valid email.');
+  var row={email:e, name:root.querySelector('.f-name').value.trim()||null, level:root.querySelector('.f-level').value,
+    notes:root.querySelector('.f-notes').value.trim()||null, active:true};
+  var r=await supa.from('cc_access').insert(row).select();
+  if(r.error) return toast(dbErr(r.error));
+  toast('Added '+e); ED.cc=null; await refresh();
+}
+function removeCc(i){ _removeRow('cc_access',D.cc[i],'the Command Center'); }
+function viewCc(){
+  var own=ccIsOwner(), e=ED.cc, form='';
+  if(own&&e==='add') form=editCard('cc-new','Give someone Command Center access',ccForm(null),'addCc()','cc');
+  else if(own&&e!=null&&D.cc[e]){
+    var u=D.cc[e];
+    form=editCard('cc-'+e,'Edit '+esc(u.name||u.email)+' <span class="mono muted">'+esc(u.email)+'</span>',ccForm(u),'saveCc('+e+')','cc','removeCc('+e+')','Remove access');
+  }
+  return '<div class="card"><p class="sub" style="margin:0"><b>Owner</b>: everything here, including this list. '
+    +'<b>Manager</b>: adds and edits users in Modcraft, PMES, KEYSTONE, HATID and ShelfSync; can see this list but not change it. '
+    +'Anyone not on this list cannot open the Command Center. There must always be at least one active Owner.</p>'
+    +(own?'':'<div class="note warn" style="margin:8px 0 0">You are a Manager — only an Owner can change this list.</div>')+'</div>'
+    +form+'<div class="card">'+listBar(own?"openEd('cc','add')":'',own?'+ Give access':'')
+    +'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Level</th><th>Status</th><th>Notes</th><th>Last change</th><th></th></tr></thead><tbody>'
+    +(D.cc.length?D.cc.map(function(u,i){
+      return '<tr'+sAttr([u.name,u.email,u.level,u.notes],!u.active)+(u.active?'':' class="off"')+'><td><b>'+esc(u.name||'—')+'</b>'
+        +(ME&&norm(ME.email)===norm(u.email)?' <span class="muted">(you)</span>':'')+'</td><td class="mono">'+esc(u.email)+'</td>'
+        +'<td>'+ccLevelPill(u.level)+'</td><td>'+actPill(u.active)+'</td><td>'+esc(u.notes||'—')+'</td>'
+        +'<td class="mono" style="white-space:nowrap">'+(u.updated_at?fmt(u.updated_at)+(u.updated_by?' <span class="muted">'+esc(u.updated_by)+'</span>':''):'—')+'</td>'
+        +'<td>'+(own?'<button class="btn" onclick="openEd(\'cc\','+i+')">Edit</button>':'')+'</td></tr>'}).join('')
+      :'<tr><td colspan="7" class="muted">Nobody yet.</td></tr>')
     +'</tbody></table></div></div>';
 }
 
