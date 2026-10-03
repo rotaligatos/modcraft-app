@@ -9580,14 +9580,15 @@ async function renderNotify(){
         Status: ${state.mailGw?.connected ? `<span class="tag ok">Connected ${esc(state.mailGw.url_end || '')}</span>` : '<span class="tag">Not connected</span>'}</div>
       <ol class="gs-steps" style="margin:0 0 10px;padding-left:20px;font-size:14px;line-height:1.7">
         <li>Signed in to Google as the sending account, open <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com → New project</a>. Name it <b>HATID Mailer</b>.</li>
-        <li><button class="btn" type="button" id="gs-copy">Copy the mail script</button> — delete what’s in the editor, paste, and <b>Save</b>. Then pick <b>authorize</b> in the function list, click <b>Run</b> once and allow the permission.</li>
+        <li><button class="btn" type="button" id="gs-copy">Copy the mail script</button> — delete what’s in the editor, paste, and <b>Save</b>. Then pick <b>authorize</b> in the function list, click <b>Run</b> once and allow the permission. Copying is always safe — it uses the password the script already has.</li>
         <li><b>Deploy → New deployment</b> → type <b>Web app</b> → Execute as: <b>Me</b> → Who has access: <b>Anyone</b> → <b>Deploy</b>. Copy the <b>Web app URL</b> (ends in <code>/exec</code>).</li>
         <li><span style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center;width:100%"><input class="i" id="gs-url" style="flex:1;min-width:220px" placeholder="https://script.google.com/macros/s/…/exec"><button class="btn primary" type="button" id="gs-save">Save</button></span></li>
         <li>Tick <b>Send emails</b> below and Save, then <button class="btn" type="button" id="gs-test" ${state.mailGw?.connected ? '' : 'disabled'}>Send me a test email</button></li>
         <li><b>Replies into HATID:</b> in the script, pick <b>startChecking</b> in the function list at the top → <b>Run</b> → allow access. The inbox is then checked every minute; replies about deliveries appear in <b>Messages</b> (and get the Gmail label “HATID”), everything else stays in Gmail only.
           ${state.mailGw?.checked_at ? (Date.now() - new Date(state.mailGw.checked_at) < 10 * 60e3 ? `<span class="tag ok">Checking — last ${esc(fmtTime(state.mailGw.checked_at))}</span>` : `<span class="tag bad">Stopped — last check ${esc(fmtTime(state.mailGw.checked_at))}; run startChecking again</span>`) : '<span class="tag">Not started</span>'}</li>
       </ol>
-      <div class="ft">Copying the script makes a new secret, so an older copy of the script stops working until you replace it and redeploy (Deploy → Manage deployments → edit → New version).</div>
+      <div class="ft">To update the script later, copy it again and redeploy: Deploy → Manage deployments → pencil → Version: <b>New version</b> → Deploy (keeps the same URL).
+        ${state.mailGw?.has_secret ? `If the script’s password may have leaked: <button class="btn" type="button" id="gs-copy-new" data-fresh="1">Change password &amp; copy</button> — HATID stops sending until the new copy is pasted and redeployed.` : ''}</div>
     </div>
     <div class="card pad rp-sec nt-msg" id="sms-card"><h3>SMS — how texts are sent</h3>
       ${smsModeHtml(cfg)}
@@ -9654,19 +9655,20 @@ async function renderNotify(){
     b.disabled = false;
   });
   if (state.smsGw?.connected && $('sg-dev')) smsGatewayCall().then(r => { if ($('sg-dev')) $('sg-dev').textContent = r.devices?.length ? `· ${r.devices[0].name}${r.devices[0].lastSeen ? ', last online ' + fmtTime(r.devices[0].lastSeen) : ''}` : '· no phone online'; }).catch(() => {});
-  if ($('gs-copy')) $('gs-copy').addEventListener('click', async e => {
+  ['gs-copy', 'gs-copy-new'].forEach(id => $(id) && $(id).addEventListener('click', async e => {
     const b = e.currentTarget;
-    if (state.mailGw?.has_secret && !confirm('This makes a new secret. If the script is already set up, you must paste this new copy and redeploy it. Continue?')) return;
+    const fresh = b.dataset.fresh === '1';
+    if (fresh && !confirm('This gives HATID a NEW password. From this moment HATID’s emails, reply-checking and Drive photos stop until you paste the copy that is about to be made into the Apps Script editor, Save, and deploy a New version. Only do this if the old password may have leaked. Continue?')) return;
     b.disabled = true;
     try {
-      const { data: sec } = await withRetry('Preparing the script', () => sb.rpc('job_mail_gateway_new_secret'));
+      const { data: sec } = await withRetry('Preparing the script', () => sb.rpc(fresh ? 'job_mail_gateway_new_secret' : 'job_mail_gateway_secret'));
       const code = gasMailerScript(sec);
       try { await navigator.clipboard.writeText(code); toast('Script copied — paste it into the Apps Script editor', 'ok'); }
       catch { openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true" style="max-width:720px"><h2>HATID Mailer script</h2><div class="ft">Select all and copy.</div><textarea class="i" style="width:100%;height:340px;font-family:var(--mono);font-size:12px" readonly>${esc(code)}</textarea><div class="row-btns" style="justify-content:flex-end"><button class="btn" id="gs-close">Close</button></div></div>`); $('gs-close').addEventListener('click', () => { closeOverlay(); }); }
       state.mailGw = { ...(state.mailGw || {}), has_secret: true };
     } catch {}
     b.disabled = false;
-  });
+  }));
   if ($('gs-save')) $('gs-save').addEventListener('click', async e => {
     const url = $('gs-url').value.trim(), b = e.currentTarget;
     if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url)) return toast('Paste the Web app URL — it looks like https://script.google.com/macros/s/…/exec', 'error');
@@ -9708,7 +9710,7 @@ function gasMailerScript(secret){
   return `// HATID Mailer — sends HATID emails from this Google account (or one of its aliases), and saves delivery photos to its Google Drive.
 // Deploy: Deploy → New deployment → Web app → Execute as: Me → Who has access: Anyone.
 // Replies into HATID: after deploying, run startChecking once (see the bottom of this file).
-// The secret below must match HATID. Getting a new copy from HATID changes it.
+// The secret below must match HATID. Copying the script again keeps it; only “Change password & copy” in HATID makes a new one.
 const SECRET = '${secret}';
 
 function doPost(e) {
