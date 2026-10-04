@@ -13553,7 +13553,7 @@ function _lockQuotationForPause(serial,entry,orderId,byName){
       try{ supaUpsertState(serial,state); }catch(e){}
       logActivity('Quotation locked — order #'+orderId+' paused (approved by '+(entry.approvedBy||byName)+').'+_reasonSuffix(entry.reason), serial);
     }).catch(function(e){ console.warn('[order-pause] failed to persist pause lock for '+serial,e); });
-  });
+  },{quiet:true});
 }
 // ── Resume -- no approval needed, but always logged (Rommel: "resume must also be logged") ──
 function resumeOrderPause(orderId){
@@ -13596,7 +13596,7 @@ function _clearOrderPauseOnQuotation(serial,who,orderId){
       try{ supaUpsertState(serial,state); }catch(e){}
       logActivity('Quotation unlocked — order #'+orderId+' pause resumed by '+who+'.', serial);
     }).catch(function(e){ console.warn('[order-pause] failed to clear pause lock for '+serial,e); });
-  });
+  },{quiet:true});
 }
 // ── Closes the "stale open tab" residual gap ──────────────────────────────────────────────
 // gSaveQuotation()'s pause guard only ever checks what THIS BROWSER already believes
@@ -16021,8 +16021,9 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
   // failing. _apprApplyRemoteDecisions retries forever on a load failure (by design, so a
   // genuinely transient miss doesn't strand an approved decision), which is exactly why a
   // permanent Sheets-side failure hammers the API every poll indefinitely instead of just once.
-  loadQuotationJson(serial,function(state){
+  loadQuotationJson(serial,function(state,why){
     if(!state){
+      if(why==='missing'){ console.warn('[approval] '+serial+' has no saved state anywhere (deleted or never saved) — nothing to carry the approval onto.'); if(callback) callback(false,'missing'); return; }
       console.warn('[approval] could not load quotation '+serial+' to persist the approval — relying on the requester\'s own session/save to pick it up.');
       if(callback) callback(false); return;
     }
@@ -16094,7 +16095,7 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
       console.warn('[approval] failed to persist approved field for '+serial,e);
       if(callback) callback(false);
     });
-  });
+  },{quiet:true});
 }
 
 // ── Applying decisions taken away from a laptop ────────────────────────────────────────────
@@ -16187,7 +16188,16 @@ function _apprApplyRemoteDecisions(){
     if((tries[n.reqId]||0)>=APPR_APPLY_MAX_TRIES) return;
     budget--;
     n.applied=true;   // optimistic: one missed apply we can see in the log beats a retry loop
-    _persistApprovedFieldToQuotation(payload,function(ok){
+    _persistApprovedFieldToQuotation(payload,function(ok,why){
+      if(!ok&&why==='missing'){
+        // The quotation was deleted (or never saved) after the request was approved. Retrying can
+        // never succeed, so close it out on the request itself -- every browser then stops trying.
+        n.applied=true;
+        try{ gSaveApprovalRequest({id:n.reqId,applied:true},function(){}); }catch(e5){}
+        try{ logActivity('An approved '+(APPR_TYPE_LABELS[n.type]||n.type)+' was not carried over — '
+          +n.serial+' no longer has a saved record (deleted or never saved).', n.serial); }catch(e6){}
+        return;
+      }
       if(ok){
         n.applied=true;   // payload may be the fabricated signature object, not this notif
         // The line itself is written centrally by _persistApprovedFieldToQuotation, against the
@@ -32824,7 +32834,7 @@ function _supaCachedSelect(table,cols){
 var _pollStateMemo={serial:'',at:0,p:null};
 function _pollStateLite(serial,cb){
   if(!(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady())){
-    loadQuotationJson(serial,cb); return;
+    loadQuotationJson(serial,cb,{quiet:true}); return;
   }
   var now=Date.now();
   if(!(_pollStateMemo.serial===serial&&now-_pollStateMemo.at<5000&&_pollStateMemo.p)){
@@ -32833,7 +32843,7 @@ function _pollStateLite(serial,cb){
       .catch(function(){ return undefined; })};
   }
   _pollStateMemo.p.then(function(st){
-    if(st===undefined) loadQuotationJson(serial,cb);   // view unreachable -> the old path, not nothing
+    if(st===undefined) loadQuotationJson(serial,cb,{quiet:true});   // view unreachable -> the old path, not nothing
     else cb(st);
   });
 }
@@ -34125,7 +34135,7 @@ function gSaveQuotation(opts){
         _gSaveQuotationCore();
         w.forEach(function(f){ _afterPendingSave(f); });
       }
-    });
+    },{quiet:true});
     return;
   }
   _gSaveQuotationCore();
@@ -34852,9 +34862,10 @@ var _qStateRowCache={}; // {serial: rowIdx} — populated whenever we scan colum
 // Both cases mean "this cache entry is wrong," not "this quotation's saved state is actually
 // broken." Self-heal once: drop the stale entry, re-scan column A for the TRUE current row, and
 // retry — only escalate to the user if a freshly-scanned row also fails.
-function _qStateReadRow(serial,rowIdx,callback,alreadyRescanned){
+function _qStateReadRow(serial,rowIdx,callback,alreadyRescanned,quiet){
+  function say(m){ if(!quiet) alert(m); }
   sheetsGet('Quotation State!A'+rowIdx+':K'+rowIdx).then(function(d2){
-    if(d2.error){alert('Failed to load quotation state.');if(callback)callback(null);return;}
+    if(d2.error){say('Failed to load quotation state.');if(callback)callback(null,'error');return;}
     var row=(d2.values||[])[0]||[];
     var json=(row.slice(1)).join(''); // reassemble chunked JSON from columns B..K
     var state=null;
@@ -34862,53 +34873,60 @@ function _qStateReadRow(serial,rowIdx,callback,alreadyRescanned){
     var mismatched=state&&String(state.baseSerial||state.serial||'')!==String(serial);
     if((!state||mismatched)&&!alreadyRescanned){
       delete _qStateRowCache[serial];
-      _loadQuotationJsonFromSheets(serial,callback,true);
+      _loadQuotationJsonFromSheets(serial,callback,true,quiet);
       return;
     }
-    if(!state||mismatched){ alert('Saved state for '+serial+' is corrupted.'); if(callback)callback(null); return; }
+    if(!state||mismatched){ say('Saved state for '+serial+' is corrupted.'); if(callback)callback(null,'error'); return; }
     if(callback)callback(state);
   }).catch(function(e){
     console.warn('Load state failed',e);
-    alert('Failed to load quotation state. Check your connection.');
-    if(callback)callback(null);
+    say('Failed to load quotation state. Check your connection.');
+    if(callback)callback(null,'error');
   });
 }
-function loadQuotationJson(serial,callback){
-  if(!gToken){alert('Please sign in to load quotations.');return;}
+// opts.quiet: a BACKGROUND caller (approval poll, pause/lock reconcile, save-conflict check).
+// It must never raise a blocking alert() -- that is how a deleted quotation's leftover approval
+// put "No saved state found for QT-M00000145" in front of the user over and over (2026-10-04).
+// The callback's 2nd argument says why it failed: 'missing' = no saved state exists anywhere
+// (deleted or never saved; retrying cannot help), otherwise a possibly-transient read error.
+function loadQuotationJson(serial,callback,opts){
+  opts=opts||{};
+  if(!gToken){ if(!opts.quiet) alert('Please sign in to load quotations.'); if(opts.quiet&&callback) callback(null,'error'); return; }
   // Read path: when USE_SUPABASE is on, try Supabase first (indexed single-row read,
   // no chunking) and fall back to the Sheets path below on miss/error/flag-off.
   if(USE_SUPABASE&&supaReady()){
     supaGetState(serial).then(function(state){
       if(state){ if(callback)callback(state); return; }
-      _loadQuotationJsonFromSheets(serial,callback);
+      _loadQuotationJsonFromSheets(serial,callback,false,opts.quiet);
     });
     return;
   }
-  _loadQuotationJsonFromSheets(serial,callback);
+  _loadQuotationJsonFromSheets(serial,callback,false,opts.quiet);
 }
-function _loadQuotationJsonFromSheets(serial,callback,forceRescan){
+function _loadQuotationJsonFromSheets(serial,callback,forceRescan,quiet){
+  function say(m){ if(!quiet) alert(m); }
   // In-session row cache: if we've already scanned column A this session (via a prior load or save),
   // skip straight to the single-row read — 1 call instead of 2. forceRescan bypasses it — set only by
   // _qStateReadRow's own self-heal retry above, once a cached index has already proven stale.
-  if(!forceRescan&&_qStateRowCache[serial]>0){ _qStateReadRow(serial,_qStateRowCache[serial],callback); return; }
+  if(!forceRescan&&_qStateRowCache[serial]>0){ _qStateReadRow(serial,_qStateRowCache[serial],callback,false,quiet); return; }
   // First time this session (or a forced re-scan after a stale cache hit): read only column A
   // (cheap) to find the row, then fetch just that row's chunked columns — avoids downloading the
   // WHOLE sheet (every quotation's 10 chunked columns, up to 450KB each) just to find one row.
   // While we're scanning, cache every serial's row for later.
   sheetsGet('Quotation State!A:A').then(function(d){
-    if(d.error){alert('Quotation State sheet not found. Save the quotation once to create it.');if(callback)callback(null);return;}
+    if(d.error){say('Quotation State sheet not found. Save the quotation once to create it.');if(callback)callback(null,'error');return;}
     var vals=d.values||[];
     var rowIdx=-1;
     for(var i=1;i<vals.length;i++){ if(vals[i][0]){ _qStateRowCache[vals[i][0]]=i+1; if(vals[i][0]===serial) rowIdx=i+1; } }
     if(rowIdx<0){
-      alert('No saved state found for '+serial+'.\nSave or lock the quotation at least once to store its state.');
-      if(callback)callback(null);return;
+      say('No saved state found for '+serial+'.\nSave or lock the quotation at least once to store its state.');
+      if(callback)callback(null,'missing');return;
     }
-    _qStateReadRow(serial,rowIdx,callback,true); // fresh scan just ran — this index is trusted, no further retry
+    _qStateReadRow(serial,rowIdx,callback,true,quiet); // fresh scan just ran — this index is trusted, no further retry
   }).catch(function(e){
     console.warn('Load state failed',e);
-    alert('Failed to load quotation state. Check your connection.');
-    if(callback)callback(null);
+    say('Failed to load quotation state. Check your connection.');
+    if(callback)callback(null,'error');
   });
 }
 function restoreFullQuotationState(state){

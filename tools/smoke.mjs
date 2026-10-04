@@ -3434,6 +3434,38 @@ const PROFILES = {
             w._ordersMigrationInFlight = saved._ordersMigrationInFlight;
           }
         })();
+      /* 2026-10-04 -- "No saved state found for QT-M00000145" kept popping up on the Project List.
+         The quotation had been deleted, but an approved signature request on it still had
+         applied=false, so the 60s approval poll kept trying to carry it over and every try raised
+         a blocking alert(). A background load must stay quiet, and a quotation that no longer
+         exists must close the request out instead of retrying. */
+      if (typeof window._apprApplyRemoteDecisions === 'function')
+        await (async () => {
+          const w = window;
+          const sv = { gToken: w.gToken, alert: w.alert, sheetsGet: w.sheetsGet, NOTIFS: w.NOTIFS, USE: w.USE_SUPABASE,
+                       save: w.gSaveApprovalRequest, sig: w._apprSigObjectFor, log: w.logActivity };
+          let alerts = 0, savedApplied = null;
+          w.gToken = 't'; w.USE_SUPABASE = false; w.alert = () => { alerts++; };
+          w.sheetsGet = () => Promise.resolve({ values: [['Serial'], ['QT-W00000001']] });
+          w.gSaveApprovalRequest = (r) => { savedApplied = r.applied; };
+          w._apprSigObjectFor = () => ({ name: 'X', img: 'data:' }); w.logActivity = () => {};
+          try {
+            localStorage.removeItem('mc_appr_apply_tries');
+            const why = await new Promise(r => w.loadQuotationJson('QT-M00009999', (s, y) => r(y), { quiet: true }));
+            const n = { reqId: 'r1', serial: 'QT-M00009999', type: 'signature', status: 'approved', applied: false,
+                        decision: { grand: 1 }, sigSlot: 'checked', approverEmail: 'a@x' };
+            w.NOTIFS = [n];
+            w._apprApplyRemoteDecisions();
+            await new Promise(r => setTimeout(r, 50));
+            check('background load of a deleted quotation: no alert, reports missing, request closed out',
+              () => ({ alerts, why, applied: n.applied, savedApplied }),
+              { alerts: 0, why: 'missing', applied: true, savedApplied: true });
+          } finally {
+            w.gToken = sv.gToken; w.alert = sv.alert; w.sheetsGet = sv.sheetsGet; w.NOTIFS = sv.NOTIFS;
+            w.USE_SUPABASE = sv.USE; w.gSaveApprovalRequest = sv.save; w._apprSigObjectFor = sv.sig; w.logActivity = sv.log;
+            localStorage.removeItem('mc_appr_apply_tries');
+          }
+        })();
       /* Rommel, 2026-08-27 -- reported on QT-C00000006: "cannot unlock or be edited, says already
          approved by the client, but in reality it's not". Root cause, confirmed against the real
          activity log: _iqApprovedEditBlocked's gate is qClientApproved||qApproved (both flags,
