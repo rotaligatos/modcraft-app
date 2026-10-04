@@ -5001,6 +5001,10 @@ const PROFILES = {
           const h = f([['KITCHEN — Juan'], [], ['Description', 'Board', 'Pcs', 'Length (mm)', 'Width (mm)'], ['Side', 'PB', 2, 720, 560]]);
           return [c.ok ? c.row(['Back panel', 'MP06 WARM WHITE', 4, 528, 658]).slice(0, 7) : c.missing, h && h.i, h && h.cm.row(['Side', 'PB', 2, 720, 560]).slice(0, 7), f([['Back panel', 'MP06', 4, 528, 658]])];
         }, [[undefined, 'Back panel', 'MP06 WARM WHITE', 528, 658, undefined, 4], 2, [undefined, 'Side', 'PB', 720, 560, undefined, 2], null]);
+        check('Deleting a client removes it from Supabase too (clients load from there first)', () => {
+          const one = String(window.deleteClient), many = String(window.deleteSelectedClients);
+          return [typeof window.supaDeleteClient === 'function', /supaDeleteClient\(/.test(one), /supaDeleteClient\(/.test(many)];
+        }, [true, true, true]);
         check('Client-list memory is kept in the MSSI website\'s form (header signature + field numbers), both ways', () => {
           const C = window.CLR;
           const sig = C.webRowSig(['Item', 'Board', 'Part', 'THK (mm)', 'Length', 'Width', 'Qty', '', '']);
