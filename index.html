@@ -12748,6 +12748,25 @@ function downloadStage2Template() {
 
 // ── Dashboard ─────────────────────────────────────────────────────────────
 // Load dirData without rendering the directory table (for dashboard use)
+// A copy of the column titles sitting BELOW row 1 (Serial / Date / Business Name ...). It showed
+// up in the Project List as a quotation called "Business Name" (2026-10-04). Never a quotation.
+function _isQuotHeaderRow(r){
+  return !!(r&&String(r[0]||'').trim().toLowerCase()==='serial'&&String(r[2]||'').trim().toLowerCase()==='business name');
+}
+// Take any such stray copy out of the sheet -- archived to Deleted Rows first, so reversible.
+var _quotHeaderHealDone=false;
+function _healStrayQuotHeaderRows(rows){
+  if(_quotHeaderHealDone||!rows) return;
+  var drop=[];
+  for(var i=1;i<rows.length;i++) if(_isQuotHeaderRow(rows[i])) drop.push(i+1);
+  if(!drop.length) return;
+  _quotHeaderHealDone=true;
+  try{
+    _sheetsDeleteRowsByIndex('Quotations',drop,'Stray copy of the column titles below the header row').then(function(){
+      try{ logActivity('Removed '+drop.length+' stray column-title row'+(drop.length>1?'s':'')+' from the Quotations sheet (row '+drop.join(', ')+'; kept in Deleted Rows).',''); }catch(e){}
+    }).catch(function(e){ console.warn('[quotations] could not remove stray header row',e); });
+  }catch(e){}
+}
 function gLoadDirData(cb){
   // The old guard also returned early whenever sessionQuotations had ANY entry, which pinned the
   // list to this session's own saves for the life of the tab.
@@ -12758,9 +12777,10 @@ function gLoadDirData(cb){
   sheetsGet('Quotations!A:AC').then(function(d){
     if(!d.error){
       var rows=d.values||[],seen={};
+      _healStrayQuotHeaderRows(rows);
       dirData=[];
       for(var i=1;i<rows.length;i++){
-        var r=rows[i]; if(!r||!r[0]) continue;
+        var r=rows[i]; if(!r||!r[0]||_isQuotHeaderRow(r)) continue;
         var ser=r[0],m=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
         // Revisions share a base serial, so they collapse to one row.
         // A later revision SUPERSEDES: take its identity and its state, or the row
@@ -24445,7 +24465,7 @@ function renderDirectory(){
       // Deduplicate by base serial (options share same base serial)
       var seen={};
       for(var i=1;i<rows.length;i++){
-        var r=rows[i]; if(!r||!r[0]) continue;
+        var r=rows[i]; if(!r||!r[0]||_isQuotHeaderRow(r)) continue;
         var ser=r[0];
         var baseM=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
         var baseS=baseM?baseM[1]:ser; // strip option suffix (e.g. -1, -2) but not 4-digit serial part
@@ -31010,9 +31030,13 @@ function setupMissingSheetTabs(){
   var STATE_HDR=[['Serial','State JSON (chunked across columns B–K — do not edit manually)']];
   Promise.all([sheetsGet('Quotations!A1'),sheetsGet('Clients!A1'),sheetsGet('Quotation State!A1')]).then(function(res){
     var tasks=[];
-    if(res[0].error) tasks.push(sheetsCreateTab('Quotations').then(function(){return sheetsAppend('Quotations!A:AC',QUOT_HDR);}));
-    if(res[1].error) tasks.push(sheetsCreateTab('Clients').then(function(){return sheetsAppend('Clients!A:L',CLI_HDR);}));
-    if(res[2].error) tasks.push(sheetsCreateTab('Quotation State').then(function(){return sheetsAppend('Quotation State!A1:K1',STATE_HDR);}));
+    // Only a tab that is genuinely missing gets created, and the titles are written only when the
+    // create succeeded -- otherwise a passing read error appended a second title row mid-sheet.
+    function mk(i,tab,rng,hdr){ if(res[i].error&&_isMissingTabError(res[i].error))
+      tasks.push(sheetsCreateTab(tab).then(function(c){ if(c&&!c.error) return sheetsAppend(rng,hdr); })); }
+    mk(0,'Quotations','Quotations!A:AC',QUOT_HDR);
+    mk(1,'Clients','Clients!A:L',CLI_HDR);
+    mk(2,'Quotation State','Quotation State!A1:K1',STATE_HDR);
     if(!tasks.length){if(status) status.innerHTML='<div class="alert alert-success"><i class="ti ti-circle-check"></i><div>All tabs already exist — nothing to create.</div></div>';return Promise.resolve();}
     return Promise.all(tasks);
   }).then(function(){
@@ -34608,7 +34632,8 @@ function _proceedSaveQuotation(){
         throw _rowGuardError('could not read the Quotations sheet ('+((d.error&&d.error.message)||'read failed')+')');
       if(known)
         throw _rowGuardError('the Quotations sheet could not be read and this quotation already has a row');
-      return sheetsCreateTab('Quotations').then(function(){
+      return sheetsCreateTab('Quotations').then(function(c){
+        if(c&&c.error) throw _rowGuardError('the Quotations tab could not be created ('+((c.error&&c.error.message)||'create failed')+')');
         return sheetsAppend('Quotations!A:AC',[QUOT_HDR]).then(function(){
           return sheetsAppend('Quotations!A:AC',[row])
             .then(function(){ _quotRowSeen[serial]=true; return _healDuplicateRowsFor(serial,row); });

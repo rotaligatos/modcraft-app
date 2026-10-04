@@ -3434,6 +3434,28 @@ const PROFILES = {
             w._ordersMigrationInFlight = saved._ordersMigrationInFlight;
           }
         })();
+      /* 2026-10-04 -- a copy of the column titles sat mid-sheet and showed in the Project List as a
+         quotation called "Business Name". It must be skipped and taken out (archived first). */
+      if (typeof window.gLoadDirData === 'function')
+        await (async () => {
+          const w = window;
+          const sv = { gToken: w.gToken, sheetsGet: w.sheetsGet, del: w._sheetsDeleteRowsByIndex, done: w._quotHeaderHealDone, log: w.logActivity };
+          let dropped = null;
+          const hdr = ['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User'];
+          w.gToken = 't'; w._quotHeaderHealDone = false; w.logActivity = () => {};
+          w.sheetsGet = () => Promise.resolve({ values: [hdr, hdr, ['QT-W00000001','2026-10-01','Acme','Direct','Ana','Draft','100','Ana']] });
+          w._sheetsDeleteRowsByIndex = (sh, rows) => { dropped = { sh, rows }; return Promise.resolve(); };
+          try {
+            await new Promise(r => w.gLoadDirData(r));
+            await new Promise(r => setTimeout(r, 20));
+            check('Project List: a stray column-title row is skipped and removed from the sheet',
+              () => ({ ids: (w.dirData || []).map(e => e.id), dropped }),
+              { ids: ['QT-W00000001'], dropped: { sh: 'Quotations', rows: [2] } });
+          } finally {
+            w.gToken = sv.gToken; w.sheetsGet = sv.sheetsGet; w._sheetsDeleteRowsByIndex = sv.del;
+            w._quotHeaderHealDone = sv.done; w.logActivity = sv.log;
+          }
+        })();
       /* 2026-10-04 -- "No saved state found for QT-M00000145" kept popping up on the Project List.
          The quotation had been deleted, but an approved signature request on it still had
          applied=false, so the 60s approval poll kept trying to carry it over and every try raised
