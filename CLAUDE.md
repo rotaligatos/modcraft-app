@@ -12748,3 +12748,16 @@ portal MSSI_COMPANY). Rommel chose option 1: fix only what people SEE; the full 
 - **2026-10-04 (website privacy):** migration `website_privacy_consent` APPLIED — `pending_orders.consent_at` + restrictive
   insert policy refusing website orders without it (Wufoo unaffected). Files: supabase_website_consent.sql, test_website_consent.sql.
   ⚠ Supabase MCP from a remote session: any statement with DROP triggers a confirmation that cannot be shown → cancelled.
+
+## What was changed on 2026-10-04 (session — ShelfSync moved to its own address)
+- **ShelfSync now lives at `https://rotaligatos.github.io/shelfsync/`, repo `rotaligatos/shelfsync`** (built app + its own
+  deploy workflow with the vendor/ library step). Reason: Chrome on Rommel's phone said ShelfSync was "already installed" before
+  it ever was; the only manifest that ever claimed the whole `/modcraft-app/` folder was Modcraft's (scope `./`, 10–15 Aug), so a
+  phone with a Modcraft install from then may treat anything under `/modcraft-app/` as Modcraft. Moving out removes that for good.
+- **This repo's `shelfsync/` folder is now only a forwarding page + a self-unregistering `sw.js`** (manifest deleted). Do NOT copy
+  ShelfSync builds here any more — publish to `rotaligatos/shelfsync`. The "ShelfSync libraries" step was removed from this
+  repo's deploy workflow (supersedes the note above). Command Center's `SS_APP_URL` points to the new address.
+- `shelfsync-push` (SCM project) redeployed with the new link (v3). Same web domain, so sessions, saved data, fingerprint
+  sign-in and notification permission carry over; the app re-subscribes notifications by itself after sign-in.
+- Command Center, HATID and Approval still live under `/modcraft-app/` with narrow scopes; an old (10–15 Aug) Modcraft install
+  could in theory still shadow them on that one phone. Move them the same way if it is ever seen.
