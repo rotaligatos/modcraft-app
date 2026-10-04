@@ -277,6 +277,8 @@ table.tbl{width:100%;border-collapse:collapse;font-size:.85rem}
 .ai-out h3{margin-top:16px;margin-bottom:4px;font-size:1rem}
 .ai-out ul{margin:4px 0 8px;padding-left:20px}
 .ai-out p{margin-block:6px}
+.push-nudge{flex-wrap:wrap;gap:8px;border-style:solid;border-color:#f59e0b88;background:#fff9eb;color:#5a4300}
+:root[data-theme="dark"] .push-nudge{background:#2a2310;color:#f5d48a}
 .notice{border:1px dashed var(--line);border-radius:var(--r-sm);padding:10px 12px;font-size:.82rem;color:var(--ink-2);background:var(--surface)}
 .filters{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
 .filters label.f{min-width:150px;flex:1 1 150px;max-width:240px}
@@ -2189,6 +2191,79 @@ const Bio = {
   }
 };
 /* =====================================================================
+   PUSH NOTIFICATIONS
+   ---------------------------------------------------------------------
+   A device is registered for the person signed in on it (ss_push_subscribe).
+   When a request moves, the database works out who must act next and the
+   shelfsync-push function notifies their devices (supabase/push.sql).
+   A shared phone follows whoever signed in last; signing out stops it.
+   iPhone/iPad: only works once ShelfSync is added to the Home Screen.
+   ===================================================================== */
+const PUSH = {
+  key: "BPXy1U7fCn8ano-H6amO7FV0IAAIJV-aGQ_vZJ7iyW3fmrwRg0woJuiNv6myz1dsIKjXfWs6inYx5tkH4M4Q1_4",   // public half only; the private key is in Vault
+  fn: "shelfsync-push",
+  state: null,                                   // 'on' | 'off' | 'denied' | 'unsupported' | 'install' (iPhone, not on Home Screen)
+  supported() { return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && location.protocol === "https:"; },
+  ios() { return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); },
+  standalone() { return matchMedia("(display-mode: standalone)").matches || navigator.standalone === true; },
+  keyBytes() { const s = PUSH.key.replace(/-/g, "+").replace(/_/g, "/"), raw = atob(s + "===".slice((s.length + 3) % 4)); return Uint8Array.from(raw, c => c.charCodeAt(0)); },
+  async reg() { return Promise.race([navigator.serviceWorker.ready, new Promise((_, rej) => setTimeout(() => rej(new Error("The app's background service isn't ready. Reload and try again.")), 10000))]); },
+  async sub() { try { return await (await PUSH.reg()).pushManager.getSubscription(); } catch (e) { return null; } },
+  async check() {
+    let s;
+    if (MODE !== "live") s = "unsupported";
+    else if (PUSH.ios() && !PUSH.standalone()) s = "install";
+    else if (!PUSH.supported()) s = "unsupported";
+    else if (Notification.permission === "denied") s = "denied";
+    else s = Notification.permission === "granted" && await PUSH.sub() ? "on" : "off";
+    const changed = s !== PUSH.state; PUSH.state = s; return changed;
+  },
+  async save(sub) {
+    const j = sub.toJSON();
+    const r = await SB.rpc("ss_push_subscribe", { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth, p_label: deviceLabel() });
+    if (r.error) throw r.error;
+  },
+  /* turn on for this device (must come from a tap: browsers ask for permission only then) */
+  async enable() {
+    if (MODE !== "live") throw new Error("Notifications work in the live app only");
+    if (PUSH.ios() && !PUSH.standalone()) throw new Error("On iPhone, add ShelfSync to the Home Screen first, then open it from there");
+    if (!PUSH.supported()) throw new Error("This browser can't receive notifications");
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { await PUSH.check(); throw new Error(perm === "denied" ? "Notifications are blocked for ShelfSync. Allow them in the browser or phone settings." : "Notifications weren't allowed"); }
+    const reg = await PUSH.reg();
+    // some Android phones never answer here (battery saver, no Google services): say so instead of waiting forever
+    const sub = await Promise.race([(async () => (await reg.pushManager.getSubscription()) || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: PUSH.keyBytes() }))(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("The phone didn't answer. Check that battery saver is off and Google Play services are on, then try again.")), 20000))]);
+    await PUSH.save(sub); await PUSH.check();
+  },
+  async disable() {
+    const sub = await PUSH.sub();
+    if (sub) { try { await SB.rpc("ss_push_unsubscribe", { p_endpoint: sub.endpoint }); } catch (e) {} try { await sub.unsubscribe(); } catch (e) {} }
+    await PUSH.check();
+  },
+  /* after sign-in: a phone that already has notifications on now belongs to this person */
+  async resync() {
+    if (MODE !== "live" || !SB || !PUSH.supported() || Notification.permission !== "granted") { await PUSH.check(); return; }
+    const sub = await PUSH.sub(); if (sub) { try { await PUSH.save(sub); } catch (e) { console.warn("push resync", e); } }
+    await PUSH.check();
+  },
+  /* sign-out: this phone stops getting the person's notifications (the browser keeps its permission) */
+  async forget() {
+    if (MODE !== "live" || !SB || !PUSH.supported()) return;
+    const sub = await PUSH.sub(); if (!sub) return;
+    try { await Promise.race([SB.rpc("ss_push_unsubscribe", { p_endpoint: sub.endpoint }), new Promise(r => setTimeout(r, 3000))]); } catch (e) {}
+  },
+  /* one line for the account menu */
+  label() { return { on: "On", off: "Off", denied: "Blocked", unsupported: "Not available", install: "Add to Home Screen first" }[PUSH.state] || "…"; },
+  /* the nudge on Home / Depot requests: only when it can be switched on and hasn't been dismissed */
+  nudge(text) {
+    if (PRACTICE || MODE !== "live" || !ME || !["off", "install"].includes(PUSH.state) || LS.get("shelfsync-push-nudge-" + ME.id)) return "";
+    return `<div class="notice row between push-nudge"><span>🔔 ${esc(text)}</span><span class="row"><button class="btn small primary" onclick="App.pushMenu()">${PUSH.state === "install" ? "How" : "Turn on"}</button><button class="btn small ghost" onclick="App.pushNudgeOff()">Not now</button></span></div>`;
+  }
+};
+/* a tap on a notification while the app is already open */
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.type === "open-request" && ME) App.openFromPush(e.data.id); });
+/* =====================================================================
    PROMODISER SCREENS
    ===================================================================== */
 const myDepot = () => idx.depot(ME.depot_id);
@@ -2260,6 +2335,7 @@ const PROMO_ROUTES = {
           ${incoming.map(r => `<div class="row between"><span><b class="mono">${esc(r.req_no)}</b>${r.hatid_ref ? ` <span class="small faint">DR ${esc(r.hatid_ref)}</span>` : ""}</span><span class="small faint">sent ${dshort(r.dispatched_at || r.updated_at)}</span></div>`).join("")}
           <p class="small muted">When it arrives, count the items and confirm. Your stock goes up only after you confirm.</p>
           <button class="btn primary block" onclick="App.go('request')">${ICON.finger}<span>Check and confirm receipt</span></button></div>` : ""; })()}
+      ${PUSH.nudge("Get notified when a delivery is on its way to your branch.")}
       <div class="qa">${qa.join("")}</div>
       ${can("sell") ? `<div class="card"><div class="card-h"><h2>Today's sales</h2><span class="small faint">${new Date().toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric" })}</span></div>
         <div class="row" style="gap:28px"><div><div class="eyebrow">Receipts</div><div class="num big">${todays.length}</div></div>
@@ -2653,6 +2729,7 @@ const PLANT_ROUTES = {
     return `
       <div class="section-h"><div><div class="eyebrow">Waiting for your action</div><h1>Depot requests</h1></div>
         <span class="small faint">PPIC → Supply Chain → Plant (noted) → S&M Director → MD</span></div>
+      ${PUSH.nudge("Get a notification on this device when a request is waiting for you.")}
       <div class="chipset">${[["mine", "Waiting for you"], ["open", "In progress"], ["done", "Completed"]].map(([k, l]) => `<button aria-pressed="${tab === k}" onclick="App.apTab('${k}')">${l} · ${lists[k].length}</button>`).join("")}</div>
       ${batchable.length > 1 ? `<div class="row batch-bar"><label class="check"><input type="checkbox" id="ap-all" ${picked.length === batchable.length ? "checked" : ""} onchange="App.apPickAll(this.checked)"> Select all ${batchable.length} that only need your approval</label>
         <button class="btn primary" ${picked.length ? "" : "disabled"} onclick="App.approveSelected()">${ICON.finger}<span>Approve ${picked.length || ""} selected</span></button></div>` : ""}
@@ -4108,7 +4185,8 @@ const App = {
       <div class="row">${navigator.onLine ? `<button class="btn primary" onclick="closeSheets();flushOutbox(true)">Sync now</button>` : ""}<button class="btn" onclick="App.signOut(true)">Sign out anyway</button><button class="btn ghost" onclick="closeSheets()">Stay signed in</button></div></div>`);
     closeSheets(); sess.del(BIO_OK); LS.del("shelfsync-demo-user"); LS.set("shelfsync-signed-out", true);
     stopRealtime();
-    if (MODE === "live" && SB) SB.auth.signOut({ scope: "local" }).catch(() => {});
+    // this phone stops getting the person's notifications, then the session ends
+    if (MODE === "live" && SB) { const sb = SB; PUSH.forget().finally(() => sb.auth.signOut({ scope: "local" }).catch(() => {})); }
     ME = null; SERVER = null; stopSync(); AUTH.step = "login"; AUTH.user = null; UI.route = null; render();
   },
   /* what's waiting on this phone, what couldn't be saved, and why */
@@ -4145,6 +4223,7 @@ const App = {
     const keys = (S.passkeys || []).filter(k => k.user_id === ME.id);
     openSheet(`<div class="stack"><div class="row"><span class="avatar" style="width:40px;height:40px">${esc(initials(ME.full_name))}</span><div><b>${esc(ME.full_name)}</b><div class="small muted">${esc(ROLES[ME.role])}${ME.email ? " · " + esc(ME.email) : ""}</div></div></div>
       <div class="menu">${deferredInstall ? `<button onclick="App.install()">Install ShelfSync on this device</button>` : `<button onclick="App.installHelp()">How to install on this device</button>`}
+      ${MODE === "live" ? `<button onclick="App.pushMenu()">Notifications · ${PUSH.label()}</button>` : ""}
       <button onclick="App.bioMenu()">Face ID / fingerprint · ${keys.length ? keys.length + " device" + (keys.length > 1 ? "s" : "") : "not set up"}</button>
       ${PRACTICE ? "" : `<button onclick="closeSheets();App.practice()">🎓 Practice with sample data</button>`}
       <button onclick="App.theme()">Theme: ${UI.theme || "system"}</button>
@@ -4152,6 +4231,30 @@ const App = {
       <button onclick="App.signOut()">Sign out</button>
       <button onclick="closeSheets()">Close</button></div>
       <div class="row between" style="flex-wrap:wrap">${coLogos(brandCompanies(), true)}${madeBy().replace('class="made-by"', 'class="made-by lg"')}</div></div>`);
+  },
+  /* notifications on this device */
+  async pushMenu() {
+    closeSheets(); await PUSH.check();
+    const st = PUSH.state, who = isPromo() ? "when a delivery is on its way to your branch, or a request is rejected" : "when a depot request is waiting for you";
+    const body = {
+      on: `<p class="muted small">This device tells you ${who}.</p><div class="row"><button class="btn" onclick="App.pushTest()">Send a test</button><button class="btn danger" onclick="App.pushOff()">Turn off on this device</button><button class="btn ghost" onclick="closeSheets()">Close</button></div>`,
+      off: `<p class="muted small">Get a notification ${who}, even when ShelfSync is closed. Your phone will ask once.</p><div class="row"><button class="btn primary" onclick="App.pushOn()">Turn on</button><button class="btn ghost" onclick="closeSheets()">Close</button></div>`,
+      denied: `<p class="muted small">Notifications are blocked for ShelfSync on this device. Allow them in the browser (the lock icon beside the address) or in the phone's app settings, then come back here.</p><button class="btn ghost" onclick="closeSheets()">Close</button>`,
+      install: `<p class="muted small">On iPhone and iPad, notifications work only when ShelfSync is on the Home Screen: tap <b>Share</b>, then <b>Add to Home Screen</b>, open ShelfSync from there and turn notifications on.</p><button class="btn ghost" onclick="closeSheets()">Close</button>`,
+      unsupported: `<p class="muted small">${MODE !== "live" ? "Notifications work in the live app only." : "This browser can't receive notifications. Use Chrome or Edge, or install ShelfSync."}</p><button class="btn ghost" onclick="closeSheets()">Close</button>`
+    }[st];
+    openSheet(`<div class="stack"><h2>Notifications</h2>${body}</div>`);
+  },
+  async pushOn() { await busy(async () => { await PUSH.enable(); toast("Notifications are on for this device"); App.pushMenu(); rerender(); }); },
+  async pushOff() { await busy(async () => { await PUSH.disable(); toast("Notifications are off for this device"); App.pushMenu(); rerender(); }); },
+  async pushTest() { await busy(async () => { const r = await fn(PUSH.fn, { test: true }); toast(r.sent ? "Test sent. It should appear in a few seconds." : "Nothing was sent: " + (r.skipped || "no device registered") + ". Turn notifications off and on again.", !r.sent); }); },
+  pushNudgeOff() { if (ME) LS.set("shelfsync-push-nudge-" + ME.id, true); rerender(); toast("You can turn notifications on any time from the account menu"); },
+  /* opened from a notification */
+  openFromPush(id) {
+    const r = S.requests.find(x => x.id === id);
+    if (!r) { refreshTables(["requests"]).then(() => { if (S.requests.some(x => x.id === id)) App.openFromPush(id); }).catch(() => {}); return; }
+    if (isPromo()) { if (!myDepotIds().includes(r.depot_id)) return; if (ME.depot_id !== r.depot_id && myDepotIds().includes(r.depot_id)) { LS.set("shelfsync-depot-" + ME.id, r.depot_id); ME = withWorkingDepot(ME); } go("request"); }
+    else App.openRequest(id);
   },
   bioMenu() {
     const keys = (S.passkeys || []).filter(k => k.user_id === ME.id);
@@ -4890,6 +4993,10 @@ async function finishLogin(u, event) {
   if (!resume) SB.rpc("ss_touch", { p_event: event, p_agent: navigator.userAgent }).then(() => {}, () => {});
   try { await loadLive(!!snap); } catch (e) { toast((snap ? "Showing data saved on this phone. " : "Couldn't load data: ") + friendlyErr(e), true); }
   startRealtime(); flushOutbox(true);
+  PUSH.resync().then(() => rerender({ keepInputs: true })).catch(() => {});
+  // opened by tapping a notification: go straight to that request
+  const want = new URLSearchParams(location.search).get("r");
+  if (want) { history.replaceState(null, "", location.pathname); App.openFromPush(want); }
 }
 /* no signal and no session: open with what's saved on this phone; entries wait in the sync list */
 function enterOffline(snap) {

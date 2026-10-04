@@ -1,6 +1,6 @@
 // ShelfSync service worker: the app and its libraries work offline; data calls always go to the network.
 // A new version installs in the background and waits until the person taps "Reload" in the app.
-const VERSION = "shelfsync-v10";
+const VERSION = "shelfsync-v11";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/co-wcli.png", "./icons/co-wcli-mark.png",
   "./icons/co-cwli.png", "./icons/co-cwli-mark.png", "./icons/rtmo.png"];
 // libraries: the copy published with the app (vendor/), else the CDN — same list as LIBS in src/20-data.js.
@@ -43,4 +43,22 @@ self.addEventListener("fetch", e => {
     }
     return r;
   })));
+});
+
+// notifications: a depot request needs this person (sent by the shelfsync-push function)
+self.addEventListener("push", e => {
+  let d = {}; try { d = e.data ? e.data.json() : {}; } catch (x) { d = { title: "ShelfSync", body: e.data ? e.data.text() : "" }; }
+  e.waitUntil(self.registration.showNotification(d.title || "ShelfSync", {
+    body: d.body || "", tag: d.tag || "shelfsync", renotify: true, icon: "./icons/icon-192.png", badge: "./icons/icon-192.png",
+    data: { url: d.url || "./index.html", request_id: d.request_id || null } }));
+});
+// a tap opens the request: in the ShelfSync window already open if there is one, else a new one
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  const d = e.notification.data || {}, url = new URL(d.url || "./index.html", self.registration.scope).href;
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
+    const mine = list.find(c => c.url.startsWith(self.registration.scope));
+    if (mine) { if (d.request_id) mine.postMessage({ type: "open-request", id: d.request_id }); return mine.focus(); }
+    return self.clients.openWindow(url);
+  }));
 });
