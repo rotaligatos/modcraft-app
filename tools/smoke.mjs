@@ -3434,6 +3434,27 @@ const PROFILES = {
             w._ordersMigrationInFlight = saved._ordersMigrationInFlight;
           }
         })();
+      /* 2026-10-04 -- a client who registered on the website exists only in the database, so a
+         Clients list loaded from the Sheet never showed them. They must be merged in. */
+      if (typeof window.gLoadClients === 'function')
+        await (async () => {
+          const w = window;
+          const sv = { gToken: w.gToken, sheetsGet: w.sheetsGet, ready: w.supaReady, get: w.supaGetClients, USE: w.USE_SUPABASE };
+          w.gToken = 't'; w.USE_SUPABASE = false; w.supaReady = () => true;
+          w.sheetsGet = (rng) => Promise.resolve(rng.indexOf('Clients') === 0
+            ? { values: [['ID'], ['1', 'Ana', 'Acme', '', 'ana@acme.test']] } : { values: [] });
+          w.supaGetClients = () => Promise.resolve([
+            { id: '1', name: 'Ana', biz_name: 'Acme', email: 'ana@acme.test' },
+            { id: '143', name: 'Web Sign-up', biz_name: 'Site Co', email: 'web@site.test' }]);
+          try {
+            await new Promise(r => w.gLoadClients(r));
+            await new Promise(r => setTimeout(r, 30));
+            check('Clients list from the Sheet also shows website sign-ups held only in the database',
+              () => w.liveClients.map(c => String(c.id)).sort(), ['1', '143']);
+          } finally {
+            w.gToken = sv.gToken; w.sheetsGet = sv.sheetsGet; w.supaReady = sv.ready; w.supaGetClients = sv.get; w.USE_SUPABASE = sv.USE;
+          }
+        })();
       /* 2026-10-04 -- a copy of the column titles sat mid-sheet and showed in the Project List as a
          quotation called "Business Name". It must be skipped and taken out (archived first). */
       if (typeof window.gLoadDirData === 'function')
