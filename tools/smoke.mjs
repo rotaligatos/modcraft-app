@@ -5374,7 +5374,7 @@ if (!PROFILE) {
 const FILE = pathToFileURL(path.resolve(TARGET)).href;
 
 const browser = await chromium.launch();
-const page = await browser.newPage();
+const page = await browser.newPage({ timezoneId: 'Asia/Manila' });   // ModCraft's users are all in PH; working-hours maths uses the browser clock
 const pageErrors = [];
 page.on('pageerror', e => pageErrors.push(e.message));
 // Block anything not the local file — makes the run deterministic + offline. A profile may
