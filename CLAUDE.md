@@ -12731,3 +12731,16 @@ MSSI website admin moves into the Command Center (Rommel). Database (test `test_
   Choice remembered per browser (`localStorage mc_show_test_orders`). Hidden test orders still get cutting-list totals.
 - Verified: smoke 207/207 identical to before (run in the cloud container — the device VM cannot download the browser);
   in-page check: hidden queue 2 real + badge 2 + notice; Show → 3 with TEST pill; Hide → back to 2. No page errors.
+
+## What was changed on 2026-10-04 (session 4 — company name shown correctly, display only)
+Rommel: the legal name is **Module System and Services, Inc.** (no s). ModCraft, Command Center, HATID and the portal use
+"Module Systems and Services, Inc." as the internal KEY (APPR_ROUTING, colours, SLA config, COMPANIES, 72 stored quotations,
+portal MSSI_COMPANY). Rommel chose option 1: fix only what people SEE; the full rename (option 2) is deferred as too risky.
+- `coShow(s)` (index.html + command-center.html) swaps the plural for the singular in DISPLAYED text only. Applied to:
+  the whole printed/PDF/emailed quotation (`_buildPrintBody`), all production print-outs (`_prodPrintWindow`), the home-company
+  field, subsidiary dropdown text, banner, live-values label, Noted-by threshold labels, series labels, batch/job company cells,
+  shop drawing company. Command Center dropdown options now carry value= (internal key) with corrected text — before, the
+  visible text WAS the saved value. ⚠ Never feed coShow() output back into a key or a saved value.
+- Not changed: HATID practice-ticket CO_NAME (training sample only), quotation_app.html (legacy).
+- Verified: smoke 207/207 identical; in-page: print body + production print corrected, COMPANIES key unchanged; CC option
+  text singular, value plural.
