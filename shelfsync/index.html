@@ -222,6 +222,8 @@ table.tbl{width:100%;border-collapse:collapse;font-size:.85rem}
 .kpi .v{font-family:var(--f-display);font-size:1.55rem;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15;margin-top:4px}
 .kpi .d{font-size:.78rem;margin-top:2px}
 .up{color:var(--good)} .down{color:var(--crit)}
+.cmp-bar{height:4px;background:var(--line);border-radius:2px;margin-top:4px;overflow:hidden}.cmp-bar i{display:block;height:100%;background:var(--series-1)}
+.cmp-mx th .cmp-col{max-width:110px;white-space:normal;line-height:1.2;font-size:12px}.cmp-mx td.num{min-width:84px}.cmp-mx tr.total td{border-top:2px solid var(--line)}
 
 .chart-box{position:relative;height:260px}
 .chart-box.tall{height:300px}
@@ -663,8 +665,9 @@ const Engine = {
     lines.forEach(l => { S.sale_lines.push({ id: uuid(), sale_id: id, product_id: l.product_id, qty: l.qty, unit_price: l.unit_price });
       Engine.move(depot_id, l.product_id, -l.qty, "sale", id, at); });
   },
-  lost({ id, depot_id, product_id, qty, note, created_at }) {
-    S.lost_sales.push({ id, depot_id, product_id, qty, note, created_by: ME.id, created_at: created_at || new Date().toISOString() });
+  lost({ id, depot_id, product_id, qty, note, created_at, reason, asked_item, asked_category }) {
+    if (!product_id && !(asked_item || "").trim()) throw new Error("Say what the customer asked for");
+    S.lost_sales.push({ id, depot_id, product_id: product_id || null, qty, note, reason: reason || null, asked_item: asked_item || null, asked_category: asked_category || null, created_by: ME.id, created_at: created_at || new Date().toISOString() });
   },
   count({ id, depot_id, note, lines, created_at, kind }) {
     if (!can("count")) throw new Error("Stock count is switched off for your account");
@@ -1066,7 +1069,7 @@ const Remote = {
     const data = chk(await SB.from("ss_sales").upsert({ id: p.id, client_uuid: p.id, depot_id: p.depot_id, receipt_no: p.receipt_no, sold_at: p.sold_at || new Date().toISOString() }, { onConflict: "id", ignoreDuplicates: true }).select());
     if (data && data.length) chk(await SB.from("ss_sale_lines").insert(p.lines.map(l => ({ sale_id: p.id, product_id: l.product_id, qty: l.qty, unit_price: l.unit_price }))));
   },
-  async lost(p) { await upsertSent("ss_lost_sales", { id: p.id, client_uuid: p.id, depot_id: p.depot_id, product_id: p.product_id, qty: p.qty, note: p.note, created_at: p.created_at }); },
+  async lost(p) { await upsertSent("ss_lost_sales", { id: p.id, client_uuid: p.id, depot_id: p.depot_id, product_id: p.product_id || null, qty: p.qty, note: p.note, reason: p.reason || null, asked_item: p.asked_item || null, asked_category: p.asked_category || null, created_at: p.created_at }); },
   async count(p) {
     const r = await SB.rpc("ss_save_count", { p: { id: p.id, depot_id: p.depot_id, note: p.note, kind: p.kind || "spot", created_at: p.created_at, sent_at: new Date().toISOString(), lines: p.lines } });
     if (!r.error) return;
@@ -1452,7 +1455,7 @@ let SNAP_AT = 0;
 /* =====================================================================
    DEMO DATA — sample depots, products and 150 days of simulated sales
    ===================================================================== */
-const DEMO_KEY = "shelfsync-demo-v6";
+const DEMO_KEY = "shelfsync-demo-v7";
 function persistDemo() { if (S && MODE === "demo" && !PRACTICE) { if (!LS.set(DEMO_KEY, S)) console.warn("demo data not saved (storage unavailable)"); } }
 function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 function ean13(base12) { const s = base12.split("").reduce((a, c, i) => a + (+c) * (i % 2 ? 3 : 1), 0); return base12 + ((10 - s % 10) % 10); }
@@ -1673,6 +1676,14 @@ function buildDemo() {
   [["High-Pressure Laminate", 120], ["Melamine Board", 100], ["Edge Band", 40]].forEach(([category, max_qty]) => S0.capacity.push({ id: "cap-w-" + category, depot_id: null, account_id: "WILCON", category, max_qty }));
   [["High-Pressure Laminate", 90], ["Melamine Board", 80], ["Edge Band", 30]].forEach(([category, max_qty]) => S0.capacity.push({ id: "cap-q-" + category, depot_id: "d-wqc", account_id: null, category, max_qty }));
   [["High-Pressure Laminate", 100], ["Melamine Board", 90], ["Edge Band", 30]].forEach(([category, max_qty]) => S0.capacity.push({ id: "cap-a-" + category, depot_id: null, account_id: "ALLHOME", category, max_qty }));
+  // customers asked for things we couldn't sell: not carried at that branch, or not in our range
+  [["d-wqc", "HPL 1mm Black Matte 4×8", "High-Pressure Laminate", 12, 3, "Contractor, condo fit-out"], ["d-aim", "HPL 1mm Black Matte 4×8", "High-Pressure Laminate", 6, 8, "Asked twice this week"],
+   ["d-cmd", "PVC edge band 2mm, 22mm walnut", "Edge Band", 30, 5, "Cabinet maker"], ["d-wqc", "Marine plywood 3/4", "Other", 20, 10, "Went to another store"],
+   ["d-aim", "Acrylic gloss board, white", "Other", 4, 2, ""]].forEach(([dep, item, cat, qty, ago, note], i) => {
+    if (S0.depots.some(d => d.id === dep)) S0.lost_sales.push({ id: "la-" + i, depot_id: dep, product_id: null, qty, note: note || null, reason: "not_in_range", asked_item: item, asked_category: cat, created_by: "u-promo-" + dep, created_at: new Date(Date.now() - ago * 864e5).toISOString() }); });
+  S0.depots.filter(d => !d.is_consolidation_dc).slice(0, 4).forEach((dp, i) => {
+    const p = S0.products.find(pr => pr.company_id === dp.company_id && !S0.stock.some(s => s.depot_id === dp.id && s.product_id === pr.id));
+    if (p) S0.lost_sales.push({ id: "lc-" + i, depot_id: dp.id, product_id: p.id, qty: 3 + i * 2, note: "We don't carry it here", reason: "not_carried", created_by: "u-promo-" + dp.id, created_at: new Date(Date.now() - (2 + i) * 864e5).toISOString() }); });
   // competitor sightings
   S0.competitors.push({ id: "co-1", depot_id: "d-wqc", brand: "Brand X", product: "HPL 0.8mm 4×8 White Gloss", category: "High-Pressure Laminate", spec: "0.8mm, 4×8, gloss", price: 1150, promo: "5% off this week", facings: 6,
     our_product_id: "p-WLH103", notes: "Placed at eye level beside our Arctic White.", created_by: "u-promo-d-wqc", creator_name: "Jessa Ramos", created_at: new Date(Date.now() - 30 * 3600e3).toISOString() });
@@ -1735,7 +1746,7 @@ function dailyIndex() {
     if (!sold.has(k)) { sold.set(k, new Float64Array(span)); amt.set(k, new Float64Array(span)); }
     sold.get(k)[d] += l.qty; amt.get(k)[d] += l.qty * l.unit_price;
   });
-  S.lost_sales.forEach(l => {
+  S.lost_sales.forEach(l => { if (!l.product_id) return;
     const d = Math.floor((t0 - startOfDay(l.created_at)) / DAY); if (d < 0 || d >= span) return;
     const k = l.depot_id + "|" + l.product_id; if (!lost.has(k)) lost.set(k, new Float64Array(span)); lost.get(k)[d] += l.qty;
   });
@@ -2453,6 +2464,18 @@ function scanItem(q) {
   const hits = ps.filter(p => (p.name + " " + p.sku + " " + (p.barcode || "")).toLowerCase().includes(q));
   return hits.length === 1 ? hits[0] : null;
 }
+/* "Customer asked, couldn't sell": one of our items (out of stock or not carried here), or something we don't sell at all */
+function lostCard() {
+  const k = UI.lostKind || "ours", types = Array.from(new Set(myProducts().map(p => p.category).filter(Boolean))).sort();
+  return `<div class="card stack-sm"><h2>Customer asked, but couldn't sell?</h2><p class="small muted">Log it so the Plant sees the real demand: items out of stock, items this branch doesn't carry, and things we don't sell at all.</p>
+    <div class="chipset" role="tablist"><button role="tab" aria-pressed="${k === "ours"}" onclick="UI.lostKind='ours';rerender()">One of our items</button><button role="tab" aria-pressed="${k === "other"}" onclick="UI.lostKind='other';rerender()">Something we don't sell</button></div>
+    ${k === "ours" ? `<div class="row"><select class="in grow" id="lost-p" aria-label="Item asked for">${itemOptions(null, true)}</select>
+        <input class="in qty" id="lost-q" type="number" min="1" value="1" aria-label="Quantity asked"></div>`
+      : `<input class="in" id="lost-item" maxlength="160" placeholder="What they asked for (e.g. HPL 1mm black matte, 4×8)" aria-label="What the customer asked for">
+        <div class="row"><select class="in grow" id="lost-cat" aria-label="Type">${opt("", "Type (if you know)", "")}${types.map(t => opt(t, t, "")).join("")}${opt("Other", "Other", "")}</select>
+        <input class="in qty" id="lost-q" type="number" min="1" value="1" aria-label="Quantity asked"></div>`}
+    <input class="in" id="lost-n" placeholder="Note (e.g. contractor, needs 40 sheets; went to another store)"><button class="btn" onclick="App.logLost()">Log missed sale</button></div>`;
+}
 const itemOptions = (sel, withStock) => myProducts().map(p => opt(p.id, p.sku + " · " + p.name + (withStock ? " (" + fmt(onHand(ME.depot_id, p.id)) + " on hand)" : ""), sel)).join("");
 /* same chain, same region (what the database lets a promodiser see) */
 const branchDepots = () => { const me = myDepot(); return S.depots.filter(d => d.active !== false && !d.is_consolidation_dc && d.account_id === me.account_id && (d.region || "") === (me.region || "")); };
@@ -2538,10 +2561,7 @@ const PROMO_ROUTES = {
         ${q ? (results.length ? `<div class="list">${results.map(p => { const oh = onHand(dp.id, p.id); return `<div class="row between"><button class="row grow pick-row" onclick="App.addCart('${p.id}')">${prodCell(p, " · " + peso(priceFor(p, dp)))}<span class="small faint num">${fmt(oh)} on hand</span></button>${oh <= 0 && can("sell") ? `<button class="btn small" onclick="App.quickLost('${p.id}')" title="Customer wanted it but there's none">Missed sale</button>` : ""}</div>`; }).join("")}</div>` : `<div class="empty">No item matches “${esc(UI.sellQ)}”.</div>`) : `<p class="small faint">USB or Bluetooth barcode scanners work too: scan into the box and the item is added. The camera keeps scanning until you tap Stop.</p>`}
       </div>
       ${cartCard()}
-      <div class="card stack-sm"><h2>Customer asked, but no stock?</h2><p class="small muted">Log it so the Plant sees the real demand, not just what was on the shelf.</p>
-        <div class="row"><select class="in grow" id="lost-p">${itemOptions()}</select>
-          <input class="in qty" id="lost-q" type="number" min="1" value="1" aria-label="Quantity asked"></div>
-        <input class="in" id="lost-n" placeholder="Note (e.g. contractor, needs 40 sheets)"><button class="btn" onclick="App.logLost()">Log missed sale</button></div>
+      ${lostCard()}
       <div class="card"><div class="card-h"><h2>Today's receipts</h2><span class="small faint">${todays.length}</span></div>
         ${todays.length ? `<div class="list">${todays.slice(0, 15).map(s => { const ls = S.sale_lines.filter(l => l.sale_id === s.id), canVoid = s.created_by === ME.id && [s.sold_at, s.created_at].every(t => !t || Date.now() - new Date(t).getTime() < 30 * 60000);
           return `<div class="row between"><div class="grow"><b class="mono">${esc(s.receipt_no || "No OR")}</b> <span class="small faint">${tonly(s.sold_at)}</span><div class="small muted">${ls.map(l => esc((idx.product(l.product_id) || {}).sku) + " ×" + l.qty).join(", ")}</div></div><b class="num">${peso(s.total_amount)}</b>${canVoid ? `<button class="btn ghost small" onclick="App.voidSale('${s.id}')">Void</button>` : ""}</div>`; }).join("")}</div>` : `<div class="empty">No sales encoded yet today.</div>`}
@@ -2813,6 +2833,8 @@ const PLANT_ROUTES = {
         <div class="card"><div class="card-h"><h2>Needs attention</h2><button class="btn ghost small" onclick="App.go('plan')">Open planner</button></div>
           ${att.length ? `<div class="list">${att.map(x => `<div class="row between">${prodCell(x.p, " · " + esc(x.dp.name))}<div style="text-align:right">${planChip(x.status)}<div class="small faint num">${fmt(x.oh)} on hand · ${isFinite(x.cover) ? fmt(x.cover) + " days" : "—"}${x.runOut != null ? ` · <span class="${x.gap ? "late" : ""}">out ~${dshort(x.runOut)}</span>` : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">No items below reorder point.</div>`}</div>
       </div>
+      ${dashCompareCards(f)}
+      ${dashAskedCard(f)}
       ${silentDepotsCard(A.ds)}`;
   },
   after() {
@@ -3754,7 +3776,7 @@ const REPORT_TYPES = {
   targets: { label: "Target vs actual", groups: ["depot", "month", "account"], measures: ["amount"] },
   competitors: { label: "Competitor prices", groups: ["brand", "category", "depot"], measures: ["count", "gap"] }
 };
-const GROUP_LABEL = { month: "Month", week: "Week", day: "Day", account: "Account", depot: "Depot", region: "Region", item: "Item", category: "Category", promodiser: "Promodiser", status: "Status", kind: "Movement", brand: "Brand" };
+const GROUP_LABEL = { month: "Month", week: "Week", day: "Day", account: "Account", depot: "Depot", region: "Region", item: "Item", category: "Type", promodiser: "Promodiser", status: "Status", kind: "Movement", brand: "Brand" };
 const MEASURE_LABEL = { amount: "Sales ₱", units: "Units", receipts: "Receipts", value: "Value ₱", in: "In", out: "Out", net: "Net", count: "Count", days: "Avg days to approve", gap: "Avg price gap vs ours" };
 const PERIODS = { this_month: "This month", last_month: "Last month", last_3m: "Last 3 months", last_6m: "Last 6 months", last_12m: "Last 12 months", ytd: "Year to date", custom: "Custom dates" };
 function periodRange(cfg) {
@@ -3764,7 +3786,7 @@ function periodRange(cfg) {
   return r ? [isoDate(r[0]), isoDate(r[1])] : [cfg.from || isoDate(n), cfg.to || isoDate(n)];
 }
 const weekKey = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return isoDate(d); };
-function groupKey(g, { depot_id, product_id, at, user, status, kind, brand, category }) {
+function groupKey(g, { depot_id, product_id, at, user, status, kind, brand, category, asked }) {
   const d = depot_id && idx.depot(depot_id), p = product_id && idx.product(product_id);
   switch (g) {
     case "month": return [monthKey(at), monthLabel(monthKey(at))];
@@ -3773,7 +3795,7 @@ function groupKey(g, { depot_id, product_id, at, user, status, kind, brand, cate
     case "account": return [d ? d.account_id : "?", d ? idx.account(d.account_id).name : "?"];
     case "depot": return [depot_id, d ? d.name : "?"];
     case "region": return [d ? d.region || "—" : "—", d ? d.region || "—" : "—"];
-    case "item": return [product_id, p ? p.sku + " · " + p.name : "?"];
+    case "item": return p ? [product_id, p.sku + " · " + p.name] : asked ? ["t:" + asked.toLowerCase(), asked + " (we don't sell it)"] : [product_id, "?"];
     case "category": { const c = category || (p ? p.category : "—") || "—"; return [c, c]; }
     case "promodiser": { const u = idx.user(user); return [user || "?", u ? u.full_name + (u.role !== "promodiser" ? " (" + ROLES[u.role] + ")" : "") : "Imported / other"]; }
     case "status": return [status, status];
@@ -3816,7 +3838,7 @@ function reportData(cfg) {
     });
     G.forEach(r => { r.v.days = r.v._dn ? r.v.days / r.v._dn : null; delete r.v._dn; });
   } else if (cfg.type === "missed") {
-    S.lost_sales.filter(l => ds.has(l.depot_id) && inR(l.created_at)).forEach(l => add({ depot_id: l.depot_id, product_id: l.product_id, at: l.created_at }, { units: l.qty, count: 1 }));
+    S.lost_sales.filter(l => ds.has(l.depot_id) && inR(l.created_at)).forEach(l => add({ depot_id: l.depot_id, product_id: l.product_id, at: l.created_at, asked: l.product_id ? null : (l.asked_item || "Not described"), category: l.product_id ? null : (l.asked_category || "—") }, { units: l.qty, count: 1 }));
   } else if (cfg.type === "targets") {
     measures = ["target", "actual", "reached"];
     const months = new Set(); for (let d = new Date(f0); d.getTime() <= t0; d = new Date(d.getFullYear(), d.getMonth() + 1, 1)) months.add(monthKey(d));
@@ -3840,11 +3862,12 @@ const mLabel = m => ({ target: "Target ₱", actual: "Actual ₱", reached: "Rea
 const mFmt = (m, v) => v == null ? "—" : ["amount", "value", "target", "actual"].includes(m) ? peso(v) : ["days"].includes(m) ? fmt(v, 1) : ["gap", "reached"].includes(m) ? fmt(v, 1) + "%" : fmt(v);
 
 PLANT_ROUTES.reports = { view() {
-  const tabs = [["builder", "Report builder"], ["depot", "Depot reports", (S.depot_reports || []).filter(r => r.status === "submitted" && inMyPlant(r.depot_id)).length], ["competitors", "Competitor watch"], ["saved", "Saved reports", (S.report_defs || []).length]];
+  const tabs = [["builder", "Report builder"], ["compare", "Depot comparison"], ["depot", "Depot reports", (S.depot_reports || []).filter(r => r.status === "submitted" && inMyPlant(r.depot_id)).length], ["competitors", "Competitor watch"], ["saved", "Saved reports", (S.report_defs || []).length]];
   UI.subs = UI.subs || {}; const t = UI.subs.reports || "builder";
-  return `<div class="section-h"><div><div class="eyebrow">Reports</div><h1>${t === "depot" ? "Reports from the depots" : t === "competitors" ? "Competitor watch" : "Build a report"}</h1></div></div>
-    ${subtabs("reports", tabs, t)}${t === "builder" ? reportBuilder() : t === "depot" ? depotReportsInbox() : t === "competitors" ? competitorWatch() : savedReports()}`;
+  return `<div class="section-h"><div><div class="eyebrow">Reports</div><h1>${t === "compare" ? "Depots compared" : t === "depot" ? "Reports from the depots" : t === "competitors" ? "Competitor watch" : "Build a report"}</h1></div></div>
+    ${subtabs("reports", tabs, t)}${t === "builder" ? reportBuilder() : t === "compare" ? compareReport() : t === "depot" ? depotReportsInbox() : t === "competitors" ? competitorWatch() : savedReports()}`;
 }, after() {
+  if ((UI.subs || {}).reports === "compare") { const c = UI.cmp; if (c && c.view === "depots" && $("#ch-cmp")) drawCompareChart($("#ch-cmp"), compareData({ period: c.period, from: c.from, to: c.to, company: c.company, account: c.account, depot: "" }).rows); return; }
   if ((UI.subs || {}).reports && UI.subs.reports !== "builder") return;
   const cfg = UI.rep, d = UI.repData; if (!cfg || !d || !d.rows.length || !$("#ch-rep")) return;
   const m = d.measures[0], css = getComputedStyle(document.documentElement), col = css.getPropertyValue("--series-1").trim();
@@ -4556,7 +4579,7 @@ const App = {
   },
   async saveQuickLost(pid) {
     const q = Number(val("ql-q")); if (!(q > 0)) return toast("Enter the quantity the customer asked for", true);
-    await once("ql", async () => { await API.run("lost", { id: uuid(), depot_id: ME.depot_id, product_id: pid, qty: q, note: val("ql-n").trim() || null, created_at: new Date().toISOString() }); closeSheets(); toast("Missed sale logged. Thank you!"); });
+    await once("ql", async () => { await API.run("lost", { id: uuid(), depot_id: ME.depot_id, product_id: pid, qty: q, note: val("ql-n").trim() || null, reason: lostReason(ME.depot_id, pid), created_at: new Date().toISOString() }); closeSheets(); toast("Missed sale logged. Thank you!"); });
   },
   /* void a wrong sale: the person who made it within 30 minutes (PPIC / Admin any time) */
   voidSale(id) {
@@ -4593,8 +4616,12 @@ const App = {
   },
   async logLost() {
     const q = Number(val("lost-q")); if (!(q > 0)) return toast("Enter the quantity the customer asked for", true);
-    await once("lost", async () => { await API.run("lost", { id: uuid(), depot_id: ME.depot_id, product_id: val("lost-p"), qty: q, note: val("lost-n").trim() || null, created_at: new Date().toISOString() });
-      $("#lost-n").value = ""; $("#lost-q").value = 1; toast("Missed sale logged. Thank you!"); });
+    const other = (UI.lostKind || "ours") === "other", pid = other ? null : val("lost-p"), item = other ? val("lost-item").trim() : "";
+    if (other && item.length < 2) return toast("Type what the customer asked for", true);
+    if (!other && !pid) return toast("Pick the item", true);
+    await once("lost", async () => { await API.run("lost", { id: uuid(), depot_id: ME.depot_id, product_id: pid, qty: q, note: val("lost-n").trim() || null, reason: lostReason(ME.depot_id, pid),
+        asked_item: other ? item : null, asked_category: other ? (val("lost-cat") || null) : null, created_at: new Date().toISOString() });
+      $("#lost-n").value = ""; $("#lost-q").value = 1; if ($("#lost-item")) $("#lost-item").value = ""; toast("Missed sale logged. Thank you!"); });
   },
   async camera() {
     const box = $("#scan-box"); if (!box) return;
@@ -5632,6 +5659,306 @@ function adjustRulesCard() {
     <p class="small faint">On the count day, promodisers who haven't submitted get a reminder at the reminder hour; at the deadline hour PPIC is told which branches are missing. Adjustments already waiting keep the approvers they had when raised.</p>
     <button class="btn primary" style="justify-self:start" onclick="App.saveAdjustRules()">Save</button></div>`;
 }
+/* =====================================================================
+   DEPOT COMPARISON — how the depots do against each other
+   ---------------------------------------------------------------------
+   Reports › Depot comparison, and two cards on the Dashboard:
+   - Depots: sales, units, receipts, average receipt, share, change vs the
+     previous period of the same length, target reached, items sold / carried
+     items with no sale, best type and best SKU.
+   - Type by depot and SKU by depot: a table with the depots across, each cell
+     shaded against the best depot in its row; "Show as % of the depot's sales"
+     compares the mix instead of the size.
+   Uses the same sales as the report builder: day-by-day for the last 200 days,
+   the monthly totals for longer periods (no receipt counts there).
+   ===================================================================== */
+const CMP_VIEWS = { depots: "Depots", best: "Best sellers", type: "Type by depot", sku: "SKU by depot", asked: "Asked for, couldn't sell" };
+const typeOf = p => (p && p.category) || "No type";
+/* sales between two dates: [{d, p, amount, units, sale}] (sale = receipt id, null from monthly totals) */
+function salesFacts(from, to, ds) {
+  const winStart = isoDate(today0() - (SINCE_DAYS - 1) * DAY), out = [];
+  if (from < winStart) {
+    const fm = from.slice(0, 7), tm = to.slice(0, 7);
+    monthlyRows().forEach(m => { if (ds.has(m.depot_id) && m.month >= fm && m.month <= tm) out.push({ d: m.depot_id, p: m.product_id, amount: m.amount, units: m.units, sale: null }); });
+    return { facts: out, monthly: true, from: fm + "-01", to };
+  }
+  const f0 = new Date(from + "T00:00:00").getTime(), t0 = new Date(to + "T23:59:59").getTime();
+  const sb = new Map(S.sales.filter(s => ds.has(s.depot_id)).filter(s => { const v = new Date(s.sold_at).getTime(); return v >= f0 && v <= t0; }).map(s => [s.id, s]));
+  S.sale_lines.forEach(l => { const s = sb.get(l.sale_id); if (s) out.push({ d: s.depot_id, p: l.product_id, amount: l.qty * l.unit_price, units: l.qty, sale: s.id }); });
+  return { facts: out, monthly: false, from, to };
+}
+function compareData(cfg) {
+  const key = "cmp" + JSON.stringify(cfg); if (CACHE[key]) return CACHE[key];
+  const [from, to] = periodRange(cfg), depots = scopeDepots(cfg).filter(d => d.active !== false && !d.is_consolidation_dc), ds = new Set(depots.map(d => d.id));
+  const cur = salesFacts(from, to, ds);
+  const len = Math.round((new Date(to) - new Date(cur.from)) / DAY) + 1, pTo = isoDate(new Date(cur.from).getTime() - DAY), pFrom = isoDate(new Date(cur.from).getTime() - len * DAY);
+  const prev = salesFacts(pFrom, pTo, ds);
+  const D = new Map(depots.map(d => [d.id, { d, amount: 0, units: 0, rec: new Set(), prev: 0, prevU: 0, byType: {}, byProd: {} }]));
+  cur.facts.forEach(f => { const x = D.get(f.d); if (!x) return; const p = idx.product(f.p), t = typeOf(p);
+    x.amount += f.amount; x.units += f.units; if (f.sale) x.rec.add(f.sale);
+    const bt = x.byType[t] = x.byType[t] || { amount: 0, units: 0 }; bt.amount += f.amount; bt.units += f.units;
+    const bp = x.byProd[f.p] = x.byProd[f.p] || { amount: 0, units: 0 }; bp.amount += f.amount; bp.units += f.units; });
+  prev.facts.forEach(f => { const x = D.get(f.d); if (x) { x.prev += f.amount; x.prevU += f.units; } });
+  // targets for the months the period touches
+  const months = new Set(); for (let t = new Date(cur.from + "T00:00:00"); t <= new Date(to + "T00:00:00"); t = new Date(t.getFullYear(), t.getMonth() + 1, 1)) months.add(monthKey(t));
+  // a month's target counts only for the days of it inside the period (Sep 5 – Oct 4 = 26/30 of Sep + 4/31 of Oct)
+  const pS = new Date(cur.from + "T00:00:00").getTime(), pE = new Date(to + "T00:00:00").getTime(), tgt = {};
+  (S.targets || []).forEach(t => { const mk = String(t.month).slice(0, 7); if (!ds.has(t.depot_id) || !months.has(mk)) return;
+    const [yy, mm] = mk.split("-").map(Number), mS = new Date(yy, mm - 1, 1).getTime(), mE = new Date(yy, mm, 0).getTime(), dim = Math.round((mE - mS) / DAY) + 1;
+    const days = Math.round((Math.min(mE, pE) - Math.max(mS, pS)) / DAY) + 1; if (days > 0) tgt[t.depot_id] = (tgt[t.depot_id] || 0) + Number(t.amount || 0) * days / dim; });
+  const total = { amount: 0, units: 0 }; D.forEach(x => { total.amount += x.amount; total.units += x.units; });
+  const rows = Array.from(D.values()).map(x => {
+    const carried = S.stock.filter(s => s.depot_id === x.d.id && s.on_hand > 0).map(s => s.product_id);
+    const best = o => Object.entries(o).sort((a, b) => b[1].amount - a[1].amount)[0];
+    const bt = best(x.byType), bp = best(x.byProd);
+    return { ...x, receipts: cur.monthly ? null : x.rec.size, avg: !cur.monthly && x.rec.size ? x.amount / x.rec.size : null, share: total.amount ? x.amount / total.amount : 0,
+      change: x.prev ? (x.amount - x.prev) / x.prev : null, target: tgt[x.d.id] || null, reached: tgt[x.d.id] ? x.amount / tgt[x.d.id] : null,
+      skus: Object.keys(x.byProd).length, idle: carried.filter(p => !x.byProd[p]).length, carried: carried.length, topType: bt ? bt[0] : null, topSku: bp ? bp[0] : null };
+  }).sort((a, b) => b.amount - a.amount || a.d.name.localeCompare(b.d.name));
+  return CACHE[key] = { from: cur.from, to, monthly: cur.monthly, prevFrom: pFrom, prevTo: pTo, rows, total };
+}
+/* rows × depots: dim 'type' or 'sku' */
+function compareMatrix(data, dim, m, opts = {}) {
+  const cols = data.rows.filter(r => r.amount || !opts.hideIdle), R = new Map();
+  cols.forEach(c => { const src = dim === "type" ? c.byType : c.byProd;
+    Object.entries(src).forEach(([k, v]) => { if (dim === "sku" && opts.type && typeOf(idx.product(k)) !== opts.type) return;
+      const r = R.get(k) || { k, cells: {}, total: 0 }; r.cells[c.d.id] = v[m]; r.total += v[m]; R.set(k, r); }); });
+  let rows = Array.from(R.values());
+  if (dim === "sku") {
+    const q = (opts.q || "").trim().toLowerCase();
+    if (q) rows = rows.filter(r => { const p = idx.product(r.k) || {}; return ((p.sku || "") + " " + (p.name || "") + " " + (p.barcode || "")).toLowerCase().includes(q); });
+    // carried items that didn't sell anywhere still show (as zeros) when a type is picked or searched
+  }
+  rows.sort((a, b) => b.total - a.total);
+  const colTotal = {}; cols.forEach(c => colTotal[c.d.id] = rows.reduce((s, r) => s + (r.cells[c.d.id] || 0), 0));
+  return { cols, rows, colTotal };
+}
+const pctTxt1 = v => v == null ? "—" : (v >= 0 ? "▲ " : "▼ ") + fmt(Math.abs(v * 100), 1) + "%";
+const cmpVal = (m, v) => m === "amount" ? peso(v) : fmt(v);
+/* one cell: shaded against the best depot in the row */
+function heatCell(v, max, txt, best) {
+  const a = max > 0 && v > 0 ? Math.round(8 + 42 * v / max) : 0;
+  return `<td class="r num" style="${a ? `background:color-mix(in srgb, var(--accent) ${a}%, transparent);` : ""}${best ? "font-weight:700;" : ""}">${v ? txt : `<span class="faint">—</span>`}</td>`;
+}
+function matrixTable(mx, data, dim, m, asShare, limit) {
+  const shown = limit ? mx.rows.slice(0, limit) : mx.rows;
+  const label = r => { if (dim === "type") return `<b>${esc(r.k)}</b>`; const p = idx.product(r.k); return p ? prodCell(p) : esc(r.k); };
+  const depTot = id => { const c = data.rows.find(x => x.d.id === id); return c ? c[m] : 0; };
+  return `<div class="tbl-wrap"><table class="tbl cmp-mx"><thead><tr><th style="min-width:${dim === "sku" ? 220 : 140}px">${dim === "type" ? "Type" : "Item"}</th>
+      ${mx.cols.map(c => `<th class="r" title="${esc(c.d.name)}"><div class="cmp-col">${esc(c.d.name)}</div></th>`).join("")}<th class="r">All depots</th><th>Sells best at</th></tr></thead><tbody>
+    ${shown.length ? shown.map(r => { const vals = mx.cols.map(c => r.cells[c.d.id] || 0), shareOf = (v, c) => depTot(c.d.id) ? v / depTot(c.d.id) : 0;
+      const disp = mx.cols.map((c, i) => asShare ? shareOf(vals[i], c) : vals[i]), max = Math.max(...disp, 0), bi = disp.indexOf(max);
+      return `<tr><td>${label(r)}</td>${mx.cols.map((c, i) => heatCell(disp[i], max, asShare ? fmt(disp[i] * 100, 1) + "%" : cmpVal(m, vals[i]), i === bi && max > 0)).join("")}
+        <td class="r num"><b>${asShare ? fmt((data.total[m] ? r.total / data.total[m] : 0) * 100, 1) + "%" : cmpVal(m, r.total)}</b></td><td class="small nowrap">${max > 0 ? esc(mx.cols[bi].d.name) : "—"}</td></tr>`; }).join("")
+      : `<tr><td colspan="${mx.cols.length + 3}"><div class="empty">No sales for these settings.</div></td></tr>`}
+    ${shown.length ? `<tr class="total"><td><b>Total</b></td>${mx.cols.map(c => `<td class="r num"><b>${asShare ? "100%" : cmpVal(m, mx.colTotal[c.d.id])}</b></td>`).join("")}<td class="r num"><b>${asShare ? "100%" : cmpVal(m, data.total[m])}</b></td><td></td></tr>` : ""}
+  </tbody></table></div>${limit && mx.rows.length > limit ? `<p class="small faint">Showing the top ${limit} of ${mx.rows.length}. Search or pick a type to narrow it, or export for all.</p>` : ""}`;
+}
+function depotsTable(data, limit, compact) {
+  const rows = limit ? data.rows.slice(0, limit) : data.rows, maxA = Math.max(...data.rows.map(r => r.amount), 0);
+  return `<div class="tbl-wrap"><table class="tbl"><thead><tr><th class="r">#</th><th>Depot</th><th class="r">Sales ₱</th><th class="r">vs previous</th><th class="r">Share</th><th class="r">Units</th>
+      ${compact ? "" : `<th class="r">Receipts</th><th class="r">Avg receipt</th><th class="r" title="Monthly targets, counted for the days of each month inside the period">Target reached</th><th class="r" title="Items carried (stock on hand) that didn't sell in the period">Carried, no sale</th>`}<th>Best type</th><th>Best SKU</th></tr></thead><tbody>
+    ${rows.length ? rows.map((r, i) => { const tp = r.topSku && idx.product(r.topSku);
+      return `<tr><td class="r faint">${i + 1}</td><td class="nowrap"><b>${esc(r.d.name)}</b><div class="small faint">${esc(idx.account(r.d.account_id).name)}${r.d.region ? " · " + esc(r.d.region) : ""}</div></td>
+        <td class="r num" style="min-width:120px"><b>${peso(r.amount)}</b><div class="cmp-bar"><i style="width:${maxA ? Math.round(r.amount / maxA * 100) : 0}%"></i></div></td>
+        <td class="r num ${r.change == null ? "" : r.change >= 0 ? "up" : "down"}">${r.change == null ? (r.amount ? "new" : "—") : pctTxt1(r.change)}</td><td class="r num">${fmt(r.share * 100, 1)}%</td><td class="r num">${fmt(r.units)}</td>
+        ${compact ? "" : `<td class="r num">${r.receipts == null ? "—" : fmt(r.receipts)}</td><td class="r num">${r.avg == null ? "—" : peso(r.avg)}</td>
+        <td class="r num">${r.reached == null ? "—" : `<span class="chip ${r.reached >= 1 ? "good" : r.reached >= .8 ? "warn" : "crit"}">${fmt(r.reached * 100)}%</span>`}</td>
+        <td class="r num">${r.carried ? `${fmt(r.idle)} <span class="small faint">of ${fmt(r.carried)}</span>` : "—"}</td>`}
+        <td class="small nowrap">${r.topType ? esc(r.topType) : "—"}</td><td class="small nowrap" title="${tp ? esc(tp.name) : ""}">${tp ? `<span class="mono">${esc(tp.sku)}</span>` : "—"}</td></tr>`; }).join("")
+      : `<tr><td colspan="12"><div class="empty">No depots in this view.</div></td></tr>`}
+    ${rows.length && !limit ? `<tr class="total"><td></td><td><b>All depots</b></td><td class="r num"><b>${peso(data.total.amount)}</b></td><td class="r num">${pctTxt1(data.rows.reduce((s, r) => s + r.prev, 0) ? data.total.amount / data.rows.reduce((s, r) => s + r.prev, 0) - 1 : null)}</td><td class="r num">100%</td><td class="r num"><b>${fmt(data.total.units)}</b></td>${compact ? "" : "<td></td><td></td><td></td><td></td>"}<td></td><td></td></tr>` : ""}
+  </tbody></table></div>`;
+}
+
+/* Reports › Depot comparison */
+function compareReport() {
+  const cfg = UI.cmp = UI.cmp || { view: "depots", measure: "amount", share: false, period: "this_month", company: "", account: "", depot: "", from: "", to: "", type: "", q: "" };
+  const d = compareData({ period: cfg.period, from: cfg.from, to: cfg.to, company: cfg.company, account: cfg.account, depot: "" });
+  const accts = S.accounts.filter(a => S.depots.some(x => x.account_id === a.id)), types = Array.from(new Set(S.products.map(typeOf))).sort();
+  const set = k => `onchange="UI.cmp['${k}']=this.${k === "share" ? "checked" : "value"};${k === "company" ? "UI.cmp.account='';" : ""}rerender()"`;
+  const m = ["depots", "best", "asked"].includes(cfg.view) ? "amount" : cfg.measure, isMx = cfg.view === "type" || cfg.view === "sku";
+  let body;
+  if (cfg.view === "best") { const B = bestData(d); body = cfg.bdepot && d.rows.some(r => r.d.id === cfg.bdepot) ? bestForDepot(B, d, cfg.bdepot) : bestOverall(B, m, cfg.q); }
+  else if (cfg.view === "asked") body = askedView(d);
+  else if (cfg.view === "depots") body = `<div class="chart-box" style="height:${Math.max(180, Math.min(d.rows.length, 20) * 26 + 40)}px"><canvas id="ch-cmp" role="img" aria-label="Sales by depot"></canvas></div>${depotsTable(d)}`;
+  else { const mx = compareMatrix(d, cfg.view, m, { type: cfg.type, q: cfg.q }); body = matrixTable(mx, d, cfg.view, m, cfg.share, cfg.view === "sku" ? 60 : 0); }
+  return `<div class="card stack-sm no-print">
+      <div class="filters">
+        <label class="f">Compare<select class="in" id="cm-view" ${set("view")}>${Object.entries(CMP_VIEWS).map(([k, v]) => opt(k, v, cfg.view)).join("")}</select></label>
+        <label class="f">Period<select class="in" id="cm-period" ${set("period")}>${Object.entries(PERIODS).map(([k, v]) => opt(k, v, cfg.period)).join("")}</select></label>
+        ${cfg.period === "custom" ? `<label class="f">From<input class="in" type="date" value="${esc(cfg.from)}" ${set("from")}></label><label class="f">To<input class="in" type="date" value="${esc(cfg.to)}" ${set("to")}></label>` : ""}
+        ${isMx ? `<label class="f">Measure<select class="in" id="cm-m" ${set("measure")}>${opt("amount", "Sales ₱", cfg.measure)}${opt("units", "Units", cfg.measure)}</select></label>` : ""}
+      </div>
+      <div class="filters">
+        <label class="f">Company<select class="in" ${set("company")}>${opt("", "All", cfg.company)}${myCompanyList().map(c => opt(c.id, c.id, cfg.company)).join("")}</select></label>
+        <label class="f">Account<select class="in" ${set("account")}>${opt("", "All accounts", cfg.account)}${accts.filter(a => !cfg.company || S.depots.some(x => x.account_id === a.id && x.company_id === cfg.company)).map(a => opt(a.id, a.name, cfg.account)).join("")}</select></label>
+        ${cfg.view === "sku" ? `<label class="f">Type<select class="in" ${set("type")}>${opt("", "All types", cfg.type)}${types.map(t => opt(t, t, cfg.type)).join("")}</select></label>
+          <label class="f">Find SKU<input class="in" id="cm-q" value="${esc(cfg.q)}" placeholder="SKU, name or barcode" oninput="UI.cmp.q=this.value" onchange="rerender()"></label>` : ""}
+        ${cfg.view === "best" ? `<label class="f">Depot<select class="in" id="cm-bd" ${set("bdepot")}>${opt("", "All depots (overall)", cfg.bdepot)}${d.rows.map(r => opt(r.d.id, r.d.name, cfg.bdepot)).join("")}</select></label>${!cfg.bdepot ? `<label class="f">Find SKU<input class="in" value="${esc(cfg.q)}" placeholder="SKU, name or barcode" oninput="UI.cmp.q=this.value" onchange="rerender()"></label>` : ""}` : ""}
+        ${isMx ? `<label class="check" style="align-self:flex-end"><input type="checkbox" ${cfg.share ? "checked" : ""} ${set("share")}> Show as % of each depot's sales (compare the mix)</label>` : ""}
+      </div>
+      <div class="row"><button class="btn" onclick="App.exportCompare()">Export to Excel</button><button class="btn" onclick="window.print()">Print / save as PDF</button></div></div>
+    <div class="card print-area"><div class="card-h"><div><h2>${esc(CMP_VIEWS[cfg.view])}</h2>
+      <p class="small faint">${dshort(d.from)} – ${dshort(d.to)}, ${new Date(d.to).getFullYear()} · compared with ${dshort(d.prevFrom)} – ${dshort(d.prevTo)} · ${esc([cfg.company || "All companies", cfg.account ? idx.account(cfg.account).name : ""].filter(Boolean).join(" · "))}</p></div></div>
+      ${d.monthly ? `<p class="small muted">Whole months, from the monthly totals (receipt counts aren't kept there).</p>` : ""}
+      ${isMx ? `<p class="small muted">Each cell is shaded against the best depot in its row; the best is in bold.${cfg.share ? " Figures are each depot's own mix: what share of its sales came from that " + (cfg.view === "type" ? "type" : "item") + "." : ""}</p>` : ""}
+      ${body}</div>`;
+}
+function drawCompareChart(canvas, rows) {
+  if (!canvas || !rows.length) return;
+  const css = getComputedStyle(document.documentElement), s1 = css.getPropertyValue("--series-1").trim(), s2 = css.getPropertyValue("--ink-3").trim();
+  const top = rows.slice(0, 20), opts = chartBase({ money: true });
+  opts.indexAxis = "y"; const x = opts.scales.x; opts.scales.x = opts.scales.y; opts.scales.y = { ...x, ticks: { ...x.ticks, autoSkip: false } };
+  opts.plugins.legend = { display: true, position: "bottom", labels: { boxWidth: 12, color: s2 } };
+  charts.push(new Chart(canvas, { type: "bar", data: { labels: top.map(r => r.d.name.length > 28 ? r.d.name.slice(0, 27) + "…" : r.d.name), datasets: [
+    { label: "This period", data: top.map(r => Math.round(r.amount)), backgroundColor: s1, borderRadius: 4, maxBarThickness: 16 },
+    { label: "Previous period", data: top.map(r => Math.round(r.prev)), backgroundColor: css.getPropertyValue("--series-band").trim() || s2, borderRadius: 4, maxBarThickness: 16 }] }, options: opts }));
+}
+/* Dashboard: the two cards */
+function dashCompareCards(f) {
+  const r = f.range, cfg = { period: "custom", from: isoDate(today0() - (r - 1) * DAY), to: isoDate(Date.now()), company: f.company, account: f.account, depot: f.depot };
+  const d = compareData(cfg); if (!d.rows.length) return "";
+  const mx = compareMatrix(d, "type", "amount"), top = { ...mx, cols: mx.cols.slice(0, 8) };
+  return `<div class="card"><div class="card-h"><div><h2>Depots compared</h2><p class="small faint">Sales, last ${r} days vs the ${r} days before</p></div><button class="btn ghost small" onclick="App.openCompare('depots')">Full comparison</button></div>
+      ${depotsTable(d, 10, true)}${d.rows.length > 10 ? `<p class="small faint">Top 10 of ${d.rows.length} depots.</p>` : ""}</div>
+    <div class="card"><div class="card-h"><div><h2>Type by depot</h2><p class="small faint">₱, last ${r} days${mx.cols.length > 8 ? " · top 8 depots" : ""}</p></div><div class="row"><button class="btn ghost small" onclick="App.openCompare('type')">Open</button><button class="btn ghost small" onclick="App.openCompare('sku')">SKU by depot</button></div></div>
+      ${matrixTable(top, d, "type", "amount", false, 0)}</div>`;
+}
+
+/* ---------- what sells where, and what customers asked for that we couldn't sell ---------- */
+const LOST_REASON = { out_of_stock: ["Out of stock here", "warn"], not_carried: ["Not carried here", "info"], not_in_range: ["We don't sell it", "crit"] };
+/* at the time it's logged: carried here (a stock line exists) → out of stock; our item not stocked here → not carried; no item → not in our range */
+function lostReason(depotId, pid) { if (!pid) return "not_in_range"; return S.stock.some(s => s.depot_id === depotId && s.product_id === pid) ? "out_of_stock" : "not_carried"; }
+const lostReasonOf = l => l.reason || lostReason(l.depot_id, l.product_id);
+const askedKey = t => String(t || "").toLowerCase().replace(/[^a-z0-9×x.]+/g, " ").replace(/\s+/g, " ").trim();
+const carries = (depotId, pid) => S.stock.some(s => s.depot_id === depotId && s.product_id === pid);
+const onShelf = (depotId, pid) => S.stock.some(s => s.depot_id === depotId && s.product_id === pid && s.on_hand > 0);
+function lostFacts(data, ds) {
+  const f0 = new Date(data.from + "T00:00:00").getTime(), t0 = new Date(data.to + "T23:59:59").getTime();
+  return (S.lost_sales || []).filter(l => ds.has(l.depot_id)).filter(l => { const v = new Date(l.created_at).getTime(); return v >= f0 && v <= t0; });
+}
+/* every item: where it sells, where it's carried, where it was asked for */
+function bestData(data) {
+  const key = "best" + data.from + data.to + data.rows.map(r => r.d.id).join(); if (CACHE[key]) return CACHE[key];
+  const dep = data.rows.map(r => r.d), ds = new Set(dep.map(d => d.id)), P = new Map();
+  const get = pid => { if (!P.has(pid)) P.set(pid, { pid, p: idx.product(pid), amount: 0, units: 0, at: {}, asked: 0, askedAt: {} }); return P.get(pid); };
+  data.rows.forEach(r => Object.entries(r.byProd).forEach(([pid, v]) => { const x = get(pid); x.amount += v.amount; x.units += v.units; x.at[r.d.id] = v; }));
+  lostFacts(data, ds).forEach(l => { if (!l.product_id) return; const x = get(l.product_id); x.asked += l.qty; x.askedAt[l.depot_id] = (x.askedAt[l.depot_id] || 0) + l.qty; });
+  const items = Array.from(P.values()).filter(x => x.p).map(x => {
+    // only depots of the item's own company can carry it
+    const mine = dep.filter(d => !x.p.company_id || d.company_id === x.p.company_id), selling = Object.keys(x.at), notCarried = mine.filter(d => !carries(d.id, x.pid) && !x.at[d.id]), idle = mine.filter(d => onShelf(d.id, x.pid) && !x.at[d.id]);
+    const best = selling.sort((a, b) => x.at[b].amount - x.at[a].amount)[0];
+    return { ...x, selling: selling.length, of: mine.length, best: best ? idx.depot(best) : null, perSelling: selling.length ? x.amount / selling.length : 0, notCarried, idle };
+  }).sort((a, b) => b.amount - a.amount || b.asked - a.asked);
+  items.forEach((x, i) => x.rank = x.amount ? i + 1 : null);
+  return CACHE[key] = { items, total: data.total, depots: dep };
+}
+function bestOverall(B, m, q) {
+  const t = (q || "").trim().toLowerCase(), list = B.items.filter(x => !t || (x.p.sku + " " + x.p.name + " " + (x.p.barcode || "")).toLowerCase().includes(t)), N = B.depots.length;
+  return `<div class="tbl-wrap"><table class="tbl"><thead><tr><th class="r">#</th><th style="min-width:220px">Item</th><th>Type</th><th class="r">Sales ₱</th><th class="r">Units</th><th class="r">Share</th>
+      <th class="r" title="Depots that sold it in the period, of the depots in this view">Selling at</th><th>Sells best at</th><th class="r" title="Avg sales per depot that sells it">Per selling depot</th>
+      <th class="r" title="Depots in this view with no stock line for it: a chance to place it">Not carried at</th><th class="r" title="Units customers asked for that couldn't be sold">Asked, couldn't sell</th></tr></thead><tbody>
+    ${list.length ? list.slice(0, 80).map(x => `<tr><td class="r faint">${x.rank || "—"}</td><td>${prodCell(x.p)}</td><td class="small nowrap">${esc(typeOf(x.p))}</td><td class="r num"><b>${peso(x.amount)}</b></td><td class="r num">${fmt(x.units)}</td>
+      <td class="r num">${B.total.amount ? fmt(x.amount / B.total.amount * 100, 1) + "%" : "—"}</td><td class="r num">${fmt(x.selling)} <span class="small faint">of ${x.of}</span></td><td class="small nowrap">${x.best ? esc(x.best.name) : "—"}</td>
+      <td class="r num">${x.selling ? peso(x.perSelling) : "—"}</td><td class="r num" title="${esc(x.notCarried.map(d => d.name).join(", "))}">${x.notCarried.length ? `<span class="chip info">${fmt(x.notCarried.length)}</span>` : "—"}</td>
+      <td class="r num">${x.asked ? `<b class="down">${fmt(x.asked)}</b>` : "—"}</td></tr>`).join("") : `<tr><td colspan="11"><div class="empty">No sales for these settings.</div></td></tr>`}
+  </tbody></table></div>${list.length > 80 ? `<p class="small faint">Top 80 of ${list.length}. Export for all.</p>` : ""}`;
+}
+/* one depot: its best sellers, what sells elsewhere but isn't here, and what sits on its shelf unsold */
+function bestForDepot(B, data, depotId) {
+  const r = data.rows.find(x => x.d.id === depotId); if (!r) return `<div class="empty">Pick a depot.</div>`;
+  const mine = B.items.filter(x => x.at[depotId]).sort((a, b) => b.at[depotId].amount - a.at[depotId].amount);
+  const gaps = B.items.filter(x => (!x.p.company_id || x.p.company_id === r.d.company_id) && !carries(depotId, x.pid) && !x.at[depotId] && (x.amount > 0 || x.askedAt[depotId])).sort((a, b) => (b.askedAt[depotId] || 0) - (a.askedAt[depotId] || 0) || b.perSelling - a.perSelling).slice(0, 15);
+  const idle = S.stock.filter(s => s.depot_id === depotId && s.on_hand > 0 && !r.byProd[s.product_id]).map(s => ({ s, p: idx.product(s.product_id), x: B.items.find(i => i.pid === s.product_id) })).filter(o => o.p)
+    .sort((a, b) => b.s.on_hand * priceFor(b.p, r.d) - a.s.on_hand * priceFor(a.p, r.d));
+  return `<h3>Best sellers at ${esc(r.d.name)}</h3>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th class="r">#</th><th style="min-width:220px">Item</th><th>Type</th><th class="r">Sales ₱</th><th class="r">Units</th><th class="r">Share of depot</th><th class="r" title="Rank across all depots in this view">Rank, all depots</th><th class="r">On hand</th></tr></thead><tbody>
+      ${mine.length ? mine.slice(0, 40).map((x, i) => `<tr><td class="r faint">${i + 1}</td><td>${prodCell(x.p)}</td><td class="small nowrap">${esc(typeOf(x.p))}</td><td class="r num"><b>${peso(x.at[depotId].amount)}</b></td><td class="r num">${fmt(x.at[depotId].units)}</td>
+        <td class="r num">${r.amount ? fmt(x.at[depotId].amount / r.amount * 100, 1) + "%" : "—"}</td><td class="r num">${x.rank ? "#" + x.rank : "—"}</td><td class="r num">${fmt(onHand(depotId, x.pid))}</td></tr>`).join("") : `<tr><td colspan="8"><div class="empty">No sales in this period.</div></td></tr>`}
+    </tbody></table></div>
+    <h3 style="margin-top:18px">Sells elsewhere, not carried here</h3><p class="small muted">Our items this depot has no stock line for, ranked by what customers asked for here, then by sales at the depots that carry them.</p>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th style="min-width:220px">Item</th><th>Type</th><th class="r">Asked for here</th><th class="r">Selling at</th><th class="r">Per selling depot</th><th>Sells best at</th></tr></thead><tbody>
+      ${gaps.length ? gaps.map(x => `<tr><td>${prodCell(x.p)}</td><td class="small nowrap">${esc(typeOf(x.p))}</td><td class="r num">${x.askedAt[depotId] ? `<b class="down">${fmt(x.askedAt[depotId])}</b>` : "—"}</td><td class="r num">${fmt(x.selling)} depots</td>
+        <td class="r num">${x.selling ? peso(x.perSelling) : "—"}</td><td class="small nowrap">${x.best ? esc(x.best.name) : "—"}</td></tr>`).join("") : `<tr><td colspan="6"><div class="empty">This depot carries everything that sells elsewhere.</div></td></tr>`}
+    </tbody></table></div>
+    <h3 style="margin-top:18px">On the shelf, no sale in the period</h3>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th style="min-width:220px">Item</th><th class="r">On hand</th><th class="r">Value at SRP</th><th class="r">Sells at other depots</th></tr></thead><tbody>
+      ${idle.length ? idle.slice(0, 20).map(o => `<tr><td>${prodCell(o.p)}</td><td class="r num">${fmt(o.s.on_hand)}</td><td class="r num">${peso(o.s.on_hand * priceFor(o.p, r.d))}</td><td class="r num">${o.x && o.x.selling ? fmt(o.x.selling) + " depots" : "nowhere"}</td></tr>`).join("") : `<tr><td colspan="4"><div class="empty">Everything on the shelf sold at least once.</div></td></tr>`}
+    </tbody></table></div>`;
+}
+/* missed sales grouped: our items by item, the rest by what was typed */
+function askedData(data) {
+  const ds = new Set(data.rows.map(r => r.d.id)), L = lostFacts(data, ds), G = new Map(), byDepot = new Map(data.rows.map(r => [r.d.id, { d: r.d, out_of_stock: 0, not_carried: 0, not_in_range: 0, units: 0, value: 0, top: {} }]));
+  L.forEach(l => { const reason = lostReasonOf(l), p = l.product_id && idx.product(l.product_id), dp = idx.depot(l.depot_id);
+    const k = p ? "p:" + p.id : "t:" + askedKey(l.asked_item || l.note || "?");
+    const g = G.get(k) || { k, p, label: p ? null : (l.asked_item || l.note || "Not described"), type: p ? typeOf(p) : (l.asked_category || "—"), units: 0, times: 0, value: 0, reasons: {}, depots: {}, notes: [] };
+    const v = p && dp ? l.qty * priceFor(p, dp) : 0;
+    g.units += l.qty; g.times++; g.value += v; g.reasons[reason] = (g.reasons[reason] || 0) + l.qty; g.depots[l.depot_id] = (g.depots[l.depot_id] || 0) + l.qty;
+    if (l.note && g.notes.length < 3 && !g.notes.includes(l.note)) g.notes.push(l.note); G.set(k, g);
+    const b = byDepot.get(l.depot_id); if (b) { b[reason] += l.qty; b.units += l.qty; b.value += v; b.top[k] = (b.top[k] || 0) + l.qty; } });
+  const groups = Array.from(G.values()).sort((a, b) => b.units - a.units || b.times - a.times);
+  const tot = { units: 0, value: 0, out_of_stock: 0, not_carried: 0, not_in_range: 0 }; byDepot.forEach(b => { tot.units += b.units; tot.value += b.value; Object.keys(LOST_REASON).forEach(r => tot[r] += b[r]); });
+  return { groups, depots: Array.from(byDepot.values()).filter(b => b.units).sort((a, b) => b.units - a.units), tot, G };
+}
+function askedView(data) {
+  const A = askedData(data), win = isoDate(today0() - (SINCE_DAYS - 1) * DAY), gl = g => g.p ? prodCell(g.p) : `<b>${esc(g.label)}</b><div class="small faint">Not in our range</div>`;
+  const reasons = o => Object.entries(o).sort((a, b) => b[1] - a[1]).map(([r, q]) => `<span class="chip ${LOST_REASON[r][1]}">${LOST_REASON[r][0]} · ${fmt(q)}</span>`).join(" ");
+  return `${data.from < win ? `<p class="small muted">Missed sales are kept for the last ${SINCE_DAYS} days, so older months show none.</p>` : ""}
+    <div class="kpis"><div class="kpi"><div class="eyebrow">Units asked for, not sold</div><div class="v">${fmt(A.tot.units)}</div><div class="d muted">${A.groups.length} different items</div></div>
+      ${Object.entries(LOST_REASON).map(([r, [l]]) => `<div class="kpi"><div class="eyebrow">${l}</div><div class="v">${fmt(A.tot[r])}</div><div class="d muted">units</div></div>`).join("")}
+      <div class="kpi"><div class="eyebrow">Sales missed, our items</div><div class="v">${pesoK(A.tot.value)}</div><div class="d muted">at SRP</div></div></div>
+    <h3>Most asked for</h3>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th style="min-width:220px">Asked for</th><th>Type</th><th class="r">Units</th><th class="r">Times</th><th>Why it wasn't sold</th><th>Where</th><th>Notes</th></tr></thead><tbody>
+      ${A.groups.length ? A.groups.slice(0, 60).map(g => `<tr><td>${gl(g)}</td><td class="small nowrap">${esc(g.type)}</td><td class="r num"><b>${fmt(g.units)}</b></td><td class="r num">${fmt(g.times)}</td><td>${reasons(g.reasons)}</td>
+        <td class="small">${Object.entries(g.depots).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, q]) => esc(idx.depot(id).name) + " " + fmt(q)).join(" · ")}${Object.keys(g.depots).length > 3 ? ` <span class="faint">+${Object.keys(g.depots).length - 3}</span>` : ""}</td>
+        <td class="small muted">${g.notes.map(esc).join(" · ") || "—"}</td></tr>`).join("") : `<tr><td colspan="7"><div class="empty">No missed sales logged in this period. Promodisers log them on the Sell screen.</div></td></tr>`}
+    </tbody></table></div>
+    ${A.depots.length ? `<h3 style="margin-top:18px">By depot</h3><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Depot</th>${Object.values(LOST_REASON).map(([l]) => `<th class="r">${l}</th>`).join("")}<th class="r">All units</th><th>Most asked for</th></tr></thead><tbody>
+      ${A.depots.map(b => { const t = Object.entries(b.top).sort((x, y) => y[1] - x[1])[0], g = t && A.G.get(t[0]);
+        return `<tr><td class="nowrap"><b>${esc(b.d.name)}</b></td>${Object.keys(LOST_REASON).map(r => `<td class="r num">${b[r] ? fmt(b[r]) : "—"}</td>`).join("")}<td class="r num"><b>${fmt(b.units)}</b></td><td class="small">${g ? (g.p ? esc(g.p.sku + " " + g.p.name) : esc(g.label)) : "—"}</td></tr>`; }).join("")}
+    </tbody></table></div>` : ""}`;
+}
+/* dashboard: the items customers asked for */
+function dashAskedCard(f) {
+  const r = f.range, d = compareData({ period: "custom", from: isoDate(today0() - (r - 1) * DAY), to: isoDate(Date.now()), company: f.company, account: f.account, depot: f.depot }), A = askedData(d);
+  return `<div class="card"><div class="card-h"><div><h2>Customers asked for, couldn't sell</h2><p class="small faint">Last ${r} days · ${fmt(A.tot.units)} units · ${fmt(A.tot.not_in_range)} for things we don't sell</p></div><button class="btn ghost small" onclick="App.openCompare('asked')">Open</button></div>
+    ${A.groups.length ? `<div class="list">${A.groups.slice(0, 6).map(g => `<div class="row between"><div class="grow">${g.p ? prodCell(g.p) : `<b>${esc(g.label)}</b> <span class="small faint">· not in our range</span>`}</div>
+      <div style="text-align:right"><b class="num">${fmt(g.units)}</b> <span class="small faint">units</span><div class="small faint">${Object.keys(g.depots).length} depot${Object.keys(g.depots).length > 1 ? "s" : ""} · ${Object.entries(g.reasons).sort((a, b) => b[1] - a[1]).map(([x]) => LOST_REASON[x][0]).join(", ")}</div></div></div>`).join("")}</div>`
+      : `<div class="empty">Nothing logged. Promodisers log missed sales on the Sell screen.</div>`}</div>`;
+}
+
+Object.assign(App, {
+  openCompare(view) {
+    const f = UI.f; UI.cmp = { ...(UI.cmp || { measure: "amount", share: false, type: "", q: "" }), view, period: "custom", from: isoDate(today0() - (f.range - 1) * DAY), to: isoDate(Date.now()), company: f.company || "", account: f.account || "" };
+    UI.subs = UI.subs || {}; UI.subs.reports = "compare"; App.go("reports");
+  },
+  exportCompare() {
+    const cfg = UI.cmp, d = compareData({ period: cfg.period, from: cfg.from, to: cfg.to, company: cfg.company, account: cfg.account, depot: "" });
+    const name = "ShelfSync " + CMP_VIEWS[cfg.view] + " " + d.from + " to " + d.to;
+    if (cfg.view === "depots") return exportRows(name, ["Rank", "Depot", "Account", "Region", "Sales ₱", "Previous period ₱", "Change %", "Share %", "Units", "Receipts", "Avg receipt ₱", "Target ₱", "Reached %", "Items sold", "Carried, no sale", "Best type", "Best SKU"],
+      d.rows.map((r, i) => { const p = r.topSku && idx.product(r.topSku); return [i + 1, r.d.name, idx.account(r.d.account_id).name, r.d.region || "", Math.round(r.amount * 100) / 100, Math.round(r.prev * 100) / 100,
+        r.change == null ? "" : Math.round(r.change * 1000) / 10, Math.round(r.share * 1000) / 10, r.units, r.receipts ?? "", r.avg == null ? "" : Math.round(r.avg), r.target ?? "", r.reached == null ? "" : Math.round(r.reached * 1000) / 10,
+        r.skus, r.idle, r.topType || "", p ? p.sku : ""]; }), "Depots");
+    if (cfg.view === "best") { const B = bestData(d), N = B.depots.length;
+      if (cfg.bdepot && d.rows.some(r => r.d.id === cfg.bdepot)) { const dp = idx.depot(cfg.bdepot), r = d.rows.find(x => x.d.id === cfg.bdepot);
+        return exportRows(name + " " + dp.name, ["Rank", "SKU", "Item", "Type", "Sales ₱", "Units", "Share of depot %", "Rank, all depots", "On hand", "Carried here", "Asked for here (units)"],
+          B.items.filter(x => x.at[cfg.bdepot] || carries(cfg.bdepot, x.pid) || x.askedAt[cfg.bdepot] || x.amount).map(x => ({ x, a: x.at[cfg.bdepot] || { amount: 0, units: 0 } })).sort((a, b) => b.a.amount - a.a.amount || b.x.amount - a.x.amount)
+            .map((o, i) => [o.a.amount ? i + 1 : "", o.x.p.sku, o.x.p.name, typeOf(o.x.p), Math.round(o.a.amount * 100) / 100, o.a.units, r.amount ? Math.round(o.a.amount / r.amount * 1000) / 10 : 0, o.x.rank || "", onHand(cfg.bdepot, o.x.pid),
+              carries(cfg.bdepot, o.x.pid) ? "yes" : "no", o.x.askedAt[cfg.bdepot] || 0]), "Items"); }
+      return exportRows(name, ["Rank", "SKU", "Item", "Type", "Sales ₱", "Units", "Share %", "Selling at (depots)", "Depots of its company", "Sells best at", "Per selling depot ₱", "Not carried at (depots)", "Not carried at", "Asked, couldn't sell (units)"],
+        B.items.map(x => [x.rank || "", x.p.sku, x.p.name, typeOf(x.p), Math.round(x.amount * 100) / 100, x.units, B.total.amount ? Math.round(x.amount / B.total.amount * 1000) / 10 : 0, x.selling, x.of, x.best ? x.best.name : "",
+          Math.round(x.perSelling), x.notCarried.length, x.notCarried.map(dd => dd.name).join(", "), x.asked]), "Best sellers"); }
+    if (cfg.view === "asked") { const A = askedData(d);
+      return exportRows(name, ["Asked for", "SKU", "Type", "Units", "Times logged", "Out of stock here", "Not carried here", "We don't sell it", "Sales missed ₱ (our items, SRP)", "Depots", "Notes"],
+        A.groups.map(g => [g.p ? g.p.name : g.label, g.p ? g.p.sku : "", g.type, g.units, g.times, g.reasons.out_of_stock || 0, g.reasons.not_carried || 0, g.reasons.not_in_range || 0, Math.round(g.value),
+          Object.entries(g.depots).map(([id, q]) => idx.depot(id).name + " " + q).join("; "), g.notes.join("; ")]), "Asked for"); }
+    const m = cfg.measure, mx = compareMatrix(d, cfg.view, m, { type: cfg.type, q: cfg.q });
+    const head = cfg.view === "type" ? ["Type"] : ["SKU", "Item", "Type"];
+    exportRows(name, head.concat(mx.cols.map(c => c.d.name), ["All depots"]), mx.rows.map(r => { const p = idx.product(r.k) || {};
+      return (cfg.view === "type" ? [r.k] : [p.sku || "", p.name || "", typeOf(p)]).concat(mx.cols.map(c => r.cells[c.d.id] ? Math.round(r.cells[c.d.id] * 100) / 100 : 0), [Math.round(r.total * 100) / 100]); }), CMP_VIEWS[cfg.view]);
+  }
+});
 /* =====================================================================
    GUIDED PRACTICE — the real screens, a throwaway copy of the sample data
    ---------------------------------------------------------------------
