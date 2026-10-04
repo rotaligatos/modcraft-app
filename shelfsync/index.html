@@ -518,7 +518,7 @@ const ROLES = { promodiser:"Promodiser", ppic:"PPIC", scm:"Supply Chain Manager"
 /* Accounting: sees what a Plant user sees for their companies (sales, stock value, targets, documents, requests), changes nothing.
    The database enforces this (ss_view_only, accounting_role.sql); here it only hides the buttons. Someone with Accounting plus another role keeps that role's rights. */
 const viewOnly = () => !!ME && rolesOf(ME).every(r => r === "accounting");
-const VIEW_ONLY_PAGES = ["dashboard", "performance", "reports", "approvals", "recon", "movements", "documents", "depots", "checks"];
+const VIEW_ONLY_PAGES = ["dashboard", "performance", "reports", "approvals", "recon", "movements", "documents", "depots", "checks", "weekly"];
 const CHAIN = [
   { status:"for_ppic",       role:"ppic",       short:"PPIC",      label:"PPIC review",                 verb:"Endorse to Supply Chain" },
   { status:"for_scm",        role:"scm",        short:"SCM",       label:"Supply Chain Manager",        verb:"Approve" },
@@ -666,10 +666,11 @@ const Engine = {
   lost({ id, depot_id, product_id, qty, note, created_at }) {
     S.lost_sales.push({ id, depot_id, product_id, qty, note, created_by: ME.id, created_at: created_at || new Date().toISOString() });
   },
-  count({ id, depot_id, note, lines, created_at }) {
+  count({ id, depot_id, note, lines, created_at, kind }) {
     if (!can("count")) throw new Error("Stock count is switched off for your account");
-    const at = created_at || new Date().toISOString(), t = new Date(at).getTime();
-    S.counts.push({ id, depot_id, note, created_by: ME.id, created_at: at });
+    const at = created_at || new Date().toISOString(), t = new Date(at).getTime(), k = kind === "weekly" ? "weekly" : "spot";
+    // a count records what was on the shelf; stock changes only when PPIC's adjustment is approved (weekly_count.sql)
+    S.counts.push({ id, depot_id, note, kind: k, status: "submitted", week_of: k === "weekly" ? weekFriday(at) : null, created_by: ME.id, created_at: at });
     // stock that moved after the count (a delivery received while the count waited to sync) is kept, like the database does
     const after = new Map(), add = (pid, q) => after.set(pid, (after.get(pid) || 0) + q);
     S.movements.forEach(m => { if (m.depot_id === depot_id && m.affects_stock !== false && new Date(m.created_at).getTime() > t) add(m.product_id, m.qty); });
@@ -680,7 +681,6 @@ const Engine = {
     lines.forEach(l => {
       const sys = onHand(depot_id, l.product_id) - later(l.product_id);
       S.count_lines.push({ id: uuid(), count_id: id, product_id: l.product_id, system_qty: sys, counted_qty: l.counted_qty });
-      if (l.counted_qty !== sys) Engine.move(depot_id, l.product_id, l.counted_qty - sys, "count_adj", id, at);
       out.push({ ...l, system_qty: sys, variance: l.counted_qty - sys });
       // a count that includes an item with an open stock check records the counted figure on it (the plant then accepts or corrects)
       stockChecks().forEach(c => { if (c.depot_id === depot_id && c.product_id === l.product_id && ["open", "recount"].includes(c.status) && c.created_at <= at)
@@ -857,13 +857,63 @@ const Engine = {
     else if (action === "adjust") {
       if (!c.product_id) throw new Error("Adjust needs an item; for a whole depot, ask for a recount");
       const q = Number(qty); if (qty === "" || qty == null || !isFinite(q) || q < 0) throw new Error("Enter the right quantity");
-      const cid = uuid(), sys = onHand(c.depot_id, c.product_id);
-      S.counts.push({ id: cid, depot_id: c.depot_id, note: "Stock check: " + c.reason.slice(0, 120), created_by: ME.id, created_at: now });
-      S.count_lines.push({ id: uuid(), count_id: cid, product_id: c.product_id, system_qty: sys, counted_qty: q });
-      if (q !== sys) Engine.move(c.depot_id, c.product_id, q - sys, "count_adj", cid, now);
-      Object.assign(c, { status: "adjusted", counted: q, resolution: n || "Set to " + fmt(q), resolved_by: ME.id, resolved_at: now });
+      if (c.adjustment_id && adjustments().some(a => a.id === c.adjustment_id && a.status === "pending")) throw new Error("An adjustment for this is already waiting for approval");
+      // changes stock only when the approval chain says yes (like the database)
+      Engine.adjustMake({ id: uuid(), depot_id: c.depot_id, note: "Stock check: " + c.reason.slice(0, 120),
+        lines: [{ product_id: c.product_id, system_qty: onHand(c.depot_id, c.product_id), counted_qty: c.recount_qty ?? null, new_qty: q, reason: n || "Stock check: " + c.reason.slice(0, 120), check_id: c.id }] });
     } else throw new Error("Unknown action");
     c.updated_at = now;
+  },
+  adjustMake({ id, depot_id, count_id, note, lines }) {
+    if (!hasRole("admin", "ppic")) throw new Error("Only PPIC (or Admin) can propose a stock adjustment");
+    if (count_id && adjustments().some(a => a.count_id === count_id && a.status === "pending")) throw new Error("This count already has an adjustment waiting for approval");
+    const ls = (lines || []).filter(l => l.new_qty !== "" && l.new_qty != null);
+    if (!ls.length) throw new Error("An adjustment needs at least one item");
+    if (ls.some(l => !String(l.reason || "").trim())) throw new Error("Give a reason for every item");
+    if (ls.some(l => !(Number(l.new_qty) >= 0))) throw new Error("Quantities can't be below zero");
+    const now = new Date().toISOString(), ym = now.slice(2, 4) + now.slice(5, 7);
+    const no = "ADJ-" + ym + "-" + String(adjustments().filter(a => (a.adj_no || "").startsWith("ADJ-" + ym)).length + 1).padStart(4, "0");
+    const a = { id: id || uuid(), adj_no: no, depot_id, count_id: count_id || null, status: "pending", chain: adjustChain(), step: 0, note: note || null, created_by: ME.id, created_at: now, updated_at: now,
+      _lines: ls.map(l => ({ id: uuid(), product_id: l.product_id, system_qty: l.system_qty ?? null, counted_qty: l.counted_qty ?? null, new_qty: Number(l.new_qty), reason: String(l.reason).trim(), check_id: l.check_id || null })),
+      _events: [{ id: uuid(), step: 0, role: "ppic", action: "raised", note: note || null, by_user: ME.id, at: now }] };
+    adjustments().push(a);
+    a._lines.forEach(l => { const c = l.check_id && stockChecks().find(x => x.id === l.check_id); if (c) c.adjustment_id = a.id; });
+    const cnt = count_id && S.counts.find(x => x.id === count_id);
+    if (cnt && cnt.status === "submitted") Object.assign(cnt, { status: "reviewed", reviewed_by: ME.id, reviewed_at: now, review_note: cnt.review_note || "Adjustment " + no });
+    if (!a.chain.length) adjApply(a);
+    return no;
+  },
+  adjustAct({ id, action, note }) {
+    const a = adjustments().find(x => x.id === id); if (!a) throw new Error("Not found");
+    if (a.status !== "pending") throw new Error("This adjustment is already " + a.status);
+    const now = new Date().toISOString(), n = String(note || "").trim(), r = a.chain[a.step];
+    const ev = (action, role) => a._events.push({ id: uuid(), step: a.step, role, action, note: n || null, by_user: ME.id, at: now });
+    if (action === "cancel") {
+      if (!(a.created_by === ME.id || hasRole("ppic", "admin"))) throw new Error("Only PPIC can cancel it");
+      Object.assign(a, { status: "cancelled", decided_by: ME.id, decided_at: now, updated_at: now }); ev("cancelled", "ppic");
+      stockChecks().forEach(c => { if (c.adjustment_id === a.id) c.adjustment_id = null; });
+      const cnt = a.count_id && S.counts.find(x => x.id === a.count_id); if (cnt && cnt.status === "reviewed") Object.assign(cnt, { status: "submitted", reviewed_by: null, reviewed_at: null, review_note: null });
+      return "cancelled";
+    }
+    if (!hasRole(r, "admin")) throw new Error("Waiting for " + (ROLES[r] || r) + " to approve");
+    if (a.created_by === ME.id && !hasRole("admin")) throw new Error("You raised this adjustment; someone else approves it");
+    if (action === "reject") {
+      if (!n) throw new Error("Say why it is rejected");
+      Object.assign(a, { status: "rejected", decided_by: ME.id, decided_at: now, updated_at: now }); ev("rejected", r);
+      stockChecks().forEach(c => { if (c.adjustment_id === a.id) c.adjustment_id = null; });
+      const cnt = a.count_id && S.counts.find(x => x.id === a.count_id); if (cnt) cnt.review_note = "Adjustment " + a.adj_no + " rejected";
+      return "rejected";
+    }
+    if (action !== "approve") throw new Error("Unknown action");
+    ev("approved", r);
+    if (a.step + 1 >= a.chain.length) { adjApply(a); return "applied"; }
+    a.step++; a.updated_at = now; return "approved";
+  },
+  countReview({ id, note }) {
+    const c = S.counts.find(x => x.id === id); if (!c) throw new Error("Not found");
+    if (!hasRole("admin", "ppic")) throw new Error("Only PPIC can review a count");
+    if (c.status !== "submitted") throw new Error("This count is already " + c.status);
+    Object.assign(c, { status: "reviewed", reviewed_by: ME.id, reviewed_at: new Date().toISOString(), review_note: String(note || "").trim() || "Reviewed, no change" });
   },
   undoImport({ id }) {
     const imp = S.imports.find(x => x.id === id);
@@ -884,8 +934,9 @@ const OFFLINE_OK = new Set(["sale", "lost", "count", "movement", "message", "dep
 const OP_LABEL = { reviewDelivery: "Delivery check", sale: "Sale", lost: "Missed sale", count: "Stock count", movement: "Stock movement", message: "Message", depotReport: "Depot report",
   retailerSales: "Store's sales report", competitor: "Competitor entry", updateStocks: "Shelf minimums", updateDepot: "Depot setting", document: "File / photo" };
 /* which server tables to refresh after an op reaches the server */
-const OP_TABLES = { sale: ["sales", "stock"], lost: ["lost_sales"], count: ["counts", "movements", "stock", "stock_checks"],
-  checkAct: ["stock_checks", "counts", "movements", "stock"], addCheck: ["stock_checks"], movement: ["movements", "stock"], message: ["messages"],
+const OP_TABLES = { sale: ["sales", "stock"], lost: ["lost_sales"], count: ["counts", "stock_checks"],
+  checkAct: ["stock_checks", "counts", "movements", "stock", "adjustments"], adjustMake: ["adjustments", "counts", "stock_checks", "movements", "stock"],
+  adjustAct: ["adjustments", "counts", "stock_checks", "movements", "stock"], countReview: ["counts"], addCheck: ["stock_checks"], movement: ["movements", "stock"], message: ["messages"],
   depotReport: ["depot_reports"], retailerSales: ["retailer_sales"], competitor: ["competitors"], updateStocks: ["stock"], updateDepot: ["depots"], document: ["documents"],
   request: ["requests"], reviewDelivery: ["movements"], advance: ["requests", "stock", "movements"], setOdoo: ["requests"], docReceived: ["documents"], ackReport: ["depot_reports"],
   reportDef: ["report_defs"], delReportDef: ["report_defs"], delRetailerSales: ["retailer_sales"], saveCapacity: ["capacity"], aiRecs: ["ai_recs"],
@@ -1017,7 +1068,7 @@ const Remote = {
   },
   async lost(p) { await upsertSent("ss_lost_sales", { id: p.id, client_uuid: p.id, depot_id: p.depot_id, product_id: p.product_id, qty: p.qty, note: p.note, created_at: p.created_at }); },
   async count(p) {
-    const r = await SB.rpc("ss_save_count", { p: { id: p.id, depot_id: p.depot_id, note: p.note, created_at: p.created_at, sent_at: new Date().toISOString(), lines: p.lines } });
+    const r = await SB.rpc("ss_save_count", { p: { id: p.id, depot_id: p.depot_id, note: p.note, kind: p.kind || "spot", created_at: p.created_at, sent_at: new Date().toISOString(), lines: p.lines } });
     if (!r.error) return;
     if (!rpcMissing(r.error)) throw sbErr(r.error);
     const data = chk(await SB.from("ss_counts").upsert({ id: p.id, client_uuid: p.id, depot_id: p.depot_id, note: p.note }, { onConflict: "id", ignoreDuplicates: true }).select());
@@ -1089,6 +1140,9 @@ const Remote = {
   async aiRecs(p) { chk(await SB.from("ss_ai_recs").insert(p.rows)); },
   async saveDepot(p) { const { ship_via_depot_id, ...d } = p.depot; chk(await SB.from("ss_depots").upsert(d)); },
   async saveAccount(p) { chk(await SB.from("ss_accounts").upsert(p.account)); },
+  async adjustMake(p) { const r = await SB.rpc("ss_adjust_make", { p: { depot_id: p.depot_id, count_id: p.count_id || null, note: p.note || null, lines: p.lines } }); if (r.error) throw sbErr(r.error); },
+  async adjustAct(p) { const r = await SB.rpc("ss_adjust_act", { p_id: p.id, p_action: p.action, p_note: p.note || null }); if (r.error) throw sbErr(r.error); },
+  async countReview(p) { const r = await SB.rpc("ss_count_review", { p_count: p.id, p_note: p.note || null }); if (r.error) throw sbErr(r.error); },
   async saveProduct(p) {
     const { swatch, kind, ...prod } = p.product;
     const r = await SB.rpc("ss_save_product", { p: { ...prod, swatch: swatch || null }, p_prices: p.prices || {} });
@@ -1209,7 +1263,13 @@ const TABLES = {
   sales: { inc: "created_at", key: "id", keep: r => inWindow(r.sold_at), q: () => SB.from("ss_sales").select("*, ss_sale_lines(*)").gte("sold_at", sinceIso()).order("id"),
     map: ({ ss_sale_lines, ...s }) => ({ ...s, total_amount: Number(s.total_amount), _lines: (ss_sale_lines || []).map(l => ({ ...l, qty: Number(l.qty), unit_price: Number(l.unit_price) })) }) },
   lost_sales: { inc: "created_at", synced: true, key: "id", keep: r => inWindow(r.created_at), q: () => SB.from("ss_lost_sales").select("*").gte("created_at", sinceIso()).order("id"), map: l => ({ ...l, qty: Number(l.qty) }) },
-  counts: { inc: "created_at", synced: true, key: "id", keep: r => inWindow(r.created_at), q: () => SB.from("ss_counts").select("*").gte("created_at", sinceIso()).order("id") },
+  counts: { inc: "created_at", synced: true, key: "id", keep: r => inWindow(r.created_at), q: () => SB.from("ss_counts").select("*, ss_count_lines(*)").gte("created_at", sinceIso()).order("id"),
+    map: ({ ss_count_lines, ...c }) => ({ ...c, _lines: (ss_count_lines || []).map(l => ({ ...l, system_qty: N(l.system_qty), counted_qty: Number(l.counted_qty) })) }) },
+  adjustments: { inc: "updated_at", key: "id", keep: r => r.status === "pending" || !r.updated_at || Date.parse(r.updated_at) >= Date.now() - 180 * DAY,
+    q: () => SB.from("ss_adjustments").select("*, ss_adjustment_lines(*), ss_adjustment_events(*)").or("status.eq.pending,updated_at.gte." + new Date(Date.now() - 180 * DAY).toISOString()).order("id"),
+    map: ({ ss_adjustment_lines, ss_adjustment_events, ...a }) => ({ ...a, chain: a.chain || [],
+      _lines: (ss_adjustment_lines || []).map(l => ({ ...l, system_qty: N(l.system_qty), counted_qty: N(l.counted_qty), new_qty: Number(l.new_qty), applied_delta: N(l.applied_delta) })),
+      _events: (ss_adjustment_events || []).sort((x, y) => String(x.at).localeCompare(String(y.at))) }) },
   requests: { inc: "updated_at", key: "id", keep: r => OPEN_REQ.includes(r.status) || !r.updated_at || Date.parse(r.updated_at) >= Date.now() - 400 * DAY,
     q: () => SB.from("ss_requests").select("*").or("status.in.(" + OPEN_REQ.join(",") + "),updated_at.gte." + new Date(Date.now() - 400 * DAY).toISOString()).order("id") },
   messages: { inc: "created_at", synced: true, key: "id", cap: 3000,
@@ -1308,16 +1368,18 @@ function rebuildS() {
     companies: X.companies || [], plants: X.plants || [], accounts: clone(X.accounts), depots: clone(X.depots), products: X.products || [], prices: X.prices || [],
     stock: clone(X.stock), movements: (X.movements || []).slice(),
     sales: sales.map(({ _lines, ...s }) => s), sale_lines: sales.flatMap(s => s._lines || []), voided: (X.sales || []).filter(s => s.voided_at).map(({ _lines, ...s }) => s),
-    lost_sales: (X.lost_sales || []).slice(), counts: (X.counts || []).slice(), count_lines: [],
+    lost_sales: (X.lost_sales || []).slice(), counts: (X.counts || []).map(({ _lines, ...c }) => ({ ...c })), count_lines: (X.counts || []).flatMap(c => (c._lines || []).map(l => ({ ...l }))),
     requests: clone(X.requests), request_lines: clone(X.request_lines),
     request_events: (X.request_events || []).map(e => ({ ...e, actor_name: (names[e.actor] || {}).full_name || ROLES[e.actor_role] || "" })),
     messages: (X.messages || []).map(m => ({ ...m, sender_role: (names[m.sender] || {}).role })),
     settings: { service_level: st.service_level || { A: .98, B: .95, C: .90 }, review_days: Number(st.review_days || 14), history_days: Number(st.history_days || 90),
-      passkey_policy: st.passkey_policy || { login: true, actions: true }, promo_visibility: st.promo_visibility || "account_region", odoo_ticket_required: st.odoo_ticket_required || "ppic_review" },
+      passkey_policy: st.passkey_policy || { login: true, actions: true }, promo_visibility: st.promo_visibility || "account_region", odoo_ticket_required: st.odoo_ticket_required || "ppic_review",
+      adjust_chain: Array.isArray(st.adjust_chain) ? st.adjust_chain : ["scm"], weekly_count: st.weekly_count || { day: 5, due: "18:00", remind: "08:00" } },
     users: X.users || [], documents: clone(X.documents), depot_reports: clone(X.depot_reports), report_defs: (X.report_defs || []).slice(), ai_recs: X.ai_recs || [],
     imports: X.imports || [], targets: X.targets || [], delivery_history: X.delivery_history || [], snapshots: [], monthly: X.monthly || [],
     passkeys: (X.passkeys || []).slice(), access_log: X.access_log || [], capacity: X.capacity || [], competitors: (X.competitors || []).slice(), retailer_sales: (X.retailer_sales || []).slice(),
-    stock_checks: clone(X.stock_checks)
+    stock_checks: clone(X.stock_checks),
+    adjustments: (X.adjustments || []).map(a => ({ ...a, _lines: (a._lines || []).map(l => ({ ...l })), _events: (a._events || []).slice() }))
   };
   CACHE = {};
   // what's still waiting on this phone, on top — unless the server already has it (sent, reply not back yet)
@@ -1390,7 +1452,7 @@ let SNAP_AT = 0;
 /* =====================================================================
    DEMO DATA — sample depots, products and 150 days of simulated sales
    ===================================================================== */
-const DEMO_KEY = "shelfsync-demo-v5";
+const DEMO_KEY = "shelfsync-demo-v6";
 function persistDemo() { if (S && MODE === "demo" && !PRACTICE) { if (!LS.set(DEMO_KEY, S)) console.warn("demo data not saved (storage unavailable)"); } }
 function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 function ean13(base12) { const s = base12.split("").reduce((a, c, i) => a + (+c) * (i % 2 ? 3 : 1), 0); return base12 + ((10 - s % 10) % 10); }
@@ -1446,9 +1508,9 @@ function buildDemo() {
   const N = 150, t0 = today0() - (N - 1) * DAY;
   const S0 = { companies, plants, accounts, depots, products, prices: [], stock: [], movements: [], sales: [], sale_lines: [], lost_sales: [], counts: [], count_lines: [],
     requests: [], request_lines: [], request_events: [], messages: [], users: [], documents: [], depot_reports: [], report_defs: [], ai_recs: [],
-    imports: [], targets: [], delivery_history: [], snapshots: [], passkeys: [], access_log: [], retailer_sales: [], capacity: [], competitors: [], stock_checks: [],
+    imports: [], targets: [], delivery_history: [], snapshots: [], passkeys: [], access_log: [], retailer_sales: [], capacity: [], competitors: [], stock_checks: [], adjustments: [],
     settings: { service_level: { A: .98, B: .95, C: .90 }, review_days: 14, history_days: 90, passkey_policy: { login: true, actions: true },
-      promo_visibility: "account_region", odoo_ticket_required: "ppic_review" } };
+      promo_visibility: "account_region", odoo_ticket_required: "ppic_review", adjust_chain: ["scm"], weekly_count: { day: 5, due: "18:00", remind: "08:00" } } };
   // account prices: Wilcon gets a 4% lower price on WCLI items; others pay SRP
   products.forEach(p => { if (p.company_id === "WCLI") S0.prices.push({ product_id: p.id, account_id: "WILCON", price: Math.round(p.srp * 0.96 / 10) * 10 }); });
   const priceOf = (p, dp) => { const r = S0.prices.find(x => x.product_id === p.id && x.account_id === dp.account_id); return r ? r.price : p.srp; };
@@ -1626,6 +1688,32 @@ function buildDemo() {
   ck("ck-2", "d-wqc", "p-WLM201", "versions", "The count is different in two saved copies of the tracker: 18 in one, 16 in the other", { status: "recount", resolution: "Please count this one first" });
   ck("ck-3", "d-aim", "p-WLM201", "went_down", "Went DOWN by 5 between counts with no sale or pull-out recorded");
   ck("ck-4", "d-cmd", null, "stale", "Last counted 7 months ago; nobody has counted since — every quantity here needs a recount");
+  // weekly stock counts (sample): this week's from Kevin waits for PPIC; last week's from Jessa went through an approved adjustment;
+  // a spot count at Triumph Antipolo has an adjustment waiting for Supply Chain
+  const wkF = weekFriday(Date.now()), fri = t => new Date(t + "T15:00:00+08:00").getTime(), mon = new Date(addDaysIso(wkF, -4) + "T09:00:00+08:00").getTime();
+  const ata1 = new Date(Math.max(mon, Math.min(fri(wkF), Date.now() - 3600e3))).toISOString(), ata0 = new Date(fri(addDaysIso(wkF, -7))).toISOString();
+  const sys = (d, p) => (S0.stock.find(x => x.depot_id === d && x.product_id === p) || {}).on_hand || 0;
+  // the system figure at the count's time: stock now, less what moved after (like the database)
+  const sysAt = (d, p, at) => { const t = Date.parse(at), ids = new Set(S0.sales.filter(x => x.depot_id === d && Date.parse(x.sold_at) > t).map(x => x.id));
+    return sys(d, p) - S0.movements.filter(m => m.depot_id === d && m.product_id === p && Date.parse(m.created_at) > t).reduce((q, m) => q + m.qty, 0)
+      + S0.sale_lines.filter(l => ids.has(l.sale_id) && l.product_id === p).reduce((q, l) => q + l.qty, 0); };
+  const wcount = (id, d, at, kind, by, status, diffs, extra = {}) => {
+    const items = S0.stock.filter(x => x.depot_id === d).map(x => x.product_id);
+    S0.counts.push({ id, depot_id: d, kind, status, week_of: kind === "weekly" ? weekFriday(at) : null, note: null, created_by: by, created_at: at, ...extra });
+    items.forEach((p, i) => { const y = sysAt(d, p, at); S0.count_lines.push({ id: id + "-" + i, count_id: id, product_id: p, system_qty: y, counted_qty: Math.max(0, y + (diffs[p] || 0)) }); });
+  };
+  wcount("cnt-1", "d-aim", ata1, "weekly", "u-promo-d-aim", "submitted", { "p-WLM201": -3, "p-WLH102": 2 });
+  wcount("cnt-0", "d-wqc", ata0, "weekly", "u-promo-d-wqc", "applied", { "p-WLH101": -1 }, { reviewed_by: "u-ppic-pasig", reviewed_at: ata0, review_note: "Adjustment ADJ-0001" });
+  const ev = (step, role, action, by, at, note = null) => ({ id: uuid(), step, role, action, note, by_user: by, at });
+  const ta0 = new Date(new Date(ata0).getTime() + 20 * 3600e3).toISOString(), ta1 = new Date(new Date(ata0).getTime() + 30 * 3600e3).toISOString();
+  S0.adjustments.push({ id: "adj-0", adj_no: "ADJ-" + ta0.slice(2, 4) + ta0.slice(5, 7) + "-0001", depot_id: "d-wqc", count_id: "cnt-0", status: "approved", chain: ["scm"], step: 0, note: "Weekly count", created_by: "u-ppic-pasig", created_at: ta0, updated_at: ta1, applied_at: ta1, decided_by: "u-scm", decided_at: ta1,
+    _lines: [{ id: "adjl-0", product_id: "p-WLH101", system_qty: sys("d-wqc", "p-WLH101"), counted_qty: sys("d-wqc", "p-WLH101") - 1, new_qty: sys("d-wqc", "p-WLH101") - 1, reason: "Weekly count: one sheet chipped and set aside", applied_delta: 0 }],
+    _events: [ev(0, "ppic", "raised", "u-ppic-pasig", ta0, "Weekly count"), ev(0, "scm", "approved", "u-scm", ta1), ev(0, null, "applied", "u-scm", ta1, "Stock changed")] });
+  const ta2 = new Date(Date.now() - 26 * 3600e3).toISOString();
+  wcount("cnt-2", "d-tan", new Date(Date.now() - 30 * 3600e3).toISOString(), "spot", (S0.users.find(u => u.depot_id === "d-tan") || {}).id || "u-ppic-pasig", "reviewed", { "p-WLH103": -4 }, { reviewed_by: "u-ppic-pasig", reviewed_at: ta2, review_note: "Adjustment ADJ-0002" });
+  S0.adjustments.push({ id: "adj-1", adj_no: "ADJ-" + ta2.slice(2, 4) + ta2.slice(5, 7) + "-0002", depot_id: "d-tan", count_id: "cnt-2", status: "pending", chain: ["scm"], step: 0, note: "4 sheets missing; the store's own count agrees", created_by: "u-ppic-pasig", created_at: ta2, updated_at: ta2,
+    _lines: [{ id: "adjl-1", product_id: "p-WLH103", system_qty: sys("d-tan", "p-WLH103"), counted_qty: sys("d-tan", "p-WLH103") - 4, new_qty: Math.max(0, sys("d-tan", "p-WLH103") - 4), reason: "Counted short by 4; no pull-out on file" }],
+    _events: [ev(0, "ppic", "raised", "u-ppic-pasig", ta2, "4 sheets missing; the store's own count agrees")] });
   S0.access_log.push({ id: "al-1", user_id: "u-promo-d-alp", event: "suspended", detail: "by Admin · agency contract ended", created_at: new Date(Date.now() - 5 * DAY).toISOString() });
   return S0;
 }
@@ -1968,7 +2056,7 @@ function promoTabs() {
 function plantItems() {
   const a = hasRole("admin"), imp = hasRole("admin", "ppic", "scm");
   const items = [["h", "Overview"], ["dashboard", "Dashboard"], ["performance", "Performance"], ["reports", "Reports"],
-    ["h", "Operations"], ["approvals", "Depot requests"], ["plan", "Stock planner"], ["ai", "AI insights"], ["recon", "Sales check"], ["movements", "Stock movements"], ["documents", "Documents"], ["chat", "Messages"],
+    ["h", "Operations"], ["approvals", "Depot requests"], ["weekly", "Weekly counts"], ["plan", "Stock planner"], ["ai", "AI insights"], ["recon", "Sales check"], ["movements", "Stock movements"], ["documents", "Documents"], ["chat", "Messages"],
     ["h", "Data"], ["depots", "Depots & stock"], ["checks", "Stock to verify"], imp ? ["import", "Import data"] : null, ["settings", "Planning rules"],
     a ? ["h", "Admin"] : null, a ? ["command", "Setup"] : null].filter(Boolean);
   if (!viewOnly()) return items;
@@ -2079,7 +2167,7 @@ function myQueue() {
 function plantRail() {
   const counts = { approvals: myQueue().length, documents: (S.documents || []).filter(d => d.status === "sent" && inMyPlant(d.depot_id)).length,
     reports: (S.depot_reports || []).filter(r => r.status === "submitted" && inMyPlant(r.depot_id)).length,
-    movements: hasRole("admin", "ppic") ? unreviewedDeliveries(null).filter(d => inMyPlant(d.depot_id)).length : 0, checks: canCloseChecks() ? myCheckCount() : 0 };
+    movements: hasRole("admin", "ppic") ? unreviewedDeliveries(null).filter(d => inMyPlant(d.depot_id)).length : 0, checks: canCloseChecks() ? myCheckCount() : 0, weekly: myWeeklyCount() };
   return `<nav class="rail" aria-label="Plant sections">${plantItems().map(([k, l]) => k === "h" ? `<div class="rail-h">${esc(l)}</div>` :
     `<button ${UI.route === k ? 'aria-current="page"' : ""} onclick="App.go('${k}')">${esc(l)}${counts[k] ? `<span class="count">${counts[k]}</span>` : ""}</button>`).join("")}<div class="rail-foot"><button class="btn sm practice-btn" onclick="App.practice()">🎓 Practice</button><div class="hide-sm">${madeBy()}</div></div></nav>`;
 }
@@ -2342,7 +2430,7 @@ const PUSH = {
   }
 };
 /* a tap on a notification while the app is already open */
-if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.type === "open-request" && ME) App.openFromPush(e.data.id); });
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (!e.data || !ME) return; if (e.data.type === "open-request") App.openFromPush(e.data.id); else if (e.data.type === "open-go") App.openGo(e.data.go); });
 /* =====================================================================
    PROMODISER SCREENS
    ===================================================================== */
@@ -2422,6 +2510,7 @@ const PROMO_ROUTES = {
           <p class="small muted">The Plant can't confirm ${whole ? "this branch's stock" : "these figures"} from the records. Count what is really on the shelf and in the stockroom.</p>
           ${items.length ? `<div class="list">${items.slice(0, 8).map(c => { const p = idx.product(c.product_id); return p ? `<div class="row between">${prodCell(p)}<span class="small faint num">system ${fmt(onHand(dp.id, p.id))}</span></div>` : ""; }).join("")}</div>` : ""}
           <button class="btn primary block" onclick="App.sub('stock','count');App.go('stock')">${ICON.count}<span>Count now</span></button></div>`; })()}
+      ${weeklyHomeCard(dp)}
       ${PUSH.nudge("Get notified when a delivery is on its way to your branch.")}
       <div class="qa">${qa.join("")}</div>
       ${can("sell") ? `<div class="card"><div class="card-h"><h2>Today's sales</h2><span class="small faint">${new Date().toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric" })}</span></div>
@@ -2467,14 +2556,20 @@ const PROMO_ROUTES = {
     let body = "";
     if (t === "count") {
       const q = (UI.countQ || "").toLowerCase(); UI.countDraft = UI.countDraft || {};
+      const wk = weekFriday(Date.now()), done = weeklyCountOf(dp.id, wk), mode = countMode(dp);
       const flagged = new Set(stockChecks().filter(c => c.depot_id === dp.id && ["open", "recount"].includes(c.status) && c.product_id).map(c => c.product_id));
-      const prods = myProducts().filter(p => !q || (p.name + p.sku).toLowerCase().includes(q)).sort((a, b) => flagged.has(b.id) - flagged.has(a.id)), n = Object.keys(UI.countDraft).length;
-      body = `<p class="muted small">Enter the actual quantity on the shelf and in the stockroom. Leave blank to skip an item. Differences are saved as count adjustments.</p>
+      const base = mode === "weekly" ? weeklyItems(dp.id) : myProducts(), left = mode === "weekly" ? base.filter(p => UI.countDraft[p.id] === undefined) : [];
+      const prods = (UI.countLeft && mode === "weekly" ? left : base).filter(p => !q || (p.name + p.sku).toLowerCase().includes(q)).sort((a, b) => flagged.has(b.id) - flagged.has(a.id)), n = Object.keys(UI.countDraft).length;
+      body = `<div class="chipset" role="tablist"><button role="tab" aria-pressed="${mode === "weekly"}" onclick="App.countModeSet('weekly')">Weekly count</button><button role="tab" aria-pressed="${mode === "spot"}" onclick="App.countModeSet('spot')">Spot count</button></div>
+        ${mode === "weekly" ? `<p class="muted small">Count <b>every item</b> on the shelf and in the stockroom${done ? "" : ` and submit by <b>${esc(dueText(wk))}</b>`}. Enter 0 for an item you don't have. ${done ? `<b>Already sent this week (${dtime(done.created_at)}).</b> Sending again replaces nothing; PPIC sees both.` : ""}</p>
+          <div class="row between small"><span id="count-left">${countLeftText(left.length, base.length)}</span><label class="check"><input type="checkbox" ${UI.countLeft ? "checked" : ""} onchange="UI.countLeft=this.checked;saveUI();rerender()"> Show only items not counted yet</label></div>`
+        : `<p class="muted small">Count only the items you want to check between weekly counts. Leave blank to skip an item.</p>`}
+        <p class="small faint">Your count goes to PPIC. Stock doesn't change until PPIC checks the differences and the adjustment is approved.</p>
         <div class="searchbar"><input class="in grow" id="count-q" placeholder="Scan a barcode, or type to filter" value="${esc(UI.countQ || "")}" oninput="App.countFilter(this.value)" onkeydown="if(event.key==='Enter')App.countJump()" autocomplete="off" inputmode="search"></div>
         <div class="card flush"><div class="list" id="count-list">${prods.length ? prods.map(p => { const sys = onHand(dp.id, p.id), v = UI.countDraft[p.id];
           return `<div class="row between" style="padding-inline:14px">${prodCell(p, ` · system ${fmt(sys)} ${esc(p.uom)}` + (flagged.has(p.id) ? ' <span class="chip warn">Please count</span>' : ""))}<div class="row" style="gap:8px;flex-wrap:nowrap"><span id="cdiff-${p.id}">${countDiffChip(v, sys)}</span><input class="in qty" id="cnt-${p.id}" type="number" min="0" inputmode="numeric" enterkeyhint="next" placeholder="—" value="${v ?? ""}" oninput="App.countSet('${p.id}',this.value)" aria-label="Counted ${esc(p.sku)}"></div></div>`; }).join("") : `<div class="empty">No item matches.</div>`}</div></div>
         <label class="f">Note<input class="in" id="count-note" placeholder="e.g. 2 sheets chipped, set aside" value="${esc(UI.countNote || "")}" oninput="UI.countNote=this.value;saveUI()"></label>
-        <button class="btn primary lg block" id="count-go" ${n ? "" : "disabled"} onclick="App.submitCount()">${countBtnText(n)}</button>`;
+        <button class="btn primary lg block" id="count-go" ${countReady(mode, left.length, n) ? "" : "disabled"} onclick="App.submitCount()">${countBtnText(n, mode, left.length)}</button>`;
     } else if (t === "card") {
       UI.cardP = UI.cardP && idx.product(UI.cardP) ? UI.cardP : "";
       body = `<p class="muted small">Every movement of stock at ${esc(dp.name)}: sales, deliveries, counts, damages and returns, with the running balance.</p>
@@ -2579,7 +2674,11 @@ const PROMO_ROUTES = {
   chat: { view() { return chatView(ME.depot_id, true); }, after() { const c = $(".chat"); if (c) c.scrollTop = c.scrollHeight; } }
 };
 const countDiffChip = (v, sys) => { if (v === undefined || v === "") return ""; const d = Number(v) - sys; return d ? `<span class="chip ${d < 0 ? "crit" : "info"} num">${d > 0 ? "+" : ""}${fmt(d)}</span>` : `<span class="chip good">OK</span>`; };
-const countBtnText = n => `Submit count (${n} item${n === 1 ? "" : "s"})`;
+const countBtnText = (n, mode, left) => mode === "weekly" ? (left ? `Count ${left} more item${left === 1 ? "" : "s"} to submit` : `Submit weekly count (${n} item${n === 1 ? "" : "s"})`) : `Submit count (${n} item${n === 1 ? "" : "s"})`;
+const countReady = (mode, left, n) => mode === "weekly" ? !left && n > 0 : n > 0;
+const countLeftText = (left, all) => left ? `<b>${all - left}</b> of ${all} counted` : `All ${all} items counted`;
+/* weekly unless this week's weekly count is already in (then a spot count), or the promodiser picked one */
+const countMode = dp => UI.countMode === "weekly" || UI.countMode === "spot" ? UI.countMode : weeklyCountOf(dp.id, weekFriday(Date.now())) ? "spot" : "weekly";
 /* the sale being entered (its own function so the camera can update it without closing) */
 function cartCard() {
   const dp = myDepot(), total = UI.cart.reduce((s, l) => s + l.qty * l.unit_price, 0);
@@ -4023,7 +4122,8 @@ function cmdRules() {
       <label class="f">PPIC must enter the Odoo ticket number<select class="in" id="ru-odoo">${opt("ppic_review", "Before endorsing to Supply Chain (and when PPIC raises a request)", od)}${opt("dispatch", "Before dispatch", od)}${opt("off", "Optional", od)}</select></label>
       <p class="small faint">PPIC creates the delivery ticket in Odoo, then types the ticket number into ShelfSync.</p></div>
     <div class="card stack"><h2>What promodisers can see</h2><p class="small muted">Their own depot, plus stock at branches of the same chain in the same region (for example, Wilcon NCR branches). Never sales of other depots, dashboards, planning or AI. Individual features can be switched off per person in Users & access.</p></div>
-    <button class="btn primary" style="justify-self:start" onclick="App.saveRules()">Save rules</button>`;
+    <button class="btn primary" style="justify-self:start" onclick="App.saveRules()">Save rules</button>
+    ${adjustRulesCard()}`;
 }
 function cmdLog() {
   const list = (S.access_log || []).slice().sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 300);
@@ -4395,6 +4495,11 @@ const App = {
   async pushTest() { await busy(async () => { const r = await fn(PUSH.fn, { test: true }); toast(r.sent ? "Test sent. It should appear in a few seconds." : "Nothing was sent: " + (r.skipped || "no device registered") + ". Turn notifications off and on again.", !r.sent); }); },
   pushNudgeOff() { if (ME) LS.set("shelfsync-push-nudge-" + ME.id, Date.now()); rerender(); toast("Hidden for 3 days. The bell at the top turns notifications on any time."); },
   /* opened from a notification */
+  /* opened by a notification that isn't about a request: weekly count reminder, adjustment to approve */
+  openGo(where) {
+    if (where === "count" && isPromo()) { UI.countMode = "weekly"; App.sub("stock", "count"); return App.go("stock"); }
+    if ((where === "adjust" || where === "weekly") && !isPromo()) { UI.wkTab = where === "adjust" ? "adjust" : "week"; if (where === "adjust") UI.adjF = null; UI.wkOff = 0; return App.go("weekly"); }
+  },
   openFromPush(id) {
     const r = S.requests.find(x => x.id === id);
     if (!r) { refreshTables(["requests"]).then(() => { if (S.requests.some(x => x.id === id)) App.openFromPush(id); }).catch(() => {}); return; }
@@ -4520,19 +4625,25 @@ const App = {
     if (v === "") delete UI.countDraft[pid]; else { const n = Number(v); if (!(n >= 0)) return; UI.countDraft[pid] = n; }
     saveUI();
     const d = $("#cdiff-" + CSS.escape(pid)); if (d) d.innerHTML = countDiffChip(UI.countDraft[pid], onHand(ME.depot_id, pid));
-    const b = $("#count-go"), n = Object.keys(UI.countDraft).length; if (b) { b.disabled = !n; b.textContent = countBtnText(n); }
+    const dp = myDepot(), mode = countMode(dp), all = mode === "weekly" ? weeklyItems(dp.id) : [], left = all.filter(p => UI.countDraft[p.id] === undefined).length;
+    const b = $("#count-go"), n = Object.keys(UI.countDraft).length; if (b) { b.disabled = !countReady(mode, left, n); b.textContent = countBtnText(n, mode, left); }
+    const lt = $("#count-left"); if (lt) lt.innerHTML = countLeftText(left, all.length);
   },
+  countModeSet(m) { UI.countMode = m; UI.countLeft = false; saveUI(); rerender(); },
   async submitCount(force) {
-    const lines = Object.entries(UI.countDraft).filter(([pid]) => idx.product(pid)).map(([product_id, counted_qty]) => ({ product_id, counted_qty }));
+    const dp = myDepot(), mode = countMode(dp);
+    const keep = mode === "weekly" ? new Set(weeklyItems(dp.id).map(p => p.id)) : null;
+    const lines = Object.entries(UI.countDraft).filter(([pid]) => idx.product(pid) && (!keep || keep.has(pid))).map(([product_id, counted_qty]) => ({ product_id, counted_qty }));
     if (!lines.length) return;
+    if (mode === "weekly" && lines.length < keep.size) return toast("Count every item for the weekly count (enter 0 if there's none)", true);
     // a big difference is usually a typo: ask once before adjusting stock
     const big = lines.filter(l => { const sys = onHand(ME.depot_id, l.product_id), d = Math.abs(l.counted_qty - sys); return d >= 20 && d > Math.max(sys, 1) * 0.5; });
-    if (big.length && force !== true) return openSheet(`<div class="stack"><h2>Check ${big.length === 1 ? "this count" : "these counts"}</h2><p class="muted small">Big differences from the system are usually a typo. If they're right, submit.</p>
+    if (big.length && force !== true) return openSheet(`<div class="stack"><h2>Check ${big.length === 1 ? "this count" : "these counts"}</h2><p class="muted small">Big differences from the system are usually a typo. If they're right, submit: PPIC checks them before stock changes.</p>
       <div class="list">${big.map(l => { const p = idx.product(l.product_id), sys = onHand(ME.depot_id, l.product_id); return `<div class="row between">${prodCell(p)}<span class="num">system ${fmt(sys)} → <b>${fmt(l.counted_qty)}</b></span></div>`; }).join("")}</div>
       <div class="row"><button class="btn primary" onclick="closeSheets();App.submitCount(true)">They're right, submit</button><button class="btn ghost" onclick="closeSheets()">Go back and fix</button></div></div>`);
-    await once("count", async () => { const res = await API.run("count", { id: uuid(), depot_id: ME.depot_id, note: UI.countNote || null, lines, created_at: new Date().toISOString() });
-      const off = res.filter(r => r.variance !== 0); UI.countDraft = {}; UI.countNote = ""; saveUI(); rerender();
-      toast(off.length ? `Count saved. ${off.length} item${off.length === 1 ? "" : "s"} adjusted.` : "Count saved. Everything matched."); });
+    await once("count", async () => { const res = await API.run("count", { id: uuid(), depot_id: ME.depot_id, kind: mode, note: UI.countNote || null, lines, created_at: new Date().toISOString() });
+      const off = res.filter(r => r.variance !== 0); UI.countDraft = {}; UI.countNote = ""; UI.countMode = null; UI.countLeft = false; saveUI(); rerender();
+      toast((mode === "weekly" ? "Weekly count sent to PPIC. " : "Count sent to PPIC. ") + (off.length ? `${off.length} item${off.length === 1 ? "" : "s"} differ from the system; PPIC will check them.` : "Everything matched.")); });
   },
   async saveAdjust() {
     const q = Number(val("adj-q")); if (!(q > 0)) return toast("Enter a quantity", true);
@@ -5162,8 +5273,9 @@ async function finishLogin(u, event) {
   startRealtime(); flushOutbox(true);
   PUSH.resync().then(() => { rerender({ keepInputs: true }); PUSH.maybeAsk(); }).catch(() => {});
   // opened by tapping a notification: go straight to that request
-  const want = new URLSearchParams(location.search).get("r");
+  const sp = new URLSearchParams(location.search), want = sp.get("r"), goTo = sp.get("go");
   if (want) { history.replaceState(null, "", location.pathname); App.openFromPush(want); }
+  else if (goTo) { history.replaceState(null, "", location.pathname); App.openGo(goTo); }
 }
 /* no signal and no session: open with what's saved on this phone; entries wait in the sync list */
 function enterOffline(snap) {
@@ -5176,7 +5288,7 @@ function enterOffline(snap) {
 /* =====================================================================
    STOCK TO VERIFY — a stock figure whose history doesn't add up is used, but marked until someone confirms it.
    Marks come from Import data › "Stock to verify" (the files' own inconsistencies) or are added here.
-   The plant closes them: ask the promodiser to recount, confirm, correct (saved as a stock count), or dismiss.
+   The plant closes them: ask the promodiser to recount, confirm, correct (a stock adjustment, applied when approved), or dismiss.
    A promodiser's count that includes the item records the counted figure on the mark; the plant then accepts or corrects it.
    ===================================================================== */
 const CHECK_CLOSED = ["validated", "adjusted", "dismissed"];
@@ -5214,7 +5326,8 @@ PLANT_ROUTES.checks = { view() {
     .sort((a, b) => (a.status === "counted" ? -1 : 0) - (b.status === "counted" ? -1 : 0) || ((idx.depot(a.depot_id) || {}).name || "").localeCompare((idx.depot(b.depot_id) || {}).name || "") || String(b.created_at).localeCompare(String(a.created_at)));
   const n = k => all.filter(pick[k]).length, can = canCloseChecks();
   const byDepot = {}; all.filter(c => CHECK_ACTIVE.includes(c.status)).forEach(c => { const x = byDepot[c.depot_id] = byDepot[c.depot_id] || { lines: new Set(), whole: [], counted: 0 }; if (c.product_id) x.lines.add(c.product_id); else x.whole.push(c.kind); if (c.status === "counted") x.counted++; });
-  const act = c => !can || CHECK_CLOSED.includes(c.status) ? "" : `<div class="row" style="gap:6px;flex-wrap:wrap;justify-content:flex-end">
+  const pend = c => c.adjustment_id && adjustments().find(a => a.id === c.adjustment_id && a.status === "pending");
+  const act = c => pend(c) ? `<button class="btn small" onclick="App.adjView('${pend(c).id}')">Correction ${esc(pend(c).adj_no)} · ${esc(adjWaiting(pend(c)))}</button>` : !can || CHECK_CLOSED.includes(c.status) ? "" : `<div class="row" style="gap:6px;flex-wrap:wrap;justify-content:flex-end">
       ${c.status === "counted" ? `<button class="btn small primary" onclick="App.checkAct('${c.id}','validate')">Accept ${fmt(c.recount_qty)}</button>` : `<button class="btn small" onclick="App.checkAct('${c.id}','validate')">Figure is right</button>`}
       ${c.product_id ? `<button class="btn small" onclick="App.checkFix('${c.id}')">Correct it</button>` : ""}
       ${c.status !== "recount" ? `<button class="btn small" onclick="App.checkAct('${c.id}','ask_recount')">Ask for recount</button>` : ""}
@@ -5247,15 +5360,15 @@ Object.assign(App, {
   async checkAct(id, action, note, qty) {
     try { await API.run("checkAct", { id, action, note, qty }); } catch (e) { return; }      // API.run already said what went wrong
     closeSheets();
-    { toast({ validate: "Confirmed", ask_recount: "Recount asked — the promodiser sees it on their home screen", dismiss: "Dismissed", adjust: "Stock corrected" }[action] || "Saved"); rerender(); }
+    { toast({ validate: "Confirmed", ask_recount: "Recount asked — the promodiser sees it on their home screen", dismiss: "Dismissed", adjust: adjustChain().length ? "Correction sent for approval: " + adjustChain().map(r => ROLES[r]).join(" → ") : "Stock corrected" }[action] || "Saved"); rerender(); }
   },
   checkFix(id) {
     const c = stockChecks().find(x => x.id === id), p = idx.product(c.product_id), d = idx.depot(c.depot_id);
     openSheet(`<form class="stack" onsubmit="event.preventDefault();App.checkAct('${id}','adjust',val('ck-note'),val('ck-qty'))"><h2>Correct the stock</h2>
-      <p class="small muted">${esc(p.name)} at <b>${esc(d.name)}</b>. ShelfSync now: <b>${fmt(onHand(c.depot_id, c.product_id))}</b> ${esc(p.uom)}${c.recount_qty != null ? ` · recounted <b>${fmt(c.recount_qty)}</b>` : ""}. Saved as a stock count, so the stock card shows the change.</p>
+      <p class="small muted">${esc(p.name)} at <b>${esc(d.name)}</b>. ShelfSync now: <b>${fmt(onHand(c.depot_id, c.product_id))}</b> ${esc(p.uom)}${c.recount_qty != null ? ` · recounted <b>${fmt(c.recount_qty)}</b>` : ""}. It goes for approval (${esc(adjustChain().map(r => ROLES[r]).join(" → ") || "none")}); stock changes when approved.</p>
       <label class="f">The right quantity<input class="in" id="ck-qty" type="number" min="0" step="any" required autofocus value="${c.recount_qty ?? ""}"></label>
       <label class="f">Note<input class="in" id="ck-note" placeholder="e.g. checked the DR — 2 sheets were never received"></label>
-      <div class="row"><button class="btn primary" type="submit">Save</button><button class="btn ghost" type="button" onclick="closeSheets()">Cancel</button></div></form>`);
+      <div class="row"><button class="btn primary" type="submit">Send for approval</button><button class="btn ghost" type="button" onclick="closeSheets()">Cancel</button></div></form>`);
   },
   checkDismiss(id) {
     openSheet(`<form class="stack" onsubmit="event.preventDefault();App.checkAct('${id}','dismiss',val('ck-note'))"><h2>Not a stock issue</h2>
@@ -5285,6 +5398,240 @@ Object.assign(App, {
         return [d.name, p.sku || "(whole depot)", p.name || "", CHECK_KIND[c.kind] || c.kind, c.reason, c.as_of || "", p.id ? onHand(c.depot_id, p.id) : "", c.recount_qty ?? "", (CHECK_STATUS[c.status] || [c.status])[0], c.resolution || "", c.resolved_by ? userName(c.resolved_by) : ""]; }), "Stock to verify");
   }
 });
+/* =====================================================================
+   WEEKLY STOCK COUNT and STOCK ADJUSTMENTS (supabase/weekly_count.sql)
+   ---------------------------------------------------------------------
+   Every branch counts its stock each week and submits it by the deadline
+   (Friday 6:00 PM unless Admin changes it). A count records what was on
+   the shelf and the system figure at that moment; it does NOT change stock.
+   PPIC reviews each count. Where they differ, PPIC proposes an adjustment
+   (take the count, keep the system figure, or another figure) with a reason.
+   The adjustment goes through the approval chain set by Admin (default:
+   Supply Chain; can add Plant Manager, S&M Director, Managing Director).
+   Stock changes only on the final approval.
+   ===================================================================== */
+const ADJ_ROLES = ["scm", "plant_mgr", "smd", "md"];
+const DAY_NAMES = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+function adjustments() { return S.adjustments || (S.adjustments = []); }
+function adjustChain() { const c = (S.settings && S.settings.adjust_chain) || ["scm"]; return ADJ_ROLES.filter(r => c.includes(r)).sort((a, b) => c.indexOf(a) - c.indexOf(b)); }
+const weeklyCfg = () => Object.assign({ day: 5, due: "18:00", remind: "08:00" }, (S.settings && S.settings.weekly_count) || {});
+/* weeks run Monday to Sunday (Philippine time); a week is named by its Friday, like the database */
+function weekMonday(t) { const d = new Date(new Date(t).getTime() + 8 * 3600e3); const off = (d.getUTCDay() + 6) % 7; d.setUTCDate(d.getUTCDate() - off); return d.toISOString().slice(0, 10); }
+function weekFriday(t) { const m = new Date(weekMonday(t) + "T00:00:00Z"); m.setUTCDate(m.getUTCDate() + 4); return m.toISOString().slice(0, 10); }
+const addDaysIso = (iso, n) => { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+/* the deadline of the week whose Friday is wk */
+function weekDue(wk) { const c = weeklyCfg(), day = addDaysIso(addDaysIso(wk, -4), (Number(c.day) || 5) - 1); return new Date(day + "T" + (c.due || "18:00") + ":00+08:00"); }
+const time12 = hm => { const [h, m] = String(hm || "18:00").split(":").map(Number); return ((h % 12) || 12) + ":" + String(m || 0).padStart(2, "0") + (h < 12 ? " AM" : " PM"); };
+const dueText = wk => { const d = weekDue(wk); return d.toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" }) + ", " + d.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }); };
+/* the items a branch counts every week: what it carries (has a stock line), else every item of its company */
+function weeklyItems(depotId) {
+  const d = idx.depot(depotId); if (!d) return [];
+  const carried = new Set(S.stock.filter(s => s.depot_id === depotId).map(s => s.product_id));
+  const co = S.products.filter(p => p.company_id === d.company_id && p.active !== false);
+  const mine = co.filter(p => carried.has(p.id));
+  return (mine.length ? mine : co).sort((a, b) => (a.sku || "").localeCompare(b.sku || ""));
+}
+const weeklyCountOf = (depotId, wk) => S.counts.filter(c => c.depot_id === depotId && c.kind === "weekly" && c.week_of === wk).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+const countLines = id => S.count_lines.filter(l => l.count_id === id);
+const promosOf = depotId => S.users.filter(u => u.role === "promodiser" && u.status === "active" && (u.depot_id === depotId || (u.depot_ids || []).includes(depotId)));
+/* system figure for an item at a moment: stock now, less what moved after */
+function stockAt(depotId, productId, at) {
+  const t = new Date(at).getTime(); let later = 0;
+  S.movements.forEach(m => { if (m.depot_id === depotId && m.product_id === productId && m.affects_stock !== false && new Date(m.created_at).getTime() > t) later += m.qty; });
+  const ids = new Set(S.sales.filter(s => s.depot_id === depotId && s.affects_stock !== false && new Date(s.sold_at).getTime() > t).map(s => s.id));
+  S.sale_lines.forEach(l => { if (ids.has(l.sale_id) && l.product_id === productId) later -= l.qty; });
+  return onHand(depotId, productId) - later;
+}
+/* final approval (demo / this phone): stock follows, as the database does */
+function adjApply(a) {
+  const now = new Date().toISOString(), cnt = a.count_id && S.counts.find(x => x.id === a.count_id), at = cnt ? cnt.created_at : now;
+  a._lines.forEach(l => {
+    const sys = stockAt(a.depot_id, l.product_id, at), d = l.new_qty - sys;
+    if (d) Engine.move(a.depot_id, l.product_id, d, "count_adj", a.id, at, { ref_text: a.adj_no, note: l.reason });
+    l.applied_delta = d;
+    const c = l.check_id && stockChecks().find(x => x.id === l.check_id);
+    if (c && !CHECK_CLOSED.includes(c.status)) Object.assign(c, { status: "adjusted", counted: l.new_qty, resolution: "Adjusted to " + fmt(l.new_qty) + " (" + a.adj_no + ")", resolved_by: ME.id, resolved_at: now, updated_at: now });
+  });
+  Object.assign(a, { status: "approved", applied_at: now, decided_by: ME.id, decided_at: now, updated_at: now });
+  a._events.push({ id: uuid(), step: a.step, action: "applied", note: "Stock changed", by_user: ME.id, at: now });
+  if (cnt) cnt.status = "applied";
+}
+const ADJ_STATUS = { pending: ["Waiting", "warn"], approved: ["Approved — stock updated", "good"], rejected: ["Rejected", "crit"], cancelled: ["Cancelled", ""] };
+const COUNT_STATUS = { submitted: ["To review", "warn"], reviewed: ["Reviewed", "info"], applied: ["Adjusted", "good"] };
+const canReviewCounts = () => !viewOnly() && hasRole("admin", "ppic");
+const canActAdj = a => !viewOnly() && a.status === "pending" && hasRole(a.chain[a.step], "admin") && (a.created_by !== ME.id || hasRole("admin")) && inMyPlant(a.depot_id);
+const adjWaiting = a => a.status === "pending" ? "Waiting for " + (ROLES[a.chain[a.step]] || a.chain[a.step] || "approval") : (ADJ_STATUS[a.status] || [a.status])[0];
+/* differences in one count: [{line, product, diff, value}] */
+function countDiffs(c) {
+  return countLines(c.id).map(l => { const p = idx.product(l.product_id) || { sku: "?", name: "Unknown item", uom: "" }, diff = l.counted_qty - (l.system_qty ?? 0);
+    return { l, p, diff, value: diff * (p.srp || 0) }; }).filter(x => x.diff);
+}
+const countsToReview = () => S.counts.filter(c => c.status === "submitted" && c.kind !== "opening" && inMyPlant(c.depot_id));
+/* the number on the rail: counts for PPIC to review, adjustments waiting for me */
+function myWeeklyCount() {
+  return (canReviewCounts() ? countsToReview().length : 0) + adjustments().filter(canActAdj).length;
+}
+/* promodiser: the weekly count card on Home */
+function weeklyHomeCard(dp) {
+  if (!can("count")) return "";
+  const wk = weekFriday(Date.now()), c = weeklyCountOf(dp.id, wk), due = weekDue(wk), now = Date.now();
+  if (c) return `<div class="notice row between"><span>✅ Weekly count sent ${dtime(c.created_at)}${new Date(c.created_at) > due ? " (late)" : ""}. PPIC checks it.</span></div>`;
+  const late = now > due, today = isoDate(now) === isoDate(due);
+  return `<div class="card stack-sm" style="border-color:var(--${late ? "crit" : today ? "warn" : "line"})"><div class="card-h" style="margin:0"><h2>Weekly stock count</h2><span class="chip ${late ? "crit" : today ? "warn" : "info"}">${late ? "Late" : today ? "Due today" : "Due " + DAY_NAMES[Number(weeklyCfg().day) || 5]}</span></div>
+    <p class="small muted">${late ? "The deadline was " + esc(dueText(wk)) + ". Count every item and submit it now." : "Count every item on the shelf and in the stockroom and submit by <b>" + esc(dueText(wk)) + "</b>."} Your stock doesn't change until PPIC checks the count and it is approved.</p>
+    <button class="btn primary block" onclick="UI.countMode='weekly';App.sub('stock','count');App.go('stock')">${ICON.count}<span>Start weekly count</span></button></div>`;
+}
+
+PLANT_ROUTES.weekly = { view() {
+  const f = UI.f, ds = scopeDepots(f).filter(d => d.active !== false && !d.is_consolidation_dc), dsIds = new Set(ds.map(d => d.id));
+  const tab = UI.wkTab || "week", off = Number(UI.wkOff || 0);
+  const wk = addDaysIso(weekFriday(Date.now()), 7 * off), due = weekDue(wk), past = Date.now() > due;
+  const review = countsToReview().filter(c => dsIds.has(c.depot_id));
+  const adjs = adjustments().filter(a => dsIds.has(a.depot_id));
+  const mine = adjs.filter(canActAdj), pending = adjs.filter(a => a.status === "pending");
+  const rows = ds.map(d => { const c = weeklyCountOf(d.id, wk), pr = promosOf(d.id), dif = c ? countDiffs(c) : [];
+    return { d, c, pr, dif, st: c ? (new Date(c.created_at) > due ? "late" : "done") : !pr.length ? "none" : past ? "missed" : "due" }; });
+  const n = k => rows.filter(r => r.st === k).length;
+  const stChip = r => ({ done: `<span class="chip good">Submitted</span>`, late: `<span class="chip warn">Submitted late</span>`, missed: `<span class="chip crit">Not submitted</span>`,
+    due: `<span class="chip">Not yet</span>`, none: `<span class="chip">No promodiser</span>` })[r.st];
+  const chainTxt = adjustChain().map(r => ROLES[r]).join(" → ") || "no approval (applies at once)";
+  let body = "";
+  if (tab === "week") {
+    body = `<div class="row between" style="flex-wrap:wrap;gap:8px"><div class="row"><button class="btn small" onclick="App.wkWeek(-1)" aria-label="Previous week">‹</button><b>Week of ${dshort(addDaysIso(wk, -4))} – ${dshort(addDaysIso(wk, 2))}</b><button class="btn small" onclick="App.wkWeek(1)" ${off >= 0 ? "disabled" : ""} aria-label="Next week">›</button></div>
+        <span class="small muted">Deadline ${esc(dueText(wk))}</span></div>
+      <div class="kv-grid"><div><div class="eyebrow">Submitted</div><b class="num">${n("done") + n("late")}</b></div><div><div class="eyebrow">Late</div><b class="num">${n("late")}</b></div>
+        <div><div class="eyebrow">${past ? "Not submitted" : "Still to submit"}</div><b class="num">${n(past ? "missed" : "due")}</b></div><div><div class="eyebrow">No promodiser</div><b class="num">${n("none")}</b></div></div>
+      <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Branch</th><th>Promodiser</th><th>Status</th><th class="r">Items counted</th><th class="r">Differences</th><th class="r">Value at SRP</th><th></th></tr></thead><tbody>
+      ${rows.length ? rows.sort((a, b) => ["missed", "due", "late", "done", "none"].indexOf(a.st) - ["missed", "due", "late", "done", "none"].indexOf(b.st) || a.d.name.localeCompare(b.d.name)).map(r => {
+        const items = weeklyItems(r.d.id).length, cnt = r.c ? countLines(r.c.id).length : 0, val = r.dif.reduce((s, x) => s + x.value, 0);
+        return `<tr><td class="nowrap"><b>${esc(r.d.name)}</b><div class="small faint mono">${esc(r.d.code || "")}</div></td><td class="small">${r.pr.map(u => esc(u.full_name)).join(", ") || "—"}</td>
+          <td>${stChip(r)}${r.c ? `<div class="small faint">${dtime(r.c.created_at)}</div>` : ""}</td><td class="r num">${r.c ? fmt(cnt) + (cnt < items ? ` <span class="small faint">of ${fmt(items)}</span>` : "") : "—"}</td>
+          <td class="r num">${r.c ? (r.dif.length ? `<b>${r.dif.length}</b>` : "0") : "—"}</td><td class="r num">${r.c && r.dif.length ? (val < 0 ? "−" : "+") + pesoK(Math.abs(val)) : "—"}</td>
+          <td>${r.c ? `<button class="btn small ${r.c.status === "submitted" && canReviewCounts() ? "primary" : ""}" onclick="App.wkReview('${r.c.id}')">${r.c.status === "submitted" && canReviewCounts() ? "Review" : "View"}</button> ${statusChipCount(r.c)}` : ""}</td></tr>`; }).join("")
+        : `<tr><td colspan="7"><div class="empty">No branches in this view.</div></td></tr>`}</tbody></table></div></div>`;
+  } else if (tab === "review") {
+    body = `<p class="muted small">Every count a promodiser sent (weekly, or a spot count in between). Look at the differences, then propose an adjustment or mark it reviewed. Stock doesn't change until the adjustment is approved by ${esc(chainTxt)}.</p>
+      <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Branch</th><th>Count</th><th>By</th><th class="r">Items</th><th class="r">Differences</th><th class="r">Value at SRP</th><th></th></tr></thead><tbody>
+      ${review.length ? review.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).map(c => { const dif = countDiffs(c), val = dif.reduce((s, x) => s + x.value, 0), d = idx.depot(c.depot_id) || {};
+        return `<tr><td class="nowrap"><b>${esc(d.name)}</b></td><td>${c.kind === "weekly" ? "Weekly" : "Spot"} · ${dtime(c.created_at)}</td><td class="small">${esc(userName(c.created_by))}</td><td class="r num">${fmt(countLines(c.id).length)}</td>
+          <td class="r num">${dif.length ? `<b>${dif.length}</b>` : "0"}</td><td class="r num">${dif.length ? (val < 0 ? "−" : "+") + pesoK(Math.abs(val)) : "—"}</td><td><button class="btn small ${canReviewCounts() ? "primary" : ""}" onclick="App.wkReview('${c.id}')">${canReviewCounts() ? "Review" : "View"}</button></td></tr>`; }).join("")
+        : `<tr><td colspan="7"><div class="empty">No counts waiting for review.</div></td></tr>`}</tbody></table></div></div>`;
+  } else {
+    const which = UI.adjF || (mine.length ? "mine" : "pending");
+    const list = adjs.filter({ mine: canActAdj, pending: a => a.status === "pending", done: a => a.status !== "pending", all: () => true }[which]).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    body = `<p class="muted small">Approval: PPIC proposes → ${esc(chainTxt)}. Stock changes on the last approval. ${hasRole("admin") ? `Change the chain in Setup › Rules.` : ""}</p>
+      ${subtabs("adjF", [["mine", "Waiting for me", mine.length], ["pending", "All waiting", pending.length], ["done", "Decided"], ["all", "All"]], which)}
+      <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>No.</th><th>Branch</th><th class="r">Items</th><th class="r">Net change</th><th class="r">Value at SRP</th><th>Raised</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.length ? list.map(a => { const d = idx.depot(a.depot_id) || {}, net = a._lines.reduce((s, l) => s + (l.applied_delta ?? (l.new_qty - (l.system_qty ?? 0))), 0),
+          val = a._lines.reduce((s, l) => s + (l.applied_delta ?? (l.new_qty - (l.system_qty ?? 0))) * ((idx.product(l.product_id) || {}).srp || 0), 0), st = ADJ_STATUS[a.status] || [a.status, ""];
+        return `<tr><td class="mono nowrap"><b>${esc(a.adj_no || "")}</b></td><td class="nowrap">${esc(d.name)}</td><td class="r num">${a._lines.length}</td><td class="r num">${net > 0 ? "+" : ""}${fmt(net)}</td>
+          <td class="r num">${(val < 0 ? "−" : "+") + pesoK(Math.abs(val))}</td><td class="small">${esc(userName(a.created_by))}<div class="faint">${dtime(a.created_at)}</div></td>
+          <td><span class="chip ${st[1]}">${esc(adjWaiting(a))}</span>${a.chain.length ? `<div class="small faint">${adjSteps(a)}</div>` : ""}</td>
+          <td class="ck-act"><div class="row" style="gap:6px;flex-wrap:wrap;justify-content:flex-end"><button class="btn small ${canActAdj(a) ? "primary" : ""}" onclick="App.adjView('${a.id}')">${canActAdj(a) ? "Review" : "View"}</button></div></td></tr>`; }).join("")
+        : `<tr><td colspan="8"><div class="empty">${which === "mine" ? "Nothing waiting for you." : "Nothing here."}</div></td></tr>`}</tbody></table></div></div>`;
+  }
+  return `<div class="section-h"><div><div class="eyebrow">Operations</div><h1>Weekly counts</h1></div><div class="row"><button class="btn" onclick="App.exportWeekly()">Export</button></div></div>
+    <p class="muted small" style="max-width:82ch">Each branch counts all its stock every week by <b>${esc(DAY_NAMES[Number(weeklyCfg().day) || 5])} ${esc(time12(weeklyCfg().due))}</b>. A count doesn't change stock: PPIC reviews the differences and proposes an adjustment, approved by ${esc(chainTxt)}.</p>
+    ${filtersBar()}
+    ${subtabs("wkTab", [["week", "This week"], ["review", "Counts to review", review.length], ["adjust", "Adjustments", mine.length || pending.length]], tab)}
+    ${body}`;
+}};
+const statusChipCount = c => { const s = COUNT_STATUS[c.status] || [c.status, ""]; return `<span class="chip ${s[1]}">${esc(s[0])}</span>`; };
+const adjSteps = a => a.chain.map((r, i) => { const done = a.status === "approved" || i < a.step; const cur = a.status === "pending" && i === a.step;
+  return `<span style="${cur ? "font-weight:700" : ""}">${done ? "✓ " : ""}${esc((CHAIN.find(x => x.role === r) || {}).short || ROLES[r] || r)}</span>`; }).join(" → ");
+
+Object.assign(App, {
+  wkWeek(d) { UI.wkOff = Math.min(0, Number(UI.wkOff || 0) + d); saveUI(); rerender(); },
+  /* PPIC: look at one count and propose an adjustment */
+  wkReview(id) {
+    const c = S.counts.find(x => x.id === id); if (!c) return;
+    const d = idx.depot(c.depot_id) || {}, ls = countLines(id).map(l => ({ l, p: idx.product(l.product_id) || { id: l.product_id, sku: "?", name: "Unknown item", uom: "" } }));
+    const diffs = ls.filter(x => x.l.counted_qty !== (x.l.system_qty ?? 0)), same = ls.length - diffs.length, can = canReviewCounts() && c.status === "submitted";
+    const adj = adjustments().filter(a => a.count_id === id);
+    UI.wkCount = id;
+    openSheet(`<div class="stack"><h2>${c.kind === "weekly" ? "Weekly count" : "Stock count"} · ${esc(d.name)}</h2>
+      <p class="small muted">${esc(userName(c.created_by))} · ${dtime(c.created_at)} · ${fmt(ls.length)} item${ls.length === 1 ? "" : "s"} counted, ${diffs.length ? `<b>${diffs.length} differ</b>` : "all match"} the system figure at that time.${c.note ? `<br>Note: ${esc(c.note)}` : ""}</p>
+      ${c.review_note ? `<p class="small">↳ ${esc(c.review_note)}${c.reviewed_by ? " — " + esc(userName(c.reviewed_by)) : ""}</p>` : ""}
+      ${adj.length ? `<div class="small">${adj.map(a => `<span class="mono">${esc(a.adj_no)}</span> · ${esc(adjWaiting(a))}`).join("<br>")}</div>` : ""}
+      ${diffs.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="r">System</th><th class="r">Counted</th><th class="r">Diff</th>${can ? "<th>Set stock to</th><th>Reason</th>" : ""}</tr></thead><tbody>
+        ${diffs.map(({ l, p }) => { const df = l.counted_qty - (l.system_qty ?? 0);
+          return `<tr><td style="min-width:180px">${prodCell(p)}</td><td class="r num">${fmt(l.system_qty ?? 0)}</td><td class="r num"><b>${fmt(l.counted_qty)}</b></td><td class="r num"><span class="chip ${df < 0 ? "crit" : "info"}">${df > 0 ? "+" : ""}${fmt(df)}</span></td>
+          ${can ? `<td class="nowrap"><select class="in" style="min-width:112px" id="wk-m-${l.id}" onchange="document.getElementById('wk-o-${l.id}').style.display=this.value==='other'?'':'none'">${opt("count", "Counted", "count")}${opt("system", "System", "")}${opt("other", "Other…", "")}</select>
+            <input class="in qty" id="wk-o-${l.id}" type="number" min="0" step="any" style="display:none;width:80px;margin-left:6px" placeholder="qty"></td>
+            <td><input class="in" id="wk-r-${l.id}" placeholder="Reason" value="${c.kind === "weekly" ? "Weekly count" : "Stock count"}"></td>` : ""}</tr>`; }).join("")}</tbody></table></div>` : `<div class="notice">Every item matched the system figure.</div>`}
+      ${same && diffs.length ? `<p class="small faint">${fmt(same)} other item${same === 1 ? "" : "s"} matched.</p>` : ""}
+      ${can ? `<label class="f">Note for the approvers<input class="in" id="wk-note" placeholder="e.g. checked with the store; 2 sheets were never received"></label>
+        <div class="row">${diffs.length ? `<button class="btn primary" onclick="App.wkPropose('${id}')">Send for approval</button>` : ""}<button class="btn" onclick="App.wkNoChange('${id}')">${diffs.length ? "No adjustment, mark reviewed" : "Mark reviewed"}</button><button class="btn ghost" onclick="closeSheets()">Close</button></div>
+        <p class="small faint">Approval: ${esc(adjustChain().map(r => ROLES[r]).join(" → ") || "none — applies at once")}.</p>`
+      : `<div class="row"><button class="btn ghost" onclick="closeSheets()">Close</button></div>`}</div>`, { wide: true, modal: can });
+  },
+  async wkPropose(id) {
+    const ls = countLines(id).filter(l => l.counted_qty !== (l.system_qty ?? 0)), lines = [];
+    for (const l of ls) {
+      const m = val("wk-m-" + l.id), reason = val("wk-r-" + l.id).trim();
+      const nq = m === "count" ? l.counted_qty : m === "system" ? (l.system_qty ?? 0) : Number(val("wk-o-" + l.id));
+      if (m === "other" && (val("wk-o-" + l.id) === "" || !(nq >= 0))) return toast("Enter the quantity for every item set to “Other”", true);
+      if (nq === (l.system_qty ?? 0)) continue;                     // keeping the system figure: nothing to adjust
+      if (!reason) return toast("Give a reason for every item", true);
+      lines.push({ product_id: l.product_id, system_qty: l.system_qty, counted_qty: l.counted_qty, new_qty: nq, reason });
+    }
+    if (!lines.length) return App.wkNoChange(id, "Kept the system figures");
+    const c = S.counts.find(x => x.id === id);
+    try { await API.run("adjustMake", { id: uuid(), depot_id: c.depot_id, count_id: id, note: val("wk-note").trim() || null, lines }); } catch (e) { return; }
+    closeSheets(); toast(adjustChain().length ? "Sent for approval: " + adjustChain().map(r => ROLES[r]).join(" → ") : "Stock adjusted"); rerender();
+  },
+  async wkNoChange(id, note) {
+    try { await API.run("countReview", { id, note: note || val("wk-note").trim() || null }); } catch (e) { return; }
+    closeSheets(); toast("Marked reviewed"); rerender();
+  },
+  /* one adjustment: lines, history, approve / reject / cancel */
+  adjView(id) {
+    const a = adjustments().find(x => x.id === id); if (!a) return;
+    const d = idx.depot(a.depot_id) || {}, act = canActAdj(a), cancel = a.status === "pending" && !viewOnly() && (a.created_by === ME.id || hasRole("ppic", "admin"));
+    const ev = { raised: "Raised", approved: "Approved", rejected: "Rejected", cancelled: "Cancelled", applied: "Stock updated" };
+    openSheet(`<div class="stack"><h2>Stock adjustment <span class="mono">${esc(a.adj_no || "")}</span></h2>
+      <p class="small muted">${esc(d.name)} · raised by ${esc(userName(a.created_by))}, ${dtime(a.created_at)}${a.count_id ? " from a stock count" : ""}.${a.note ? `<br>Note: ${esc(a.note)}` : ""}</p>
+      <div><span class="chip ${(ADJ_STATUS[a.status] || ["", ""])[1]}">${esc(adjWaiting(a))}</span> ${a.chain.length ? `<span class="small faint">${adjSteps(a)}</span>` : ""}</div>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="r">System</th><th class="r">Counted</th><th class="r">Set to</th><th class="r">Change</th><th>Reason</th></tr></thead><tbody>
+        ${a._lines.map(l => { const p = idx.product(l.product_id) || { sku: "?", name: "Unknown item", uom: "" }, ch = l.applied_delta ?? (l.new_qty - (l.system_qty ?? 0));
+          return `<tr><td style="min-width:180px">${prodCell(p)}</td><td class="r num">${l.system_qty == null ? "—" : fmt(l.system_qty)}</td><td class="r num">${l.counted_qty == null ? "—" : fmt(l.counted_qty)}</td><td class="r num"><b>${fmt(l.new_qty)}</b></td>
+            <td class="r num">${ch > 0 ? "+" : ""}${fmt(ch)}<div class="small faint">${(ch < 0 ? "−" : "+") + peso(Math.abs(ch * (p.srp || 0)))}</div></td><td class="small">${esc(l.reason || "")}</td></tr>`; }).join("")}</tbody></table></div>
+      <div class="stack-sm small">${a._events.map(e => `<div>${dtime(e.at)} · <b>${esc(ev[e.action] || e.action)}</b>${e.role && e.action !== "applied" ? " (" + esc(ROLES[e.role] || e.role) + ")" : ""}${e.by_user ? " — " + esc(userName(e.by_user)) : ""}${e.note ? `: ${esc(e.note)}` : ""}</div>`).join("")}</div>
+      ${act || cancel ? `<label class="f">Note${act ? " (needed to reject)" : ""}<input class="in" id="adj-note" placeholder="${act ? "e.g. confirmed with the branch photo" : "Why it is cancelled"}"></label>
+        <div class="row">${act ? `<button class="btn primary" onclick="App.adjAct('${a.id}','approve')">${a.step + 1 >= a.chain.length ? "Approve — update stock" : "Approve"}</button><button class="btn" onclick="App.adjAct('${a.id}','reject')">Reject</button>` : ""}${cancel ? `<button class="btn ghost" onclick="App.adjAct('${a.id}','cancel')">Cancel adjustment</button>` : ""}<button class="btn ghost" onclick="closeSheets()">Close</button></div>`
+      : `<div class="row"><button class="btn ghost" onclick="closeSheets()">Close</button></div>`}</div>`, { wide: true });
+  },
+  async adjAct(id, action) {
+    const note = val("adj-note").trim();
+    if (action === "reject" && !note) return toast("Say why it is rejected", true);
+    let r; try { r = await API.run("adjustAct", { id, action, note }); } catch (e) { return; }
+    closeSheets(); toast({ approve: r === "approved" ? "Approved — sent to the next approver" : "Approved — stock updated", reject: "Rejected", cancel: "Cancelled" }[action] || "Saved"); rerender();
+  },
+  exportWeekly() {
+    const ds = new Set(scopeDepots(UI.f).map(d => d.id)), list = S.counts.filter(c => ds.has(c.depot_id) && c.kind !== "opening");
+    if (!list.length) return toast("Nothing to export", true);
+    const rows = []; list.forEach(c => { const d = idx.depot(c.depot_id) || {}; countLines(c.id).forEach(l => { const p = idx.product(l.product_id) || {};
+      rows.push([d.name, c.kind === "weekly" ? "Weekly" : "Spot", c.week_of || "", c.created_at, userName(c.created_by), p.sku || "", p.name || "", l.system_qty ?? "", l.counted_qty, l.counted_qty - (l.system_qty ?? 0), (COUNT_STATUS[c.status] || [c.status])[0]]); }); });
+    exportRows("ShelfSync stock counts " + isoDate(Date.now()), ["Branch", "Type", "Week (Friday)", "Counted at", "By", "SKU", "Item", "System", "Counted", "Difference", "Status"], rows, "Counts");
+  },
+  /* Setup › Rules (Admin): the approval chain and the weekly deadline */
+  async saveAdjustRules() {
+    const chain = ADJ_ROLES.filter(r => checked("ar-" + r));
+    const wc = { day: Number(val("wc-day")) || 5, due: val("wc-due") || "18:00", remind: val("wc-rem") || "08:00" };
+    await busy(async () => { await API.run("updateSettings", { adjust_chain: chain, weekly_count: wc }); toast("Saved"); rerender(); });
+  }
+});
+/* Setup › Rules: the card (Admin) */
+function adjustRulesCard() {
+  const ch = adjustChain(), wc = weeklyCfg();
+  return `<div class="card stack"><h2>Weekly count and stock adjustments</h2>
+    <p class="small muted">Promodisers count every item each week by the deadline. A count doesn't change stock: PPIC proposes an adjustment and it goes to these approvers, in this order. Stock changes on the last approval. Untick all to let PPIC's adjustment apply at once.</p>
+    <div class="stack-sm">${ADJ_ROLES.map(r => `<label class="check"><input type="checkbox" id="ar-${r}" ${ch.includes(r) ? "checked" : ""}> ${esc(ROLES[r])}</label>`).join("")}</div>
+    <div class="row" style="gap:12px;flex-wrap:wrap"><label class="f">Count day<select class="in" id="wc-day">${[1, 2, 3, 4, 5, 6, 7].map(i => opt(i, DAY_NAMES[i], wc.day)).join("")}</select></label>
+      <label class="f">Deadline<input class="in" id="wc-due" type="time" value="${esc(wc.due)}"></label><label class="f">Reminder<input class="in" id="wc-rem" type="time" value="${esc(wc.remind)}"></label></div>
+    <p class="small faint">On the count day, promodisers who haven't submitted get a reminder at the reminder hour; at the deadline hour PPIC is told which branches are missing. Adjustments already waiting keep the approvers they had when raised.</p>
+    <button class="btn primary" style="justify-self:start" onclick="App.saveAdjustRules()">Save</button></div>`;
+}
 /* =====================================================================
    GUIDED PRACTICE — the real screens, a throwaway copy of the sample data
    ---------------------------------------------------------------------
