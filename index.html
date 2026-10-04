@@ -37165,12 +37165,12 @@ function linesToAoa(lines) {
   }
   function mappedSku(k){
     if(ST.matEdit[k]!=null) return ST.matEdit[k];
-    return clientMap()[k]||(ST.store.mats||{})[k]||'';
+    return clientMap()[k]||(ST.learned||{})[k]||(ST.store.mats||{})[k]||'';
   }
   function mappedFrom(k){
     if(ST.matEdit[k]!=null) return '';
     if(clientMap()[k]) return 'client';
-    if((ST.store.mats||{})[k]) return 'shared';
+    if((ST.learned||{})[k]||(ST.store.mats||{})[k]) return 'shared';
     return '';
   }
 
@@ -37565,6 +37565,7 @@ function linesToAoa(lines) {
       }
     });
     if(changed) saveStore();
+    shareLearned();
     var flagged=panels.filter(function(p){ return p.remark.indexOf('⚠')>=0; }).length;
     try{ logActivity('Client cutting list imported ('+srcNames.join(', ')+') — '+panels.length+' rows'
       +(hw.length?', '+hw.length+' hardware':'')+(flagged?', '+flagged+' flagged':''),''); }catch(e){}
@@ -37573,19 +37574,95 @@ function linesToAoa(lines) {
       +(flagged?' — '+flagged+' carry a ⚠ remark to check':''));
   }
 
+  // ── Shared self-learning memory (2026-10-04) ──────────────────────────────────────────────
+  // The same memory the MSSI website reads and writes (tables cutlist_layouts / cutlist_code_map
+  // through cutlist_learned / cutlist_learn). A layout a client confirmed on the website — or one an
+  // estimator confirmed here — reads correctly in the other app, and a client's own code maps to the
+  // catalogue name either side settled on. Kept in the website's form so both read one record:
+  // header signature = its header keys (letters only) joined by '|'; mapping = its field numbers →
+  // column; row numbers skip blank rows (the website reads sheets without them).
+  var CLR2WEB={part:1,material:2,length:3,width:4,thk:5,qty:6,edge:7,emat:8,groove:10,remark:11};
+  function webHdrKey(h){ return String(h==null?'':h).toLowerCase().replace(/\(\s*mm\s*\)/g,'')
+    .replace(/(^|[^a-z])mm(?![a-z])/g,'$1').replace(/[^a-z]/g,''); }
+  function webRowSig(r){ var k=[].slice.call(r||[]).map(webHdrKey); while(k.length&&!k[k.length-1]) k.pop(); return k.join('|'); }
+  function nonBlankIdx(aoa){ var idx=[];
+    for(var r=0;r<aoa.length;r++){ if((aoa[r]||[]).some(function(v){ return v!=null&&v!==''; })) idx.push(r); }
+    return idx; }
+  function toWebMapping(res){ var pos={},eL=[],eW=[];
+    for(var f in res.map){ var v=res.map[f]; if(CLR2WEB[f]!=null&&v!=null&&v>=0) pos[CLR2WEB[f]]=+v; }
+    (res.edgeFlags||[]).forEach(function(e){ (e.dim==='W'?eW:eL).push(e.col); });
+    return {pos:pos,edgeL:eL,edgeW:eW}; }
+  function fromWebMapping(m){ var out={},pos=(m&&m.pos)||{};
+    for(var f in CLR2WEB){ var v=pos[CLR2WEB[f]]; if(v!=null&&v!=='') out[f]=+v; }
+    return out; }
+  function clientName(){ return String((el('cl-bizname')&&el('cl-bizname').value)||(el('cl-name')&&el('cl-name').value)||'').trim(); }
+  function sharedReady(){ return typeof supaReady==='function'&&supaReady()&&typeof supa!=='undefined'&&supa&&supa.rpc; }
+
+  // Before the window opens: sheets with no layout remembered here are checked against the
+  // shared memory, then every material and tape code is looked up. Never blocks on failure.
+  function sharedLearned(){
+    ST.learned={};
+    if(!sharedReady()) return Promise.resolve();
+    var cn=clientName()||null;
+    var jobs=allSheets().map(function(x){
+      var s=x.s; if(s.remembered||!s.aoa) return null;
+      var idx=nonBlankIdx(s.aoa).slice(0,15);
+      return supa.rpc('cutlist_learned',{p_sigs:idx.map(function(r){ return webRowSig(s.aoa[r]); }),p_codes:null,p_client:cn})
+        .then(function(r){
+          var lay=r&&!r.error&&r.data&&r.data.layout; if(!lay||!lay.mapping) return;
+          var map=fromWebMapping(lay.mapping), hdr=idx[+lay.row];
+          if(hdr==null||map.length==null||map.width==null) return;
+          s.force={header:hdr,map:map};
+          s.remembered={file:lay.source==='website'?'the client\'s upload on the MSSI website':'an earlier ModCraft import',shared:true};
+          readSheet(s);
+        },function(){});
+    }).filter(Boolean);
+    return Promise.all(jobs).then(function(){
+      var mats=distinctMats(), tapes=distinctTapes(), ask=[], back={};
+      mats.forEach(function(m){ ask.push(m.text); back[m.text]=m.key; });
+      tapes.forEach(function(t){ var q='tape:'+t.text; ask.push(q); back[q]=t.key; });
+      if(!ask.length) return;
+      return supa.rpc('cutlist_learned',{p_sigs:null,p_codes:ask.slice(0,200),p_client:cn}).then(function(r){
+        var codes=(r&&!r.error&&r.data&&r.data.codes)||{};
+        Object.keys(codes).forEach(function(q){ if(back[q]) ST.learned[back[q]]=codes[q]; });
+      },function(){});
+    }).catch(function(){});
+  }
+
+  // After an import is confirmed: teach the shared memory what was used. With a client named on
+  // the quotation it is saved for that client; with none, only a layout a person corrected becomes
+  // a shared default (the reader's own guess is not worth teaching everyone).
+  function shareLearned(){
+    if(!sharedReady()) return;
+    var cn=clientName(), codes={}, sent=false;
+    Object.keys(ST.matEdit).forEach(function(k){ var v=String(ST.matEdit[k]||'').trim(); if(v) codes[k]=v; });
+    allSheets().forEach(function(x){
+      var s=x.s;
+      if(!s.include||!s.res||s.res.kind==='hardware'||s.res.header==null||s.res.header<0) return;
+      if(!cn&&!(s.force&&s.force.map)) return;
+      supa.rpc('cutlist_learn',{p_sig:webRowSig(s.aoa[s.res.header]),p_mapping:toWebMapping(s.res),
+        p_codes:sent?{}:codes,p_client:cn||null,p_shared:!cn}).then(function(r){
+          if(r&&r.error) console.warn('[clr] cutlist_learn',r.error.message); },function(){});
+      sent=true;
+    });
+    if(!sent&&Object.keys(codes).length)
+      supa.rpc('cutlist_learn',{p_sig:'',p_mapping:null,p_codes:codes,p_client:cn||null,p_shared:!cn})
+        .then(function(){},function(){});
+  }
+
   function open(inputEl){
     var files=[].slice.call((inputEl&&inputEl.files)||[]);
     if(inputEl) inputEl.value='';
     if(!files.length) return;
     if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return; }
-    ST.files=[]; ST.active=0; ST.matEdit={}; ST.sugg={}; ST.rawFiles=files;
+    ST.files=[]; ST.active=0; ST.matEdit={}; ST.sugg={}; ST.learned={}; ST.rawFiles=files;
     ensureModal();
     el('ov-clr-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Reading '+files.length+' file'+(files.length===1?'':'s')+'…</div>';
     el('ov-clr-foot').innerHTML='';
     openModal('ov-clr');
     return loadStore().then(function(){
       return files.reduce(function(p,f){ return p.then(function(){ return readFile(f).then(function(r){ ST.files.push(r); }); }); },Promise.resolve());
-    }).then(render);
+    }).then(sharedLearned).then(render);
   }
 
   return {
@@ -37615,6 +37692,7 @@ function linesToAoa(lines) {
     useSku:function(btn){ ST.matEdit[btn.getAttribute('data-k')]=btn.getAttribute('data-sku'); render(); },
     codeWords:codeWords, readClientMat:readClientMat, suggestFor:suggestFor,
     // Pure reader + conversion, exposed for tests.
+    webRowSig:webRowSig, toWebMapping:toWebMapping, fromWebMapping:fromWebMapping,
     readClientSheet:readClientSheet, linesToAoa:linesToAoa, totals:totals, toPanel:toPanel,
     _state:function(){ return ST; }
   };

@@ -5001,6 +5001,15 @@ const PROFILES = {
           const h = f([['KITCHEN — Juan'], [], ['Description', 'Board', 'Pcs', 'Length (mm)', 'Width (mm)'], ['Side', 'PB', 2, 720, 560]]);
           return [c.ok ? c.row(['Back panel', 'MP06 WARM WHITE', 4, 528, 658]).slice(0, 7) : c.missing, h && h.i, h && h.cm.row(['Side', 'PB', 2, 720, 560]).slice(0, 7), f([['Back panel', 'MP06', 4, 528, 658]])];
         }, [[undefined, 'Back panel', 'MP06 WARM WHITE', 528, 658, undefined, 4], 2, [undefined, 'Side', 'PB', 720, 560, undefined, 2], null]);
+        check('Client-list memory is kept in the MSSI website\'s form (header signature + field numbers), both ways', () => {
+          const C = window.CLR;
+          const sig = C.webRowSig(['Item', 'Board', 'Part', 'THK (mm)', 'Length', 'Width', 'Qty', '', '']);
+          const web = C.toWebMapping({ map: { item: 0, material: 1, part: 2, thk: 3, length: 4, width: 5, qty: 6 },
+            edgeFlags: [{ col: 7, dim: 'L' }, { col: 8, dim: 'W' }] });
+          return [sig, web, C.fromWebMapping(web)];
+        }, ['item|board|part|thk|length|width|qty',
+          { pos: { 1: 2, 2: 1, 3: 4, 4: 5, 5: 3, 6: 6 }, edgeL: [7], edgeW: [8] },
+          { part: 2, material: 1, length: 4, width: 5, thk: 3, qty: 6 }]);
         check('Website HPL build: raw board and HPL sheet arrive resolved; raw plywood arrives outsourced', () => {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = [{ name: 'Raw Boards 4x8 18mm MDF', unit: 'pc', price: 900 }, { name: 'Coastal Green 4x8 0.7mm HPL', unit: 'pc', price: 1500 },
