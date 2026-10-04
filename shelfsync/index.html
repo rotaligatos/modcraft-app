@@ -417,6 +417,7 @@ body.promo #pr-card{bottom:calc(84px + env(safe-area-inset-bottom,0px))}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .pr-sc.rec{background:#2a2310}}
 @media print{#pr-card,#pr-ring,body.practice::after{display:none!important}}
 @media print{.topbar,.rail,.tabbar,.no-print,.toast-wrap,.chipset,.section-h .row{display:none!important}.plant-layout{display:block}.card{border:0}body{background:#fff;color:#000}}
+.ck-act{min-width:250px}.ck-act .btn{white-space:nowrap}.chk-mark{margin-left:4px;padding:0 6px;font-size:11px}
 </style>
 
 </head>
@@ -517,7 +518,7 @@ const ROLES = { promodiser:"Promodiser", ppic:"PPIC", scm:"Supply Chain Manager"
 /* Accounting: sees what a Plant user sees for their companies (sales, stock value, targets, documents, requests), changes nothing.
    The database enforces this (ss_view_only, accounting_role.sql); here it only hides the buttons. Someone with Accounting plus another role keeps that role's rights. */
 const viewOnly = () => !!ME && rolesOf(ME).every(r => r === "accounting");
-const VIEW_ONLY_PAGES = ["dashboard", "performance", "reports", "approvals", "recon", "movements", "documents", "depots"];
+const VIEW_ONLY_PAGES = ["dashboard", "performance", "reports", "approvals", "recon", "movements", "documents", "depots", "checks"];
 const CHAIN = [
   { status:"for_ppic",       role:"ppic",       short:"PPIC",      label:"PPIC review",                 verb:"Endorse to Supply Chain" },
   { status:"for_scm",        role:"scm",        short:"SCM",       label:"Supply Chain Manager",        verb:"Approve" },
@@ -681,6 +682,9 @@ const Engine = {
       S.count_lines.push({ id: uuid(), count_id: id, product_id: l.product_id, system_qty: sys, counted_qty: l.counted_qty });
       if (l.counted_qty !== sys) Engine.move(depot_id, l.product_id, l.counted_qty - sys, "count_adj", id, at);
       out.push({ ...l, system_qty: sys, variance: l.counted_qty - sys });
+      // a count that includes an item with an open stock check records the counted figure on it (the plant then accepts or corrects)
+      stockChecks().forEach(c => { if (c.depot_id === depot_id && c.product_id === l.product_id && ["open", "recount"].includes(c.status) && c.created_at <= at)
+        Object.assign(c, { status: "counted", recount_qty: l.counted_qty, recount_by: ME.id, recount_at: at, updated_at: new Date().toISOString() }); });
     });
     return out;
   },
@@ -836,8 +840,34 @@ const Engine = {
   },
   addPasskey(k) { S.passkeys.push(k); S.access_log.push({ id: uuid(), user_id: k.user_id, event: "passkey_added", detail: k.device_label, created_at: new Date().toISOString() }); },
   logAccess({ event, detail }) { S.access_log.push({ id: uuid(), user_id: ME.id, event, detail: detail || null, user_agent: navigator.userAgent.slice(0, 120), created_at: new Date().toISOString() }); },
+  addCheck({ id, depot_id, product_id, reason, kind }) {
+    if (!hasRole("admin", "ppic", "scm", "plant_mgr")) throw new Error("Only PPIC, Supply Chain, the Plant Manager or Admin can mark stock for checking");
+    if (!String(reason || "").trim()) throw new Error("Say what needs checking");
+    const now = new Date().toISOString();
+    stockChecks().push({ id, depot_id, product_id: product_id || null, kind: kind || "other", reason: String(reason).trim(), status: "open", created_by: ME.id, created_at: now, updated_at: now });
+  },
+  checkAct({ id, action, note, qty }) {
+    const c = stockChecks().find(x => x.id === id); if (!c) throw new Error("Not found");
+    if (!hasRole("admin", "ppic", "scm", "plant_mgr")) throw new Error("Only PPIC, Supply Chain, the Plant Manager or Admin can close a stock check");
+    if (CHECK_CLOSED.includes(c.status)) throw new Error("This check is already closed");
+    const now = new Date().toISOString(), n = String(note || "").trim();
+    if (action === "ask_recount") Object.assign(c, { status: "recount", resolution: n || null });
+    else if (action === "validate") Object.assign(c, { status: "validated", resolution: n || (c.status === "counted" ? "Accepted the recount (" + fmt(c.recount_qty) + ")" : "Confirmed as right"), resolved_by: ME.id, resolved_at: now });
+    else if (action === "dismiss") { if (!n) throw new Error("Say why it is not a stock problem"); Object.assign(c, { status: "dismissed", resolution: n, resolved_by: ME.id, resolved_at: now }); }
+    else if (action === "adjust") {
+      if (!c.product_id) throw new Error("Adjust needs an item; for a whole depot, ask for a recount");
+      const q = Number(qty); if (qty === "" || qty == null || !isFinite(q) || q < 0) throw new Error("Enter the right quantity");
+      const cid = uuid(), sys = onHand(c.depot_id, c.product_id);
+      S.counts.push({ id: cid, depot_id: c.depot_id, note: "Stock check: " + c.reason.slice(0, 120), created_by: ME.id, created_at: now });
+      S.count_lines.push({ id: uuid(), count_id: cid, product_id: c.product_id, system_qty: sys, counted_qty: q });
+      if (q !== sys) Engine.move(c.depot_id, c.product_id, q - sys, "count_adj", cid, now);
+      Object.assign(c, { status: "adjusted", counted: q, resolution: n || "Set to " + fmt(q), resolved_by: ME.id, resolved_at: now });
+    } else throw new Error("Unknown action");
+    c.updated_at = now;
+  },
   undoImport({ id }) {
     const imp = S.imports.find(x => x.id === id);
+    if (imp.kind === "stock_checks") { const now = new Date().toISOString(); stockChecks().forEach(c => { if (c.import_id === id && !CHECK_CLOSED.includes(c.status)) Object.assign(c, { status: "dismissed", resolution: "Import undone", resolved_by: ME.id, resolved_at: now, updated_at: now }); }); imp.undone_at = now; return; }
     if (!["sales_history", "stock_history", "deliveries_history", "targets", "retailer_sales"].includes(imp.kind)) throw new Error("Only history imports can be undone");
     const sales = new Set(S.sales.filter(s => s.import_id === id).map(s => s.id));
     S.sales = S.sales.filter(s => !sales.has(s.id)); S.sale_lines = S.sale_lines.filter(l => !sales.has(l.sale_id));
@@ -854,7 +884,8 @@ const OFFLINE_OK = new Set(["sale", "lost", "count", "movement", "message", "dep
 const OP_LABEL = { reviewDelivery: "Delivery check", sale: "Sale", lost: "Missed sale", count: "Stock count", movement: "Stock movement", message: "Message", depotReport: "Depot report",
   retailerSales: "Store's sales report", competitor: "Competitor entry", updateStocks: "Shelf minimums", updateDepot: "Depot setting", document: "File / photo" };
 /* which server tables to refresh after an op reaches the server */
-const OP_TABLES = { sale: ["sales", "stock"], lost: ["lost_sales"], count: ["counts", "movements", "stock"], movement: ["movements", "stock"], message: ["messages"],
+const OP_TABLES = { sale: ["sales", "stock"], lost: ["lost_sales"], count: ["counts", "movements", "stock", "stock_checks"],
+  checkAct: ["stock_checks", "counts", "movements", "stock"], addCheck: ["stock_checks"], movement: ["movements", "stock"], message: ["messages"],
   depotReport: ["depot_reports"], retailerSales: ["retailer_sales"], competitor: ["competitors"], updateStocks: ["stock"], updateDepot: ["depots"], document: ["documents"],
   request: ["requests"], reviewDelivery: ["movements"], advance: ["requests", "stock", "movements"], setOdoo: ["requests"], docReceived: ["documents"], ackReport: ["depot_reports"],
   reportDef: ["report_defs"], delReportDef: ["report_defs"], delRetailerSales: ["retailer_sales"], saveCapacity: ["capacity"], aiRecs: ["ai_recs"],
@@ -1074,7 +1105,11 @@ const Remote = {
   },
   async addPasskey() {},
   async logAccess(p) { chk(await SB.rpc("ss_touch", { p_event: p.event, p_agent: navigator.userAgent })); },
-  async undoImport(p) { chk(await SB.rpc("ss_undo_import", { p_import: p.id })); },
+  async undoImport(p) { const imp = S.imports.find(x => x.id === p.id);
+    if (imp && imp.kind === "stock_checks") { chk(await SB.rpc("ss_withdraw_check_import", { p_import: p.id })); return; }
+    chk(await SB.rpc("ss_undo_import", { p_import: p.id })); },
+  async addCheck(p) { chk(await SB.from("ss_stock_checks").insert({ id: p.id, depot_id: p.depot_id, product_id: p.product_id || null, kind: p.kind || "other", reason: String(p.reason).trim() })); },
+  async checkAct(p) { chk(await SB.rpc("ss_check_act", { p_id: p.id, p_action: p.action, p_note: p.note || null, p_qty: p.qty === "" || p.qty == null ? null : Number(p.qty) })); },
   async updateDepot(p) { chk(await SB.from("ss_depots").update(p.patch).eq("id", p.id)); },
   async updateSettings(p) { for (const [key, value] of Object.entries(p)) chk(await SB.from("ss_settings").upsert({ key, value })); },
   async updateStocks(p) { for (const r of p.rows) chk(await SB.from("ss_stock").update({ min_display: r.min_display }).eq("depot_id", r.depot_id).eq("product_id", r.product_id)); }
@@ -1193,6 +1228,9 @@ const TABLES = {
     map: m => ({ ...m, month: String(m.month).slice(0, 7), units: Number(m.units), amount: Number(m.amount), receipts: Number(m.receipts) }) },
   passkeys: { full: () => pageAll(() => SB.from("ss_passkeys").select("id,user_id,device_label,created_at,last_used_at").order("id")) },
   retailer_sales: { full: () => pageAll(() => SB.from("ss_retailer_sales").select("*").gte("period_end", sinceIso().slice(0, 10)).order("id")), map: r => ({ ...r, qty: Number(r.qty), amount: N(r.amount), ending_stock: N(r.ending_stock) }) },
+  stock_checks: { inc: "updated_at", key: "id", keep: r => !CHECK_CLOSED.includes(r.status) || !r.updated_at || Date.parse(r.updated_at) >= Date.now() - 120 * DAY,
+    q: () => SB.from("ss_stock_checks").select("*").or("status.in.(open,recount,counted),updated_at.gte." + new Date(Date.now() - 120 * DAY).toISOString()).order("id"),
+    map: c => ({ ...c, expected: N(c.expected), counted: N(c.counted), recount_qty: N(c.recount_qty) }) },
   capacity: { full: () => pageAll(() => SB.from("ss_depot_capacity").select("*").order("id")), map: c => ({ ...c, max_qty: Number(c.max_qty) }) },
   competitors: { full: async () => chk(await SB.from("ss_competitor_obs").select("*").order("created_at", { ascending: false }).limit(1000)), map: c => ({ ...c, price: N(c.price) }) },
   access_log: { admin: true, full: async () => chk(await SB.from("ss_access_log").select("*").order("created_at", { ascending: false }).limit(500)) }
@@ -1278,7 +1316,8 @@ function rebuildS() {
       passkey_policy: st.passkey_policy || { login: true, actions: true }, promo_visibility: st.promo_visibility || "account_region", odoo_ticket_required: st.odoo_ticket_required || "ppic_review" },
     users: X.users || [], documents: clone(X.documents), depot_reports: clone(X.depot_reports), report_defs: (X.report_defs || []).slice(), ai_recs: X.ai_recs || [],
     imports: X.imports || [], targets: X.targets || [], delivery_history: X.delivery_history || [], snapshots: [], monthly: X.monthly || [],
-    passkeys: (X.passkeys || []).slice(), access_log: X.access_log || [], capacity: X.capacity || [], competitors: (X.competitors || []).slice(), retailer_sales: (X.retailer_sales || []).slice()
+    passkeys: (X.passkeys || []).slice(), access_log: X.access_log || [], capacity: X.capacity || [], competitors: (X.competitors || []).slice(), retailer_sales: (X.retailer_sales || []).slice(),
+    stock_checks: clone(X.stock_checks)
   };
   CACHE = {};
   // what's still waiting on this phone, on top — unless the server already has it (sent, reply not back yet)
@@ -1407,7 +1446,7 @@ function buildDemo() {
   const N = 150, t0 = today0() - (N - 1) * DAY;
   const S0 = { companies, plants, accounts, depots, products, prices: [], stock: [], movements: [], sales: [], sale_lines: [], lost_sales: [], counts: [], count_lines: [],
     requests: [], request_lines: [], request_events: [], messages: [], users: [], documents: [], depot_reports: [], report_defs: [], ai_recs: [],
-    imports: [], targets: [], delivery_history: [], snapshots: [], passkeys: [], access_log: [], retailer_sales: [], capacity: [], competitors: [],
+    imports: [], targets: [], delivery_history: [], snapshots: [], passkeys: [], access_log: [], retailer_sales: [], capacity: [], competitors: [], stock_checks: [],
     settings: { service_level: { A: .98, B: .95, C: .90 }, review_days: 14, history_days: 90, passkey_policy: { login: true, actions: true },
       promo_visibility: "account_region", odoo_ticket_required: "ppic_review" } };
   // account prices: Wilcon gets a 4% lower price on WCLI items; others pay SRP
@@ -1581,6 +1620,12 @@ function buildDemo() {
     our_product_id: "p-CWE301", notes: null, created_by: "u-promo-d-cmd", creator_name: "Mark Villanueva", created_at: new Date(Date.now() - 2 * DAY).toISOString() });
   S0.report_defs.push({ id: "rd-1", name: "Monthly sales by account", shared: true, created_by: "u-smd", created_at: new Date(Date.now() - 9 * DAY).toISOString(),
     config: { type: "sales", group: "account", period: "last_6m", company: "", account: "", depot: "", measure: "amount" } });
+  // stock to verify (sample): what the old trackers couldn't explain
+  const ckAt = new Date(Date.now() - 3 * DAY).toISOString(), ck = (id, d, p, kind, reason, extra = {}) => S0.stock_checks.push({ id, depot_id: d, product_id: p, kind, reason, status: "open", as_of: isoDate(Date.now() - 8 * DAY), created_by: "u-ppic-pasig", created_at: ckAt, updated_at: ckAt, ...extra });
+  ck("ck-1", "d-wqc", "p-WLH103", "went_up", "Went UP by 2 between the last count and the next month's opening, with no delivery recorded");
+  ck("ck-2", "d-wqc", "p-WLM201", "versions", "The count is different in two saved copies of the tracker: 18 in one, 16 in the other", { status: "recount", resolution: "Please count this one first" });
+  ck("ck-3", "d-aim", "p-WLM201", "went_down", "Went DOWN by 5 between counts with no sale or pull-out recorded");
+  ck("ck-4", "d-cmd", null, "stale", "Last counted 7 months ago; nobody has counted since — every quantity here needs a recount");
   S0.access_log.push({ id: "al-1", user_id: "u-promo-d-alp", event: "suspended", detail: "by Admin · agency contract ended", created_at: new Date(Date.now() - 5 * DAY).toISOString() });
   return S0;
 }
@@ -1924,7 +1969,7 @@ function plantItems() {
   const a = hasRole("admin"), imp = hasRole("admin", "ppic", "scm");
   const items = [["h", "Overview"], ["dashboard", "Dashboard"], ["performance", "Performance"], ["reports", "Reports"],
     ["h", "Operations"], ["approvals", "Depot requests"], ["plan", "Stock planner"], ["ai", "AI insights"], ["recon", "Sales check"], ["movements", "Stock movements"], ["documents", "Documents"], ["chat", "Messages"],
-    ["h", "Data"], ["depots", "Depots & stock"], imp ? ["import", "Import data"] : null, ["settings", "Planning rules"],
+    ["h", "Data"], ["depots", "Depots & stock"], ["checks", "Stock to verify"], imp ? ["import", "Import data"] : null, ["settings", "Planning rules"],
     a ? ["h", "Admin"] : null, a ? ["command", "Setup"] : null].filter(Boolean);
   if (!viewOnly()) return items;
   // Accounting: only the read-only pages; a heading stays only if a page follows it
@@ -2034,7 +2079,7 @@ function myQueue() {
 function plantRail() {
   const counts = { approvals: myQueue().length, documents: (S.documents || []).filter(d => d.status === "sent" && inMyPlant(d.depot_id)).length,
     reports: (S.depot_reports || []).filter(r => r.status === "submitted" && inMyPlant(r.depot_id)).length,
-    movements: hasRole("admin", "ppic") ? unreviewedDeliveries(null).filter(d => inMyPlant(d.depot_id)).length : 0 };
+    movements: hasRole("admin", "ppic") ? unreviewedDeliveries(null).filter(d => inMyPlant(d.depot_id)).length : 0, checks: canCloseChecks() ? myCheckCount() : 0 };
   return `<nav class="rail" aria-label="Plant sections">${plantItems().map(([k, l]) => k === "h" ? `<div class="rail-h">${esc(l)}</div>` :
     `<button ${UI.route === k ? 'aria-current="page"' : ""} onclick="App.go('${k}')">${esc(l)}${counts[k] ? `<span class="count">${counts[k]}</span>` : ""}</button>`).join("")}<div class="rail-foot"><button class="btn sm practice-btn" onclick="App.practice()">🎓 Practice</button><div class="hide-sm">${madeBy()}</div></div></nav>`;
 }
@@ -2370,6 +2415,13 @@ const PROMO_ROUTES = {
           ${incoming.map(r => `<div class="row between"><span><b class="mono">${esc(r.req_no)}</b>${r.hatid_ref ? ` <span class="small faint">DR ${esc(r.hatid_ref)}</span>` : ""}</span><span class="small faint">sent ${dshort(r.dispatched_at || r.updated_at)}</span></div>`).join("")}
           <p class="small muted">When it arrives, count the items and confirm. Your stock goes up only after you confirm.</p>
           <button class="btn primary block" onclick="App.go('request')">${ICON.finger}<span>Check and confirm receipt</span></button></div>` : ""; })()}
+      ${(() => { const rc = can("count") ? stockChecks().filter(c => c.depot_id === dp.id && c.status === "recount") : [];
+        if (!rc.length) return "";
+        const whole = rc.some(c => !c.product_id), items = rc.filter(c => c.product_id);
+        return `<div class="card stack-sm" style="border-color:var(--warn)"><div class="card-h" style="margin:0"><h2>Please recount</h2><span class="chip warn">${whole ? "Whole branch" : items.length + " item" + (items.length === 1 ? "" : "s")}</span></div>
+          <p class="small muted">The Plant can't confirm ${whole ? "this branch's stock" : "these figures"} from the records. Count what is really on the shelf and in the stockroom.</p>
+          ${items.length ? `<div class="list">${items.slice(0, 8).map(c => { const p = idx.product(c.product_id); return p ? `<div class="row between">${prodCell(p)}<span class="small faint num">system ${fmt(onHand(dp.id, p.id))}</span></div>` : ""; }).join("")}</div>` : ""}
+          <button class="btn primary block" onclick="App.sub('stock','count');App.go('stock')">${ICON.count}<span>Count now</span></button></div>`; })()}
       ${PUSH.nudge("Get notified when a delivery is on its way to your branch.")}
       <div class="qa">${qa.join("")}</div>
       ${can("sell") ? `<div class="card"><div class="card-h"><h2>Today's sales</h2><span class="small faint">${new Date().toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric" })}</span></div>
@@ -2415,11 +2467,12 @@ const PROMO_ROUTES = {
     let body = "";
     if (t === "count") {
       const q = (UI.countQ || "").toLowerCase(); UI.countDraft = UI.countDraft || {};
-      const prods = myProducts().filter(p => !q || (p.name + p.sku).toLowerCase().includes(q)), n = Object.keys(UI.countDraft).length;
+      const flagged = new Set(stockChecks().filter(c => c.depot_id === dp.id && ["open", "recount"].includes(c.status) && c.product_id).map(c => c.product_id));
+      const prods = myProducts().filter(p => !q || (p.name + p.sku).toLowerCase().includes(q)).sort((a, b) => flagged.has(b.id) - flagged.has(a.id)), n = Object.keys(UI.countDraft).length;
       body = `<p class="muted small">Enter the actual quantity on the shelf and in the stockroom. Leave blank to skip an item. Differences are saved as count adjustments.</p>
         <div class="searchbar"><input class="in grow" id="count-q" placeholder="Scan a barcode, or type to filter" value="${esc(UI.countQ || "")}" oninput="App.countFilter(this.value)" onkeydown="if(event.key==='Enter')App.countJump()" autocomplete="off" inputmode="search"></div>
         <div class="card flush"><div class="list" id="count-list">${prods.length ? prods.map(p => { const sys = onHand(dp.id, p.id), v = UI.countDraft[p.id];
-          return `<div class="row between" style="padding-inline:14px">${prodCell(p, ` · system ${fmt(sys)} ${esc(p.uom)}`)}<div class="row" style="gap:8px;flex-wrap:nowrap"><span id="cdiff-${p.id}">${countDiffChip(v, sys)}</span><input class="in qty" id="cnt-${p.id}" type="number" min="0" inputmode="numeric" enterkeyhint="next" placeholder="—" value="${v ?? ""}" oninput="App.countSet('${p.id}',this.value)" aria-label="Counted ${esc(p.sku)}"></div></div>`; }).join("") : `<div class="empty">No item matches.</div>`}</div></div>
+          return `<div class="row between" style="padding-inline:14px">${prodCell(p, ` · system ${fmt(sys)} ${esc(p.uom)}` + (flagged.has(p.id) ? ' <span class="chip warn">Please count</span>' : ""))}<div class="row" style="gap:8px;flex-wrap:nowrap"><span id="cdiff-${p.id}">${countDiffChip(v, sys)}</span><input class="in qty" id="cnt-${p.id}" type="number" min="0" inputmode="numeric" enterkeyhint="next" placeholder="—" value="${v ?? ""}" oninput="App.countSet('${p.id}',this.value)" aria-label="Counted ${esc(p.sku)}"></div></div>`; }).join("") : `<div class="empty">No item matches.</div>`}</div></div>
         <label class="f">Note<input class="in" id="count-note" placeholder="e.g. 2 sheets chipped, set aside" value="${esc(UI.countNote || "")}" oninput="UI.countNote=this.value;saveUI()"></label>
         <button class="btn primary lg block" id="count-go" ${n ? "" : "disabled"} onclick="App.submitCount()">${countBtnText(n)}</button>`;
     } else if (t === "card") {
@@ -2797,10 +2850,10 @@ const PLANT_ROUTES = {
         <td class="r">${lt.source === "actual" ? fmt(lt.L) + " (" + lt.n + ")" : "—"}</td>
         <td class="r">${fmt(st.reduce((s, x) => s + x.on_hand, 0))}</td><td class="r">${pesoK(st.reduce((s, x) => s + x.on_hand * ((idx.product(x.product_id) || {}).srp || 0), 0))}</td></tr>`; }).join("")}
       </tbody></table></div></div>
-      <div class="card flush"><div class="card-h" style="padding:14px 14px 0"><h2>Stock by item and depot</h2><span class="small faint">units on hand; amber = at or below minimum display</span></div>
+      <div class="card flush"><div class="card-h" style="padding:14px 14px 0"><h2>Stock by item and depot</h2><span class="small faint">units on hand; amber = at or below minimum display; <span class="chip warn">!</span> = not confirmed yet (<a href="#" onclick="event.preventDefault();App.go('checks')">Stock to verify</a>)</span></div>
         <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th>${sellable.map(d => `<th class="r" title="${esc(d.name)}">${esc(d.code)}</th>`).join("")}</tr></thead><tbody>
         ${prods.map(p => `<tr><td style="min-width:220px">${prodCell(p)}</td>${sellable.map(d => { const s = idx.stock(d.id, p.id); if (!s || d.company_id !== p.company_id) return '<td class="r faint">·</td>'; const low = isLow(s);
-          return `<td class="r" style="${s.on_hand <= 0 ? "color:var(--crit);font-weight:700" : low ? "color:var(--warn);font-weight:700" : ""}">${fmt(s.on_hand)}</td>`; }).join("")}</tr>`).join("")}
+          return `<td class="r" style="${s.on_hand <= 0 ? "color:var(--crit);font-weight:700" : low ? "color:var(--warn);font-weight:700" : ""}">${fmt(s.on_hand)}${checkMark(d.id, p.id, { text: false })}</td>`; }).join("")}</tr>`).join("")}
         </tbody></table></div></div>`;
   }},
 
@@ -4024,6 +4077,11 @@ const IMPORT_KINDS = {
     fields: [["depot", "Depot", true, ["depot", "branch"]], ["item", "Item", true, ["sku", "item", "barcode"]], ["qty", "Qty delivered", true, ["qty", "delivered", "quantity"]],
       ["requested_on", "Requested on", false, ["requested", "request date", "po date", "order date"]], ["received_on", "Received on", true, ["received", "delivery date", "date received", "dr date"]], ["ref", "DR / reference", false, ["dr", "ref", "reference"]]],
     example: [["WIL-QAV", "WL-H101", 40, "2025-11-03", "2025-12-08", "DR-231004"]] },
+  stock_checks: { label: "Stock to verify", desc: "Stock lines whose history doesn't add up. They stay in use but are marked for the team to recount or confirm. Leave Item blank for a whole depot.", undo: true,
+    fields: [["depot", "Depot", true, ["depot", "branch", "store"]], ["item", "Item (blank = whole depot)", false, ["sku", "item", "barcode", "code"]], ["kind", "Type", false, ["type", "kind", "check"]],
+      ["reason", "What doesn't add up", true, ["what doesn t add up", "reason", "detail", "why", "issue", "note"]], ["as_of", "As of", false, ["as of", "date"]],
+      ["expected", "Expected qty", false, ["expected"]], ["counted", "Counted qty", false, ["counted", "on hand"]]],
+    example: [["WIL-QAV", "WL-H101", "went_up", "Went up by 2 with no delivery recorded", "2026-09-26", 22, 24]] },
   targets: { label: "Monthly targets", desc: "Sales target per depot per month.", undo: true,
     fields: [["depot", "Depot", true, ["depot", "branch"]], ["month", "Month", true, ["month", "period", "date"]], ["amount", "Target ₱", true, ["target", "amount", "quota"]], ["units", "Target units", false, ["units", "qty"]]],
     example: [["WIL-QAV", "2026-10", 450000, ""]] }
@@ -4082,10 +4140,11 @@ function importCheck() {
   body.forEach((r, n) => {
     const e = [], rec = { _n: I.headerRow + 2 + n };
     K.fields.forEach(([k, label, req]) => { const v = g(r, k); if (req && (v === "" || v == null)) e.push(label + " is empty"); });
-    if (["sales_history", "retailer_sales", "opening_stock", "stock_history", "deliveries_history", "targets"].includes(I.kind)) {
+    if (["sales_history", "retailer_sales", "opening_stock", "stock_history", "deliveries_history", "targets", "stock_checks"].includes(I.kind)) {
       const dv = g(r, "depot"), d = dv !== "" && dv != null ? findDepot(dv) : (I.depot ? idx.depot(I.depot) : null);
       if (!d) { e.push("Unknown depot " + (dv || "(none)")); if (dv) unknown.depots.add(String(dv)); } else rec.depot_id = d.id;
-      if (I.kind !== "targets") { const iv = g(r, "item"), p = findItem(iv, d && d.company_id); if (!p) { e.push("Unknown item " + iv); if (iv) unknown.items.add(String(iv)); } else rec.product_id = p.id; }
+      if (I.kind === "stock_checks" && (g(r, "item") === "" || g(r, "item") == null)) rec.product_id = null;
+      else if (I.kind !== "targets") { const iv = g(r, "item"), p = findItem(iv, d && d.company_id); if (!p) { e.push("Unknown item " + iv); if (iv) unknown.items.add(String(iv)); } else rec.product_id = p.id; }
     }
     if (["sales_history", "retailer_sales", "opening_stock", "stock_history", "deliveries_history"].includes(I.kind)) { const q = toNum(g(r, "qty")); if (q == null || isNaN(q) || q < 0) e.push("Qty must be a number"); else rec.qty = q; }
     if (I.kind === "sales_history") { rec.date = toDate(g(r, "date")); if (!rec.date) e.push("Bad date"); const a = toNum(g(r, "amount")), up = toNum(g(r, "unit_price"));
@@ -4094,6 +4153,8 @@ function importCheck() {
       const a = toNum(g(r, "amount")); rec.amount = a != null && !isNaN(a) ? a : null; const es = toNum(g(r, "ending_stock")); rec.ending_stock = es != null && !isNaN(es) ? es : null; }
     if (I.kind === "stock_history") { rec.date = toDate(g(r, "date")); if (!rec.date) e.push("Bad date"); }
     if (I.kind === "deliveries_history") { rec.received_on = toDate(g(r, "received_on")); rec.requested_on = toDate(g(r, "requested_on")) || null; rec.ref = String(g(r, "ref") || "") || null; if (!rec.received_on) e.push("Bad received date"); }
+    if (I.kind === "stock_checks") { rec.reason = String(g(r, "reason") || "").trim(); const k = normH(g(r, "kind")).replace(/ /g, "_"); rec.kind = CHECK_KIND[k] ? k : (Object.keys(CHECK_KIND).find(x => normH(CHECK_KIND[x]) === normH(g(r, "kind"))) || "other");
+      rec.as_of = toDate(g(r, "as_of")) || null; const ex = toNum(g(r, "expected")), co = toNum(g(r, "counted")); rec.expected = ex == null || isNaN(ex) ? null : ex; rec.counted = co == null || isNaN(co) ? null : co; }
     if (I.kind === "targets") { const m = toDate(g(r, "month")); rec.month = m ? m.slice(0, 7) + "-01" : ""; if (!m) e.push("Bad month"); rec.amount = toNum(g(r, "amount")); rec.units = toNum(g(r, "units")) || 0; if (rec.amount == null || isNaN(rec.amount)) e.push("Target must be a number"); }
     if (I.kind === "items") {
       const co = String(g(r, "company") || "").trim().toUpperCase(); if (!S.companies.some(c => c.id === co)) e.push("Company must be " + S.companies.map(c => c.id).join(" or "));
@@ -4179,6 +4240,7 @@ async function applyImport(kind, rows, filename) {
       await ins("ss_retailer_sales", rows.map(r => ({ depot_id: r.depot_id, product_id: r.product_id, period_start: r.period_start, period_end: r.period_end, qty: r.qty, amount: r.amount, ending_stock: r.ending_stock, source: /pdf|png|jpe?g|heic/i.test(filename) ? "pdf" : "excel", import_id: imp.id })));
     } else if (kind === "stock_history") await ins("ss_stock_snapshots", rows.map(r => ({ depot_id: r.depot_id, product_id: r.product_id, as_of: r.date, qty: r.qty, import_id: imp.id })));
     else if (kind === "deliveries_history") await ins("ss_delivery_history", rows.map(r => ({ depot_id: r.depot_id, product_id: r.product_id, qty: r.qty, requested_on: r.requested_on, received_on: r.received_on, ref: r.ref, import_id: imp.id })));
+    else if (kind === "stock_checks") await ins("ss_stock_checks", rows.map(r => ({ depot_id: r.depot_id, product_id: r.product_id, kind: r.kind, reason: r.reason, as_of: r.as_of, expected: r.expected, counted: r.counted, import_id: imp.id })));
     else if (kind === "targets") await ins("ss_targets", rows.map(r => ({ depot_id: r.depot_id, month: r.month, amount: r.amount, units: r.units, import_id: imp.id })), { onConflict: "depot_id,month" });
     else if (kind === "opening_stock") {
       const by = {}; rows.forEach(r => (by[r.depot_id] = by[r.depot_id] || []).push(r));
@@ -4198,6 +4260,7 @@ async function applyImport(kind, rows, filename) {
     else if (kind === "retailer_sales") rows.forEach(r => S.retailer_sales.push({ id: uuid(), depot_id: r.depot_id, product_id: r.product_id, period_start: r.period_start, period_end: r.period_end, qty: r.qty, amount: r.amount, ending_stock: r.ending_stock, source: /pdf|png|jpe?g/i.test(filename) ? "pdf" : "excel", import_id: imp.id, created_by: ME.id, created_at: imp.created_at }));
     else if (kind === "stock_history") rows.forEach(r => S.snapshots.push({ id: uuid(), depot_id: r.depot_id, product_id: r.product_id, as_of: r.date, qty: r.qty, import_id: imp.id }));
     else if (kind === "deliveries_history") rows.forEach(r => S.delivery_history.push({ id: uuid(), depot_id: r.depot_id, product_id: r.product_id, qty: r.qty, requested_on: r.requested_on, received_on: r.received_on, ref: r.ref, import_id: imp.id }));
+    else if (kind === "stock_checks") rows.forEach(r => stockChecks().push({ id: uuid(), depot_id: r.depot_id, product_id: r.product_id, kind: r.kind, reason: r.reason, as_of: r.as_of, expected: r.expected, counted: r.counted, status: "open", import_id: imp.id, created_by: ME.id, created_at: imp.created_at, updated_at: imp.created_at }));
     else if (kind === "targets") rows.forEach(r => { S.targets = S.targets.filter(t => !(t.depot_id === r.depot_id && String(t.month).slice(0, 7) === r.month.slice(0, 7))); S.targets.push({ depot_id: r.depot_id, month: r.month, amount: r.amount, units: r.units, import_id: imp.id }); });
     else if (kind === "opening_stock") { const by = {}; rows.forEach(r => (by[r.depot_id] = by[r.depot_id] || []).push(r)); Object.entries(by).forEach(([d, ls]) => Engine.count({ id: uuid(), depot_id: d, note: "Opening balance import: " + filename, lines: ls.map(l => ({ product_id: l.product_id, counted_qty: l.qty })) })); }
   }
@@ -5110,6 +5173,118 @@ function enterOffline(snap) {
   Q.use(ME.id); useSnapshot(snap); render();
   toast("No signal. Working with the data saved on this phone (" + dtime(snap.at) + ").");
 }
+/* =====================================================================
+   STOCK TO VERIFY — a stock figure whose history doesn't add up is used, but marked until someone confirms it.
+   Marks come from Import data › "Stock to verify" (the files' own inconsistencies) or are added here.
+   The plant closes them: ask the promodiser to recount, confirm, correct (saved as a stock count), or dismiss.
+   A promodiser's count that includes the item records the counted figure on the mark; the plant then accepts or corrects it.
+   ===================================================================== */
+const CHECK_CLOSED = ["validated", "adjusted", "dismissed"];
+const CHECK_ACTIVE = ["open", "recount", "counted"];
+const stockChecks = () => S.stock_checks || (S.stock_checks = []);
+const CHECK_KIND = {
+  went_up: "Went up, no delivery", went_down: "Went down, no sale", versions: "File copies disagree", pullout: "Pull-out to confirm",
+  identity: "Confirm the item", stale: "Not counted lately", sales_value: "Sales report differs", sheet_math: "Sheet doesn't add up", other: "Other"
+};
+const CHECK_STATUS = { open: ["Needs checking", "warn"], recount: ["Recount asked", "info"], counted: ["Recounted — review", "info"],
+  validated: ["Confirmed", "good"], adjusted: ["Corrected", "good"], dismissed: ["Dismissed", ""] };
+const canCloseChecks = () => !viewOnly() && hasRole("admin", "ppic", "scm", "plant_mgr");
+/* active marks on one stock line, or on the whole depot (product_id null) */
+function activeChecks(depotId, productId) {
+  return stockChecks().filter(c => c.depot_id === depotId && CHECK_ACTIVE.includes(c.status) && (productId === undefined || c.product_id === productId || (productId !== null && !c.product_id)));
+}
+/* the small mark shown next to a stock figure */
+function checkMark(depotId, productId, opts = {}) {
+  const line = stockChecks().filter(c => c.depot_id === depotId && c.product_id === productId && CHECK_ACTIVE.includes(c.status));
+  // a whole-depot mark puts every figure in doubt — except a sales-report difference, which questions sales, not each item's stock
+  const whole = stockChecks().some(c => c.depot_id === depotId && !c.product_id && CHECK_ACTIVE.includes(c.status) && c.kind !== "sales_value");
+  if (!line.length && !whole) return "";
+  const why = line.map(c => c.reason).concat(whole ? ["Whole depot: not confirmed"] : []).join(" • ");
+  return `<span class="chip warn chk-mark" title="${esc(why)}">${opts.text === false ? "!" : line.some(c => c.status === "recount") ? "Recount" : "Check"}</span>`;
+}
+const myCheckCount = () => stockChecks().filter(c => ["open", "counted"].includes(c.status) && (!companyScoped() || inMyCompany((idx.depot(c.depot_id) || {}).company_id))).length;
+
+PLANT_ROUTES.checks = { view() {
+  const f = UI.f, ds = scopeDepots(f), dsIds = new Set(ds.map(d => d.id));
+  const all = stockChecks().filter(c => dsIds.has(c.depot_id));
+  const tab = UI.ckTab || "action";
+  const pick = { action: c => ["open", "counted"].includes(c.status), recount: c => c.status === "recount", closed: c => CHECK_CLOSED.includes(c.status), all: () => true };
+  const q = (UI.ckQ || "").trim().toLowerCase();
+  const rows = all.filter(pick[tab]).filter(c => !q || ((idx.product(c.product_id) || {}).name + " " + (idx.product(c.product_id) || {}).sku + " " + (idx.depot(c.depot_id) || {}).name + " " + c.reason).toLowerCase().includes(q))
+    .sort((a, b) => (a.status === "counted" ? -1 : 0) - (b.status === "counted" ? -1 : 0) || ((idx.depot(a.depot_id) || {}).name || "").localeCompare((idx.depot(b.depot_id) || {}).name || "") || String(b.created_at).localeCompare(String(a.created_at)));
+  const n = k => all.filter(pick[k]).length, can = canCloseChecks();
+  const byDepot = {}; all.filter(c => CHECK_ACTIVE.includes(c.status)).forEach(c => { const x = byDepot[c.depot_id] = byDepot[c.depot_id] || { lines: new Set(), whole: [], counted: 0 }; if (c.product_id) x.lines.add(c.product_id); else x.whole.push(c.kind); if (c.status === "counted") x.counted++; });
+  const act = c => !can || CHECK_CLOSED.includes(c.status) ? "" : `<div class="row" style="gap:6px;flex-wrap:wrap;justify-content:flex-end">
+      ${c.status === "counted" ? `<button class="btn small primary" onclick="App.checkAct('${c.id}','validate')">Accept ${fmt(c.recount_qty)}</button>` : `<button class="btn small" onclick="App.checkAct('${c.id}','validate')">Figure is right</button>`}
+      ${c.product_id ? `<button class="btn small" onclick="App.checkFix('${c.id}')">Correct it</button>` : ""}
+      ${c.status !== "recount" ? `<button class="btn small" onclick="App.checkAct('${c.id}','ask_recount')">Ask for recount</button>` : ""}
+      <button class="btn small ghost" onclick="App.checkDismiss('${c.id}')">Not a stock issue</button></div>`;
+  return `
+    <div class="section-h"><div><div class="eyebrow">Data</div><h1>Stock to verify</h1></div>
+      <div class="row">${can ? `<button class="btn" onclick="App.checkAdd()">Mark stock for checking</button>` : ""}${hasRole("admin", "ppic", "scm") ? `<button class="btn" onclick="UI.impKind='stock_checks';App.go('import')">Import list</button>` : ""}<button class="btn" onclick="App.exportChecks()">Export</button></div></div>
+    <p class="muted small" style="max-width:82ch">Stock figures whose history doesn't add up — gone up with no delivery, down with no sale, two copies of a count that disagree, a depot nobody has counted lately. The figure is still used for planning; this list is what the team still has to confirm. A promodiser's count of the item shows here as <b>Recounted</b> for you to accept or correct.</p>
+    ${filtersBar()}
+    ${Object.keys(byDepot).length ? `<div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Depot</th><th class="r">Items to check</th><th>Whole depot</th><th class="r">Recounted, to review</th><th class="r">Stock value at SRP</th></tr></thead><tbody>
+      ${Object.entries(byDepot).map(([id, x]) => { const d = idx.depot(id) || {}, st = S.stock.filter(s => s.depot_id === id);
+        return `<tr><td class="nowrap"><b>${esc(d.name)}</b><div class="small faint mono">${esc(d.code || "")}</div></td><td class="r"><b>${x.lines.size}</b> of ${st.filter(s => s.on_hand).length}</td><td>${x.whole.length ? Array.from(new Set(x.whole)).map(k => `<span class="chip warn">${esc(k === "stale" ? "Recount every item" : CHECK_KIND[k] || k)}</span>`).join(" ") : "—"}</td><td class="r">${x.counted || "—"}</td>
+        <td class="r">${pesoK(st.reduce((s, y) => s + y.on_hand * ((idx.product(y.product_id) || {}).srp || 0), 0))}</td></tr>`; }).join("")}
+    </tbody></table></div></div>` : ""}
+    <div class="row between" style="flex-wrap:wrap;gap:8px">${subtabs("ckTab", [["action", "Needs action", n("action")], ["recount", "Recount asked", n("recount")], ["closed", "Closed", n("closed")], ["all", "All", all.length]], tab)}
+      <input class="in" id="ck-q" style="max-width:260px" placeholder="Filter item, depot or reason" value="${esc(UI.ckQ || "")}" oninput="App.checkFilter(this.value)" autocomplete="off"></div>
+    <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th>Depot</th><th>Why</th><th class="r">ShelfSync now</th><th class="r">Recount</th><th>Status</th><th></th></tr></thead><tbody>
+      ${rows.length ? rows.map(c => { const p = idx.product(c.product_id), d = idx.depot(c.depot_id) || {}, st = CHECK_STATUS[c.status] || [c.status, ""];
+        return `<tr><td style="min-width:200px">${p ? prodCell(p) : '<b>Whole depot</b><div class="small faint">every item</div>'}</td><td class="nowrap small">${esc(d.name)}</td>
+          <td style="min-width:240px;max-width:420px"><span class="chip">${esc(CHECK_KIND[c.kind] || c.kind)}</span><div class="small" style="margin-top:4px">${esc(c.reason)}</div>${c.as_of ? `<div class="small faint">as of ${dshort(c.as_of)}</div>` : ""}${c.resolution ? `<div class="small faint" style="margin-top:4px">↳ ${esc(c.resolution)}${c.resolved_by ? " — " + esc(userName(c.resolved_by)) : ""}</div>` : ""}</td>
+          <td class="r num">${p ? fmt(onHand(c.depot_id, c.product_id)) : "—"}</td>
+          <td class="r num">${c.recount_qty != null ? `<b>${fmt(c.recount_qty)}</b><div class="small faint">${esc(userName(c.recount_by))} · ${dshort(c.recount_at)}</div>` : "—"}</td>
+          <td><span class="chip ${st[1]}">${esc(st[0])}</span></td><td class="ck-act">${act(c)}</td></tr>`; }).join("")
+        : `<tr><td colspan="7"><div class="empty">${tab === "action" ? "Nothing waiting. Every stock figure here has been confirmed." : "Nothing here."}</div></td></tr>`}
+    </tbody></table></div></div>`;
+}};
+
+Object.assign(App, {
+  checkFilter(v) { UI.ckQ = v; rerender(); const el = $("#ck-q"); if (el) { el.focus(); el.setSelectionRange(v.length, v.length); } },
+  async checkAct(id, action, note, qty) {
+    try { await API.run("checkAct", { id, action, note, qty }); } catch (e) { return; }      // API.run already said what went wrong
+    closeSheets();
+    { toast({ validate: "Confirmed", ask_recount: "Recount asked — the promodiser sees it on their home screen", dismiss: "Dismissed", adjust: "Stock corrected" }[action] || "Saved"); rerender(); }
+  },
+  checkFix(id) {
+    const c = stockChecks().find(x => x.id === id), p = idx.product(c.product_id), d = idx.depot(c.depot_id);
+    openSheet(`<form class="stack" onsubmit="event.preventDefault();App.checkAct('${id}','adjust',val('ck-note'),val('ck-qty'))"><h2>Correct the stock</h2>
+      <p class="small muted">${esc(p.name)} at <b>${esc(d.name)}</b>. ShelfSync now: <b>${fmt(onHand(c.depot_id, c.product_id))}</b> ${esc(p.uom)}${c.recount_qty != null ? ` · recounted <b>${fmt(c.recount_qty)}</b>` : ""}. Saved as a stock count, so the stock card shows the change.</p>
+      <label class="f">The right quantity<input class="in" id="ck-qty" type="number" min="0" step="any" required autofocus value="${c.recount_qty ?? ""}"></label>
+      <label class="f">Note<input class="in" id="ck-note" placeholder="e.g. checked the DR — 2 sheets were never received"></label>
+      <div class="row"><button class="btn primary" type="submit">Save</button><button class="btn ghost" type="button" onclick="closeSheets()">Cancel</button></div></form>`);
+  },
+  checkDismiss(id) {
+    openSheet(`<form class="stack" onsubmit="event.preventDefault();App.checkAct('${id}','dismiss',val('ck-note'))"><h2>Not a stock issue</h2>
+      <label class="f">Why<input class="in" id="ck-note" required autofocus placeholder="e.g. item was relabelled, stock is the same"></label>
+      <div class="row"><button class="btn primary" type="submit">Dismiss</button><button class="btn ghost" type="button" onclick="closeSheets()">Cancel</button></div></form>`);
+  },
+  checkAdd(depotId) {
+    const ds = scopeDepots(UI.f); if (!ds.length) return toast("Add depots first (Setup › Depots)", true);
+    UI.ckDepot = depotId || (UI.ckDepot && ds.some(d => d.id === UI.ckDepot) ? UI.ckDepot : ds[0].id);
+    const dp = idx.depot(UI.ckDepot), prods = S.products.filter(p => p.company_id === dp.company_id && p.active !== false);
+    openSheet(`<form class="stack" onsubmit="event.preventDefault();App.checkSave()"><h2>Mark stock for checking</h2>
+      <label class="f">Depot<select class="in" id="ck-depot" onchange="App.checkAdd(this.value)">${ds.map(d => opt(d.id, d.name, UI.ckDepot)).join("")}</select></label>
+      <label class="f">Item<select class="in" id="ck-item">${opt("", "Whole depot (every item)", "")}${prods.map(p => opt(p.id, p.sku + " · " + p.name + " (" + fmt(onHand(dp.id, p.id)) + ")", "")).join("")}</select></label>
+      <label class="f">What doesn't add up<input class="in" id="ck-reason" required placeholder="e.g. went up by 30 with no delivery recorded"></label>
+      <div class="row"><button class="btn primary" type="submit">Save</button><button class="btn ghost" type="button" onclick="closeSheets()">Cancel</button></div></form>`);
+  },
+  async checkSave() {
+    const reason = val("ck-reason"); if (!reason.trim()) return toast("Say what needs checking", true);
+    try { await API.run("addCheck", { id: uuid(), depot_id: val("ck-depot"), product_id: val("ck-item") || null, reason, kind: "other" }); } catch (e) { return; }
+    closeSheets(); toast("Marked for checking"); rerender();
+  },
+  exportChecks() {
+    const ds = new Set(scopeDepots(UI.f).map(d => d.id)), list = stockChecks().filter(c => ds.has(c.depot_id));
+    if (!list.length) return toast("Nothing to export", true);
+    exportRows("ShelfSync stock to verify " + isoDate(Date.now()), ["Depot", "SKU", "Item", "Why", "Detail", "As of", "ShelfSync now", "Recount", "Status", "Resolution", "Closed by"],
+      list.map(c => { const p = idx.product(c.product_id) || {}, d = idx.depot(c.depot_id) || {};
+        return [d.name, p.sku || "(whole depot)", p.name || "", CHECK_KIND[c.kind] || c.kind, c.reason, c.as_of || "", p.id ? onHand(c.depot_id, p.id) : "", c.recount_qty ?? "", (CHECK_STATUS[c.status] || [c.status])[0], c.resolution || "", c.resolved_by ? userName(c.resolved_by) : ""]; }), "Stock to verify");
+  }
+});
 /* =====================================================================
    GUIDED PRACTICE — the real screens, a throwaway copy of the sample data
    ---------------------------------------------------------------------
