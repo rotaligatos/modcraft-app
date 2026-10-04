@@ -5001,6 +5001,15 @@ const PROFILES = {
           const h = f([['KITCHEN — Juan'], [], ['Description', 'Board', 'Pcs', 'Length (mm)', 'Width (mm)'], ['Side', 'PB', 2, 720, 560]]);
           return [c.ok ? c.row(['Back panel', 'MP06 WARM WHITE', 4, 528, 658]).slice(0, 7) : c.missing, h && h.i, h && h.cm.row(['Side', 'PB', 2, 720, 560]).slice(0, 7), f([['Back panel', 'MP06', 4, 528, 658]])];
         }, [[undefined, 'Back panel', 'MP06 WARM WHITE', 528, 658, undefined, 4], 2, [undefined, 'Side', 'PB', 720, 560, undefined, 2], null]);
+        check('A client list read from the Sheet before Supabase was ready is read again once it is', () => {
+          const w = window, keep = w.gLoadClients, kt = w.gToken, ks = w._clientsSrc; let n = 0;
+          try {
+            w.gLoadClients = () => { n++; }; w.gToken = 'x';
+            w._clientsSrc = 'sheet'; w._supaSessionArrived();
+            w._clientsSrc = 'supabase'; w._supaSessionArrived();
+            return n;
+          } finally { w.gLoadClients = keep; w.gToken = kt; w._clientsSrc = ks; }
+        }, 1);
         check('Deleting a client removes it from Supabase too (clients load from there first)', () => {
           const one = String(window.deleteClient), many = String(window.deleteSelectedClients);
           return [typeof window.supaDeleteClient === 'function', /supaDeleteClient\(/.test(one), /supaDeleteClient\(/.test(many)];
