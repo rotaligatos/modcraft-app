@@ -126,6 +126,9 @@ button,input,select,textarea{font:inherit;color:inherit}
 .chip.accent{background:var(--accent-soft);color:var(--accent)}
 .iconbtn{border:1px solid var(--line);background:var(--surface);border-radius:999px;height:42px;min-width:42px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;font-size:.85rem;font-weight:600}
 .iconbtn:hover{background:var(--surface-2)}
+.iconbtn.bell{position:relative;padding:0}.iconbtn.bell svg{width:20px;height:20px}
+.iconbtn.bell.off{border-color:#f59e0b;color:#b45309}
+.bell-dot{position:absolute;top:6px;right:7px;width:9px;height:9px;border-radius:50%;background:#f59e0b;box-shadow:0 0 0 2px var(--surface)}
 .avatar{width:30px;height:30px;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;font-weight:700;font-size:.78rem;font-family:var(--f-display)}
 
 .main{padding-inline:16px;padding-block:18px 28px;max-width:1400px;margin-inline:auto}
@@ -1839,6 +1842,8 @@ function killCharts() { charts.forEach(c => { try { c.destroy(); } catch (e) {} 
 
 const svg = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 const ICON = {
+  bell: svg('<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
+  bellOff: svg('<path d="M6 8a6 6 0 0 1 9.3-5M18 8c0 7 3 9 3 9H9M6.3 12C5.9 15.6 3 17 3 17h11M10.3 21a1.94 1.94 0 0 0 3.4 0M3 3l18 18"/>'),
   home: svg('<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>'),
   sell: svg('<path d="M4 5v14M7 5v14M11 5v14M14 5v14M18 5v14M21 5v14"/>'),
   stock: svg('<path d="M3 20h18M5 20V9h4v11M10 20V5h4v15M15 20v-8h4v8"/>'),
@@ -1985,6 +1990,7 @@ function topbar() {
     <div class="brand">${LOGO}<span>ShelfSync</span></div>${coLogos(bc)}
     ${isPromo() && myDepotIds().length > 1 ? `<button class="ctx grow ctx-btn" onclick="App.pickDepot()" aria-label="Switch branch"><b>${esc(ctxA)} ▾</b><span>${esc(ctxB)} · ${myDepotIds().length} branches</span></button>` : `<div class="ctx grow"><b>${esc(ctxA)}</b><span>${esc(ctxB)}</span></div>`}
     <span id="sync">${syncChip()}</span>
+    ${pushBell()}
     <button class="iconbtn" onclick="App.menu()" aria-label="Account menu"><span class="avatar">${esc(initials(ME.full_name))}</span></button>
   </div></header>`;
 }
@@ -1998,6 +2004,12 @@ function syncChip() {
   if (n && !SYNC.ok) return b("warn", (SYNC.authNeeded ? "Sign in to sync " : "Sync paused · ") + n);
   if (n) return b("info", "Syncing " + n);
   return b("good", "Synced", true);
+}
+/* the bell in the top bar: always there, with a dot while notifications are off on this device */
+function pushBell() {
+  if (MODE !== "live" || PRACTICE || !PUSH.state || PUSH.state === "unsupported") return "";
+  const off = PUSH.state !== "on", txt = { on: "Notifications on", off: "Notifications off. Tap to turn on", install: "Notifications: add ShelfSync to the Home Screen first", denied: "Notifications blocked" }[PUSH.state];
+  return `<button class="iconbtn bell ${off ? "off" : ""}" onclick="App.pushMenu()" aria-label="${txt}" title="${txt}">${PUSH.state === "denied" ? ICON.bellOff : ICON.bell}${off ? '<span class="bell-dot"></span>' : ""}</button>`;
 }
 function renderSync() { const el = $("#sync"); if (el) el.innerHTML = syncChip(); }
 
@@ -2253,11 +2265,25 @@ const PUSH = {
     const sub = await PUSH.sub(); if (!sub) return;
     try { await Promise.race([SB.rpc("ss_push_unsubscribe", { p_endpoint: sub.endpoint }), new Promise(r => setTimeout(r, 3000))]); } catch (e) {}
   },
+  /* once a day after sign-in, while it is off: ask (the bell and the bar stay until it is on) */
+  maybeAsk() {
+    if (MODE !== "live" || PRACTICE || !ME || !["off", "install"].includes(PUSH.state)) return;
+    const k = "shelfsync-push-asked-" + ME.id; if (Date.now() - Number(LS.get(k) || 0) < DAY) return;
+    LS.set(k, Date.now()); if (!document.querySelector(".sheet-bg")) App.pushMenu();
+  },
+  /* Admin › Setup: who has notifications on */
+  devices: null, devicesAt: 0,
+  loadDevices() {
+    if (MODE !== "live" || !SB || Date.now() - PUSH.devicesAt < 60000) return;
+    PUSH.devicesAt = Date.now();
+    SB.rpc("ss_push_devices").then(r => { if (r.error) return; PUSH.devices = new Map((r.data || []).map(x => [x.user_id, x])); rerender({ keepInputs: true }); }, () => {});
+  },
   /* one line for the account menu */
   label() { return { on: "On", off: "Off", denied: "Blocked", unsupported: "Not available", install: "Add to Home Screen first" }[PUSH.state] || "…"; },
   /* the nudge on Home / Depot requests: only when it can be switched on and hasn't been dismissed */
   nudge(text) {
-    if (PRACTICE || MODE !== "live" || !ME || !["off", "install"].includes(PUSH.state) || LS.get("shelfsync-push-nudge-" + ME.id)) return "";
+    const snoozed = Number(LS.get("shelfsync-push-nudge-" + ME?.id) || 0);
+    if (PRACTICE || MODE !== "live" || !ME || !["off", "install"].includes(PUSH.state) || Date.now() - snoozed < 3 * DAY) return "";
     return `<div class="notice row between push-nudge"><span>🔔 ${esc(text)}</span><span class="row"><button class="btn small primary" onclick="App.pushMenu()">${PUSH.state === "install" ? "How" : "Turn on"}</button><button class="btn small ghost" onclick="App.pushNudgeOff()">Not now</button></span></div>`;
   }
 };
@@ -3754,18 +3780,20 @@ function cmdUsers() {
   const list = (S.users || []).filter(u => (!role || u.role === role) && (!st || accessState(u) === st) && (!q || (u.full_name + " " + (u.email || "") + " " + (u.agency || "")).toLowerCase().includes(q)))
     .sort((a, b) => (a.role === "promodiser" ? 0 : 1) - (b.role === "promodiser" ? 0 : 1) || a.full_name.localeCompare(b.full_name));
   const keys = u => (S.passkeys || []).filter(k => k.user_id === u.id).length;
+  PUSH.loadDevices();
   return `<div class="row between"><div class="filters">
       <label class="f">Search<input class="in" id="cu-q" placeholder="Name, email, agency" value="${esc(UI.cuQ || "")}" oninput="UI.cuQ=this.value" onchange="rerender()"></label>
       <label class="f">Role<select class="in" id="cu-role" onchange="UI.cuRole=this.value;rerender()">${opt("", "All roles", role)}${Object.entries(ROLES).map(([k, v]) => opt(k, v, role)).join("")}</select></label>
       <label class="f">Access<select class="in" id="cu-st" onchange="UI.cuSt=this.value;rerender()">${opt("", "Any", st)}${opt("active", "Active", st)}${opt("suspended", "Suspended", st)}${opt("expired", "Expired", st)}</select></label></div>
     <a class="btn primary" href="${esc(liveConfig().commandCenterUrl)}" target="_blank" rel="noopener">Manage in Command Center ↗</a></div>
     <div class="notice">People are added, changed, switched off and their Face ID / fingerprint reset in the <b>Command Center › ShelfSync</b>, the same place as Modcraft, PMES, KEYSTONE and HATID. Changes reach ShelfSync as soon as they are saved there.</div>
-    <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>User</th><th>Role</th><th>Assigned to</th><th>Agency</th><th>Access</th><th>Until</th><th>Biometrics</th><th>Last active</th></tr></thead><tbody>
+    <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>User</th><th>Role</th><th>Assigned to</th><th>Agency</th><th>Access</th><th>Until</th><th>Biometrics</th>${MODE === "live" ? "<th>Notifications</th>" : ""}<th>Last active</th></tr></thead><tbody>
     ${list.map(u => `<tr><td class="nowrap"><b>${esc(u.full_name)}</b><div class="small faint">${esc(u.email || "")}</div></td><td class="small">${esc(rolesLabel(u))}</td>
       <td class="small">${u.depot_id ? [u.depot_id].concat(u.depot_ids || []).map(x => esc((idx.depot(x) || {}).name || "?")).join(" + ") : u.plant_id ? esc(idx.plant(u.plant_id).name) : esc(u.company_id || "")}</td><td class="small">${esc(u.agency || "—")}</td>
       <td>${stateChip(u)}${u.role === "promodiser" && u.perms && Object.values(u.perms).some(v => v === false) ? '<div class="small faint">Some features off</div>' : ""}</td>
       <td class="small nowrap">${u.access_expires ? dshort(u.access_expires) + ", " + u.access_expires.slice(0, 4) : "—"}</td>
       <td class="small">${keys(u) ? `<span class="chip good">${keys(u)} device${keys(u) > 1 ? "s" : ""}</span>` : u.require_passkey === false ? '<span class="faint">Not required</span>' : '<span class="chip warn">Not set up</span>'}</td>
+      ${MODE === "live" ? `<td class="small">${!PUSH.devices ? "…" : PUSH.devices.has(u.id) ? `<span class="chip good">On · ${PUSH.devices.get(u.id).devices} device${PUSH.devices.get(u.id).devices > 1 ? "s" : ""}</span>` : '<span class="chip warn">Off</span>'}</td>` : ""}
       <td class="small nowrap">${u.last_seen_at ? dtime(u.last_seen_at) : "—"}</td>
     </tr>`).join("")}
     </tbody></table></div></div>
@@ -4248,7 +4276,7 @@ const App = {
   async pushOn() { await busy(async () => { await PUSH.enable(); toast("Notifications are on for this device"); App.pushMenu(); rerender(); }); },
   async pushOff() { await busy(async () => { await PUSH.disable(); toast("Notifications are off for this device"); App.pushMenu(); rerender(); }); },
   async pushTest() { await busy(async () => { const r = await fn(PUSH.fn, { test: true }); toast(r.sent ? "Test sent. It should appear in a few seconds." : "Nothing was sent: " + (r.skipped || "no device registered") + ". Turn notifications off and on again.", !r.sent); }); },
-  pushNudgeOff() { if (ME) LS.set("shelfsync-push-nudge-" + ME.id, true); rerender(); toast("You can turn notifications on any time from the account menu"); },
+  pushNudgeOff() { if (ME) LS.set("shelfsync-push-nudge-" + ME.id, Date.now()); rerender(); toast("Hidden for 3 days. The bell at the top turns notifications on any time."); },
   /* opened from a notification */
   openFromPush(id) {
     const r = S.requests.find(x => x.id === id);
@@ -4993,7 +5021,7 @@ async function finishLogin(u, event) {
   if (!resume) SB.rpc("ss_touch", { p_event: event, p_agent: navigator.userAgent }).then(() => {}, () => {});
   try { await loadLive(!!snap); } catch (e) { toast((snap ? "Showing data saved on this phone. " : "Couldn't load data: ") + friendlyErr(e), true); }
   startRealtime(); flushOutbox(true);
-  PUSH.resync().then(() => rerender({ keepInputs: true })).catch(() => {});
+  PUSH.resync().then(() => { rerender({ keepInputs: true }); PUSH.maybeAsk(); }).catch(() => {});
   // opened by tapping a notification: go straight to that request
   const want = new URLSearchParams(location.search).get("r");
   if (want) { history.replaceState(null, "", location.pathname); App.openFromPush(want); }
@@ -5309,7 +5337,11 @@ if ("serviceWorker" in navigator && (location.protocol === "https:" || location.
     setInterval(() => reg.update().catch(() => {}), 30 * 60000);
   }).catch(() => {});
   // reload only when the person tapped Reload on the update bar (the first install also changes the controller)
-  navigator.serviceWorker.addEventListener("controllerchange", () => { if (!wantReload) return; wantReload = false; location.reload(); });
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (wantReload) { wantReload = false; location.reload(); return; }
+    if (hadController) showUpdate(() => location.reload());     // a new version took over in the background
+  });
 }
 function showUpdate(go) {
   if (document.getElementById("upd")) return;

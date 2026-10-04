@@ -1,6 +1,6 @@
 // ShelfSync service worker: the app and its libraries work offline; data calls always go to the network.
-// A new version installs in the background and waits until the person taps "Reload" in the app.
-const VERSION = "shelfsync-v11";
+// A new version installs in the background and takes over at once; the page offers "Reload" to use the new screens.
+const VERSION = "shelfsync-v12";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/co-wcli.png", "./icons/co-wcli-mark.png",
   "./icons/co-cwli.png", "./icons/co-cwli-mark.png", "./icons/rtmo.png"];
 // libraries: the copy published with the app (vendor/), else the CDN — same list as LIBS in src/20-data.js.
@@ -11,7 +11,9 @@ const LIBS = [
   ["./vendor/html5-qrcode.min.js", "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"],
   ["./vendor/chart.umd.min.js", "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"]];
 const isScript = r => r && r.ok && !/text\/html/i.test(r.headers.get("content-type") || "");
+// a new version takes over at once (notifications depend on it); the open page keeps running until the person taps Reload
 self.addEventListener("install", e => {
+  self.skipWaiting();
   e.waitUntil(caches.open(VERSION).then(async c => {
     await c.addAll(SHELL);
     await Promise.all(LIBS.map(async ([own, cdn]) => {
