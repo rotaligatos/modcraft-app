@@ -439,7 +439,11 @@ function zOf(p) {
 
 /* ---------- roles & approval chain ---------- */
 const ROLES = { promodiser:"Promodiser", ppic:"PPIC", scm:"Supply Chain Manager", plant_mgr:"Plant Manager",
-  smd:"Sales & Marketing Director", md:"Managing Director", admin:"Admin" };
+  smd:"Sales & Marketing Director", md:"Managing Director", admin:"Admin", accounting:"Accounting" };
+/* Accounting: sees what a Plant user sees for their companies (sales, stock value, targets, documents, requests), changes nothing.
+   The database enforces this (ss_view_only, accounting_role.sql); here it only hides the buttons. Someone with Accounting plus another role keeps that role's rights. */
+const viewOnly = () => !!ME && rolesOf(ME).every(r => r === "accounting");
+const VIEW_ONLY_PAGES = ["dashboard", "performance", "reports", "approvals", "recon", "movements", "documents", "depots"];
 const CHAIN = [
   { status:"for_ppic",       role:"ppic",       short:"PPIC",      label:"PPIC review",                 verb:"Endorse to Supply Chain" },
   { status:"for_scm",        role:"scm",        short:"SCM",       label:"Supply Chain Manager",        verb:"Approve" },
@@ -481,7 +485,7 @@ function withWorkingDepot(u) {
 }
 const myDepotIds = () => !ME ? [] : Array.from(new Set([ME.home_depot_id || ME.depot_id].concat(ME.depot_ids || []).filter(Boolean)));
 const can = p => !!ME && (ME.role !== "promodiser" || !ME.perms || ME.perms[p] !== false);
-const DOC_TYPES = { delivery_receipt: "Delivery receipt", count_sheet: "Stock count sheet", pullout_slip: "Pull-out slip", damage_photo: "Damage photo",
+const DOC_TYPES = { cof: "Consignment order form (COF)", delivery_receipt: "Delivery receipt", count_sheet: "Stock count sheet", pullout_slip: "Pull-out slip", damage_photo: "Damage photo",
   sellout_report: "Retailer sell-out report", shelf_photo: "Shelf / display photo", other: "Other" };
 const MOVE_KINDS = { sale: ["Sale", "out"], receipt: ["Delivery received", "in"], count_adj: ["Count adjustment", "adj"], damage: ["Damaged", "out"],
   return: ["Customer return", "in"], pullout: ["Pull-out to Plant", "out"], transfer_in: ["Transfer in", "in"], transfer_out: ["Transfer out", "out"], opening: ["Opening balance", "adj"] };
@@ -605,10 +609,18 @@ const Engine = {
     });
     return out;
   },
-  movement({ id, depot_id, product_id, kind, qty, note, created_at }) {
-    if (ME.role === "promodiser" && (!can("movements") || !["damage", "return", "pullout"].includes(kind))) throw new Error("Not allowed");
+  movement({ id, depot_id, product_id, kind, qty, note, created_at, ref_text }) {
+    // a promodiser may record damage / return / pull-out, and a delivery that came without a request (DR no. required)
+    const promoReceipt = kind === "receipt" && can("receive") && String(ref_text || "").trim();
+    if (ME.role === "promodiser" && !promoReceipt && (!can("movements") || !["damage", "return", "pullout"].includes(kind))) throw new Error("Not allowed");
     const signed = MOVE_KINDS[kind][1] === "out" ? -Math.abs(qty) : Math.abs(qty);
-    Engine.move(depot_id, product_id, signed, kind, null, created_at || null, { id, note });
+    Engine.move(depot_id, product_id, signed, kind, null, created_at || null, { id, note, ref_text: String(ref_text || "").trim() || null });
+  },
+  /* PPIC checks a delivery a promodiser recorded without a request (same rule as ss_review_delivery) */
+  reviewDelivery({ depot_id, ref }) {
+    if (!hasRole("ppic", "admin")) throw new Error("Only PPIC can check deliveries");
+    const now = new Date().toISOString();
+    S.movements.filter(m => m.depot_id === depot_id && m.kind === "receipt" && !m.ref_id && m.ref_text === ref && !m.reviewed_at).forEach(m => { m.reviewed_at = now; m.reviewed_by = ME.id; });
   },
   /* void a sale: the person who made it within 30 minutes, or PPIC / Admin (the database checks the same) */
   voidSale({ id, reason }) {
@@ -623,7 +635,7 @@ const Engine = {
     if (SERVER) { const x = (SERVER.sales || []).find(y => y.id === id); if (x) x.voided_at = new Date().toISOString(); }
     (S.voided = S.voided || []).push({ ...s, voided_at: new Date().toISOString(), void_reason: reason });
   },
-  request({ id, depot_id, origin, note, needed_by, lines, confirm_id, odoo_ticket_ref }) {
+  request({ id, depot_id, origin, note, needed_by, lines, confirm_id, odoo_ticket_ref, cof_ref }) {
     if (ME.role === "promodiser" && !can("request")) throw new Error("Requesting stock is switched off for your account");
     needConfirm("request:" + id, confirm_id);
     if (origin === "ppic" && odooRule() === "ppic_review" && !String(odoo_ticket_ref || "").trim()) throw new Error("Enter the Odoo ticket number first");
@@ -632,7 +644,7 @@ const Engine = {
     const now = new Date();
     const req = { id, req_no: "RR-" + String(now.getFullYear()).slice(2) + String(now.getMonth()+1).padStart(2,"0") + "-" + String(n).padStart(4,"0"),
       company_id: dp.company_id, plant_id: dp.plant_id, depot_id, ship_to_depot_id: dp.ship_via_depot_id || dp.id,
-      origin, status: origin === "ppic" ? "for_scm" : "for_ppic", note, needed_by, confirm_id: confirm_id || null,
+      origin, status: origin === "ppic" ? "for_scm" : "for_ppic", note, needed_by, cof_ref: String(cof_ref || "").trim() || null, confirm_id: confirm_id || null,
       odoo_ticket_ref: origin === "ppic" ? (String(odoo_ticket_ref || "").trim() || null) : null, created_by: ME.id,
       created_at: now.toISOString(), updated_at: now.toISOString() };
     S.requests.push(req);
@@ -764,12 +776,12 @@ const Engine = {
    Online-only ops (biometric actions, admin) go to the server first.
    Each entry keeps the time it was made on the device, so a sale made offline on Tuesday stays Tuesday's sale. */
 const OFFLINE_OK = new Set(["sale", "lost", "count", "movement", "message", "depotReport", "retailerSales", "competitor", "updateStocks", "updateDepot", "document"]);
-const OP_LABEL = { sale: "Sale", lost: "Missed sale", count: "Stock count", movement: "Stock movement", message: "Message", depotReport: "Depot report",
+const OP_LABEL = { reviewDelivery: "Delivery check", sale: "Sale", lost: "Missed sale", count: "Stock count", movement: "Stock movement", message: "Message", depotReport: "Depot report",
   retailerSales: "Store's sales report", competitor: "Competitor entry", updateStocks: "Shelf minimums", updateDepot: "Depot setting", document: "File / photo" };
 /* which server tables to refresh after an op reaches the server */
 const OP_TABLES = { sale: ["sales", "stock"], lost: ["lost_sales"], count: ["counts", "movements", "stock"], movement: ["movements", "stock"], message: ["messages"],
   depotReport: ["depot_reports"], retailerSales: ["retailer_sales"], competitor: ["competitors"], updateStocks: ["stock"], updateDepot: ["depots"], document: ["documents"],
-  request: ["requests"], advance: ["requests", "stock", "movements"], setOdoo: ["requests"], docReceived: ["documents"], ackReport: ["depot_reports"],
+  request: ["requests"], reviewDelivery: ["movements"], advance: ["requests", "stock", "movements"], setOdoo: ["requests"], docReceived: ["documents"], ackReport: ["depot_reports"],
   reportDef: ["report_defs"], delReportDef: ["report_defs"], delRetailerSales: ["retailer_sales"], saveCapacity: ["capacity"], aiRecs: ["ai_recs"],
   saveDepot: ["depots"], saveAccount: ["accounts", "depots"], saveProduct: ["products", "prices"], resetPasskeys: ["passkeys"], updateSettings: ["settings"],
   voidSale: ["stock"], logAccess: [] };
@@ -907,10 +919,15 @@ const Remote = {
   },
   async movement(p) {
     const signed = MOVE_KINDS[p.kind][1] === "out" ? -Math.abs(p.qty) : Math.abs(p.qty);
-    await upsertSent("ss_movements", { id: p.id, client_uuid: p.id, depot_id: p.depot_id, product_id: p.product_id, kind: p.kind, qty: signed, note: p.note, created_at: p.created_at });
+    await upsertSent("ss_movements", { id: p.id, client_uuid: p.id, depot_id: p.depot_id, product_id: p.product_id, kind: p.kind, qty: signed, note: p.note, created_at: p.created_at, ...(p.ref_text ? { ref_text: p.ref_text } : {}) });
+  },
+  async reviewDelivery(p) {
+    chk(await SB.rpc("ss_review_delivery", { p_depot: p.depot_id, p_ref: p.ref }));
+    const now = new Date().toISOString();   // show it at once; the next refresh brings the server's copy
+    S.movements.filter(m => m.depot_id === p.depot_id && m.kind === "receipt" && !m.ref_id && m.ref_text === p.ref && !m.reviewed_at).forEach(m => { m.reviewed_at = now; m.reviewed_by = ME.id; });
   },
   async request(p) {
-    const body = { id: p.id, depot_id: p.depot_id, origin: p.origin, note: p.note, needed_by: p.needed_by || null, confirm_id: p.confirm_id || null, odoo_ticket_ref: p.odoo_ticket_ref || null,
+    const body = { id: p.id, depot_id: p.depot_id, origin: p.origin, note: p.note, needed_by: p.needed_by || null, cof_ref: p.cof_ref || null, confirm_id: p.confirm_id || null, odoo_ticket_ref: p.odoo_ticket_ref || null,
       lines: p.lines.map(l => ({ product_id: l.product_id, qty_requested: l.qty_requested, qty_suggested: l.qty_suggested ?? null, qty_ai: l.qty_ai ?? null })) };
     const r = await SB.rpc("ss_submit_request", { p: body });
     if (!r.error) { p._req_no = r.data; return; }
@@ -1258,7 +1275,7 @@ let SNAP_AT = 0;
 /* =====================================================================
    DEMO DATA — sample depots, products and 150 days of simulated sales
    ===================================================================== */
-const DEMO_KEY = "shelfsync-demo-v3";
+const DEMO_KEY = "shelfsync-demo-v4";
 function persistDemo() { if (S && MODE === "demo") { if (!LS.set(DEMO_KEY, S)) console.warn("demo data not saved (storage unavailable)"); } }
 function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 function ean13(base12) { const s = base12.split("").reduce((a, c, i) => a + (+c) * (i % 2 ? 3 : 1), 0); return base12 + ((10 - s % 10) % 10); }
@@ -1381,11 +1398,13 @@ function buildDemo() {
     U("u-promo-d-aim", "Kevin Dela Cruz", "kevin.delacruz@agency.demo", "promodiser", "WCLI", { depot_id: "d-aim", agency: "Prime Promo Agency", access_expires: yearEnd, perms: { reports: false } }),
     U("u-promo-d-cmd", "Mark Villanueva", "mark.villanueva@agency.demo", "promodiser", "CWLI", { depot_id: "d-cmd", agency: "Cebu Merchandising Services", access_expires: yearEnd }),
     U("u-promo-d-alp", "Ana Lim", "ana.lim@agency.demo", "promodiser", "WCLI", { depot_id: "d-alp", agency: "Prime Promo Agency", status: "suspended" }),
+    U("u-agent", "Paolo Reyes · Sales agent", "paolo.reyes@wcli.demo", "promodiser", "WCLI", { depot_id: "d-wal", depot_ids: ["d-wpa", "d-wqc"], mobile: "0917 555 0144" }),
     U("u-ppic-pasig", "Carla Mendoza", "carla.mendoza@wcli.demo", "ppic", "WCLI", { plant_id: "PASIG" }),
     U("u-ppic-cebu", "Rhea Tan", "rhea.tan@wcli.demo", "ppic", "CWLI", { plant_id: "CEBU" }),
     U("u-scm", "Supply Chain Manager", "scm@wcli.demo", "scm", "WCLI", { companies: ["CWLI"] }),
     U("u-smd", "Sales & Marketing Director", "smd@wcli.demo", "smd", "WCLI", { companies: ["CWLI"] }),
     U("u-md", "Managing Director", "md@wcli.demo", "md", "WCLI"),
+    U("u-acct", "Accounting", "accounting@wcli.demo", "accounting", "WCLI", { companies: ["CWLI"] }),
     U("u-admin", "Admin · Plant Manager", "admin@wcli.demo", "admin", "WCLI", { extra_roles: ["plant_mgr"] }),
   ];
   // in-flight requests at each stage of the chain
@@ -1821,10 +1840,14 @@ function promoTabs() {
 }
 function plantItems() {
   const a = hasRole("admin"), imp = hasRole("admin", "ppic", "scm");
-  return [["h", "Overview"], ["dashboard", "Dashboard"], ["performance", "Performance"], ["reports", "Reports"],
+  const items = [["h", "Overview"], ["dashboard", "Dashboard"], ["performance", "Performance"], ["reports", "Reports"],
     ["h", "Operations"], ["approvals", "Approvals"], ["plan", "Replenishment"], ["ai", "AI insights"], ["recon", "Sales check"], ["movements", "Stock movements"], ["documents", "Documents"], ["chat", "Messages"],
     ["h", "Data"], ["depots", "Depots & stock"], imp ? ["import", "Import data"] : null, ["settings", "Planning rules"],
     a ? ["h", "Admin"] : null, a ? ["command", "Setup"] : null].filter(Boolean);
+  if (!viewOnly()) return items;
+  // Accounting: only the read-only pages; a heading stays only if a page follows it
+  const kept = items.filter(x => x[0] === "h" || VIEW_ONLY_PAGES.includes(x[0]));
+  return kept.filter((x, i) => x[0] !== "h" || (kept[i + 1] && kept[i + 1][0] !== "h"));
 }
 
 function render() {
@@ -1920,7 +1943,8 @@ function myQueue() {
 }
 function plantRail() {
   const counts = { approvals: myQueue().length, documents: (S.documents || []).filter(d => d.status === "sent" && inMyPlant(d.depot_id)).length,
-    reports: (S.depot_reports || []).filter(r => r.status === "submitted" && inMyPlant(r.depot_id)).length };
+    reports: (S.depot_reports || []).filter(r => r.status === "submitted" && inMyPlant(r.depot_id)).length,
+    movements: hasRole("admin", "ppic") ? unreviewedDeliveries(null).filter(d => inMyPlant(d.depot_id)).length : 0 };
   return `<nav class="rail" aria-label="Plant sections">${plantItems().map(([k, l]) => k === "h" ? `<div class="rail-h">${esc(l)}</div>` :
     `<button ${UI.route === k ? 'aria-current="page"' : ""} onclick="App.go('${k}')">${esc(l)}${counts[k] ? `<span class="count">${counts[k]}</span>` : ""}</button>`).join("")}<div class="rail-foot hide-sm">${madeBy()}</div></nav>`;
 }
@@ -2159,11 +2183,16 @@ const PROMO_ROUTES = {
       can("count") && `<button onclick="App.sub('stock','count');App.go('stock')">${ICON.count}<b>Count stock</b><span>Update what's on the shelf</span></button>`,
       can("request") && `<button onclick="App.go('request')">${ICON.request}<b>Request stock</b><span>Send to PPIC</span></button>`,
       can("reports") && `<button onclick="App.sub('report','daily');App.go('report')">${ICON.report}<b>Daily report</b><span>${reportedToday ? "Sent today" : "Not sent yet today"}</span></button>`,
-      can("reports") && `<button onclick="App.sub('report','competitor');App.go('report')">${ICON.scan}<b>Competitor</b><span>Photo and price</span></button>`,
+      can("reports") && `<button onclick="App.sub('report','competitor');App.go('report')">${ICON.scan}<b>Market watch</b><span>Other brands: photo and price</span></button>`,
       can("documents") && `<button onclick="App.docSheet({depot_id:'${dp.id}',message:true})">${ICON.doc}<b>Send document</b><span>DR, count sheet, photos</span></button>`,
       can("messages") && !can("reports") && `<button onclick="App.go('chat')">${ICON.chat}<b>Message Plant</b><span>Chat with the base</span></button>`].filter(Boolean);
     return `<div class="stack">
       <div class="stack-sm"><h1>${greet}, ${esc(ME.full_name.split(" ")[0])}</h1><p class="muted small">${shipNote(dp)}</p></div>
+      ${(() => { const incoming = can("receive") ? S.requests.filter(r => r.depot_id === dp.id && r.status === "dispatched") : [];
+        return incoming.length ? `<div class="card stack-sm" style="border-color:var(--accent)"><div class="card-h" style="margin:0"><h2>Delivery on the way</h2><span class="chip info">${incoming.length}</span></div>
+          ${incoming.map(r => `<div class="row between"><span><b class="mono">${esc(r.req_no)}</b>${r.hatid_ref ? ` <span class="small faint">DR ${esc(r.hatid_ref)}</span>` : ""}</span><span class="small faint">sent ${dshort(r.dispatched_at || r.updated_at)}</span></div>`).join("")}
+          <p class="small muted">When it arrives, count the items and confirm. Your stock goes up only after you confirm.</p>
+          <button class="btn primary block" onclick="App.go('request')">${ICON.finger}<span>Check and confirm receipt</span></button></div>` : ""; })()}
       <div class="qa">${qa.join("")}</div>
       ${can("sell") ? `<div class="card"><div class="card-h"><h2>Today's sales</h2><span class="small faint">${new Date().toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric" })}</span></div>
         <div class="row" style="gap:28px"><div><div class="eyebrow">Receipts</div><div class="num big">${todays.length}</div></div>
@@ -2241,16 +2270,23 @@ const PROMO_ROUTES = {
 
   request: { view() {
     const dp = myDepot();
-    const mine = S.requests.filter(r => r.depot_id === dp.id).sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const all = S.requests.filter(r => r.depot_id === dp.id).sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const incoming = can("receive") ? all.filter(r => r.status === "dispatched") : [];
+    const mine = all.filter(r => !incoming.includes(r));
     const draft = UI.reqDraft;
     return `<div class="stack">
       <h1>Stock requests</h1>
+      ${incoming.length ? `<div class="stack-sm"><h2>Deliveries to receive</h2><p class="small muted">Check each item against the delivery receipt. Change a quantity if less arrived, attach the signed DR, then confirm.</p>
+        ${incoming.map(r => promoReqCard(r)).join("")}</div>` : ""}
+      ${can("receive") ? drCard(dp) : ""}
       ${can("request") ? `<div class="card stack-sm"><div class="card-h" style="margin:0"><h2>New request</h2><span class="small faint">${shipNote(dp)}</span></div>
         <div class="searchbar"><input class="in grow" id="rq-q" placeholder="Scan or type the item you need" value="${esc(UI.rqQ || "")}" oninput="App.rqSearch(this.value)" onkeydown="if(event.key==='Enter')App.rqEnter()" autocomplete="off" inputmode="search"></div>
         ${(UI.rqQ || "").trim() ? reqResults(dp) : ""}
         ${draft.length ? `<div class="list">${draft.map((l, i) => { const p = idx.product(l.product_id); if (!p) return ""; const pq = pipelineQty(dp.id, p.id), way = pq.transit + pq.pending;
           return `<div class="row between">${prodCell(p, " · " + fmt(onHand(dp.id, p.id)) + " on hand" + (way ? ` · <span class="chip info">${fmt(way)} already requested</span>` : ""))}<div class="row" style="gap:6px;flex-wrap:nowrap"><input class="in qty" id="rqd-${i}" type="number" min="1" value="${l.qty_requested}" onchange="App.reqSet(${i},this.value)" aria-label="Quantity for ${esc(p.sku)}"><button class="btn ghost danger" onclick="App.reqDel(${i})" aria-label="Remove">×</button></div></div>`; }).join("")}</div>` : `<p class="small faint">Search or scan the items you need. The quantity starts at what brings the shelf back to twice its minimum.</p>`}
-        <div class="row"><label class="f grow">Needed by<input class="in" id="rq-date" type="date" value="${esc(UI.reqDate || "")}" onchange="UI.reqDate=this.value"></label></div>
+        <div class="row"><label class="f grow">COF no.<input class="in" id="rq-cof" value="${esc(UI.reqCof || "")}" oninput="UI.reqCof=this.value" placeholder="e.g. 004512"></label>
+          <label class="f grow">Needed by<input class="in" id="rq-date" type="date" value="${esc(UI.reqDate || "")}" onchange="UI.reqDate=this.value"></label></div>
+        <div class="f"><span>Signed COF (photo or PDF)</span>${filePicker("rq", { accept: "image/*,application/pdf", label: "Choose file" })}</div>
         <label class="f">Reason / note for PPIC<textarea class="in" id="rq-note" oninput="UI.reqNote=this.value" placeholder="e.g. Promo next month, contractor inquiry">${esc(UI.reqNote || "")}</textarea></label>
         <button class="btn primary lg" ${draft.length ? "" : "disabled"} onclick="App.reqSubmit()">${ICON.finger}<span>Send to PPIC</span></button>
         <p class="small faint">${Bio.required() ? "You'll confirm with Face ID or fingerprint. " : ""}Approval: PPIC → Supply Chain Manager → Plant Manager (noted) → Sales & Marketing Director → Managing Director.${navigator.onLine ? "" : " Sending needs a signal."}</p>
@@ -2261,7 +2297,7 @@ const PROMO_ROUTES = {
   }},
 
   report: { view() {
-    const tabs = [["daily", "My report"], ["sellout", "Store's sales report"], ["competitor", "Competitor"], ["history", "Sent"]];
+    const tabs = [["daily", "My report"], ["sellout", "Store's sales report"], ["competitor", "Market watch"], ["history", "Sent"]];
     UI.subs = UI.subs || {}; if (!tabs.some(t => t[0] === UI.subs.report)) UI.subs.report = "daily";
     const t = UI.subs.report, dp = myDepot();
     let body = "";
@@ -2273,7 +2309,7 @@ const PROMO_ROUTES = {
         <div class="small faint">${dshort(range[0])}${range[0] !== range[1] ? " – " + dshort(range[1]) : ""} · filled in from what you encoded</div>
         ${summaryBlock(sm)}
         <label class="f">Remarks for the Plant<textarea class="in" id="rep-rem" oninput="UI.repRem=this.value" placeholder="Store traffic, customer feedback, display issues">${esc(UI.repRem || "")}</textarea></label>
-        <label class="f">Competitor activity (optional)<textarea class="in" id="rep-comp" oninput="UI.repComp=this.value" placeholder="Promos, new items, price changes you noticed">${esc(UI.repComp || "")}</textarea></label>
+        <label class="f">Market watch: other brands (optional)<textarea class="in" id="rep-comp" oninput="UI.repComp=this.value" placeholder="Promos, new items, price changes you noticed">${esc(UI.repComp || "")}</textarea></label>
         <div class="f"><span>Photos or files (optional)</span>${filePicker("rep", { accept: "image/*,application/pdf,.xlsx,.xls,.csv", label: "Choose files" })}</div>
         <button class="btn primary lg" onclick="App.submitDepotReport('${per === "week" ? "weekly" : "daily"}','${range[0]}','${range[1]}')">Submit report</button></div>`;
     } else if (t === "sellout") {
@@ -2288,7 +2324,7 @@ const PROMO_ROUTES = {
         <button class="btn primary lg" onclick="App.submitSellout()">Submit depot's sales report</button></div>`;
     } else if (t === "competitor") {
       const cats = Array.from(new Set(myProducts().map(p => p.category).filter(Boolean)));
-      body = `<div class="card stack-sm"><p class="muted small">Take a photo of the competitor's product and note what you see. The Plant uses this for pricing and display decisions.</p>
+      body = `<div class="card stack-sm"><p class="muted small">Take a photo of another brand's product and note what you see. The Plant uses this for pricing and display decisions.</p>
         <div class="row"><label class="f grow">Brand *<input class="in" id="co-brand" placeholder="Brand name"></label><label class="f grow">Product<input class="in" id="co-prod" placeholder="e.g. HPL white gloss"></label></div>
         <div class="row"><label class="f grow">Category<select class="in" id="co-cat">${cats.map(c => opt(c, c)).join("")}${opt("Other", "Other")}</select></label><label class="f grow">Size / thickness / finish<input class="in" id="co-spec" placeholder="0.8mm, 4×8, gloss"></label></div>
         <div class="row"><label class="f grow">Shelf price ₱<input class="in" id="co-price" type="number" min="0" step="0.01" inputmode="decimal"></label><label class="f grow">Facings on shelf<input class="in" id="co-face" type="number" min="0" inputmode="numeric"></label></div>
@@ -2296,7 +2332,7 @@ const PROMO_ROUTES = {
         <label class="f">Our matching item (optional)<select class="in" id="co-our">${opt("", "None")}${itemOptions()}</select></label>
         <label class="f">Notes<textarea class="in" id="co-notes" placeholder="Placement, stock level, customer comments"></textarea></label>
         ${filePicker("co")}
-        <button class="btn primary lg" onclick="App.submitCompetitor()">Save competitor entry</button></div>`;
+        <button class="btn primary lg" onclick="App.submitCompetitor()">Save market watch entry</button></div>`;
     } else {
       const reps = S.depot_reports.filter(r => r.depot_id === dp.id).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 15);
       const comps = S.competitors.filter(c => c.depot_id === dp.id).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 10);
@@ -2304,7 +2340,7 @@ const PROMO_ROUTES = {
       body = `<div class="card"><div class="card-h"><h2>My reports</h2></div>${reps.length ? `<div class="list">${reps.map(r => `<div class="stack-sm"><div class="row between"><b>${r.period === "daily" ? dshort(r.period_start) : dshort(r.period_start) + " – " + dshort(r.period_end)}</b><span class="chip ${r.status === "acknowledged" ? "good" : "warn"}">${r.status === "acknowledged" ? "Acknowledged" : "Sent"}</span></div>
           <div class="small muted">${peso((r.summary || {}).sales_amount)} · ${fmt((r.summary || {}).receipts)} receipts${r.remarks ? " · " + esc(r.remarks) : ""}</div>${r.ack_note ? `<div class="small">Plant: “${esc(r.ack_note)}”</div>` : ""}</div>`).join("")}</div>` : `<div class="empty">No reports yet.</div>`}</div>
         <div class="card"><div class="card-h"><h2>Store's sales reports</h2></div>${so.length ? `<div class="list">${so.map(g => `<div class="row between"><span>${dshort(g.period_start)} – ${dshort(g.period_end)}</span><span class="small muted">${fmt(g.lines)} items · ${fmt(g.qty)} units</span></div>`).join("")}</div>` : `<div class="empty">None sent yet.</div>`}</div>
-        <div class="card"><div class="card-h"><h2>Competitor entries</h2></div>${comps.length ? `<div class="list">${comps.map(c => `<div class="row between"><div class="grow"><b>${esc(c.brand)}</b> ${esc(c.product || "")}<div class="small faint">${dtime(c.created_at)}</div></div>${c.price ? `<b class="num">${peso(c.price)}</b>` : ""}</div>`).join("")}</div>` : `<div class="empty">None yet.</div>`}</div>`;
+        <div class="card"><div class="card-h"><h2>Market watch entries</h2></div>${comps.length ? `<div class="list">${comps.map(c => `<div class="row between"><div class="grow"><b>${esc(c.brand)}</b> ${esc(c.product || "")}<div class="small faint">${dtime(c.created_at)}</div></div>${c.price ? `<b class="num">${peso(c.price)}</b>` : ""}</div>`).join("")}</div>` : `<div class="empty">None yet.</div>`}</div>`;
     }
     return `<div class="stack"><div class="section-h"><h1>Reports</h1><span class="small faint">${esc(dp.name)}</span></div>${subtabs("report", tabs, t)}${body}</div>`;
   }},
@@ -2333,6 +2369,23 @@ function suggestQty(dpId, p) {
   const need = s ? s.min_display * 2 - s.on_hand - pq.transit - pq.pending : 0;
   return Math.max(pack, Math.ceil(Math.max(0, need) / pack) * pack);
 }
+/* a delivery that arrived with no request in the app: recorded by the promodiser with its DR no., checked by PPIC */
+function drCard(dp) {
+  const draft = UI.drDraft || [];
+  if (!UI.drOpen) return `<div class="card row between"><div class="grow"><b>Delivery arrived without a request?</b><div class="small faint">Record it here so your stock is right. PPIC checks it afterwards.</div></div><button class="btn" onclick="UI.drOpen=true;rerender()">Record delivery</button></div>`;
+  const q = (UI.drQ || "").trim().toLowerCase();
+  const res = q ? myProducts().filter(p => (p.name + " " + p.sku + " " + (p.barcode || "")).toLowerCase().includes(q)).slice(0, 8) : [];
+  return `<div class="card stack-sm"><div class="card-h" style="margin:0"><h2>Delivery without a request</h2><button class="btn ghost small" onclick="App.drCancel()">Cancel</button></div>
+    <p class="small muted">Use this only when items arrived and there is no request for them above. Enter the DR number, every item and quantity, and a photo of the DR. It adds to your stock now; PPIC checks it.</p>
+    <label class="f">DR no. (required)<input class="in" id="dr-no" value="${esc(UI.drNo || "")}" oninput="UI.drNo=this.value" placeholder="e.g. 118204"></label>
+    <div class="searchbar"><input class="in grow" id="dr-q" placeholder="Scan or type an item on the DR" value="${esc(UI.drQ || "")}" oninput="App.drSearch(this.value)" onkeydown="if(event.key==='Enter')App.drEnter()" autocomplete="off" inputmode="search"></div>
+    ${q ? (res.length ? `<div class="list">${res.map(p => `<div class="row between">${prodCell(p, " · " + fmt(onHand(dp.id, p.id)) + " on hand")}<button class="btn small" onclick="App.drPick('${p.id}')">Add</button></div>`).join("")}</div>` : `<div class="empty">No item matches “${esc(UI.drQ)}”.</div>`) : ""}
+    ${draft.length ? `<div class="list">${draft.map((l, i) => { const p = idx.product(l.product_id); if (!p) return "";
+      return `<div class="row between">${prodCell(p)}<div class="row" style="gap:6px;flex-wrap:nowrap"><input class="in qty" id="drd-${i}" type="number" min="1" value="${l.qty}" onchange="App.drSet(${i},this.value)" aria-label="Quantity received for ${esc(p.sku)}"><button class="btn ghost danger" onclick="App.drDel(${i})" aria-label="Remove">×</button></div></div>`; }).join("")}</div>` : `<p class="small faint">No items yet. Add each item printed on the DR.</p>`}
+    <div class="f"><span>Photo of the DR</span>${filePicker("dr", { accept: "image/*,application/pdf", label: "Choose file" })}</div>
+    <label class="f">Note (optional)<textarea class="in" id="dr-note" oninput="UI.drNote=this.value" placeholder="e.g. Delivered by the Plant truck with the promo items">${esc(UI.drNote || "")}</textarea></label>
+    <button class="btn primary lg" ${draft.length ? "" : "disabled"} onclick="App.drSave()">Add to stock</button></div>`;
+}
 function reqResults(dp) {
   const q = (UI.rqQ || "").trim().toLowerCase(), ps = myProducts().filter(p => (p.name + " " + p.sku + " " + (p.barcode || "")).toLowerCase().includes(q)).slice(0, 8);
   if (!ps.length) return `<div class="empty">No item matches “${esc(UI.rqQ)}”.</div>`;
@@ -2350,7 +2403,7 @@ function promoReqCard(r) {
   const lines = S.request_lines.filter(l => l.request_id === r.id);
   const recv = r.status === "dispatched" && can("receive");
   const docs = (S.documents || []).filter(d => d.request_id === r.id);
-  return `<div class="card stack-sm"><div class="row between"><div><b class="mono">${esc(r.req_no)}</b> <span class="small faint">${dshort(r.created_at)} · ${r.origin === "ppic" ? "by PPIC" : r.created_by === ME.id ? "by you" : "by promodiser"}</span></div>${statusChip(r.status)}</div>
+  return `<div class="card stack-sm"><div class="row between"><div><b class="mono">${esc(r.req_no)}</b>${r.cof_ref ? ` <span class="small">COF ${esc(r.cof_ref)}</span>` : ""} <span class="small faint">${dshort(r.created_at)} · ${r.origin === "ppic" ? "by PPIC" : r.created_by === ME.id ? "by you" : "by promodiser"}</span></div>${statusChip(r.status)}</div>
     ${miniChain(r)}
     <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="r">Requested</th><th class="r">Approved</th>${recv || r.status === "received" ? '<th class="r">Received</th>' : ""}</tr></thead><tbody>
     ${lines.map(l => { const p = idx.product(l.product_id); return `<tr><td>${prodCell(p)}</td><td class="r">${fmt(l.qty_requested)}</td><td class="r">${l.qty_approved == null ? "—" : fmt(l.qty_approved)}</td>${recv ? `<td class="r"><input class="in qty" id="rcv-${l.id}" type="number" min="0" value="${l.qty_approved ?? l.qty_requested}"></td>` : r.status === "received" ? `<td class="r">${fmt(l.qty_received ?? l.qty_approved)}</td>` : ""}</tr>`; }).join("")}
@@ -2556,7 +2609,7 @@ const PLANT_ROUTES = {
       <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Depot</th><th>Account</th><th>Region</th><th>Plant</th><th>Delivery route</th><th>Space used</th><th class="r">Lead time (days)</th><th class="r">Actual avg</th><th class="r">Units</th><th class="r">Value at SRP</th></tr></thead><tbody>
       ${ds.map(d => { const st = S.stock.filter(s => s.depot_id === d.id), lt = leadTime(d), via = d.ship_via_depot_id ? idx.depot(d.ship_via_depot_id) : null;
         return `<tr><td><b>${esc(d.name)}</b><div class="small faint mono">${esc(d.code)}</div></td><td>${esc(idx.account(d.account_id).name)}</td><td>${esc(d.region || "—")}</td><td>${esc(idx.plant(d.plant_id).name)}</td>
-        <td>${d.is_consolidation_dc ? '<span class="chip info">Consolidation DC</span>' : via ? "Via " + esc(via.name) : "Direct"}</td>
+        <td>${d.is_consolidation_dc ? '<span class="chip info">Warehouse (DC)</span>' : via ? "Via " + esc(via.name) : "Direct"}</td>
         <td class="small">${d.is_consolidation_dc ? "—" : spaceSummary(d).map(x => `<div class="space-bar" title="${esc(x.category)}: ${fmt(x.used)} of ${fmt(x.cap)}"><span style="width:${Math.min(100, x.used / x.cap * 100)}%" class="${x.used > x.cap ? "over" : ""}"></span></div><span class="faint">${esc(x.category.split(" ")[0])} ${fmt(x.used)}/${fmt(x.cap)}</span>`).join("") || '<span class="faint">Not set</span>'}</td>
         <td class="r">${canEdit ? `<span class="row" style="justify-content:flex-end;gap:4px;flex-wrap:nowrap"><input class="in qty" style="width:64px" id="ltmin-${d.id}" type="number" value="${d.lead_time_min}" onchange="App.lt('${d.id}','lead_time_min',this.value)" aria-label="Minimum lead time">–<input class="in qty" style="width:64px" id="ltmax-${d.id}" type="number" value="${d.lead_time_max}" onchange="App.lt('${d.id}','lead_time_max',this.value)" aria-label="Maximum lead time"></span>` : `${d.lead_time_min}–${d.lead_time_max}`}</td>
         <td class="r">${lt.source === "actual" ? fmt(lt.L) + " (" + lt.n + ")" : "—"}</td>
@@ -2638,6 +2691,7 @@ function approvalDetail(r) {
     </tbody></table></div>
     ${reasons.length ? `<div class="ai-note"><div class="eyebrow">AI advice</div>${reasons.map(x => `<div class="small"><b class="mono">${esc(x.p.sku)}</b> ${fmt(x.ai.ai_qty)}: ${esc(x.ai.reason)}</div>`).join("")}</div>` : ""}
     ${space.length ? `<div class="small muted">Shelf space at ${esc(dp.name)}: ${space.map(x => `${esc(x.category)} ${fmt(x.used)}/${fmt(x.cap)}${x.used > x.cap ? ' <b style="color:var(--crit)">over</b>' : ""}`).join(" · ")} <span class="faint">(on hand + pipeline, including this request)</span></div>` : ""}
+    ${r.origin === "promodiser" ? `<div class="row odoo-row"><span class="small">COF no.</span>${r.cof_ref ? `<b class="mono">${esc(r.cof_ref)}</b>` : '<span class="chip warn">Not given</span>'}${(S.documents || []).some(d => d.request_id === r.id && d.doc_type === "cof") ? ' <span class="chip good">Signed COF attached</span>' : ""}</div>` : ""}
     <div class="row odoo-row"><span class="small">Odoo ticket</span>${r.odoo_ticket_ref ? `<b class="mono">${esc(r.odoo_ticket_ref)}</b>` : '<span class="chip warn">Not entered</span>'}
       ${odooEditable && !needOdoo ? `<button class="btn ghost small" onclick="App.editOdoo('${r.id}')">${r.odoo_ticket_ref ? "Change" : "Add"}</button>` : ""}</div>
     ${docs.length ? `<div><div class="eyebrow" style="margin-bottom:6px">Documents from the depot</div><div class="doc-row">${docs.map(docChip).join("")}</div></div>` : ""}
@@ -2783,6 +2837,26 @@ function movementTable({ depots, product, days = 30, compact, kinds }) {
   </tbody></table></div>${rows.length > lim ? `<div style="padding:10px 14px"><button class="btn ghost small" onclick="UI.mvLimit=${lim + 150};rerender()">Show more (${rows.length - lim} older)</button></div>` : ""}</div>`;
 }
 
+/* deliveries a promodiser recorded without a request, not yet checked by PPIC (grouped per depot + DR no.) */
+function unreviewedDeliveries(depotIds) {
+  const g = new Map();
+  S.movements.forEach(m => { if (m.kind !== "receipt" || m.ref_id || !m.ref_text || m.reviewed_at || (depotIds && !depotIds.has(m.depot_id))) return;
+    const k = m.depot_id + "|" + m.ref_text, x = g.get(k) || { depot_id: m.depot_id, ref: m.ref_text, at: m.created_at, by: m.created_by, lines: [] };
+    x.lines.push(m); if (m.created_at < x.at) x.at = m.created_at; g.set(k, x); });
+  return Array.from(g.values()).sort((a, b) => a.at.localeCompare(b.at));
+}
+function unreviewedCard(depotIds) {
+  const list = unreviewedDeliveries(depotIds); if (!list.length) return "";
+  const canCheck = hasRole("admin", "ppic") && !viewOnly();
+  return `<div class="card stack-sm" style="border-color:var(--warn)"><div class="card-h" style="margin:0"><h2>Deliveries recorded without a request</h2><span class="chip warn">${list.length}</span></div>
+    <p class="small muted">A promodiser added these to stock from a DR that had no request in the app. Check them against the DR${canCheck ? ", then mark checked" : ""}.</p>
+    ${list.map(d => { const docs = (S.documents || []).filter(x => x.depot_id === d.depot_id && x.doc_type === "delivery_receipt" && x.note === "DR " + d.ref);
+      return `<div class="card flush" style="padding:10px 14px"><div class="row between"><div><b class="mono">DR ${esc(d.ref)}</b> · ${esc((idx.depot(d.depot_id) || {}).name || "")}<div class="small faint">${dtime(d.at)} · ${esc(userName(d.by))}${docs.length ? " · DR photo attached" : " · <span class='chip warn'>No DR photo</span>"}</div></div>
+        ${canCheck ? `<button class="btn small" data-ref="${esc(d.ref)}" onclick="App.reviewDelivery('${d.depot_id}',this.dataset.ref)">Mark checked</button>` : ""}</div>
+        <div class="small">${d.lines.map(m => { const p = idx.product(m.product_id); return `<span class="mono">${esc(p ? p.sku : "?")}</span> × ${fmt(m.qty)}`; }).join(" · ")}</div>
+        ${d.lines[0].note ? `<div class="small muted">${esc(d.lines[0].note)}</div>` : ""}</div>`; }).join("")}
+  </div>`;
+}
 PLANT_ROUTES.movements = { view() {
   const f = UI.f, ds = scopeDepots(f).map(d => d.id), days = UI.mvDays || 30, kind = UI.mvKind || "";
   const prods = S.products.filter(p => !f.company || p.company_id === f.company);
@@ -2792,6 +2866,7 @@ PLANT_ROUTES.movements = { view() {
   return `
     <div class="section-h"><div><div class="eyebrow">Stock card</div><h1>Stock movements</h1></div>
       <button class="btn" onclick="App.exportMovements()">Export to Excel</button></div>
+    ${unreviewedCard(new Set(ds))}
     ${filtersBar()}
     <div class="filters">
       <label class="f">Item<select class="in" id="mv-p" onchange="UI.mvP=this.value;UI.mvLimit=150;rerender()">${opt("", "All items", UI.mvP)}${prods.map(p => opt(p.id, p.sku + " · " + p.name, UI.mvP)).join("")}</select></label>
@@ -2873,7 +2948,7 @@ PLANT_ROUTES.documents = { view() {
         <td class="nowrap">${esc((idx.depot(d.depot_id) || {}).name || "")}</td><td class="small">${esc(d.uploader_name || userName(d.uploaded_by))}</td><td class="small nowrap">${dtime(d.created_at)}</td>
         <td class="small">${r ? `<span class="mono">${esc(r.req_no)}</span>` : d.report_id ? "Depot report" : d.competitor_id ? "Competitor entry" : d.message_id ? "Message" : "—"}</td>
         <td>${d.status === "received" ? `<span class="chip good">Received</span><div class="small faint">${esc(userName(d.received_by))}</div>` : '<span class="chip warn">New</span>'}</td>
-        <td>${d.status === "sent" ? `<button class="btn small" onclick="App.docReceived('${d.id}')">Mark received</button>` : ""}</td></tr>`; }).join("")}
+        <td>${d.status === "sent" && !viewOnly() ? `<button class="btn small" onclick="App.docReceived('${d.id}')">Mark received</button>` : ""}</td></tr>`; }).join("")}
     </tbody></table></div>` : `<div class="empty">No documents here.</div>`}</div>`;
 }};
 /* =====================================================================
@@ -3183,7 +3258,7 @@ function depotReportsInbox() {
         ${r.remarks ? `<div><div class="eyebrow">Remarks</div>${esc(r.remarks)}</div>` : ""}${r.competitor_notes ? `<div><div class="eyebrow">Competitor activity</div>${esc(r.competitor_notes)}</div>` : ""}
         ${docs.length ? `<div class="doc-row">${docs.map(docChip).join("")}</div>` : ""}
         ${r.status === "acknowledged" ? `<div class="small muted">Acknowledged by ${esc(userName(r.ack_by))}${r.ack_note ? ": “" + esc(r.ack_note) + "”" : ""}</div>` :
-          `<div class="row" style="flex-wrap:nowrap"><input class="in grow" id="ack-${r.id}" placeholder="Reply (optional)"><button class="btn primary" onclick="App.ackReport('${r.id}')">Acknowledge</button></div>`}</div>`; }).join("") : `<div class="card empty">No depot reports here.</div>`}</div>`;
+          viewOnly() ? `<span class="chip warn">Not yet acknowledged</span>` : `<div class="row" style="flex-wrap:nowrap"><input class="in grow" id="ack-${r.id}" placeholder="Reply (optional)"><button class="btn primary" onclick="App.ackReport('${r.id}')">Acknowledge</button></div>`}</div>`; }).join("") : `<div class="card empty">No depot reports here.</div>`}</div>`;
 }
 function competitorWatch() {
   const q = (UI.cwQ || "").toLowerCase(), cat = UI.cwCat || "", ds = new Set(scopeDepots(UI.f).map(d => d.id));
@@ -3293,7 +3368,7 @@ function cmdDepots() {
     <div class="card flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Depot</th><th>Account</th><th>Company · plant</th><th>Region</th><th>Delivery route</th><th class="r">Lead time</th><th>Promodisers</th><th>Status</th><th></th></tr></thead><tbody>
     ${list.map(d => { const via = d.ship_via_depot_id && idx.depot(d.ship_via_depot_id), pr = (S.users || []).filter(u => u.depot_id === d.id || (u.depot_ids || []).includes(d.id));
       return `<tr><td class="nowrap"><b>${esc(d.name)}</b><div class="small faint mono">${esc(d.code)}</div></td><td>${esc(idx.account(d.account_id).name)}</td><td class="small">${esc(d.company_id)} · ${esc(idx.plant(d.plant_id).name)}</td><td class="small">${esc(d.region || "—")}</td>
-        <td class="small">${d.is_consolidation_dc ? '<span class="chip info">Consolidation DC</span>' : via ? "Via " + esc(via.name) : "Direct"}</td><td class="r small">${d.lead_time_min}–${d.lead_time_max} d</td>
+        <td class="small">${d.is_consolidation_dc ? '<span class="chip info">Warehouse (DC)</span>' : via ? "Via " + esc(via.name) : "Direct"}</td><td class="r small">${d.lead_time_min}–${d.lead_time_max} d</td>
         <td class="small">${pr.map(u => esc(u.full_name)).join(", ") || '<span class="faint">None</span>'}</td><td>${d.active === false ? '<span class="chip">Inactive</span>' : '<span class="chip good">Active</span>'}</td>
         <td><button class="btn small" onclick="App.editDepot('${d.id}')">Edit</button></td></tr>`; }).join("")}
     </tbody></table></div></div>
@@ -3316,7 +3391,7 @@ function depotForm(d) {
       <label class="f">Lead time to (days)<input class="in" id="df-ltmax" type="number" min="1" value="${d.lead_time_max}"></label>
     </div>
     <label class="f">Address<input class="in" id="df-addr" value="${esc(d.address || "")}"></label>
-    <label class="check"><input type="checkbox" id="df-dc" ${d.is_consolidation_dc ? "checked" : ""} onchange="App.depotRoutePreview()"> This is the chain's consolidation DC (receives for its branches)</label>
+    <label class="check"><input type="checkbox" id="df-dc" ${d.is_consolidation_dc ? "checked" : ""} onchange="App.depotRoutePreview()"> Warehouse only - no sales (the chain's DC that receives deliveries for its branches). Leave unticked for stores.</label>
     <label class="check"><input type="checkbox" id="df-active" ${d.active !== false ? "checked" : ""}> Active</label>
     <div class="notice" id="df-route"></div>
     <fieldset class="perms"><legend>Shelf / stockroom space at this depot</legend><div class="grid-2">${caps}</div><p class="small faint">Leave blank to use the account default. Replenishment never suggests more than fits.</p></fieldset>
@@ -3436,7 +3511,7 @@ const IMPORT_KINDS = {
     fields: [["code", "Depot code", true, ["code", "depot code", "branch code"]], ["name", "Depot name", true, ["name", "depot", "branch", "store"]], ["account", "Account (chain)", true, ["account", "chain", "customer"]],
       ["company", "Company", true, ["company"]], ["plant", "Supplying plant (Pasig / Cebu)", true, ["plant", "supplied by", "source"]], ["region", "Region", false, ["region", "area"]],
       ["address", "Address", false, ["address", "location"]], ["lead_time_min", "Lead time from (days)", false, ["lead time min", "lt min", "lead time from"]], ["lead_time_max", "Lead time to (days)", false, ["lead time max", "lt max", "lead time to"]],
-      ["is_dc", "Is consolidation DC (Y/N)", false, ["dc", "is dc", "consolidation"]]],
+      ["is_dc", "Warehouse only - no sales (Y/N)", false, ["warehouse only no sales y n", "warehouse", "dc", "is dc", "consolidation"]]],
     example: [["WIL-QAV", "Wilcon Quezon Ave", "WILCON", "WCLI", "Pasig", "NCR", "Quezon City", 30, 40, "N"], ["WIL-DC", "Wilcon Central DC", "WILCON", "WCLI", "Pasig", "Calabarzon", "Cavite", 7, 10, "Y"]] },
   sales_history: { label: "Sales history (your trackers)", desc: "Past sales per depot and item. Feeds dashboards, performance and planning. Doesn't change current stock.", undo: true,
     fields: [["date", "Date", true, ["date", "sales date", "period", "month"]], ["depot", "Depot (code or name)", true, ["depot", "branch", "store", "outlet"]], ["item", "Item (SKU or barcode)", true, ["sku", "item code", "item", "barcode", "code"]],
@@ -3909,11 +3984,44 @@ const App = {
     const id = UI.reqDraftId, units = UI.reqDraft.reduce((s, l) => s + l.qty_requested, 0);
     await once("request", async () => {
       const confirm_id = await Bio.confirm("request:" + id, `Send a request for ${fmt(units)} units (${UI.reqDraft.length} item${UI.reqDraft.length > 1 ? "s" : ""}) to PPIC.`);
-      const payload = { id, depot_id: ME.depot_id, origin: "promodiser", note: (UI.reqNote || "").trim() || null, needed_by: UI.reqDate || null, lines: UI.reqDraft.map(l => ({ ...l })), confirm_id };
+      const files = (UI.files.rq || []).slice();
+      const payload = { id, depot_id: ME.depot_id, origin: "promodiser", note: (UI.reqNote || "").trim() || null, needed_by: UI.reqDate || null, cof_ref: (UI.reqCof || "").trim() || null, lines: UI.reqDraft.map(l => ({ ...l })), confirm_id };
       await API.run("request", payload);
       const r = S.requests.find(x => x.id === id);
-      UI.reqDraft = []; UI.reqDraftId = null; UI.reqNote = ""; UI.reqDate = ""; saveUI(); rerender(); toast("Request " + (payload._req_no || (r ? r.req_no : "")) + " sent to PPIC");
+      // the signed COF goes with the request (PPIC sees it under "Documents from the depot")
+      const ids = files.length ? await sendFiles(files, { depot_id: ME.depot_id, request_id: id, doc_type: "cof" }) : [];
+      UI.files.rq = []; UI.reqDraft = []; UI.reqDraftId = null; UI.reqNote = ""; UI.reqDate = ""; UI.reqCof = ""; saveUI(); rerender();
+      toast("Request " + (payload._req_no || (r ? r.req_no : "")) + " sent to PPIC" + filesNote(ids));
     });
+  },
+  /* ---------- delivery without a request ---------- */
+  drSearch(v) { UI.drQ = v; rerender(); const el = $("#dr-q"); if (el) { el.focus(); el.setSelectionRange(v.length, v.length); } },
+  drEnter() { const p = scanItem(UI.drQ); if (p) App.drPick(p.id); else if ((UI.drQ || "").trim()) toast("No item matches " + UI.drQ.trim(), true); },
+  drPick(pid) {
+    UI.drDraft = UI.drDraft || []; const p = idx.product(pid);
+    if (UI.drDraft.find(x => x.product_id === pid)) return toast(p.sku + " is already listed. Change its quantity below.");
+    UI.drDraft.push({ id: uuid(), product_id: pid, qty: 1 }); UI.drQ = ""; rerender();          // the line id stays the same on a retry, so nothing is added twice
+  },
+  drSet(i, v) { const n = Number(v); if (n > 0 && UI.drDraft[i]) UI.drDraft[i].qty = n; },
+  drDel(i) { UI.drDraft.splice(i, 1); rerender(); },
+  drCancel() { UI.drOpen = false; UI.drDraft = []; UI.drQ = ""; UI.drNo = ""; UI.drNote = ""; if (UI.files) UI.files.dr = []; rerender(); },
+  async drSave() {
+    const dr = (UI.drNo || "").trim(); if (!dr) return toast("Enter the DR number", true);
+    const draft = (UI.drDraft || []).filter(l => l.qty > 0); if (!draft.length) return toast("Add the items on the DR", true);
+    const mine = new Set(draft.map(l => l.id));
+    if (S.movements.some(m => m.depot_id === ME.depot_id && m.kind === "receipt" && m.ref_text === dr && !mine.has(m.id)))
+      return toast("DR " + dr + " is already recorded for this branch", true);
+    await once("dr", async () => {
+      const at = new Date().toISOString(), note = (UI.drNote || "").trim(), files = ((UI.files || {}).dr || []).slice();
+      for (const l of draft) await API.run("movement", { id: l.id, depot_id: ME.depot_id, product_id: l.product_id, kind: "receipt", qty: l.qty,
+        note: "Delivery without a request" + (note ? ": " + note : ""), ref_text: dr, created_at: at });
+      const ids = files.length ? await sendFiles(files, { depot_id: ME.depot_id, doc_type: "delivery_receipt", note: "DR " + dr }) : [];
+      const units = draft.reduce((s, l) => s + l.qty, 0);
+      App.drCancel(); toast("DR " + dr + ": " + fmt(units) + " added to stock. PPIC will check it." + filesNote(ids));
+    });
+  },
+  async reviewDelivery(depot_id, ref) {
+    await once("review-" + depot_id + ref, async () => { await API.run("reviewDelivery", { depot_id, ref }); toast("DR " + ref + " marked checked"); rerender(); });
   },
   async receive(id) {
     const r = S.requests.find(x => x.id === id);
@@ -3958,7 +4066,7 @@ const App = {
     else if (DOCBLOBS.has(id)) url = URL.createObjectURL(DOCBLOBS.get(id));
     else note = d.file_path === "sample" ? "This is a sample document in the demo, so there's no file to show." : "In the demo, files are kept only until the page is reloaded.";
     const isImg = /^image\//.test(d.mime || "");
-    openSheet(`<div class="stack"><div><div class="eyebrow">${esc(DOC_TYPES[d.doc_type] || (d.doc_type === "competitor_photo" ? "Competitor photo" : d.doc_type))}</div><h2>${esc(d.title)}</h2>
+    openSheet(`<div class="stack"><div><div class="eyebrow">${esc(DOC_TYPES[d.doc_type] || (d.doc_type === "competitor_photo" ? (isPromo() ? "Market watch photo" : "Competitor photo") : d.doc_type))}</div><h2>${esc(d.title)}</h2>
       <div class="small muted">${esc((idx.depot(d.depot_id) || {}).name || "")} · ${esc(d.uploader_name || userName(d.uploaded_by))} · ${dtime(d.created_at)}${d.size_bytes ? " · " + fileSize(d.size_bytes) : ""}</div></div>
       ${d.note ? `<div class="notice">${esc(d.note)}</div>` : ""}
       ${url ? (isImg ? `<img src="${esc(url)}" alt="${esc(d.title)}" class="doc-img">` : `<a class="btn primary" href="${esc(url)}" target="_blank" rel="noopener">Open file</a>`) : `<div class="empty">${esc(note)}</div>`}
@@ -3989,7 +4097,7 @@ const App = {
     });
   },
   async submitCompetitor() {
-    const brand = val("co-brand").trim(); if (!brand) return toast("Enter the competitor's brand", true);
+    const brand = val("co-brand").trim(); if (!brand) return toast("Enter the brand", true);
     const price = val("co-price"), face = val("co-face");
     const obs = { id: uuid(), depot_id: ME.depot_id, brand, product: val("co-prod").trim() || null, category: val("co-cat") || null, spec: val("co-spec").trim() || null,
       price: price === "" ? null : Number(price), promo: val("co-promo").trim() || null, facings: face === "" ? null : Number(face), our_product_id: val("co-our") || null, notes: val("co-notes").trim() || null };
@@ -3997,7 +4105,7 @@ const App = {
     await once("competitor", async () => {
       await API.run("competitor", { obs });
       const ids = files.length ? await sendFiles(files, { depot_id: ME.depot_id, competitor_id: obs.id, doc_type: "competitor_photo" }) : [];
-      UI.files.co = []; App.sub("report", "history"); toast("Competitor entry saved" + filesNote(ids));
+      UI.files.co = []; App.sub("report", "history"); toast((isPromo() ? "Market watch entry" : "Competitor entry") + " saved" + filesNote(ids));
     });
   },
 
