@@ -12744,3 +12744,7 @@ portal MSSI_COMPANY). Rommel chose option 1: fix only what people SEE; the full 
 - Not changed: HATID practice-ticket CO_NAME (training sample only), quotation_app.html (legacy).
 - Verified: smoke 207/207 identical; in-page: print body + production print corrected, COMPANIES key unchanged; CC option
   text singular, value plural.
+
+- **2026-10-04 (website privacy):** migration `website_privacy_consent` APPLIED — `pending_orders.consent_at` + restrictive
+  insert policy refusing website orders without it (Wufoo unaffected). Files: supabase_website_consent.sql, test_website_consent.sql.
+  ⚠ Supabase MCP from a remote session: any statement with DROP triggers a confirmation that cannot be shown → cancelled.
