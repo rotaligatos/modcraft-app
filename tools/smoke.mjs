@@ -4995,6 +4995,12 @@ const PROFILES = {
             row(['Qty', 'Width (mm)', 'Edge Material', 'Part', 'Material SKU', 'Length (mm)', 'Group', 'Thickness (mm)'], [3, 560, 'tape', 'P', 'M', 720, 'G', 18]),
             row(['Group', 'Part', 'Material SKU', 'Thickness (mm)', 'Qty', 'Width (mm)'], ['G', 'P', 'M', 18, 3, 560])];
         }, [['G', 'P', 'M', 720, 560, 18, 3], ['G', 'P', 'M', 720, 560, 18, 3], ['G', 'P', 'M', 720, 560, 18, 3], ['Length (mm)']]);
+        check('Upload reads a client sheet headed Part/Material/Qty/L/W, and finds a header that is not on row 1', () => {
+          const m = window.MCL._panelColMap, f = window.MCL._findPanelHeader;
+          const c = m(['Part', 'Material', 'Qty', 'L', 'W']);
+          const h = f([['KITCHEN — Juan'], [], ['Description', 'Board', 'Pcs', 'Length (mm)', 'Width (mm)'], ['Side', 'PB', 2, 720, 560]]);
+          return [c.ok ? c.row(['Back panel', 'MP06 WARM WHITE', 4, 528, 658]).slice(0, 7) : c.missing, h && h.i, h && h.cm.row(['Side', 'PB', 2, 720, 560]).slice(0, 7), f([['Back panel', 'MP06', 4, 528, 658]])];
+        }, [[undefined, 'Back panel', 'MP06 WARM WHITE', 528, 658, undefined, 4], 2, [undefined, 'Side', 'PB', 720, 560, undefined, 2], null]);
         check('Website HPL build: raw board and HPL sheet arrive resolved; raw plywood arrives outsourced', () => {
           const w = window, keep = w.dbMaterials;
           w.dbMaterials = [{ name: 'Raw Boards 4x8 18mm MDF', unit: 'pc', price: 900 }, { name: 'Coastal Green 4x8 0.7mm HPL', unit: 'pc', price: 1500 },
