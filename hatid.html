@@ -1773,7 +1773,7 @@ function simPoolOf(j){ return j.truck_id ? state.ref.truckById?.[j.truck_id]?.po
 function simSnapshot(poolId, date){
   const pool = state.ref.poolById?.[poolId] || {}, js = SIM.jobs.filter(j => j.scheduled_date === date && LIVE_ON_TRUCK.includes(j.status));
   const drop = j => ({ job_id: j.id, serial: j.quotation_serial, company: j.company, customer: j.client_name, address: j.address || destLabel(j.destination_id), job_type: j.job_type,
-    doc_refs: j.doc_refs, weight: j.estimated_weight_kg, agent_id: j.agent_id, agent: state.ref.agentById?.[j.agent_id]?.name || null });
+    doc_refs: j.doc_refs, weight: j.estimated_weight_kg, agent_id: j.agent_id, agent: state.ref.agentById?.[j.agent_id]?.name || null, drop_key: dropKey(j) });
   const secs = new Map();
   js.filter(j => j.truck_id && state.ref.truckById?.[j.truck_id]?.pool_id === poolId).sort(dropSort).forEach(j => {
     const t = state.ref.truckById[j.truck_id], k = j.truck_id + '|' + (j.trip_no || 1), crew = (SIM.truck_crews || []).find(c => c.truck_id === t.id && c.work_date === date) || {};
@@ -3487,9 +3487,45 @@ async function openJob(id){
       .select('id, kind, channel, recipient_label, status, last_error, attempts, created_at, sent_at').eq('job_id', id).order('created_at', { ascending: false }))).data || [];
     if (['partial','returned'].includes(job.delivery_outcome))
       job._redeliveries = (await withRetry('Loading redeliveries', () => sb.from('jobs').select('id, status, scheduled_date').eq('redelivery_of', id))).data || [];
+    if (job.truck_id && job.scheduled_date)   // the other SOs on this truck trip — to show which share this drop (stop)
+      job._mates = ((await withRetry('Loading the trip', () => sb.from('jobs').select('id, quotation_serial, client_name, address, drop_split, drop_seq, created_at, trip_no, status')
+        .eq('truck_id', job.truck_id).eq('scheduled_date', job.scheduled_date).in('status', LIVE_ON_TRUCK))).data || []).filter(m => (m.trip_no || 1) === (job.trip_no || 1));
   } catch { closeOverlay(); return; }
   renderDrawer(job, events || [], costs || [], rep || {});
 }
+
+/* Drawer "Drop" row: which drop (stop) this SO is on its trip, which other SOs share it, and the split / join control */
+function dropRowHtml(job, dispatcher){
+  const mates = (job._mates || []).slice().sort(dropSort);
+  const i = mates.findIndex(m => m.id === job.id);
+  if (!job.truck_id || i < 0) return '';
+  const sn = stopNumbers(mates), k = dropKey(job);
+  const same = mates.filter(m => m.id !== job.id && dropKey(m) === k);
+  const natural = dropKey({ ...job, drop_split: null });
+  const couldJoin = !!job.drop_split && mates.some(m => m.id !== job.id && dropKey(m) === natural);
+  const can = dispatcher && job.status !== 'rejected';
+  let html = `Drop ${sn.nums[i]} of ${sn.count}${mates.length > sn.count ? ` <span class="ft">(${mates.length} SOs on this trip)</span>` : ''}`;
+  if (same.length) html += `<div class="ft">Same stop as ${same.map(m => `<span class="mono">${esc(m.quotation_serial)}</span>`).join(', ')} — same client and address, so it is one drop (one drop fee).</div>`;
+  if (job.drop_split) html += `<div class="ft" style="color:var(--warn)">Separated by dispatch — counted as its own drop${couldJoin ? ', even though another SO on this trip has the same client and address' : ''}.</div>`;
+  if (can && same.length) html += `<div><button class="lnk" data-drop-split="${esc(job.id)}">Separate this SO into its own drop</button></div>`;
+  else if (can && couldJoin) html += `<div><button class="lnk" data-drop-join="${esc(job.id)}">Join back to the same stop</button></div>`;
+  return `<dt>Drop</dt><dd>${html}</dd>`;
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest && e.target.closest('[data-drop-split],[data-drop-join]'); if (!b) return;
+  e.preventDefault();
+  const split = !!b.dataset.dropSplit, id = b.dataset.dropSplit || b.dataset.dropJoin;
+  if (!isDispatcher()) return;
+  const why = split ? prompt('Why make this SO its own drop? (e.g. a different gate or receiver, or delivered at a different time)', '') : '';
+  if (why === null) return;
+  b.disabled = true;
+  try {
+    await withRetry(split ? 'Separating the drop' : 'Joining the drop', () => sb.from('jobs').update({ drop_split: split ? id : null }).eq('id', id));
+    await logEvent(id, 'note', split ? `Separated into its own drop${why.trim() ? ' — ' + why.trim() : ''}` : 'Joined back to the same stop as the other SOs for this client and address');
+    toast(split ? 'Now its own drop — the trip cost follows' : 'Back on the same stop — one drop fee for the stop', 'ok');
+    openJob(id);
+  } catch { b.disabled = false; }
+});
 
 /* Plain-language trip cost line for the drawer */
 function tripCostText(job, rep){
@@ -3498,7 +3534,10 @@ function tripCostText(job, rep){
   if (job.trip_base_rate == null) return 'No trip rate for this destination and truck — cost blank';
   const base = `Trip rate to ${destInfo(job.destination_id)?.dest.name || 'destination'}: ${peso(job.trip_base_rate)}`;
   if (!canSeeCosts() || rep.standard_cost == null) return base;
-  const role = job.job_type === 'backload' ? 'backload fee' : rep.drop_no === 1 ? 'farthest drop, carries the trip rate' : `drop ${rep.drop_no} of ${rep.trip_drops}, carries the drop fee`;
+  const k = dropKey(job), shares = (job._mates || []).some(m => m.id !== job.id && dropKey(m) === k);
+  const role = job.job_type === 'backload' ? 'backload fee'
+    : shares && !Number(rep.standard_cost) ? `same stop as another SO on drop ${rep.drop_no} — no extra drop fee`
+    : rep.drop_no === 1 ? 'farthest drop, carries the trip rate' : `drop ${rep.drop_no} of ${rep.trip_drops}, carries the drop fee`;
   return `${base}<br>This job: <b>${peso(rep.standard_cost)}</b> (${role}) · Trip ${job.trip_no} total ${peso(rep.trip_total)}`;
 }
 
@@ -3548,19 +3587,45 @@ const LIVE_ON_TRUCK = ['scheduled','dispatched','in_progress','completed','issue
 const costTxt = c => c ? '≈ ' + peso(c) : 'no rate set';
 async function dayPlanCtx(date){
   const [load, jobsRes] = await Promise.all([fetchLoad(date),
-    withRetry('Loading the day’s drops', () => sb.from('jobs').select('id, quotation_serial, client_name, company, truck_id, trip_no, drop_seq, destination_id, estimated_weight_kg, board_pcs, items, status, doc_refs, site_lat, site_lon, address, prepared_at, prep, prep_req_at, prep_waived_at, job_type')
+    withRetry('Loading the day’s drops', () => sb.from('jobs').select('id, quotation_serial, client_name, company, truck_id, trip_no, drop_seq, drop_split, destination_id, estimated_weight_kg, board_pcs, items, status, doc_refs, site_lat, site_lon, address, prepared_at, prep, prep_req_at, prep_waived_at, job_type')
       .eq('scheduled_date', date).not('truck_id', 'is', null))]);
   const fixed = {};
   (jobsRes.data || []).filter(j => j.truck_id && LIVE_ON_TRUCK.includes(j.status)).forEach(j => { (fixed[`${j.truck_id}|${j.trip_no || 1}`] ??= []).push(j); });
   return { date, load, fixed };
 }
 function rateAmt(destId, cls, date){ const r = destId && (rateFor(destId, cls || 'standard', date) || rateFor(destId, 'standard', date)); return r ? Number(r.rate) : null; }
-function tripCost(truck, destIds, date){
-  if (!destIds.length) return 0;
+/* ----- One drop = one stop (Rommel 2026-10-05): jobs for the same client at the same address, on the same truck trip,
+   are ONE drop — one drop number, one drop fee — even when they are several SOs. Dispatch can separate a job into its own
+   drop (jobs.drop_split). Must match the database's job_drop_key() exactly, or the planner and the trip cost disagree. */
+function dropNorm(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function dropKey(j){
+  if (!j) return '';
+  if (j.drop_split && String(j.drop_split).trim()) return 'split:' + String(j.drop_split).trim();
+  const a = dropNorm(j.address);
+  if (!a) return 'id:' + j.id;   // no address: can't tell it is the same stop
+  return dropNorm(j.client_name) + '|' + a;
+}
+/* Stop numbers for an ordered list of jobs: first appearance numbers the stop; SOs of the same stop share its number */
+function stopNumbers(list){
+  const num = new Map(), out = [];
+  (list || []).forEach(j => { const k = dropKey(j); if (!num.has(k)) num.set(k, num.size + 1); out.push(num.get(k)); });
+  return { nums: out, count: num.size, perStop: k => (list || []).filter(j => dropKey(j) === k).length };
+}
+const dropsTxt = (stops, sos) => `${stops} drop${stops === 1 ? '' : 's'}${sos > stops ? ` (${sos} SOs)` : ''}`;   // a drop = a stop; several SOs can share one
+/* Number of stops on a planner trip, optionally with one job added or one job taken out */
+function binStops(b, add, withoutId){
+  const js = [...b.fixed, ...b.planned].filter(j => j && j.id !== withoutId);
+  if (add) js.push(add);
+  return new Set(js.map(dropKey)).size;
+}
+/* Trip cost: farthest drop's rate + 2nd / 3rd / later drop fees. `stops` = number of drops (stops); defaults to one per job */
+function tripCost(truck, destIds, date, stops){
+  const n = stops ?? destIds.length;
+  if (!destIds.length || !n) return 0;
   const rates = destIds.map(d => rateAmt(d, truck.truck_class, date)).filter(x => x != null);
   const pool = state.ref.poolById[truck.pool_id] || {};
   let c = rates.length ? Math.max(...rates) : 0;
-  for (let i = 2; i <= destIds.length; i++) c += Number(i === 2 ? pool.second_drop_fee : i === 3 ? pool.third_drop_fee : pool.succeeding_drop_fee) || 0;
+  for (let i = 2; i <= n; i++) c += Number(i === 2 ? pool.second_drop_fee : i === 3 ? pool.third_drop_fee : pool.succeeding_drop_fee) || 0;
   return c;
 }
 /* One bin per truck × trip for the day, holding what's already scheduled on it */
@@ -3626,7 +3691,7 @@ function placeScore(job, b, ctx, rest, cache){
   const rc = used ? routeCheck(job, b) : null;
   if (used && rc && !rc.ok) return { bad: 'off the route', over, warns };
   if (used && !rc && info?.group && !binGroups(b).has(info.group.id)) return { bad: 'other area', over, warns };
-  const before = tripCost(b.truck, b.dests, ctx.date), after = tripCost(b.truck, [...b.dests, job.destination_id], ctx.date);
+  const before = tripCost(b.truck, b.dests, ctx.date, binStops(b)), after = tripCost(b.truck, [...b.dests, job.destination_id], ctx.date, binStops(b, job));
   let cost;
   if (used) cost = after - before + (rc ? rc.add * ROUTE_KM_COST : binZones(b).has(info?.zone?.id) ? 0 : 150);   // on the way: pay for the extra km; no pins: same area free, nearby area small cost
   else cost = (after || 3000) / Math.max(1, Math.min(rest, b.cap)) * w               // new trip: its cost shared by the load it can still carry (picks the right-sized truck)
@@ -3675,9 +3740,9 @@ async function suggestForJob(job, date, destId){
   const b = plan.bins.find(x => x.key === p.key), [truck_id, trip] = p.key.split('|');
   const mates = b.fixed.length + b.planned.length - 1;
   const without = [...b.dests]; const di = without.lastIndexOf(destId); if (di >= 0) without.splice(di, 1);
-  const addCost = tripCost(b.truck, b.dests, date) - (without.length ? tripCost(b.truck, without, date) : 0);
+  const addCost = tripCost(b.truck, b.dests, date, binStops(b)) - (without.length ? tripCost(b.truck, without, date, binStops(b, null, job.id)) : 0);
   return { ctx, best: { truck_id, trip_no: +trip, label: b.t.label, kgAfter: b.kg, max: b.cap, mates, addCost: addCost || null, company: !b.truck.uses_trip_rates,
-    why: `${mates ? `rides with ${mates} other drop${mates === 1 ? '' : 's'} going the same way` : 'own trip'} · trip ${Math.round(b.kg / (b.cap || 1) * 100)}% full${canSeeCosts() ? ` · trip cost ${costTxt(tripCost(b.truck, b.dests, date))}` : ''}` } };
+    why: `${mates ? `rides with ${mates} other drop${mates === 1 ? '' : 's'} going the same way` : 'own trip'} · trip ${Math.round(b.kg / (b.cap || 1) * 100)}% full${canSeeCosts() ? ` · trip cost ${costTxt(tripCost(b.truck, b.dests, date, binStops(b)))}` : ''}` } };
 }
 
 /* ===== Day planner (Rommel 2026-10-01) =====
@@ -3767,8 +3832,8 @@ function dpTripInfo(DP, b){
   const base = poolBase(b.t.pool_id), pts = b.order.map(ptOf), known = base && pts.length && pts.every(Boolean);
   const r = known ? routeExcess(base, pts) : null, off = known && r.excess > routeAllow(b.t.pool_id) + 0.5;
   const areas = [...new Set(b.order.map(j => destInfo(j.destination_id)?.zone?.name).filter(Boolean))];
-  const fixedCost = tripCost(b.truck, b.fixed.map(j => j.destination_id).filter(Boolean), DP.date);
-  const cost = tripCost(b.truck, b.dests, DP.date);
+  const fixedCost = tripCost(b.truck, b.fixed.map(j => j.destination_id).filter(Boolean), DP.date, new Set(b.fixed.map(dropKey)).size);
+  const cost = tripCost(b.truck, b.dests, DP.date, binStops(b));
   const warns = [];
   const w0 = ruleWarnings({ job: b.order[0] || {}, date: DP.date, destId: b.order[0]?.destination_id, truck: b.truck, tripLoad: null }).filter(w => !/No .* trip rate/.test(w) || b.planned.length);
   w0.forEach(w => warns.push(w));
@@ -3789,8 +3854,9 @@ function dpRender(DP){
   const costAll = sum(used, b => b.info.cost), addAll = sum(used, b => b.info.addCost);
   const zero = sum(used, b => b.info.zero), unprep = sum(used, b => b.info.unprep), offs = used.filter(b => b.info.off).length;
   const tile = (v, l, c = '') => `<div class="dp-tile ${c}"><b>${v}</b><span>${l}</span></div>`;
+  const stopsAll = sum(used, b => stopNumbers(b.order).count), sosAll = planned + fixed;
   const summary = `<div class="dp-sum">
-    ${tile(`${planned + fixed}`, `drops${fixed ? ` <span class="ft">(${fixed} already on trucks)</span>` : ''}`)}
+    ${tile(`${stopsAll}`, `drops${sosAll > stopsAll ? ` <span class="ft">(${sosAll} SOs)</span>` : ''}${fixed ? ` <span class="ft">(${fixed} SO${fixed === 1 ? '' : 's'} already on trucks)</span>` : ''}`)}
     ${tile(`${Math.round(kgAll).toLocaleString('en-PH')} kg`, `of ${Math.round(capAll).toLocaleString('en-PH')} kg on the trips used`)}
     ${tile(`${used.length}`, `trip${used.length === 1 ? '' : 's'} on ${trucksUsed} truck${trucksUsed === 1 ? '' : 's'}`)}
     ${tile(`${capAll ? Math.round(kgAll / capAll * 100) : 0}%`, 'average fill')}
@@ -3811,16 +3877,16 @@ function dpRender(DP){
     </tbody></table></div>` : '';
   // by truck
   const byTruck = {}; used.forEach(b => (byTruck[b.t.truck_id] ??= []).push(b));
-  const row = (j, i, b) => { const isNew = b ? b.planned.includes(j) && !j._was : true, moved = !!j._was, go = !['scheduled','proposed'].includes(j.status), can = !go;
-    return `<li class="${isNew && b ? 'new' : ''}${moved ? ' moved' : ''}${can ? '' : ' fixed'}" data-dp-j="${esc(j.id)}">${can ? '<span class="dp-h" title="Drag to reorder or move to another trip" aria-label="Drag">⠿</span>' : '<span class="dp-h off" title="Already on the road">🔒</span>'}<span class="dp-n">${b ? i + 1 : '•'}</span>
-      <span class="dp-d"><a href="#" data-dp-open="${esc(j.id)}" class="mono">${esc(j.quotation_serial)}</a> ${esc(j.client_name || '')}<span class="ft"> · ${esc(destLabel(j.destination_id))} · ${kg(j.estimated_weight_kg)}${Number(j.estimated_weight_kg) ? '' : ' ⚠'}</span> ${prepMark(j)}${isNew && b ? ' <span class="tag info">new</span>' : ''}${moved ? ' <span class="tag warn">moved</span>' : ''}${go ? ` ${pill(j.status)}` : ''}${!b && j._why ? `<div class="ft" style="color:var(--warn)">${esc(j._why)}</div>` : ''}</span></li>`; };
-  const tripCard = b => { const I = b.info, p = b.cap ? Math.round(b.kg / b.cap * 100) : 0;
+  const row = (j, i, b, sn) => { const isNew = b ? b.planned.includes(j) && !j._was : true, same = sn && sn.perStop(dropKey(j)) > 1, moved = !!j._was, go = !['scheduled','proposed'].includes(j.status), can = !go;
+    return `<li class="${isNew && b ? 'new' : ''}${moved ? ' moved' : ''}${can ? '' : ' fixed'}" data-dp-j="${esc(j.id)}">${can ? '<span class="dp-h" title="Drag to reorder or move to another trip" aria-label="Drag">⠿</span>' : '<span class="dp-h off" title="Already on the road">🔒</span>'}<span class="dp-n">${b ? (sn ? sn.nums[i] : i + 1) : '•'}</span>
+      <span class="dp-d"><a href="#" data-dp-open="${esc(j.id)}" class="mono">${esc(j.quotation_serial)}</a> ${esc(j.client_name || '')}<span class="ft"> · ${esc(destLabel(j.destination_id))} · ${kg(j.estimated_weight_kg)}${Number(j.estimated_weight_kg) ? '' : ' ⚠'}</span> ${prepMark(j)}${same ? ' <span class="tag" title="Same client and address as another SO on this trip — one drop">same stop</span>' : ''}${isNew && b ? ' <span class="tag info">new</span>' : ''}${moved ? ' <span class="tag warn">moved</span>' : ''}${go ? ` ${pill(j.status)}` : ''}${!b && j._why ? `<div class="ft" style="color:var(--warn)">${esc(j._why)}</div>` : ''}</span></li>`; };
+  const tripCard = b => { const I = b.info, p = b.cap ? Math.round(b.kg / b.cap * 100) : 0, sn = stopNumbers(b.order);
     return `<div class="dp-trip" style="--c:${b.color}">
       <div class="dp-th"><b>Trip ${b.trip_no}</b><span class="pl-bar"><i class="${ratioClass(b.kg / (b.cap || 1))}" style="width:${Math.min(100, p)}%"></i></span>
-        <span class="ft">${Math.round(b.kg).toLocaleString('en-PH')} / ${Math.round(b.cap).toLocaleString('en-PH')} kg · <b>${p}%</b>${b.capPcs ? ` · ${b.pcs}/${b.capPcs} boards` : ''} · ${b.order.length} drop${b.order.length === 1 ? '' : 's'}${I.known ? ` · ≈${Math.round(I.km)} km out` : ''}${costs ? ` · ${costTxt(I.cost)}` : ''}</span></div>
+        <span class="ft">${Math.round(b.kg).toLocaleString('en-PH')} / ${Math.round(b.cap).toLocaleString('en-PH')} kg · <b>${p}%</b>${b.capPcs ? ` · ${b.pcs}/${b.capPcs} boards` : ''} · ${dropsTxt(sn.count, b.order.length)}${I.known ? ` · ≈${Math.round(I.km)} km out` : ''}${costs ? ` · ${costTxt(I.cost)}` : ''}</span></div>
       <div class="dp-areas">${I.areas.map(a => `<span class="tag">${esc(a)}</span>`).join(' ')}</div>
       ${I.warns.length ? `<div class="dp-warn">${I.warns.map(w => `<div>⚠ ${esc(w)}</div>`).join('')}</div>` : ''}
-      <ol class="dp-drops" data-dp-bin="${esc(b.key)}">${b.order.map((j, i) => row(j, i, b)).join('')}</ol></div>`; };
+      <ol class="dp-drops" data-dp-bin="${esc(b.key)}">${b.order.map((j, i) => row(j, i, b, sn)).join('')}</ol></div>`; };
   const trucks = Object.values(byTruck).map(bs => { const t = bs[0].t, tr = bs[0].truck, st = codingStatus(tr, DP.date);
     const spare = DP.bins.find(x => x.t.truck_id === t.truck_id && !x.order.length);
     return `<div class="card dp-truck"><div class="dp-tt"><b>${esc(t.label)}</b> <span class="ft">${esc(FLEET_LABEL[t.fleet_type] || t.fleet_type)}${st.coded ? ' · <b style="color:var(--warn)">coding</b>' : ''}</span></div>${bs.map(tripCard).join('')}
@@ -3863,18 +3929,18 @@ function dpMove(DP, id, key, at){
     const o = from.order.map(x => x.id).filter(x => x !== id); o.splice(Math.min(at ?? o.length, o.length), 0, id); DP.seq[key] = o; dpOrder(DP, from); return dpRender(DP);
   }
   let c0 = 0;
-  if (from){ c0 = tripCost(from.truck, from.dests, DP.date);
+  if (from){ c0 = tripCost(from.truck, from.dests, DP.date, binStops(from));
     if (f.fixed){ from.fixed = from.fixed.filter(x => x.id !== id); from.kg -= Number(j.estimated_weight_kg || 0); from.pcs -= boardsPcs(j.board_pcs); const k = from.dests.lastIndexOf(j.destination_id); if (k >= 0) from.dests.splice(k, 1); j._was = j._was || from.key; }
     else removeFromBin(from, j);
-    c0 = tripCost(from.truck, from.dests, DP.date) - c0;
+    c0 = tripCost(from.truck, from.dests, DP.date, binStops(from)) - c0;
     if (DP.seq[from.key]) DP.seq[from.key] = DP.seq[from.key].filter(x => x !== id); dpOrder(DP, from); }
   else DP.unplaced = DP.unplaced.filter(x => x.job.id !== id);
   if (!key){ if (j._was && f.fixed !== undefined && !from?.planned) {} DP.unplaced.push({ job: j, reason: 'Left for later' }); dpRender(DP); return toast(`${j.quotation_serial} left for later`, 'ok'); }
-  const to = DP.bins.find(b => b.key === key), c1 = tripCost(to.truck, to.dests, DP.date);
+  const to = DP.bins.find(b => b.key === key), c1 = tripCost(to.truck, to.dests, DP.date, binStops(to));
   addToBin(to, j); DP.moved.add(id);
   if (j._was === to.key){ to.planned = to.planned.filter(x => x.id !== id); to.fixed.push(j); delete j._was; }   // moved back home
   const o = (to.order || []).map(x => x.id).filter(x => x !== id); o.splice(Math.min(at ?? o.length, o.length), 0, id); DP.seq[to.key] = o; dpOrder(DP, to);
-  const dc = tripCost(to.truck, to.dests, DP.date) - c1 + c0;
+  const dc = tripCost(to.truck, to.dests, DP.date, binStops(to)) - c1 + c0;
   const w = ruleWarnings({ job: j, date: DP.date, destId: j.destination_id, truck: to.truck, tripLoad: { trip_no: to.trip_no, kg: to.kg - Number(j.estimated_weight_kg || 0), pcs: to.pcs - boardsPcs(j.board_pcs) } }).filter(x => !/trip rate/.test(x));
   const rc = to.order.length > 1 ? dpTripInfo(DP, to) : null;
   toast(`${j.quotation_serial} → ${to.t.label} trip ${to.trip_no}: ${to.cap ? Math.round(to.kg / to.cap * 100) : 0}% full${canSeeCosts() ? ` · ${dc >= 0 ? '+' : '−'}${peso(Math.abs(dc))}` : ''}${w.length ? ' · ⚠ ' + w[0] : rc?.off ? ' · ⚠ off the way' : ''}`, w.length || rc?.off ? 'error' : 'ok');
@@ -4029,6 +4095,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
           ${returnedList(job).length ? `<div class="ft">Coming back: ${esc(returnedList(job).map(x => `${x.back} × ${x.label}`).join(', '))}</div>` : ''}</dd>` : ''}
         ${job.redelivery_of ? `<dt>Redelivery</dt><dd><a href="#" data-open-job="${esc(job.redelivery_of)}">Open the original delivery</a></dd>` : ''}
         <dt>${job.courier_vehicle_id ? 'Delivered by' : 'Truck / trip'}</dt><dd>${job.courier_vehicle_id ? courierRowHtml(job) : job.trucks ? esc(job.trucks.label) + ` <span class="ft">${esc(FLEET_LABEL[job.trucks.fleet_type]||'')}${job.trip_no ? ' · trip ' + job.trip_no : ''}</span>` + (dispatcher ? ` <button class="lnk" id="dr-where">📍 Where is the truck?</button>` : '') : '<span class="muted">Unassigned</span>'}</dd>
+        ${job.courier_vehicle_id ? '' : dropRowHtml(job, dispatcher)}
         ${canSeeCosts() ? `<dt>Trip cost</dt><dd>${tripCostText(job, rep)}</dd>` : ''}
         ${job.order_value != null && canSeeCosts() ? `<dt>Order value</dt><dd>${peso(job.order_value)}${br ? `<div class="ft">Customer delivery charge (proposal): ${peso(br.charge)} · ${esc(br.label)}</div>` : ''}</dd>` : ''}
         ${job.override_reason ? `<dt>Override</dt><dd><div style="color:var(--warn)">${esc((job.rule_warnings || []).join(' '))}</div><div class="ft">Reason: ${esc(job.override_reason)}</div></dd>` : ''}
@@ -4559,14 +4626,14 @@ function tripState(t){
 const tripOf = job => state.field?.date === job.scheduled_date ? fieldTrips(state.field).find(t => t.truck_id === job.truck_id && t.trip_no === (job.trip_no || 1)) : null;
 
 function tripCardHtml(t){
-  const s = tripState(t), lbl = `${esc(t.truck.label || 'Truck')} · Trip ${t.trip_no}`;
+  const s = tripState(t), lbl = `${esc(t.truck.label || 'Truck')} · Trip ${t.trip_no}`, sn = stopNumbers(t.jobs);
   const re = t.notices.find(n => n.kind === 'reorder' && n.status === 'pending');
   const req = t.notices.find(n => n.kind === 'order_request' && (n.status === 'pending' || Date.now() - new Date(n.resolved_at || 0) < 2 * 3600e3));
   let pre = '';
   if (!s.departed && s.open.length){
     pre = `<ol class="pd-steps">
         ${s.company ? `<li class="${t.check ? 'ok' : ''}"><span>${t.check ? '✓' : '1'}</span> Truck checklist${t.check ? ` — ${t.check.fails ? `<b style="color:var(--bad)">${t.check.fails} not OK</b> (Engineering told)` : 'all OK'}` : ' <span class="ft">(first trip of the day)</span>'}</li>` : ''}
-        <li class="${s.ticked === t.jobs.length ? 'ok' : ''}"><span>${s.ticked === t.jobs.length ? '✓' : s.company ? '2' : '1'}</span> Load checked — ${s.ticked} of ${t.jobs.length} drop${t.jobs.length > 1 ? 's' : ''}</li>
+        <li class="${s.ticked === t.jobs.length ? 'ok' : ''}"><span>${s.ticked === t.jobs.length ? '✓' : s.company ? '2' : '1'}</span> Load checked — ${s.ticked} of ${t.jobs.length} SO${t.jobs.length > 1 ? 's' : ''}</li>
         <li class="${s.locked ? 'ok' : ''}"><span>${s.locked ? '🔒' : s.company ? '3' : '2'}</span> ${s.locked ? `Confirmed ${hm12(t.row.load_locked_at)} — locked` : 'Confirm — then it locks'}</li></ol>
       ${s.locked && (s.tracked || (state.gpsLive && state.field?.mine === t.truck_id)) ? '<div class="ft" style="margin-top:6px">📡 GPS starts the trip by itself when the truck leaves the base. No signal? Tap Depart.</div>' : ''}<div class="row-btns" style="margin:8px 0 0">${s.locked ? `<button class="btn ${s.tracked || (state.gpsLive && state.field?.mine === t.truck_id) ? '' : 'primary '}big" data-depart-trip="${esc(t.key)}">🚚 Depart — start trip ${t.trip_no}</button><button class="btn" data-predep="${esc(t.key)}">View check</button>`
         : `<button class="btn primary big" data-predep="${esc(t.key)}" ${state.field?.needTruck ? 'disabled title="Choose your truck first"' : ''}>${s.ticked || t.check ? 'Continue' : 'Start'} pre-departure check</button>`}</div>
@@ -4580,14 +4647,14 @@ function tripCardHtml(t){
   const gated = !s.departed && !s.locked && s.open.length;   // drops open only after the pre-departure check is confirmed
   const drops = (gated ? '<div class="ft" style="margin:6px 2px">🔒 The drops open after you finish and confirm the pre-departure check.</div>' : '')
     + t.jobs.map((j, i) => `<button class="card fjob drop ${s.departed && j === s.next ? 'next' : ''}${gated ? ' gated' : ''}" data-id="${esc(j.id)}"${gated ? ' disabled aria-disabled="true"' : ''}>
-      <div class="l1"><span class="dno">${i + 1}</span><span class="client">${esc(j.client_name || j.quotation_serial)}</span>${s.departed && j === s.next ? '<span class="tag info">Next</span>' : ''}${pill(j.status)}${prepMark(j)}</div>
+      <div class="l1"><span class="dno">${sn.nums[i]}</span><span class="client">${esc(j.client_name || j.quotation_serial)}</span>${s.departed && j === s.next ? '<span class="tag info">Next</span>' : ''}${pill(j.status)}${prepMark(j)}</div>
       <div class="addr">${esc(j.address || 'No address on file')}</div>
-      <div class="meta"><span>Drop ${i + 1} of ${t.jobs.length}</span><span class="mono">${esc(j.quotation_serial)}</span><span>${kg(j.estimated_weight_kg)}</span>${j.load_check?.all ? '<span style="color:var(--ok)">✓ load checked</span>' : ''}${j.delivery_outcome && j.delivery_outcome !== 'full' ? `<span class="tag bad">${esc(OUTCOME_LABEL[j.delivery_outcome])}</span>` : ''}</div>
+      <div class="meta"><span>Drop ${sn.nums[i]} of ${sn.count}${sn.perStop(dropKey(j)) > 1 ? ` · same stop, ${sn.perStop(dropKey(j))} SOs` : ''}</span><span class="mono">${esc(j.quotation_serial)}</span><span>${kg(j.estimated_weight_kg)}</span>${j.load_check?.all ? '<span style="color:var(--ok)">✓ load checked</span>' : ''}${j.delivery_outcome && j.delivery_outcome !== 'full' ? `<span class="tag bad">${esc(OUTCOME_LABEL[j.delivery_outcome])}</span>` : ''}</div>
     </button>`).join('');
   const back = t.row?.gps_back_at || t.row?.back_at;
   const done = s.done ? `<div class="okbox">✅ All drops done — ${t.row?.return_sent_at ? `base was told you’re returning (${hm12(t.row.return_sent_at)})` : s.tracked && !state.preview?.sim ? 'base is told you’re returning once you leave the last site' : 'base is told you’re returning to base'}.
       ${back ? `<br>🏁 Back at base ${hm12(back)}` : !s.tracked ? `<div style="margin-top:8px"><button class="btn big" data-back-trip="${esc(t.key)}">🏁 Back at base</button></div>` : ''}</div>` : '';
-  return `<div class="card trip-card"><div class="trip-h"><b>🚚 ${lbl}</b><span class="ft">${t.jobs.length} drop${t.jobs.length > 1 ? 's' : ''}${s.done ? ' · done' : s.departed ? ' · on the road' : ''}</span></div>
+  return `<div class="card trip-card"><div class="trip-h"><b>🚚 ${lbl}</b><span class="ft">${dropsTxt(sn.count, t.jobs.length)}${s.done ? ' · done' : s.departed ? ' · on the road' : ''}</span></div>
     ${banners}${pre}<div class="drops">${drops}</div>${done}</div>`;
 }
 
@@ -4663,10 +4730,11 @@ async function openPredepart(key){
       <label class="f" style="margin-top:8px">Notes (optional)<input class="i" id="ck-notes" value="${esc(ckState.notes)}"></label>
       <div class="ft" style="margin-top:6px">A “Not OK” doesn’t stop the trip — base and Engineering are alerted right away. The result goes to the Engineering Chat space.</div>
       <button class="btn primary" id="ck-save" style="margin-top:10px">Save truck checklist</button></div>`;
+  const loadSn = stopNumbers(t.jobs);
   const loadHtml = t.jobs.map((j, i) => {
     const lines = outcomeLines(j), got = j.load_check?.lines || {}, closed = !OPEN_ST.includes(j.status), np = !ro && !closed && unprepared(j);
     return `<div class="card${np ? ' gated' : ''}" style="padding:14px"><div class="l1" style="display:flex;gap:8px;align-items:center;justify-content:space-between">
-        <div><b>Drop ${i + 1} — ${esc(j.client_name || j.quotation_serial)}</b><div class="ft mono">${esc(j.quotation_serial)}</div></div>
+        <div><b>Drop ${loadSn.nums[i]} — ${esc(j.client_name || j.quotation_serial)}</b><div class="ft mono">${esc(j.quotation_serial)}</div></div>
         ${!ro && !closed && !np && lines.length ? `<button class="btn" data-tick-all="${esc(j.id)}">Tick all</button>` : ''}</div>
       ${np ? `<div class="warnbox" style="margin:6px 0 0">⏳ <b>Not prepared yet by the warehouse</b> — don’t load this drop yet.${j.prep_req_at ? ' Base asked to let it go without the missing items; waiting for the manager’s decision.' : ' Tell the base if you are waiting on it.'}</div>` : ''}
       ${lines.length ? `<div class="ld-lines">${lines.map(x => `<label class="loadck"><input type="checkbox" data-lk="${esc(j.id)}" data-k="${x.k}" ${got[x.k] || closed ? 'checked' : ''} ${ro || closed || np ? 'disabled' : ''}> <span><b>${x.qty}</b> × ${esc(x.label)}</span></label>`).join('')}</div>`
@@ -4874,7 +4942,7 @@ async function openTripsPanel(date = localDate()){
     const s = tripState(t), req = t.notices.filter(n => n.kind === 'order_request' && n.status === 'pending'), acks = t.notices.filter(n => n.kind === 'reorder');
     const back = t.row?.gps_back_at || t.row?.back_at;
     return `<div class="card" style="padding:12px;margin-bottom:10px"><div class="trip-h"><b>🚚 ${esc(t.truck.label || 'Truck')} · Trip ${t.trip_no}</b>
-        <span class="ft">${t.jobs.length} drop(s) · ${s.done ? (back ? 'back at base ' + hm12(back) : t.row?.return_sent_at ? 'returning to base (' + hm12(t.row.return_sent_at) + ')' : 'all drops done') : s.departed ? 'on the road' : 'at the base'}</span></div>
+        <span class="ft">${dropsTxt(stopNumbers(t.jobs).count, t.jobs.length)} · ${s.done ? (back ? 'back at base ' + hm12(back) : t.row?.return_sent_at ? 'returning to base (' + hm12(t.row.return_sent_at) + ')' : 'all drops done') : s.departed ? 'on the road' : 'at the base'}</span></div>
       <div class="ft" style="margin:4px 0">${s.company ? (t.check ? `Truck checklist ✓ ${hm12(t.check.created_at)} by ${esc(t.check.actor_name || '')}${t.check.fails ? ` — <b style="color:var(--bad)">${t.check.fails} not OK</b>: ${esc((t.check.results || []).filter(x => x.v === 'bad').map(x => x.label + (x.note ? ' (' + x.note + ')' : '')).join(', '))}` : ' — all OK'}` : 'Truck checklist: not done yet') + ' · ' : ''}
         Load checked ${s.ticked}/${t.jobs.length} · ${s.locked ? `<b>🔒 confirmed ${hm12(t.row.load_locked_at)}</b>` : s.departed ? '<b style="color:var(--bad)">left without confirming</b>' : 'not confirmed'}
         ${s.locked && canUnlockLoad() && s.open.some(j => j.status === 'scheduled') ? ` <button class="btn" data-unl="${esc(t.key)}">🔓 Unlock</button>` : ''}</div>
@@ -11333,11 +11401,12 @@ function schedFormHtml(pool, date, content, signs, urls, editable, form, s){
   const secs = content.map((sec, si) => {
     const over = Number(sec.capacity) && Number(sec.total_weight) > Number(sec.capacity);
     const inp = (f, v, ph) => editable ? `<input class="ed" data-crew="${esc(sec.truck_id)}" data-f="${f}" value="${esc(v || '')}" placeholder="${ph}" aria-label="${ph}">` : esc(v || '');
+    const sk = {}, stopNo = dr => sk[dr.drop_key || 'id:' + dr.job_id] ??= Object.keys(sk).length + 1;   // Drop No. = stop: SOs for the same client and address share it
     const rows = sec.drops.map((dr, di) => {
       const refs = (dr.doc_refs || []).length ? dr.doc_refs : [{}];
       const ctl = editable ? `<td class="ctl no-print" rowspan="${refs.length}"><button data-mv="${si}|${di}|-1" ${di ? '' : 'disabled'} aria-label="Move up">↑</button> <button data-mv="${si}|${di}|1" ${di < sec.drops.length - 1 ? '' : 'disabled'} aria-label="Move down">↓</button> <button data-refs="${esc(dr.job_id)}">Refs</button></td>` : '';
       const agentCell = editable && isDispatcher() ? `<select class="ag-sel no-print-border" data-agent-job="${esc(dr.job_id)}" aria-label="Sales agent">${agentOptions(dr.company, dr.agent_id)}</select>` : esc(dr.agent || '—');
-      return refs.map((r, ri) => `<tr>${ri === 0 ? `<td class="n" rowspan="${refs.length}">${di + 1}</td><td rowspan="${refs.length}"><b>${esc(dr.customer || dr.serial)}</b><div style="font-size:10px;color:#555">${esc(dr.serial)} · ${esc(dr.company)}${dr.job_type && dr.job_type !== 'delivery' ? ' · ' + esc(dr.job_type) : ''}</div>${state.prepMap?.[dr.job_id] ? `<div class="no-print" style="margin-top:3px">${prepMark(state.prepMap[dr.job_id])}</div>` : ''}</td><td rowspan="${refs.length}">${esc(dr.address || '')}</td><td class="ag" rowspan="${refs.length}">${agentCell}</td>` : ''}
+      return refs.map((r, ri) => `<tr>${ri === 0 ? `<td class="n" rowspan="${refs.length}">${stopNo(dr)}</td><td rowspan="${refs.length}"><b>${esc(dr.customer || dr.serial)}</b><div style="font-size:10px;color:#555">${esc(dr.serial)} · ${esc(dr.company)}${dr.job_type && dr.job_type !== 'delivery' ? ' · ' + esc(dr.job_type) : ''}</div>${state.prepMap?.[dr.job_id] ? `<div class="no-print" style="margin-top:3px">${prepMark(state.prepMap[dr.job_id])}</div>` : ''}</td><td rowspan="${refs.length}">${esc(dr.address || '')}</td><td class="ag" rowspan="${refs.length}">${agentCell}</td>` : ''}
         <td>${r.ref ? `<span class="ref">${esc(r.ref)}</span>` : ''}</td><td>${esc(r.remarks || '')}</td>
         <td class="w">${r.weight != null && r.weight !== '' ? Number(r.weight).toLocaleString('en-PH') : ri === 0 && !(dr.doc_refs || []).some(x => x.weight) && dr.weight ? Number(dr.weight).toLocaleString('en-PH') : ''}</td>${ri === 0 ? ctl : ''}</tr>`).join('');
     }).join('');
