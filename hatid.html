@@ -3032,11 +3032,14 @@ async function fillFromOdoo(f, txt, addItem, refresh){
 
 /* ===== Upload tickets: Odoo Helpdesk export (.xlsx/.csv, labels or technical names) or the HATID template → many jobs ===== */
 // Each source column is recognised by any of its names (Odoo's label, Odoo's technical name, or the HATID template heading)
+// ⚠ The ticket field the sales agents actually fill is "Ref. Sales Order" (x_studio_many2one_field_qwcli). The plain
+// "Sales Order" field is a different one that nobody fills, so an export built on it comes out with no customer and
+// no items (Oct 2026, 16 jobs created empty). The "ref" names are listed FIRST so they win when both are in the file.
 const UP_TICKET = {
-  'Ref. Sales Order': ['sale_order_id', 'x_studio_many2one_field_qwcli', 'ref sales order', 'sales order', 'so number', 'so no', 'so'],
-  'CUSTOMER NAME': ['sale_order_id/partner_id', 'sales order/customer', 'customer name', 'customer', 'client', 'client name', 'partner_name', 'partner_id', 'partner_id/name'],
-  'Salesperson': ['sale_order_id/user_id', 'sales order/salesperson', 'salesperson', 'sales agent', 'agent'],
-  'Company': ['sale_order_id/company_id', 'sales order/company', 'company_id', 'company'],
+  'Ref. Sales Order': ['x_studio_many2one_field_qwcli', 'ref. sales order', 'ref sales order', 'sale_order_id', 'sales order', 'so number', 'so no', 'so'],
+  'CUSTOMER NAME': ['x_studio_many2one_field_qwcli/partner_id', 'ref. sales order/customer', 'sale_order_id/partner_id', 'sales order/customer', 'customer name', 'customer', 'client', 'client name', 'partner_name', 'partner_id', 'partner_id/name'],
+  'Salesperson': ['x_studio_many2one_field_qwcli/user_id', 'ref. sales order/salesperson', 'sale_order_id/user_id', 'sales order/salesperson', 'salesperson', 'sales agent', 'agent'],
+  'Company': ['x_studio_many2one_field_qwcli/company_id', 'ref. sales order/company', 'sale_order_id/company_id', 'sales order/company', 'company_id', 'company'],
   'Scheduled Date': ['x_studio_scheduled_date', 'scheduled date', 'delivery date', 'date'],
   'Delivery Type': ['x_studio_delivery_type', 'delivery type', 'job type'],
   'Fulfillment Status': ['x_studio_fulfillment_status', 'fulfillment status'],
@@ -3048,7 +3051,7 @@ const UP_TICKET = {
   'Contact Number': ['x_studio_contact_number', 'contact number', 'mobile', 'contact mobile'],
   'Client Email': ['partner_email', 'client email', 'email'],
   'Created on': ['create_date', 'created on', 'ticket created', 'created'],
-  'Order Total': ['sale_order_id/amount_total', 'sales order/total', 'order total', 'order value'],
+  'Order Total': ['x_studio_many2one_field_qwcli/amount_total', 'ref. sales order/total', 'sale_order_id/amount_total', 'sales order/total', 'order total', 'order value'],
   '_name': ['name', 'subject', 'ticket'],
   '_id': ['id', 'ticket id', 'external id'],
 };
@@ -3058,7 +3061,9 @@ const UP_LINE = {   // per order line (Odoo sub-fields, or the template's item c
   unit: ['order_line/product_uom', 'order lines/unit of measure', 'order line/unit of measure', 'unit', 'unit of measure'],
   subtotal: ['order_line/price_total', 'order lines/total', 'order_line/price_subtotal', 'order lines/subtotal', 'order line/subtotal', 'subtotal'],   // VAT-inclusive total first, like the ticket's total
 };
-const upKey = h => String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ').replace(/^sale_order_id\/order_line\//, 'order_line/').replace(/^sales order\/order lines\//, 'order lines/');
+const upKey = h => String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+  .replace(/^(sale_order_id|x_studio_many2one_field_qwcli)\/order_line\//, 'order_line/')
+  .replace(/^(ref\.? )?sales order\/order lines\//, 'order lines/');
 function upColumns(headers){
   const keys = headers.map(upKey), col = {}, line = {};
   const find = names => { for (const n of names){ const i = keys.indexOf(n); if (i >= 0) return i; } return -1; };
@@ -3108,7 +3113,8 @@ function parseTicketRows(rows){
       for (const [f, i] of Object.entries(col)) cur.fields[f] = Array.isArray(i) ? (i.map(x => upCell(r[x])).find(Boolean) || '') : upCell(r[i]);
       const no = (String(cur.fields._id || '').match(/helpdesk_ticket_(\d+)/) || [])[1];
       const nm = cur.fields._name || cur.fields['Ref. Sales Order'] || k;
-      if (!cur.fields['Ref. Sales Order']) cur.fields['Ref. Sales Order'] = (nm.match(/\b[A-Z]{1,3}\d{3,}\b/) || [nm])[0];
+      cur.noLink = !cur.fields['Ref. Sales Order'];   // SO read from the ticket name only — the export carried no Sales Order link
+      if (cur.noLink) cur.fields['Ref. Sales Order'] = (nm.match(/\b[A-Z]{1,3}\d{3,}\b/) || [nm])[0];
       cur.ticket = { so: cur.fields['Ref. Sales Order'], no, label: no ? `${nm} (#${no})` : nm };
       if (cur.fields['Order Total']) cur.total = odooNum(cur.fields['Order Total']);
     }
@@ -3119,7 +3125,17 @@ function parseTicketRows(rows){
     }
   }
   const any = f => out.some(t => (t.fields[f] || '').trim());   // a column counts only if it has data
-  return { tickets: out, grouped, noSo, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson') };
+  return { tickets: out, grouped, noSo, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson'),
+    noLink: out.filter(t => t.noLink).length };
+}
+/* A ticket with no customer AND no items is never usable — it would become an empty job that can still be
+   prepared and loaded (Oct 2026: 5 such jobs went out on trucks). It is never ticked and cannot be created. */
+const upUnusable = j => !(j.client || '').trim() && !(j.items || []).length;
+function upNoLinkMsg(r){
+  if (!r.noLink || r.hasClient || r.hasLines) return '';
+  return `<b>The Sales Order columns in this file are empty</b> — the SO numbers below were read from the ticket Subject, so there is <b>no customer and no item list</b> for any ticket. `
+    + `This happens when the export uses Odoo’s plain <b>Sales Order</b> field instead of <b>Ref. Sales Order</b> (the field your agents fill on the ticket). `
+    + `Fix the HATID export template (<button class="lnk" id="up-how3">how</button>) and export again, or use <b>Paste ticket</b> for each one.`;
 }
 /* ---- What already happened on an SO (Rommel 2026-10-02): sales agents raise a NEW Odoo ticket with the same SO for the
    balance ("full delivery / full pick-up of the remaining balance"). So an upload doesn't stop at "already in HATID": it looks
@@ -3173,13 +3189,15 @@ function openJobUpload(){
         <li>Odoo › <b>Helpdesk › Tickets</b>, switch to the <b>list view</b> (☰), tick any ticket, then <b>⚙ Action → Export</b>.</li>
         <li>At the top, <b>untick</b> “I want to update data (import-compatible export)”, and pick <b>XLSX</b>.</li>
         <li>In the right-hand list, remove everything (🗑). Then use the search box on the left to add:
-          <b>Sales Order</b>, <b>Scheduled Date</b>, <b>Delivery Type</b>, <b>Fulfillment Status</b>, <b>Payment Status</b>, <b>Delivery Address</b>, <b>Delivery Instructions</b>, <b>Contact Person</b>, <b>Contact Number</b>.</li>
-        <li>Now the fields that live on the <b>Sales Order</b>:
+          <b>Ref. Sales Order</b>, <b>Subject</b>, <b>Scheduled Date</b>, <b>Delivery Type</b>, <b>Fulfillment Status</b>, <b>Payment Status</b>, <b>Delivery Address</b>, <b>Delivery Instructions</b>, <b>Contact Person</b>, <b>Contact Number</b>.
+          <br><span class="ft">⚠ Use <b>Ref. Sales Order</b> — the field your agents pick on the ticket. Odoo also lists a plain <b>Sales Order</b> field; it is left empty on your tickets, so it exports no customer and no items.</span></li>
+        <li>Now the fields that live on that Sales Order:
           <ul style="margin:2px 0;padding-left:18px">
-            <li>In the left list, search <b>Sales Order</b>. Click the small <b>arrow ( &gt; )</b> to the <b>left</b> of it (not the name) — its own fields open underneath, indented.</li>
+            <li>In the left list, search <b>Ref. Sales Order</b>. Click the small <b>arrow ( &gt; )</b> to the <b>left</b> of it (not the name) — its own fields open underneath, indented.</li>
             <li>From that indented list add <b>Customer</b>, <b>Salesperson</b>, <b>Company</b> and <b>Total</b>.</li>
             <li>In the same indented list, click the <b>arrow ( &gt; )</b> left of <b>Order Lines</b>, and from the deeper list add <b>Description</b>, <b>Quantity</b>, <b>Unit of Measure</b> and <b>Subtotal</b>.</li>
-            <li>On the right you should now see e.g. “Sales Order/Customer” and “Sales Order/Order Lines/Description”.</li>
+            <li>On the right you should now see e.g. “Ref. Sales Order/Customer” and “Ref. Sales Order/Order Lines/Description”.</li>
+            <li>Check: export one ticket you know and open it — the Customer and Description columns must have text. If they are blank, the wrong Sales Order field was used.</li>
           </ul></li>
         <li>Open the template dropdown → <b>New template</b> → name it <b>HATID</b> → save.</li>
       </ol>
@@ -3202,7 +3220,7 @@ function openJobUpload(){
       const j = odooToJob(t), co = j.company && cos.includes(j.company) ? j.company : (j.company ? null : co0);
       const dest = co ? guessDest(co, j.address) : null, ag = co ? guessAgent(co, j.salesperson) : null;
       const past = j.date && j.date < localDate(), date = !j.date ? '' : past ? nextWorkDay() : j.date;   // a passed date moves to the next working day (flagged)
-      return { j, co, dest: dest?.id || '', agent: ag?.id || '', date, was: past ? j.date : null, pick: !!co && !!dest };
+      return { j, co, dest: dest?.id || '', agent: ag?.id || '', date, was: past ? j.date : null, pick: !!co && !!dest && !upUnusable(j), empty: upUnusable(j) };
     });
     render();
   };
@@ -3210,6 +3228,7 @@ function openJobUpload(){
     const P = parsed, miss = [!P.hasLines && 'order lines (items)', !P.hasClient && 'customer name', !P.hasAgent && 'salesperson', !P.hasCompany && 'company'].filter(Boolean);
     $('up-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${P.tickets.length} delivery ticket${P.tickets.length === 1 ? '' : 's'} found.
       ${P.noSo ? `<div class="warn">${upNoSoMsg(P)}</div>` : ''}
+      ${upNoLinkMsg(P) ? `<div class="warn">${upNoLinkMsg(P)}</div>` : ''}
       ${P.pickups?.length ? `<div class="warn"><b>${P.pickups.length} Pick-up ticket${P.pickups.length === 1 ? '' : 's'} left out</b> (${esc(P.pickups.join(', '))}) — only delivery tickets are uploaded here. Upload ${P.pickups.length === 1 ? 'it' : 'them'} in <b>Pick-up mode › Pick-up tickets</b>.</div>` : ''}
       ${miss.length ? `<div class="warn">This file has no ${miss.join(', ')} — ${!P.hasLines ? 'jobs will have no item list. ' : ''}Add them to the Odoo export (<button class="lnk" id="up-how2">how</button>) or fill them in after.</div>` : ''}</div>
       <div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th><input type="checkbox" id="up-all" aria-label="Select all"></th><th>SO / client</th><th>Date</th><th>Destination *</th><th>Sales agent</th><th>Load</th><th>Check</th></tr></thead><tbody>
@@ -3222,8 +3241,9 @@ function openJobUpload(){
         if (!j.contact && !j.phone) w.push('No contact person/number');
         if (x.dup) w.push(`⚠ ${x.dup}`);
         if (x.bal) w.push(`↺ ${x.bal}`);
-        if (!j.items.length) w.push('No items');
-        return `<tr data-up="${i}"><td><input type="checkbox" data-up-pick ${x.pick ? 'checked' : ''} ${x.co && !x.full ? '' : 'disabled'} aria-label="Create this job"></td>
+        if (x.empty) w.unshift('⛔ No customer and no items — can’t be created. Paste this ticket instead, or fix the export');
+        else if (!j.items.length) w.push('No items');
+        return `<tr data-up="${i}"><td><input type="checkbox" data-up-pick ${x.pick ? 'checked' : ''} ${x.co && !x.full && !x.empty ? '' : 'disabled'} aria-label="Create this job"></td>
           <td><b class="mono">${esc(j.so || '—')}</b>${j.ticket && j.ticket !== j.so ? ` <span class="ft">${esc(j.ticket)}</span>` : ''}<div>${esc(j.client || '—')}</div><div class="ft">${esc(j.address || 'no address')}</div></td>
           <td><input class="i" type="date" data-up-date value="${esc(x.date)}" style="min-width:130px"></td>
           <td><select class="i" data-up-dest ${x.co ? '' : 'disabled'}>${x.co ? destOptions(x.co, x.dest) : ''}</select></td>
@@ -3235,10 +3255,10 @@ function openJobUpload(){
               <div style="font-size:11px">Untick what isn’t on this delivery, or lower the number (e.g. the client’s vehicle takes only part) — the rest stays as a balance.</div></details>` : '0 items'}${nb ? `<br>${nb} boards · ${Math.round(boardsKg(j.boards))} kg` : ''}</td>
           <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '✓ Ready'}</td></tr>`; }).join('')}
       </tbody></table></div>`;
-    $('up-how2')?.addEventListener('click', () => { $('up-guide').open = true; $('up-guide').scrollIntoView({ behavior: 'smooth' }); });
+    ['up-how2', 'up-how3'].forEach(id => $(id)?.addEventListener('click', () => { $('up-guide').open = true; $('up-guide').scrollIntoView({ behavior: 'smooth' }); }));
     const sync = () => { const n = document.querySelectorAll('[data-up-pick]:checked').length; $('up-go').disabled = !n; $('up-go').textContent = n ? `Create ${n} job${n === 1 ? '' : 's'}` : 'Create jobs'; };
     document.querySelectorAll('tr[data-up]').forEach(tr => { const x = P.jobs[+tr.dataset.up];
-      tr.querySelector('[data-up-dest]').addEventListener('change', e => { x.dest = e.target.value; if (x.dest) tr.querySelector('[data-up-pick]').checked = true; sync(); });
+      tr.querySelector('[data-up-dest]').addEventListener('change', e => { x.dest = e.target.value; if (x.dest && !x.empty && !x.full){ tr.querySelector('[data-up-pick]').checked = true; x.pick = true; } sync(); });
       tr.querySelector('[data-up-agent]').addEventListener('change', e => { x.agent = e.target.value; });
       tr.querySelector('[data-up-date]').addEventListener('change', e => { x.date = e.target.value; });
       tr.querySelector('[data-up-pick]').addEventListener('change', e => { x.pick = e.target.checked; sync(); });
@@ -5986,7 +6006,7 @@ async function openPkUpload(){
     const rows = R.rows;
     $('pku-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${rows.length} pick-up ticket${rows.length === 1 ? '' : 's'} found.
       ${R.r.noSo ? `<div class="warn">${upNoSoMsg(R.r)}</div>` : ''}
-      ${rows.some(x => !x.P.client) ? `<div class="warn">${rows.filter(x => !x.P.client).length} ticket${rows.filter(x => !x.P.client).length === 1 ? ' has' : 's have'} <b>no client name</b> — in the Odoo HATID export add <b>Sales Order › Customer</b> (open the arrow left of Sales Order, then add Customer).</div>` : ''}
+      ${rows.some(x => !x.P.client) ? `<div class="warn">${rows.filter(x => !x.P.client).length} ticket${rows.filter(x => !x.P.client).length === 1 ? ' has' : 's have'} <b>no client name</b> — in the Odoo HATID export add <b>Ref. Sales Order › Customer</b> (open the arrow left of <b>Ref. Sales Order</b>, not the plain Sales Order, then add Customer).</div>` : ''}
       ${R.other.length ? `<div class="warn"><b>${R.other.length} delivery ticket${R.other.length === 1 ? '' : 's'} left out</b> (${esc(R.other.join(', '))}) — only pick-up tickets are loaded here. Upload ${R.other.length === 1 ? 'it' : 'them'} in <b>Delivery mode › Delivery tickets</b>.</div>` : ''}
       ${rows.some(x => x.P.created_est) ? `<div class="warn">No <b>Created on</b> column — the cut-off can’t be checked from the ticket time (<button class="lnk" id="pku-how">how to add it</button>). Scheduled tickets are timed as now.</div>` : ''}</div>
       <div class="tbl-wrap"><table class="jobs up-t"><thead><tr><th><input type="checkbox" id="pku-all" aria-label="Select all" checked></th><th>SO / client</th><th>Type</th><th>Pick-up date</th><th>Site</th><th>Items</th><th>Check</th></tr></thead><tbody>
