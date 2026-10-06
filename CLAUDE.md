@@ -12761,3 +12761,19 @@ portal MSSI_COMPANY). Rommel chose option 1: fix only what people SEE; the full 
   sign-in and notification permission carry over; the app re-subscribes notifications by itself after sign-in.
 - Command Center, HATID and Approval still live under `/modcraft-app/` with narrow scopes; an old (10–15 Aug) Modcraft install
   could in theory still shadow them on that one phone. Move them the same way if it is ever seen.
+
+## What was changed on 2026-10-06 (session — HATID upload created empty jobs from an Odoo export, `47b67e6`)
+Michael's Odoo Helpdesk export (21 tickets) had every Sales Order, Customer and order-line column EMPTY; the SO
+survived only in Subject. HATID read the SO from Subject and created 16 jobs with no client and no items
+(2026-10-05 01:41 UTC); 5 (S79400, S79004, S79129, S79162, S79207) were scheduled, prepared and LOADED empty.
+- **Cause:** the export guide said add "Sales Order". The field agents fill is **Ref. Sales Order**
+  (`x_studio_many2one_field_qwcli` — the paste path already reads that label). The plain "Sales Order" field is
+  never filled. No bulk upload has ever arrived with customers/items; every complete job came by Paste ticket.
+- **Fix (hatid.html):** parser prefers Ref. Sales Order and its sub-fields; a ticket with no customer AND no items
+  cannot be created (`upUnusable`); file-level warning (`upNoLinkMsg`) when every SO came from Subject; guide and
+  pick-up hint say Ref. Sales Order with a "check one ticket" step; picking a destination now sets `x.pick`.
+- **Not changed, deliberately:** `job_prep_set` allows "prepared" with zero items (`cardinality(keys)=0`), and real
+  zero-item jobs exist (S79479 delivery charge, S79512 reference) — a prep/load block would break those.
+- **Data:** S79400's client set from its Subject. The other 4 still need client + items from Odoo (re-paste).
+- **Not verified:** the Odoo field label in the export dialog is inferred from the ticket form and the studio
+  technical name; first real export with the rebuilt template is the proof.
