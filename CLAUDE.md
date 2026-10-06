@@ -12777,3 +12777,8 @@ survived only in Subject. HATID read the SO from Subject and created 16 jobs wit
 - **Data:** S79400's client set from its Subject. The other 4 still need client + items from Odoo (re-paste).
 - **Not verified:** the Odoo field label in the export dialog is inferred from the ticket form and the studio
   technical name; first real export with the rebuilt template is the proof.
+- **Correction, same day (`22c193a`):** Rommel's screenshot of the HATID export template shows two "Sales Order"
+  fields and NO "Ref. Sales Order" option. So the more likely cause is that the ticket list was **grouped** in Odoo
+  (a known cause of empty Sales Order columns; HATID only detected it via "Pickup (5)" heading rows, and this file had
+  none). Added a standing "don't group before exporting" warning to the upload window and the steps; softened the
+  Ref. Sales Order wording. Decisive test: export the same tickets UNGROUPED with the current template.
