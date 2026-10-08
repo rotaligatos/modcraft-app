@@ -16,7 +16,12 @@ var DRIVE_FOLDER_ID = '1hK4iox_XmAFWOD-mMGjpEHBENOxJneeB';
 // file field on the form should be a deliberate addition here, not a silent
 // change in what the webhook does.
 var FILE_FIELDS = ['Field128','Field129','Field132','Field133','Field134',
-                   'Field135','Field136','Field137','Field138','Field139','Field140'];
+                   'Field135','Field136','Field137','Field138','Field139','Field140',
+                   // added to the form 2026-10-08
+                   'Field602','Field603','Field604'];
+// Safety net if this list falls behind the form again: the database trigger
+// pending_orders_wufoo_extra adds any unlisted file field to the order (as its
+// Wufoo link) and keeps every other answer, titled, in pending_orders.wufoo_extra.
 
 // WUFOO_API_KEY was removed 2026-08-02. Nothing read it: _uploadAttachment fetches
 // the attachment link with NO auth header, because Wufoo hands out pre-signed
