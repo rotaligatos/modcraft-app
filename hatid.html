@@ -793,6 +793,7 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
 .pr-sc.off{opacity:.55}
 .pr-team th{font-size:12px;max-width:110px;white-space:normal;vertical-align:bottom}.pr-team td.c{text-align:center}
 @media print{#pr-card,#pr-ring,body.practice::after{display:none!important}}
+.i.bw.est{border-color:var(--warn);background:var(--warn-soft)}
 </style>
 </head>
 <body>
@@ -1328,12 +1329,14 @@ async function loadRefData(){
   try { courier = (await sb.from('job_courier_vehicles').select('*').order('sort_order')).data || []; } catch {}
   let materials = [];
   try { materials = (await sb.from('material_weights').select('*').order('sort_order')).data || []; } catch {}
+  let boardWeights = [];
+  try { boardWeights = (await sb.from('board_weights').select('*').order('gauge_mm')).data || []; } catch {}
   if (isDispatcher()){
     try { [agents, notify] = await Promise.all([fetchAll('Loading agents', () => sb.from('job_agents').select('*').order('name')),
       sb.from('job_notify_settings').select('*').eq('id', true).maybeSingle().then(r => r.data)]); } catch {}
   }
   const byId = a => Object.fromEntries(a.map(x => [x.id, x]));
-  state.ref = { pools, groups, zones, dests, rates, brackets, gauges, trucks, calendar, avail, notices, agents, notify, courier, materials, agentById: byId(agents),
+  state.ref = { pools, groups, zones, dests, rates, brackets, gauges, trucks, calendar, avail, notices, agents, notify, courier, materials, boardWeights, agentById: byId(agents),
     poolById: byId(pools), groupById: byId(groups), zoneById: byId(zones), destById: byId(dests), truckById: byId(trucks) };
 }
 function poolsForCompany(company){ return state.ref.pools.filter(p => p.companies.includes(company)); }
@@ -1371,8 +1374,57 @@ function bracketCharge(destId, orderValue, fullTruck){
   const v = Number(orderValue);
   return v >= 50000 ? { charge: b.from_50k, label: '₱50K & above' } : v >= 30000 ? { charge: b.from_30k, label: '₱30K–49,999' } : { charge: b.below_30k, label: 'Below ₱30K' };
 }
-/* Board pieces {gauge: pcs} → kg / pcs, using the 4x8 sheet weights */
-function boardsKg(pcs){ return Object.entries(pcs || {}).reduce((s, [g, n]) => s + Number(n || 0) * Number(state.ref.gauges.find(x => Number(x.gauge_mm) === Number(g))?.kg_per_sheet || 0), 0); }
+/* ---------- Board weights by substrate (Settings › Material weights) ----------
+   An 18mm sheet is ~39 kg in MDF but ~29 kg in plywood, so a board line is weighed by what it is made of, not only its
+   thickness. Lookup: substrate + thickness (board_weights) → the base substrate (MDF-MR → MDF) → the "any board" figure
+   for that thickness (board_gauges). The kg per sheet found is stored on the line (w) like every other item.
+   HPL sheets are weighed the same way but are NOT boards: they never count toward a truck's board capacity.
+   Board COUNTS stay keyed by thickness (board_pcs) — capacity and every count read them. Rommel 2026-10-10. */
+const BOARD_SUBS = [['MDF', 'MDF'], ['MDF-MR', 'MDF moisture-resistant'], ['PB', 'Particle board (PB)'], ['PB-MR', 'PB moisture-resistant'], ['PLY', 'Plywood'], ['HDF', 'HDF']];
+function boardSubLabel(s){ return s === 'HPL' ? 'HPL' : (BOARD_SUBS.find(x => x[0] === s) || [, s || 'Board'])[1]; }
+function boardSubstrateOf(desc){
+  const d = String(desc || '');
+  const base = /\bhdf\b/i.test(d) ? 'HDF' : /\bmdf\b/i.test(d) ? 'MDF' : /\bpb\b|particle\s*board|chip\s*board/i.test(d) ? 'PB' : /plywood|\bply\b|marine/i.test(d) ? 'PLY' : '';
+  return (base === 'MDF' || base === 'PB') && /\bh?mr\b|moisture/i.test(d) ? base + '-MR' : base;
+}
+function boardWeightRows(){ return (state.ref.boardWeights || []).filter(r => r.active !== false); }
+// "any board" figure for a thickness — same lookup the old boardsKg used (active or not), so old deliveries keep their weight
+function anyBoardKg(g){ return Number((state.ref.gauges || []).find(x => Number(x.gauge_mm) === Number(g))?.kg_per_sheet || 0); }
+function boardSheetKg(sub, g){
+  const gn = Number(g), rows = boardWeightRows();
+  for (const s of sub ? [sub, sub.replace(/-MR$/, '')] : []){
+    const r = rows.find(x => x.substrate === s && Number(x.gauge_mm) === gn);
+    if (r) return { kg: Number(r.kg_per_sheet), rule: `${boardSubLabel(s)} ${fmtQty(gn)}mm` };
+  }
+  const a = anyBoardKg(gn);
+  return a > 0 ? { kg: a, rule: `${fmtQty(gn)}mm board (any)` } : null;
+}
+// Thicknesses that make a line a board: the "any board" list plus every substrate thickness (HPL excluded — not a board)
+function boardGaugeSet(){
+  return new Set([...(state.ref.gauges || []).filter(g => g.active).map(g => g.gauge_mm), ...boardWeightRows().filter(r => r.substrate !== 'HPL').map(r => r.gauge_mm)].map(x => String(Number(x))));
+}
+// An HPL sheet line ("PURE WHITE 4X8 .7MM HPL", pc/sheet) → kg per sheet. Edging, lipping and lamination services are not sheets.
+function hplSheetKg(desc, unit){
+  const d = String(desc || '');
+  if (!/\bhpl\b/i.test(d) || MATW_SKIP.test(d) || /edge\s*band|edging|\btape\b|lipping|laminat/i.test(d)) return null;
+  if (!/^(pc|pcs|piece|pieces|sheet|sheets|units?)?$/i.test(String(unit || '').trim())) return null;
+  const sz = d.match(/\b(\d+)\s*x\s*(\d+)\b/i); if (sz && !(sz[1] === '4' && sz[2] === '8')) return null;
+  const t = (d.match(/(\d*\.?\d+)\s*mm(?!\s*x)/i) || [])[1];
+  if (t == null) return { w: null, rule: 'HPL sheet', why: 'no thickness in the description' };
+  const tn = Number(t), r = boardWeightRows().find(x => x.substrate === 'HPL' && Number(x.gauge_mm) === tn);
+  return r ? { w: Number(r.kg_per_sheet), rule: `HPL ${fmtQty(tn)}mm sheet` } : { w: null, rule: 'HPL sheet', why: `no weight for ${fmtQty(tn)}mm HPL in Settings` };
+}
+/* Board kg. With the delivery's items, each board line weighs its own kg per sheet (w); the board count stays the
+   authority on HOW MANY (a count below the lines scales them down, a count above them adds "any board" sheets).
+   Without items it is the old thickness-only figure. Mirrors job_boards_kg(pcs, items) in the database. */
+function boardsKg(pcs, items){
+  const by = {};
+  (items || []).forEach(it => { if (it.g == null) return; const q = Number(it.qty || 0); if (!(q > 0)) return;
+    const g = String(Number(it.g)), b = by[g] || (by[g] = { q: 0, kg: 0 }); b.q += q; b.kg += q * (Number(it.w) > 0 ? Number(it.w) : anyBoardKg(g)); });
+  return Object.entries(pcs || {}).reduce((s, [g0, n]) => { const g = String(Number(g0)), p = Number(n || 0); if (!(p > 0)) return s;
+    const b = by[g], any = anyBoardKg(g);
+    return s + (b && b.q ? Math.min(p, b.q) * (b.kg / b.q) + Math.max(0, p - b.q) * any : p * any); }, 0);
+}
 /* ---------- Material weights (Settings › Material weights) ----------
    Boards are weighed per sheet by thickness (board_gauges). Every other ticket line is weighed by the first matching rule in
    material_weights: all of a rule's words must appear in the line's description. A rule is kg per piece, kg per m² (area read
@@ -1416,18 +1468,23 @@ function matwFor(desc, unit, rules){
   if (dm.t == null) return { w: null, rule: r.name, why: 'no thickness in the description' };
   return { w: Math.round(kg * area * dm.t * 1000) / 1000, rule: r.name };
 }
-// put the kg per unit on every non-board line (boards keep their per-sheet weight via g)
+// put the kg per unit on every line: boards by substrate + thickness (still counted via g), HPL sheets per sheet,
+// everything else by the material rules
 function weighItems(items){
   const rules = matwRules();
   return (items || []).map(it => {
-    if (it.g != null) return it;
-    const { w: _w, wr: _wr, wq: _wq, ...rest } = it, r = matwFor(it.desc, it.unit, rules);
+    const { w: _w, wr: _wr, wq: _wq, ...rest } = it;
+    if (it.g != null){ const b = boardSheetKg(boardSubstrateOf(it.desc), it.g);
+      return b ? { ...rest, w: b.kg, wr: b.rule } : { ...rest, wr: `${fmtQty(Number(it.g))}mm board`, wq: `no weight for ${fmtQty(Number(it.g))}mm boards in Settings` }; }
+    const h = hplSheetKg(it.desc, it.unit);
+    if (h) return h.w != null ? { ...rest, w: h.w, wr: h.rule } : { ...rest, wr: h.rule, wq: h.why };
+    const r = matwFor(it.desc, it.unit, rules);
     if (!r) return rest;
     return r.w != null ? { ...rest, w: r.w, wr: r.rule } : { ...rest, wr: r.rule, wq: r.why };
   });
 }
 function itemsKg(items){ return (items || []).reduce((s, it) => s + (it.g == null && Number(it.w) > 0 ? Number(it.w) * Number(it.qty || 0) : 0), 0); }
-function unweighed(items){ return (items || []).filter(it => it.g == null && it.wq); }
+function unweighed(items){ return (items || []).filter(it => it.wq); }
 function boardsPcs(pcs){ return Object.values(pcs || {}).reduce((s, n) => s + Number(n || 0), 0); }
 function boardsText(pcs){ const e = Object.entries(pcs || {}).filter(([, n]) => Number(n) > 0); return e.length ? e.sort((a, b) => a[0] - b[0]).map(([g, n]) => `${n}×${g}mm`).join(', ') : ''; }
 
@@ -1784,7 +1841,7 @@ function prJob(o){
   items.forEach(it => { if (it.g != null) bp[it.g] = (bp[it.g] || 0) + Number(it.qty); });
   return { id: newId(), quotation_serial: o.so, company: c.co, client_name: o.client, job_type: 'delivery', scheduled_date: c.today, status: 'proposed',
     truck_id: null, trip_no: null, drop_seq: null, destination_id: d.id, address: c.addr(d), agent_id: c.agent?.id || null, items, board_pcs: bp,
-    estimated_weight_kg: Math.round((boardsKg(bp) + (o.otherKg ?? 8)) * 100) / 100, doc_refs: [{ ref: o.so, remarks: 'Full Released' }], prep: {}, prepared_at: null,
+    estimated_weight_kg: Math.round((boardsKg(bp, items) + (o.otherKg ?? 8)) * 100) / 100, doc_refs: [{ ref: o.so, remarks: 'Full Released' }], prep: {}, prepared_at: null,
     balance_items: [], created_at: now, updated_at: now, created_by: 'practice-ss', created_name: 'Sales Support (practice)', client_contact_name: o.contact || 'Mr. Santos',
     client_phone: '09170000001', notes: o.notes || 'PRACTICE — sample ticket', odoo_ticket: `${o.so} (#9${o.so.slice(-3)})`, ...(o.x || {}) };
 }
@@ -1899,11 +1956,11 @@ function simDeliveryRpc(fn, a){
       const bp = items => { const b = {}; items.forEach(it => { if (it.g != null) b[it.g] = (b[it.g] || 0) + Number(it.qty || 0); }); return b; };
       const nb = bp(take), kb = bp(keep);
       const bal = { ...JSON.parse(JSON.stringify(j)), id: newId(), status: 'proposed', truck_id: null, trip_no: null, drop_seq: null, scheduled_date: null, items: take, board_pcs: nb,
-        estimated_weight_kg: Math.round((boardsKg(nb) + itemsKg(take)) * 100) / 100 || null, load_check: null, loaded_at: null, prep: {}, prepared_at: null, prepared_name: null, prep_req_at: null, prep_req_name: null,
+        estimated_weight_kg: Math.round((boardsKg(nb, take) + itemsKg(take)) * 100) / 100 || null, load_check: null, loaded_at: null, prep: {}, prepared_at: null, prepared_name: null, prep_req_at: null, prep_req_name: null,
         prep_req_note: null, prep_req_lines: null, prep_waived_at: null, redelivery_of: j.id, created_at: now, updated_at: now,
         notes: `Balance — not available for the ${fmtDay(j.scheduled_date)} delivery (${j.prep_req_note}).` + (j.notes ? '\n' + j.notes : '') };
       SIM.jobs.push(bal);
-      Object.assign(j, { items: keep, board_pcs: kb, estimated_weight_kg: Math.round((boardsKg(kb) + itemsKg(keep) + 5) * 100) / 100, prep: { all: true }, prepared_at: now, prepared_name: who,
+      Object.assign(j, { items: keep, board_pcs: kb, estimated_weight_kg: Math.round((boardsKg(kb, keep) + itemsKg(keep) + 5) * 100) / 100, prep: { all: true }, prepared_at: now, prepared_name: who,
         prep_waived_at: now, prep_waived_name: who, prep_balance_job: bal.id, prep_req_at: null });
       ev(j.id, 'prep_waived', 'Allowed to go without the missing items — they stay open as a balance delivery'); ev(bal.id, 'proposed', `Balance of ${j.quotation_serial}`);
       return ok(bal.id);
@@ -3006,7 +3063,7 @@ function odooToJob(t){
   const siteLine = t.lines.find(x => /^site\s*:/i.test(x.desc || ''));
   const address = F('Delivery Address') || pick(/delivery address\s*:\s*(.+)/i) || (siteLine ? siteLine.desc.replace(/^site\s*:\s*/i, '') : '');
   const terms = pick(/terms?\s*:\s*(.+)/i);
-  const gauges = new Set(state.ref.gauges.filter(g => g.active).map(g => String(Number(g.gauge_mm))));
+  const gauges = boardGaugeSet();
   const boards = {}, items = [], other = [], skipped = [];
   let total = 0;
   for (const ln of t.lines){
@@ -3345,7 +3402,7 @@ async function upOdooCheck(r){
 }
 function upCheckSummary(P){
   const T = P.tickets, read = T.reduce((s, t) => s + (t.fileLines ?? t.lines.length), 0);
-  const nb = P.jobs.reduce((s, x) => s + Object.values(x.j.boards).reduce((a, b) => a + b, 0), 0), kgB = P.jobs.reduce((s, x) => s + boardsKg(x.j.boards), 0), kgM = P.jobs.reduce((s, x) => s + itemsKg(x.j.items), 0), kg = kgB + kgM;
+  const nb = P.jobs.reduce((s, x) => s + Object.values(x.j.boards).reduce((a, b) => a + b, 0), 0), kgB = P.jobs.reduce((s, x) => s + boardsKg(x.j.boards, x.j.items), 0), kgM = P.jobs.reduce((s, x) => s + itemsKg(x.j.items), 0), kg = kgB + kgM;
   let o = '';
   if (P.odoo?.ok){ const c = k => T.filter(k).length, same = c(t => t.chk && !t.chk.none && !t.chk.fromOdoo && !t.chk.diff.length), fil = c(t => t.chk?.fromOdoo), dif = c(t => t.chk?.diff?.length), none = c(t => t.chk?.none);
     o = ` Checked against the Odoo copy${P.odoo.synced ? ` (updated ${fmtDay(String(P.odoo.synced).slice(0, 10))})` : ''}: <b>${same}</b> same${fil ? ` · <b style="color:var(--warn)">${fil} filled from Odoo</b>` : ''}${dif ? ` · <b style="color:var(--warn)">${dif} don’t agree</b>` : ''}${none ? ` · ${none} not in the copy` : ''}.`; }
@@ -3445,7 +3502,7 @@ function openJobUpload(){
               ${j.items.map((it, k) => { const L = x.left?.[k], gone = x.lockHeld && L && L.left <= 0;
                 const mx = L ? L.left : Number(it.qty || 0);
                 return `<label class="loadck${gone ? ' off' : ''}" style="margin-top:3px;font-size:12px${gone ? ';opacity:.5;text-decoration:line-through' : ''}"><input type="checkbox" data-up-it="${k}" ${x.held?.has(k) ? '' : 'checked'} ${gone ? 'disabled' : ''}>${gone ? '' : ` <input class="i up-q" type="number" min="0" max="${mx}" step="any" data-up-q="${k}" value="${x.q?.[k] ?? mx}" title="How many go on this delivery" aria-label="Qty on this delivery">`} ${L && L.cov && L.left > 0 ? `<b>${esc(fmtQty(L.left))}</b> of ${esc(fmtQty(it.qty))}` : esc(fmtQty(it.qty))} × ${esc(it.desc)}${gone ? ' — already delivered / on a job' : L && L.cov && L.left > 0 ? ` <span class="ft">(${esc(fmtQty(L.cov))} already delivered / on a job)</span>` : ''}</label>`; }).join('')}
-              <div style="font-size:11px">Untick what isn’t on this delivery, or lower the number (e.g. the client’s vehicle takes only part) — the rest stays as a balance.</div></details>` : '0 items'}${nb ? `<br>${nb} boards · ${Math.round(boardsKg(j.boards))} kg` : ''}</td>
+              <div style="font-size:11px">Untick what isn’t on this delivery, or lower the number (e.g. the client’s vehicle takes only part) — the rest stays as a balance.</div></details>` : '0 items'}${nb ? `<br>${nb} boards · ${Math.round(boardsKg(j.boards, j.items))} kg` : ''}</td>
           <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '✓ Ready'}${x.t.chk?.diff?.length && x.t.odooLines?.length ? `<button class="btn sm" data-up-odoo style="margin-top:4px">Use Odoo’s list (${x.t.odooLines.length})</button>` : ''}${x.t.chk && !x.t.chk.none && !x.t.chk.fromOdoo && !x.t.chk.diff.length && x.t.odooLines?.length ? `<div style="color:var(--ok, #2e7d32)">✓ Same as Odoo (${x.t.odooLines.length} line${x.t.odooLines.length === 1 ? '' : 's'})</div>` : ''}</td></tr>`; }).join('')}
       </tbody></table></div>`;
     ['up-how2', 'up-how3'].forEach(id => $(id)?.addEventListener('click', () => { $('up-guide').open = true; $('up-guide').scrollIntoView({ behavior: 'smooth' }); }));
@@ -3512,7 +3569,7 @@ function openJobUpload(){
       return { id: newId(), quotation_serial: (j.so || j.ticket || 'ODOO').toUpperCase(), company: x.co, client_name: j.client || null, agent_id: x.agent || null,
         client_contact_name: j.contact || null, client_phone: phone, client_email: /@/.test(j.email || '') ? j.email.trim().toLowerCase() : null,
         destination_id: x.dest, job_type: j.job_type, scheduled_date: x.date || null, board_pcs: j.boards, items: j.items,
-        estimated_weight_kg: Math.round((boardsKg(j.boards) + itemsKg(j.items)) * 100) / 100, order_value: j.total || null, address: j.address || null, notes: j.notes || null,
+        estimated_weight_kg: Math.round((boardsKg(j.boards, j.items) + itemsKg(j.items)) * 100) / 100, order_value: j.total || null, address: j.address || null, notes: j.notes || null,
         doc_refs: j.so ? [{ ref: j.so.toUpperCase(), remarks: j.fulfillment || null }] : [], odoo_ticket: j.ticket || null,
         payment_status: j.payment_status || null, payment_terms: j.terms || null, fulfillment_status: j.fulfillment || null, balance_items: bal, status: 'proposed' }; });
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Creating…';
@@ -3626,7 +3683,7 @@ function openNewJob(){
   f.addEventListener('input', e => { if (e.target.matches('[data-it=qty]') && e.target.closest('.it[data-orig]')){ const r = e.target.closest('.it'); if (Number(e.target.value) > Number(r.dataset.orig)) e.target.value = r.dataset.orig; if (r.dataset.g) syncBoardsFromItems(f); $('nj-held').textContent = heldNote(); } });
   if (!$('unit-list')) document.body.insertAdjacentHTML('beforeend', '<datalist id="unit-list"><option>pcs</option><option>rolls</option><option>boxes</option><option>sets</option><option>bundles</option><option>gallons</option></datalist>');
   const refresh = () => {
-    const kgB = boardsKg(readBoards(f)), other = Number($('nj-other').value || 0), mi = weighItems(readItems($('nj-items'), '.it:not(.held)')), kgM = itemsKg(mi), nu = unweighed(mi).length;
+    const other = Number($('nj-other').value || 0), mi = weighItems(readItems($('nj-items'), '.it:not(.held)')), kgB = boardsKg(readBoards(f), mi), kgM = itemsKg(mi), nu = unweighed(mi).length;
     $('nj-weight').textContent = `${Math.round((kgB + kgM + other) * 10) / 10} kg · ${boardsPcs(readBoards(f))} pcs${kgM ? ` (incl. ${Math.round(kgM)} kg slabs & materials)` : ''}${nu ? ` · ⚠ ${nu} line${nu === 1 ? '' : 's'} with no weight` : ''}`;
     const i = destInfo(f.destination_id.value);
     $('nj-dest-info').textContent = i ? `${i.group.name} › ${i.zone.name} · delivers ${(i.group.schedule_days || []).map(d => DAY_SHORT[d]).join(', ')}${i.dest.km_from_plant ? ` · ${i.dest.km_from_plant} km from ${i.pool.origin_name || 'plant'}` : ''}${i.dest.notes ? ' · ⚠ ' + i.dest.notes : ''}` : '';
@@ -3656,7 +3713,7 @@ function openNewJob(){
       fd.balance_items.push({ desc: r.querySelector('[data-it=desc]').value.trim(), qty: rest, unit: r.querySelector('[data-it=unit]').value.trim() || null, ...(r.dataset.g ? { g: r.dataset.g } : {}) }); });
     fd.items = weighItems(fd.items.filter(it => Number(it.qty) !== 0)); fd.balance_items = weighItems(fd.balance_items);
     if (!fd.items.length && fd.balance_items.length) return toast('Tick at least one item for this delivery', 'error');
-    fd.estimated_weight_kg = Math.round((boardsKg(fd.board_pcs) + itemsKg(fd.items) + Number($('nj-other').value || 0)) * 100) / 100;
+    fd.estimated_weight_kg = Math.round((boardsKg(fd.board_pcs, fd.items) + itemsKg(fd.items) + Number($('nj-other').value || 0)) * 100) / 100;
     if (fd.order_value != null) fd.order_value = Number(fd.order_value);
     fd.quotation_serial = fd.quotation_serial.trim().toUpperCase();
     if (fd.client_phone && !isPhMobile(fd.client_phone)) return toast('Client mobile: enter a Philippine mobile number, e.g. 0917 123 4567', 'error');
@@ -5594,9 +5651,9 @@ function ssItemsModal(j, after){
       const now = on.has(+i.dataset.k) ? q : 0;
       if (now > 0) items.push({ ...x.it, qty: now }); if (x.total - now > 0) bal.push({ ...x.it, qty: x.total - now }); }
     if (!items.length) return toast('Keep at least one item (or cancel the ticket)', 'error');
-    const boards = ssBoards(j, items), other = Math.max(0, Number(j.estimated_weight_kg || 0) - boardsKg(j.board_pcs) - itemsKg(j.items)), wi = weighItems(items), wb = weighItems(bal);
+    const boards = ssBoards(j, items), other = Math.max(0, Number(j.estimated_weight_kg || 0) - boardsKg(j.board_pcs, j.items) - itemsKg(j.items)), wi = weighItems(items), wb = weighItems(bal);
     e.target.disabled = true;
-    try { await pkRpc('Saving', 'job_ss_lines', { p_job: j.id, p_items: wi, p_balance: wb, p_boards: boards, p_weight: Math.round((boardsKg(boards) + itemsKg(wi) + other) * 100) / 100 });
+    try { await pkRpc('Saving', 'job_ss_lines', { p_job: j.id, p_items: wi, p_balance: wb, p_boards: boards, p_weight: Math.round((boardsKg(boards, wi) + itemsKg(wi) + other) * 100) / 100 });
       toast(bal.length ? `Saved — ${bal.length} item${bal.length === 1 ? '' : 's'} left for a later delivery` : 'Saved — everything on this delivery', 'ok'); closeOverlay(); (after || loadPkDtix)(); } catch { e.target.disabled = false; }
   });
 }
@@ -5611,7 +5668,7 @@ function ssBalanceModal(j, after){
   $('ssb-go').addEventListener('click', async e => {
     const boards = {}; bal.forEach(it => { if (it.g != null) boards[it.g] = (boards[it.g] || 0) + Number(it.qty || 0); });
     e.target.disabled = true;
-    try { await pkRpc('Sending', 'job_ss_balance', { p_job: j.id, p_date: $('ssb-d').value || null, p_boards: boards, p_weight: Math.round((boardsKg(boards) + itemsKg(weighItems(bal))) * 100) / 100 });
+    try { await pkRpc('Sending', 'job_ss_balance', { p_job: j.id, p_date: $('ssb-d').value || null, p_boards: boards, p_weight: Math.round((boardsKg(boards, weighItems(bal)) + itemsKg(weighItems(bal))) * 100) / 100 });
       toast('Balance sent to dispatch', 'ok'); closeOverlay(); (after || loadPkDtix)(); } catch { e.target.disabled = false; }
   });
 }
@@ -6493,9 +6550,11 @@ function startTv(site){
    (quartz, solid surface, …). Weights change trucks' loads, so every save names who made it. */
 const MATW_BASIS = { piece: 'kg per piece', sqm: 'kg per m²', sqm_mm: 'kg per m² per mm' };
 async function reloadWeights(){
-  const [m, g] = await Promise.all([sb.from('material_weights').select('*').order('sort_order'), sb.from('board_gauges').select('*').order('gauge_mm')]);
+  const [m, g, bw] = await Promise.all([sb.from('material_weights').select('*').order('sort_order'), sb.from('board_gauges').select('*').order('gauge_mm'),
+    sb.from('board_weights').select('*').order('gauge_mm')]);
   if (!m.error) state.ref.materials = m.data || [];
   if (!g.error) state.ref.gauges = g.data || [];
+  if (!bw.error) state.ref.boardWeights = bw.data || [];
 }
 async function renderWeightSettings(){
   setSetHead('How HATID weighs each delivery: boards by thickness, everything else by the rules below. Truck loads are the sum of their deliveries.',
@@ -6511,11 +6570,26 @@ async function renderWeightSettings(){
       <td><input type="checkbox" data-f="active" ${r.active !== false ? 'checked' : ''} aria-label="In use"></td>
       <td><input class="i" data-f="notes" value="${esc(r.notes || '')}" style="min-width:180px"></td>
       <td><button class="btn primary sm" data-mwsave>Save</button>${r.updated_by ? `<div class="ft">${esc(r.updated_by)} · ${fmtDay(String(r.updated_at).slice(0, 10))}</div>` : ''}</td></tr>`;
-  const gRow = g => `<tr data-gg="${esc(g.gauge_mm ?? '')}" class="${g.active === false ? 'off' : ''}">
-      <td>${g.gauge_mm != null ? `<b>${esc(Number(g.gauge_mm))} mm</b>` : '<input class="i" type="number" min="1" step="any" data-f="gauge_mm" placeholder="mm" style="width:80px">'}</td>
-      <td><input class="i" type="number" min="0" step="any" data-f="kg_per_sheet" value="${esc(g.kg_per_sheet ?? '')}" style="width:90px"></td>
-      <td><input type="checkbox" data-f="active" ${g.active !== false ? 'checked' : ''} aria-label="In use"></td>
-      <td><button class="btn primary sm" data-ggsave>Save</button></td></tr>`;
+  // Board grid: one row per thickness, one column per board type. "Any board" = board_gauges (used when the line doesn't
+  // say what board it is, or that type has no figure). A blank board-type cell falls back — the placeholder shows to what.
+  const bws = state.ref.boardWeights || [];
+  const bRow = (sub, mm) => bws.find(x => x.substrate === sub && Number(x.gauge_mm) === mm);
+  const thick = [...new Set([...gauges.map(g => Number(g.gauge_mm)), ...bws.filter(r => r.substrate !== 'HPL').map(r => Number(r.gauge_mm))])].sort((a, b) => a - b);
+  const fallbackKg = (sub, mm) => { const base = sub.replace(/-MR$/, ''), b = base !== sub ? bRow(base, mm) : null;
+    return b && b.active !== false ? Number(b.kg_per_sheet) : Number(gauges.find(g => Number(g.gauge_mm) === mm)?.kg_per_sheet || 0) || null; };
+  const est = r => r && /typical|estimated/i.test(r.notes || '');
+  const bCell = (sub, mm) => { const r = bRow(sub, mm), on = r && r.active !== false, fb = fallbackKg(sub, mm);
+    return `<td><input class="i bw${est(r) ? ' est' : ''}" type="number" min="0" step="any" data-sub="${esc(sub)}" value="${on ? esc(r.kg_per_sheet) : ''}"
+      placeholder="${fb ? '→ ' + esc(fmtQty(fb)) : '—'}" title="${esc(on ? (r.notes || '') + (r.updated_by ? ` · ${r.updated_by}` : '') : fb ? `Blank — uses ${fmtQty(fb)} kg` : 'Blank — no weight for this thickness')}" style="width:74px"></td>`; };
+  const anyCell = mm => { const g = gauges.find(x => Number(x.gauge_mm) === mm), on = g && g.active !== false;
+    return `<td><input class="i bw" type="number" min="0" step="any" data-sub="" value="${on ? esc(g.kg_per_sheet) : ''}" placeholder="${g ? 'off · ' + esc(fmtQty(g.kg_per_sheet)) : '—'}" title="Used when the line doesn’t say the board type, or that type has no figure" style="width:74px"></td>`; };
+  const tRow = mm => `<tr ${mm != null ? `data-mm="${esc(mm)}"` : ''}><td>${mm != null ? `<b>${esc(fmtQty(mm))} mm</b>` : '<input class="i" type="number" min="0.1" step="any" data-mm-in placeholder="mm" style="width:70px">'}</td>
+      ${anyCell(mm)}${BOARD_SUBS.map(([s]) => bCell(s, mm)).join('')}</tr>`;
+  const hRow = mm => { const r = mm != null ? bRow('HPL', mm) : null;
+    return `<tr ${mm != null ? `data-mm="${esc(mm)}"` : ''}><td>${mm != null ? `<b>${esc(fmtQty(mm))} mm</b>` : '<input class="i" type="number" min="0.1" step="any" data-mm-in placeholder="mm" style="width:70px">'}</td>
+      <td><input class="i bw${est(r) ? ' est' : ''}" type="number" min="0" step="any" data-sub="HPL" value="${r && r.active !== false ? esc(r.kg_per_sheet) : ''}" style="width:74px"></td>
+      <td class="ft">${esc(r?.notes || '')}${r?.updated_by ? ` · ${esc(r.updated_by)}` : ''}</td></tr>`; };
+  const hplMm = bws.filter(r => r.substrate === 'HPL').map(r => Number(r.gauge_mm)).sort((a, b) => a - b);
   $('set-body').innerHTML = `
     <div class="card pad rp-sec"><h3>Try a ticket line</h3>
       <div class="ft" style="margin-bottom:6px">Paste a line exactly as it appears on the Odoo ticket to see what HATID will weigh it at.</div>
@@ -6529,17 +6603,30 @@ async function renderWeightSettings(){
       <div class="tbl-wrap"><table class="rt ut"><thead><tr><th>Name</th><th>Words to match</th><th>Weighed by</th><th>kg</th><th>In use</th><th>Notes</th><th></th></tr></thead>
       <tbody id="mw-rows">${mats.map(mRow).join('')}</tbody></table></div>
       <div class="row-btns"><button class="btn" id="mw-add">+ Add material</button></div></div>
-    <div class="card pad rp-sec"><h3>Boards (kg per sheet)</h3>
-      <div class="ft" style="margin-bottom:8px">A 4x8 board — or a line naming plywood, MDF, PB, melamine, HDF or marine — is weighed per sheet by its thickness.</div>
-      <div class="tbl-wrap"><table class="rt ut" style="min-width:0"><thead><tr><th>Thickness</th><th>kg per sheet</th><th>In use</th><th></th></tr></thead>
-      <tbody id="gg-rows">${gauges.map(gRow).join('')}</tbody></table></div>
-      <div class="row-btns"><button class="btn" id="gg-add">+ Add a thickness</button></div></div>
+    <div class="card pad rp-sec"><h3>Boards (kg per 4x8 sheet)</h3>
+      <div class="ft" style="margin-bottom:8px">A 4x8 board — or a line naming plywood, MDF, PB, melamine, HDF or marine — is weighed by <b>what it is made of</b> and its thickness.
+        HATID reads the board type from the line: “MDF”, “PB”/“particle board”, “plywood”/“ply”/“marine”, “HDF”; “MR”, “HMR” or “moisture” makes it moisture-resistant.
+        A <b>blank</b> cell uses the figure shown in grey: moisture-resistant falls back to its plain board, everything else to <b>Any board</b>.
+        <b>Any board</b> is also used when the line doesn’t say what board it is. <span style="color:var(--warn)">Amber</span> = typical figure, not yet the supplier’s — replace it.</div>
+      <div class="tbl-wrap"><table class="rt ut" style="min-width:0"><thead><tr><th>Thickness</th><th>Any board</th>${BOARD_SUBS.map(([, l]) => `<th>${esc(l)}</th>`).join('')}</tr></thead>
+      <tbody id="bw-rows">${thick.map(tRow).join('')}</tbody></table></div>
+      <div class="row-btns"><button class="btn" id="bw-add">+ Add a thickness</button><button class="btn primary" id="bw-save">Save board weights</button></div></div>
+    <div class="card pad rp-sec"><h3>HPL sheets (kg per 4x8 sheet)</h3>
+      <div class="ft" style="margin-bottom:8px">A line like “PURE WHITE 4X8 .7MM HPL” (pc / sheet) is weighed per sheet by its thickness. HPL sheets add weight but <b>don’t count as boards</b> toward a truck’s board limit. Edge band, lipping and lamination lines are not sheets.</div>
+      <div class="tbl-wrap"><table class="rt ut" style="min-width:0"><thead><tr><th>Thickness</th><th>kg per sheet</th><th>Notes</th></tr></thead>
+      <tbody id="hpl-rows">${hplMm.map(hRow).join('')}</tbody></table></div>
+      <div class="row-btns"><button class="btn" id="hpl-add">+ Add a thickness</button><button class="btn primary" id="hpl-save">Save HPL weights</button></div></div>
     <div class="ft">Changing a weight affects deliveries uploaded from now on. To update deliveries already waiting, use <b>Re-weigh open deliveries</b>.</div>`;
   const test = () => {
     const desc = $('mw-t-desc').value.trim(), qty = Number($('mw-t-qty').value || 0), unit = $('mw-t-unit').value.trim(), out = $('mw-t-out');
     if (!desc) return out.textContent = '';
-    const gs = new Set(gauges.filter(g => g.active).map(g => String(Number(g.gauge_mm)))), bg = boardGaugeOf(desc.replace(/\s+/g, ' '), unit, gs);
-    if (bg){ const k = Number(gauges.find(g => String(Number(g.gauge_mm)) === bg)?.kg_per_sheet || 0); return out.innerHTML = `Board, ${esc(bg)} mm — ${esc(fmtQty(k))} kg per sheet × ${esc(fmtQty(qty))} = <b>${esc(kg(k * qty))}</b>`; }
+    const bg = boardGaugeOf(desc.replace(/\s+/g, ' '), unit, boardGaugeSet());
+    if (bg){ const sub = boardSubstrateOf(desc), b = boardSheetKg(sub, bg);
+      if (!b) return out.innerHTML = `<span style="color:var(--warn)">A ${esc(bg)} mm board, but there is no weight for that thickness — it counts as <b>0 kg</b>. Add it to the board grid.</span>`;
+      return out.innerHTML = `Board — ${sub ? esc(boardSubLabel(sub)) : 'board type not named in the line'}, ${esc(bg)} mm · uses <b>${esc(b.rule)}</b>: ${esc(fmtQty(b.kg))} kg per sheet × ${esc(fmtQty(qty))} = <b>${esc(kg(b.kg * qty))}</b>`; }
+    const h = hplSheetKg(desc, unit);
+    if (h) return out.innerHTML = h.w == null ? `<span style="color:var(--warn)">An HPL sheet, but there is ${esc(h.why)} — it counts as 0 kg.</span>`
+      : `${esc(h.rule)} (not counted as a board) — ${esc(fmtQty(h.w))} kg per sheet × ${esc(fmtQty(qty))} = <b>${esc(kg(h.w * qty))}</b>`;
     const r = matwFor(desc, unit);
     if (!r) return out.innerHTML = MATW_SKIP.test(desc) ? 'A service or charge line — not weighed (0 kg).' : '<span style="color:var(--warn)">No rule matches — this line counts as <b>0 kg</b>. Add a material with words from this description.</span>';
     if (r.w == null) return out.innerHTML = `<span style="color:var(--warn)">Matches “${esc(r.rule)}”, but there is ${esc(r.why)} — this line counts as 0 kg.</span>`;
@@ -6548,7 +6635,41 @@ async function renderWeightSettings(){
   };
   ['mw-t-desc', 'mw-t-qty', 'mw-t-unit'].forEach(id => $(id).addEventListener('input', test));
   $('mw-add').addEventListener('click', () => { $('mw-rows').insertAdjacentHTML('beforeend', mRow({ basis: 'piece', active: true })); bindRows(); });
-  $('gg-add').addEventListener('click', () => { $('gg-rows').insertAdjacentHTML('beforeend', gRow({ active: true })); bindRows(); });
+  $('bw-add').addEventListener('click', () => { $('bw-rows').insertAdjacentHTML('beforeend', tRow(null)); $('bw-rows').lastElementChild.querySelector('[data-mm-in]').focus(); });
+  $('hpl-add').addEventListener('click', () => { $('hpl-rows').insertAdjacentHTML('beforeend', hRow(null)); $('hpl-rows').lastElementChild.querySelector('[data-mm-in]').focus(); });
+  // Save a weight grid: a figure upserts it, a cleared cell removes that board type's figure (it falls back again);
+  // the "Any board" column edits board_gauges (cleared = switched off, the row is kept for old deliveries).
+  const saveGrid = async (body, btn) => {
+    const ups = [], dels = [], gUps = [], gIns = [], errs = [], seen = new Set();
+    body.querySelectorAll('tr').forEach(tr => {
+      const mm = tr.dataset.mm ? Number(tr.dataset.mm) : Number(tr.querySelector('[data-mm-in]')?.value), cells = [...tr.querySelectorAll('[data-sub]')];
+      if (!tr.dataset.mm){ if (!cells.some(c => c.value !== '')) return; if (!(mm > 0)) return errs.push('Enter the thickness (mm) for the new row');
+        if (seen.has(mm) || [...body.querySelectorAll('tr[data-mm]')].some(x => Number(x.dataset.mm) === mm)) return errs.push(`${fmtQty(mm)} mm is already in the list — change it there`); }
+      seen.add(mm);
+      cells.forEach(c => { const sub = c.dataset.sub, v = c.value === '' ? null : Number(c.value);
+        if (v != null && !(v > 0)) return errs.push(`${fmtQty(mm)} mm ${sub ? boardSubLabel(sub) : 'Any board'}: enter a weight above 0`);
+        if (!sub){ const g = gauges.find(x => Number(x.gauge_mm) === mm);
+          if (v == null){ if (g && g.active !== false) gUps.push({ gauge_mm: mm, p: { active: false } }); }
+          else if (!g) gIns.push({ gauge_mm: mm, kg_per_sheet: v, active: true });
+          else if (Number(g.kg_per_sheet) !== v || g.active === false) gUps.push({ gauge_mm: mm, p: { kg_per_sheet: v, active: true } });
+          return; }
+        const r = bRow(sub, mm);
+        if (v == null){ if (r) dels.push({ sub, mm }); }
+        else if (!r || Number(r.kg_per_sheet) !== v || r.active === false) ups.push({ substrate: sub, gauge_mm: mm, kg_per_sheet: v, active: true, notes: r && Number(r.kg_per_sheet) === v ? r.notes : null });
+      }); });
+    if (errs.length) return toast(errs[0], 'error');
+    if (!ups.length && !dels.length && !gUps.length && !gIns.length) return toast('Nothing changed', 'ok');
+    btn.disabled = true;
+    try {
+      if (ups.length) await withRetry('Saving', () => sb.from('board_weights').upsert(ups, { onConflict: 'substrate,gauge_mm' }));
+      for (const d of dels) await withRetry('Saving', () => sb.from('board_weights').delete().eq('substrate', d.sub).eq('gauge_mm', d.mm));
+      for (const g of gUps) await withRetry('Saving', () => sb.from('board_gauges').update(g.p).eq('gauge_mm', g.gauge_mm));
+      if (gIns.length) await withRetry('Saving', () => sb.from('board_gauges').insert(gIns));
+      toast('Saved — applies to deliveries uploaded from now on. Use Re-weigh for the ones already waiting.', 'ok'); renderWeightSettings();
+    } catch { btn.disabled = false; }
+  };
+  $('bw-save').addEventListener('click', e => saveGrid($('bw-rows'), e.currentTarget));
+  $('hpl-save').addEventListener('click', e => saveGrid($('hpl-rows'), e.currentTarget));
   const bindRows = () => {
     document.querySelectorAll('[data-mwsave]:not([data-b])').forEach(b => { b.dataset.b = 1; b.addEventListener('click', async () => {
       const tr = b.closest('tr'), v = f => tr.querySelector(`[data-f=${f}]`), p = { name: v('name').value.trim(), words: v('words').value.trim(), basis: v('basis').value,
@@ -6559,23 +6680,16 @@ async function renderWeightSettings(){
       try { const id = tr.dataset.mw;
         await withRetry('Saving', () => id ? sb.from('material_weights').update(p).eq('id', id) : sb.from('material_weights').insert(p));
         toast('Saved — applies to deliveries uploaded from now on', 'ok'); renderWeightSettings(); } catch { b.disabled = false; } }); });
-    document.querySelectorAll('[data-ggsave]:not([data-b])').forEach(b => { b.dataset.b = 1; b.addEventListener('click', async () => {
-      const tr = b.closest('tr'), v = f => tr.querySelector(`[data-f=${f}]`), mm = tr.dataset.gg !== '' ? Number(tr.dataset.gg) : Number(v('gauge_mm')?.value);
-      const p = { kg_per_sheet: Number(v('kg_per_sheet').value), active: v('active').checked };
-      if (!(mm > 0)) return toast('Enter the thickness in mm', 'error'); if (!(p.kg_per_sheet > 0)) return toast('Enter the kg per sheet', 'error');
-      if (tr.dataset.gg === '' && gauges.some(g => Number(g.gauge_mm) === mm)) return toast(`${mm} mm is already in the list — change it there`, 'error');
-      b.disabled = true;
-      try { await withRetry('Saving', () => tr.dataset.gg !== '' ? sb.from('board_gauges').update(p).eq('gauge_mm', mm) : sb.from('board_gauges').insert({ gauge_mm: mm, ...p }));
-        toast('Saved', 'ok'); renderWeightSettings(); } catch { b.disabled = false; } }); });
   };
   bindRows();
   $('mw-reweigh').addEventListener('click', async e => {
     const b = e.currentTarget; b.disabled = true;
     try {
-      const rows = await fetchAll('Loading open deliveries', () => sb.from('jobs').select('id, quotation_serial, items, estimated_weight_kg').in('status', ['proposed', 'scheduled']));
+      const rows = await fetchAll('Loading open deliveries', () => sb.from('jobs').select('id, quotation_serial, items, board_pcs, estimated_weight_kg').in('status', ['proposed', 'scheduled']));
       const key = it => JSON.stringify([it.w ?? null, it.wr ?? null, it.wq ?? null]);
+      const tot = (pcs, its) => boardsKg(pcs || {}, its || []) + itemsKg(its || []);
       const todo = rows.map(j => ({ j, ni: weighItems(j.items || []) })).filter(x => x.ni.some((it, k) => key(it) !== key((x.j.items || [])[k] || {})))
-        .map(x => ({ ...x, d: itemsKg(x.ni) - itemsKg(x.j.items) }));
+        .map(x => ({ ...x, d: tot(x.j.board_pcs, x.ni) - tot(x.j.board_pcs, x.j.items) }));
       if (!todo.length){ toast('Every open delivery already uses the current weights', 'ok'); b.disabled = false; return; }
       if (!confirm(`${todo.length} open deliver${todo.length === 1 ? 'y' : 'ies'} will change weight:\n\n` + todo.slice(0, 12).map(x => `${x.j.quotation_serial}: ${x.d >= 0 ? '+' : ''}${Math.round(x.d)} kg`).join('\n') + (todo.length > 12 ? `\n… and ${todo.length - 12} more` : '') + '\n\nUpdate them?')){ b.disabled = false; return; }
       let ok = 0, bad = [];
@@ -9679,7 +9793,7 @@ async function createRedelivery(job){
   back.forEach(x => { if (x.g != null) board_pcs[x.g] = (board_pcs[x.g] || 0) + x.back;
     else { const it = job.items[x.i]; items.push({ ...it, qty: x.back }); if (it.g != null) board_pcs[it.g] = (board_pcs[it.g] || 0) + x.back; } });
   const row = { quotation_serial: job.quotation_serial, company: job.company, client_name: job.client_name, job_type: job.job_type === 'backload' ? 'delivery' : job.job_type,
-    destination_id: job.destination_id, address: job.address, board_pcs, items, estimated_weight_kg: Math.round((boardsKg(board_pcs) + itemsKg(items)) * 100) / 100,
+    destination_id: job.destination_id, address: job.address, board_pcs, items, estimated_weight_kg: Math.round((boardsKg(board_pcs, items) + itemsKg(items)) * 100) / 100,
     notes: `Redelivery of items returned on ${job.scheduled_date}.` + (job.notes ? '\n' + job.notes : ''), status: 'proposed', redelivery_of: job.id };
   try {
     const { data } = await withRetry('Creating redelivery', () => sb.from('jobs').insert(row).select().single());
