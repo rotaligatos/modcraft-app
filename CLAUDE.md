@@ -12798,3 +12798,18 @@ survived only in Subject. HATID read the SO from Subject and created 16 jobs wit
   of the workbook (`readTicketWorkbook`, used by delivery AND pick-up upload); SO column found by content (`upSoByContent`)
   when no heading names it; a line row repeating the date/type stays with its ticket; "15 pcs" qty read. Preview shows
   "How the columns were read". 17 file shapes tested (scratch harness, not committed).
+
+## What was changed on 2026-10-09 (session 2 — HATID Material weights, `92ef811`)
+- **Weight was boards-only.** Quartz/solid surface slabs, adhesive and every non-board line counted 0 kg. Real Odoo
+  slab lines do NOT say "quartz"/"solid surface" — only colour + size + "Slab" (solid surface 3.05×0.76m, 6–12mm;
+  quartz-type 3.00×1.60/0.80m, 18mm). Adhesive is sold in kg.
+- **Settings › Material weights** (admin/manager): boards per sheet (`board_gauges`, now editable) + rules in new table
+  `material_weights` (name, comma words — all must appear, basis piece | sqm | sqm_mm, kg). Size read from the
+  description (`matwDims`). Unit kg → weighs its qty. Fabrication/installation/charge/polish lines never weighed
+  (`MATW_SKIP`). Test box. **Seeded typical figures** (solid surface 1.75, quartz 2.4 kg per m² per mm; per-meter 12/9mm)
+  — Rommel to replace with supplier figures.
+- Each non-board line stores its kg per unit (`w`, `wr` rule, `wq` why-not) via `weighItems()`; weight = boards +
+  `itemsKg()` everywhere: upload, paste/manual, Sales Support lines/balance, redelivery, practice mocks. DB:
+  `job_items_kg(jsonb)`, `job_prep_decide` split counts it, `job_reweigh_items` (admin/manager; only w/wr/wq may change)
+  behind "Re-weigh open deliveries". `job_settings_editor()` = active admin/manager.
+- Open: S79267 (3 slabs + 4kg adhesive) gains ~150 kg when Rommel presses Re-weigh.
