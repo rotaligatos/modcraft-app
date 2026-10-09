@@ -2914,6 +2914,19 @@ function parseOdooTicket(txt){
   }
   return t;
 }
+// A line is a full board (weighed per sheet) when it is counted in pieces, names a thickness we have a weight for, and is
+// a 4x8 or says what board it is. "Triplestar Plywood 2F Warm White 18mm" has no "4x8" and still is one — missing those
+// left 100- and 50-board deliveries at 0 kg. Edge band, tape, HPL sheets, screws and any other size (6x8, 4x10) are not.
+function boardGaugeOf(d, unit, gauges){
+  if (!/^(pc|pcs|piece|pieces|sheet|sheets|units?)?$/i.test(String(unit || '').trim())) return null;
+  if (/edge\s*band|edging|\btape\b|\bhpl\b|screw|hinge|glue|contact cement/i.test(d)) return null;
+  const sz = d.match(/\b(\d+)\s*x\s*(\d+)\b/i);
+  if (sz && !(sz[1] === '4' && sz[2] === '8')) return null;
+  if (!sz && !/plywood|\bmdf\b|\bpb\b|particle\s*board|melamine|\bhdf\b|marine|\bboard\b|ply\b/i.test(d)) return null;
+  const g = (d.match(/(\d+(?:\.\d+)?)\s*mm(?!\s*x)/i) || [])[1];
+  const k = g == null ? null : String(Number(g));
+  return k && gauges.has(k) ? k : null;
+}
 function odooToJob(t){
   const F = k => (t.fields[k] || '').trim();
   const instr = F('Delivery Instructions');
@@ -2943,10 +2956,8 @@ function odooToJob(t){
     total += ln.subtotal || 0;
     if (!ln.qty){ if (!/^site\s*:/i.test(d)) other.push(d); continue; }
     if (/delivery charge/i.test(d) || /\bservice\b/i.test(d)){ skipped.push(d); continue; }
-    const g = (d.match(/(\d+(?:\.\d+)?)\s*mm(?!\s*x)/i) || [])[1];
-    if (/\b4\s*x\s*8\b/i.test(d) && g && gauges.has(String(Number(g))) && /^(pc|pcs|sheet|sheets)?$/i.test(ln.unit || '')){
-      const k = String(Number(g)); boards[k] = (boards[k] || 0) + ln.qty; items.push({ desc: d, qty: ln.qty, unit: ln.unit || 'pc', g: k }); continue;
-    }
+    const k = boardGaugeOf(d, ln.unit, gauges);
+    if (k){ boards[k] = (boards[k] || 0) + ln.qty; items.push({ desc: d, qty: ln.qty, unit: ln.unit || 'pc', g: k }); continue; }
     items.push({ desc: d, qty: ln.qty, unit: ln.unit });
   }
   // Notes keep only what isn't already in its own field (address, contact and terms have their own boxes)
@@ -3177,6 +3188,59 @@ function soLeft(h, items, opt = {}){   // opt.pk: loading the pick-up ticket its
     used[k] = (used[k] || 0) + cov; usedJ[k] = (usedJ[k] || 0) + covJ;
     return { cov, covJ, left: q - cov }; });
 }
+/* ---- Did the app read the upload right? (Rommel 2026-10-09) Every ticket is checked against HATID's read-only copy of
+   the Odoo sales orders before anything is created: a ticket that came through with no items or no customer (grouped /
+   broken export) is filled from the copy and flagged; a ticket whose lines don't agree with Odoo is flagged with what
+   differs and can switch to Odoo's list. After creating, the jobs are read back and compared with what was sent. */
+function upLineDiff(file, odoo){
+  const sum = ls => { const o = {}; ls.forEach(l => { const q = Number(l.qty) || 0; if (q <= 0) return; const k = soKey(l.desc); (o[k] ??= { desc: l.desc, qty: 0 }).qty += q; }); return o; };
+  const A = sum(file), B = sum(odoo), out = [];
+  for (const k in B){ if (!A[k]) out.push(`missing from the file: ${fmtQty(B[k].qty)} × ${B[k].desc}`); else if (Math.abs(A[k].qty - B[k].qty) > 1e-6) out.push(`${B[k].desc}: file ${fmtQty(A[k].qty)}, Odoo ${fmtQty(B[k].qty)}`); }
+  for (const k in A) if (!B[k]) out.push(`not on the SO in Odoo: ${fmtQty(A[k].qty)} × ${A[k].desc}`);
+  return out;
+}
+async function upOdooCheck(r){
+  const soOf = t => String(t.ticket?.so || t.fields['Ref. Sales Order'] || '').toUpperCase().trim();
+  r.tickets.forEach(t => { t.fileLines = t.lines.length; t.chk = null; });
+  const sos = [...new Set(r.tickets.map(soOf).filter(Boolean))];
+  r.odoo = { ok: false };
+  if (!sos.length) return;
+  let data;
+  try { const res = await sb.rpc('job_odoo_so_check', { p_sos: sos }); if (res.error) throw res.error; data = res.data || []; }
+  catch (e){ r.odoo = { ok: false, err: e?.message || 'unreachable' }; return; }
+  const M = {}; data.forEach(m => { M[String(m.so).toUpperCase()] = m; });
+  r.odoo = { ok: true, synced: data.reduce((a, m) => (m.synced_at || '') > a ? m.synced_at : a, '') };
+  for (const t of r.tickets){
+    const m = M[soOf(t)]; if (!m){ t.chk = { none: true }; continue; }
+    const ml = (m.lines || []).filter(l => l.type !== 'line_section' && String(l.desc || '').trim())
+      .map(l => ({ desc: String(l.desc).replace(/\s+/g, ' ').trim(), qty: Number(l.qty) || 0, unit: l.unit || null, subtotal: null }));
+    const filled = [], fill = (f, v, label) => { if (v && !String(t.fields[f] || '').trim()){ t.fields[f] = v; if (label) filled.push(label); } };
+    fill('CUSTOMER NAME', m.customer, 'customer'); fill('Salesperson', m.salesperson, null); fill('Company', m.company, null);   // agent/company fill in quietly
+    t.odooLines = ml; t.odooSynced = m.synced_at;
+    if (!t.lines.length && ml.length){ t.lines = ml.slice(); filled.unshift(`items (${ml.length} line${ml.length === 1 ? '' : 's'})`); t.chk = { filled, diff: [], fromOdoo: true }; }
+    else t.chk = { filled, diff: ml.length ? upLineDiff(t.lines, ml) : [] };
+  }
+}
+function upCheckSummary(P){
+  const T = P.tickets, read = T.reduce((s, t) => s + (t.fileLines ?? t.lines.length), 0);
+  const nb = P.jobs.reduce((s, x) => s + Object.values(x.j.boards).reduce((a, b) => a + b, 0), 0), kg = P.jobs.reduce((s, x) => s + boardsKg(x.j.boards), 0);
+  let o = '';
+  if (P.odoo?.ok){ const c = k => T.filter(k).length, same = c(t => t.chk && !t.chk.none && !t.chk.fromOdoo && !t.chk.diff.length), fil = c(t => t.chk?.fromOdoo), dif = c(t => t.chk?.diff?.length), none = c(t => t.chk?.none);
+    o = ` Checked against the Odoo copy${P.odoo.synced ? ` (updated ${fmtDay(String(P.odoo.synced).slice(0, 10))})` : ''}: <b>${same}</b> same${fil ? ` · <b style="color:var(--warn)">${fil} filled from Odoo</b>` : ''}${dif ? ` · <b style="color:var(--warn)">${dif} don’t agree</b>` : ''}${none ? ` · ${none} not in the copy` : ''}.`; }
+  else if (P.odoo?.err) o = ` <span style="color:var(--warn)">Couldn’t check against the Odoo copy — compare the items by hand.</span>`;
+  return `<div class="ft" style="margin-top:4px">Read from the file: <b>${read}</b> item line${read === 1 ? '' : 's'} · <b>${nb}</b> board${nb === 1 ? '' : 's'} (${Math.round(kg)} kg).${o}</div>`;
+}
+async function upVerifyCreated(rows){   // read back what was saved and compare with what was sent
+  const res = await sb.from('jobs').select('id, quotation_serial, client_name, items, board_pcs, estimated_weight_kg').in('id', rows.map(r => r.id));
+  if (res.error) return { err: res.error.message };
+  const got = new Map((res.data || []).map(j => [j.id, j])), bad = [];
+  for (const r of rows){ const j = got.get(r.id);
+    if (!j){ bad.push(`${r.quotation_serial}: not found after saving`); continue; }
+    if ((j.items || []).length !== (r.items || []).length) bad.push(`${r.quotation_serial}: ${(j.items || []).length} items saved, ${(r.items || []).length} sent`);
+    if (Math.abs(Number(j.estimated_weight_kg || 0) - Number(r.estimated_weight_kg || 0)) > 0.01) bad.push(`${r.quotation_serial}: weight ${j.estimated_weight_kg} saved, ${r.estimated_weight_kg} sent`);
+    if ((j.client_name || '') !== (r.client_name || '')) bad.push(`${r.quotation_serial}: client not saved`); }
+  return { bad };
+}
 function nextWorkDay(){ let d = addDays(localDate(), 1); while (isoDow(d) === 7 || (state.ref.calendar || []).some(c => c.day === d && c.kind === 'holiday' && !c.pool_id)) d = addDays(d, 1); return d; }
 function openJobUpload(){
   const cos = myCompanies();
@@ -3221,13 +3285,13 @@ function openJobUpload(){
       const j = odooToJob(t), co = j.company && cos.includes(j.company) ? j.company : (j.company ? null : co0);
       const dest = co ? guessDest(co, j.address) : null, ag = co ? guessAgent(co, j.salesperson) : null;
       const past = j.date && j.date < localDate(), date = !j.date ? '' : past ? nextWorkDay() : j.date;   // a passed date moves to the next working day (flagged)
-      return { j, co, dest: dest?.id || '', agent: ag?.id || '', date, was: past ? j.date : null, pick: !!co && !!dest && !upUnusable(j), empty: upUnusable(j) };
+      return { t, j, co, dest: dest?.id || '', agent: ag?.id || '', date, was: past ? j.date : null, pick: !!co && !!dest && !upUnusable(j), empty: upUnusable(j) };
     });
     render();
   };
   const render = () => {
     const P = parsed, miss = [!P.hasLines && 'order lines (items)', !P.hasClient && 'customer name', !P.hasAgent && 'salesperson', !P.hasCompany && 'company'].filter(Boolean);
-    $('up-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${P.tickets.length} delivery ticket${P.tickets.length === 1 ? '' : 's'} found.
+    $('up-out').innerHTML = `<div class="imp-sum" style="margin:10px 0">${P.tickets.length} delivery ticket${P.tickets.length === 1 ? '' : 's'} found.${upCheckSummary(P)}
       ${P.noSo ? `<div class="warn">${upNoSoMsg(P)}</div>` : ''}
       ${upNoLinkMsg(P) ? `<div class="warn">${upNoLinkMsg(P)}</div>` : ''}
       ${P.pickups?.length ? `<div class="warn"><b>${P.pickups.length} Pick-up ticket${P.pickups.length === 1 ? '' : 's'} left out</b> (${esc(P.pickups.join(', '))}) — only delivery tickets are uploaded here. Upload ${P.pickups.length === 1 ? 'it' : 'them'} in <b>Pick-up mode › Pick-up tickets</b>.</div>` : ''}
@@ -3242,6 +3306,10 @@ function openJobUpload(){
         if (!j.contact && !j.phone) w.push('No contact person/number');
         if (x.dup) w.push(`⚠ ${x.dup}`);
         if (x.bal) w.push(`↺ ${x.bal}`);
+        const C = x.t.chk;
+        if (C?.filled?.length) w.push(`${C.filled.join(' and ').replace(/^./, c => c.toUpperCase())} taken from the Odoo copy — the file didn’t have ${C.filled.length > 1 || /lines/.test(C.filled[0]) ? 'them' : 'it'}${/chosen/.test(C.filled[0]) ? ' right' : ''}. Check before creating`);
+        if (C?.diff?.length) w.push(`The file and Odoo don’t agree: ${C.diff.slice(0, 3).join('; ')}${C.diff.length > 3 ? ` (+${C.diff.length - 3} more)` : ''}`);
+        if (C?.none && P.odoo?.ok) w.push('Not in the Odoo copy yet — check the items against the ticket');
         if (x.empty) w.unshift('⛔ No customer and no items — can’t be created. Paste this ticket instead, or fix the export');
         else if (!j.items.length) w.push('No items');
         return `<tr data-up="${i}"><td><input type="checkbox" data-up-pick ${x.pick ? 'checked' : ''} ${x.co && !x.full && !x.empty ? '' : 'disabled'} aria-label="Create this job"></td>
@@ -3254,13 +3322,17 @@ function openJobUpload(){
                 const mx = L ? L.left : Number(it.qty || 0);
                 return `<label class="loadck${gone ? ' off' : ''}" style="margin-top:3px;font-size:12px${gone ? ';opacity:.5;text-decoration:line-through' : ''}"><input type="checkbox" data-up-it="${k}" ${x.held?.has(k) ? '' : 'checked'} ${gone ? 'disabled' : ''}>${gone ? '' : ` <input class="i up-q" type="number" min="0" max="${mx}" step="any" data-up-q="${k}" value="${x.q?.[k] ?? mx}" title="How many go on this delivery" aria-label="Qty on this delivery">`} ${L && L.cov && L.left > 0 ? `<b>${esc(fmtQty(L.left))}</b> of ${esc(fmtQty(it.qty))}` : esc(fmtQty(it.qty))} × ${esc(it.desc)}${gone ? ' — already delivered / on a job' : L && L.cov && L.left > 0 ? ` <span class="ft">(${esc(fmtQty(L.cov))} already delivered / on a job)</span>` : ''}</label>`; }).join('')}
               <div style="font-size:11px">Untick what isn’t on this delivery, or lower the number (e.g. the client’s vehicle takes only part) — the rest stays as a balance.</div></details>` : '0 items'}${nb ? `<br>${nb} boards · ${Math.round(boardsKg(j.boards))} kg` : ''}</td>
-          <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '✓ Ready'}</td></tr>`; }).join('')}
+          <td class="ft">${w.length ? `<ul class="warn" style="margin:0;padding-left:16px">${w.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '✓ Ready'}${x.t.chk?.diff?.length && x.t.odooLines?.length ? `<button class="btn sm" data-up-odoo style="margin-top:4px">Use Odoo’s list (${x.t.odooLines.length})</button>` : ''}${x.t.chk && !x.t.chk.none && !x.t.chk.fromOdoo && !x.t.chk.diff.length && x.t.odooLines?.length ? `<div style="color:var(--ok, #2e7d32)">✓ Same as Odoo (${x.t.odooLines.length} line${x.t.odooLines.length === 1 ? '' : 's'})</div>` : ''}</td></tr>`; }).join('')}
       </tbody></table></div>`;
     ['up-how2', 'up-how3'].forEach(id => $(id)?.addEventListener('click', () => { $('up-guide').open = true; $('up-guide').scrollIntoView({ behavior: 'smooth' }); }));
     const sync = () => { const n = document.querySelectorAll('[data-up-pick]:checked').length; $('up-go').disabled = !n; $('up-go').textContent = n ? `Create ${n} job${n === 1 ? '' : 's'}` : 'Create jobs'; };
     document.querySelectorAll('tr[data-up]').forEach(tr => { const x = P.jobs[+tr.dataset.up];
       tr.querySelector('[data-up-dest]').addEventListener('change', e => { x.dest = e.target.value; if (x.dest && !x.empty && !x.full){ tr.querySelector('[data-up-pick]').checked = true; x.pick = true; } sync(); });
       tr.querySelector('[data-up-agent]').addEventListener('change', e => { x.agent = e.target.value; });
+      tr.querySelector('[data-up-odoo]')?.addEventListener('click', () => {   // replace this ticket's lines with what Odoo holds
+        x.t.lines = x.t.odooLines.slice(); x.t.chk = { ...x.t.chk, diff: [], fromOdoo: true, filled: [`items (${x.t.lines.length} lines, chosen)`, ...(x.t.chk.filled || []).filter(f => !/^items/.test(f))] };
+        x.j = odooToJob(x.t); x.empty = upUnusable(x.j); delete x.left; delete x.held; delete x.q; delete x.lockHeld; delete x.dup; delete x.bal; delete x.full;
+        render(); dupCheck(); });
       tr.querySelector('[data-up-date]').addEventListener('change', e => { x.date = e.target.value; });
       tr.querySelector('[data-up-pick]').addEventListener('change', e => { x.pick = e.target.checked; sync(); });
       tr.querySelectorAll('[data-up-q]').forEach(i => i.addEventListener('change', () => { const k = +i.dataset.upQ, mx = Number(i.max), q = Number(i.value);
@@ -3297,6 +3369,8 @@ function openJobUpload(){
       const isPk = t => odooToJob(t).job_type === 'pickup';
       r.pickups = r.tickets.filter(isPk).map(t => t.ticket?.so || t.key); r.tickets = r.tickets.filter(t => !isPk(t));
       if (!r.tickets.length){ $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px"><b>Nothing added — ${r.pickups.length === 1 ? 'this is a Pick-up ticket' : `all ${r.pickups.length} tickets are Pick-ups`}</b> (${esc(r.pickups.join(', '))}). Only delivery tickets go here; upload pick-ups in <b>Pick-up mode › Pick-up tickets</b>.</div>`; return; }
+      $('up-out').innerHTML = '<div class="muted" style="padding:14px"><span class="spin"></span> Checking the tickets against Odoo…</div>';
+      await upOdooCheck(r);
       parsed = r; $('up-guide').open = !(r.hasLines && r.hasClient); build(); dupCheck();
     } catch (err) { $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(err?.message || 'Could not read the file')}</div>`; }
   });
@@ -3321,7 +3395,11 @@ function openJobUpload(){
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Creating…';
     try {
       await withRetry('Creating jobs', () => sb.from('jobs').insert(rows));
-      for (const r of rows) await logEvent(r.id, 'proposed', `Imported from ${r.odoo_ticket ? 'Odoo ticket ' + r.odoo_ticket : 'Excel upload'}`);
+      for (const r of rows){ const t = parsed.jobs.find(x => x.pick && (x.j.so || '').toUpperCase() === r.quotation_serial)?.t, C = t?.chk;
+        await logEvent(r.id, 'proposed', `Imported from ${r.odoo_ticket ? 'Odoo ticket ' + r.odoo_ticket : 'Excel upload'}${C?.fromOdoo ? ' — items taken from the Odoo copy' : C?.filled?.length ? ' — ' + C.filled.join(', ') + ' taken from the Odoo copy' : ''}`); }
+      const V = await upVerifyCreated(rows).catch(e => ({ err: e?.message }));
+      if (V.bad?.length) alert(`Saved, but ${V.bad.length} job${V.bad.length === 1 ? ' doesn’t' : 's don’t'} match what was read from the file — open and check:\n\n• ${V.bad.join('\n• ')}`);
+      else if (V.err) toast('Jobs created, but they couldn’t be read back to double-check — open one to make sure', 'error');
       toast(isDispatcher() ? `${rows.length} job${rows.length === 1 ? '' : 's'} created — confirm them with a truck on Dispatch` : `${rows.length} ticket${rows.length === 1 ? '' : 's'} sent to dispatch` + (parsed.pickups?.length ? ` — ${parsed.pickups.length} pick-up ticket${parsed.pickups.length === 1 ? '' : 's'} left out` : ''), 'ok'); closeOverlay(); afterJobsCreated();
     } catch { b.disabled = false; b.textContent = `Create ${rows.length} job${rows.length === 1 ? '' : 's'}`; }
   });
