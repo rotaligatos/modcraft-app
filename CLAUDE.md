@@ -12793,3 +12793,8 @@ survived only in Subject. HATID read the SO from Subject and created 16 jobs wit
 - **DB `job_prep_decide`**: balance job now weighed, original reweighed (new `job_boards_kg(jsonb)`).
 - **Data**: 18 open jobs corrected (6 empty Oct-5 jobs filled from the copy; 12 reweighed), each with a 'note' event
   "HATID fix 2026-10-09". ⚠ The SQL repair rule mirrors `boardGaugeOf` — change both together.
+- **Same day (`46f9b53`) — the reader no longer depends on the template's layout.** Headings tidied by `upKey` then matched by
+  meaning (`UP_FUZZY`, `UP_FUZZY_LINE`) when the exact names miss; heading row = best-scoring of the first 30 rows; best sheet
+  of the workbook (`readTicketWorkbook`, used by delivery AND pick-up upload); SO column found by content (`upSoByContent`)
+  when no heading names it; a line row repeating the date/type stays with its ticket; "15 pcs" qty read. Preview shows
+  "How the columns were read". 17 file shapes tested (scratch harness, not committed).
