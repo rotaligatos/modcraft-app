@@ -2838,6 +2838,23 @@ const PROFILES = {
             return { serial: w.qSerial, draftKeyCleared: w.qDraftKey === '', requestAllowed: w._requireSavedForRequest() === true };
           } finally { w.qDraftKey = saved.qDraftKey; w.qSerial = saved.qSerial; w.showToast = saved.toast; w.logActivity = saved.log; w.qSourceOrderId = saved.src; }
         }, { serial: 'QT-W00000999', draftKeyCleared: true, requestAllowed: true });
+      /* 2026-10-10 -- test quotations (QT-X…) work live but must never count: the X series comes from
+         the switch, and the dashboard/report population (_dashAllEntries) drops them. */
+      if (typeof window._isTestQuotation === 'function' && typeof window._dashAllEntries === 'function')
+        check('test quotations: X series when switched on, never counted in the figures', () => {
+          const w = window;
+          const saved = { dir: w.dirData, sess: w.sessionQuotations, td: w.qTestDraft, qs: w.qSerial };
+          try {
+            w.qSerial = ''; w.qTestDraft = true;
+            const prefixX = w._serialPrefix() === 'X';
+            w.qTestDraft = false;
+            const prefixNormal = w._serialPrefix() !== 'X';
+            w.sessionQuotations = {};
+            w.dirData = [{ id: 'QT-X00000001', status: 'Draft' }, { id: 'QT-W00000001', status: 'Draft' }];
+            const counted = w._dashAllEntries().map((e) => e.id);
+            return { prefixX, prefixNormal, counted };
+          } finally { w.dirData = saved.dir; w.sessionQuotations = saved.sess; w.qTestDraft = saved.td; w.qSerial = saved.qs; }
+        }, { prefixX: true, prefixNormal: true, counted: ['QT-W00000001'] });
       if (typeof window.onDiscRequest === 'function' && document.getElementById('disc-inp'))
         check('onDiscRequest: does not send a discount request before the quotation has been saved', () => {
           const w = window;

@@ -3518,8 +3518,8 @@ function _mssiCommApplies(type,sub){
 function _homeCompanyFromState(state){
   var c=(state&&state.client)||{};
   if(c.homeCompany) return c.homeCompany;
-  var pm=String((state&&state.serial)||'').match(/^QT-([WCMT])\d{8}/);
-  if((c.type||'Direct')==='Direct'&&pm&&pm[1]!=='T') return {W:COMPANIES[0],M:COMPANIES[1],C:COMPANIES[2]}[pm[1]];   // T = training: no company in the number
+  var pm=String((state&&state.serial)||'').match(/^QT-([WCMTX])\d{8}/);
+  if((c.type||'Direct')==='Direct'&&pm&&pm[1]!=='T'&&pm[1]!=='X') return {W:COMPANIES[0],M:COMPANIES[1],C:COMPANIES[2]}[pm[1]];   // T = training, X = test: no company in the number
   var sig=state&&state.signatures&&state.signatures.prepared, users=(typeof sheetUsers!=='undefined'&&sheetUsers)||[];
   var em=String((sig&&sig.email)||'').trim().toLowerCase(), nm=String((sig&&sig.name)||'').trim().toLowerCase();
   for(var i=0;i<users.length;i++){
@@ -4999,7 +4999,16 @@ function _refreshSerialTag(){
 // CWLI (subsidiary) gets a "C" serial, keeping each entity's own sequence
 // coherent. Falls back to currentUserCompany before login / before the
 // quotation form has rendered (cl-type doesn't exist yet).
+// ── TEST QUOTATIONS (2026-10-10) ─────────────────────────────────────────────────────────────
+// A test quotation behaves 100% live (real Sheet, database, Drive, approvals, Job Order, KEYSTONE,
+// PMES) but is numbered QT-X…, so the real W/M/C series is never used. The number IS the marker:
+// every filter in Modcraft, KEYSTONE and PMES recognises a test by the X, so there is no separate
+// flag to keep in step. Admin-only, chosen on an unsaved draft; once numbered it stays a test.
+var qTestDraft=false;   // the switch, before the number exists
+function _isTestSerial(s){ return /^QT-X/.test(String(s||'')); }
+function _isTestQuotation(){ return qTestDraft||_isTestSerial(qSerial); }
 function _serialPrefix(){
+  if(_isTestQuotation()) return 'X';
   // WCLI → W; MSSI → M; CWLI (Cebu World Laminate) → C
   var type = (typeof el==='function' && el('cl-type')) ? el('cl-type').value : 'Direct';
   var co = ((typeof getCompanyName==='function' ? getCompanyName(type) : null) || currentUserCompany || '').toLowerCase();
@@ -6578,6 +6587,7 @@ function initQuotation() {
   qHomeCompany='';   // a new quotation belongs to whoever makes it — fixed at its first save
   if(typeof renderClientCompanyField==='function') renderClientCompanyField();
   qSerial=''; qDraftKey=_newDraftKey(); // no number until one is claimed, at first save
+  qTestDraft=false;                     // a new quotation is never a test unless an Admin says so
   qSerialCommitted=false;
   qLoadedSavedAt=null; qLoadedSavedBy='';
   qPrevSerials=[];
@@ -6878,7 +6888,7 @@ function _syncVatUI(){
 // under the previous currentUserCompany-based prefix logic) as "mismatched"
 // just for being opened, not because anyone actually changed anything.
 function _currentPrefixOfSerial(serial){
-  var m=String(serial||'').match(/^QT-([WCMT])/);
+  var m=String(serial||'').match(/^QT-([WCMTX])/);
   return m?m[1]:null;
 }
 function _onQuotationCompanyMightChange(){
@@ -12960,7 +12970,7 @@ function gLoadDirData(cb){
       dirData=[];
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]||_isQuotHeaderRow(r)) continue;
-        var ser=r[0],m=ser.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
+        var ser=r[0],m=ser.match(/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
         // Revisions share a base serial, so they collapse to one row.
         // A later revision SUPERSEDES: take its identity and its state, or the row
         // would open the old version and report the old version's status.
@@ -13023,7 +13033,8 @@ function _dirIsStale(){ return !_dirLoadedAt || (Date.now()-_dirLoadedAt)>DIR_MA
 function _dashAllEntries(){
   var merged={};
   (dirData||[]).forEach(function(e){if(e&&e.id) merged[e.baseSerial||e.id]=e;});
-  return Object.values(_mergeSessionOver(merged));
+  // Test quotations (QT-X…) never count: dashboard, KPIs, win rate, revenue, reports, Team performance.
+  return Object.values(_mergeSessionOver(merged)).filter(function(e){ return !_isTestSerial(e&&(e.baseSerial||e.id)); });
 }
 
 // ── Dashboard company scope ───────────────────────────────────────────────────
@@ -19004,6 +19015,7 @@ function _nudgeJobSource(){
 // survives a reload, a different entry point, and an option (-2) or revision (.R1) suffix, since
 // _serialRoot compares the quotation identity rather than the string.
 function orderMarkSentFromQuotation(){
+  if(_isTestQuotation()) return;   // a test quotation never closes a real order
   var id=qSourceOrderId;
   if(!id) id=_orderAwaitingQuotation(qSerial||qBaseSerial||'');
   if(!id) return;
@@ -24662,7 +24674,7 @@ function renderDirectory(){
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]||_isQuotHeaderRow(r)) continue;
         var ser=r[0];
-        var baseM=ser.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
+        var baseM=ser.match(/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/);
         var baseS=baseM?baseM[1]:ser; // strip option suffix (e.g. -1, -2) but not 4-digit serial part
         if(seen[baseS]){
           var prev=seen[baseS];
@@ -24805,6 +24817,12 @@ function renderDirectoryTable(){
   var merged={}; baseList.forEach(function(e){merged[e.id]=e;});
   _mergeSessionOver(merged,function(e,k){return k;});
   var list=Object.values(merged).slice();
+  // Test quotations (QT-X…) are hidden unless asked for — see the Test toggle in the filter bar.
+  var _testCount=list.filter(function(e){ return _isTestSerial(e.baseSerial||e.id); }).length;
+  if(!window.dirShowTest) list=list.filter(function(e){ return !_isTestSerial(e.baseSerial||e.id); });
+  var _tb=el('dir-test-toggle');
+  if(!_tb&&_testCount){ var _ab=el('dir-archive-toggle'); if(_ab&&_ab.parentNode){ _tb=document.createElement('button'); _tb.id='dir-test-toggle'; _tb.className='btn'; _tb.style.cssText='height:34px;font-size:12px;color:#b91c1c;border-color:#fca5a5'; _tb.onclick=function(){ window.dirShowTest=!window.dirShowTest; renderDirectory(); }; _ab.parentNode.insertBefore(_tb,_ab.nextSibling); } }
+  if(_tb){ _tb.style.display=_testCount?'':'none'; _tb.textContent=(window.dirShowTest?'Hide ':'Show ')+_testCount+' test'; }
   // Count archived before filtering so the toggle button can show the number
   // Was (e.status==='Archived'), which could never be true — nothing ever wrote it.
   var archivedCount=Object.values(merged).filter(function(e){return quotAgeStage(e)==='archived';}).length;
@@ -28349,7 +28367,7 @@ function supaMigrateAll(){
     for(var i=1;i<rows.length;i++){
       var r=rows[i]; if(!r||!r[0]) continue;
       var ser=r[0];
-      var baseM=ser.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
+      var baseM=ser.match(/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/);
       var baseS=baseM?baseM[1]:ser;
       headerRows.push({
         serial:ser,created:r[1]||'',client:r[2]||'',status:r[5]||'',
@@ -29962,7 +29980,7 @@ function _showDriveWarning(msg){
 // Save a JSON state backup into Modcraft Quotations/{baseSerial}/ — belt-and-suspenders alongside Sheets.
 function saveQuotationStateToDrive(serial,json){
   if(!gToken) return;
-  var baseSerial=(serial.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/)||[,''])[1]||serial;
+  var baseSerial=(serial.match(/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/)||[,''])[1]||serial;
   var cn=driveClientName();
   var fileName=baseSerial+' — '+cn+' — state.json';
   ensureDriveFolder()
@@ -33619,7 +33637,7 @@ function gLoadClients(callback){
           var qclient=(qr[2]||'').toLowerCase();
           for(var ci=0;ci<liveClients.length;ci++){
             var lc=liveClients[ci];
-            if((lc.bizname||'').toLowerCase()===qclient||(lc.name||'').toLowerCase()===qclient){
+            if(!_isTestSerial(qr[0])&&((lc.bizname||'').toLowerCase()===qclient||(lc.name||'').toLowerCase()===qclient)){
               lc.txns.push({id:qr[0],proj:qr[8]||qr[4]||'',date:qr[1]||'',val:parseFloat((qr[6]||'0').replace(/[^\d.]/g,''))||0,st:qr[5]||'Draft'});
               break;
             }
@@ -33651,7 +33669,7 @@ function gLoadClients(callback){
             for(var ci=0;ci<liveClients.length;ci++){
               var lc=liveClients[ci];
               if((lc.bizname||'').toLowerCase()===qclient||(lc.name||'').toLowerCase()===qclient){
-                lc.txns.push({id:q.serial,proj:q.service_type||'',date:q.created_at||'',val:parseFloat(q.total)||0,st:q.status||'Draft'});
+                if(!_isTestSerial(q.serial)) lc.txns.push({id:q.serial,proj:q.service_type||'',date:q.created_at||'',val:parseFloat(q.total)||0,st:q.status||'Draft'});
                 break;
               }
             }
@@ -34565,7 +34583,7 @@ function _saveConflictReload(){
 // A revision of an option therefore reads QT-M00001-3.R1 and stays unambiguous.
 //
 // Safe by construction: every base-serial regex in this file is start-anchored
-// (/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/), so the suffix is stripped wherever the base
+// (/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/), so the suffix is stripped wherever the base
 // is needed — directory grouping, Drive folders, dedup. The claim path's
 // $-anchored regex only ever sees a freshly minted serial, before any suffix exists.
 // W / M / C from the serial — the quotation's own company, already encoded at creation.
@@ -34581,7 +34599,7 @@ function _quotCompanyKey(e){
   return _companyPrefixOf(e&&e.id);
 }
 function _companyPrefixOf(serial){
-  var m=String(serial||'').match(/^QT-([WCMT])\d{8}/);
+  var m=String(serial||'').match(/^QT-([WCMTX])\d{8}/);
   return m?m[1]:'';
 }
 function _serialStem(serial){ return String(serial||'').replace(/\.R\d+$/,''); }
@@ -34589,7 +34607,7 @@ function _serialStem(serial){ return String(serial||'').replace(/\.R\d+$/,''); }
 // Use this to ask "is this the same quotation?", never a raw === on the serial.
 function _serialRoot(serial){
   var s=String(serial||'');
-  var m=s.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
+  var m=s.match(/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/);
   return m?m[1]:_serialStem(s);
 }
 function _revisionOf(serial){
@@ -34611,7 +34629,7 @@ function _fallbackSerialCheck(claimSerial){
       _serialClaimSettled();
       return;
     }
-    if(!/^QT-[WCMT]\d+$/.test(newSerial||'')){
+    if(!/^QT-[WCMTX]\d+$/.test(newSerial||'')){
       // Refuse rather than write a row with no key. A failed save can be retried; a row filed
       // under an empty serial is the mess this whole change exists to prevent.
       showToast('Could not assign a quotation number — nothing was saved. Check your connection and try again.');
@@ -34695,6 +34713,15 @@ function _acceptClaimedSerial(oldSerial,newSerial,wasCollision){
 // vanishingly unlikely case of a repeat collision.
 function _resolveSerialCollision(oldSerial){
   var prefix=_serialPrefix();
+  if(prefix==='X'){
+    // Test series: no shared counter (the claim service and SERIAL_COUNTERS only know W/M/C).
+    // Next number = highest QT-X in the Quotations sheet + 1.
+    return sheetsGet('Quotations!A:A').then(function(d){
+      if(!d||d.error) return '';
+      var max=0; ((d.values)||[]).forEach(function(r){ var m=String((r&&r[0])||'').match(/^QT-X(\d{8})/); if(m) max=Math.max(max,+m[1]); });
+      return 'QT-X'+String(max+1).padStart(8,'0');
+    }).catch(function(){ return ''; });
+  }
   function attempt(n){
     if(n>5) return Promise.resolve(''); // give up rather than invent a key — the caller refuses the save
     return new Promise(function(res){ _loadSerialCounters(res); }).then(function(){
@@ -34794,7 +34821,7 @@ function _proceedSaveQuotation(){
   var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',fqClientApprovedAt||'',now,(fqSentAt||qSentAt||''),agentVal||'',(qPrevSerials||[]).join(', ')];
   // Store in session memory immediately so directory shows it without waiting for Sheets
   var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated','Sent At','Agent','Previous Numbers'];
-  var _bsM=serial.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
+  var _bsM=serial.match(/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/);
   sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:fqClientApprovedAt||'',clientApproved:!!fqClientApproved,updatedAt:now,sentAt:(fqSentAt||qSentAt||''),agent:agentVal||'',prevSerials:(qPrevSerials||[]).join(', ')};
   try{ supaUpsertQuotation(sessionQuotations[serial]); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
   // ── Two saves must not both APPEND the same serial ──────────────────────────────────────
@@ -34922,7 +34949,7 @@ function _proceedSaveQuotation(){
   });   // ← end of the per-serial row-write chain opened above
   saveQuotationJson();
   // Also upsert client record from quotation info
-  if(clName||contactName){
+  if((clName||contactName)&&!_isTestQuotation()){   // a test quotation never creates or edits a real client
     var clSeg=(el('cl-segment')?el('cl-segment').value:'')||(el('cl-segment-other')?el('cl-segment-other').value:'');
     var clSegGrp=typeof getSegmentGroup==='function'?getSegmentGroup(el('cl-segment')?el('cl-segment').value:''):'';
     var _cl=liveClients.length?liveClients:DEMO_CLIENTS;
@@ -45061,6 +45088,7 @@ function _msgTestMailer(){
 // dryRun:true previews the next number without consuming it (for the Test button).
 function _claimSerialAtomic(prefix,cb,dryRun){
   if(!SERIAL_CLAIM_URL){ cb(null); return; }
+  if(prefix==='X'){ cb(null); return; }   // test series: numbered from the sheet itself (_resolveSerialCollision)
   fetch(SERIAL_CLAIM_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({prefix:prefix,dryRun:!!dryRun})})
     .then(function(r){ return r.json(); })
     .then(function(d){ cb((d&&d.serial)?d.serial:null); })
@@ -46263,6 +46291,80 @@ window.sendChat=function(){
     }
   },1500);
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',draw); else setTimeout(draw,500);
+})();
+</script>
+
+<script>
+/* ── TEST QUOTATIONS — switch, labels, printout, routing (2026-10-10) ──────────────────────
+   Live app only (training has its own T series). See _isTestQuotation() for the rule.
+     • Admin-only "Test quotation" switch on an unsaved draft (not on one exported from a real order)
+     • red TEST label beside the number; "TEST — NOT A VALID QUOTATION" across the printout
+     • every approval and signature goes back to the person testing, never to a real approver
+     • an Additional order made from a test quotation is a test too */
+(function(){
+  if(window._TRN) return;
+  function $(id){ return document.getElementById(id); }
+  function wrap(name,make){ var o=window[name]; if(typeof o==='function') window[name]=make(o); }
+
+  window.onTestQuotationToggle=function(on){
+    if(on){
+      _confirm('Make this a TEST quotation?\n\nIt will be numbered QT-X… and works exactly like a live one (approvals, Job Order, KEYSTONE, PMES), but it never counts in reports or KPIs, is hidden from the Project List unless you show it, and prints as "TEST — NOT A VALID QUOTATION". Approvals and signatures come back to you.\n\nOnce saved it stays a test.',
+        function(){ qTestDraft=true; try{ _refreshSerialTag(); }catch(e){} paint(); try{ logActivity('Marked as a TEST quotation.'); }catch(e){} },
+        function(){ var c=$('q-test-chk'); if(c) c.checked=false; });
+    } else { qTestDraft=false; paint(); }
+  };
+
+  function ensureSwitch(){
+    if($('q-test-row')) return;
+    var w=$('jobsrc-walkin'); if(!w) return;
+    var row=w.closest('div'); if(!row||!row.parentNode) return;
+    var d=document.createElement('div'); d.id='q-test-row';
+    d.style.cssText='display:none;align-items:center;gap:8px;margin:0 0 10px;padding:7px 12px;border:1px dashed #fca5a5;border-radius:8px;font-size:12px;color:#b91c1c';
+    d.innerHTML='<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600"><input type="checkbox" id="q-test-chk" onchange="onTestQuotationToggle(this.checked)" style="margin:0"> Test quotation</label>'
+      +'<span style="color:var(--text2);font-weight:400">Admin only · numbered QT-X…, never counted in reports, approvals come back to you</span>';
+    row.parentNode.insertBefore(d,row);
+  }
+  function paint(){
+    ensureSwitch();
+    var test=_isTestQuotation();
+    var row=$('q-test-row'), chk=$('q-test-chk');
+    // offered only on an unsaved draft that did not come from a real order
+    var can=window.currentRole==='Admin'&&!window.qSerial&&!window.qSourceOrderId;
+    if(row) row.style.display=can?'flex':'none';
+    if(chk) chk.checked=!!window.qTestDraft;
+    var qs=$('q-serial'), pill=$('q-test-pill');
+    if(qs&&!pill){ pill=document.createElement('span'); pill.id='q-test-pill';
+      pill.style.cssText='display:none;margin-left:6px;background:#dc2626;color:#fff;font:700 11px/1 system-ui,sans-serif;letter-spacing:.06em;padding:4px 8px;border-radius:6px;vertical-align:middle';
+      pill.textContent='TEST'; qs.parentNode.insertBefore(pill,qs.nextSibling); }
+    if(pill) pill.style.display=test?'inline-block':'none';
+  }
+  setInterval(paint,800);
+
+  // Every approval and signature on a test quotation comes back to the person testing.
+  function me(){
+    var u=null; try{ u=findApproverForSelf(); }catch(e){}
+    if(u) return u;
+    return (window.gUser&&gUser.email)?{name:gUser.name||gUser.email,email:gUser.email,pos:window.currentRole||'',active:true}:null;
+  }
+  ['findApproverForAction','findApprover','_findSignatory'].forEach(function(n){
+    wrap(n,function(orig){ return function(){ if(_isTestQuotation()){ var m=me(); if(m) return m; } return orig.apply(this,arguments); }; });
+  });
+
+  // Extra work on a test is a test too — never a real order hanging off a test.
+  wrap('createAdditionalOrder',function(orig){ return function(src){
+    var r=orig.apply(this,arguments);
+    if(_isTestSerial(src)){ qTestDraft=true; paint(); }
+    return r;
+  };});
+
+  // The printout can never pass for a real quotation.
+  wrap('_buildPrintBody',function(orig){ return function(){
+    var h=orig.apply(this,arguments);
+    if(!_isTestQuotation()) return h;
+    var band='<div style="background:#dc2626;color:#fff;text-align:center;font:800 16px/1.2 Arial,sans-serif;letter-spacing:.08em;padding:10px;margin-bottom:12px">TEST — NOT A VALID QUOTATION</div>';
+    var mark='<div style="position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:5"><div style="position:absolute;top:38%;left:-10%;width:120%;transform:rotate(-24deg);text-align:center;font:900 72px/1 Arial,sans-serif;color:rgba(220,38,38,.13);white-space:nowrap">TEST — NOT VALID</div></div>';
+    return '<div style="position:relative">'+band+h+mark+'</div>';
+  };});
 })();
 </script>
 
