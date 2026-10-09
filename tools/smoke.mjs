@@ -2810,11 +2810,11 @@ const PROFILES = {
       if (typeof window._requireSavedForRequest === 'function')
         check('_requireSavedForRequest: blocks a discount/override request before the first save', () => {
           const w = window;
-          const saved = { qDraftKey: w.qDraftKey, toast: w.showToast };
+          const saved = { qDraftKey: w.qDraftKey, qSerial: w.qSerial, toast: w.showToast };
           let toastCalled = false;
           w.showToast = () => { toastCalled = true; };
           try {
-            w.qDraftKey = 'DRAFT-abc123';
+            w.qSerial = ''; w.qDraftKey = 'DRAFT-abc123';
             const blockedWhileDraft = w._requireSavedForRequest() === false;
             const toastFiredOnBlock = toastCalled;
             toastCalled = false;
@@ -2822,8 +2822,22 @@ const PROFILES = {
             const allowedOnceSaved = w._requireSavedForRequest() === true;
             const noToastWhenAllowed = !toastCalled;
             return { blockedWhileDraft, toastFiredOnBlock, allowedOnceSaved, noToastWhenAllowed };
-          } finally { w.qDraftKey = saved.qDraftKey; w.showToast = saved.toast; }
+          } finally { w.qDraftKey = saved.qDraftKey; w.qSerial = saved.qSerial; w.showToast = saved.toast; }
         }, { blockedWhileDraft: true, toastFiredOnBlock: true, allowedOnceSaved: true, noToastWhenAllowed: true });
+      /* 2026-10-10 -- the check above set qDraftKey='' by hand to mean 'saved', but a real first save never
+         cleared it (only reopening did), so every request right after a first save was refused with
+         'save first'. Drive the REAL claim step instead. */
+      if (typeof window._acceptClaimedSerial === 'function' && typeof window._requireSavedForRequest === 'function')
+        check('first save: once a number is claimed, a request is no longer refused as unsaved', () => {
+          const w = window;
+          const saved = { qDraftKey: w.qDraftKey, qSerial: w.qSerial, toast: w.showToast, log: w.logActivity, src: w.qSourceOrderId };
+          w.showToast = () => {}; w.logActivity = () => {}; w.qSourceOrderId = null;
+          try {
+            w.qSerial = ''; w.qDraftKey = 'DRAFT-abc123';
+            w._acceptClaimedSerial('', 'QT-W00000999', false);
+            return { serial: w.qSerial, draftKeyCleared: w.qDraftKey === '', requestAllowed: w._requireSavedForRequest() === true };
+          } finally { w.qDraftKey = saved.qDraftKey; w.qSerial = saved.qSerial; w.showToast = saved.toast; w.logActivity = saved.log; w.qSourceOrderId = saved.src; }
+        }, { serial: 'QT-W00000999', draftKeyCleared: true, requestAllowed: true });
       if (typeof window.onDiscRequest === 'function' && document.getElementById('disc-inp'))
         check('onDiscRequest: does not send a discount request before the quotation has been saved', () => {
           const w = window;
