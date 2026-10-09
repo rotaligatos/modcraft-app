@@ -12782,3 +12782,14 @@ survived only in Subject. HATID read the SO from Subject and created 16 jobs wit
   (a known cause of empty Sales Order columns; HATID only detected it via "Pickup (5)" heading rows, and this file had
   none). Added a standing "don't group before exporting" warning to the upload window and the steps; softened the
   Ref. Sales Order wording. Decisive test: export the same tickets UNGROUPED with the current template.
+
+## What was changed on 2026-10-09 (session — HATID ticket import checked against the Odoo copy, `c13429f`)
+- **Boards found without "4x8"**: `boardGaugeOf()` — unit pc/sheet + an active gauge in mm + a board word (plywood/MDF/PB/
+  melamine/HDF/marine/board) or 4x8; edge band, tape, HPL, screws and other sizes (6x8) are never boards. "Triplestar Plywood
+  2F Warm White 18mm" (100 and 50 boards) had been 0 kg.
+- **Upload checks every ticket against HATID's read-only Odoo copy** (RPC `job_odoo_so_check`, no prices, company-scoped):
+  empty ticket → items/customer filled from the copy and flagged; lines differ → listed + "Use Odoo's list"; summary states
+  lines/boards/kg read. After creating, `upVerifyCreated` reads the jobs back and alerts on any mismatch.
+- **DB `job_prep_decide`**: balance job now weighed, original reweighed (new `job_boards_kg(jsonb)`).
+- **Data**: 18 open jobs corrected (6 empty Oct-5 jobs filled from the copy; 12 reweighed), each with a 'note' event
+  "HATID fix 2026-10-09". ⚠ The SQL repair rule mirrors `boardGaugeOf` — change both together.
