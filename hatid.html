@@ -3067,14 +3067,35 @@ const UP_TICKET = {
   '_id': ['id', 'ticket id', 'external id'],
 };
 const UP_LINE = {   // per order line (Odoo sub-fields, or the template's item columns)
-  desc: ['order_line/name', 'order lines/description', 'order line/description', 'item description', 'item'],
+  desc: ['order_line/name', 'order lines/description', 'order line/description', 'order_line/product_id', 'order lines/product', 'order line/product', 'item description', 'item'],
   qty: ['order_line/product_uom_qty', 'order lines/quantity', 'order line/quantity', 'order line/qty', 'qty', 'quantity'],
   unit: ['order_line/product_uom', 'order lines/unit of measure', 'order line/unit of measure', 'unit', 'unit of measure'],
   subtotal: ['order_line/price_total', 'order lines/total', 'order_line/price_subtotal', 'order lines/subtotal', 'order line/subtotal', 'subtotal'],   // VAT-inclusive total first, like the ticket's total
 };
-const upKey = h => String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+/* Headings are read by meaning, not by exact spelling (Rommel 2026-10-09: "it should understand what it is uploading").
+   upKey tidies a heading ("Sales Order /\nCustomer:" → "sales order/customer"); the exact lists above are tried first,
+   then UP_FUZZY recognises the usual words (SO #, Client, Product, Qty., UoM …) on whatever heading is left over. */
+const upKey = h => String(h ?? '').toLowerCase().replace(/[\r\n\t]+/g, ' ').replace(/\s*\/\s*/g, '/').replace(/[:*]+\s*$/, '').replace(/\s+/g, ' ').trim()
   .replace(/^(sale_order_id|x_studio_many2one_field_qwcli)\/order_line\//, 'order_line/')
   .replace(/^(ref\.? )?sales order\/order lines\//, 'order lines/');
+const UP_FUZZY = {   // tested on the LAST part of the heading ("Sales Order/Order Lines/Product" → "product")
+  'Ref. Sales Order': /^(ref\.? )?(sales? ?order|s\.?o\.?)( ?(no\.?|number|#|ref(erence)?))?$|^(sales )?order (no\.?|number|#|ref)$/,
+  'CUSTOMER NAME': /^(customer|client|partner|account)( ?name)?$|^(sold|deliver) to$/,
+  'Salesperson': /^(sales ?(person|man|rep|agent)|agent|account manager|ae)$/,
+  'Company': /^(company|branch|business unit)$/,
+  'Scheduled Date': /^(scheduled|delivery|target|schedule)( delivery)? ?date$|^date( of delivery)?$|^sched\.? ?date$/,
+  'Delivery Type': /^(delivery |job |ticket )?type$/,
+  'Delivery Address': /^(delivery |site |ship(ping)? )?address$|^(ship|deliver) to address$|^location$/,
+  'Delivery Instructions': /instruction|^remarks?$|^notes?$|^special/,
+  'Contact Person': /^contact( person| name)?$|^receiver$|^recipient$/,
+  'Contact Number': /^(contact |mobile |phone |cell(phone)? )?(no\.?|number)$|^(mobile|phone|cellphone|tel(ephone)?|cp)( no\.?)?$/,
+  'Payment Status': /^payment( status)?$/, 'Fulfillment Status': /^fulfil+ment( status)?$/,
+};
+const UP_FUZZY_LINE = {
+  desc: /^(description|product( name)?|item( description| name)?|particulars|materials?|article)$/,
+  qty: /^(qty\.?|quantity|ordered qty\.?|qty ordered|pcs|no\.? of (pcs|pieces))$/,
+  unit: /^(uom|u\.?o\.?m\.?|unit( of measure)?|units)$/,
+};
 function upColumns(headers){
   const keys = headers.map(upKey), col = {}, line = {};
   const find = names => { for (const n of names){ const i = keys.indexOf(n); if (i >= 0) return i; } return -1; };
@@ -3089,7 +3110,33 @@ function upColumns(headers){
   }
   // x_studio one2many exports its lines as "x_studio_…/field" — take those too
   if (line.desc == null){ const i = keys.findIndex(k => /^x_studio_one2many[^/]*\/(name|description|product_id)$/.test(k)); if (i >= 0) line.desc = i; }
+  // anything still missing: recognise the heading by its words
+  const used = () => new Set([...Object.values(col).flat(), ...Object.values(line)]);
+  const last = k => k.split('/').pop().trim();
+  for (const [f, re] of Object.entries(UP_FUZZY_LINE)) if (line[f] == null){ const u = used(), i = keys.findIndex((k, i) => !u.has(i) && re.test(last(k))); if (i >= 0) line[f] = i; }
+  for (const [f, re] of Object.entries(UP_FUZZY)) if (col[f] == null){ const u = used(), i = keys.findIndex((k, i) => !u.has(i) && k && !/order lines?\/|order_line\//.test(k) && re.test(last(k))); if (i >= 0) col[f] = i; }
   return { col, line };
+}
+const upHeadScore = r => { const { col, line } = upColumns(r); return Object.keys(col).length + Object.keys(line).length; };
+/* Find the SO column by its contents when no heading names it: the column where most cells look like an SO number */
+function upSoByContent(rows, hi, taken){
+  const n = Math.max(...rows.slice(hi + 1, hi + 200).map(r => r.length), 0); let best = -1, bestHits = 0;
+  for (let c = 0; c < n; c++){ if (taken.has(c)) continue;
+    const vals = rows.slice(hi + 1, hi + 200).map(r => upCell(r[c])).filter(Boolean);
+    const hits = vals.filter(v => /^[A-Z]{1,3}\d{4,}$/i.test(v)).length;
+    if (hits >= 1 && hits >= vals.length * 0.6 && hits > bestHits){ best = c; bestHits = hits; } }
+  return best;
+}
+/* Some exports put the data on another sheet — read every sheet and keep the one that yields the most */
+function readTicketWorkbook(X, wb){
+  let best = null;
+  for (const n of wb.SheetNames){
+    const r = parseTicketRows(X.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' }));
+    const score = r.error ? -1 : r.tickets.length * 1000 + r.tickets.reduce((s, t) => s + t.lines.length, 0);
+    if (!best || score > best.score) best = { r, score, sheet: n };
+  }
+  if (best && wb.SheetNames.length > 1 && !best.r.error) best.r.sheet = best.sheet;
+  return best ? best.r : { error: 'This file has no sheets.' };
 }
 function upCell(v){
   if (v == null) return '';
@@ -3105,9 +3152,15 @@ function upNoSoMsg(r){   // tickets in the file with an empty Sales Order column
 }
 function parseTicketRows(rows){
   const known = new Set([...Object.values(UP_TICKET), ...Object.values(UP_LINE)].flat());
-  const hi = rows.slice(0, 15).findIndex(r => r.filter(c => known.has(upKey(c)) || /\/(name|description|quantity|product_uom_qty)$/.test(upKey(c))).length >= 2);
-  if (hi < 0) return { error: 'No heading row found — the first row should have column names (e.g. Ref. Sales Order, Customer, Delivery Address).' };
+  // the heading row is the row (of the first 30) that names the most columns we know — not necessarily row 1
+  let hi = -1, hs = 1;
+  rows.slice(0, 30).forEach((r, i) => { if (!r.some(c => upCell(c))) return; const sc = upHeadScore(r) + r.filter(c => known.has(upKey(c))).length; if (sc > hs){ hs = sc; hi = i; } });
+  if (hi < 0) return { error: 'No heading row found — the file needs a row of column names (e.g. Sales Order, Customer, Delivery Address, Description, Quantity).' };
   const { col, line } = upColumns(rows[hi]);
+  if (col['Ref. Sales Order'] == null && col._name == null){   // no heading says "sales order": look for a column of SO numbers
+    const c = upSoByContent(rows, hi, new Set([...Object.values(col).flat(), ...Object.values(line)]));
+    if (c >= 0) col['Ref. Sales Order'] = c;
+  }
   if (col['Ref. Sales Order'] == null && col._name == null) return { error: 'This file has no sales order column. Export from Odoo › Helpdesk › Tickets with the HATID template, or use the HATID Excel template.' };
   const first = c => Array.isArray(c) ? c[0] : c;
   const keyCol = first(col._id ?? col['Ref. Sales Order'] ?? col._name);
@@ -3118,7 +3171,13 @@ function parseTicketRows(rows){
     const filled = r.map(upCell).filter(Boolean);
     if (filled.length === 1 && /^.+\(\d+\)$/.test(filled[0])){ grouped++; continue; }
     const k = upCell(r[keyCol]) || (col._name != null ? upCell(r[first(col._name)]) : '');   // no Sales Order link: the ticket's own name (usually the SO number)
-    if (!k && tCols.some(i => upCell(r[i]))){ noSo++; cur = null; continue; }   // a ticket row with no Sales Order — can't be used
+    if (!k && tCols.some(i => upCell(r[i]))){
+      // a line row that just repeats the date/type of the ticket above is still that ticket's line — only a row that
+      // names a different customer or address is a separate ticket without a Sales Order
+      const own = f => { const i = first(col[f]); return i != null ? upCell(r[i]) : ''; };
+      const other = cur && ['CUSTOMER NAME', 'Delivery Address'].some(f => own(f) && own(f) !== (cur.fields[f] || ''));
+      if (!cur || other || line.desc == null || !upCell(r[line.desc])){ noSo++; cur = null; continue; }
+    }
     if (k && (!cur || k !== cur.key)){
       cur = { key: k, fields: {}, lines: [], ticket: null, total: null }; out.push(cur);
       for (const [f, i] of Object.entries(col)) cur.fields[f] = Array.isArray(i) ? (i.map(x => upCell(r[x])).find(Boolean) || '') : upCell(r[i]);
@@ -3131,12 +3190,17 @@ function parseTicketRows(rows){
     }
     if (!cur) continue;
     if (line.desc != null && upCell(r[line.desc])){
-      cur.lines.push({ desc: upCell(r[line.desc]), qty: odooNum(upCell(r[line.qty])) ?? 0, unit: line.unit != null ? upCell(r[line.unit]).replace(/^units?$/i, 'pc') || null : null,
+      const qt = upCell(r[line.qty]), qm = odooNum(qt) == null ? qt.match(/^([\d,]+(?:\.\d+)?)\s*([a-z]+[a-z. ]*)?$/i) : null;   // "15 pcs" → 15 + pcs
+      cur.lines.push({ desc: upCell(r[line.desc]), qty: odooNum(qt) ?? (qm ? odooNum(qm[1]) : 0) ?? 0,
+        unit: (line.unit != null ? upCell(r[line.unit]) : '').replace(/^units?$/i, 'pc') || (qm?.[2] ? qm[2].trim().replace(/\.$/, '').replace(/^units?$/i, 'pc') : null),
         subtotal: line.subtotal != null ? odooNum(upCell(r[line.subtotal])) : null });
     }
   }
   const any = f => out.some(t => (t.fields[f] || '').trim());   // a column counts only if it has data
-  return { tickets: out, grouped, noSo, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson'),
+  const hd = i => upCell(rows[hi][Array.isArray(i) ? i[0] : i]);
+  const NAMES = { 'Ref. Sales Order': 'SO', 'CUSTOMER NAME': 'Customer', 'Scheduled Date': 'Date', 'Delivery Address': 'Address', 'Salesperson': 'Agent', desc: 'Item', qty: 'Qty', unit: 'Unit' };
+  const mapped = [...Object.entries(col), ...Object.entries(line)].filter(([f]) => NAMES[f]).sort((a, b) => Object.keys(NAMES).indexOf(a[0]) - Object.keys(NAMES).indexOf(b[0])).map(([f, i]) => `${NAMES[f]} ← “${hd(i) || 'column ' + (+i + 1)}”`);
+  return { tickets: out, grouped, noSo, mapped, headRow: hi + 1, hasLines: out.some(t => t.lines.length), hasClient: any('CUSTOMER NAME'), hasCompany: any('Company'), hasAgent: any('Salesperson'),
     noLink: out.filter(t => t.noLink).length };
 }
 /* A ticket with no customer AND no items is never usable — it would become an empty job that can still be
@@ -3228,7 +3292,8 @@ function upCheckSummary(P){
   if (P.odoo?.ok){ const c = k => T.filter(k).length, same = c(t => t.chk && !t.chk.none && !t.chk.fromOdoo && !t.chk.diff.length), fil = c(t => t.chk?.fromOdoo), dif = c(t => t.chk?.diff?.length), none = c(t => t.chk?.none);
     o = ` Checked against the Odoo copy${P.odoo.synced ? ` (updated ${fmtDay(String(P.odoo.synced).slice(0, 10))})` : ''}: <b>${same}</b> same${fil ? ` · <b style="color:var(--warn)">${fil} filled from Odoo</b>` : ''}${dif ? ` · <b style="color:var(--warn)">${dif} don’t agree</b>` : ''}${none ? ` · ${none} not in the copy` : ''}.`; }
   else if (P.odoo?.err) o = ` <span style="color:var(--warn)">Couldn’t check against the Odoo copy — compare the items by hand.</span>`;
-  return `<div class="ft" style="margin-top:4px">Read from the file: <b>${read}</b> item line${read === 1 ? '' : 's'} · <b>${nb}</b> board${nb === 1 ? '' : 's'} (${Math.round(kg)} kg).${o}</div>`;
+  const cols = P.mapped?.length ? `<details style="margin-top:2px"><summary class="ft">How the columns were read${P.sheet ? ` (sheet “${esc(P.sheet)}”)` : ''}, headings on row ${P.headRow}</summary><div class="ft">${P.mapped.map(esc).join(' · ')}</div></details>` : '';
+  return cols + `<div class="ft" style="margin-top:4px">Read from the file: <b>${read}</b> item line${read === 1 ? '' : 's'} · <b>${nb}</b> board${nb === 1 ? '' : 's'} (${Math.round(kg)} kg).${o}</div>`;
 }
 async function upVerifyCreated(rows){   // read back what was saved and compare with what was sent
   const res = await sb.from('jobs').select('id, quotation_serial, client_name, items, board_pcs, estimated_weight_kg').in('id', rows.map(r => r.id));
@@ -3362,8 +3427,7 @@ function openJobUpload(){
     try {
       const X = await loadXlsx();
       const wb = X.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
-      const rows = X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
-      const r = parseTicketRows(rows);
+      const r = readTicketWorkbook(X, wb);
       if (r.error){ $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(r.error)}</div>`; return; }
       if (!r.tickets.length){ $('up-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${upNoSoMsg(r) || 'No tickets in this file.'}</div>`; return; }
       const isPk = t => odooToJob(t).job_type === 'pickup';
@@ -6157,7 +6221,7 @@ async function openPkUpload(){
     try {
       const X = await loadXlsx();
       const wb = X.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
-      const r = parseTicketRows(X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' }));
+      const r = readTicketWorkbook(X, wb);
       if (r.error){ $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${esc(r.error)}</div>`; return; }
       if (!r.tickets.length){ $('pku-out').innerHTML = `<div class="imp-sum warn" style="margin-top:10px">${upNoSoMsg(r) || 'No tickets in this file.'}</div>`; return; }
       const all = r.tickets.map(pkFromRow), pk = all.filter(P => P.kind), other = all.filter(P => !P.kind).map(P => P.so_no || '?');
