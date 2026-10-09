@@ -12813,3 +12813,18 @@ survived only in Subject. HATID read the SO from Subject and created 16 jobs wit
   `job_items_kg(jsonb)`, `job_prep_decide` split counts it, `job_reweigh_items` (admin/manager; only w/wr/wq may change)
   behind "Re-weigh open deliveries". `job_settings_editor()` = active admin/manager.
 - Open: S79267 (3 slabs + 4kg adhesive) gains ~150 kg when Rommel presses Re-weigh.
+
+## What was changed on 2026-10-10 (session — HATID board weight by board type + HPL, `98cdea3`)
+- Rommel: board weight depends on the substrate, and HPL must be weighed too.
+- **`board_weights`** (HATID project nssviuuagtlvxjvvvagt; PK substrate+gauge_mm; substrates MDF, MDF-MR, PB, PB-MR,
+  PLY, HDF, HPL). Lookup: exact type+thickness → plain board for MR → "Any board" (`board_gauges`). Seeds are typical
+  (notes "Typical — replace with supplier weight", shown amber) — Rommel to replace with supplier figures.
+- Board lines (`g` set) store their own `w`/`wr`/`wq`; `boardsKg(pcs, items)` weighs by line, the board count still
+  decides HOW MANY (fewer pcs scale down, more pcs add Any-board sheets). DB `job_boards_kg(pcs, items)` mirrors it,
+  used by `job_prep_decide` and `job_reweigh_items`. Verified 0 of 24 existing jobs changed before re-weigh.
+- **HPL sheets** (`hplSheetKg`: says HPL, unit pc/sheet, 4x8 or no size, thickness needed) weigh per sheet but do NOT
+  count as boards (truck board limit). Edge band/lipping/lamination lines are not sheets.
+- Settings › Material weights: board grid (thickness × type, Any board column; blank = fall back, cleared Any = off),
+  HPL card, test box knows boards and HPL, Re-weigh includes board lines.
+- ⚠ The board-type words in `boardSubstrateOf` (MDF, PB/particle/chip board, plywood/ply/marine, HDF; MR/HMR/moisture)
+  are the only way a line gets its type. A line with no type word uses Any board.
