@@ -45489,6 +45489,7 @@ window.sendChat=function(){
     var wasOpen=t.classList.contains('open');
     t.innerHTML='<button id="trn-pill" onclick="event.stopPropagation();trnToggleMenu()"><i class="ti ti-school"></i> TRAINING ▾</button>'
       +'<div id="trn-menu" onclick="event.stopPropagation()"><div class="trn-note">Training mode — nothing here is live. Quotations are numbered QT-T…, and nothing is sent to anyone.</div>'
+      +'<button onclick="trnOpenScenarios()"><b>Scenarios</b> — guided practice</button>'
       +(isAppr?'<button onclick="trnToggleRequester()" title="On: your requests go to the Training Approver, as they would for a staff member. Off: you approve them yourself with your PIN.">'+(_trnAsRequester()?'✓ ':'')+'Practise as requester</button>':'')
       +(canReset?'<button onclick="trnResetArea()">Reset training data</button>':'')
       +(window._trnIsTrainee&&window._trnIsTrainee()?'':'<button onclick="toggleTrainingMode()">Exit training mode</button>')
@@ -45538,6 +45539,10 @@ window.sendChat=function(){
   ['_refreshOpenQuotationLockState','_refreshOpenQuotationPauseState','_shadowUserCheck','_apprApplyRemoteDecisions',
    '_supaNoteError','_supaCheckLiveness','_supaHandleConfirmedBroken']
     .forEach(function(n){ wrap(n,function(){ return function(){}; }); });
+
+  // Training log lines live in TRN Activity Log only. The database copy is blocked in training anyway,
+  // so waiting for it would leave every line 'not yet saved' and retrying forever.
+  wrap('_writeLogEntry',function(orig){ return function(e){ if(e) e.needSupa=false; return orig.apply(this,arguments); };});
 
   // ── Drive: never create folders (a fake folder id must never be cached for live use) ──
   wrap('ensureDriveFolder',function(){ return function(){ return Promise.resolve('training'); }; });
@@ -45593,6 +45598,9 @@ window.sendChat=function(){
       } else {
         n.status=decision;
       }
+      // A pause is applied on the approver's side in the live app (doApprovalAction); here the
+      // simulated approver is that side, so it applies it.
+      if(n.type==='order_pause'){ try{ _applyOrderPauseDecision(n,n.status,TRAINING_APPROVER.name,''); }catch(e){} }
     });
     if(cb) cb();
   };});
@@ -45648,6 +45656,262 @@ window.sendChat=function(){
       }).catch(function(){ toast('Could not reset — try again.'); });
     });
   };
+})();
+</script>
+
+<script>
+/* ── TRAINING MODE — guided scenarios (2026-10-10) ──────────────────────────────────────────
+   Training only. Each scenario: a goal, optional sample data, and steps that tick themselves by
+   reading the app's own state every 1.5 s — the trainee does the real thing, nothing is faked.
+   A step, once done, stays done (so a later step that changes the state cannot un-tick it).
+   Finishing a scenario writes a line to the TRAINING activity log, so a trainer can see who
+   completed what. Progress is also kept per person in this browser. */
+(function(){
+  if(!window._TRN) return;
+  function $(id){ return document.getElementById(id); }
+  function v(id){ var e=$(id); return e?String(e.value||'').trim():''; }
+  function T(){ return /^QT-T/.test(window.qSerial||''); }
+  function areas(){ return window.qAreas||[]; }
+  function anyArea(f){ return areas().some(f); }
+  function carcassQty(){ var n=0; areas().forEach(function(a){ (a.items||[]).forEach(function(it){ n+=(+it.qty||0); }); }); return n; }
+  function bomCount(){ var n=0; areas().forEach(function(a){ n+=(a.bomItems||[]).filter(function(b){ return (+b.qty||0)>0; }).length; }); return n; }
+  function svcCount(){ var n=0; areas().forEach(function(a){ n+=(a.svcItems||[]).filter(function(s){ return (+s.qty||0)>0; }).length; }); return n; }
+  function myNotif(type,pred){ var me=((window.gUser&&gUser.email)||'').toLowerCase();
+    return (window.NOTIFS||[]).some(function(n){ return n&&n.type===type&&String(n.fromEmail||'').toLowerCase()===me&&(!pred||pred(n)); }); }
+  function order(id){ return (window.pendingOrders||[]).find(function(o){ return o.id===id; })||null; }
+  function grand(){ return (window._pCalc&&+_pCalc.grand)||0; }
+
+  // Sample Wufoo-style order, written to the TRAINING orders tab only.
+  function seedOrder(o,cb){
+    var id='TR'+String(Date.now()).slice(-6);
+    var now=new Date().toISOString();
+    var row=[id,now,o.client,o.company,'09170000000',o.email||'client@example.com','',
+      'New',o.service||'Cutting & Edging','2F','Medium Density Fiberboard (MDF)','Along the width',
+      'Yes','Yes','Yes','No','No','No','No','N/A','Training Agent','','','Pending','','',
+      (window.currentUserCompany||''),'Wufoo',o.address||'',o.project||'','',o.segment||'','','',o.notes||''];
+    sheetsAppend('Pending Orders!A:AI',[row]).then(function(){
+      gLoadPendingOrders(function(){ try{ renderOrders(); }catch(e){} if(cb) cb(id); });
+    }).catch(function(){ showToast('Could not create the sample order — check your connection.'); });
+  }
+  // Called only after trnStartScenario has already asked about unsaved work (confirmUnsavedThen).
+  function freshQuotation(){ try{ initQuotation(); }catch(e){} try{ navigate('quotation'); }catch(e){} }
+
+  var S=[
+   {id:'walkin',title:'1. Walk-in client — carcass quotation',
+    goal:'A client walks in and wants 3 kitchen base cabinets and 2 hanging cabinets. Build the quotation by cabinet type, save it, lock it and share it.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Pick how the job arrived: Walk-in',ok:function(){ return window.qJobSource==='walkin'; }},
+      {t:'Enter the client name and contact number',ok:function(){ return !!v('cl-name')&&!!v('cl-contact'); }},
+      {t:'Fabrication by furniture type (carcass) — add at least 2 cabinet lines, 5 units in total',ok:function(){ return window.qFabMode==='carcass'&&carcassQty()>=5; }},
+      {t:'Save — it gets a QT-T number',ok:T},
+      {t:'Lock the quotation',ok:function(){ return T()&&!!window.qLocked; }},
+      {t:'Share it with the client (any way — nothing is really sent)',ok:function(){ return T()&&!!window.qSentStatus; }}]},
+   {id:'wufoo',title:'2. Order from Wufoo → quotation',
+    goal:'A Wufoo order has arrived for cutting and edging. Pick it up from Orders, quote it in cutting-list mode and send it. The order should close by itself when you share.',
+    start:function(st){ seedOrder({client:'Training Kitchen Co.',company:'Training Kitchen Co.',project:'Unit 4B Kitchen',notes:'Cut and edge 18mm MDF, 2F white.'},function(id){ st.orderId=id; navigate('orders'); showToast('A sample order '+id+' is waiting in Orders → New.'); }); },
+    steps:[
+      {t:'Open Orders and press Export to Quotation on the training order',ok:function(st){ return !!st.orderId&&window.qSourceOrderId===st.orderId; }},
+      {t:'Switch fabrication to By cutting list and add at least 2 services (e.g. cutting, edgebanding)',ok:function(){ return window.qFabMode==='services'&&svcCount()>=2; }},
+      {t:'Save and lock',ok:function(){ return T()&&!!window.qLocked; }},
+      {t:'Share it — the order moves to IQ Lock/Sent and its clock stops',ok:function(st){ var o=order(st.orderId); return !!o&&o.status==='Done'; }}]},
+   {id:'bom',title:'3. BOM cabinet quotation',
+    goal:'Quote a wardrobe using By BOM: pick a cabinet type, check its materials, hardware and services, then save and lock.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Enter the client name',ok:function(){ return !!v('cl-name'); }},
+      {t:'Switch fabrication to By BOM',ok:function(){ return window.qFabMode==='bom'; }},
+      {t:'Add at least one BOM cabinet with a quantity',ok:function(){ return window.qFabMode==='bom'&&bomCount()>=1; }},
+      {t:'Save and lock',ok:function(){ return T()&&!!window.qLocked; }}]},
+   {id:'cutlist',title:'4. Client\'s cutting list → Designers Support → quotation',
+    goal:'A client sent a cutting list. It is already typed into the Cutting List tab for you. Load it into analysis, check the boards and the cutting layout, then reflect it into a quotation and save.',
+    start:function(){
+      freshQuotation();
+      try{
+        navigate('production'); setTimeout(function(){ try{ setProdTab('cutlist');
+          var s=MCL.state(); s.panels=[
+            {group:'Cabinet 1',part:'Side panel',mat:'',th:18,L:720,W:560,qty:2,ebt:'1L',emat:'',grain:'',svcs:[],remark:''},
+            {group:'Cabinet 1',part:'Bottom',mat:'',th:18,L:564,W:560,qty:1,ebt:'1L',emat:'',grain:'',svcs:[],remark:''},
+            {group:'Cabinet 1',part:'Shelf',mat:'',th:18,L:564,W:540,qty:2,ebt:'1L',emat:'',grain:'',svcs:[],remark:''},
+            {group:'Cabinet 1',part:'Door',mat:'',th:18,L:716,W:298,qty:2,ebt:'4S',emat:'',grain:'',svcs:[],remark:''}];
+          MCL.addPanel(1);
+          showToast('Sample cutting list loaded. Pick a board in the Material column for each row, then press Load into analysis.');
+        }catch(e){} },400);
+      }catch(e){}
+    },
+    steps:[
+      {t:'Pick a board (material) on every row of the cutting list',ok:function(){ try{ var p=MCL.state().panels.filter(function(x){ return +x.L>0; }); return p.length>=4&&p.every(function(x){ return !!x.mat; }); }catch(e){ return false; } }},
+      {t:'Press Load into analysis — the cutting layout and boards appear',ok:function(){ return !!(window.prodState&&prodState.result); }},
+      {t:'Reflect to quotation',ok:function(){ return window.qFabMode==='services'&&svcCount()>=1; }},
+      {t:'Enter the client name and save',ok:function(){ return T()&&!!v('cl-name'); }}]},
+   {id:'counter',title:'5. Discount request → counter-offer → accept',
+    goal:'The client asks for 10% off. Request it. The approver will answer with a counter-offer of 5% — accept it and check the total drops.',
+    decide:function(n){ return n.type==='discount'?'countered':null; },
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Build any quotation (client name + at least one line) and save it',ok:function(){ return T()&&grand()>0; }},
+      {t:'Request a 10% discount (Pricing adjustments → Discount request)',ok:function(){ return myNotif('discount'); }},
+      {t:'Wait for the approver — a counter-offer arrives',ok:function(){ return myNotif('discount',function(n){ return n.status==='countered'; }); }},
+      {t:'Accept the counter-offer on the Approvals page',ok:function(){ return !!window.qDiscApproved&&(+window.qDiscPct||0)>0; }}]},
+   {id:'subsidiary',title:'6. Subsidiary account and VAT',
+    goal:'Quote a job for a subsidiary (WCLI or CWLI). See how the account type changes VAT and whether materials are charged.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Set Account category to Subsidiary and pick the company',ok:function(){ return v('cl-type')==='Subsidiary'; }},
+      {t:'Check VAT — a subsidiary quotation is VAT-exclusive',ok:function(){ return v('cl-type')==='Subsidiary'&&window.qVatApproved===false; }},
+      {t:'Add at least one line and save',ok:function(){ return T()&&grand()>0; }}]},
+   {id:'clientmat',title:'7. Client-supplied materials',
+    goal:'The client will bring their own boards. Switch on client-supplied materials, list what they bring, and see the service uplift.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Use By cutting list or By BOM',ok:function(){ return window.qFabMode==='services'||window.qFabMode==='bom'; }},
+      {t:'Tick Client-supplied materials',ok:function(){ return !!window.qClientSupplyMat; }},
+      {t:'List at least one material the client is bringing',ok:function(){ return (window.qClientSupplyMatList||[]).some(function(m){ return m&&(m.type||m.brand||m.color); }); }},
+      {t:'Save',ok:T}]},
+   {id:'options',title:'8. Two options for the client',
+    goal:'The client wants to compare two finishes. Make Option 1 and Option 2 with different prices, then approve one.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Build and save a quotation',ok:function(){ return T()&&grand()>0; }},
+      {t:'Lock it',ok:function(){ return T()&&!!window.qLocked; }},
+      {t:'Create a new option (Option 2)',ok:function(){ return (window.qOptionsList||[]).length>=2; }},
+      {t:'Approve one option for the Final Quotation',ok:function(){ return (window.qOptionsList||[]).some(function(o){ return o.status==='approved'; }); }}]},
+   {id:'revise',title:'9. Unlock and revise',
+    goal:'The client changed their mind after receiving the quotation. Request an unlock, change something, and lock again — the number gets .R1.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Build, save and lock a quotation',ok:function(){ return T()&&!!window.qLocked; }},
+      {t:'Request an unlock (the approver will approve it)',ok:function(){ return myNotif('unlock'); }},
+      {t:'Once unlocked, change a quantity',ok:function(st){ if(!window.qLocked&&T()){ if(st.g0==null) st.g0=grand(); return grand()!==st.g0; } return false; }},
+      {t:'Lock again — the number now ends in .R1',ok:function(){ return /\.R\d+$/.test(window.qSerial||'')&&!!window.qLocked; }}]},
+   {id:'final',title:'10. Final Quotation, signatures, client approval',
+    goal:'The client approved the Initial Quotation. Move to the Final Quotation, lock it, get it signed, and record the client\'s approval.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Build, save and lock the Initial Quotation',ok:function(){ return T()&&!!window.qLocked; }},
+      {t:'Approve & proceed to Stage 2',ok:function(){ return !!window.qApproved; }},
+      {t:'Lock the Final Quotation',ok:function(){ return !!window.fqLocked; }},
+      {t:'Request signatures — Checked by gets signed',ok:function(){ return !!(window.qSignatures&&qSignatures.checked); }},
+      {t:'Record Client Approve on the Final Quotation',ok:function(){ return !!window.fqClientApproved; }}]},
+   {id:'additional',title:'11. Additional order',
+    goal:'After the job was quoted, the client wants two extra cabinets. Do not edit the original — create an Additional order from the Project List.',
+    start:function(){ try{ navigate('directory'); }catch(e){} },
+    steps:[
+      {t:'Make sure you have a locked training quotation (any scenario above)',ok:function(st){ return (window.dirData||[]).some(function(d){ return /^QT-T/.test(d.id||'')&&d.status&&d.status!=='Draft'; })||st.seen; }},
+      {t:'In the Project List press Additional on it',ok:function(st){ if(window.qAdditionalFrom){ st.seen=true; return true; } return false; }},
+      {t:'Add the extra cabinets and save',ok:function(){ return !!window.qAdditionalFrom&&T()&&grand()>0; }}]},
+   {id:'install',title:'12. Fabrication with installation',
+    goal:'Quote a job outside Metro Manila that includes installation. See how mobilization and installation are added.',
+    start:function(){ freshQuotation(); },
+    steps:[
+      {t:'Service requirement: Fabrication with Installation',ok:function(){ return v('cl-service')==='Fabrication with Installation'; }},
+      {t:'Enter the project location',ok:function(){ return !!v('cl-location'); }},
+      {t:'Add cabinets and enter the carcass count',ok:function(){ return grand()>0&&(+(window._pCalc&&_pCalc.instBase)||0)>0; }},
+      {t:'Check mobilization is included and save',ok:function(){ return T()&&(+(window._pCalc&&_pCalc.mobBase)||0)>0; }}]},
+   {id:'pause',title:'13. Pause an order, decline and reactivate',
+    goal:'The client asked to hold the job while they decide. Pause the order (stops the clock), resume it, then record that the client declined the quotation — and bring it back when they return.',
+    start:function(st){ seedOrder({client:'Training Condo Owner',company:'',project:'Condo 12F Wardrobe',notes:'Client will confirm next week.'},function(id){ st.orderId=id; navigate('orders'); showToast('A sample order '+id+' is waiting in Orders → New.'); }); },
+    steps:[
+      {t:'Pause the training order (needs approval — the approver will approve)',ok:function(st){ var o=order(st.orderId); return !!o&&(o.pauseHistory||[]).some(function(p){ return p.status==='approved'; }); }},
+      {t:'Resume it',ok:function(st){ var o=order(st.orderId); return !!o&&(o.pauseHistory||[]).some(function(p){ return !!p.resumedAt; }); }},
+      {t:'Export it to a quotation, build and save it',ok:function(st){ return window.qSourceOrderId===st.orderId&&T(); }},
+      {t:'Record Client Declined (Stage 1 → Decline)',ok:function(st){ if(window.qCancelled) st.declined=true; return !!st.declined; }},
+      {t:'Reactivate it',ok:function(st){ return !!st.declined&&!window.qCancelled; }}]}
+  ];
+  window._TRN_SCENARIOS=S;
+
+  // ── state ──
+  function meKey(){ return 'mc_trn_prog_'+(((window.gUser&&gUser.email)||'').toLowerCase()); }
+  function prog(){ try{ return JSON.parse(localStorage.getItem(meKey())||'{}'); }catch(e){ return {}; } }
+  function saveProg(p){ try{ localStorage.setItem(meKey(),JSON.stringify(p)); }catch(e){} }
+  var active=null;   // {sc, st:{}, done:[bool]}
+  try{ var saved=JSON.parse(localStorage.getItem('mc_trn_active')||'null'); if(saved){ var sc0=S.find(function(x){ return x.id===saved.id; }); if(sc0) active={sc:sc0,st:saved.st||{},done:saved.done||[]}; } }catch(e){}
+  function persist(){ try{ localStorage.setItem('mc_trn_active',active?JSON.stringify({id:active.sc.id,st:active.st,done:active.done}):'null'); }catch(e){} }
+
+  // The simulated approver asks the running scenario how to answer.
+  window._trnScenarioDecision=function(n){ return active&&active.sc.decide?active.sc.decide(n):null; };
+
+  window.trnOpenScenarios=function(){
+    var p=prog(), ov=$('trn-scen-ov');
+    if(!ov){ ov=document.createElement('div'); ov.id='trn-scen-ov'; document.body.appendChild(ov);
+      ov.onclick=function(e){ if(e.target===ov) ov.style.display='none'; }; }
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:2147483550;display:flex;align-items:center;justify-content:center;padding:16px';
+    var done=S.filter(function(x){ return p[x.id]; }).length;
+    ov.innerHTML='<div style="background:var(--card);border-radius:14px;max-width:640px;width:100%;max-height:86vh;overflow:auto;padding:20px 22px;box-shadow:0 10px 30px rgba(0,0,0,.25)">'
+      +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="font-size:17px;flex:1">Training scenarios</b>'
+      +'<span style="font-size:12px;color:var(--text2)">'+done+' of '+S.length+' done</span>'
+      +'<button class="btn" onclick="document.getElementById(\'trn-scen-ov\').style.display=\'none\'">Close</button></div>'
+      +'<div style="font-size:12.5px;color:var(--text2);margin-bottom:14px">Pick one. A checklist opens on the right and ticks itself as you work. Everything stays in training.</div>'
+      +S.map(function(x){
+        return '<div style="display:flex;gap:12px;align-items:flex-start;border:.5px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">'
+          +'<div style="flex:1"><div style="font-weight:600;font-size:13.5px">'+(p[x.id]?'<span style="color:var(--teal)">✓ </span>':'')+escHtml(x.title)+'</div>'
+          +'<div style="font-size:12px;color:var(--text2);margin-top:3px;line-height:1.45">'+escHtml(x.goal)+'</div></div>'
+          +'<button class="btn btn-primary" style="white-space:nowrap" onclick="trnStartScenario(\''+x.id+'\')">'+(active&&active.sc.id===x.id?'Restart':'Start')+'</button></div>';
+      }).join('')+'</div>';
+  };
+  window.trnStartScenario=function(id){
+    var sc=S.find(function(x){ return x.id===id; }); if(!sc) return;
+    var ov=$('trn-scen-ov'); if(ov) ov.style.display='none';
+    var go=function(){
+      active={sc:sc,st:{},done:sc.steps.map(function(){ return false; })}; persist();
+      try{ sc.start&&sc.start(active.st); }catch(e){ console.warn('[training] start',e); }
+      setTimeout(function(){ persist(); },3000);
+      draw(); try{ logActivity('Training: started "'+sc.title+'".',''); }catch(e){}
+    };
+    if(typeof confirmUnsavedThen==='function') confirmUnsavedThen(go); else go();
+  };
+  window.trnStopScenario=function(){ active=null; persist(); draw(); };
+  window.trnToggleCard=function(){ var c=$('trn-card'); if(c) c.classList.toggle('min'); };
+
+  function draw(){
+    var c=$('trn-card');
+    if(!active){ if(c) c.remove(); return; }
+    if(!c){ c=document.createElement('div'); c.id='trn-card'; document.body.appendChild(c); }
+    var sc=active.sc, n=active.done.filter(Boolean).length, cur=active.done.indexOf(false);
+    c.innerHTML='<div class="trn-h" onclick="trnToggleCard()"><b>'+escHtml(sc.title)+'</b><span>'+n+'/'+sc.steps.length+' ▾</span></div>'
+      +'<div class="trn-b"><div class="trn-goal">'+escHtml(sc.goal)+'</div>'
+      +sc.steps.map(function(s,i){
+        var d=active.done[i];
+        return '<div class="trn-step'+(d?' ok':'')+(i===cur?' cur':'')+'"><span>'+(d?'✓':(i===cur?'▶':'○'))+'</span><span>'+escHtml(s.t)+'</span></div>';
+      }).join('')
+      +(cur<0?'<div class="trn-done">Scenario complete — well done.</div>':'')
+      +'<div class="trn-btns"><button onclick="trnOpenScenarios()">Scenarios</button><button onclick="trnStartScenario(\''+sc.id+'\')">Restart</button><button onclick="trnStopScenario()">Close</button></div></div>';
+  }
+  var css=document.createElement('style');
+  css.textContent='#trn-card{position:fixed;right:22px;top:66px;width:300px;z-index:2147483540;background:var(--card);border:2px solid #f97316;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.18);font:13px system-ui,sans-serif;color:var(--text)}'
+    +'#trn-card .trn-h{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:9px 12px;background:#f97316;color:#fff;border-radius:9px 9px 0 0;cursor:pointer}'
+    +'#trn-card .trn-h b{font-size:12.5px;line-height:1.3}#trn-card .trn-h span{font-size:12px;white-space:nowrap}'
+    +'#trn-card.min .trn-b{display:none}#trn-card.min .trn-h{border-radius:9px}'
+    +'#trn-card .trn-b{padding:10px 12px;max-height:60vh;overflow:auto}'
+    +'#trn-card .trn-goal{font-size:12px;color:var(--text2);line-height:1.45;margin-bottom:8px}'
+    +'#trn-card .trn-step{display:flex;gap:8px;padding:5px 0;line-height:1.4;color:var(--text2)}'
+    +'#trn-card .trn-step.cur{color:var(--text);font-weight:600}#trn-card .trn-step.ok{color:var(--teal)}'
+    +'#trn-card .trn-step span:first-child{width:14px;flex:none}'
+    +'#trn-card .trn-done{margin-top:8px;padding:8px;border-radius:8px;background:var(--wash-teal,#e6f6f2);color:var(--teal);font-weight:600}'
+    +'#trn-card .trn-btns{display:flex;gap:6px;margin-top:10px}#trn-card .trn-btns button{flex:1;border:.5px solid var(--border);background:transparent;border-radius:7px;padding:5px;font:600 11.5px system-ui;cursor:pointer;color:var(--text)}';
+  document.head.appendChild(css);
+
+  // ── the checker ──
+  setInterval(function(){
+    if(!active||!window.gUser) return;
+    var changed=false;
+    active.sc.steps.forEach(function(s,i){
+      if(active.done[i]) return;
+      // in order: a step only counts once the ones before it are done
+      if(i>0&&!active.done[i-1]) return;
+      var ok=false; try{ ok=!!s.ok(active.st); }catch(e){}
+      if(ok){ active.done[i]=true; changed=true; }
+    });
+    if(changed){
+      persist(); draw();
+      if(active.done.every(Boolean)){
+        var p=prog(); p[active.sc.id]=new Date().toISOString(); saveProg(p);
+        try{ showToast('✓ Scenario complete: '+active.sc.title); }catch(e){}
+        try{ logActivity('Training: completed "'+active.sc.title+'".',''); }catch(e){}
+      }
+    }
+  },1500);
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',draw); else setTimeout(draw,500);
 })();
 </script>
 
