@@ -33,6 +33,154 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.31.0/dist/tabler-icons.min.css">
 <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pptxgenjs/dist/pptxgen.bundle.js"></script>
+<script>
+/* ── TRAINING MODE — network guard (2026-10-09) ─────────────────────────────────────────────
+   Runs before anything else on the page, so the Supabase client and every Google call pick up
+   this fetch. When training is on (localStorage mc_training=1) it is the ONE place that decides
+   what may leave the browser:
+     • Google Sheet (main spreadsheet): the data tabs are redirected to their "TRN " copies
+       (Quotations → TRN Quotations, …). Any write to any other tab — Settings, User Roles,
+       anything unknown — is refused. Row deletes are allowed only on TRN sheet ids.
+     • Price DB / Logistics DB / Drive / email relay / serial-claim service / push: never written.
+     • Supabase: data tables read as empty and are never written; shared reference tables
+       (prices, catalogue, settings, users) still read, so prices are real. Bug reports
+       (tickets) still go through.
+   Default is DENY: a write this guard does not recognise is blocked, never let through. */
+(function(){
+  var on=false; try{ on=localStorage.getItem('mc_training')==='1'; }catch(e){}
+  window._TRN=on;
+  if(!on) return;
+  var TRN_TABS={'Quotations':1,'Quotation State':1,'Clients':1,'Pending Orders':1,'Activity Log':1,'Deleted Rows':1,'Messages':1};
+  window._TRN_TABS=TRN_TABS;
+  window._trnTab=function(t){ t=String(t||''); return TRN_TABS[t]?('TRN '+t):t; };
+  window._trnSheetIds={};            // sheetIds of the TRN tabs — the only ones a row may be deleted from
+  var DATA_TABLES={quotations:1,quotation_states:1,quotation_state_lite:1,quotation_stage_flags:1,clients:1,
+    pending_orders:1,order_cutting_lists:1,approval_requests:1,messages:1,activity_log:1,job_orders:1,
+    board_layouts:1,drawing_analyses:1,user_shadow_log:1,mapping_audit:1,push_subscriptions:1,device_capabilities:1};
+  var RPC_READ={modcraft_service_capacity:1,cutlist_learned:1,catalogue_search:1,catalogue_resolve:1,catalogue_list:1};
+  var realFetch=window.fetch.bind(window);
+  function fake(obj,status,headers){
+    var h={'Content-Type':'application/json'}; if(headers) for(var k in headers) h[k]=headers[k];
+    return Promise.resolve(new Response(JSON.stringify(obj),{status:status||200,headers:h}));
+  }
+  function blocked(what){ try{ console.info('[training] blocked: '+what); }catch(e){} }
+  // Range like "Quotations!A:AC" or "'Quotation State'!A2:K2" → mapped, or null when the tab is not a data tab.
+  function mapRange(r){
+    var m=String(r||'').match(/^'?([^'!]+)'?(!.*)?$/); if(!m) return null;
+    var tab=m[1]; if(tab.indexOf('TRN ')===0) return r;
+    if(!TRN_TABS[tab]) return null;
+    return 'TRN '+tab+(m[2]||'');
+  }
+  window.fetch=function(input,init){
+    var url=(typeof input==='string')?input:(input&&input.url)||'';
+    var method=String((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+    var body=init&&init.body;
+    try{
+      // ── Google Sheets ──
+      if(url.indexOf('sheets.googleapis.com/v4/spreadsheets/')>=0){
+        var sid=(url.match(/spreadsheets\/([^\/:?]+)/)||[])[1]||'';
+        var main=(typeof SHEETS_ID!=='undefined'&&sid===SHEETS_ID);
+        if(!main){ if(method==='GET') return realFetch(input,init); blocked('write to another spreadsheet'); return fake({}); }
+        var vm=url.match(/\/values\/([^?:]+)(:[a-zA-Z]+)?/);
+        if(vm && vm[1]!=='') {
+          var range=decodeURIComponent(vm[1]); var mapped=mapRange(range);
+          if(mapped===null){
+            if(method==='GET') return realFetch(input,init);
+            blocked('write to live tab '+range); return fake({updates:{updatedRows:0}});
+          }
+          url=url.replace(vm[1],encodeURIComponent(mapped));
+          if(body&&typeof body==='string'){ try{ var b=JSON.parse(body); if(b.range){ b.range=mapRange(b.range)||b.range; } body=JSON.stringify(b);}catch(e){} }
+          return realFetch(url,Object.assign({},init||{},{body:body}));
+        }
+        if(/\/values:batchUpdate/.test(url)){
+          var bb=JSON.parse(body||'{}'); var ok=true;
+          (bb.data||[]).forEach(function(d){ var m2=mapRange(d.range); if(m2===null) ok=false; else d.range=m2; });
+          if(!ok){ blocked('batch write touching a live tab'); return fake({}); }
+          return realFetch(url,Object.assign({},init||{},{body:JSON.stringify(bb)}));
+        }
+        if(/:batchUpdate/.test(url)&&method!=='GET'){
+          var rb=JSON.parse(body||'{}'); var ok2=true;
+          (rb.requests||[]).forEach(function(rq){
+            if(rq.addSheet){ var t=rq.addSheet.properties&&rq.addSheet.properties.title; var tt=window._trnTab(t);
+              if(String(tt).indexOf('TRN ')!==0) ok2=false; else rq.addSheet.properties.title=tt; }
+            else if(rq.deleteDimension){ var id=rq.deleteDimension.range&&rq.deleteDimension.range.sheetId;
+              if(!window._trnSheetIds[id]) ok2=false; }
+            else ok2=false;   // anything else is not something training needs
+          });
+          if(!ok2){ blocked('sheet structure change outside the training tabs'); return fake({replies:[]}); }
+          return realFetch(url,Object.assign({},init||{},{body:JSON.stringify(rb)})).then(function(res){
+            // learn the id of any training tab just created, so its rows can be deleted later
+            return res.clone().json().then(function(j){
+              (j.replies||[]).forEach(function(rp){ if(rp.addSheet&&rp.addSheet.properties) window._trnSheetIds[rp.addSheet.properties.sheetId]=1; });
+              return res;
+            }).catch(function(){ return res; });
+          });
+        }
+        if(method==='GET') return realFetch(input,init);
+        blocked('unrecognised Sheets write'); return fake({});
+      }
+      // ── Google Drive ──
+      if(/googleapis\.com\/(upload\/)?drive\//.test(url)){
+        if(method==='GET') return realFetch(input,init);
+        blocked('Drive write'); return fake({id:'training-'+Date.now()});
+      }
+      // ── Supabase ──
+      var SU=(typeof SUPA_URL!=='undefined'?SUPA_URL:'');
+      if(SU && url.indexOf(SU)===0){
+        var p=url.slice(SU.length);
+        if(p.indexOf('/auth/')===0) return realFetch(input,init);
+        if(p.indexOf('/functions/')===0){ blocked('edge function'); return fake({}); }
+        if(p.indexOf('/storage/')===0){
+          if(p.indexOf('ticket-attachments')>=0) return realFetch(input,init);
+          if(method==='GET') return fake({error:'training'},404);
+          blocked('storage write'); return fake({Key:'training',Id:'training'});
+        }
+        var rm=p.match(/^\/rest\/v1\/rpc\/([a-zA-Z0-9_]+)/);
+        if(rm){ if(RPC_READ[rm[1]]) return realFetch(input,init); blocked('rpc '+rm[1]); return fake(null); }
+        var tm=p.match(/^\/rest\/v1\/([a-zA-Z0-9_]+)/);
+        if(tm){
+          var tbl=tm[1];
+          if(tbl==='tickets') return realFetch(input,init);          // "Report a problem" still works
+          if(method==='GET'||method==='HEAD'){
+            if(DATA_TABLES[tbl]){
+              // A single-row read (.single()/.maybeSingle()) must come back as "no row", not as an
+              // empty list — an empty list is truthy and would read as a row that exists.
+              var acc=''; try{ var hh=(init&&init.headers)||{}; acc=(typeof hh.get==='function')?(hh.get('Accept')||''):(hh.Accept||hh.accept||''); }catch(e){}
+              if(String(acc).indexOf('vnd.pgrst.object')>=0) return fake({code:'PGRST116',message:'training: no rows'},406);
+              return fake([],200,{'Content-Range':'*/0'});
+            }
+            return realFetch(input,init);
+          }
+          blocked('database write to '+tbl); return fake([],201,{'Content-Range':'*/0'});
+        }
+        if(method==='GET') return realFetch(input,init);
+        blocked('Supabase call'); return fake({});
+      }
+      // ── Apps Script relays (email/Chat mailer, serial claim) ──
+      if(url.indexOf('script.google.com')>=0){ blocked('Apps Script relay'); return fake({}); }
+    }catch(e){
+      // A request this guard could not read must not slip through to live data.
+      if(method!=='GET'){ blocked('unreadable request'); return fake({}); }
+    }
+    return realFetch(input,init);
+  };
+  // Opening the user's mail / Viber / WhatsApp would reach a REAL client.
+  var realOpen=window.open.bind(window);
+  window.open=function(u){
+    var s=String(u||'');
+    if(/^(mailto:|viber:|whatsapp:|sms:|tel:)|wa\.me|api\.whatsapp|mail\.google\.com/i.test(s)){
+      try{ if(typeof showToast==='function') showToast('Training mode — nothing was sent to anyone.'); }catch(e){}
+      blocked('open '+s.slice(0,40));
+      return {closed:false,close:function(){},focus:function(){},location:{href:''},document:{write:function(){},close:function(){}}};
+    }
+    return realOpen.apply(window,arguments);
+  };
+  if(navigator.share){
+    try{ navigator.share=function(){ try{ showToast('Training mode — nothing was shared.'); }catch(e){} return Promise.resolve(); }; }catch(e){}
+  }
+})();
+</script>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -3370,8 +3518,8 @@ function _mssiCommApplies(type,sub){
 function _homeCompanyFromState(state){
   var c=(state&&state.client)||{};
   if(c.homeCompany) return c.homeCompany;
-  var pm=String((state&&state.serial)||'').match(/^QT-([WCM])\d{8}/);
-  if((c.type||'Direct')==='Direct'&&pm) return {W:COMPANIES[0],M:COMPANIES[1],C:COMPANIES[2]}[pm[1]];
+  var pm=String((state&&state.serial)||'').match(/^QT-([WCMT])\d{8}/);
+  if((c.type||'Direct')==='Direct'&&pm&&pm[1]!=='T') return {W:COMPANIES[0],M:COMPANIES[1],C:COMPANIES[2]}[pm[1]];   // T = training: no company in the number
   var sig=state&&state.signatures&&state.signatures.prepared, users=(typeof sheetUsers!=='undefined'&&sheetUsers)||[];
   var em=String((sig&&sig.email)||'').trim().toLowerCase(), nm=String((sig&&sig.name)||'').trim().toLowerCase();
   for(var i=0;i<users.length;i++){
@@ -6730,7 +6878,7 @@ function _syncVatUI(){
 // under the previous currentUserCompany-based prefix logic) as "mismatched"
 // just for being opened, not because anyone actually changed anything.
 function _currentPrefixOfSerial(serial){
-  var m=String(serial||'').match(/^QT-([WCM])/);
+  var m=String(serial||'').match(/^QT-([WCMT])/);
   return m?m[1]:null;
 }
 function _onQuotationCompanyMightChange(){
@@ -12809,7 +12957,7 @@ function gLoadDirData(cb){
       dirData=[];
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]||_isQuotHeaderRow(r)) continue;
-        var ser=r[0],m=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
+        var ser=r[0],m=ser.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/),baseS=m?m[1]:ser;
         // Revisions share a base serial, so they collapse to one row.
         // A later revision SUPERSEDES: take its identity and its state, or the row
         // would open the old version and report the old version's status.
@@ -15602,7 +15750,7 @@ function exportReportToPPT() {
 // Load sheetUsers silently on app start so routing works without visiting Users page
 function loadSheetUsersBackground(){
   if(!gToken) return;
-  sheetsGet('User Roles!A:AA')
+  sheetsGet('User Roles!A:AB')
     .then(function(data){
       var rows=data.values||[];
       sheetUsers=parseUserRows(rows);
@@ -22040,7 +22188,8 @@ function parseUserRows(rows){
     // Col AA — must this person hold their own PIN. Signatories can be ANY active user now, so
     // who needs a PIN is a choice rather than a consequence of rank. Absent reads as FALSE.
     var requirePin=String(r[26]||'').toUpperCase()==='TRUE';
-    out.push({name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:pinHash,pinSalt:pinSalt,includeKpi:includeKpi,requirePin:requirePin,rowIdx:i+1});
+    var isTrainee=String(r[27]||'').toUpperCase()==='TRUE';   // AB: training mode only (see TRAINING MODE)
+    out.push({isTrainee:isTrainee,name:name,email:email,pos:pos,active:active,company:company,mac:mac,acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:pinHash,pinSalt:pinSalt,includeKpi:includeKpi,requirePin:requirePin,rowIdx:i+1});
   }
   return out;
 }
@@ -22049,7 +22198,7 @@ function loadUsersFromSheet(){
   var wrap=el('users-wrap');
   if(!gToken){if(wrap)wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Please sign in to manage users.</div>';return;}
   if(wrap)wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text2);font-size:13px"><i class="ti ti-loader" style="font-size:18px"></i> Loading users…</div>';
-  sheetsGet('User Roles!A:AA')
+  sheetsGet('User Roles!A:AB')
     .then(function(data){
       sheetUsers=parseUserRows(data.values||[]);
       renderUsers();
@@ -22157,6 +22306,7 @@ function renderUsers(){
           +'<input type="checkbox" id="u'+i+'reqpin" '+(u.requirePin?'checked':'')+(isAdmin?'':' disabled')+'>'
           +'Require own PIN</label>'
           +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Tick for anyone named as a <b>Checked by</b> or <b>Noted by</b> signatory. They will be asked to set one before their first PIN action, and the shared fallback stops working for them.</div>')
+      +(typeof _trnUserTickHtml==='function'?_trnUserTickHtml(i,u,isAdmin):'')
       +'<div style="font-size:11px;margin-top:4px">'+(u.pinHash&&u.pinSalt?'<span style="color:var(--teal)">PIN is set.</span>':'<span style="color:var(--amber)">No PIN yet.</span>')+'</div>';
     h+='<div style="background:var(--card);border:.5px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:12px;opacity:'+(u.active?1:.6)+'">'
       +'<div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">'
@@ -22230,6 +22380,7 @@ function saveUserRow(i){
   // this card; the switch is only rendered for an Admin, so preserve the stored value otherwise.
   var includeKpi=el('u'+i+'kpi')?el('u'+i+'kpi').checked:!!u.includeKpi;
   var requirePin=_pinAlwaysRequired(pos)?true:(el('u'+i+'reqpin')?el('u'+i+'reqpin').checked:!!u.requirePin);
+  var isTrainee=el('u'+i+'trainee')?el('u'+i+'trainee').checked:!!u.isTrainee;
   var accessCompanies=u.accessCompanies||[];
   if(pos!=='Admin'&&pos!=='Director'){
     accessCompanies=Object.keys(COMPANY_KEY_NAMES).filter(function(k){
@@ -22246,14 +22397,15 @@ function saveUserRow(i){
     u.pinHash||'', u.pinSalt||'',                                                                    // W-X
     accessCompanies.join(','),                                                                        // Y
     includeKpi?'TRUE':'FALSE',
-    requirePin?'TRUE':'FALSE'];                                                                   // AA                                                                     // Z                                                                      // Y
-  sheetsUpdate('User Roles!A'+u.rowIdx+':AA'+u.rowIdx,[row])
+    requirePin?'TRUE':'FALSE',                                                                    // AA
+    isTrainee?'TRUE':'FALSE'];                                                                    // AB                                                                   // AA                                                                     // Z                                                                      // Y
+  sheetsUpdate('User Roles!A'+u.rowIdx+':AB'+u.rowIdx,[row])
     .then(function(){
       // lamiEnabled is carried across explicitly. This rebuilds the whole object field by field,
       // so anything not named here is dropped — and lamiEnabled lives only in Supabase, written
       // the moment it is ticked, so losing it here made a saved setting look like it had failed.
       // Any future field that is not a Sheet column must be added to this line too.
-      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',includeKpi:includeKpi,requirePin:requirePin,lamiEnabled:!!u.lamiEnabled,rowIdx:u.rowIdx};
+      sheetUsers[i]={name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:u.active,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:delegateTo,delegateActive:delegateActive,receiveAll:receiveAll,accessCompanies:accessCompanies,pinHash:u.pinHash||'',pinSalt:u.pinSalt||'',includeKpi:includeKpi,requirePin:requirePin,isTrainee:isTrainee,lamiEnabled:!!u.lamiEnabled,rowIdx:u.rowIdx};
       supaUpsertUser(sheetUsers[i]);
       // Correcting your OWN name here should show on the next quotation you save, not after a
       // re-login — otherwise the fix looks like it did nothing.
@@ -22338,9 +22490,11 @@ function submitAddUser(){
   row.push('','');  // W-X: no PIN set on add
   row.push('');  // Y: no additional company access on add — grant explicitly afterward if needed
   row.push(el('n-kpi')&&el('n-kpi').checked?'TRUE':'FALSE');  // Z: include in the performance matrix
+  row.push('FALSE');  // AA: require own PIN (off on add)
+  row.push('FALSE');  // AB: trainee (off on add)
   var acc={};
   for(var k=0;k<ACC_KEYS.length;k++){var cb=el('na'+k);acc[ACC_KEYS[k]]=cb?cb.checked:false;}
-  sheetsAppend('User Roles!A:AA',[row])
+  sheetsAppend('User Roles!A:AB',[row])
     .then(function(){
       supaUpsertUser({name:name.trim(),email:email.trim().toLowerCase(),pos:pos,active:true,company:co.trim(),mac:mac.trim(),acc:acc,delegateTo:'',accessCompanies:[],pinHash:'',pinSalt:''});
       var w=el('add-user-form-wrap');if(w)w.innerHTML=''; loadUsersFromSheet(); showToast('User added.');
@@ -24505,7 +24659,7 @@ function renderDirectory(){
       for(var i=1;i<rows.length;i++){
         var r=rows[i]; if(!r||!r[0]||_isQuotHeaderRow(r)) continue;
         var ser=r[0];
-        var baseM=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
+        var baseM=ser.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
         var baseS=baseM?baseM[1]:ser; // strip option suffix (e.g. -1, -2) but not 4-digit serial part
         if(seen[baseS]){
           var prev=seen[baseS];
@@ -28192,7 +28346,7 @@ function supaMigrateAll(){
     for(var i=1;i<rows.length;i++){
       var r=rows[i]; if(!r||!r[0]) continue;
       var ser=r[0];
-      var baseM=ser.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
+      var baseM=ser.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
       var baseS=baseM?baseM[1]:ser;
       headerRows.push({
         serial:ser,created:r[1]||'',client:r[2]||'',status:r[5]||'',
@@ -28521,7 +28675,7 @@ function supaMigrateUsers(){
   if(!gToken){ console.warn('[migrate] sign in to the app first'); return Promise.resolve(null); }
   _usersMigrationInFlight=true;
   console.log('[migrate] backfilling Users into Supabase from User Roles sheet…');
-  return sheetsGet('User Roles!A:AA').then(function(d){
+  return sheetsGet('User Roles!A:AB').then(function(d){
     var rows=(d&&!d.error&&d.values)||[];
     var users=parseUserRows(rows);
     console.log('[migrate] found',users.length,'user row(s) in Sheets — migrating...');
@@ -28969,7 +29123,7 @@ function gCheckRole(){
   // fell into the data.error branch below and showed the misleading "ask your
   // Admin to share the spreadsheet" message — telling the user they lack access
   // when really the server was just briefly busy.
-  _sheetsGetWithRetry('User Roles!A:AA',4)
+  _sheetsGetWithRetry('User Roles!A:AB',4)
     .then(function(data){
       if(data.error){
         if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
@@ -29805,7 +29959,7 @@ function _showDriveWarning(msg){
 // Save a JSON state backup into Modcraft Quotations/{baseSerial}/ — belt-and-suspenders alongside Sheets.
 function saveQuotationStateToDrive(serial,json){
   if(!gToken) return;
-  var baseSerial=(serial.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/)||[,''])[1]||serial;
+  var baseSerial=(serial.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/)||[,''])[1]||serial;
   var cn=driveClientName();
   var fileName=baseSerial+' — '+cn+' — state.json';
   ensureDriveFolder()
@@ -34408,7 +34562,7 @@ function _saveConflictReload(){
 // A revision of an option therefore reads QT-M00001-3.R1 and stays unambiguous.
 //
 // Safe by construction: every base-serial regex in this file is start-anchored
-// (/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/), so the suffix is stripped wherever the base
+// (/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/), so the suffix is stripped wherever the base
 // is needed — directory grouping, Drive folders, dedup. The claim path's
 // $-anchored regex only ever sees a freshly minted serial, before any suffix exists.
 // W / M / C from the serial — the quotation's own company, already encoded at creation.
@@ -34424,7 +34578,7 @@ function _quotCompanyKey(e){
   return _companyPrefixOf(e&&e.id);
 }
 function _companyPrefixOf(serial){
-  var m=String(serial||'').match(/^QT-([WCM])\d{8}/);
+  var m=String(serial||'').match(/^QT-([WCMT])\d{8}/);
   return m?m[1]:'';
 }
 function _serialStem(serial){ return String(serial||'').replace(/\.R\d+$/,''); }
@@ -34432,7 +34586,7 @@ function _serialStem(serial){ return String(serial||'').replace(/\.R\d+$/,''); }
 // Use this to ask "is this the same quotation?", never a raw === on the serial.
 function _serialRoot(serial){
   var s=String(serial||'');
-  var m=s.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
+  var m=s.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
   return m?m[1]:_serialStem(s);
 }
 function _revisionOf(serial){
@@ -34454,7 +34608,7 @@ function _fallbackSerialCheck(claimSerial){
       _serialClaimSettled();
       return;
     }
-    if(!/^QT-[WCM]\d+$/.test(newSerial||'')){
+    if(!/^QT-[WCMT]\d+$/.test(newSerial||'')){
       // Refuse rather than write a row with no key. A failed save can be retried; a row filed
       // under an empty serial is the mess this whole change exists to prevent.
       showToast('Could not assign a quotation number — nothing was saved. Check your connection and try again.');
@@ -34636,7 +34790,7 @@ function _proceedSaveQuotation(){
   var row=[serial,now,clName,clType,contactName,status,total,gUser.name||gUser.email,seg,qLocked?'Yes':'No',stage,optCount,svcReq,qInitLockedAt||'',qInitApprovedAt||'',fqLockedAt||'',qClosedAt||'',qSourceOrderId||'',leadSrc||'',projName||'',_quotCo,_jobSrc,_jobStart,qAdditionalFrom||'',fqClientApprovedAt||'',now,(fqSentAt||qSentAt||''),agentVal||'',(qPrevSerials||[]).join(', ')];
   // Store in session memory immediately so directory shows it without waiting for Sheets
   var QUOT_HDR=['Serial','Date','Business Name','Account Type','Contact Name','Status','Total','User','Segment','Locked','Stage','Options','Service','Initial Locked','Initial Approved','Final Locked','Final Approved','Source Order','Lead Source','Project Name','Company','Job Source','Job Started','Additional From','Final Client Approved','Last Updated','Sent At','Agent','Previous Numbers'];
-  var _bsM=serial.match(/^(QT-(?:[WCM]\d{8}|\d{6}-\d{4}))/);
+  var _bsM=serial.match(/^(QT-(?:[WCMT]\d{8}|\d{6}-\d{4}))/);
   sessionQuotations[serial]={id:serial,baseSerial:_bsM?_bsM[1]:serial,created:now,client:clName,contact:contactName,type:svcReq,value:grand,user:gUser.name||gUser.email,segment:seg,status:status,locked:qLocked,stage:stage,options:optCount,initLockedAt:qInitLockedAt||'',initApprovedAt:qInitApprovedAt||'',finalLockedAt:fqLockedAt||'',closedAt:qClosedAt||'',sourceOrder:qSourceOrderId||'',leadSource:leadSrc||'',project:projName||'',company:_quotCo,jobSource:_jobSrc,jobStartedAt:_jobStart,additionalFrom:qAdditionalFrom||'',clientApprovedAt:fqClientApprovedAt||'',clientApproved:!!fqClientApproved,updatedAt:now,sentAt:(fqSentAt||qSentAt||''),agent:agentVal||'',prevSerials:(qPrevSerials||[]).join(', ')};
   try{ supaUpsertQuotation(sessionQuotations[serial]); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
   // ── Two saves must not both APPEND the same serial ──────────────────────────────────────
@@ -45242,6 +45396,233 @@ window.sendChat=function(){
   }).catch(function(){if(dot)dot.remove();appendAiMsg('Network error — try again.');});
 };
 </script>
+<script>
+/* ── TRAINING MODE — behaviour (2026-10-09) ─────────────────────────────────────────────────
+   The network guard at the top of the page is what keeps live data safe. This part makes the
+   app behave sensibly inside training:
+     • T-series numbers (QT-T00000001…) taken from the TRN Quotations tab, never the live counters
+     • a simulated approver answers every request within a few seconds, through the same code a
+       real decision goes through, so the trainee sees the real flow
+     • no messages, push, email, Chat; no live approvals or messages loaded into the bell
+     • the orange frame + TRAINING label, the avatar-menu switch, and Reset (Admin/Director)
+     • a person ticked as Trainee in Settings → Users is put into training at sign-in and cannot
+       leave it until the tick is removed.
+   Switching in or out reloads the page, so nothing from one world stays in memory in the other. */
+(function(){
+  var TRN=!!window._TRN;
+  var TRAINING_APPROVER={name:'Training Approver',email:'training.approver@training.local',pos:'Manager',active:true,company:'',acc:{}};
+  function wrap(name,make){ var o=window[name]; if(typeof o==='function') window[name]=make(o); }
+  function toast(m){ try{ showToast(m); }catch(e){} }
+  function me(){
+    var e=((window.gUser&&gUser.email)||'').trim().toLowerCase();
+    return (window.sheetUsers||[]).find(function(u){ return u.email&&u.email.trim().toLowerCase()===e; })||null;
+  }
+  window._trnIsTrainee=function(){ var u=me(); return !!(u&&u.isTrainee); };
+
+  // ── Switch (avatar menu) ─────────────────────────────────────────────────
+  window.toggleTrainingMode=function(){
+    if(TRN&&window._trnIsTrainee()){ toast('You are set as a Trainee — ask your Admin to switch training off for you.'); return; }
+    var msg=TRN
+      ? 'Leave training mode?\n\nThe page reloads and you sign in again to the LIVE app. Your training work stays in the training area.'
+      : 'Switch to training mode?\n\nThe page reloads and you sign in again. In training nothing touches live quotations, orders, clients, numbers or approvals, and nothing is sent to anyone.';
+    _confirm(msg,function(){
+      try{ if(TRN) localStorage.removeItem('mc_training'); else localStorage.setItem('mc_training','1'); }catch(e){}
+      location.reload();
+    });
+  };
+  function addMenuItem(){
+    var menu=document.getElementById('avatar-menu'); if(!menu||document.getElementById('avatar-trn-btn')) return;
+    var b=document.createElement('button'); b.id='avatar-trn-btn';
+    b.style.cssText='width:100%;text-align:left;padding:7px 14px;font-size:13px;border:none;background:transparent;cursor:pointer;color:#c2410c';
+    b.innerHTML=TRN?'<i class="ti ti-school-off"></i> Exit training mode':'<i class="ti ti-school"></i> Training mode';
+    b.onclick=function(){ try{closeAvatarMenu();}catch(e){} window.toggleTrainingMode(); };
+    var last=menu.lastElementChild; menu.insertBefore(b,last);
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',addMenuItem); else addMenuItem();
+
+  // ── Forced trainee: decided at sign-in, from Settings → Users ───────────────
+  wrap('gShowApp',function(orig){ return function(){
+    if(!TRN&&window._trnIsTrainee()){
+      try{ localStorage.setItem('mc_training','1'); }catch(e){}
+      var s=document.getElementById('login-status');
+      if(s) s.innerHTML='<b style="color:#c2410c">You are set as a Trainee — opening training mode. Please sign in again.</b>';
+      setTimeout(function(){ location.reload(); },1800);
+      return;
+    }
+    var r=orig.apply(this,arguments);
+    if(TRN) setTimeout(_trnStart,300);
+    return r;
+  };});
+
+  // ── Trainee tick on the user card ────────────────────────────────────────
+  // Read from User Roles column AB by parseUserRows; written by saveUserRow.
+  window._trnUserTickHtml=function(i,u,isAdmin){
+    return '<label style="display:flex;align-items:center;gap:7px;font-size:12px;margin-top:8px;'+(isAdmin?'cursor:pointer':'cursor:default;opacity:.55')+'">'
+      +'<input type="checkbox" id="u'+i+'trainee" '+(u.isTrainee?'checked':'')+(isAdmin?'':' disabled')+'>'
+      +'Trainee — opens in training mode only</label>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">They work on practice copies with their own T-series numbers. Nothing they do reaches live quotations, orders, clients, approvals or clients\' inboxes. Untick when they are ready.</div>';
+  };
+
+  if(!TRN) return;   // ─────────── everything below runs only in training ───────────
+
+  document.documentElement.classList.add('trn-on');
+  var st=document.createElement('style');
+  st.textContent='html.trn-on body::after{content:"";position:fixed;inset:0;border:5px solid #f97316;pointer-events:none;z-index:2147483600}'
+    +'html.trn-on .topbar{background:repeating-linear-gradient(135deg,var(--card) 0 18px,rgba(249,115,22,.10) 18px 36px)!important}'
+    +'#trn-tag{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:2147483601;background:#f97316;color:#fff;font:700 12px/1 system-ui,sans-serif;letter-spacing:.06em;padding:6px 14px 7px;border-radius:0 0 10px 10px;box-shadow:0 2px 8px rgba(0,0,0,.18);display:flex;gap:10px;align-items:center}'
+    +'#trn-tag button{background:#fff;color:#c2410c;border:none;border-radius:6px;font:600 11px system-ui,sans-serif;padding:3px 8px;cursor:pointer}';
+  document.head.appendChild(st);
+  function drawTag(){
+    var t=document.getElementById('trn-tag');
+    if(!t){ t=document.createElement('div'); t.id='trn-tag'; document.body.appendChild(t); }
+    var canReset=(window.currentRole==='Admin'||window.currentRole==='Director');
+    t.innerHTML='<span>TRAINING MODE · nothing here is live</span>'
+      +(canReset?'<button onclick="trnResetArea()">Reset training data</button>':'')
+      +(window._trnIsTrainee&&window._trnIsTrainee()?'':'<button onclick="toggleTrainingMode()">Exit</button>');
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',drawTag); else drawTag();
+
+  // Data reads come from the TRN tabs (the guard redirects them). Supabase-first reads would
+  // see an empty database instead, so they are switched off — except the price catalogue,
+  // which must stay real.
+  window.USE_SUPABASE=false;
+  wrap('loadPriceDatabase',function(orig){ return function(){
+    window.USE_SUPABASE=true; try{ return orig.apply(this,arguments); } finally { window.USE_SUPABASE=false; }
+  };});
+  // Never resume a live session's leftovers.
+  window.PENDING_SERIAL_KEY='mc_pending_serial_trn';
+  window.LOG_OUTBOX_KEY='mc_log_outbox_trn';
+  window.SERIAL_CLAIM_URL='';
+
+  // ── T series ──
+  wrap('_serialPrefix',function(){ return function(){ return 'T'; };});
+  wrap('_saveSerialCounters',function(){ return function(){}; });
+  wrap('_claimSerialAtomic',function(){ return function(prefix,cb){ cb(null); }; });   // → numbered from TRN Quotations
+
+  // ── Nothing goes out to people ──
+  wrap('gSendMessage',function(){ return function(a,b,c,d,e,cb){ if(cb) cb(true); }; });
+  wrap('gLoadMessages',function(){ return function(cb){ if(cb) cb(); }; });
+  wrap('_pushApprovalRequest',function(){ return function(){}; });
+  wrap('_sendMessageEmail',function(){ return function(){}; });
+  wrap('_sendMessageChat',function(){ return function(){}; });
+  // The database health checks would read blocked writes as failures, and both remember what they
+  // saw (error log, 'broken since') in this browser — which would then follow the person into live.
+  ['_refreshOpenQuotationLockState','_refreshOpenQuotationPauseState','_shadowUserCheck','_apprApplyRemoteDecisions',
+   '_supaNoteError','_supaCheckLiveness','_supaHandleConfirmedBroken']
+    .forEach(function(n){ wrap(n,function(){ return function(){}; }); });
+
+  // ── Drive: never create folders (a fake folder id must never be cached for live use) ──
+  wrap('ensureDriveFolder',function(){ return function(){ return Promise.resolve('training'); }; });
+  wrap('ensureQuotationFolder',function(){ return function(){ return Promise.resolve('training'); }; });
+
+  // ── Row deletes act on the TRN copy of the tab ──
+  wrap('sheetsDeleteRowByKey',function(orig){ return function(sheet){ var a=[].slice.call(arguments); a[0]=window._trnTab(sheet); return orig.apply(this,a); };});
+  wrap('_sheetsDeleteRowsByIndex',function(orig){ return function(sheet){ var a=[].slice.call(arguments); a[0]=window._trnTab(sheet); return orig.apply(this,a); };});
+
+  // ── Settings that belong to the live company are read-only here ──
+  var NOT_IN_TRAINING='Training mode — this is not saved. Settings, users, prices and logos can only be changed in the live app.';
+  ['gSaveAppSettings','gSaveLogoRow','saveUserRow','submitAddUser','toggleUserActive','removeUserRow','resetUserPin',
+   'importPriceDbExcel','_saveHardwareToPriceDb','_priceDbAddRow','normalizeServiceUnits','dedupeServicesSheet',
+   'dedupeMaterialsSheet','_carcassSaveTplToDb','_initPriceDBConfirmed','saveDeviceBindingSetting','saveProductionSettings',
+   'supaMigrateAll','supaMigratePriceDb','supaMigrateOrders','supaMigrateUsers']
+    .forEach(function(n){ wrap(n,function(){ return function(){ toast(NOT_IN_TRAINING); return Promise.resolve(); }; }); });
+
+  // ── Simulated approver ──
+  ['findApproverForAction','findApprover'].forEach(function(n){ wrap(n,function(){ return function(){ return TRAINING_APPROVER; }; }); });
+  wrap('_findSignatory',function(){ return function(){ return TRAINING_APPROVER; }; });
+  var _trnDecideAt={};
+  wrap('gSaveApprovalRequest',function(){ return function(req,cb){
+    if(req&&req.id&&req.status==='pending'&&!_trnDecideAt[req.id]) _trnDecideAt[req.id]=Date.now()+4000;
+    if(cb) cb(true);
+    setTimeout(function(){ try{ _pollApprovalsNow(true); }catch(e){} },4500);
+  };});
+  // The poll asks for "what changed"; here the simulated approver is what changes it.
+  wrap('gLoadApprovalRequests',function(){ return function(cb){
+    var now=Date.now();
+    (window.NOTIFS||[]).forEach(function(n){
+      if(!n||n.status!=='pending'||!n.reqId) return;
+      var due=_trnDecideAt[n.reqId]; if(!due||now<due) return;
+      var decision=(window._trnScenarioDecision&&window._trnScenarioDecision(n))||'approved';
+      n.by=TRAINING_APPROVER.name; n.actionDate=new Date().toISOString();
+      if(n.type==='signature'){
+        var sig={name:TRAINING_APPROVER.name,email:TRAINING_APPROVER.email,role:'Manager',img:'',at:n.actionDate};
+        n.status='approved';
+        if((qBaseSerial||qSerial)===n.serial){
+          qSignatures=qSignatures||{}; qSignatures[n.sigSlot]=sig;
+          try{ if(qSigBaseTotal==null) _sigCaptureBaseTotal(); }catch(e){}
+          try{ renderSignatureBar(); }catch(e){}
+        }
+        try{ _persistSignatureToQuotation(n.serial,n.sigSlot,sig,function(){}); }catch(e){}
+        try{ logActivity(_sigLabel(n.sigSlot)+' signed by '+sig.name+' (training) on '+n.serial+'.'); }catch(e){}
+        if(n.sigSlot==='checked'){
+          var needs=((qBaseSerial||qSerial)===n.serial)?_notedRequired():(n.notedRequired!==false);
+          if(needs) setTimeout(function(){ try{ _sendSignatureRequest('noted',true,n.serial,n.client,'',{amount:n.amount,decision:n.decision}); }catch(e){} },300);
+        }
+        return;
+      }
+      if(decision==='countered'&&n.type==='discount'){
+        n.status='countered'; n.counterDisc=Math.max(0,Math.round((+n.reqDisc||0)/2));
+      } else {
+        n.status=decision;
+      }
+    });
+    if(cb) cb();
+  };});
+
+  // ── On entering: make sure the training tabs exist, then number from them ──
+  window._trnStart=function(){
+    drawTag();
+    var meta='https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'?fields=sheets.properties(sheetId,title)';
+    gApiFetch(meta,{}).then(function(j){
+      var have={}; (j.sheets||[]).forEach(function(s){ have[s.properties.title]=s.properties.sheetId; });
+      Object.keys(have).forEach(function(t){ if(t.indexOf('TRN ')===0) window._trnSheetIds[have[t]]=1; });
+      var jobs=Object.keys(window._TRN_TABS).filter(function(t){ return have[t]!=null&&have['TRN '+t]==null; }).map(function(t){
+        // Create the copy and give it the live tab's own column titles, so every reader and
+        // writer finds the columns where it expects them.
+        return sheetsCreateTab('TRN '+t);
+      });
+      return Promise.all(jobs).then(function(){ return jobs.length; });
+    }).then(function(created){
+      return _trnCopyHeaders().then(function(){ return created; });
+    }).then(function(created){
+      return sheetsGet('Quotations!A:A').then(function(d){
+        var max=0; ((d&&d.values)||[]).forEach(function(r){ var m=String(r[0]||'').match(/^QT-T(\d{8})/); if(m) max=Math.max(max,+m[1]); });
+        serialCounters.T=max+1;
+        if(created){ try{ gLoadDirData(function(){}); gLoadClients(function(){}); gLoadPendingOrders(function(){}); }catch(e){} }
+      });
+    }).catch(function(e){ console.warn('[training] setup',e); toast('Training area could not be prepared — check your connection and reload.'); });
+  };
+  // Header copy reads the LIVE tab's first row directly (bypassing the redirect by asking the real
+  // fetch via a marker the guard does not map) and writes it into the TRN tab when that is empty.
+  window._trnCopyHeaders=function(){
+    return Promise.all(Object.keys(window._TRN_TABS).map(function(t){
+      return sheetsGet('TRN '+t+'!1:1').then(function(d){
+        if(d&&!d.error&&d.values&&d.values[0]&&d.values[0].length) return;   // already has titles
+        return _trnLiveHeader(t).then(function(row){ if(row&&row.length) return sheetsUpdate('TRN '+t+'!A1',[row]); });
+      }).catch(function(){});
+    }));
+  };
+  window._trnLiveHeader=function(t){
+    // A GET of the live tab's first row: reads are always allowed through, only this one is
+    // asked for by its real name on purpose (the guard maps data-tab names, so ask via batchGet,
+    // which the guard passes through as a plain GET).
+    var u='https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values:batchGet?ranges='+encodeURIComponent(t+'!1:1');
+    return gApiFetch(u,{}).then(function(j){ var v=j&&j.valueRanges&&j.valueRanges[0]&&j.valueRanges[0].values; return v&&v[0]||[]; }).catch(function(){ return []; });
+  };
+
+  // ── Reset (Admin / Director) ──
+  window.trnResetArea=function(){
+    if(!(currentRole==='Admin'||currentRole==='Director')){ toast('Only an Admin or Director can reset training data.'); return; }
+    _confirm('Reset the training area?\n\nEvery training quotation, client, order and log entry is cleared for everyone. Live data is not touched.',function(){
+      Promise.all(Object.keys(window._TRN_TABS).map(function(t){ return sheetsClear('TRN '+t+'!A2:ZZ'); })).then(function(){
+        try{ logActivity('Training area reset by '+((gUser&&gUser.name)||'')+'.',''); }catch(e){}
+        toast('Training area cleared.'); setTimeout(function(){ location.reload(); },900);
+      }).catch(function(){ toast('Could not reset — try again.'); });
+    });
+  };
+})();
+</script>
+
 <!-- ===== Orion ticketing — Report a problem (self-contained add-on; additive only) ===== -->
 <style id="orpt-style">
 #orpt-btn{position:fixed;left:14px;bottom:14px;z-index:90;display:flex;align-items:center;gap:7px;
