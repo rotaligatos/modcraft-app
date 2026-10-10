@@ -1614,7 +1614,7 @@ async function withRetry(label, fn, tries = 3){
    touched. Reading still uses the admin's own access, so all companies' jobs show. */
 const PV_READ_RPC = new Set(['job_schedule_view','job_passcode_status','job_tracker_status','job_field_staff','job_truck_load','job_history','job_history_summary',
   'job_monthly_get','job_modem_status','job_sms_gateway_status','job_mail_gateway_status','job_customer_type_guess','job_schedule_confirm_preview',
-  'job_modem_heartbeat','job_modem_claim','job_modem_done','job_modem_inbound','job_modem_release']);   // the SMS modem keeps working in the background
+  'job_status_reply_preview','job_modem_heartbeat','job_modem_claim','job_modem_done','job_modem_inbound','job_modem_release']);   // the SMS modem keeps working in the background
 const pvBlocked = () => { const r = { data: null, error: { code: 'PREVIEW', message: state.preview?.practice ? 'Not available in practice' : 'Driver view is a preview' } };
   const t = { then: (a, b) => Promise.resolve(r).then(a, b) }; ['select','eq','in','single','maybeSingle','order','limit','match','is','neq','gte','lte'].forEach(k => t[k] = () => t); return t; };
 /* Practice run: sample deliveries live only in this browser tab (SIM). The driver screens read and
@@ -10314,6 +10314,10 @@ async function renderNotify(){
         <label class="f">Replies go to <span class="ft">— optional; e.g. a Google Group like logistics@… so the team gets client replies</span><input class="i" type="email" name="email_reply_to" value="${esc(cfg?.email_reply_to || '')}" placeholder="Leave blank: replies go to the sending account"></label>
         <div class="grid2"><label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="sms_enabled" ${cfg?.sms_enabled ? 'checked' : ''}> Send SMS</label>
           <label class="f">SMS sender name <span class="ft">(only for Semaphore — not used with the Android phone)</span><input class="i" name="sms_sender" value="${esc(cfg?.sms_sender || '')}" maxlength="11" placeholder="Registered with Semaphore"></label></div>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="sms_autoreply" ${cfg?.sms_autoreply ? 'checked' : ''}> Answer clients’ status texts automatically <span class="ft">— when a client texts from the number on their delivery and asks about it (“status”, “nasaan na”, “kailan darating”…), HATID replies with the status: scheduled date, prepared, on the truck and how many stops before theirs, and once the truck is tracked, about how far it is (approximate, never the exact location). One reply per number every 10 minutes. Unknown numbers get one polite “text from the number on your order” per day. Every text still shows in Messages.</span></label>
+        <div class="grid2" style="align-items:end"><label class="f">Try a client’s number <span class="ft">— shows the reply HATID would send now; nothing is sent</span><input class="i" id="sar-ph" inputmode="tel" placeholder="0917 123 4567"></label>
+          <div><button class="btn" type="button" id="sar-try">Show reply</button></div></div>
+        <div class="ft" id="sar-out" style="white-space:pre-wrap;margin-bottom:8px"></div>
         <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="daily_enabled" ${cfg?.daily_enabled !== false ? 'checked' : ''}> Send the daily summary once every truck is back at base (from 6 PM; at 10 PM at the latest, then a follow-up)</label>
         <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="drive_enabled" ${cfg?.drive_enabled ? 'checked' : ''}> Save delivery and pick-up photos to Google Drive <span class="ft">— in the mail script account’s Drive: HATID Deliveries › company › date › SO – client. First copy the mail script again (step 2 above — it now also saves photos), paste it, redeploy it (Deploy → Manage deployments → edit → New version), and run <b>authorize</b> once to allow Drive.</span></label>
         <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="sched_auto" ${cfg?.sched_auto ? 'checked' : ''}> Send schedule confirmations to clients and agents automatically as soon as a delivery schedule is approved</label>
@@ -10386,12 +10390,23 @@ async function renderNotify(){
     e.preventDefault(); const f = e.target, btn = f.querySelector('[type=submit]');
     if (f.email_alias.value.trim() && !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(f.email_alias.value.trim())) return toast('Check the alias address', 'error');
     if (f.email_reply_to.value.trim() && !/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(f.email_reply_to.value.trim())) return toast('Check the reply-to address', 'error');
+    if (f.sms_autoreply.checked && !f.sms_enabled.checked) return toast('Automatic status replies need “Send SMS” ticked too', 'error');
     if (f.email_enabled.checked && !state.mailGw?.connected && !/<?[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>?\s*$/.test(f.email_from.value.trim())) return toast('Enter the sender, e.g. HATID <logistics@yourdomain.com>', 'error');
     btn.disabled = true;
     try { await withRetry('Saving', () => sb.from('job_notify_settings').update({ email_enabled: f.email_enabled.checked, email_from: f.email_from.value.trim() || null,
-      sms_enabled: f.sms_enabled.checked, sms_sender: f.sms_sender.value.trim() || null, daily_enabled: f.daily_enabled.checked, drive_enabled: f.drive_enabled.checked, sched_auto: f.sched_auto.checked, email_reply_to: f.email_reply_to.value.trim().toLowerCase() || null, email_alias: f.email_alias.value.trim().toLowerCase() || null, updated_at: new Date().toISOString() }).eq('id', true));
+      sms_enabled: f.sms_enabled.checked, sms_sender: f.sms_sender.value.trim() || null, daily_enabled: f.daily_enabled.checked, sms_autoreply: f.sms_autoreply.checked, drive_enabled: f.drive_enabled.checked, sched_auto: f.sched_auto.checked, email_reply_to: f.email_reply_to.value.trim().toLowerCase() || null, email_alias: f.email_alias.value.trim().toLowerCase() || null, updated_at: new Date().toISOString() }).eq('id', true));
       if (f.drive_enabled.checked && !cfg?.drive_enabled){ try { const { data: n } = await sb.rpc('job_drive_requeue'); if (n) toast(`${n} earlier photo(s) queued for Google Drive`, 'ok'); } catch {} }
       toast('Saved', 'ok'); renderNotify(); } catch { btn.disabled = false; }
+  });
+  if ($('sar-try')) $('sar-try').addEventListener('click', async e => {
+    const b = e.currentTarget, out = $('sar-out');
+    if (!isPhMobile($('sar-ph').value)) return toast('Enter a mobile number, e.g. 0917 123 4567', 'error');
+    b.disabled = true;
+    try {
+      const { data } = await withRetry('Checking', () => sb.rpc('job_status_reply_preview', { p_phone: $('sar-ph').value }));
+      out.textContent = data?.text ? `Reply to ${data.label || 'client'}:\n${data.text}` : 'No open or recent delivery has this number — they would get the “text from the number on your order” reply.';
+    } catch {}
+    b.disabled = false;
   });
   document.querySelectorAll('.dc-f').forEach(f => f.addEventListener('submit', async e => {
     e.preventDefault(); const url = f.chat_webhook.value.trim(), btn = f.querySelector('[type=submit]');

@@ -12828,3 +12828,16 @@ survived only in Subject. HATID read the SO from Subject and created 16 jobs wit
   HPL card, test box knows boards and HPL, Re-weigh includes board lines.
 - ⚠ The board-type words in `boardSubstrateOf` (MDF, PB/particle/chip board, plywood/ply/marine, HDF; MR/HMR/moisture)
   are the only way a line gets its type. A line with no type word uses Any board.
+
+## What was changed on 2026-10-10 (session 2 — HATID automatic SMS status reply)
+- Client texts a status question from the phone on their delivery → HATID replies automatically
+  (`job_sms_event` → `job_status_reply_text`, HATID project). Says: being scheduled / scheduled date (+ prepared) /
+  re-scheduled (past date) / on the way, left at, stops before theirs / APPROXIMATE km from the truck's last GPS
+  reading (≤15 min old; ×1.35 road factor; ETA only when theirs is the next stop) / arrived / delivered + received by /
+  courier + tracking link. Never exact position, plate, driver or other clients.
+- Only when `job_sms_is_status_ask` matches (English/Tagalog/Cebuano words); "ok salamat" gets no reply.
+  One reply per number per 10 min; unknown numbers one polite reply per 24 h; agents never.
+- Stored as outbox kind `manual`, subject 'Automatic status reply' (no new kind — avoids changing the check).
+- Switch: Settings › Messaging › "Answer clients' status texts automatically" (`job_notify_settings.sms_autoreply`,
+  OFF by default, needs Send SMS). "Try a client's number" previews the reply (`job_status_reply_preview`, office only).
+- Tested in rolled-back transactions on a real job. Needs the SMS dongle; the distance part needs GPS tracking.
