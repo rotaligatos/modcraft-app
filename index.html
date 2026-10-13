@@ -1946,6 +1946,7 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
               </div>
             </div>
           <div id="pdb-mat-list"></div>
+          <div id="pdb-out-list"></div>
           <div id="mto-tag-wrap" style="margin-top:14px"></div>
         </div>
         <div id="pdb-panel-hardware" style="display:none">
@@ -8988,10 +8989,13 @@ function onOutsourceRowChange(a,ci,cat,ri,field,val) {
 function onOutsourceItemSearch(inp,a,ci,cat,ri){
   var db=(cat==='outsourceMaterials')?dbMaterials:dbHardware;
   var name=inp.value;
-  _refillDatalist('out-dl-'+a+'-'+ci+'-'+cat+'-'+ri,db,name);
+  // The Price DB's Outsource tab (buying prices) is offered first — those are the items that are
+  // genuinely bought out — then the regular catalogue as before.
+  var outDl=el('out-dl-'+a+'-'+ci+'-'+cat+'-'+ri);
+  if(outDl) outDl.innerHTML=(dbOutsource.length?_dlOptions(dbOutsource,name,8):'')+_dlOptions(db,name);
   var row=_outRowsArr(a,ci,cat)[ri];
   if(!row) return;
-  var item=lookupInSource(db,name);   // best duplicate, not first — see onBOMItemSearch
+  var item=(dbOutsource.length&&lookupInSource(dbOutsource,name))||lookupInSource(db,name);   // best duplicate, not first — see onBOMItemSearch
   if(item){
     row.name=item.name; row.unit=item.unit; row.price=parseFloat(item.price)||0; row.saved=true;
     if(cat==='outsourceMaterials') _forceEdgeTapeUnit(row,item.name);
@@ -9200,6 +9204,17 @@ function loadCabinetTemplate(a,ci,silent) {
   for(var i=0;i<matched.length;i++){
     var r=matched[i];
     var cat=r.category;
+    // A material/hardware line named in the Price DB's Outsource tab is bought out, not stocked —
+    // it goes to this cabinet's Outsource section (outsource markup), not its regular rows.
+    // Re-applying the template does not duplicate it.
+    if((cat==='materials'||cat==='hardware')&&dbOutsource.length&&lookupInSource(dbOutsource,r.name)){
+      var oc=cat==='materials'?'outsourceMaterials':'outsourceHardware';
+      if(!bItem[oc]) bItem[oc]=[];
+      var nl=String(r.name||'').trim().toLowerCase();
+      if(!bItem[oc].some(function(x){return String(x.name||'').trim().toLowerCase()===nl;}))
+        bItem[oc].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,saved:true});
+      continue;
+    }
     if(cat==='materials'||cat==='hardware'||cat==='services'){
       bItem[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price});
     }
@@ -33259,6 +33274,7 @@ function supaGetPriceDb(){
 function loadPriceDatabase(showFeedback) {
   if(!gToken) return;
   if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Loading price database…</div>';}
+  _loadOutsourceList();
   if(USE_SUPABASE&&supaReady()){
     _checkPriceDbFreshness().then(function(stale){
       if(stale){
@@ -33576,6 +33592,7 @@ function _pdbRenderAll(){
   cnt('pdb-cnt-templates',issues?(issues+' to fix'):dbTemplates.length,issues>0);
   _pdbRenderSvcList();
   _pdbRenderMatSearch();
+  var ol=el('pdb-out-list'); if(ol) ol.innerHTML=_pdbOutsourceHtml();
   renderMtoTagTool();
   if(pdbTab==='templates') renderTplCheck();
   setPdbTab(pdbTab);
@@ -33640,6 +33657,8 @@ function _tplSrc(cat){ return cat==='materials'?dbMaterials:cat==='hardware'?dbH
 function _tplCatalogFor(row){
   var own=_tplSrc(row.category), hit=own?lookupInSource(own,row.name):null;
   if(hit) return {item:hit,list:_TPL_LISTS[row.category],other:false};
+  hit=(row.category!=='services'&&dbOutsource.length)?lookupInSource(dbOutsource,row.name):null;
+  if(hit) return {item:hit,list:'Outsource',other:false,outsource:true};
   var keys=['materials','hardware','services'];
   for(var i=0;i<keys.length;i++){
     if(keys[i]===row.category) continue;
@@ -33719,11 +33738,12 @@ function _tplRowHtml(t,idx,is){
   }
   var ref=c
     ? '<span style="font-size:11px;padding-left:6px;color:var(--text2)">'+escHtml(c.item.unit||'')+' · '+fmtMoney(c.item.price||0)
-      +(c.other?' <span style="color:var(--amber)">(in '+c.list+')</span>':'')+'</span>'
+      +(c.other?' <span style="color:var(--amber)">(in '+c.list+')</span>':'')
+      +(c.outsource?' <span style="color:var(--purple,#7c3aed);font-weight:600">· Outsource</span>':'')+'</span>'
     : '<span style="font-size:11px;padding-left:6px;color:var(--coral);font-weight:600">Not in the price list</span>';
   var act=(is.kind==='price'||is.kind==='unit'||is.kind==='both')
     ? '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="_tplUseCatalog('+idx+')">Use price list</button>'
-    : (is.kind==='ok'?'<span style="font-size:11px;color:var(--teal)">✓ Matches</span>':'<span style="font-size:10px;color:var(--text2)">Rename or add to the list</span>');
+    : (is.kind==='ok'?'<span style="font-size:11px;color:var(--teal)">✓ Matches</span>':'<button class="btn" style="font-size:11px;padding:2px 8px" onclick="_tplAddToPriceList('+idx+')" title="Or rename the line to an item already in the list. Bought-out items go in the sheet\'s Outsource tab instead.">Add to price list</button>');
   return '<div style="display:grid;grid-template-columns:76px minmax(180px,2fr) 70px 60px 80px minmax(150px,1fr) 118px;gap:5px;align-items:center;padding:3px 0;border-top:.5px solid var(--border)">'
     +'<span style="font-size:11px;color:var(--text2)">'+escHtml(t.category||'')+'</span>'
     +'<input value="'+escHtml(t.name||'')+'"'+(dl?' list="tpl-dl-'+idx+'"':'')+' onchange="_tplSetField('+idx+',\'name\',this.value)" style="font-size:12px;height:26px;padding:1px 6px;'+(is.kind==='missing'?bad:'')+'">'+dl
@@ -33753,6 +33773,72 @@ function _tplUseCatalogAll(){
   if(!n){ showToast('Nothing to change — the shown lines already match, or are not in the price list.'); return; }
   _tplDirty=true; renderTplCheck(); _pdbRenderCountsOnly();
   showToast(n+' line'+(n===1?'':'s')+' set to the price list. Press Save to keep them.');
+}
+// ── Outsource list: the "Outsource" tab of the Price DB sheet (Rommel, 2026-10-13) ───────────────
+// Items bought out (e.g. raw marine plywood) are NOT regular catalogue items, so they live in their
+// own tab: column A name, B buying price, optional C unit (default pc). Found by title (any tab
+// whose name contains "outsource"), else by its sheet id, so renaming the tab slightly is fine.
+// Sheet-only and small, so it is read straight from the sheet — no fast copy.
+var dbOutsource=[], dbOutsourceTab='';
+var OUTSOURCE_TAB_GID=1126202156;
+function _loadOutsourceList(){
+  if(!gToken||typeof PRICE_DB_ID==='undefined') return Promise.resolve();
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+PRICE_DB_ID+'?fields=sheets.properties(sheetId,title)',
+    {headers:{Authorization:'Bearer '+gToken}}).then(function(r){return r.json();}).then(function(meta){
+    var sh=((meta&&meta.sheets)||[]).map(function(s){return s.properties||{};});
+    var tab=sh.find(function(p){return /outsource/i.test(p.title||'');})||sh.find(function(p){return p.sheetId===OUTSOURCE_TAB_GID;});
+    if(!tab){ dbOutsource=[]; dbOutsourceTab=''; return; }
+    dbOutsourceTab=tab.title;
+    return priceDbGet("'"+tab.title.replace(/'/g,"''")+"'!A:C").then(function(d){
+      var rows=((d&&d.values)||[]).slice(1).filter(function(r){return r[0]&&String(r[0]).trim();});
+      dbOutsource=rows.map(function(r){
+        var u=String(r[2]||'').trim();
+        return {name:String(r[0]).trim(),unit:u||'pc',price:parseFloat(String(r[1]).replace(/[^0-9.\-]/g,''))||0};
+      });
+    });
+  }).then(function(){
+    var e=el('pdb-out-list'); if(e) e.innerHTML=_pdbOutsourceHtml();
+    if(pdbTab==='templates') renderTplCheck();
+    if(typeof _pdbRenderCountsOnly==='function') _pdbRenderCountsOnly();
+  }).catch(function(e){ console.warn('[pricedb] outsource list not loaded',e); });
+}
+function _pdbOutsourceHtml(){
+  var h='<div style="font-size:11px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 6px"><i class="ti ti-truck-delivery"></i> Outsource items'
+    +(dbOutsourceTab?' <span style="font-weight:400;text-transform:none;color:var(--text2)">— the "'+escHtml(dbOutsourceTab)+'" tab of the sheet</span>':'')+'</div>';
+  if(!dbOutsource.length) return h+'<div style="font-size:11px;color:var(--text2)">None. Add a tab named <b>Outsource</b> to the Price Database sheet: column A the item, column B the buying price.</div>';
+  return h+'<div style="font-size:11px;color:var(--text2);margin-bottom:6px">Bought out, not stocked. A cabinet template line with one of these names loads into the cabinet\'s <b>Outsource</b> section. Edit them in the sheet.</div>'
+    +_pdbItemRows(dbOutsource,'',200);
+}
+// Adds a template line that is not in the price list to it, from the line's own name, unit and
+// price. Written to the Google Sheet and the fast copy. The local list is REPLACED, not pushed
+// to: the lookup index is cached per array, so an in-place push would leave the new item
+// invisible. No full reload — that would also reload dbTemplates and drop unsaved edits here.
+function _tplAddToPriceList(idx){
+  var t=dbTemplates[idx]; if(!t) return;
+  var name=String(t.name||'').trim();
+  if(!name){ showToast('Type the item name on the line first.'); return; }
+  var sheet=t.category==='hardware'?'Hardware':t.category==='services'?'Services':'Materials';
+  var tbl={Hardware:'price_hardware',Materials:'price_materials',Services:'price_services'}[sheet];
+  var unit=String(t.unit||'pc').trim()||'pc', price=parseFloat(t.price)||0;
+  if(!(price>0)){ showToast('Set the price on the line first — the item is added with that price.'); return; }
+  _confirm('Add to the '+sheet+' price list?\n\n'+name+'\nUnit: '+unit+' · Price: '+fmtMoney(price)
+    +'\n\nCheck the spelling — this is the name everyone will pick from.',function(){
+    priceDbAppend(sheet+'!A:C',[[name,unit,price]]).then(function(res){
+      if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
+      if(typeof supaReady==='function'&&supaReady())
+        return supa.from(tbl).insert([{name:name,unit:unit,price:price}]).then(function(r){
+          if(r&&r.error) console.warn('[supa] '+tbl+' insert error:',r.error.message||r.error);
+        });
+    }).then(function(){
+      var it={name:name,unit:unit,price:price};
+      if(sheet==='Hardware'){ dbHardware=dbHardware.concat([it]); if(typeof _syncHardwareFromDb==='function') _syncHardwareFromDb(); }
+      else if(sheet==='Services'){ dbServices=dbServices.concat([it]); if(typeof _syncServicesFromDb==='function') _syncServicesFromDb(); }
+      else dbMaterials=dbMaterials.concat([it]);
+      logActivity('Added to the '+sheet+' price list from Cabinet Templates: '+name+' ('+unit+', '+fmtMoney(price)+').','');
+      showToast(name+' added to the '+sheet+' price list.');
+      renderTplCheck(); _pdbRenderCountsOnly();
+    }).catch(function(e){ showToast('Could not add it: '+(e&&e.message?e.message:e)); });
+  });
 }
 function _tplSave(btn){
   _carcassSaveTplToDb('',btn,function(){
