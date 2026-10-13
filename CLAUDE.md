@@ -12841,3 +12841,58 @@ survived only in Subject. HATID read the SO from Subject and created 16 jobs wit
 - Switch: Settings › Messaging › "Answer clients' status texts automatically" (`job_notify_settings.sms_autoreply`,
   OFF by default, needs Send SMS). "Try a client's number" previews the reply (`job_status_reply_preview`, office only).
 - Tested in rolled-back transactions on a real job. Needs the SMS dongle; the distance part needs GPS tracking.
+
+## What was changed on 2026-10-13 (session — missing e-sign, catalogue note, Price Database tabs, outsource in templates)
+Commits `5f3ede2`..`eb5734a`, all deployed and confirmed served.
+
+### 1. Prepared-by signature skipped at lock (`5f3ede2`)
+QT-W00000316 (Kaye, TMWI) locked with no Prepared-by although `SIG_designer-ce3@…` was on file:
+signatures load with Settings, and when not yet in memory `_stampPreparedBySignature` silently did
+nothing (the log had no "Signature applied to Prepared by" line; M198 an hour earlier did).
+Now `_stampPreparedBySignatureLate()` fetches `SIG_<email>` from Supabase, then stamps + saves onto
+the SAME quotation (refuses if another is open or it was unlocked). Toast if truly no signature.
+**Data:** W316 repaired in Supabase (state only; not sent yet), logged. **QT-M00000155** (Kaye,
+15 Sep, already sent) also has no Prepared-by — **Rommel: leave it as is.**
+
+### 2. "Fast copy N days behind" note was wrong (`ba05ad6`)
+When the mirror is behind, `loadPriceDatabase` already reads the Google Sheet directly, so a
+non-matching item is genuinely not in the catalogue. `priceDbFromSheet` suppresses the note then.
+
+### 3. Settings › Price Database in tabs (`c86c0b2`, `35b0ea5`, `eb5734a`)
+Services · Materials · Hardware · Cabinet Templates (`setPdbTab`, `#pdb-tabs`, full-width
+segmented bar, navy active; dark mode uses `var(--card)` text — measured 5.19:1 dark / 11.34 light).
+Services = searchable list; Materials = search only + Outsource items + MTO tagging; Hardware =
+existing editable list; the disabled "Cabinet Templates import" card was dropped.
+**Cabinet Templates tab** (`renderTplCheck`): every template line vs the price list — not in the
+list / different price / different unit (`_pdbNormUnit`: `/lm`=`lm`, `set (4pcs)`=`set`, pcs=pc).
+Compares PRICE and UNIT only, never qty. "Use price list" (line / all shown), "Add to price list"
+(`_tplAddToPriceList`, Sheet + Supabase, replaces the local array — lookup index is cached per array),
+"Keep as is". Saves via `_carcassSaveTplToDb('',btn,onSaved)` (same guarded clear+rewrite).
+Rommel's own review found the Sink cabinet prices look like line totals (640 = 4×160 etc.).
+
+### 4. Outsource in templates (`f138fd5`, `d76933e`, `ec15b91`)
+Rommel: bought-out items (raw marine plywood) are NOT regular catalogue items.
+- `dbOutsource` = the Price DB sheet's **Outsource** tab (A item, B buying price, optional C unit),
+  found by title /outsource/i else gid `1126202156`; sheet-only, `_loadOutsourceList()` on every
+  price-DB load. The app did not read this tab before.
+- Template **category dropdown**: Outsource material / Outsource hardware. Sheet stores
+  `outsource materials|hardware`; `_tplNorm` turns it into materials/hardware + `outsource:true`
+  (so every cost/weight/margin reader that filters on category still counts it); `_tplCatOut` writes
+  it back. ⚠ Any new template loader must call `_tplNorm`.
+- `loadCabinetTemplate` routes an outsource line (flag, or name in `dbOutsource`) into the BOM
+  cabinet's existing `outsourceMaterials/outsourceHardware` rows (outsource rates), no duplicates.
+- Outsource lines suggest Outsource-tab items AND items already saved in the catalogue (the
+  quotation 💾 on Outsource rows saves to Materials/Hardware — sourcing prices kept so staff don't
+  re-ask). `_tplNameInput` refreshes suggestions as you type. Quotation Outsource search also offers
+  `dbOutsource` first.
+- **Keep as is**: `TPL_ACCEPTED` {cabinet|category|name → unit, price, by, at} in Settings CONFIG
+  (`tplAccepted`); changing unit or price flags the line again. Saved by `_tplSave` → `gSaveAppSettings`.
+- Edited lines stay visible (`_tplTouched`) until save/filter change — before, marking Outsource
+  with "Only lines that need attention" made the line vanish.
+
+### Notes
+- A Pages deploy failed on GitHub's side (`d76933e`); retriggered with an empty commit. When a
+  user says a change isn't showing, check the Actions run before suspecting cache.
+- I quoted wrong commit hashes to Rommel twice this session (said `c0b7a2c`, `bb3c08e`; real ones
+  `ec15b91`, `eb5734a`). Read hashes from `git log`, never from memory.
+- Node `-e` / heredoc patches lost backslashes again — use Write + a node script file, or Edit.
