@@ -9207,7 +9207,7 @@ function loadCabinetTemplate(a,ci,silent) {
     // A material/hardware line named in the Price DB's Outsource tab is bought out, not stocked —
     // it goes to this cabinet's Outsource section (outsource markup), not its regular rows.
     // Re-applying the template does not duplicate it.
-    if((cat==='materials'||cat==='hardware')&&dbOutsource.length&&lookupInSource(dbOutsource,r.name)){
+    if((cat==='materials'||cat==='hardware')&&(r.outsource||(dbOutsource.length&&lookupInSource(dbOutsource,r.name)))){
       var oc=cat==='materials'?'outsourceMaterials':'outsourceHardware';
       if(!bItem[oc]) bItem[oc]=[];
       var nl=String(r.name||'').trim().toLowerCase();
@@ -20325,14 +20325,14 @@ function _carcassSaveTplToDb(cabinetName,btnEl,onSaved){
       return;
     }
     var rows=[['Cabinet','Category','Name','Unit','Qty','Price']].concat(dbTemplates.map(function(t){
-      return [t.cabinet,t.category,t.name,t.unit,t.qty,t.price];
+      return [t.cabinet,_tplCatOut(t),t.name,t.unit,t.qty,t.price];
     }));
     priceDbClear('CabinetTemplates!A:Z')
       .then(function(){ return priceDbUpdate('CabinetTemplates!A1',rows); })
       .then(function(res){
         if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
         supaReplaceTable('cabinet_templates',dbTemplates.map(function(t){
-          return {cabinet:t.cabinet,category:t.category,name:t.name,unit:t.unit,qty:t.qty,price:t.price};
+          return {cabinet:t.cabinet,category:_tplCatOut(t),name:t.name,unit:t.unit,qty:t.qty,price:t.price};
         }));
         showToast('Template changes saved to Price DB.');
         if(typeof onSaved==='function') onSaved();
@@ -33343,7 +33343,7 @@ function _loadPriceDbFromMirror(showFeedback){
       });
       dbMaterials=data.materials.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
       dbHardware=data.hardware.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
-      dbTemplates=data.templates.map(function(r){return {cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0};});
+      dbTemplates=data.templates.map(function(r){return _tplNorm({cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0});});
       _applyMtoTags();
       _syncServicesFromDb();
       supaLoadPmesCapacity();
@@ -33374,7 +33374,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
       dbServices=(svcData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbMaterials=(matData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbHardware=(hwData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
+      dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return _tplNorm({cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0});});
       _applyMtoTags();
       _syncServicesFromDb();
       supaLoadPmesCapacity();
@@ -33667,15 +33667,34 @@ function _tplCatalogFor(row){
   }
   return null;
 }
+// A template line can be marked Outsource. In the sheet its category reads "outsource materials" /
+// "outsource hardware"; in memory it stays materials/hardware with outsource:true, so every cost,
+// weight and margin calculation that filters on category keeps counting it.
+function _tplNorm(t){
+  var m=String(t.category||'').trim().toLowerCase().match(/^outsource[\s_-]*(materials?|hardware)$/);
+  if(m){ t.category=m[1].indexOf('material')===0?'materials':'hardware'; t.outsource=true; }
+  return t;
+}
+function _tplCatOut(t){ return t.outsource&&(t.category==='materials'||t.category==='hardware')?'outsource '+t.category:t.category; }
+// "Keep as is": the line's own name/unit/price are accepted on purpose. Keyed by cabinet+category+
+// name and remembers the unit and price accepted — change either and it is flagged again.
+var TPL_ACCEPTED={};
+function _tplAcceptKey(t){ return [t.cabinet,t.category,String(t.name||'').trim().toLowerCase()].join('|'); }
+function _tplIsAccepted(t){
+  var a=TPL_ACCEPTED[_tplAcceptKey(t)];
+  return !!(a&&_pdbNormUnit(a.unit)===_pdbNormUnit(t.unit)&&Math.abs((+a.price||0)-(+t.price||0))<0.005);
+}
 function _tplIssue(row){
   var c=_tplCatalogFor(row);
+  if(_tplIsAccepted(row)) return {kind:'accepted',cat:c};
+  if(row.outsource&&!(c&&c.outsource)) return {kind:'ok',cat:null,ownOutsource:true};
   if(!c) return {kind:'missing',cat:null};
   var pd=Math.abs((parseFloat(row.price)||0)-(parseFloat(c.item.price)||0))>0.005;
   var ud=_pdbNormUnit(row.unit)!==_pdbNormUnit(c.item.unit);
   return {kind:pd&&ud?'both':pd?'price':ud?'unit':'ok',cat:c,pd:pd,ud:ud};
 }
 function _tplIssueCount(){
-  var n=0; for(var i=0;i<dbTemplates.length;i++) if(_tplIssue(dbTemplates[i]).kind!=='ok') n++;
+  var n=0; for(var i=0;i<dbTemplates.length;i++){ var k=_tplIssue(dbTemplates[i]).kind; if(k!=='ok'&&k!=='accepted') n++; }
   return n;
 }
 function _tplCabinets(){
@@ -33712,14 +33731,14 @@ function renderTplCheck(){
     dbTemplates.forEach(function(t,idx){
       if(t.cabinet!==cab) return;
       var is=_tplIssue(t);
-      if(_tplCheckOnlyIssues&&is.kind==='ok') return;
+      if(_tplCheckOnlyIssues&&(is.kind==='ok'||is.kind==='accepted')) return;
       rows.push({t:t,idx:idx,is:is});
     });
     if(!rows.length) return;
     shown+=rows.length;
     h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">'
       +'<div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:6px"><i class="ti ti-template"></i> '+escHtml(cab)+'</div>'
-      +'<div style="display:grid;grid-template-columns:76px minmax(180px,2fr) 70px 60px 80px minmax(150px,1fr) 118px;gap:5px;font-size:9px;color:var(--text2);text-transform:uppercase;margin-bottom:3px">'
+      +'<div style="display:grid;grid-template-columns:'+TPL_GRID+';gap:5px;font-size:9px;color:var(--text2);text-transform:uppercase;margin-bottom:3px">'
       // Centred over the boxes. Right-aligned, "Qty" sat at the edge of the Price box and the
       // highlighted Price read as the quantity (Rommel, 2026-10-13).
       +'<span>Category</span><span>Name</span><span style="text-align:center">Unit</span><span style="text-align:center">Qty</span><span style="text-align:center">Price (₱)</span><span style="padding-left:6px">Price list (unit · price)</span><span></span></div>';
@@ -33729,28 +33748,60 @@ function renderTplCheck(){
   if(!shown) h+='<div style="font-size:12px;color:var(--teal);padding:8px 0"><i class="ti ti-check"></i> '+(_tplCheckOnlyIssues?'Every line matches the price list.':'No lines.')+'</div>';
   w.innerHTML=h;
 }
+var TPL_GRID='150px minmax(170px,2fr) 66px 58px 78px minmax(140px,1fr) 205px';
 function _tplRowHtml(t,idx,is){
   var bad='border-color:var(--coral)', amb='border-color:var(--amber)';
   var c=is.cat, dl='';
   if(is.kind==='missing'){
     var src=_tplSrc(t.category)||dbMaterials;
-    dl='<datalist id="tpl-dl-'+idx+'">'+_dlOptions(src,t.name,12)+'</datalist>';
+    dl='<datalist id="tpl-dl-'+idx+'">'+(t.category!=='services'&&dbOutsource.length?_dlOptions(dbOutsource,t.name,6):'')+_dlOptions(src,t.name,12)+'</datalist>';
   }
-  var ref=c
-    ? '<span style="font-size:11px;padding-left:6px;color:var(--text2)">'+escHtml(c.item.unit||'')+' · '+fmtMoney(c.item.price||0)
+  // Category, with Outsource as a choice for materials/hardware — a bought-out line loads into the
+  // cabinet's Outsource rows at its own price.
+  var cv=t.outsource?('out-'+t.category):t.category;
+  var copt=function(v,l){ return '<option value="'+v+'"'+(cv===v?' selected':'')+'>'+l+'</option>'; };
+  var catSel='<select onchange="_tplSetCategory('+idx+',this.value)" style="font-size:11px;height:26px;padding:0 3px'+(t.outsource?';color:var(--purple,#7c3aed);font-weight:600':'')+'">'
+    +copt('materials','Materials')+copt('hardware','Hardware')+copt('services','Services')
+    +copt('out-materials','Outsource material')+copt('out-hardware','Outsource hardware')+'</select>';
+  var ref;
+  if(is.ownOutsource) ref='<span style="font-size:11px;padding-left:6px;color:var(--purple,#7c3aed);font-weight:600">Outsource — its own price</span>';
+  else if(c) ref='<span style="font-size:11px;padding-left:6px;color:var(--text2)">'+escHtml(c.item.unit||'')+' · '+fmtMoney(c.item.price||0)
       +(c.other?' <span style="color:var(--amber)">(in '+c.list+')</span>':'')
-      +(c.outsource?' <span style="color:var(--purple,#7c3aed);font-weight:600">· Outsource</span>':'')+'</span>'
-    : '<span style="font-size:11px;padding-left:6px;color:var(--coral);font-weight:600">Not in the price list</span>';
-  var act=(is.kind==='price'||is.kind==='unit'||is.kind==='both')
-    ? '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="_tplUseCatalog('+idx+')">Use price list</button>'
-    : (is.kind==='ok'?'<span style="font-size:11px;color:var(--teal)">✓ Matches</span>':'<button class="btn" style="font-size:11px;padding:2px 8px" onclick="_tplAddToPriceList('+idx+')" title="Or rename the line to an item already in the list. Bought-out items go in the sheet\'s Outsource tab instead.">Add to price list</button>');
-  return '<div style="display:grid;grid-template-columns:76px minmax(180px,2fr) 70px 60px 80px minmax(150px,1fr) 118px;gap:5px;align-items:center;padding:3px 0;border-top:.5px solid var(--border)">'
-    +'<span style="font-size:11px;color:var(--text2)">'+escHtml(t.category||'')+'</span>'
+      +(c.outsource?' <span style="color:var(--purple,#7c3aed);font-weight:600">· Outsource</span>':'')+'</span>';
+  else ref='<span style="font-size:11px;padding-left:6px;color:var(--coral);font-weight:600">Not in the price list</span>';
+  var b=function(fn,label,title){ return '<button class="btn" style="font-size:11px;padding:2px 7px" onclick="'+fn+'('+idx+')"'+(title?' title="'+title+'"':'')+'>'+label+'</button>'; };
+  var keep=b('_tplKeepAsIs','Keep as is','Keep this line\'s own name, unit and price. It stops being flagged until you change it.');
+  var act;
+  if(is.kind==='price'||is.kind==='unit'||is.kind==='both') act=b('_tplUseCatalog','Use price list')+keep;
+  else if(is.kind==='missing') act=b('_tplAddToPriceList','Add to price list','Or rename it to an item already in the list, or set the category to Outsource.')+keep;
+  else if(is.kind==='accepted') act='<span style="font-size:11px;color:var(--teal)">✓ Kept as is</span> <a href="javascript:void(0)" onclick="_tplUndoKeep('+idx+')" style="font-size:10px;color:var(--text2)">undo</a>';
+  else act='<span style="font-size:11px;color:var(--teal)">'+(is.ownOutsource?'✓ Outsource':'✓ Matches')+'</span>';
+  return '<div style="display:grid;grid-template-columns:'+TPL_GRID+';gap:5px;align-items:center;padding:3px 0;border-top:.5px solid var(--border)">'
+    +catSel
     +'<input value="'+escHtml(t.name||'')+'"'+(dl?' list="tpl-dl-'+idx+'"':'')+' onchange="_tplSetField('+idx+',\'name\',this.value)" style="font-size:12px;height:26px;padding:1px 6px;'+(is.kind==='missing'?bad:'')+'">'+dl
     +'<input value="'+escHtml(t.unit||'')+'" onchange="_tplSetField('+idx+',\'unit\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:center;'+(is.ud?amb:'')+'">'
     +'<input type="number" value="'+(t.qty||0)+'" onchange="_tplSetField('+idx+',\'qty\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:right">'
     +'<input type="number" value="'+(t.price||0)+'" onchange="_tplSetField('+idx+',\'price\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:right;'+(is.pd?amb:'')+'">'
-    +ref+act+'</div>';
+    +ref+'<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'+act+'</span></div>';
+}
+function _tplSetCategory(idx,v){
+  var t=dbTemplates[idx]; if(!t) return;
+  var out=v.indexOf('out-')===0;
+  t.category=out?v.slice(4):v; t.outsource=out||undefined;
+  _tplDirty=true; renderTplCheck(); _pdbRenderCountsOnly();
+}
+var _tplAcceptDirty=false;
+function _tplKeepAsIs(idx){
+  var t=dbTemplates[idx]; if(!t) return;
+  _tplAcceptDirty=true;
+  TPL_ACCEPTED[_tplAcceptKey(t)]={unit:t.unit,price:t.price,by:(gUser&&(gUser.name||gUser.email))||'',at:new Date().toISOString()};
+  _tplDirty=true; renderTplCheck(); _pdbRenderCountsOnly();
+}
+function _tplUndoKeep(idx){
+  var t=dbTemplates[idx]; if(!t) return;
+  _tplAcceptDirty=true;
+  delete TPL_ACCEPTED[_tplAcceptKey(t)];
+  _tplDirty=true; renderTplCheck(); _pdbRenderCountsOnly();
 }
 function _tplSetField(idx,field,val){
   var t=dbTemplates[idx]; if(!t) return;
@@ -33843,6 +33894,8 @@ function _tplAddToPriceList(idx){
 function _tplSave(btn){
   _carcassSaveTplToDb('',btn,function(){
     _tplDirty=false;
+    // "Keep as is" choices live in the Settings CONFIG row, saved with the rest of Settings.
+    if(_tplAcceptDirty&&typeof gSaveAppSettings==='function'){ _tplAcceptDirty=false; gSaveAppSettings(); }
     if(typeof logActivity==='function') logActivity('Cabinet templates updated in Settings → Price Database.','');
     renderTplCheck(); _pdbRenderCountsOnly();
   });
@@ -34077,10 +34130,11 @@ function _collectAppSettings(){
     },
     // Custom Report Export -> Revenue Trend monthly target. Reads the live input on the
     // Export tab when it's open (so an unsaved edit isn't lost), else the last-applied value.
-    reportTargets:{ monthlyRevenue:(el('rt-target')?(parseFloat(el('rt-target').value)||0):(reportTargets.monthlyRevenue||0)) }
+    tplAccepted:TPL_ACCEPTED, reportTargets:{ monthlyRevenue:(el('rt-target')?(parseFloat(el('rt-target').value)||0):(reportTargets.monthlyRevenue||0)) }
   };
 }
 function _applyAppSettings(s){
+  if(s&&s.tplAccepted&&typeof s.tplAccepted==='object') TPL_ACCEPTED=s.tplAccepted;
   if(!s) return;
   if(s.reportTargets&&typeof s.reportTargets.monthlyRevenue!=='undefined'){ reportTargets.monthlyRevenue=Number(s.reportTargets.monthlyRevenue)||0; }
   if(s.msgMailerUrl!==undefined){ MSG_MAILER_URL=s.msgMailerUrl||''; localStorage.setItem('mc_msg_mailer_url',MSG_MAILER_URL); var _mm=el('s-msg-mailer'); if(_mm) _mm.value=MSG_MAILER_URL; }
