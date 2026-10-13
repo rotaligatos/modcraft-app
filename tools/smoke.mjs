@@ -171,6 +171,12 @@ const PROFILES = {
           const b = window._bomSheetSizeSwap(p, 'BEIGE 2F 6x6 12mm', 'BEIGE 2F 6x8 12mm', { type: 'Toilet Partition' });
           return [a, r.qty, b, p.qty, !!p.sheetNote, JSON.stringify(window._sheetDimsOf('Edgeband 1mmx22mm'))];
         }, [true, 0.4667, true, 3, true, 'null']);
+        check('installation factor: size area (floored), partition panel count; no size/walls = 1', () => {
+          const f = (b) => Math.round(window._bomInstFactor(b) * 1000) / 1000;
+          return [f({ type: 'Kitchen Base Cabinet', qty: 1 }), f({ type: 'Kitchen Base Cabinet', qty: 1, size: { w: 1200 } }),
+            f({ type: 'Kitchen Base Cabinet', qty: 1, size: { w: 600 } }), f({ type: 'Toilet Partition', qty: 3, endWalls: 2 }),
+            f({ type: 'Toilet Partition', qty: 3 })];
+        }, [1, 1.348, 1, 0.556, 1]);
         check('toilet partition: 3 cubicles between two walls = 5 panels, free-standing = 7', () => {
           const p = { type: 'Toilet Partition', qty: 3, hardware: [], services: [],
             materials: [{ name: 'BEIGE 2F 6x6 12mm COMPACT LAMINATE', unit: 'pc', qty: 3, price: 7200 }] };

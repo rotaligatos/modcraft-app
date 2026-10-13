@@ -5741,7 +5741,7 @@ function getInstCostByType(zoneKey){
     // is already a whole-quotation figure).
     return fallback*totalUnits;
   }
-  var total=0;
+  var total=0; _instAdjusted=false;
   for(var a=0;a<qAreas.length;a++){
     if(qFabMode==='carcass'){
       var items=qAreas[a].items||[];
@@ -5753,7 +5753,9 @@ function getInstCostByType(zoneKey){
       var bi=qAreas[a].bomItems||[];
       for(var i=0;i<bi.length;i++){
         var rate=_instCalcForZone(zoneKey, bi[i].type);
-        total+=rate*(bi[i].qty||1);
+        var _if=(typeof _bomInstFactor==='function')?_bomInstFactor(bi[i]):1;
+        if(Math.abs(_if-1)>1e-9) _instAdjusted=true;
+        total+=rate*(bi[i].qty||1)*_if;
       }
     }
   }
@@ -8749,6 +8751,18 @@ function _scaleFactor(by,bItem,row){
   }
   return sizeF*(by==='panels'?_partitionPanelMult(bItem):1);
 }
+// Installation follows the cabinet too (Rommel, 2026-10-13): a bigger cabinet takes longer to
+// install (panel-area factor, floored at the reference like the materials), and a toilet
+// partition row is installed panel by panel (same panel count the boards follow). Applied per
+// BOM line in getInstCostByType; the 3-unit minimum and per-type PPIC capacity are unchanged.
+var _instAdjusted=false;   // set by getInstCostByType when any line was adjusted — for the display note
+function _bomInstFactor(b){
+  if(!b) return 1;
+  var f=1;
+  if(_cabRef(b.type)&&_cabSizeActive(b)) f*=_scaleFactor('area',b);
+  if(_isPartition(b)&&b.endWalls!=null) f*=_partitionPanelMult(b);
+  return f;
+}
 function _applyCabScale(bItem){
   if(!bItem) return;
   var active=(_cabRef(bItem.type)&&_cabSizeActive(bItem))||(_isPartition(bItem)&&bItem.endWalls!=null);
@@ -10335,7 +10349,7 @@ function _miBreakdownHtml(o){
     if(o.instFloorApplied) row('ti-hammer',
       'Labor — 3-unit minimum ('+o.instUnits+' cabinet'+(o.instUnits===1?'':'s')+' ordered)','',
       o.instLaborCost,'var(--amber)');
-    else row('ti-hammer','Installation labor',o.instUnits+' × '+fmtMoney(o.instUnitPrice),o.instLaborCost);
+    else row('ti-hammer','Installation labor',o.instUnits+' × '+fmtMoney(o.instUnitPrice)+(_instAdjusted?' (average — adjusted for cabinet size / partition panels)':''),o.instLaborCost);
     row('ti-home-check','QA/QC supervision','',o.qaqcBase);
     row('ti-bed','Working-night accommodation','',o.workAccom);
     row('ti-wallet','Per diem on site','',o.perDiem);
@@ -34112,6 +34126,22 @@ function _tplCreateType(){
       dbTemplates.push({cabinet:name,category:x.category,name:x.name,unit:x.unit,qty:x.qty,price:0,scaleBy:x.scaleBy||'',addon:''}); added++;
     });
     CABINET_REF_SIZES[name]={w:preset.ref.w,h:preset.ref.h,d:preset.ref.d};
+    // Installation capacity for the new type (Settings › PPIC). Takes over the ceiling-height
+    // partition entry already there under a misspelled name ("Toiler Partion (Ceiling Height)"),
+    // which no cabinet type matched — so installation fell back to the general rate.
+    var pi=(typeof ppicSettings!=='undefined'&&ppicSettings&&ppicSettings.installation)||null;
+    if(pi){
+      pi.typeCapacity=pi.typeCapacity||{}; pi.typeUom=pi.typeUom||{};
+      var oldKey=Object.keys(pi.typeCapacity).find(function(k){return /partion|partition/i.test(k)&&/ceiling|full/i.test(k)&&k!==name;});
+      var cap=oldKey?parseFloat(pi.typeCapacity[oldKey]):0;
+      if(!(cap>0)) cap=3.5;
+      if(!(parseFloat(pi.typeCapacity[name])>0)) pi.typeCapacity[name]=cap;
+      if(!pi.typeUom[name]) pi.typeUom[name]='cubicle';
+      if(oldKey&&/toiler|partion/i.test(oldKey)){
+        delete pi.typeCapacity[oldKey]; if(pi.typeUom) delete pi.typeUom[oldKey];
+        if(Array.isArray(pi.customTypes)) pi.customTypes=pi.customTypes.filter(function(c){return c&&c.name!==oldKey;});
+      }
+    }
   } else if(src&&_cabRef(src)){ var r=_cabRef(src); CABINET_REF_SIZES[name]={w:r.w,h:r.h,d:r.d}; }
   if(!added) dbTemplates.push({cabinet:name,category:'materials',name:'',unit:'pc',qty:1,price:0,scaleBy:'',addon:''});
   // Register the type so the quotation lists it (carcass price stays 0 — BOM prices come from the lines).
