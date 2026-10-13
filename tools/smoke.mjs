@@ -133,6 +133,31 @@ const PROFILES = {
           return [/mc_set_own_pin/.test(String(window.submitSetPin)), /cc_sync_user_pins/.test(String(window.resetUserPin))];
         }, [true,true]);
       }
+      /* BOM size scaling (2026-10-13): each template line scales by what drives it; hardware rounds
+         up; smaller is floored at the reference; no size = untouched; toilet partition shares sides. */
+      if (typeof window._applyCabScale === 'function') {
+        check('BOM size scaling: hinges by height, legs by width, handles never, boards by area, floor at reference', () => {
+          const b = { type: 'Kitchen Base Cabinet', qty: 1, services: [], materials: [
+              { name: 'DuraSave Plywood 2F 18mm', unit: 'pc', qty: 0.7, price: 3300 } ],
+            hardware: [ { name: 'Hydraulic hinge', unit: 'pc', qty: 4, price: 160 }, { name: 'Steel handle 100mm', unit: 'pc', qty: 2, price: 65 },
+              { name: 'Adjustable plinth', unit: 'set', qty: 1, price: 95 } ] };
+          const q = () => [b.materials[0].qty, b.hardware[0].qty, b.hardware[1].qty, b.hardware[2].qty].join(',');
+          const out = [];
+          window._applyCabScale(b); out.push(q());                       // no size: untouched
+          b.size = { h: 1320 }; window._applyCabScale(b); out.push(q());  // +50% height: hinges 6
+          b.size = { w: 1200 }; window._applyCabScale(b); out.push(q());  // +50% width: legs 2, hinges 4
+          b.size = { w: 700 }; window._applyCabScale(b); out.push(q());   // smaller: reference
+          delete b.size; window._applyCabScale(b); out.push(q(), String(b.materials[0].baseQty));
+          return out;
+        }, ['0.7,4,2,1', '0.9532,6,2,1', '0.9436,4,2,2', '0.7,4,2,1', '0.7,4,2,1', 'undefined']);
+        check('toilet partition: 3 cubicles between two walls = 5 panels, free-standing = 7', () => {
+          const p = { type: 'Toilet Partition', qty: 3, hardware: [], services: [],
+            materials: [{ name: 'BEIGE 2F 6x6 12mm COMPACT LAMINATE', unit: 'pc', qty: 3, price: 7200 }] };
+          p.endWalls = 2; window._applyCabScale(p); const both = Math.round(p.materials[0].qty * p.qty * 1000) / 1000;
+          p.endWalls = 0; window._applyCabScale(p); const none = Math.round(p.materials[0].qty * p.qty * 1000) / 1000;
+          return [both, none];
+        }, [5, 7]);
+      }
       /* PMES Piece 4: capacity is OWNED BY PMES. Modcraft reads it per company and its Services
          page stops accepting edits to the capacity fields. Pins the read path and the read-only gate. */
       if (typeof window.supaLoadPmesCapacity === 'function') {

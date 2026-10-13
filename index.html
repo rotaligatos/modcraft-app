@@ -8670,6 +8670,146 @@ function syncSvcMatHwPricesFromDB(){
   renderItems();
 }
 // ── BOM helpers ───────────────────────────────────────────────────────────
+// ── BOM cabinets scaled to the client's size (Rommel, 2026-10-13) ──────────────────────────────
+// A cabinet template is the recipe for ONE reference-size cabinet (sizes from "Cost for Cabinets
+// costing scheme rev. 3"). When the client's cabinet differs, staff enter its size and each
+// template line scales by what actually drives it, instead of doubling the quantity:
+//   boards & HPL           -> panel area        edge tape, cutting, edgebanding -> edge length
+//   hinges                 -> height            handgrab, rod, trim, LED, legs  -> width
+//   screws, minifix, pins  -> overall size      ordinary handles, knobs, slides, holes, assembly -> none
+// Rules: smaller than the reference is charged as the reference (floor ×1); any difference is
+// charged; hardware rounds UP to whole pieces; at 2× any dimension a cutting list is recommended
+// (not enforced). Each row keeps its reference qty in baseQty and its working qty is recomputed, so
+// every reader — totals, both stages, BOM report, Job Order, printout — uses the scaled qty without
+// knowing about scaling. No size entered = nothing changes, so existing quotations do not move.
+var CABINET_REF_DEFAULT={
+  'Kitchen Base Cabinet':{w:800,h:880,d:580},   'Sink Cabinet':{w:800,h:780,d:580},
+  'Kitchen Hanging Cabinet':{w:800,h:800,d:320},'Overhead Cabinet':{w:800,h:800,d:320},
+  'Fridge Cabinet':{w:850,h:500,d:370},         'Luggage Cabinet':{w:850,h:500,d:370},
+  'Kitchen Tall Cabinet':{w:1000,h:2300,d:600}, 'Wardrobe / Closet':{w:1000,h:2300,d:600},
+  'Kitchen Drawer Cabinet':{w:500,h:800,d:580}, 'Work Space Table':{w:1500,h:800,d:600},
+  'Vanity Cabinet':{w:900,h:620,d:380},         'Toilet Partition':{w:1000,h:1800,d:1500},
+  'Wall Cladding':{w:1220,h:2440,d:0}
+};
+var CABINET_REF_SIZES={};   // Settings overrides, saved in CONFIG (cabinetRefSizes)
+var SCALE_BY_OPTS=[['','Automatic'],['area','Panel area'],['edge','Edge length'],['height','Height'],['width','Width'],['depth','Depth'],['overall','Overall size'],['panels','Partition panels'],['none','Does not scale']];
+function _cabRef(type){
+  var r=CABINET_REF_SIZES[type]||CABINET_REF_DEFAULT[type]||(/^slatwall/i.test(type||'')?{w:1220,h:2440,d:0}:null);
+  return (r&&+r.w>0&&+r.h>0)?{w:+r.w,h:+r.h,d:+r.d||0}:null;
+}
+function _scaleAuto(cat,row,cabType){
+  var n=String(row.name||'').toLowerCase(), u=_pdbNormUnit(row.unit);
+  var board=/4x8|6x6|5x10|6x8|4x10|board|plywood|mdf|\bpb\b|laminat|hpl|versaboard|melamine|slab/.test(n);
+  if(cat==='materials'||cat==='outsourceMaterials'){
+    if(u==='lm') return 'edge';
+    if(board||u==='sqm'||u==='sheet') return /toilet partition/i.test(cabType||'')?'panels':'area';
+    return 'overall';
+  }
+  if(cat==='services'){ if(u==='lm') return 'edge'; if(u==='sqm') return 'area'; return 'none'; }
+  // hardware (incl. outsourced hardware)
+  if(/handgrab|hand grab|profile/.test(n)) return 'width';
+  if(/knob|handle|pull/.test(n)) return 'none';
+  if(/slide|runner/.test(n)) return 'none';
+  if(/hinge/.test(n)) return 'height';
+  if(/hanging rod|\brod\b|trim|\bled\b|diffuser|strip|leg|plinth/.test(n)||u==='lm') return 'width';
+  return 'overall';
+}
+function _boxArea(w,h,d){ return d>0?2*(h*d+w*d+w*h):w*h; }
+function _boxEdge(w,h,d){ return d>0?4*(w+h+d):2*(w+h); }
+function _cabSizeOf(bItem,ref){
+  var s=bItem.size||{};
+  // Each side is floored at the reference: smaller is charged as the reference there.
+  return {w:Math.max(ref.w,+s.w>0?+s.w:ref.w), h:Math.max(ref.h,+s.h>0?+s.h:ref.h), d:ref.d>0?Math.max(ref.d,+s.d>0?+s.d:ref.d):0};
+}
+function _cabSizeActive(bItem){ var s=bItem&&bItem.size; return !!(s&&(+s.w>0||+s.h>0||+s.d>0)); }
+function _isPartition(bItem){ return /toilet partition/i.test((bItem&&bItem.type)||''); }
+// Toilet partition: the template is ONE free-standing cubicle = 1 front + 2 side panels (3 sheets).
+// In a row of N cubicles the sides are shared: sides = (N-1) + open ends. Applied only once the
+// "walls at ends" choice is made, so existing partition quotations do not move.
+function _partitionPanelMult(bItem){
+  if(!_isPartition(bItem)||bItem.endWalls==null) return 1;
+  var N=Math.max(1,parseInt(bItem.qty)||1), walls=Math.max(0,Math.min(2,parseInt(bItem.endWalls)||0));
+  var sides=(N-1)+(2-walls);
+  return ((N+sides)/N)/3;
+}
+function _scaleFactor(by,bItem){
+  var ref=_cabRef(bItem.type), sizeF=1;
+  if(ref&&_cabSizeActive(bItem)){
+    var z=_cabSizeOf(bItem,ref);
+    if(by==='area'||by==='overall'||by==='panels') sizeF=_boxArea(z.w,z.h,z.d)/_boxArea(ref.w,ref.h,ref.d);
+    else if(by==='edge')   sizeF=_boxEdge(z.w,z.h,z.d)/_boxEdge(ref.w,ref.h,ref.d);
+    else if(by==='height') sizeF=z.h/ref.h;
+    else if(by==='width')  sizeF=z.w/ref.w;
+    else if(by==='depth')  sizeF=ref.d>0?z.d/ref.d:1;
+    if(!(sizeF>=1)) sizeF=1;   // floor: the reference size is the base price
+  }
+  return sizeF*(by==='panels'?_partitionPanelMult(bItem):1);
+}
+function _applyCabScale(bItem){
+  if(!bItem) return;
+  var active=(_cabRef(bItem.type)&&_cabSizeActive(bItem))||(_isPartition(bItem)&&bItem.endWalls!=null);
+  ['materials','hardware','services','outsourceMaterials','outsourceHardware'].forEach(function(cat){
+    (bItem[cat]||[]).forEach(function(row){
+      if(!active){
+        if(row.baseQty!=null){ row.qty=row.baseQty; delete row.baseQty; }
+        delete row.scaleF; delete row.scaleUsed; return;
+      }
+      if(row.baseQty==null) row.baseQty=parseFloat(row.qty)||0;
+      var by=row.scaleBy||_scaleAuto(cat,row,bItem.type);
+      var f=_scaleFactor(by,bItem), q=row.baseQty*f;
+      if(cat==='hardware'||cat==='outsourceHardware') q=(Math.abs(f-1)<1e-9)?row.baseQty:Math.ceil(q-1e-9);
+      else q=Math.round(q*10000)/10000;
+      row.qty=q; row.scaleF=f; row.scaleUsed=by;
+    });
+  });
+}
+function _bomScaleNote(row){
+  if(row.baseQty==null||!row.scaleF||Math.abs(row.scaleF-1)<1e-9) return '';
+  var lab=(SCALE_BY_OPTS.find(function(o){return o[0]===row.scaleUsed;})||['',''])[1].toLowerCase();
+  return '<div style="margin:-2px 0 4px 2px;font-size:10px;color:var(--navy)">Sized: '+row.baseQty+' × '+row.scaleF.toFixed(3)
+    +' ('+escHtml(lab)+') = <b>'+(+row.qty).toLocaleString(undefined,{maximumFractionDigits:3})+'</b></div>';
+}
+function _bomSizeRowHtml(a,ci,bItem){
+  var ref=_cabRef(bItem.type), part=_isPartition(bItem);
+  if(!ref&&!part) return '<div style="font-size:10.5px;color:var(--text2);margin:-2px 0 6px 2px">No reference size for this cabinet type — set one in Settings › Price Database › Cabinet Templates to size it.</div>';
+  var s=bItem.size||{}, flat=ref&&!(ref.d>0);
+  var inp=function(k,lab,ph){ return '<label style="display:flex;align-items:center;gap:3px;font-size:10.5px;color:var(--text2)">'+lab
+    +'<input type="number" min="0" step="1" value="'+(+s[k]>0?+s[k]:'')+'" placeholder="'+ph+'" onchange="'+_hEdit('onBOMSizeChange('+a+','+ci+',\''+k+'\',this.value)')+'" style="width:68px;height:26px;font-size:12px;text-align:center"></label>'; };
+  var h='<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 6px 2px;padding:6px 8px;border:.5px dashed var(--border);border-radius:6px">'
+    +'<span style="font-size:10.5px;font-weight:600;color:var(--navy)"><i class="ti ti-ruler-measure"></i> Size (mm)</span>';
+  if(ref){
+    h+=inp('w','W',ref.w)+inp('h','H',ref.h)+(flat?'':inp('d','D',ref.d))
+      +'<span style="font-size:10.5px;color:var(--text2)">reference '+ref.w+' × '+ref.h+(flat?'':' × '+ref.d)+' — blank = reference</span>';
+  }
+  if(part){
+    var ew=bItem.endWalls==null?'':String(bItem.endWalls);
+    var o=function(v,l){ return '<option value="'+v+'"'+(ew===v?' selected':'')+'>'+l+'</option>'; };
+    h+='<label style="font-size:10.5px;color:var(--text2);display:flex;align-items:center;gap:4px">Walls at the ends of this row'
+      +'<select onchange="'+_hEdit('onBOMEndWalls('+a+','+ci+',this.value)')+'" style="height:26px;font-size:11px">'
+      +o('','— as template (free-standing single)')+o('0','None (free-standing)')+o('1','One end')+o('2','Both ends')+'</select></label>'
+      +'<span style="font-size:10.5px;color:var(--text2)">Qty = cubicles in the row</span>';
+  }
+  if(ref&&_cabSizeActive(bItem)){
+    var z=_cabSizeOf(bItem,ref), big=(z.w>=2*ref.w)||(z.h>=2*ref.h)||(ref.d>0&&z.d>=2*ref.d);
+    if(big) h+='<span style="flex-basis:100%;font-size:11px;color:var(--amber-ink);background:var(--wash-amber);border-radius:5px;padding:4px 8px"><i class="ti ti-alert-triangle"></i> At least one dimension is 2× the reference or more — consider pricing this cabinet from a cutting list for accuracy.</span>';
+    var sz=bItem.size||{}, sm=(+sz.w>0&&+sz.w<ref.w)||(+sz.h>0&&+sz.h<ref.h)||(ref.d>0&&+sz.d>0&&+sz.d<ref.d);
+    if(sm) h+='<span style="flex-basis:100%;font-size:10.5px;color:var(--text2)">Smaller than the reference in some direction — charged at the reference size there.</span>';
+    if(bItem.type&&/drawer/i.test(bItem.type)&&ref.d>0&&+sz.d>0&&+sz.d!==ref.d) h+='<span style="flex-basis:100%;font-size:10.5px;color:var(--amber-ink)"><i class="ti ti-info-circle"></i> Depth changed — check the drawer slide length.</span>';
+  }
+  return h+'</div>';
+}
+function onBOMSizeChange(a,ci,k,val){
+  var b=qAreas[a].bomItems[ci]; if(!b) return;
+  b.size=b.size||{};
+  var v=parseFloat(val); if(v>0) b.size[k]=v; else delete b.size[k];
+  if(!_cabSizeActive(b)) delete b.size;
+  _applyCabScale(b); renderItems(); recalc();
+}
+function onBOMEndWalls(a,ci,v){
+  var b=qAreas[a].bomItems[ci]; if(!b) return;
+  if(v==='') delete b.endWalls; else b.endWalls=parseInt(v)||0;
+  _applyCabScale(b); renderItems(); recalc();
+}
 function addBOMItem(a) {
   if(!qAreas[a].bomItems) qAreas[a].bomItems=[];
   qAreas[a].bomItems.push({type:CABINET_TYPES[0],qty:1,materials:[],hardware:[],services:[],outsourceMaterials:[],outsourceHardware:[]});
@@ -8697,13 +8837,17 @@ function onBOMTypeChange(a,ci,val) {
 }
 function onBOMQtyChange(a,ci,val) {
   qAreas[a].bomItems[ci].qty=parseInt(val)||1;
+  if(_isPartition(qAreas[a].bomItems[ci])){ _applyCabScale(qAreas[a].bomItems[ci]); renderItems(); }   // cubicles change shared panels
   updateBOMCostHeader(a,ci);
   updateBOMAreaSubtotal(a);
   recalcSoon();
 }
 function onBOMRowChange(a,ci,cat,ri,field,val) {
-  if(field==='qty'||field==='price') qAreas[a].bomItems[ci][cat][ri][field]=parseFloat(val)||0;
+  var _r0=qAreas[a].bomItems[ci][cat][ri];
+  if(field==='qty'&&_r0&&_r0.baseQty!=null) _r0.baseQty=parseFloat(val)||0;
+  else if(field==='qty'||field==='price') qAreas[a].bomItems[ci][cat][ri][field]=parseFloat(val)||0;
   else qAreas[a].bomItems[ci][cat][ri][field]=val;
+  if(field==='qty') _applyCabScale(qAreas[a].bomItems[ci]);
   var row=qAreas[a].bomItems[ci][cat][ri];
   var amtEl=el('bom-amt-'+a+'-'+ci+'-'+cat+'-'+ri);
   if(amtEl) amtEl.textContent=fmtMoney((row.qty||0)*(row.price||0));
@@ -9223,13 +9367,14 @@ function loadCabinetTemplate(a,ci,silent) {
       if(!bItem[oc]) bItem[oc]=[];
       var nl=String(r.name||'').trim().toLowerCase();
       if(!bItem[oc].some(function(x){return String(x.name||'').trim().toLowerCase()===nl;}))
-        bItem[oc].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,saved:true});
+        bItem[oc].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,saved:true,scaleBy:r.scaleBy||''});
       continue;
     }
     if(cat==='materials'||cat==='hardware'||cat==='services'){
-      bItem[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price});
+      bItem[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,scaleBy:r.scaleBy||''});
     }
   }
+  _applyCabScale(bItem);   // template qtys are the reference; a size already entered applies at once
   renderItems();
   recalc();
   return true;
@@ -9472,11 +9617,11 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
             +'oninput="'+_hEdit('onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" onchange="'+_hEdit('onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" '
             +'style="'+inpStyle+';width:100%"><datalist id="'+dlId+'">'+dlOpts+'</datalist></span>'
           +'<span id="'+_rndIdp+'bom-unit-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:11px;color:var(--text2);padding-left:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+row.unit+'">'+row.unit+'</span>'
-          +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
+          +'<input type="number" min="0" step="0.01" value="'+(row.baseQty!=null?row.baseQty:(row.qty||1))+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
           +'<input id="'+_rndIdp+'bom-price-'+a+'-'+ci+'-'+cat+'-'+r+'" type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)')+'" style="height:28px;font-size:12px;text-align:right">'
           +uplCell
           +'<span id="'+_rndIdp+'bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
-          +removeBtn+'</div>'+uplNote
+          +removeBtn+'</div>'+uplNote+_bomScaleNote(row)
           +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       } else {
         // Free-text mode: name input + unit select
@@ -9485,11 +9630,11 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
         h+='<div style="display:grid;grid-template-columns:'+cols+';gap:4px;margin-bottom:4px;align-items:center">'
           +'<input value="'+(row.name||'')+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'name\',this.value)')+'" style="height:28px;font-size:12px" placeholder="Item name">'
           +selU
-          +'<input type="number" min="0" step="0.01" value="'+(row.qty||1)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
+          +'<input type="number" min="0" step="0.01" value="'+(row.baseQty!=null?row.baseQty:(row.qty||1))+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
           +'<input type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)')+'" style="height:28px;font-size:12px;text-align:right">'
           +uplCell
           +'<span id="'+_rndIdp+'bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
-          +removeBtn+'</div>'+uplNote
+          +removeBtn+'</div>'+uplNote+_bomScaleNote(row)
           +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       }
     }
@@ -9718,6 +9863,7 @@ function _renderScopeCore(wrap) {
         var bItem=bomList[ci];
         var bOpts="";
         for(var j=0;j<CABINET_TYPES.length;j++) bOpts+='<option'+(CABINET_TYPES[j]===bItem.type?" selected":"")+'>'+CABINET_TYPES[j]+'</option>';
+        _applyCabScale(bItem);
         var unitCost=getBOMItemUnitCost(bItem);
         var hasRows=(bItem.materials.length||bItem.hardware.length||bItem.services.length||(bItem.outsourceMaterials&&bItem.outsourceMaterials.length)||(bItem.outsourceHardware&&bItem.outsourceHardware.length));
         var costNote=hasRows?'':'<span style="font-size:10px;color:var(--text2);margin-left:6px">(base cost)</span>';
@@ -9743,6 +9889,7 @@ function _renderScopeCore(wrap) {
                   +'<span style="color:var(--text2)"> — shown on the quotation instead of '+escHtml(bItem.type)+'</span></span>':'')
               +'</div>';
           })()
+          +_bomSizeRowHtml(a,ci,bItem)
           +renderBOMSection(a,ci,'materials','Materials',bItem.materials||[])
           +renderBOMSection(a,ci,'hardware','Hardware',bItem.hardware||[])
           +renderBOMSection(a,ci,'services','Services',bItem.services||[])
@@ -20335,15 +20482,15 @@ function _carcassSaveTplToDb(cabinetName,btnEl,onSaved){
       resetBtn();
       return;
     }
-    var rows=[['Cabinet','Category','Name','Unit','Qty','Price']].concat(dbTemplates.map(function(t){
-      return [t.cabinet,_tplCatOut(t),t.name,t.unit,t.qty,t.price];
+    var rows=[['Cabinet','Category','Name','Unit','Qty','Price','Scales by']].concat(dbTemplates.map(function(t){
+      return [t.cabinet,_tplCatOut(t),t.name,t.unit,t.qty,t.price,t.scaleBy||''];
     }));
     priceDbClear('CabinetTemplates!A:Z')
       .then(function(){ return priceDbUpdate('CabinetTemplates!A1',rows); })
       .then(function(res){
         if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
         supaReplaceTable('cabinet_templates',dbTemplates.map(function(t){
-          return {cabinet:t.cabinet,category:_tplCatOut(t),name:t.name,unit:t.unit,qty:t.qty,price:t.price};
+          return {cabinet:t.cabinet,category:_tplCatOut(t),name:t.name,unit:t.unit,qty:t.qty,price:t.price,scale_by:t.scaleBy||null};
         }));
         showToast('Template changes saved to Price DB.');
         if(typeof onSaved==='function') onSaved();
@@ -31433,7 +31580,7 @@ function supaMigratePriceDb(){
   return Promise.all([
     priceDbGet('Materials!A:C'),
     priceDbGet('Hardware!A:C'),
-    priceDbGet('CabinetTemplates!A:F'),
+    priceDbGet('CabinetTemplates!A:G'),
     priceDbGet('Services!A:C')
   ]).then(function(results){
     var matData=results[0], hwData=results[1], tplData=results[2], svcData=results[3];
@@ -31442,7 +31589,7 @@ function supaMigratePriceDb(){
     var parsed={};
     if(!matData.error&&matData.values) parsed.price_materials=matData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
     if(!hwData.error&&hwData.values) parsed.price_hardware=hwData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-    if(!tplData.error&&tplData.values) parsed.cabinet_templates=tplData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0};});
+    if(!tplData.error&&tplData.values) parsed.cabinet_templates=tplData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0,scale_by:r[6]||null};});
     if(!svcData.error&&svcData.values) parsed.price_services=svcData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
     var statKeys={price_materials:'materials',price_hardware:'hardware',cabinet_templates:'templates',price_services:'services'};
     var tableKeys=Object.keys(parsed);
@@ -33258,7 +33405,7 @@ function supaGetPriceDb(){
       supa.from('price_services').select('name,unit,price,svc_type,teams,shifts_per_day,output_per_shift,cost_data').order('id',{ascending:true}),
       _supaFetchAllRowsCached('price_materials','name,unit,price'),
       supa.from('price_hardware').select('name,unit,price'),
-      supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price')
+      supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price,scale_by')
     ]).then(function(results){
       var svc=results[0],mat=results[1],hw=results[2],tpl=results[3];
       if(svc.error||mat.error||hw.error||tpl.error) return null;
@@ -33354,7 +33501,7 @@ function _loadPriceDbFromMirror(showFeedback){
       });
       dbMaterials=data.materials.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
       dbHardware=data.hardware.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
-      dbTemplates=data.templates.map(function(r){return _tplNorm({cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0});});
+      dbTemplates=data.templates.map(function(r){return _tplNorm({cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0,scaleBy:r.scale_by||''});});
       _applyMtoTags();
       _syncServicesFromDb();
       supaLoadPmesCapacity();
@@ -33374,7 +33521,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
     priceDbGet('Services!A:C'),
     priceDbGet('Materials!A:C'),
     priceDbGet('Hardware!A:C'),
-    priceDbGet('CabinetTemplates!A:F')
+    priceDbGet('CabinetTemplates!A:G')
   ])
     .then(function(results){
       var svcData=results[0], matData=results[1], hwData=results[2], tplData=results[3];
@@ -33385,7 +33532,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
       dbServices=(svcData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbMaterials=(matData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbHardware=(hwData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return _tplNorm({cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0});});
+      dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return _tplNorm({cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0,scaleBy:r[6]||''});});
       _applyMtoTags();
       _syncServicesFromDb();
       supaLoadPmesCapacity();
@@ -33748,18 +33895,18 @@ function renderTplCheck(){
     if(!rows.length) return;
     shown+=rows.length;
     h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">'
-      +'<div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:6px"><i class="ti ti-template"></i> '+escHtml(cab)+'</div>'
+      +'<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:6px"><span style="font-size:12px;font-weight:600;color:var(--navy)"><i class="ti ti-template"></i> '+escHtml(cab)+'</span>'+_tplRefSizeHtml(cab)+'</div>'
       +'<div style="display:grid;grid-template-columns:'+TPL_GRID+';gap:5px;font-size:9px;color:var(--text2);text-transform:uppercase;margin-bottom:3px">'
       // Centred over the boxes. Right-aligned, "Qty" sat at the edge of the Price box and the
       // highlighted Price read as the quantity (Rommel, 2026-10-13).
-      +'<span>Category</span><span>Name</span><span style="text-align:center">Unit</span><span style="text-align:center">Qty</span><span style="text-align:center">Price (₱)</span><span style="padding-left:6px">Price list (unit · price)</span><span></span></div>';
+      +'<span>Category</span><span>Name</span><span style="text-align:center">Unit</span><span style="text-align:center">Qty</span><span style="text-align:center">Price (₱)</span><span style="text-align:center" title="How this line grows when a quotation enters a bigger size than the reference">Scales by</span><span style="padding-left:6px">Price list (unit · price)</span><span></span></div>';
     rows.forEach(function(r){ h+=_tplRowHtml(r.t,r.idx,r.is); });
     h+='</div>';
   });
   if(!shown) h+='<div style="font-size:12px;color:var(--teal);padding:8px 0"><i class="ti ti-check"></i> '+(_tplCheckOnlyIssues?'Every line matches the price list.':'No lines.')+'</div>';
   w.innerHTML=h;
 }
-var TPL_GRID='150px minmax(170px,2fr) 66px 58px 78px minmax(140px,1fr) 205px';
+var TPL_GRID='150px minmax(170px,2fr) 66px 58px 78px 112px minmax(140px,1fr) 205px';
 function _tplRowHtml(t,idx,is){
   var bad='border-color:var(--coral)', amb='border-color:var(--amber)';
   var c=is.cat, dl='';
@@ -33792,6 +33939,7 @@ function _tplRowHtml(t,idx,is){
     +'<input value="'+escHtml(t.unit||'')+'" onchange="_tplSetField('+idx+',\'unit\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:center;'+(is.ud?amb:'')+'">'
     +'<input type="number" value="'+(t.qty||0)+'" onchange="_tplSetField('+idx+',\'qty\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:right">'
     +'<input type="number" value="'+(t.price||0)+'" onchange="_tplSetField('+idx+',\'price\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:right;'+(is.pd?amb:'')+'">'
+    +_tplScaleSelHtml(t,idx)
     +ref+'<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'+act+'</span></div>';
 }
 function _tplNameOptions(t,q){
@@ -33801,6 +33949,23 @@ function _tplNameOptions(t,q){
 }
 function _tplNameInput(idx,q){
   var t=dbTemplates[idx], dl=el('tpl-dl-'+idx); if(t&&dl) dl.innerHTML=_tplNameOptions(t,q);
+}
+// Reference size per cabinet type and "Scales by" per line — see the BOM size scaling notes.
+function _tplRefSizeHtml(cab){
+  var r=_cabRef(cab)||{w:'',h:'',d:''}, own=!!CABINET_REF_SIZES[cab], k=cab.replace(/'/g,"\\'");
+  var f=function(d,l){ return '<label style="font-size:10.5px;color:var(--text2);display:flex;align-items:center;gap:3px">'+l+'<input type="number" min="0" value="'+(r[d]===''?'':r[d])+'" onchange="_tplSetRefSize(\''+k+'\',\''+d+'\',this.value)" style="width:64px;height:24px;font-size:11px;text-align:center"></label>'; };
+  return '<span style="display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--text2)">Reference size (mm)'+f('w','W')+f('h','H')+f('d','D')
+    +(own?'':'<span style="color:var(--text2)">'+(CABINET_REF_DEFAULT[cab]||/^slatwall/i.test(cab)?'from the costing scheme':'not set — this type is not sized')+'</span>')+'</span>';
+}
+function _tplSetRefSize(cab,d,v){
+  var cur=_cabRef(cab)||{w:0,h:0,d:0}, n={w:cur.w,h:cur.h,d:cur.d}; n[d]=Math.max(0,parseFloat(v)||0);
+  CABINET_REF_SIZES[cab]=n; _tplAcceptDirty=true; _tplDirty=true; renderTplCheck(); _pdbRenderCountsOnly();
+}
+function _tplScaleSelHtml(t,idx){
+  var auto=_scaleAuto(t.outsource?(t.category==='hardware'?'outsourceHardware':'outsourceMaterials'):t.category,t,t.cabinet);
+  var autoLab=(SCALE_BY_OPTS.find(function(o){return o[0]===auto;})||['',''])[1];
+  return '<select onchange="_tplSetField('+idx+',\'scaleBy\',this.value)" title="Automatic = '+autoLab+'" style="font-size:11px;height:26px;padding:0 3px'+(t.scaleBy?';color:var(--navy);font-weight:600':'')+'">'
+    +SCALE_BY_OPTS.map(function(o){ return '<option value="'+o[0]+'"'+((t.scaleBy||'')===o[0]?' selected':'')+'>'+(o[0]?o[1]:'Auto ('+autoLab.toLowerCase()+')')+'</option>'; }).join('')+'</select>';
 }
 function _tplSetCategory(idx,v){
   var t=dbTemplates[idx]; if(!t) return;
@@ -34156,11 +34321,12 @@ function _collectAppSettings(){
     },
     // Custom Report Export -> Revenue Trend monthly target. Reads the live input on the
     // Export tab when it's open (so an unsaved edit isn't lost), else the last-applied value.
-    tplAccepted:TPL_ACCEPTED, reportTargets:{ monthlyRevenue:(el('rt-target')?(parseFloat(el('rt-target').value)||0):(reportTargets.monthlyRevenue||0)) }
+    tplAccepted:TPL_ACCEPTED, cabinetRefSizes:CABINET_REF_SIZES, reportTargets:{ monthlyRevenue:(el('rt-target')?(parseFloat(el('rt-target').value)||0):(reportTargets.monthlyRevenue||0)) }
   };
 }
 function _applyAppSettings(s){
   if(s&&s.tplAccepted&&typeof s.tplAccepted==='object') TPL_ACCEPTED=s.tplAccepted;
+  if(s&&s.cabinetRefSizes&&typeof s.cabinetRefSizes==='object') CABINET_REF_SIZES=s.cabinetRefSizes;
   if(!s) return;
   if(s.reportTargets&&typeof s.reportTargets.monthlyRevenue!=='undefined'){ reportTargets.monthlyRevenue=Number(s.reportTargets.monthlyRevenue)||0; }
   if(s.msgMailerUrl!==undefined){ MSG_MAILER_URL=s.msgMailerUrl||''; localStorage.setItem('mc_msg_mailer_url',MSG_MAILER_URL); var _mm=el('s-msg-mailer'); if(_mm) _mm.value=MSG_MAILER_URL; }
