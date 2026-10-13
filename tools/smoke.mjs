@@ -165,6 +165,12 @@ const PROFILES = {
             return [before, on, off];
           } finally { w.dbTemplates = keep.t; w.qAreas = keep.a; w.renderItems = keep.r; w.recalc = keep.c; w.dbLoaded = keep.l; }
         }, [[1, 0], [2, 1, 'Vanity Cabinet — with Backing'], [1, 0]]);
+        check('board sheet-size swap: 4x8 -> 6x8 rescales by sheet area; partitions only flag; mm sizes ignored', () => {
+          const r = { name: 'PB 4x8 18mm', qty: 0.7 }, p = { name: 'BEIGE 2F 6x6 12mm', qty: 3 };
+          const a = window._bomSheetSizeSwap(r, 'PB 4x8 18mm', 'PB 6x8 18mm', { type: 'Kitchen Base Cabinet' });
+          const b = window._bomSheetSizeSwap(p, 'BEIGE 2F 6x6 12mm', 'BEIGE 2F 6x8 12mm', { type: 'Toilet Partition' });
+          return [a, r.qty, b, p.qty, !!p.sheetNote, JSON.stringify(window._sheetDimsOf('Edgeband 1mmx22mm'))];
+        }, [true, 0.4667, true, 3, true, 'null']);
         check('toilet partition: 3 cubicles between two walls = 5 panels, free-standing = 7', () => {
           const p = { type: 'Toilet Partition', qty: 3, hardware: [], services: [],
             materials: [{ name: 'BEIGE 2F 6x6 12mm COMPACT LAMINATE', unit: 'pc', qty: 3, price: 7200 }] };

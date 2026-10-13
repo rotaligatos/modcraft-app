@@ -8770,11 +8770,31 @@ function _applyCabScale(bItem){
 // The Qty box shows the SIZED qty; how it was reached sits in the same cell, under the number.
 function _bomSized(row){ return row.baseQty!=null&&row.scaleF&&Math.abs(row.scaleF-1)>1e-9; }
 function _bomQtyShown(row){ var q=+row.qty; return _bomSized(row)?Math.round(q*1000)/1000:(row.qty||1); }
+// ── Board sheet size swapped in a BOM row (e.g. 4x8 -> 6x8) ──
+// A template's board qty is for its own sheet size. Picking a board of a different sheet size
+// rescales the qty by sheet area (a 6x8 holds 1.5x a 4x8). Toilet partitions are not area-based
+// (one panel per sheet, or joined panels), so there it only flags the line to check by hand.
+function _sheetDimsOf(name){
+  var m=String(name||'').match(/(?:^|[^\d.])(\d{1,2})\s*[x×]\s*(\d{1,2})(?![\d.]|\s*mm)/i);
+  return m?{a:+m[1],b:+m[2]}:null;
+}
+function _bomSheetSizeSwap(row,oldName,newName,bItem){
+  var o=_sheetDimsOf(oldName), n=_sheetDimsOf(newName);
+  if(!o||!n||(o.a*o.b===n.a*n.b)){ if(o&&n) delete row.sheetNote; return false; }
+  var lab=o.a+'x'+o.b+' → '+n.a+'x'+n.b;
+  if(_isPartition(bItem)){ row.sheetNote='Sheet '+lab+' — check the panel count (one panel per sheet, or joined)'; return true; }
+  var f=(o.a*o.b)/(n.a*n.b);
+  if(row.baseQty!=null) row.baseQty=Math.round(row.baseQty*f*10000)/10000;
+  else row.qty=Math.round((+row.qty||0)*f*10000)/10000;
+  row.sheetNote='Sheet '+lab+': qty ×'+f.toFixed(3)+' — check';
+  return true;
+}
 function _bomScaleFormula(row,plain){
-  if(!_bomSized(row)) return '';
+  var sn=row.sheetNote?(plain?(' · '+row.sheetNote):'<span style="font-size:9px;color:var(--amber-ink);text-align:center;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="'+escHtml(row.sheetNote)+'"><i class="ti ti-alert-triangle"></i> sheet size</span>'):'';
+  if(!_bomSized(row)) return sn;
   var lab=(SCALE_BY_OPTS.find(function(o){return o[0]===row.scaleUsed;})||['',''])[1].toLowerCase();
   var base=Math.round((+row.baseQty||0)*1000)/1000, t=base+' × '+row.scaleF.toFixed(3);
-  return plain?('Reference '+t+' ('+lab+') = '+_bomQtyShown(row)):'<span style="font-size:9.5px;color:var(--navy);text-align:center;line-height:1.2;margin-top:1px;white-space:nowrap" title="Reference qty × size factor ('+escHtml(lab)+')">'+escHtml(t)+'</span>';
+  return plain?('Reference '+t+' ('+lab+') = '+_bomQtyShown(row)+sn):'<span style="font-size:9.5px;color:var(--navy);text-align:center;line-height:1.2;margin-top:1px;white-space:nowrap" title="Reference qty × size factor ('+escHtml(lab)+')">'+escHtml(t)+'</span>'+sn;
 }
 // ── Optional add-ons (e.g. Vanity: Backing, Top; Wardrobe: Stiffener; LED lighting) ──
 // Template lines with an add-on name are left out until that add-on is ticked on the cabinet.
@@ -8923,9 +8943,14 @@ function onBOMItemSearch(inp,a,ci,cat,ri){
   var item=lookupInSource(db,name);
   if(item){
     var price=parseFloat(item.price)||0;
+    // Update the row in place — replacing it dropped its reference qty (baseQty), add-on tag and
+    // Scales-by, so a sized row was scaled twice on the next change.
+    var _oldName=curRow.name;
+    curRow.name=item.name; curRow.unit=item.unit; curRow.price=price;
+    var _swapped=false;
+    if(cat==='materials'){ _forceEdgeTapeUnit(curRow,item.name); _swapped=_bomSheetSizeSwap(curRow,_oldName,item.name,qAreas[a].bomItems[ci]); }
+    if(curRow.baseQty!=null) _applyCabScale(qAreas[a].bomItems[ci]);
     var curQty=curRow.qty||1;
-    qAreas[a].bomItems[ci][cat][ri]={name:item.name,unit:item.unit,qty:curQty,price:price};
-    if(cat==='materials') _forceEdgeTapeUnit(qAreas[a].bomItems[ci][cat][ri],item.name);
     var finalUnit=qAreas[a].bomItems[ci][cat][ri].unit;
     // Targeted DOM update — avoids full re-render for instant response
     var unitEl=el('bom-unit-'+a+'-'+ci+'-'+cat+'-'+ri);
@@ -8938,6 +8963,7 @@ function onBOMItemSearch(inp,a,ci,cat,ri){
     updateBOMCostHeader(a,ci);
     updateBOMAreaSubtotal(a);
     recalcSoon();
+    if(_swapped) renderItems();   // the qty changed with the sheet size — redraw so the box shows it
   } else {
     curRow.name=name;
     if(cat==='materials'){
@@ -33930,6 +33956,7 @@ function renderTplCheck(){
     +cabs.map(function(c){ return '<option value="'+escHtml(c)+'"'+(c===_tplCheckCab?' selected':'')+'>'+escHtml(c)+'</option>'; }).join('')+'</select>'
     +'<label style="font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" '+(_tplCheckOnlyIssues?'checked':'')+' onchange="_tplCheckOnlyIssues=this.checked;_tplTouched={};renderTplCheck()">Only lines that need attention</label>'
     +'<span style="flex:1"></span>'
+    +'<button class="btn" onclick="_tplNewType()" style="font-size:12px"><i class="ti ti-plus"></i>New cabinet type</button>'
     +'<button class="btn" onclick="_tplUseCatalogAll()" style="font-size:12px" title="Sets every shown line with a different price or unit to the price list\'s. Lines not in the price list are left alone."><i class="ti ti-arrows-exchange"></i>Use price list for all shown</button>'
     +'<button class="btn btn-primary" id="tpl-save-btn" onclick="_tplSave(this)" style="font-size:12px'+(_tplDirty?'':';opacity:.45;cursor:default')+'"'+(_tplDirty?'':' disabled title="Nothing to save yet"')+'><i class="ti ti-device-floppy"></i>Save changes to Price DB</button>'
     +'</div>';
@@ -34022,6 +34049,78 @@ function _tplScaleSelHtml(t,idx){
   var autoLab=(SCALE_BY_OPTS.find(function(o){return o[0]===auto;})||['',''])[1];
   return '<select onchange="_tplSetField('+idx+',\'scaleBy\',this.value)" title="Automatic = '+autoLab+'" style="font-size:11px;height:26px;padding:0 3px'+(t.scaleBy?';color:var(--navy);font-weight:600':'')+'">'
     +SCALE_BY_OPTS.map(function(o){ return '<option value="'+o[0]+'"'+((t.scaleBy||'')===o[0]?' selected':'')+'>'+(o[0]?o[1]:'Auto ('+autoLab.toLowerCase()+')')+'</option>'; }).join('')+'</select>';
+}
+// ── New cabinet type, from Settings › Price Database › Cabinet Templates ──────────────────────
+// Creates the type (so it appears in the quotation's cabinet list) and copies another type's lines
+// as its starting recipe, or applies a preset. Nothing is saved until "Save changes to Price DB".
+// Presets (Rommel, 2026-10-13): full-height (floor-to-ceiling) toilet partitions, 2400 ceiling.
+// Lines added here start at ₱0 and show "Not in the price list" until sourcing prices them.
+var CAB_TYPE_PRESETS={
+  'Toilet Partition – Full Height (6x8)':{from:'Toilet Partition', ref:{w:1000,h:2400,d:1500}, sheet:'6x8', boardQty:3, extra:[]},
+  'Toilet Partition – Full Height (6x6 joined)':{from:'Toilet Partition', ref:{w:1000,h:2400,d:1500}, sheet:'6x6', boardQty:4, extra:[
+    {category:'hardware',name:'Aluminium H-joint profile (panel join)',unit:'lm',qty:4,scaleBy:'panels'},
+    {category:'hardware',name:'Aluminium transom rail (above door)',unit:'lm',qty:0.6,scaleBy:'width'}]}
+};
+// Full-height fixings, common to both presets (one free-standing cubicle: 1 m front + 2 × 1.5 m sides).
+var FULL_HEIGHT_HW=[
+  {category:'hardware',name:'Aluminium U-channel, floor',unit:'lm',qty:4,scaleBy:'panels'},
+  {category:'hardware',name:'Aluminium U-channel, ceiling',unit:'lm',qty:4,scaleBy:'panels'},
+  {category:'hardware',name:'Aluminium U-channel / L-angle, wall (vertical)',unit:'lm',qty:4.8,scaleBy:'panels'},
+  {category:'hardware',name:'Expansion anchor (floor & ceiling channels)',unit:'pc',qty:16,scaleBy:'panels'},
+  {category:'hardware',name:'Stainless screw (channels & brackets)',unit:'pc',qty:30,scaleBy:'panels'}
+];
+function _tplNewType(){
+  var cabs=_tplCabinets();
+  var opts='<option value="">— empty —</option>'+cabs.map(function(c){return '<option value="'+escHtml(c)+'">Copy of '+escHtml(c)+'</option>';}).join('')
+    +Object.keys(CAB_TYPE_PRESETS).map(function(p){return '<option value="preset:'+escHtml(p)+'">Preset: '+escHtml(p)+'</option>';}).join('');
+  var w=el('pdb-tpl-wrap'); if(!w) return;
+  var box=document.createElement('div');
+  box.id='tpl-newtype';
+  box.style.cssText='border:1px solid var(--navy);border-radius:8px;padding:12px;margin-bottom:10px;background:var(--card)';
+  box.innerHTML='<div style="font-size:13px;font-weight:600;color:var(--navy);margin-bottom:8px"><i class="ti ti-plus"></i> New cabinet type</div>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">'
+    +'<select id="tpl-nt-from" onchange="var v=this.value;if(v.indexOf(\'preset:\')===0){el(\'tpl-nt-name\').value=v.slice(7);}" style="height:30px;font-size:12px">'+opts+'</select>'
+    +'<input id="tpl-nt-name" placeholder="Type name, e.g. Toilet Partition – Full Height" style="height:30px;font-size:12px;flex:1;min-width:260px">'
+    +'<button class="btn btn-primary" style="font-size:12px" onclick="_tplCreateType()">Create</button>'
+    +'<button class="btn" style="font-size:12px" onclick="var b=el(\'tpl-newtype\');if(b)b.remove()">Cancel</button></div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-top:6px">It appears in the quotation\'s cabinet list. Press <b>Save changes to Price DB</b> afterwards to keep it.</div>';
+  var old=el('tpl-newtype'); if(old) old.remove();
+  w.insertBefore(box,w.firstChild);
+}
+function _tplCreateType(){
+  var from=(el('tpl-nt-from')||{}).value||'', name=String((el('tpl-nt-name')||{}).value||'').trim();
+  if(!name){ showToast('Type a name for the new cabinet type.'); return; }
+  if(_tplCabinets().indexOf(name)>=0||(typeof CARCASS_PRICES!=='undefined'&&CARCASS_PRICES.hasOwnProperty(name))){ showToast('"'+name+'" already exists.'); return; }
+  var preset=from.indexOf('preset:')===0?CAB_TYPE_PRESETS[from.slice(7)]:null;
+  var src=preset?preset.from:from, added=0;
+  dbTemplates.filter(function(t){return src&&t.cabinet===src;}).forEach(function(t){
+    var c={cabinet:name,category:t.category,name:t.name,unit:t.unit,qty:t.qty,price:t.price,scaleBy:t.scaleBy||'',addon:t.addon||'',outsource:t.outsource};
+    if(preset){
+      var nm=String(t.name||'');
+      if(/pilaster|support post/i.test(nm)) return;                         // full height: panels run floor to ceiling, no posts
+      if(/compact laminate/i.test(nm)&&_sheetDimsOf(nm)){                    // the board: preset sheet size and count
+        c.name=nm.replace(/(\d{1,2})\s*[x×]\s*(\d{1,2})/i,preset.sheet); c.qty=preset.boardQty;
+        if(c.name!==nm) c.price=0;                                           // a different SKU — price from sourcing
+      }
+      if(/hinge/i.test(nm)) c.qty=3;                                         // full-height doors are heavy: 3 hinges
+      if(/cutting/i.test(nm)&&preset.boardQty>3) c.qty=Math.round((+t.qty||0)*preset.boardQty/3*100)/100;
+    }
+    dbTemplates.push(c); added++;
+  });
+  if(preset){
+    FULL_HEIGHT_HW.concat(preset.extra).forEach(function(x){
+      dbTemplates.push({cabinet:name,category:x.category,name:x.name,unit:x.unit,qty:x.qty,price:0,scaleBy:x.scaleBy||'',addon:''}); added++;
+    });
+    CABINET_REF_SIZES[name]={w:preset.ref.w,h:preset.ref.h,d:preset.ref.d};
+  } else if(src&&_cabRef(src)){ var r=_cabRef(src); CABINET_REF_SIZES[name]={w:r.w,h:r.h,d:r.d}; }
+  if(!added) dbTemplates.push({cabinet:name,category:'materials',name:'',unit:'pc',qty:1,price:0,scaleBy:'',addon:''});
+  // Register the type so the quotation lists it (carcass price stays 0 — BOM prices come from the lines).
+  if(typeof CARCASS_PRICES!=='undefined'&&!CARCASS_PRICES.hasOwnProperty(name)){
+    CARCASS_PRICES[name]=0; if(typeof CABINET_BASE_COSTS!=='undefined') CABINET_BASE_COSTS[name]=0; CARCASS_NAMES.push(name);
+  }
+  _tplAcceptDirty=true; _tplDirty=true; _tplCheckCab=name; _tplCheckOnlyIssues=false; _tplTouched={};
+  renderTplCheck(); _pdbRenderCountsOnly();
+  showToast('"'+name+'" created with '+Math.max(added,1)+' line'+(added===1?'':'s')+'. Press Save changes to Price DB to keep it.');
 }
 function _tplAddLine(cab){
   dbTemplates.push({cabinet:cab,category:'materials',name:'',unit:'pc',qty:1,price:0,scaleBy:'',addon:''});
