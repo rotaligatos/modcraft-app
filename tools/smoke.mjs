@@ -150,6 +150,21 @@ const PROFILES = {
           delete b.size; window._applyCabScale(b); out.push(q(), String(b.materials[0].baseQty));
           return out;
         }, ['0.7,4,2,1', '0.9532,6,2,1', '0.9436,4,2,2', '0.7,4,2,1', '0.7,4,2,1', 'undefined']);
+        check('add-ons: ticking adds exactly that add-on\'s lines (costed); unticking removes them; description shows it', () => {
+          const w = window, keep = { t: w.dbTemplates, a: w.qAreas, r: w.renderItems, c: w.recalc, l: w.dbLoaded };
+          try {
+            w.renderItems = () => {}; w.recalc = () => {}; w.dbLoaded = true;
+            w.dbTemplates = [{ cabinet: 'Vanity Cabinet', category: 'materials', name: 'Board 18mm', unit: 'pc', qty: 1, price: 3300 },
+              { cabinet: 'Vanity Cabinet', category: 'materials', name: 'Board 6mm', unit: 'pc', qty: 0.25, price: 1590, addon: 'Backing' },
+              { cabinet: 'Vanity Cabinet', category: 'services', name: 'Cutting', unit: 'lm', qty: 3, price: 16.5, addon: 'Backing' }];
+            w.qAreas = [{ bomItems: [{ type: 'Vanity Cabinet', qty: 1, materials: [], hardware: [], services: [] }] }];
+            const b = w.qAreas[0].bomItems[0];
+            w.loadCabinetTemplate(0, 0, true); const before = [b.materials.length, b.services.length];
+            w.onBOMAddon(0, 0, 'Backing', true); const on = [b.materials.length, b.services.length, w._lineClientName(b)];
+            w.onBOMAddon(0, 0, 'Backing', false); const off = [b.materials.length, b.services.length];
+            return [before, on, off];
+          } finally { w.dbTemplates = keep.t; w.qAreas = keep.a; w.renderItems = keep.r; w.recalc = keep.c; w.dbLoaded = keep.l; }
+        }, [[1, 0], [2, 1, 'Vanity Cabinet — with Backing'], [1, 0]]);
         check('toilet partition: 3 cubicles between two walls = 5 panels, free-standing = 7', () => {
           const p = { type: 'Toilet Partition', qty: 3, hardware: [], services: [],
             materials: [{ name: 'BEIGE 2F 6x6 12mm COMPACT LAMINATE', unit: 'pc', qty: 3, price: 7200 }] };

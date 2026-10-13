@@ -7776,7 +7776,8 @@ function addItemToArea(a) {
 function _lineClientName(it){
   if(!it) return '';
   var l=(it.label||'').trim();
-  return l||it.type||'';
+  var on=it.addons?Object.keys(it.addons).filter(function(k){return it.addons[k];}):[];
+  return (l||it.type||'')+(on.length?' — with '+on.join(', '):'');
 }
 // which='items' (carcass) or 'bomItems' (BOM). Same alias field, same rules, same log line — one
 // behaviour rather than two that can drift.
@@ -8705,7 +8706,8 @@ function _scaleAuto(cat,row,cabType){
     if(board||u==='sqm'||u==='sheet') return /toilet partition/i.test(cabType||'')?'panels':'area';
     return 'overall';
   }
-  if(cat==='services'){ if(u==='lm') return 'edge'; if(u==='sqm') return 'area'; return 'none'; }
+  // Partition cutting follows the panel count too: each extra side panel is another panel to cut.
+  if(cat==='services'){ if(u==='lm') return /toilet partition/i.test(cabType||'')?'panels':'edge'; if(u==='sqm') return 'area'; return 'none'; }
   // hardware (incl. outsourced hardware)
   if(/handgrab|hand grab|profile/.test(n)) return 'width';
   if(/knob|handle|pull/.test(n)) return 'none';
@@ -8732,11 +8734,13 @@ function _partitionPanelMult(bItem){
   var sides=(N-1)+(2-walls);
   return ((N+sides)/N)/3;
 }
-function _scaleFactor(by,bItem){
+function _scaleFactor(by,bItem,row){
   var ref=_cabRef(bItem.type), sizeF=1;
   if(ref&&_cabSizeActive(bItem)){
     var z=_cabSizeOf(bItem,ref);
-    if(by==='area'||by==='overall'||by==='panels') sizeF=_boxArea(z.w,z.h,z.d)/_boxArea(ref.w,ref.h,ref.d);
+    var lmPanels=(by==='panels'&&row&&_pdbNormUnit(row.unit)==='lm');   // cut length grows with edges, not area
+    if(lmPanels) sizeF=_boxEdge(z.w,z.h,z.d)/_boxEdge(ref.w,ref.h,ref.d);
+    else if(by==='area'||by==='overall'||by==='panels') sizeF=_boxArea(z.w,z.h,z.d)/_boxArea(ref.w,ref.h,ref.d);
     else if(by==='edge')   sizeF=_boxEdge(z.w,z.h,z.d)/_boxEdge(ref.w,ref.h,ref.d);
     else if(by==='height') sizeF=z.h/ref.h;
     else if(by==='width')  sizeF=z.w/ref.w;
@@ -8756,18 +8760,61 @@ function _applyCabScale(bItem){
       }
       if(row.baseQty==null) row.baseQty=parseFloat(row.qty)||0;
       var by=row.scaleBy||_scaleAuto(cat,row,bItem.type);
-      var f=_scaleFactor(by,bItem), q=row.baseQty*f;
+      var f=_scaleFactor(by,bItem,row), q=row.baseQty*f;
       if(cat==='hardware'||cat==='outsourceHardware') q=(Math.abs(f-1)<1e-9)?row.baseQty:Math.ceil(q-1e-9);
       else q=Math.round(q*10000)/10000;
       row.qty=q; row.scaleF=f; row.scaleUsed=by;
     });
   });
 }
-function _bomScaleNote(row){
-  if(row.baseQty==null||!row.scaleF||Math.abs(row.scaleF-1)<1e-9) return '';
+// The Qty box shows the SIZED qty; how it was reached sits in the same cell, under the number.
+function _bomSized(row){ return row.baseQty!=null&&row.scaleF&&Math.abs(row.scaleF-1)>1e-9; }
+function _bomQtyShown(row){ var q=+row.qty; return _bomSized(row)?Math.round(q*1000)/1000:(row.qty||1); }
+function _bomScaleFormula(row,plain){
+  if(!_bomSized(row)) return '';
   var lab=(SCALE_BY_OPTS.find(function(o){return o[0]===row.scaleUsed;})||['',''])[1].toLowerCase();
-  return '<div style="margin:-2px 0 4px 2px;font-size:10px;color:var(--navy)">Sized: '+row.baseQty+' × '+row.scaleF.toFixed(3)
-    +' ('+escHtml(lab)+') = <b>'+(+row.qty).toLocaleString(undefined,{maximumFractionDigits:3})+'</b></div>';
+  var base=Math.round((+row.baseQty||0)*1000)/1000, t=base+' × '+row.scaleF.toFixed(3);
+  return plain?('Reference '+t+' ('+lab+') = '+_bomQtyShown(row)):'<span style="font-size:9.5px;color:var(--navy);text-align:center;line-height:1.2;margin-top:1px;white-space:nowrap" title="Reference qty × size factor ('+escHtml(lab)+')">'+escHtml(t)+'</span>';
+}
+// ── Optional add-ons (e.g. Vanity: Backing, Top; Wardrobe: Stiffener; LED lighting) ──
+// Template lines with an add-on name are left out until that add-on is ticked on the cabinet.
+// Ticking adds them (sized like every other line, and costed); unticking removes exactly them.
+function _cabTplSource(){
+  return dbTemplates.length?dbTemplates:INIT_TEMPLATES.map(function(t){return {cabinet:t[0],category:t[1],name:t[2],unit:t[3],qty:t[4],price:t[5]};});
+}
+function _cabAddonNames(type){
+  var seen={}, out=[];
+  _cabTplSource().forEach(function(t){ if(t.cabinet===type&&t.addon&&!seen[t.addon]){ seen[t.addon]=1; out.push(t.addon); } });
+  return out;
+}
+function _bomAddonRowHtml(a,ci,bItem){
+  var names=_cabAddonNames(bItem.type); if(!names.length) return '';
+  var on=bItem.addons||{};
+  return '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 6px 2px;padding:6px 8px;border:.5px dashed var(--border);border-radius:6px">'
+    +'<span style="font-size:10.5px;font-weight:600;color:var(--navy)"><i class="ti ti-circle-plus"></i> Add-ons</span>'
+    +names.map(function(n){
+      var k=n.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      return '<label style="font-size:11.5px;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox"'+(on[n]?' checked':'')
+        +' onchange="'+_hEdit('onBOMAddon('+a+','+ci+',\''+k+'\',this.checked)')+'">'+escHtml(n)+'</label>';
+    }).join('')+'</div>';
+}
+function onBOMAddon(a,ci,name,checked){
+  var b=qAreas[a].bomItems[ci]; if(!b) return;
+  b.addons=b.addons||{};
+  var cats=['materials','hardware','services','outsourceMaterials','outsourceHardware'];
+  cats.forEach(function(c){ if(b[c]) b[c]=b[c].filter(function(r){ return r.addon!==name; }); });
+  if(checked){
+    b.addons[name]=true;
+    _cabTplSource().forEach(function(r){
+      if(r.cabinet!==b.type||r.addon!==name) return;
+      var cat=r.category;
+      if((cat==='materials'||cat==='hardware')&&(r.outsource||(dbOutsource.length&&lookupInSource(dbOutsource,r.name)))) cat=cat==='materials'?'outsourceMaterials':'outsourceHardware';
+      if(cats.indexOf(cat)<0) return;
+      if(!b[cat]) b[cat]=[];
+      b[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,scaleBy:r.scaleBy||'',addon:name,saved:cat.indexOf('outsource')===0?true:undefined});
+    });
+  } else delete b.addons[name];
+  _applyCabScale(b); renderItems(); recalc();
 }
 function _bomSizeRowHtml(a,ci,bItem){
   var ref=_cabRef(bItem.type), part=_isPartition(bItem);
@@ -8844,7 +8891,8 @@ function onBOMQtyChange(a,ci,val) {
 }
 function onBOMRowChange(a,ci,cat,ri,field,val) {
   var _r0=qAreas[a].bomItems[ci][cat][ri];
-  if(field==='qty'&&_r0&&_r0.baseQty!=null) _r0.baseQty=parseFloat(val)||0;
+  // A sized row's box shows the sized qty; typing in it sets the qty, so the reference is worked back.
+  if(field==='qty'&&_r0&&_r0.baseQty!=null) _r0.baseQty=(parseFloat(val)||0)/(_r0.scaleF||1);
   else if(field==='qty'||field==='price') qAreas[a].bomItems[ci][cat][ri][field]=parseFloat(val)||0;
   else qAreas[a].bomItems[ci][cat][ri][field]=val;
   if(field==='qty') _applyCabScale(qAreas[a].bomItems[ci]);
@@ -9356,9 +9404,12 @@ function loadCabinetTemplate(a,ci,silent) {
   // Use the price stored in CabinetTemplates (not the live DB price).
   // When the user changes an item via the search field, onBOMItemSearch() will
   // then pull the current price from Materials/Hardware/Services sheet.
+  if(!bItem.addons) bItem.addons={};
   for(var i=0;i<matched.length;i++){
     var r=matched[i];
     var cat=r.category;
+    // Optional add-on lines (e.g. Backing, Top) come in only when ticked on this cabinet.
+    if(r.addon&&!bItem.addons[r.addon]) continue;
     // A material/hardware line named in the Price DB's Outsource tab is bought out, not stocked —
     // it goes to this cabinet's Outsource section (outsource markup), not its regular rows.
     // Re-applying the template does not duplicate it.
@@ -9367,11 +9418,11 @@ function loadCabinetTemplate(a,ci,silent) {
       if(!bItem[oc]) bItem[oc]=[];
       var nl=String(r.name||'').trim().toLowerCase();
       if(!bItem[oc].some(function(x){return String(x.name||'').trim().toLowerCase()===nl;}))
-        bItem[oc].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,saved:true,scaleBy:r.scaleBy||''});
+        bItem[oc].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,saved:true,scaleBy:r.scaleBy||'',addon:r.addon||undefined});
       continue;
     }
     if(cat==='materials'||cat==='hardware'||cat==='services'){
-      bItem[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,scaleBy:r.scaleBy||''});
+      bItem[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,scaleBy:r.scaleBy||'',addon:r.addon||undefined});
     }
   }
   _applyCabScale(bItem);   // template qtys are the reference; a size already entered applies at once
@@ -9617,11 +9668,11 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
             +'oninput="'+_hEdit('onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" onchange="'+_hEdit('onBOMItemSearch(this,'+a+','+ci+',\''+cat+'\','+r+')')+'" '
             +'style="'+inpStyle+';width:100%"><datalist id="'+dlId+'">'+dlOpts+'</datalist></span>'
           +'<span id="'+_rndIdp+'bom-unit-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:11px;color:var(--text2);padding-left:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+row.unit+'">'+row.unit+'</span>'
-          +'<input type="number" min="0" step="0.01" value="'+(row.baseQty!=null?row.baseQty:(row.qty||1))+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
+          +'<span style="display:flex;flex-direction:column;min-width:0"><input type="number" min="0" step="0.01" value="'+_bomQtyShown(row)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center;width:100%'+(_bomSized(row)?';border-color:var(--navy);color:var(--navy);font-weight:600':'')+'" title="'+escHtml(_bomScaleFormula(row,true))+'">'+_bomScaleFormula(row)+'</span>'
           +'<input id="'+_rndIdp+'bom-price-'+a+'-'+ci+'-'+cat+'-'+r+'" type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)')+'" style="height:28px;font-size:12px;text-align:right">'
           +uplCell
           +'<span id="'+_rndIdp+'bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
-          +removeBtn+'</div>'+uplNote+_bomScaleNote(row)
+          +removeBtn+'</div>'+uplNote
           +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       } else {
         // Free-text mode: name input + unit select
@@ -9630,11 +9681,11 @@ function renderBOMSection(a,ci,cat,catLabel,rows) {
         h+='<div style="display:grid;grid-template-columns:'+cols+';gap:4px;margin-bottom:4px;align-items:center">'
           +'<input value="'+(row.name||'')+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'name\',this.value)')+'" style="height:28px;font-size:12px" placeholder="Item name">'
           +selU
-          +'<input type="number" min="0" step="0.01" value="'+(row.baseQty!=null?row.baseQty:(row.qty||1))+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center">'
+          +'<span style="display:flex;flex-direction:column;min-width:0"><input type="number" min="0" step="0.01" value="'+_bomQtyShown(row)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'qty\',this.value)')+'" style="height:28px;font-size:12px;text-align:center;width:100%'+(_bomSized(row)?';border-color:var(--navy);color:var(--navy);font-weight:600':'')+'" title="'+escHtml(_bomScaleFormula(row,true))+'">'+_bomScaleFormula(row)+'</span>'
           +'<input type="number" min="0" step="0.01" value="'+(row.price||0)+'" oninput="'+_hEdit('onBOMRowChange('+a+','+ci+',\''+cat+'\','+r+',\'price\',this.value)')+'" style="height:28px;font-size:12px;text-align:right">'
           +uplCell
           +'<span id="'+_rndIdp+'bom-amt-'+a+'-'+ci+'-'+cat+'-'+r+'" style="font-size:12px;text-align:right;color:var(--text2)">'+amount+'</span>'
-          +removeBtn+'</div>'+uplNote+_bomScaleNote(row)
+          +removeBtn+'</div>'+uplNote
           +(cat==='materials'?_bomMatMtoRowHtml(a,ci,r,row):'');
       }
     }
@@ -9890,6 +9941,7 @@ function _renderScopeCore(wrap) {
               +'</div>';
           })()
           +_bomSizeRowHtml(a,ci,bItem)
+          +_bomAddonRowHtml(a,ci,bItem)
           +renderBOMSection(a,ci,'materials','Materials',bItem.materials||[])
           +renderBOMSection(a,ci,'hardware','Hardware',bItem.hardware||[])
           +renderBOMSection(a,ci,'services','Services',bItem.services||[])
@@ -20482,15 +20534,15 @@ function _carcassSaveTplToDb(cabinetName,btnEl,onSaved){
       resetBtn();
       return;
     }
-    var rows=[['Cabinet','Category','Name','Unit','Qty','Price','Scales by']].concat(dbTemplates.map(function(t){
-      return [t.cabinet,_tplCatOut(t),t.name,t.unit,t.qty,t.price,t.scaleBy||''];
+    var rows=[['Cabinet','Category','Name','Unit','Qty','Price','Scales by','Add-on']].concat(dbTemplates.map(function(t){
+      return [t.cabinet,_tplCatOut(t),t.name,t.unit,t.qty,t.price,t.scaleBy||'',t.addon||''];
     }));
     priceDbClear('CabinetTemplates!A:Z')
       .then(function(){ return priceDbUpdate('CabinetTemplates!A1',rows); })
       .then(function(res){
         if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
         supaReplaceTable('cabinet_templates',dbTemplates.map(function(t){
-          return {cabinet:t.cabinet,category:_tplCatOut(t),name:t.name,unit:t.unit,qty:t.qty,price:t.price,scale_by:t.scaleBy||null};
+          return {cabinet:t.cabinet,category:_tplCatOut(t),name:t.name,unit:t.unit,qty:t.qty,price:t.price,scale_by:t.scaleBy||null,addon:t.addon||null};
         }));
         showToast('Template changes saved to Price DB.');
         if(typeof onSaved==='function') onSaved();
@@ -31580,7 +31632,7 @@ function supaMigratePriceDb(){
   return Promise.all([
     priceDbGet('Materials!A:C'),
     priceDbGet('Hardware!A:C'),
-    priceDbGet('CabinetTemplates!A:G'),
+    priceDbGet('CabinetTemplates!A:H'),
     priceDbGet('Services!A:C')
   ]).then(function(results){
     var matData=results[0], hwData=results[1], tplData=results[2], svcData=results[3];
@@ -31589,7 +31641,7 @@ function supaMigratePriceDb(){
     var parsed={};
     if(!matData.error&&matData.values) parsed.price_materials=matData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
     if(!hwData.error&&hwData.values) parsed.price_hardware=hwData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-    if(!tplData.error&&tplData.values) parsed.cabinet_templates=tplData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0,scale_by:r[6]||null};});
+    if(!tplData.error&&tplData.values) parsed.cabinet_templates=tplData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0,scale_by:r[6]||null,addon:r[7]||null};});
     if(!svcData.error&&svcData.values) parsed.price_services=svcData.values.slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
     var statKeys={price_materials:'materials',price_hardware:'hardware',cabinet_templates:'templates',price_services:'services'};
     var tableKeys=Object.keys(parsed);
@@ -33405,7 +33457,7 @@ function supaGetPriceDb(){
       supa.from('price_services').select('name,unit,price,svc_type,teams,shifts_per_day,output_per_shift,cost_data').order('id',{ascending:true}),
       _supaFetchAllRowsCached('price_materials','name,unit,price'),
       supa.from('price_hardware').select('name,unit,price'),
-      supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price,scale_by')
+      supa.from('cabinet_templates').select('cabinet,category,name,unit,qty,price,scale_by,addon')
     ]).then(function(results){
       var svc=results[0],mat=results[1],hw=results[2],tpl=results[3];
       if(svc.error||mat.error||hw.error||tpl.error) return null;
@@ -33501,7 +33553,7 @@ function _loadPriceDbFromMirror(showFeedback){
       });
       dbMaterials=data.materials.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
       dbHardware=data.hardware.map(function(r){return {name:r.name||'',unit:r.unit||'pc',price:parseFloat(r.price)||0};});
-      dbTemplates=data.templates.map(function(r){return _tplNorm({cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0,scaleBy:r.scale_by||''});});
+      dbTemplates=data.templates.map(function(r){return _tplNorm({cabinet:r.cabinet||'',category:r.category||'',name:r.name||'',unit:r.unit||'pc',qty:parseFloat(r.qty)||0,price:parseFloat(r.price)||0,scaleBy:r.scale_by||'',addon:r.addon||''});});
       _applyMtoTags();
       _syncServicesFromDb();
       supaLoadPmesCapacity();
@@ -33521,7 +33573,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
     priceDbGet('Services!A:C'),
     priceDbGet('Materials!A:C'),
     priceDbGet('Hardware!A:C'),
-    priceDbGet('CabinetTemplates!A:G')
+    priceDbGet('CabinetTemplates!A:H')
   ])
     .then(function(results){
       var svcData=results[0], matData=results[1], hwData=results[2], tplData=results[3];
@@ -33532,7 +33584,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
       dbServices=(svcData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbMaterials=(matData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
       dbHardware=(hwData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return {name:r[0]||'',unit:r[1]||'pc',price:parseFloat(r[2])||0};});
-      dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return _tplNorm({cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0,scaleBy:r[6]||''});});
+      dbTemplates=(tplData.values||[]).slice(1).filter(function(r){return r[0];}).map(function(r){return _tplNorm({cabinet:r[0]||'',category:r[1]||'',name:r[2]||'',unit:r[3]||'pc',qty:parseFloat(r[4])||0,price:parseFloat(r[5])||0,scaleBy:r[6]||'',addon:r[7]||''});});
       _applyMtoTags();
       _syncServicesFromDb();
       supaLoadPmesCapacity();
@@ -33895,18 +33947,20 @@ function renderTplCheck(){
     if(!rows.length) return;
     shown+=rows.length;
     h+='<div style="border:.5px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">'
-      +'<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:6px"><span style="font-size:12px;font-weight:600;color:var(--navy)"><i class="ti ti-template"></i> '+escHtml(cab)+'</span>'+_tplRefSizeHtml(cab)+'</div>'
+      +'<div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:6px"><span style="font-size:12px;font-weight:600;color:var(--navy)"><i class="ti ti-template"></i> '+escHtml(cab)+'</span>'+_tplRefSizeHtml(cab)+'<button class="btn" style="font-size:11px;padding:2px 8px;margin-left:auto" onclick="_tplAddLine(\''+cab.replace(/'/g,"\\'")+'\')"><i class="ti ti-plus"></i>Add line</button></div>'
       +'<div style="display:grid;grid-template-columns:'+TPL_GRID+';gap:5px;font-size:9px;color:var(--text2);text-transform:uppercase;margin-bottom:3px">'
       // Centred over the boxes. Right-aligned, "Qty" sat at the edge of the Price box and the
       // highlighted Price read as the quantity (Rommel, 2026-10-13).
-      +'<span>Category</span><span>Name</span><span style="text-align:center">Unit</span><span style="text-align:center">Qty</span><span style="text-align:center">Price (₱)</span><span style="text-align:center" title="How this line grows when a quotation enters a bigger size than the reference">Scales by</span><span style="padding-left:6px">Price list (unit · price)</span><span></span></div>';
+      +'<span>Category</span><span>Name</span><span style="text-align:center">Unit</span><span style="text-align:center">Qty</span><span style="text-align:center">Price (₱)</span><span style="text-align:center" title="How this line grows when a quotation enters a bigger size than the reference">Scales by</span><span style="text-align:center" title="Blank = always included. A name (e.g. Backing) makes it an optional add-on staff can tick in the quotation.">Add-on</span><span style="padding-left:6px">Price list (unit · price)</span><span></span></div>';
     rows.forEach(function(r){ h+=_tplRowHtml(r.t,r.idx,r.is); });
     h+='</div>';
   });
+  var _an={}; dbTemplates.forEach(function(t){ if(t.addon) _an[t.addon]=1; });
+  h+='<datalist id="tpl-addon-dl">'+Object.keys(_an).map(function(n){return '<option value="'+escHtml(n)+'">';}).join('')+'</datalist>';
   if(!shown) h+='<div style="font-size:12px;color:var(--teal);padding:8px 0"><i class="ti ti-check"></i> '+(_tplCheckOnlyIssues?'Every line matches the price list.':'No lines.')+'</div>';
   w.innerHTML=h;
 }
-var TPL_GRID='150px minmax(170px,2fr) 66px 58px 78px 112px minmax(140px,1fr) 205px';
+var TPL_GRID='150px minmax(170px,2fr) 66px 58px 78px 112px 110px minmax(130px,1fr) 205px 22px';
 function _tplRowHtml(t,idx,is){
   var bad='border-color:var(--coral)', amb='border-color:var(--amber)';
   var c=is.cat, dl='';
@@ -33940,7 +33994,9 @@ function _tplRowHtml(t,idx,is){
     +'<input type="number" value="'+(t.qty||0)+'" onchange="_tplSetField('+idx+',\'qty\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:right">'
     +'<input type="number" value="'+(t.price||0)+'" onchange="_tplSetField('+idx+',\'price\',this.value)" style="font-size:12px;height:26px;padding:1px 4px;text-align:right;'+(is.pd?amb:'')+'">'
     +_tplScaleSelHtml(t,idx)
-    +ref+'<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'+act+'</span></div>';
+    +'<input value="'+escHtml(t.addon||'')+'" list="tpl-addon-dl" placeholder="standard" onchange="_tplSetField('+idx+',\'addon\',this.value)" title="Blank = always included. A name makes it an optional add-on ticked in the quotation." style="font-size:11px;height:26px;padding:1px 5px'+(t.addon?';color:var(--purple,#7c3aed);font-weight:600':'')+'">'
+    +ref+'<span style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">'+act+'</span>'
+    +'<button onclick="_tplRemoveLine('+idx+')" title="Remove this line" style="background:none;border:none;color:var(--coral);cursor:pointer;padding:0"><i class="ti ti-x"></i></button></div>';
 }
 function _tplNameOptions(t,q){
   var src=_tplSrc(t.category)||dbMaterials;
@@ -33966,6 +34022,16 @@ function _tplScaleSelHtml(t,idx){
   var autoLab=(SCALE_BY_OPTS.find(function(o){return o[0]===auto;})||['',''])[1];
   return '<select onchange="_tplSetField('+idx+',\'scaleBy\',this.value)" title="Automatic = '+autoLab+'" style="font-size:11px;height:26px;padding:0 3px'+(t.scaleBy?';color:var(--navy);font-weight:600':'')+'">'
     +SCALE_BY_OPTS.map(function(o){ return '<option value="'+o[0]+'"'+((t.scaleBy||'')===o[0]?' selected':'')+'>'+(o[0]?o[1]:'Auto ('+autoLab.toLowerCase()+')')+'</option>'; }).join('')+'</select>';
+}
+function _tplAddLine(cab){
+  dbTemplates.push({cabinet:cab,category:'materials',name:'',unit:'pc',qty:1,price:0,scaleBy:'',addon:''});
+  _tplTouched[dbTemplates.length-1]=true; _tplDirty=true; _tplCheckCab=cab; renderTplCheck(); _pdbRenderCountsOnly();
+}
+function _tplRemoveLine(idx){
+  var t=dbTemplates[idx]; if(!t) return;
+  _confirm('Remove this line from '+t.cabinet+'?\n\n'+(t.name||'(unnamed)')+'\n\nNothing is saved until you press Save changes to Price DB.',function(){
+    dbTemplates.splice(idx,1); _tplTouched={}; _tplDirty=true; renderTplCheck(); _pdbRenderCountsOnly();
+  });
 }
 function _tplSetCategory(idx,v){
   var t=dbTemplates[idx]; if(!t) return;
