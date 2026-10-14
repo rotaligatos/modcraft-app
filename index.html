@@ -4783,6 +4783,36 @@ function prodMachine(key){
           allowRotate:!!m.allowRotate, owned:m.owned!==false};
 }
 function prodKerf(){ return prodMachine().kerf; }
+// The board a material is cut from — the ONE rule, used by the packer (prodComputeBom) and by the
+// early "too big for the board" warning, so the warning can never disagree with the layout.
+function _prodBoardFor(material){
+  var w=1220, h=2440, list=(prodSettings&&prodSettings.boardSizes)||[];
+  for(var m=0;m<list.length;m++){
+    var bs=list[m];
+    if(material&&bs.material&&String(material).toLowerCase().indexOf(bs.material.split('/')[0].toLowerCase())>=0){
+      if(bs.sizes&&bs.sizes.length){ w=bs.sizes[0].w; h=bs.sizes[0].h; }
+      break;
+    }
+  }
+  return {w:w,h:h};
+}
+// Why a piece will not go on its board ('' = it fits). Same test as guillotinePackBoards: length
+// runs along the board's long side, width across, plus the saw kerf; a piece is turned only on a
+// machine that rotates AND when its grain does not fix the direction. Rommel, 2026-10-14: a piece
+// that cannot be placed was only reported after the layout, and its boards were left out of the
+// count — so it is warned on the cutting list row and blocks Reflect to quotation.
+function _prodPieceFitIssue(L,W,grain,material){
+  L=+L||0; W=+W||0; if(!(L>0&&W>0)) return '';
+  var m=prodMachine(), k=m.kerf||0, b=_prodBoardFor(material);
+  var fits=function(l,w){ return l+k<=b.h&&w+k<=b.w; };
+  if(fits(L,W)) return '';
+  var locked=(grain==='length'||grain==='width');
+  if(m.allowRotate&&!locked&&fits(W,L)) return '';
+  var maxL=b.h-k, maxW=b.w-k;
+  if(fits(W,L)) return 'Width '+W+' is wider than the board ('+maxW+' max across). It fits turned — swap Length and Width'
+    +(m.allowRotate?', or set its grain to none':'')+'.';
+  return L+' × '+W+' is bigger than a '+b.w+'×'+b.h+' board (max '+maxL+' long × '+maxW+' wide with the '+k+'mm kerf). Use a bigger board or split it into two pieces.';
+}
 // "Panel Saw · 3mm kerf" — used wherever a report has to say what it simulated.
 function prodMachineLabel(key){ var m=prodMachine(key); return m.label+' · '+m.kerf+'mm kerf'; }
 // Settings → Designers Support: define each machine's kerf. Saves on change (same pattern as the
@@ -37172,6 +37202,22 @@ var MCL=(function(){
     return ' class="mcl-f-'+field+'" onpaste="MCL.onCellPaste(event,'+'{{I}}'+',\''+field+'\')"'
       +' onkeydown="MCL.onCellKey(event,'+'{{I}}'+',\''+field+'\')"';
   }
+  // Does this row's piece go on its board? Same rule the layout uses (_prodPieceFitIssue), with the
+  // row's grain (or the job's) and the material's board. Shown the moment a size is typed, instead
+  // of only after the layout leaves the piece off every board.
+  function fitIssue(p){
+    if(!p||!(num(p.L)>0&&num(p.W)>0)) return '';
+    var gr=p.grain?_webGrainToModcraft(p.grain):(S.grain||'length');
+    var sub=(_prodParseMaterialDescriptor(p.mat||'').substrate)||p.mat||'';
+    return _prodPieceFitIssue(num(p.L),num(p.W),gr,sub);
+  }
+  function markFit(i){
+    var w=el('prod-wrap'), tr=w&&w.querySelector('tr[data-i="'+i+'"]'); if(!tr) return;
+    var why=fitIssue(S.panels[i]);
+    ['L','W'].forEach(function(f){ var x=tr.querySelector('.mcl-f-'+f); if(!x) return;
+      x.style.border=why?'1.5px solid var(--bad,#dc2626)':'.5px solid var(--border)'; x.title=why||''; });
+  }
+  function markAllFit(){ for(var i=0;i<S.panels.length;i++) markFit(i); _mclFooter(); }
   function panelRow(p,i){
     var inp='style="width:100%;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
     var sel='style="width:100%;padding:4px 4px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
@@ -37185,8 +37231,9 @@ var MCL=(function(){
     h+='<td><input '+inp+ca('th')+' type="number" min="0" step="0.1" value="'+(p.th||'')+'" oninput="MCL.set('+i+',\'th\',this.value)"></td>';
     // Order asked for by the team (2026-09-30): cabinet, part, material, thickness, QUANTITY, then size.
     h+='<td><input '+inp+ca('qty')+' type="number" min="1" value="'+(p.qty||1)+'" oninput="MCL.set('+i+',\'qty\',this.value)"></td>';
-    h+='<td><input '+inp+ca('L')+' type="number" min="0" value="'+(p.L||'')+'" oninput="MCL.set('+i+',\'L\',this.value)"></td>';
-    h+='<td><input '+inp+ca('W')+' type="number" min="0" value="'+(p.W||'')+'" oninput="MCL.set('+i+',\'W\',this.value)"></td>';
+    var fit=fitIssue(p), inpLW=fit?inp.replace('border:.5px solid var(--border)','border:1.5px solid var(--bad,#dc2626)')+' title="'+esc(fit)+'"':inp;
+    h+='<td><input '+inpLW+ca('L')+' type="number" min="0" value="'+(p.L||'')+'" oninput="MCL.set('+i+',\'L\',this.value)"></td>';
+    h+='<td><input '+inpLW+ca('W')+' type="number" min="0" value="'+(p.W||'')+'" oninput="MCL.set('+i+',\'W\',this.value)"></td>';
     h+='<td><select '+sel+' class="mcl-f-ebt" onchange="MCL.set('+i+',\'ebt\',this.value)">'+opts(EBT,p.ebt)+'</select></td>';
     h+='<td><input '+inp+ca('emat')+' value="'+esc(p.emat)+'" placeholder="edge tape (optional)" oninput="MCL.set('+i+',\'emat\',this.value)"></td>';
     h+='<td><select '+sel+' class="mcl-f-grain" onchange="MCL.set('+i+',\'grain\',this.value)">'
@@ -37484,6 +37531,7 @@ var MCL=(function(){
   function set(i,f,v){
     var p=S.panels[i]; if(!p) return;
     p[f]=(f==='L'||f==='W'||f==='qty'||f==='th')?num(v):v;
+    if(f==='L'||f==='W'||f==='grain'||f==='mat') markFit(i);
     _mclFooter();                                 // no full re-render while typing
   }
   // One definition, used by the full render and by the in-place patch. Two copies
@@ -37499,7 +37547,9 @@ var MCL=(function(){
       +' · <b style="color:var(--text)">'+t.pieces+'</b> piece'+(t.pieces===1?'':'s')
       +' · <b style="color:var(--text)">'+t.area.toFixed(3)+'</b> m²'
       +(hplN?(' · '+hplN+' HPL build'+(hplN===1?'':'s')):'')
-      +(hwN?(' · '+hwN+' hardware line'+(hwN===1?'':'s')):'');
+      +(hwN?(' · '+hwN+' hardware line'+(hwN===1?'':'s')):'')
+      +(function(){ var bad=[]; S.panels.forEach(function(p,i){ if(fitIssue(p)) bad.push(i+1); });
+        return bad.length?' · <b style="color:var(--bad,#dc2626)">⚠ '+bad.length+' row'+(bad.length===1?'':'s')+' too big for the board (row '+bad.join(', ')+') — hover the red size for why</b>':''; })();
   }
   function _mclFooter(){
     // Patch just the counts, so a keystroke never rebuilds the table under the
@@ -37750,7 +37800,8 @@ var MCL=(function(){
     build:build, afterRender:afterRender,
     onCellPaste:onCellPaste, onCellKey:onCellKey,
     downloadTemplate:downloadTemplate, uploadExcel:uploadExcel, _panelColMap:panelColMap, _findPanelHeader:findPanelHeader,
-    setGrain:function(v){ S.grain=v; },
+    setGrain:function(v){ S.grain=v; markAllFit(); },
+    _fitIssue:fitIssue,
     setGroupBy:function(v){ S.groupBy=v; rerender(); },
     // One stored value (prodSettings.machineType) with two entry points — this and the machines
     // table in Settings — so the page and the packer can never disagree about which machine ran.
@@ -37765,7 +37816,7 @@ var MCL=(function(){
     removePanel:function(i){ S.panels.splice(i,1); rerender(); },
     set:set,
     matSearch:function(inp,i){
-      S.panels[i].mat=inp.value; fillMatList('mcl-mat-dl-'+i,inp.value);
+      S.panels[i].mat=inp.value; fillMatList('mcl-mat-dl-'+i,inp.value); markFit(i);
       // The picked material already states its thickness — fill it in rather than have it typed
       // a second time, where the two can silently disagree and the panel gets cut from the wrong
       // board. Only ever writes when the text actually states a thickness; typing a partial name
@@ -42588,14 +42639,7 @@ function prodComputeBom(comps){
   var allowRotate=_mach.allowRotate;
   for(var j=0;j<keys.length;j++){
     var g=groups[keys[j]];
-    var boardW=1220; var boardH=2440;
-    for(var m=0;m<prodSettings.boardSizes.length;m++){
-      var bs=prodSettings.boardSizes[m];
-      if(g.material&&bs.material&&g.material.toLowerCase().indexOf(bs.material.split('/')[0].toLowerCase())>=0){
-        if(bs.sizes&&bs.sizes.length){boardW=bs.sizes[0].w;boardH=bs.sizes[0].h;}
-        break;
-      }
-    }
+    var _bd=_prodBoardFor(g.material), boardW=_bd.w, boardH=_bd.h;
     var sim=guillotinePackBoards(g.pieces,boardW,boardH,kerf,allowRotate);
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
@@ -43701,6 +43745,21 @@ function prodReflectToQuotation(){
   var flaggedMats=sum.materials.filter(function(r){return r.needsReview&&r.include;});
   var flaggedHw=sum.hardware.filter(function(r){return r.needsReview&&r.include;});
   var flaggedSvc=sum.services.filter(function(r){return r.needsReview&&r.include;});
+  // A piece too big for its board is on no layout, so its boards are missing from the count and the
+  // quotation would go out short (Rommel, 2026-10-14). It has to be fixed before reflecting.
+  var _comps=(prodState.result&&prodState.result.components)||[];
+  var _bomR=(prodState.result&&prodState.result._bom)||prodComputeBom(_comps), _over=[];
+  _bomR.forEach(function(b){ (b.oversizedRefs||[]).forEach(function(ref){ if(_over.indexOf(ref)<0) _over.push(ref); }); });
+  if(_over.length){
+    alert('Cannot reflect to quotation — '+_over.length+' piece'+(_over.length>1?'s are':' is')+' too big for the board, so '
+      +(_over.length>1?'they are':'it is')+' on no cutting layout and '+(_over.length>1?'their':'its')+' boards are not counted.\n\n'
+      +_over.slice(0,8).map(function(ref){ var c=_comps[ref]||{};
+        return 'P'+(ref+1)+' '+(c.name||'piece')+(c.area?' ('+c.area+')':'')+' — '+(c.length||0)+' × '+(c.width||0)
+          +'\n   '+(_prodPieceFitIssue(c.length,c.width,c.grain,c.material)||'does not fit the board'); }).join('\n')
+      +(_over.length>8?'\n…':'')
+      +'\n\nFix the size in the cutting list (swap Length and Width if it is entered sideways), then load it again.');
+    return;
+  }
   var totalFlagged=flaggedComps.length+flaggedMats.length+flaggedHw.length+flaggedSvc.length;
   if(totalFlagged){
     var names=flaggedComps.map(function(c){return c.name||'(unnamed)';})

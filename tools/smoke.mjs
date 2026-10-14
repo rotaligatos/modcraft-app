@@ -101,6 +101,18 @@ const PROFILES = {
                   return [top.data[0].jo_number, all.map(x => x.status).join(','), all.length];
                 } finally { if (keep === null) localStorage.removeItem(K); else localStorage.setItem(K, keep); }
               }, ['B', 'superseded,reserved', 2]);
+      /* 2026-10-14: a piece too big for its board was only reported after the layout, and its
+         boards were left out of the count. _prodPieceFitIssue is the same rule as the packer. */
+      if (typeof window._prodPieceFitIssue === 'function')
+        check('_prodPieceFitIssue: sideways and over-length pieces are caught, a fitting piece is not',
+              () => { const mt = window.prodSettings.machineType;
+                      try { window.prodSettings.machineType = 'panelsaw';
+                        return [window._prodPieceFitIssue(2000, 600, 'length', 'PB') === '',
+                                /swap Length and Width/.test(window._prodPieceFitIssue(600, 2000, 'length', 'PB')),
+                                /bigger board or split/.test(window._prodPieceFitIssue(2600, 500, 'length', 'PB')),
+                                window._prodPieceFitIssue(2440, 600, 'length', 'PB') !== ''];   // kerf: 2440 does not fit
+                      } finally { window.prodSettings.machineType = mt; } },
+              [true, true, true, true]);
       if (typeof window._prodReflectStageBlock === 'function')
         check('_prodReflectStageBlock: locked stages and an unopened Final Quotation refuse a cutting list',
               () => {
