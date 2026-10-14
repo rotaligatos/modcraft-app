@@ -5360,6 +5360,13 @@ const PROFILES = {
           return { oneRow20: m({ qty: 20, endWalls: 2 }), sets4: m({ qty: 20, endWalls: 2, perSet: 4 }),
                    rem22: m({ qty: 22, endWalls: 2, perSet: 4 }), freeSets: m({ qty: 6, perSet: 3 }), untouched: m({ qty: 20 }) };
         }, { oneRow20: 39, sets4: 35, rem22: 38, freeSets: 14, untouched: 60 });
+      /* 2026-10-14: fabrication-only quotations no longer print "Contingency & charges" — the
+         choice was removed and the contingency always sits inside the Fabrication line. */
+      if (typeof window._buildPrintBodyCore === 'function')
+        check('Printout: fabrication-only never prints a Contingency & charges line', () => {
+          const src = String(window._buildPrintBodyCore);
+          return { coversNoAssembly: src.includes('} else if(pMobBase===0&&pInstBase===0){'), noChoice: !document.querySelector('input[name="fabcontmode"]') };
+        }, { coversNoAssembly: true, noChoice: true });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
