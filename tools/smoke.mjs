@@ -76,6 +76,14 @@ const PROFILES = {
                 return [m.components.length, m.holeSchedule.length, m.components[1].area, m.holeSchedule[1].area, A.components.length,
                         (m._bom || []).reduce((s, b) => s + (b.layout || []).reduce((t, l) => t + l.length, 0), 0)];
               }, [2, 2, 'Cabinet 1 · List B', 'Cabinet 1 · List B', 1, 3]);
+      /* 2026-10-14: the Final Quotation summary priced each service line from the price list
+         (SERVICES[svcIdx].price × qty), ignoring a typed price and the client-supplied uplift —
+         lines that did not add up to the total. It must use the same rule as Stage 1. */
+      if (typeof window.recalcFQ === 'function')
+        check('Stage 2 summary service lines use the line\'s own price (_svcLineTotal), not the price list',
+              () => { const src = String(window.recalcFQ) + String(window._recalcFQCore || '');
+                      return [/fmtMoney\(fs\.price\*fsi\.qty\)/.test(src), /fmtMoney\(_svcLineTotal\(fsi\)\)/.test(src)]; },
+              [false, true]);
       if (typeof window._prodReflectStageBlock === 'function')
         check('_prodReflectStageBlock: locked stages and an unopened Final Quotation refuse a cutting list',
               () => {
