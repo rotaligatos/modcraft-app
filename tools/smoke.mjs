@@ -5333,6 +5333,17 @@ const PROFILES = {
             return { split, afterUnknown, afterAmbiguous: calls.length };
           } finally { w.sheetUsers = keep.su; w.gUser = keep.gu; w.gSendMessage = keep.gm; w._chipAppendAi = keep.ai; }
         }, { split: ['Rose', 'Allan', 'Jo C', 'Joanna D'], afterUnknown: 0, afterAmbiguous: 0 });
+      /* 2026-10-14 (QT-W00000261): Fabrication-only + Assembly printed raw fabrication and dumped
+         the fab contingency + cutting-list charge onto the Assembly line. The no-installation case
+         now regroups too, and foldDC is declared BEFORE the regroup blocks read it (it used to be
+         declared after, so a folded design charge vanished from the printed lines). */
+      if (typeof window._buildPrintBodyCore === 'function')
+        check('Printout: fab-only + Assembly regroups; foldDC set before it is read', () => {
+          const src = String(window._buildPrintBodyCore);
+          const decl = src.indexOf('var foldDC='), use = src.indexOf('(foldDC?dcCost:0)');
+          return { naBranch: src.includes('naOnly:true'), declaredFirst: decl > 0 && use > 0 && decl < use,
+                   noFabBufWithoutInstall: !/_fabNa=\(pC\.regularBase\|\|0\)\*_pa\(_ra\.fabCont\)\*_pa\(_ra\.fabBuf\)/.test(src) };
+        }, { naBranch: true, declaredFirst: true, noFabBufWithoutInstall: true });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
