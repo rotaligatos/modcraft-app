@@ -84,6 +84,23 @@ const PROFILES = {
               () => { const src = String(window.recalcFQ) + String(window._recalcFQCore || '');
                       return [/fmtMoney\(fs\.price\*fsi\.qty\)/.test(src), /fmtMoney\(_svcLineTotal\(fsi\)\)/.test(src)]; },
               [false, true]);
+      /* 2026-10-14: training mode blocked every job_orders write, so a trainee could never see the
+         Job Order a lock produced. In training the same queries run against a copy in this browser. */
+      if (typeof window._trnJoQuery === 'function')
+        check('_trnJoQuery: training Job Orders insert, read newest-first, supersede, and stay out of the live table',
+              () => {
+                const K = 'mc_trn_job_orders', keep = localStorage.getItem(K);
+                localStorage.removeItem(K);
+                try {
+                  window._trnJoQuery().insert([{ jo_number: 'A', serial: 'S', option_id: 0, version: 1, status: 'reserved' }]).run();
+                  window._trnJoQuery().insert([{ jo_number: 'B', serial: 'S', option_id: 0, version: 2, status: 'reserved' }]).run();
+                  const top = window._trnJoQuery().select('*').eq('serial', 'S').eq('option_id', 0).order('version', { ascending: false }).limit(1).run();
+                  const ids = window._trnJoQuery().select('id').eq('version', 1).run().data.map(x => x.id);
+                  window._trnJoQuery().update({ status: 'superseded' }).in('id', ids).run();
+                  const all = window._trnJoQuery().select('*').eq('serial', 'S').order('version').run().data;
+                  return [top.data[0].jo_number, all.map(x => x.status).join(','), all.length];
+                } finally { if (keep === null) localStorage.removeItem(K); else localStorage.setItem(K, keep); }
+              }, ['B', 'superseded,reserved', 2]);
       if (typeof window._prodReflectStageBlock === 'function')
         check('_prodReflectStageBlock: locked stages and an unopened Final Quotation refuse a cutting list',
               () => {

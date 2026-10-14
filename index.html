@@ -39311,10 +39311,65 @@ function _joAnalysisForQuotation(baseSerial,stage){
 
 // Reserve a new Job Order version at an Initial Quotation lock. Never blocks the lock: every
 // failure is logged loudly and the quotation proceeds, exactly like the other lock-time saves.
+// ── Job Orders in training mode (2026-10-14) ────────────────────────────────────────────────
+// Training blocks every write to the live job_orders table, so a trainee could lock a quotation and
+// never see the Job Order it produced — nothing to check. In training the same reads/writes go to a
+// copy kept in this browser (localStorage mc_trn_job_orders), so the Job Order window, Print and
+// Labels work exactly as live. Nothing here reaches KEYSTONE or PMES. Live is untouched: outside
+// training _joTable() is plain supa.from('job_orders').
+// Supports only the query shapes the Job Order code uses: select/eq/in/order/limit/maybeSingle,
+// insert([rows]) and update(obj).eq|in.
+function _joTable(){ return window._TRN?_trnJoQuery():supa.from('job_orders'); }
+var TRN_JO_KEY='mc_trn_job_orders';
+function _trnJoLoad(){ try{ return JSON.parse(localStorage.getItem(TRN_JO_KEY)||'[]')||[]; }catch(e){ return []; } }
+function _trnJoSave(all){
+  try{ localStorage.setItem(TRN_JO_KEY,JSON.stringify(all)); return null; }
+  catch(e){ return {message:'training Job Orders could not be kept in this browser (storage full) — clear some in the Job Order window'}; }
+}
+function _trnJoQuery(){
+  var q={op:'select',f:[],inF:null,ord:[],lim:0,single:false,rows:null,upd:null};
+  function match(r){
+    for(var i=0;i<q.f.length;i++){ if(r[q.f[i][0]]!==q.f[i][1]) return false; }
+    return !q.inF||q.inF[1].indexOf(r[q.inF[0]])>=0;
+  }
+  function run(){
+    var all=_trnJoLoad();
+    if(q.op==='insert'){
+      q.rows.forEach(function(r){ all.push(Object.assign({id:'trn-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),reserved_at:new Date().toISOString()},r)); });
+      return {data:null,error:_trnJoSave(all)};
+    }
+    if(q.op==='update'){
+      all.forEach(function(r){ if(match(r)) Object.assign(r,q.upd); });
+      return {data:null,error:_trnJoSave(all)};
+    }
+    var rows=all.filter(match);
+    if(q.ord.length) rows.sort(function(a,b){
+      for(var i=0;i<q.ord.length;i++){ var k=q.ord[i][0], up=q.ord[i][1];
+        if(a[k]===b[k]) continue; return ((a[k]>b[k])?1:-1)*(up?1:-1); }
+      return 0;
+    });
+    if(q.lim) rows=rows.slice(0,q.lim);
+    rows=JSON.parse(JSON.stringify(rows));
+    return q.single?{data:rows[0]||null,error:null}:{data:rows,error:null};
+  }
+  var api={
+    select:function(){ return api; },
+    eq:function(k,v){ q.f.push([k,v]); return api; },
+    in:function(k,vs){ q.inF=[k,vs||[]]; return api; },
+    order:function(k,o){ q.ord.push([k,!(o&&o.ascending===false)]); return api; },
+    limit:function(n){ q.lim=n; return api; },
+    maybeSingle:function(){ q.single=true; return api; },
+    insert:function(rows){ q.op='insert'; q.rows=rows||[]; return api; },
+    update:function(o){ q.op='update'; q.upd=o||{}; return api; },
+    then:function(res,rej){ return Promise.resolve().then(run).then(res,rej); },
+    run:run   // synchronous result, for the smoke check
+  };
+  return api;
+}
 function _reserveJobOrder(stage){
   stage=stage==='fq'?'fq':'s1';
   if(qDraftKey||!qSerial) return Promise.resolve(null);
-  if(typeof supaReady!=='function'||!supaReady()){ console.warn('[jo] not reserved — Supabase not connected'); return Promise.resolve(null); }
+  if(!window._TRN&&(typeof supaReady!=='function'||!supaReady())){ console.warn('[jo] not reserved — Supabase not connected'); return Promise.resolve(null); }
   var base=qBaseSerial||qSerial, optId=qActiveOptionId||0;
   var optLabel=optId?((qOptionsList.find(function(o){return o.id===optId;})||{}).label||('Option '+optId)):'';
   var rev=(String(qSerial).match(/\.R(\d+)$/)||[])[1]||'';
@@ -39324,7 +39379,7 @@ function _reserveJobOrder(stage){
   return _joAnalysisForQuotation(base,stage).then(function(an){
     if(!an||!an.result||!(an.result.components||[]).length) return null;   // no cutting list on this quotation
     // Each reserve supersedes the one before, so only the newest few rows can still be live.
-    return supa.from('job_orders').select('id,version,status,jo_number,data').eq('serial',base).eq('option_id',optId)
+    return _joTable().select('id,version,status,jo_number,data').eq('serial',base).eq('option_id',optId)
       .order('version',{ascending:false}).limit(3).then(function(r){
       if(r.error) throw r.error;
       var rows=r.data||[], v=(rows.length?rows[0].version:0)+1, jo=_joNumber(base,optId,v);
@@ -39345,11 +39400,11 @@ function _reserveJobOrder(stage){
       var top=rows[0];
       if(top&&(top.status==='reserved'||top.status==='ready')&&_joSig(top.data)===_joSig(data)) return top.jo_number;
       var live=rows.filter(function(x){return x.status==='reserved'||x.status==='ready';}).map(function(x){return x.id;});
-      var sup=live.length?supa.from('job_orders').update({status:'superseded',superseded_at:new Date().toISOString(),
+      var sup=live.length?_joTable().update({status:'superseded',superseded_at:new Date().toISOString(),
         status_note:'replaced by '+jo}).in('id',live):Promise.resolve({});
       return sup.then(function(s){
         if(s&&s.error) throw s.error;
-        return supa.from('job_orders').insert([{jo_number:jo,serial:base,option_id:optId,option_label:optLabel||null,
+        return _joTable().insert([{jo_number:jo,serial:base,option_id:optId,option_label:optLabel||null,
           version:v,status:'reserved',company:company,bander:data.bander,piece_count:data.pieceCount,
           board_count:data.boardCount,data:data,reserved_by:who}]);
       }).then(function(ins){
@@ -39369,14 +39424,14 @@ function _reserveJobOrder(stage){
 // The client approved the Final Quotation for this option: its latest reserved Job Order is ready
 // for KEYSTONE to release.
 function _markJobOrderReady(){
-  if(qDraftKey||!qSerial||typeof supaReady!=='function'||!supaReady()) return Promise.resolve();
+  if(qDraftKey||!qSerial||(!window._TRN&&(typeof supaReady!=='function'||!supaReady()))) return Promise.resolve();
   var base=qBaseSerial||qSerial, optId=qActiveOptionId||0;
-  return supa.from('job_orders').select('id,jo_number,status').eq('serial',base).eq('option_id',optId)
+  return _joTable().select('id,jo_number,status').eq('serial',base).eq('option_id',optId)
     .order('version',{ascending:false}).limit(1).then(function(r){
       var row=r&&r.data&&r.data[0];
       if(!row){ logActivity('⚠ Client approved, but no Job Order is reserved for '+(optId?'Option '+optId:'this quotation')+' — lock it again, or open Job Order to reserve one.',base); return; }
       if(row.status!=='reserved') return;
-      return supa.from('job_orders').update({status:'ready',ready_at:new Date().toISOString()}).eq('id',row.id).then(function(u){
+      return _joTable().update({status:'ready',ready_at:new Date().toISOString()}).eq('id',row.id).then(function(u){
         if(u&&u.error) throw u.error;
         logActivity('Job Order '+row.jo_number+' is ready for release (Final Quotation client-approved).',base);
       });
@@ -39505,8 +39560,8 @@ function openJobOrders(){
   el('ov-jo-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Loading…</div>';
   el('ov-jo-foot').innerHTML='<button class="btn" onclick="closeModal(\'ov-jo\')">Close</button>';
   openModal('ov-jo');
-  if(!supaReady()){ el('ov-jo-body').innerHTML='<div style="font-size:12px;color:var(--pill-coral)">Not connected to the database — connect in Settings → Company & DB.</div>'; return; }
-  supa.from('job_orders').select('id,jo_number,option_id,option_label,version,status,piece_count,board_count,bander,reserved_at,reserved_by,ready_at,released_at,status_note')
+  if(!window._TRN&&!supaReady()){ el('ov-jo-body').innerHTML='<div style="font-size:12px;color:var(--pill-coral)">Not connected to the database — connect in Settings → Company & DB.</div>'; return; }
+  _joTable().select('id,jo_number,option_id,option_label,version,status,piece_count,board_count,bander,reserved_at,reserved_by,ready_at,released_at,status_note')
     .eq('serial',base).order('option_id').order('version',{ascending:false}).then(function(r){
       var rows=(r&&r.data)||[], h='';
       var col={reserved:'navy',ready:'teal',released:'teal',superseded:'gray',cancelled:'coral'};
@@ -39523,6 +39578,7 @@ function openJobOrders(){
         });
         h+='</tbody></table>';
       }
+      if(window._TRN) h='<div style="font-size:11px;color:var(--pill-amber);margin-bottom:8px"><i class="ti ti-school"></i> Training — these Job Orders are kept in this browser only. They never reach KEYSTONE or production.</div>'+h;
       el('ov-jo-body').innerHTML=h+'<div id="ov-jo-prod"></div>';
       _joLoadProduction(base);
       // A lock whose reservation failed (or a quotation locked before Job Orders existed) can be
@@ -39593,7 +39649,7 @@ function _joReserveNow(){
   });
 }
 function printJobOrder(id,labels){
-  supa.from('job_orders').select('data,status').eq('id',id).maybeSingle().then(function(r){
+  _joTable().select('data,status').eq('id',id).maybeSingle().then(function(r){
     var row=r&&r.data; if(!row){ showToast('Could not load that Job Order.'); return; }
     if(labels) _joPrintLabels(row.data); else _joPrint(row.data,String(row.status).toUpperCase());
   });
@@ -40607,6 +40663,7 @@ function _fqDrawingAnalysisPath(base){
 function _saveFQDrawingAnalysis(){
   var da=fqDrawingAnalysis, base=qBaseSerial||qSerial;
   if(!da||!da.result||!base||qDraftKey) return;
+  if(window._TRN) return;   // training never writes Storage; the Job Order is built from the copy in memory
   var loc=_fqDrawingAnalysisPath(base);
   da.outputFilePath=loc.path;
   var body=JSON.stringify({fileName:da.fileName||'',analyzedAt:da.analyzedAt||'',parts:da.parts||[],
