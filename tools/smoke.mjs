@@ -5344,6 +5344,14 @@ const PROFILES = {
           return { naBranch: src.includes('naOnly:true'), declaredFirst: decl > 0 && use > 0 && decl < use,
                    noFabBufWithoutInstall: !/_fabNa=\(pC\.regularBase\|\|0\)\*_pa\(_ra\.fabCont\)\*_pa\(_ra\.fabBuf\)/.test(src) };
         }, { naBranch: true, declaredFirst: true, noFabBufWithoutInstall: true });
+      /* 2026-10-14: in the itemized print view the cutting list charge hid inside the hidden
+         leftover, so the visible lines were P990 short of the area subtotal (QT-W00000261). */
+      if (typeof window.buildItemizedPrintRows === 'function')
+        check('Itemized print: cutting list charge has its own line on the last area', () => {
+          const src = String(window.buildItemizedPrintRows);
+          return { line: src.includes('Cutting list charge'), lastAreaCarries: src.includes('_fabAreaAllocation(pool-_clAll,pC)'),
+                   inLeftover: src.includes('-assemblyHere-cuttingListHere') };
+        }, { line: true, lastAreaCarries: true, inLeftover: true });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
