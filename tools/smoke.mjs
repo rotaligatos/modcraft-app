@@ -5352,6 +5352,14 @@ const PROFILES = {
           return { line: src.includes('Cutting list charge'), lastAreaCarries: src.includes('_fabAreaAllocation(pool-_clAll,pC)'),
                    inLeftover: src.includes('-assemblyHere-cuttingListHere') };
         }, { line: true, lastAreaCarries: true, inLeftover: true });
+      /* 2026-10-14: toilet partitions in sets. 20 cubicles in sets of 4, walls both ends, must
+         count panels as 5 rows of (4 fronts + 3 sides) = 35, not one row of 20 (20 + 19 = 39). */
+      if (typeof window._partitionPanelMult === 'function')
+        check('Toilet partition sets: panels counted per row', () => {
+          const m = (b) => Math.round(window._partitionPanelMult(Object.assign({ type: 'Toilet Partition' }, b)) * 3 * b.qty * 1000) / 1000;
+          return { oneRow20: m({ qty: 20, endWalls: 2 }), sets4: m({ qty: 20, endWalls: 2, perSet: 4 }),
+                   rem22: m({ qty: 22, endWalls: 2, perSet: 4 }), freeSets: m({ qty: 6, perSet: 3 }), untouched: m({ qty: 20 }) };
+        }, { oneRow20: 39, sets4: 35, rem22: 38, freeSets: 14, untouched: 60 });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
