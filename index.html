@@ -45618,7 +45618,7 @@ function _chipBuildSystemPrompt(){
     +'When the user asks you to tell / notify / message / remind / "call the attention of" a colleague, '
     +'include the token [MSG:recipient|priority|message] in your reply. '
     +'priority is "urgent" if they say urgent / asap / important / right away, otherwise "normal". '
-    +'Use the colleague\'s name as the recipient. Also add a short, friendly confirmation in your reply (e.g. "Sure, I\'ll let Rose know!"). '
+    +'Use the colleague\'s name as the recipient. To message two or more people at once, put all their names in the recipient, separated by commas, in ONE token — e.g. [MSG:Rose, Allan, Joanna|normal|text]. Never emit more than one MSG token. Also add a short, friendly confirmation in your reply (e.g. "Sure, I\'ll let Rose know!"). '
     +'Do NOT repeat the full message body in your spoken confirmation. '
     +'If you are unsure who they mean, ask before sending. '
     +'People you can message: '+_lamiRecipientList()+'.\n';
@@ -45689,7 +45689,8 @@ function _gLoadMessagesFromSheets(cb){
     messagesData=out; if(cb)cb();
   }).catch(function(){ if(cb)cb(); });
 }
-function gSendMessage(toEmail,toName,text,priority,ctx,cb){
+function gSendMessage(toEmail,toName,text,priority,ctx,cb,opts){
+  opts=opts||{};
   if(!toEmail||!text){ if(cb)cb(false); return; }
   priority=(priority==='urgent')?'urgent':'normal';
   var id='msg-'+Date.now()+'-'+Math.floor(Math.random()*9000+1000);
@@ -45702,12 +45703,41 @@ function gSendMessage(toEmail,toName,text,priority,ctx,cb){
       supaInsertMessage(messagesData[0]);
       _msgSeen[id]=true; // never toast our own outgoing message
       _sendMessageEmail(toEmail,fromName,text,priority);
-      _sendMessageChat(toName,fromName,text,priority);
-      try{logActivity('Message sent to '+(toName||toEmail)+(priority==='urgent'?' (URGENT)':''));}catch(e){}
+      if(!opts.noChat) _sendMessageChat(toName,fromName,text,priority);
+      if(!opts.noLog){ try{logActivity('Message sent to '+(toName||toEmail)+(priority==='urgent'?' (URGENT)':''));}catch(e){} }
       if(cb)cb(true);
     }).catch(function(e){ if(cb)cb(false,e); });
   }
   if(_msgTabReady) doAppend(); else gEnsureMessagesTab(function(ok){ ok?doAppend():(cb&&cb(false)); });
+}
+// One message to several people. Each person gets their OWN message row, so who has read it is
+// tracked per person and nobody sees a reply chain they were not part of. Sent one after another
+// (each send appends a Sheet row; parallel appends race). The Google Chat space gets ONE post
+// naming everyone instead of one post per person, and the activity log one line.
+// cb(sentNames[], failedNames[]).
+function gSendMessageMany(recips,text,priority,ctx,cb){
+  var seen={}, list=(recips||[]).filter(function(r){
+    var k=r&&r.email&&r.email.trim().toLowerCase(); if(!k||seen[k]) return false; seen[k]=1; return true; });
+  if(!list.length||!text){ if(cb)cb([],[]); return; }
+  if(list.length===1){
+    var r1=list[0];
+    gSendMessage(r1.email,r1.name||r1.email,text,priority,ctx,function(ok){ if(cb) cb(ok?[r1.name||r1.email]:[],ok?[]:[r1.name||r1.email]); });
+    return;
+  }
+  var sent=[], failed=[], i=0;
+  (function next(){
+    if(i>=list.length){
+      var names=sent.join(', '), fromName=(gUser&&gUser.name)||((gUser&&gUser.email)||'');
+      if(sent.length){
+        _sendMessageChat(names,fromName,text,priority==='urgent'?'urgent':'normal');
+        try{logActivity('Message sent to '+names+(priority==='urgent'?' (URGENT)':''));}catch(e){}
+      }
+      if(cb) cb(sent,failed);
+      return;
+    }
+    var r=list[i++], nm=r.name||r.email;
+    gSendMessage(r.email,nm,text,priority,ctx,function(ok){ (ok?sent:failed).push(nm); next(); },{noChat:true,noLog:true});
+  })();
 }
 function _msgMarkRead(id){
   var m=null; for(var i=0;i<messagesData.length;i++){if(messagesData[i].id===id){m=messagesData[i];break;}}
@@ -45873,15 +45903,49 @@ function _msgPanelOutsideClick(e){
   var p=el('msg-panel'),btn=el('msg-btn');
   if(p&&!p.contains(e.target)&&e.target!==btn&&(!btn||!btn.contains(e.target))) closeMsgPanel();
 }
+// Recipients picked in the composer — emails, in the order they were added.
+var _msgPicked=[];
+function _msgUserByEmail(e){
+  e=(e||'').toLowerCase();
+  for(var i=0;i<sheetUsers.length;i++){ if((sheetUsers[i].email||'').toLowerCase()===e) return sheetUsers[i]; }
+  return null;
+}
+function _msgAddPick(email){
+  if(email&&_msgPicked.indexOf(email)<0) _msgPicked.push(email);
+  var s=el('msg-to'); if(s) s.value='';
+  _msgRenderPicks();
+}
+function _msgRemovePick(email){
+  _msgPicked=_msgPicked.filter(function(e){ return e!==email; });
+  _msgRenderPicks();
+}
+function _msgRenderPicks(){
+  var box=el('msg-picked'); if(!box) return;
+  box.innerHTML=_msgPicked.map(function(e){
+    var u=_msgUserByEmail(e), nm=(u&&u.name)||e;
+    return '<span class="pill pill-navy" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 4px 2px 8px">'+escHtml(nm)
+      +'<button type="button" onclick="_msgRemovePick(\''+e.replace(/'/g,"\\'")+'\')" title="Remove" style="border:none;background:none;color:inherit;cursor:pointer;font-size:13px;line-height:1;padding:0 2px">×</button></span>';
+  }).join('');
+  box.style.display=_msgPicked.length?'flex':'none';
+  // The dropdown only offers people not already picked.
+  var s=el('msg-to'); if(s){ for(var i=0;i<s.options.length;i++){ var o=s.options[i]; if(o.value) o.hidden=_msgPicked.indexOf(o.value)>=0; } }
+}
 function _msgComposeSend(){
-  var sel=el('msg-to'), ta=el('msg-text'), urg=el('msg-urgent');
-  if(!sel||!ta) return;
-  var toEmail=sel.value, text=ta.value.trim();
-  if(!toEmail){ showToast('Pick a recipient first.'); return; }
+  var ta=el('msg-text'), urg=el('msg-urgent');
+  if(!ta) return;
+  var text=ta.value.trim();
+  if(!_msgPicked.length){ showToast('Pick at least one recipient first.'); return; }
   if(!text){ showToast('Type a message first.'); return; }
-  var toName=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:'';
-  gSendMessage(toEmail,toName,text,(urg&&urg.checked)?'urgent':'normal',qSerial||'',function(ok){
-    if(ok){ showToast('📨 Message sent to '+toName); ta.value=''; if(urg)urg.checked=false; renderMsgPanel(); }
+  var recips=_msgPicked.map(function(e){ var u=_msgUserByEmail(e); return {email:e,name:(u&&u.name)||e}; });
+  gSendMessageMany(recips,text,(urg&&urg.checked)?'urgent':'normal',qSerial||'',function(sent,failed){
+    if(sent.length){
+      showToast('📨 Message sent to '+sent.join(', ')+(failed.length?' — could not reach '+failed.join(', '):''));
+      // Keep only the people it failed for, so a retry goes to them alone.
+      var failedSet={}; failed.forEach(function(n){ failedSet[n]=1; });
+      _msgPicked=recips.filter(function(r){ return failedSet[r.name]; }).map(function(r){ return r.email; });
+      if(!failed.length){ ta.value=''; if(urg)urg.checked=false; }
+      renderMsgPanel(); _msgRenderPicks();
+    }
     else showToast('Could not send — check your connection.');
   });
 }
@@ -45894,24 +45958,24 @@ function renderMsgPanel(){
   // values across when it is safe to rebuild.
   var comp=el('msg-compose');
   if(comp){
-    var _prevTo=(el('msg-to')||{}).value||'';
     var _prevText=(el('msg-text')||{}).value||'';
     var _prevUrg=!!((el('msg-urgent')||{}).checked);
     var _act=document.activeElement;
     var _composing=(_prevText.trim()!=='')||(_act&&(_act.id==='msg-text'||_act.id==='msg-to'));
     if(!_composing){
-      var opts='<option value="">— Select recipient —</option>';
+      var opts='<option value="">+ Add recipient (pick one or more)</option>';
       sheetUsers.filter(function(u){return u.email&&u.email.toLowerCase()!==me&&u.active!==false;})
         .forEach(function(u){ opts+='<option value="'+escHtml(u.email)+'">'+escHtml(u.name||u.email)+'</option>'; });
-      comp.innerHTML='<select id="msg-to" style="width:100%;height:30px;font-size:12px;margin-bottom:6px">'+opts+'</select>'
+      comp.innerHTML='<div id="msg-picked" style="display:none;flex-wrap:wrap;gap:4px;margin-bottom:6px"></div>'
+        +'<select id="msg-to" onchange="_msgAddPick(this.value)" style="width:100%;height:30px;font-size:12px;margin-bottom:6px">'+opts+'</select>'
         +'<textarea id="msg-text" rows="2" placeholder="Write a message…" style="width:100%;font-size:12px;resize:vertical;margin-bottom:6px"></textarea>'
         +'<div style="display:flex;align-items:center;justify-content:space-between">'
           +'<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer"><input type="checkbox" id="msg-urgent"> Urgent</label>'
           +'<button class="btn btn-primary" onclick="_msgComposeSend()" style="font-size:12px;padding:4px 12px"><i class="ti ti-send"></i> Send</button>'
         +'</div>';
-      // A recipient picked before the list reloaded should survive the rebuild.
-      var _toEl=el('msg-to'); if(_toEl&&_prevTo) _toEl.value=_prevTo;
+      // Recipients picked before the list reloaded survive the rebuild (they live in _msgPicked).
       var _ugEl=el('msg-urgent'); if(_ugEl) _ugEl.checked=_prevUrg;
+      _msgRenderPicks();
     }
   }
   // Thread list
@@ -45944,13 +46008,34 @@ function _chipHandleMsgMarker(raw){
   var pri=(parts[1]||'normal').trim().toLowerCase(); if(pri!=='urgent') pri='normal';
   var text=(parts.slice(2).join('|')||'').trim();
   if(!who||!text) return;
-  var r=_resolveRecipient(who);
-  if(!r){ _chipAppendAi('I couldn\'t find a user named "'+escHtml(who)+'". Check the exact name in Settings, under Users.'); return; }
-  if(r.ambiguous){ _chipAppendAi('A few people match "'+escHtml(who)+'": '+r.ambiguous.map(function(u){return escHtml(u.name);}).join(', ')+'. Which one?'); return; }
-  gSendMessage(r.email,r.name,text,pri,qSerial||'',function(ok){
-    if(ok){ showToast((pri==='urgent'?'🚨 Urgent message':'📨 Message')+' sent to '+escHtml(r.name)); _updateMsgBadge(); }
-    else showToast('Could not send the message — try again.');
+  // Several people at once: "Rose, Allan and Joanna". Every name must resolve to exactly one
+  // person before ANYTHING is sent — sending to two of three and asking about the third would
+  // leave half the group told and the user unsure who was.
+  var names=_lamiSplitRecipients(who), recips=[], missing=[], unclear=[];
+  names.forEach(function(n){
+    var r=_resolveRecipient(n);
+    if(!r) missing.push(n);
+    else if(r.ambiguous) unclear.push({q:n,opts:r.ambiguous});
+    else recips.push(r);
   });
+  if(missing.length||unclear.length){
+    var msg=[];
+    if(missing.length) msg.push('I couldn\'t find '+missing.map(function(n){return '"'+escHtml(n)+'"';}).join(', ')+'. Check the exact name in Settings, under Users.');
+    unclear.forEach(function(u){ msg.push('A few people match "'+escHtml(u.q)+'": '+u.opts.map(function(x){return escHtml(x.name);}).join(', ')+'. Which one?'); });
+    msg.push('I haven\'t sent the message to anyone yet.');
+    _chipAppendAi(msg.join(' '));
+    return;
+  }
+  gSendMessageMany(recips,text,pri,qSerial||'',function(sent,failed){
+    if(sent.length){ showToast((pri==='urgent'?'🚨 Urgent message':'📨 Message')+' sent to '+escHtml(sent.join(', '))+(failed.length?' — could not reach '+escHtml(failed.join(', ')):'')); _updateMsgBadge(); }
+    else showToast('Could not send the message — try again.');
+    if(failed.length) _chipAppendAi('I couldn\'t reach '+escHtml(failed.join(', '))+' — please try them again.');
+  });
+}
+// "Rose, Allan and Joanna" / "Rose & Allan" / "Rose; Allan" -> ['Rose','Allan','Joanna'].
+function _lamiSplitRecipients(s){
+  return String(s||'').split(/\s*(?:,|;|&|\/|\band\b|\bat\b)\s*/i)
+    .map(function(x){ return x.trim(); }).filter(Boolean);
 }
 
 // ── AI call with navigation parsing ──────────────────────────────────────

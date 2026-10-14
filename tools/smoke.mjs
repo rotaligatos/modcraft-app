@@ -5314,6 +5314,25 @@ const PROFILES = {
         }, { first: 'Acacia 1mmx22mm Matte PVC Premium Edgeband', noBoard: true, resolved: true,
              name: 'Acacia 1mmx22mm Matte PVC Premium Edgeband' });
       }
+      /* 2026-10-14: messages to several people at once. Lami splits "Rose, Allan at Joanna"
+         (Tagalog "at" = and), and if ANY name is unknown or matches several people she sends to
+         NO ONE — never half the group. Drives the real marker handler with the send stubbed. */
+      if (typeof window._lamiSplitRecipients === 'function' && typeof window.gSendMessageMany === 'function')
+        check('Lami: several recipients split; one unclear name sends nothing', () => {
+          const w = window, keep = { su: w.sheetUsers, gu: w.gUser, gm: w.gSendMessage, ai: w._chipAppendAi };
+          const calls = [];
+          try {
+            w.gUser = { email: 'me@x.ph', name: 'Me' };
+            w.sheetUsers = [{ email: 'a@x.ph', name: 'Rose A', active: true }, { email: 'b@x.ph', name: 'Allan B', active: true },
+                            { email: 'c@x.ph', name: 'Jo C', active: true }, { email: 'd@x.ph', name: 'Joanna D', active: true }];
+            w.gSendMessage = (e) => calls.push(e); w._chipAppendAi = () => {};
+            const split = w._lamiSplitRecipients('Rose, Allan at Jo C & Joanna D');
+            w._chipHandleMsgMarker('Rose, Zorro|normal|hi');
+            const afterUnknown = calls.length;
+            w._chipHandleMsgMarker('Rose, Jo|normal|hi');
+            return { split, afterUnknown, afterAmbiguous: calls.length };
+          } finally { w.sheetUsers = keep.su; w.gUser = keep.gu; w.gSendMessage = keep.gm; w._chipAppendAi = keep.ai; }
+        }, { split: ['Rose', 'Allan', 'Jo C', 'Joanna D'], afterUnknown: 0, afterAmbiguous: 0 });
       return out;
     }
   },
