@@ -5349,7 +5349,7 @@ const PROFILES = {
       if (typeof window.buildItemizedPrintRows === 'function')
         check('Itemized print: cutting list charge has its own line on the last area', () => {
           const src = String(window.buildItemizedPrintRows);
-          return { line: src.includes('Cutting list charge'), lastAreaCarries: src.includes('_fabAreaAllocation(pool-_clAll,pC)'),
+          return { line: src.includes('Cutting list charge'), lastAreaCarries: src.includes('_fabAreaAllocation(pool-_clAll'),
                    inLeftover: src.includes('-assemblyHere-cuttingListHere') };
         }, { line: true, lastAreaCarries: true, inLeftover: true });
       /* 2026-10-14: toilet partitions in sets. 20 cubicles in sets of 4, walls both ends, must
@@ -5391,6 +5391,22 @@ const PROFILES = {
           return { single: c({ qty: 1 }), pueblo: c({ qty: 4, endWalls: 2 }), setsShelf: c({ qty: 16, endWalls: 2, perSet: 4, addons: { 'Floating shelf': true } }),
                    urinal: window._partitionComponents({ type: 'Urinal Partition', qty: 2 }), other: window._partitionComponents({ type: 'Kitchen Base Cabinet', qty: 3 }) };
         }, { single: 5, pueblo: 12, setsShelf: 64, urinal: 2, other: null });
+      /* 2026-10-14: whole units per kind across the quotation. White 3.3 + 2x1 = 5.3 -> 6, black
+         4.1 -> 5, hinge 2.5 -> 3: +P1,605 when charged; P0 (still rounded) when not charged. */
+      if (typeof window._materialRoundingTopUps === 'function')
+        check('Rounding: whole units per kind for the whole quotation', () => {
+          const w = window, keep = { m: w.qFabMode, a: w.qAreas, c: w.qChargeMatHw, r: w.qMatRoundOn };
+          try {
+            w.qFabMode = 'bom';
+            w.qAreas = [{ bomItems: [
+              { qty: 1, materials: [{ name: 'White MDF', unit: 'pc', qty: 3.3, price: 1000 }, { name: 'Black MDF', unit: 'pc', qty: 4.1, price: 1000 }], hardware: [{ name: 'Hinge', unit: 'pc', qty: 2.5, price: 10 }] },
+              { qty: 2, materials: [{ name: 'White MDF', unit: 'pc', qty: 1, price: 1000 }], hardware: [] }] }];
+            w.qChargeMatHw = true; const c = w._materialRoundingTopUps(false);
+            w.qChargeMatHw = false; const n = w._materialRoundingTopUps(false);
+            w.qMatRoundOn = false; const old = w._materialRoundingTopUps(true);
+            return { charged: Math.round(c.total), wholes: c.rows.map(r => r.whole).join(','), notCharged: n.total, notChargedRows: n.rows.length, lockedOld: old.rows.length };
+          } finally { w.qFabMode = keep.m; w.qAreas = keep.a; w.qChargeMatHw = keep.c; w.qMatRoundOn = keep.r; }
+        }, { charged: 1605, wholes: '6,5,3', notCharged: 0, notChargedRows: 3, lockedOld: 0 });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
