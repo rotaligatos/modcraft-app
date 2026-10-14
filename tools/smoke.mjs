@@ -5333,6 +5333,18 @@ const PROFILES = {
             return { split, afterUnknown, afterAmbiguous: calls.length };
           } finally { w.sheetUsers = keep.su; w.gUser = keep.gu; w.gSendMessage = keep.gm; w._chipAppendAi = keep.ai; }
         }, { split: ['Rose', 'Allan', 'Jo C', 'Joanna D'], afterUnknown: 0, afterAmbiguous: 0 });
+      /* What's new: release ids unique (a reused id would silently never show), and a line marked
+         for Quotations/Settings users is not shown to someone without that access. */
+      if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
+        check('What\'s new: unique ids, lines follow access', () => {
+          const w = window, keep = { r: w.currentRole, a: w.currentUserAcc };
+          try {
+            const ids = w.WHATS_NEW.map(r => r.id);
+            w.currentRole = 'Staff'; w.currentUserAcc = { Quotations: false, Settings: false };
+            const viewer = w._wnItems(w.WHATS_NEW[w.WHATS_NEW.length - 1]).every(i => !i.show);
+            return { unique: new Set(ids).size === ids.length, viewerOnlyGeneral: viewer };
+          } finally { w.currentRole = keep.r; w.currentUserAcc = keep.a; }
+        }, { unique: true, viewerOnlyGeneral: true });
       return out;
     }
   },

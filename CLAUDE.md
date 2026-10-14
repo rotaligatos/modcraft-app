@@ -12896,3 +12896,19 @@ Rommel: bought-out items (raw marine plywood) are NOT regular catalogue items.
 - I quoted wrong commit hashes to Rommel twice this session (said `c0b7a2c`, `bb3c08e`; real ones
   `ec15b91`, `eb5734a`). Read hashes from `git log`, never from memory.
 - Node `-e` / heredoc patches lost backslashes again — use Write + a node script file, or Edit.
+
+## What was changed on 2026-10-14 (session — both stages checked, group messages, What's new)
+- **Both stages verified** (offline sample): BOM size, add-on, partition walls and installation carry
+  into the Final Quotation with the same total; editing size/add-on on Stage 2 changes only Stage 2.
+  Same in training mode. A Final Quotation forked BEFORE 2026-10-13 keeps its own unsized copy.
+- **Messages to several people** (`9b7268a`): composer picks several (chips, `_msgPicked`); Lami
+  `[MSG:Rose, Allan|pri|text]` (split on , ; & / and at). Any unknown/ambiguous name → sends to NO ONE.
+  `gSendMessageMany`: one row per person, sequential, ONE Chat post + ONE log line. Training wraps
+  `gSendMessage`/`_sendMessageChat`, so group sends are no-ops there too.
+- **What's new** card: `WHATS_NEW` list near `_lamiSplitRecipients`. Shown once per person per release
+  (localStorage + `user_prefs` pref_type `WHATSNEW`). Lami shows a bubble ("I've got N new things"),
+  tapping her or it opens the card; without Lami the card shows directly. Avatar menu → What's new
+  reopens it. `dot:` puts a NEW tag on a button until first clicked (msg-btn now).
+  ⚠ **When shipping a FEATURE people will use, add a release entry. Bug fixes get NO entry** (Rommel).
+  A fix that changes something visible (a total, a screen) → ask Rommel first. Release ids must be unique.
+  `show:'quotations'|'settings'` limits a line to people with that access (Admin/Director see all).
