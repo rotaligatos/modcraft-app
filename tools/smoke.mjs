@@ -63,6 +63,32 @@ const PROFILES = {
       if (typeof window._serialRoot === 'function')
         check('_serialRoot strips option + revision suffix',
               () => window._serialRoot('QT-M00000012-3.R1'), 'QT-M00000012');
+      /* 2026-10-14: a second cutting list reflected into the same quotation used to REPLACE the
+         first in the analysis the Job Order is built from. Lists now add up; a cabinet name both
+         lists use is told apart so drilling cannot cross-attach; the board layout covers every piece.
+         And a locked stage, or a Final Quotation not yet open, cannot take a list. */
+      if (typeof window._daMergeResults === 'function')
+        check('_daMergeResults: two cutting lists add up, shared cabinet names kept apart',
+              () => {
+                const A = { components: [{ name: 'Side', area: 'Cabinet 1', length: 700, width: 550, qty: 2, material: 'PB', thickness: 18 }], holeSchedule: [{ component: 'Side', area: 'Cabinet 1', qty: 4 }] };
+                const B = { components: [{ name: 'Side', area: 'Cabinet 1', length: 600, width: 500, qty: 1, material: 'PB', thickness: 18 }], holeSchedule: [{ component: 'Side', area: 'Cabinet 1', qty: 2 }] };
+                const m = window._daMergeResults(A, B, 'List B.xlsx');
+                return [m.components.length, m.holeSchedule.length, m.components[1].area, m.holeSchedule[1].area, A.components.length,
+                        (m._bom || []).reduce((s, b) => s + (b.layout || []).reduce((t, l) => t + l.length, 0), 0)];
+              }, [2, 2, 'Cabinet 1 · List B', 'Cabinet 1 · List B', 1, 3]);
+      if (typeof window._prodReflectStageBlock === 'function')
+        check('_prodReflectStageBlock: locked stages and an unopened Final Quotation refuse a cutting list',
+              () => {
+                const s = { l: window.qLocked, a: window.qApproved, f: window.fqLocked };
+                try {
+                  window.qLocked = false; window.qApproved = false; window.fqLocked = false;
+                  const open1 = window._prodReflectStageBlock('s1') === '', fqClosed = window._prodReflectStageBlock('fq') !== '';
+                  window.qLocked = true; const lock1 = window._prodReflectStageBlock('s1') !== '';
+                  window.qApproved = true; const open2 = window._prodReflectStageBlock('fq') === '';
+                  window.fqLocked = true; const lock2 = window._prodReflectStageBlock('fq') !== '';
+                  return [open1, fqClosed, lock1, open2, lock2];
+                } finally { window.qLocked = s.l; window.qApproved = s.a; window.fqLocked = s.f; }
+              }, [true, true, true, true, true]);
       if (typeof window.fmtMoney === 'function')
         check('fmtMoney keeps 2 decimals',
               () => /234\.50/.test(String(window.fmtMoney(1234.5))), true);
