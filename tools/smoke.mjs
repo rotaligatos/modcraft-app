@@ -5382,6 +5382,15 @@ const PROFILES = {
           const r = (cat, unit) => Math.round(window._addonFactor(b, cat, { addon: 'Floating shelf', unit }) * 1000) / 1000;
           return { board: r('materials', 'pc'), bracket: r('hardware', 'pc'), cutting: r('services', '/lm'), notAddon: window._addonFactor(b, 'materials', { unit: 'pc' }) };
         }, { board: 2.82, bracket: 2.82, cutting: 2.713, notAddon: 1 });
+      /* 2026-10-14: partition components counted from the layout. One free-standing cubicle = 5
+         (matches the Settings figure); Pueblo HQ's 4 wall-to-wall = 12; 16 in sets of 4 wall to wall
+         + 1 shelf each = 4x12 + 16 = 64; urinal screens = 1 each; other types untouched (null). */
+      if (typeof window._partitionComponents === 'function')
+        check('Project size: partitions count their own components', () => {
+          const c = (r) => window._partitionComponents(Object.assign({ type: 'Toilet Partition' }, r));
+          return { single: c({ qty: 1 }), pueblo: c({ qty: 4, endWalls: 2 }), setsShelf: c({ qty: 16, endWalls: 2, perSet: 4, addons: { 'Floating shelf': true } }),
+                   urinal: window._partitionComponents({ type: 'Urinal Partition', qty: 2 }), other: window._partitionComponents({ type: 'Kitchen Base Cabinet', qty: 3 }) };
+        }, { single: 5, pueblo: 12, setsShelf: 64, urinal: 2, other: null });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
