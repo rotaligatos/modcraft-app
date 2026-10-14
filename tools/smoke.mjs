@@ -5367,6 +5367,13 @@ const PROFILES = {
           const src = String(window._buildPrintBodyCore);
           return { coversNoAssembly: src.includes('} else if(pMobBase===0&&pInstBase===0){'), noChoice: !document.querySelector('input[name="fabcontmode"]') };
         }, { coversNoAssembly: true, noChoice: true });
+      /* 2026-10-14: ready-made Floating shelf add-on (one name, one tick) and Urinal Partition preset. */
+      if (window.ADDON_PRESETS && window.CAB_TYPE_PRESETS)
+        check('Presets: floating shelf add-on lines share one name; urinal partition is its own type', () => {
+          const sh = window.ADDON_PRESETS['Floating shelf'], ur = window.CAB_TYPE_PRESETS['Urinal Partition'];
+          return { shelfForPartition: sh.forType.test('Toilet Partition'), shelfLines: sh.lines.length,
+                   urinalOwnLines: !!(ur && ur.lines && ur.lines.length && !ur.from), fullHeightKept: !!window.CAB_TYPE_PRESETS['Toilet Partition – Full Height (6x8)'].fullHeight };
+        }, { shelfForPartition: true, shelfLines: 3, urinalOwnLines: true, fullHeightKept: true });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')
