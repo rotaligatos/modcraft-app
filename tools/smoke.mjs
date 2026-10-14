@@ -5374,6 +5374,14 @@ const PROFILES = {
           return { shelfForPartition: sh.forType.test('Toilet Partition'), shelfLines: sh.lines.length,
                    urinalOwnLines: !!(ur && ur.lines && ur.lines.length && !ur.from), fullHeightKept: !!window.CAB_TYPE_PRESETS['Toilet Partition – Full Height (6x8)'].fullHeight };
         }, { shelfForPartition: true, shelfLines: 3, urinalOwnLines: true, fullHeightKept: true });
+      /* 2026-10-14: add-on quantity + own size. 2 shelves at 1410 x 150 = board x2.82, brackets
+         ceil(2 x 2 x 1.41)=6, and the cubicle's own size never touches the shelf. */
+      if (typeof window._addonFactor === 'function')
+        check('Add-on: quantity and own size, independent of the cabinet size', () => {
+          const b = { type: 'Toilet Partition', addonQty: { 'Floating shelf': 2 }, addonSize: { 'Floating shelf': { w: 1410 } }, size: { h: 3000 } };
+          const r = (cat, unit) => Math.round(window._addonFactor(b, cat, { addon: 'Floating shelf', unit }) * 1000) / 1000;
+          return { board: r('materials', 'pc'), bracket: r('hardware', 'pc'), cutting: r('services', '/lm'), notAddon: window._addonFactor(b, 'materials', { unit: 'pc' }) };
+        }, { board: 2.82, bracket: 2.82, cutting: 2.713, notAddon: 1 });
       /* What's new: release ids unique (a reused id would silently never show), and a line marked
          for Quotations/Settings users is not shown to someone without that access. */
       if (Array.isArray(window.WHATS_NEW) && typeof window._wnItems === 'function')

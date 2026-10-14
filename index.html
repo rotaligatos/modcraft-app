@@ -7790,7 +7790,8 @@ function _lineClientName(it){
   if(!it) return '';
   var l=(it.label||'').trim();
   var on=it.addons?Object.keys(it.addons).filter(function(k){return it.addons[k];}):[];
-  return (l||it.type||'')+(on.length?' — with '+on.join(', '):'');
+  var lab=on.map(function(k){ var q=it.addonQty&&+it.addonQty[k]; return k+(q>1?' ×'+q:''); });
+  return (l||it.type||'')+(on.length?' — with '+lab.join(', '):'');
 }
 // which='items' (carcass) or 'bomItems' (BOM). Same alias field, same rules, same log line — one
 // behaviour rather than two that can drift.
@@ -8787,18 +8788,42 @@ function _bomInstFactor(b){
   if(_partitionActive(b)) f*=_partitionPanelMult(b);
   return f;
 }
+// Add-on quantity and size (Rommel, 2026-10-14: "should there be a quantity in case a client
+// prefer 2 or more shelves... should the size be adjustable itself, but does not follow the size
+// of the cubicle?"). Per cabinet unit: n of the add-on, each at its own size against the add-on's
+// own reference (ADDON_REF_SIZES) — never the cabinet's. Board follows area, lm lines follow edge
+// length, hardware follows length (rounded up). Smaller than the reference = the reference.
+var ADDON_REF_SIZES={'Floating shelf':{w:1000,d:150}};
+function _addonQty(b,name){ var q=b&&b.addonQty&&+b.addonQty[name]; return q>0?q:1; }
+function _addonSizeOf(b,name){
+  var ref=ADDON_REF_SIZES[name]; if(!ref) return null;
+  var s=(b&&b.addonSize&&b.addonSize[name])||{};
+  return {ref:ref, w:Math.max(ref.w,+s.w>0?+s.w:ref.w), d:Math.max(ref.d,+s.d>0?+s.d:ref.d)};
+}
+function _addonFactor(b,cat,row){
+  if(!row||!row.addon) return 1;
+  var f=_addonQty(b,row.addon), z=_addonSizeOf(b,row.addon);
+  if(z){
+    var lm=(_pdbNormUnit(row.unit)==='lm');
+    if(cat==='materials'||cat==='outsourceMaterials') f*=lm?(z.w+z.d)/(z.ref.w+z.ref.d):(z.w*z.d)/(z.ref.w*z.ref.d);
+    else if(cat==='services') f*=lm?(z.w+z.d)/(z.ref.w+z.ref.d):1;
+    else f*=z.w/z.ref.w;
+  }
+  return f;
+}
 function _applyCabScale(bItem){
   if(!bItem) return;
   var active=(_cabRef(bItem.type)&&_cabSizeActive(bItem))||_partitionActive(bItem);
   ['materials','hardware','services','outsourceMaterials','outsourceHardware'].forEach(function(cat){
     (bItem[cat]||[]).forEach(function(row){
-      if(!active){
+      var addF=_addonFactor(bItem,cat,row);
+      if(!active&&Math.abs(addF-1)<1e-9){
         if(row.baseQty!=null){ row.qty=row.baseQty; delete row.baseQty; }
         delete row.scaleF; delete row.scaleUsed; return;
       }
       if(row.baseQty==null) row.baseQty=parseFloat(row.qty)||0;
       var by=row.scaleBy||_scaleAuto(cat,row,bItem.type);
-      var f=_scaleFactor(by,bItem,row), q=row.baseQty*f;
+      var f=(active?_scaleFactor(by,bItem,row):1)*addF, q=row.baseQty*f;
       if(cat==='hardware'||cat==='outsourceHardware') q=(Math.abs(f-1)<1e-9)?row.baseQty:Math.ceil(q-1e-9);
       else q=Math.round(q*10000)/10000;
       row.qty=q; row.scaleF=f; row.scaleUsed=by;
@@ -8853,8 +8878,33 @@ function _bomAddonRowHtml(a,ci,bItem){
     +names.map(function(n){
       var k=n.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
       return '<label style="font-size:11.5px;display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox"'+(on[n]?' checked':'')
-        +' onchange="'+_hEdit('onBOMAddon('+a+','+ci+',\''+k+'\',this.checked)')+'">'+escHtml(n)+'</label>';
+        +' onchange="'+_hEdit('onBOMAddon('+a+','+ci+',\''+k+'\',this.checked)')+'">'+escHtml(n)+'</label>'
+        +(on[n]?_bomAddonOptsHtml(a,ci,bItem,n,k):'');
     }).join('')+'</div>';
+}
+// Quantity per cabinet unit, and the add-on's own size where it has a reference (shown once ticked).
+function _bomAddonOptsHtml(a,ci,bItem,n,k){
+  var unit=_isPartition(bItem)?'cubicle':'unit', q=_addonQty(bItem,n), ref=ADDON_REF_SIZES[n], sz=(bItem.addonSize&&bItem.addonSize[n])||{};
+  var box=function(fld,val,ph,w){
+    return '<input type="number" min="0" step="1" value="'+(val>0?val:'')+'" placeholder="'+ph+'" onchange="'
+      +_hEdit('onBOMAddonOpt('+a+','+ci+',\''+k+'\',\''+fld+'\',this.value)')+'" style="width:'+w+'px;height:24px;font-size:11.5px;text-align:center">';
+  };
+  return '<span style="display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--text2);padding:2px 6px;background:var(--wash-navy);border-radius:5px">'
+    +'×'+box('qty',q===1?0:q,'1',44)+' per '+unit
+    +(ref?' · L'+box('w',+sz.w,ref.w,58)+' × D'+box('d',+sz.d,ref.d,52)+' mm <span title="Its own size — does not follow the cabinet size. Blank = '+ref.w+' × '+ref.d+'.">(own size)</span>':'')
+    +'</span>';
+}
+function onBOMAddonOpt(a,ci,name,fld,val){
+  var b=qAreas[a].bomItems[ci]; if(!b) return;
+  var v=parseFloat(val);
+  if(fld==='qty'){ b.addonQty=b.addonQty||{}; if(v>0&&v!==1) b.addonQty[name]=v; else delete b.addonQty[name]; }
+  else {
+    b.addonSize=b.addonSize||{};
+    var z=b.addonSize[name]=b.addonSize[name]||{};
+    if(v>0) z[fld]=v; else delete z[fld];
+    if(!z.w&&!z.d) delete b.addonSize[name];
+  }
+  _applyCabScale(b); renderItems(); recalc();
 }
 function onBOMAddon(a,ci,name,checked){
   var b=qAreas[a].bomItems[ci]; if(!b) return;
@@ -8871,7 +8921,7 @@ function onBOMAddon(a,ci,name,checked){
       if(!b[cat]) b[cat]=[];
       b[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,scaleBy:r.scaleBy||'',addon:name,saved:cat.indexOf('outsource')===0?true:undefined});
     });
-  } else delete b.addons[name];
+  } else { delete b.addons[name]; if(b.addonQty) delete b.addonQty[name]; if(b.addonSize) delete b.addonSize[name]; }
   _applyCabScale(b); renderItems(); recalc();
 }
 function _bomSizeRowHtml(a,ci,bItem){
@@ -46159,6 +46209,11 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-14-addon-qty', date:'14 Oct 2026', items:[
+    {id:'addon-qty-size', icon:'ti-circle-plus', title:'Add-ons with quantity and their own size',
+     text:'Tick an add-on, then set how many per cabinet (e.g. 2 floating shelves per cubicle) and, for shelves, their own length × depth.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-14-partition-sets', date:'14 Oct 2026', items:[
     {id:'partition-sets', icon:'ti-layout-columns', title:'Toilet partitions in sets',
      text:'Enter the total cubicles and how many stand in one row (e.g. 20 in sets of 4); each row is priced with its own walls and shared panels.',
