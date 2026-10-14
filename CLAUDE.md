@@ -12912,3 +12912,60 @@ Rommel: bought-out items (raw marine plywood) are NOT regular catalogue items.
   ⚠ **When shipping a FEATURE people will use, add a release entry. Bug fixes get NO entry** (Rommel).
   A fix that changes something visible (a total, a screen) → ask Rommel first. Release ids must be unique.
   `show:'quotations'|'settings'` limits a line to people with that access (Admin/Director see all).
+
+## What was changed on 2026-10-14 (session 2 — printout attribution, partitions, add-ons, whole-unit rounding)
+Commits `d697730`..`340215a`, all deployed and confirmed served. QT-W00000261 used as the reference.
+- **Printout markup attribution extended to Fabrication-only** (`d697730`, `2fa1ed8`). The 18 Aug
+  regroup (each part keeps its own markup) now also covers Fabrication-only **with** Assembly and
+  **without** (branch `else if(pMobBase===0&&pInstBase===0)`, `miRegroup.naOnly`). No fab buffer
+  there (engine applies it only with installation). Assembly / "Other charges" row = what is left of
+  the old lump, so lines always equal the grand total. **The "Charge under: separate line / included"
+  choice on the Contingency & charges card is REMOVED** — contingency always prints inside
+  Fabrication (`onFabContMode` deleted; `qFabCont.mode` still saved, now ignored). 67 quotations
+  issued since 18 Aug went out with the separate line under the old default.
+- Fixed: `foldDC` was declared after the regroup block that reads it → a folded design charge
+  vanished from printed lines when Installation was on.
+- **Cutting list charge**: own line in the itemized print view (last area carries it); the on-screen
+  summary's Fabrication line now INCLUDES it (+ contingency) with "includes Cutting list charge ₱…"
+  — screen and printout Fabrication match (QT-261: ₱43,159.93). Minimum-charge rows in the itemized
+  view now print WITH fab contingency (were ₱8.32 short on QT-261 Opt 1).
+- **Toilet partitions in sets** (`89f1121`): BOM line field **Cubicles per set** (`bItem.perSet`);
+  Qty = TOTAL cubicles; walls apply per set; `_partitionSets`/`_partitionActive`/`_partitionPanelMult`.
+  20 in 4s wall-to-wall = 5×(4+3)=35 panels vs one row of 20 = 39. Size label "per cubicle, not the
+  whole row". Free-standing = no wall either end (app default "as template" = free-standing single).
+- **Presets** (`6af1ef3`): `ADDON_PRESETS['Floating shelf']` (button on partition templates; 3 lines,
+  one add-on name, scaleBy none) and `CAB_TYPE_PRESETS['Urinal Partition']` (`lines:` form; full-height
+  presets now carry `fullHeight:true`). **Rommel saved both** (Urinal Partition created + saved via the
+  app 2026-10-14). Urinal PPIC capacity set to **8/team/day** (my estimate, not team data). Full-height
+  partitions stay at default 3/day until Rommel has data. Brackets/screws on urinal still ₱0.
+- **Add-on rule**: one package = every line (materials/hardware/services) shares the SAME add-on name.
+  Vanity add-ons are named separately per line ("w/ Backing Material", …) → 3 ticks; Rommel to rename.
+- **Add-on quantity + own size** (`5b394f7`, `509bd39`): `bItem.addonQty[name]`, `bItem.addonSize[name]`,
+  `ADDON_REF_SIZES={'Floating shelf':{w:1000,d:150}}`, `_addonFactor` (board by area, lm by edge,
+  hardware by length, ceil; floored at the add-on's reference; never the cabinet's size). Printout
+  "— with Floating shelf ×2".
+- **Project size auto for partitions** (`1a3c9f4`): `_partitionComponents` — per row of n: n doors +
+  (n+1) front strips + (n−1) sides + open ends (single free-standing = 5 = Settings figure; Pueblo row
+  of 4 wall-to-wall = 12); urinal = 1/screen; sized add-ons add their count.
+- **Whole-unit rounding** (`c52849f`): `_materialRoundingTopUps(locked)` — every material/hardware/
+  outsource item totalled across the WHOLE quotation by name+unit, rounded up (not per cabinet). Charged
+  → extra at average price joins fabBase (outsource → outsourceBase, own markup); NOT charged
+  (Subsidiary) still rounds, adds ₱0 (it's what they order and supply back). Both stages; `_pCalc.
+  matRound`; summary line "Rounding to whole units" (hover lists items); itemized print line; BOM report
+  whole numbers. BOM + cutting-list modes only (carcass unchanged). **Issued quotations kept as issued**:
+  `qMatRoundOn` (state `matRoundOn`) — a quotation locked without it is not rounded until unlocked.
+- **BOM report lists outsource items** (`340215a`) tagged OUTSOURCE, kept apart from own stock.
+- **Pueblo HQ toilet partition drawing** read: female = 1 row of 4, wall to wall, 12mm phenolic
+  (compact laminate), 2425 high (standard, not full height); male = 1 cubicle 2000 wide wall to wall +
+  2 urinal screens (~390×1100) + floating shelves (4×1000, 1×1410). One board covers screens + shelves.
+- ⚠ Shell heredocs broke patches twice more (`\n` → real newline inside a JS string; `\'` mangled).
+  Write patch scripts with the Write tool as .cjs files, then run them.
+- ⚠ Claude-in-Chrome was used to create the Urinal Partition in Rommel's signed-in app (he signed in).
+
+# OPEN — updated 2026-10-14 (session 2 end)
+- Price urinal brackets/screws and the floating-shelf bracket (₱0 now).
+- Rename Vanity add-on lines to one name each ("Backing", "Top").
+- Full-height partition PPIC capacity — waiting on Rommel's data (keep 3/day).
+- Screen summary Assembly shows raw ₱6,800 vs printout ₱12,641.20 (with its markup) — asked Rommel
+  whether to show it marked up on screen; no answer yet.
+- Everything in the 2026-10-13 list still stands (QT-M00000155 Prepared-by: leave as is).
