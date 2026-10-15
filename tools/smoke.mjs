@@ -123,6 +123,21 @@ const PROFILES = {
                      window.prodComputeServices([{ material: 'PB', length: 1220, width: 2440, qty: 1 }], [], []).cuttingLMNet,
                      window.prodComputeServices([{ material: 'PB', length: 1000, width: 500, qty: 1 }], [], []).cuttingLMNet],
               [0, 0, 3]);
+      /* 2026-10-16 (ARBAU): the same words at 18mm and 6mm must not share one board SKU; a banded row
+         with no tape named takes the tape picked for its board. */
+      if (window.CLR && typeof window.CLR.toPanel === 'function' && typeof window.CLR._state === 'function')
+        check('CLR.toPanel: a words-only mapping applies only at its SKU\'s thickness; unnamed tape is filled per board',
+              () => {
+                const ST = window.CLR._state(), keepM = ST.store.mats, keepE = ST.matEdit;
+                try {
+                  ST.store.mats = { 'warm white': 'WW PB 4x8 2F (18mm, Stipple)' };
+                  ST.matEdit = { 'tapenone:warm white': 'WW 1mmx22mm Edgeband' };
+                  const base = { group: 'G', part: 'P', L: 600, W: 400, qty: 1, code: '4S', emat: '', issues: [] };
+                  const a = window.CLR.toPanel(Object.assign({}, base, { material: 'WARM WHITE', thk: 18 }), '');
+                  const c = window.CLR.toPanel(Object.assign({}, base, { material: 'WARM WHITE', thk: 6, code: '' }), '');
+                  return [a.mat, c.mat, a.emat, c.emat];
+                } finally { ST.store.mats = keepM; ST.matEdit = keepE; }
+              }, ['WW PB 4x8 2F (18mm, Stipple)', 'WARM WHITE', 'WW 1mmx22mm Edgeband', '']);
       if (typeof window._prodPieceFitIssue === 'function')
         check('_prodPieceFitIssue: sideways and over-length pieces are caught, a fitting piece is not',
               () => { const mt = window.prodSettings.machineType;

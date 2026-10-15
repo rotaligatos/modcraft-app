@@ -38502,6 +38502,13 @@ function linesToAoa(lines) {
 
   function sigOf(aoa,h){ return h<0?'':(aoa[h]||[]).map(norm).filter(Boolean).join('|'); }
   function matKey(s){ return norm(s); }
+  // ARBAU writes the same words for the 18mm boards and the 6mm backing ("WARM WHITE STIPPLE TWO
+  // FACE"), so a mapping keyed on the words alone put the backing on the 18mm SKU (Rommel,
+  // 2026-10-16). The key carries the row's thickness; an older words-only mapping still applies,
+  // but only to rows of the thickness its SKU states.
+  function rowMatKey(text,thk){ var k=matKey(text); return +thk>0?k+'@'+(+thk):k; }
+  function skuThk(n){ var m=String(n||'').match(/(\d+(?:\.\d+)?)\s*mm/i); return m?+m[1]:0; }
+  function legacyOk(k,v){ var at=k.lastIndexOf('@'); if(at<0||!v) return false; var t=skuThk(v); return !t||t===+k.slice(at+1); }
 
   // The remembered layouts and material mappings live in the shared settings table, so a
   // correction one estimator makes is there for the next one. localStorage is only a mirror
@@ -38605,7 +38612,7 @@ function linesToAoa(lines) {
     var seen={},out=[];
     includedRows('panels').forEach(function(x){
       var m=String(x.r.material||'').trim(); if(!m) return;
-      var k=matKey(m); if(seen[k]){ seen[k].n+=(x.r.qty||1); return; }
+      var k=rowMatKey(m,x.r.thk); if(seen[k]){ seen[k].n+=(x.r.qty||1); return; }
       seen[k]={text:m,key:k,n:(x.r.qty||1),thk:x.r.thk||0,faces:x.r.faces||0}; out.push(seen[k]);
     });
     return out;
@@ -38624,10 +38631,19 @@ function linesToAoa(lines) {
   function distinctTapes(){
     var seen={},out=[];
     includedRows('panels').forEach(function(x){
-      var t=String(x.r.emat||'').trim(); if(!t) return;
+      var t=String(x.r.emat||'').trim();
+      // Banded but no tape named (ARBAU names none): one entry per board, so a tape is picked here
+      // and remembered, instead of the edge banding arriving with no tape to price.
+      if(!t){
+        if(!x.r.code) return;
+        var bm=String(x.r.material||'').trim(), nk='tapenone:'+matKey(bm||'board');
+        var bsku=(bm&&mappedSku(rowMatKey(bm,x.r.thk)))||bm;
+        if(seen[nk]){ seen[nk].n+=(x.r.qty||1); return; }
+        seen[nk]={text:bm||'(no board named)',key:nk,n:(x.r.qty||1),gloss:/gloss/i.test(bsku),none:true}; out.push(seen[nk]); return;
+      }
       // The tape's finish follows the board it bands: high-gloss tape only on a high-gloss board,
       // matte otherwise (Rommel, 2026-09-26). The board is read as mapped, else as the client wrote it.
-      var m=String(x.r.material||'').trim(), board=(m&&mappedSku(matKey(m)))||m;
+      var m=String(x.r.material||'').trim(), board=(m&&mappedSku(rowMatKey(m,x.r.thk)))||m;
       var gloss=/gloss/i.test(board);
       var k=tapeKey(t); if(seen[k]){ seen[k].n+=(x.r.qty||1); if(gloss) seen[k].gloss=true; return; }
       seen[k]={text:t,key:k,n:(x.r.qty||1),gloss:gloss}; out.push(seen[k]);
@@ -38672,12 +38688,15 @@ function linesToAoa(lines) {
   }
   function mappedSku(k){
     if(ST.matEdit[k]!=null) return ST.matEdit[k];
-    return clientMap()[k]||(ST.learned||{})[k]||(ST.store.mats||{})[k]||'';
+    var v=clientMap()[k]||(ST.learned||{})[k]||(ST.store.mats||{})[k]||'';
+    if(!v&&k.indexOf('@')>0){ var base=k.slice(0,k.lastIndexOf('@')), lv=mappedSku(base); if(legacyOk(k,lv)) v=lv; }
+    return v;
   }
   function mappedFrom(k){
     if(ST.matEdit[k]!=null) return '';
     if(clientMap()[k]) return 'client';
     if((ST.learned||{})[k]||(ST.store.mats||{})[k]) return 'shared';
+    if(k.indexOf('@')>0){ var base=k.slice(0,k.lastIndexOf('@')); if(legacyOk(k,mappedSku(base))) return mappedFrom(base); }
     return '';
   }
 
@@ -38979,7 +38998,7 @@ function linesToAoa(lines) {
         +'<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>As written</th><th '+th+'>Pieces</th><th '+th+'>Our edge-band SKU</th></tr>';
       tapes.forEach(function(t,ti){
         var v=mappedSku(t.key), from=mappedFrom(t.key), sug=v?[]:suggestTape(t);
-        h+='<tr><td '+td+'>'+esc(t.text)+'</td><td '+td+'>'+t.n+'</td><td '+td+'>'
+        h+='<tr'+(t.none&&!v?' style="background:var(--wash-amber)"':'')+'><td '+td+'>'+(t.none?'<b>No tape named</b><div style="font-size:11px;color:var(--text2)">edge banding on '+esc(t.text)+'</div>':esc(t.text))+'</td><td '+td+'>'+t.n+'</td><td '+td+'>'
           +'<input list="clr-tape-dl-'+ti+'" value="'+esc(v)+'" placeholder="search edge bands…" data-k="'+esc(t.key)+'"'
           +' oninput="CLR.tapeSearch(this,'+ti+')" onchange="CLR.tapeSearch(this,'+ti+')"'
           +' style="width:100%;max-width:520px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit">'
@@ -39004,7 +39023,7 @@ function linesToAoa(lines) {
   // ⚠ remark, so it is still visible after import — never silently resolved.
   function toPanel(r,sizeMode){
     var p=MCL.blankPanel();
-    var mat=String(r.material||'').trim(), sku=mat?mappedSku(matKey(mat)):'';
+    var mat=String(r.material||'').trim(), sku=mat?mappedSku(rowMatKey(mat,r.thk)):'';
     p.group=r.group||'Cabinet 1';
     p.part=r.part||'Part';
     // "OUTSOURCE: Marine Plywood 18mm (raw)" — the board is bought in, not taken from stock. The
@@ -39019,6 +39038,7 @@ function linesToAoa(lines) {
     p.qty=+r.qty||1;
     p.ebt=r.code||'';
     var tapeTxt=String(r.emat||'').trim(), tapeSku=tapeTxt?mappedSku(tapeKey(tapeTxt)):'';
+    if(!tapeTxt&&r.code) tapeSku=mappedSku('tapenone:'+matKey(mat||'board'));
     p.emat=tapeSku||tapeTxt;
     // Grooving arrives as a run length already computed from the edge it follows, for the
     // whole row. Left as plain "Grooving": which of the catalogue's grooving prices applies is
@@ -42921,6 +42941,22 @@ function prodBuildSummary(result) {
     }
     mats.push(trow);
   }
+  // Edge banding nobody named a tape for still uses tape — it has to be priced (Rommel, 2026-10-16).
+  // One line to fill, flagged, with tapes in the board's colour suggested; it can be unticked.
+  var unTape=ebtByTape.filter(function(x){ return x.tape==='Unspecified'&&x.lm>0; })[0];
+  if(unTape){
+    var tcat=_prodEdgeTapeCatalog(), boardWords=[];
+    (result._bom||[]).slice().sort(function(a,b){ return (b.totalArea||0)-(a.totalArea||0); }).slice(0,1).forEach(function(b){
+      // Colour words only — board, finish and face words ("stipple", "two face", "[SDP]") are not in a tape's name.
+      var notColour=/^(sdp|stipple|matte?|supermatte|gloss|glossy|crosscut|woodgrain|textile|fabric|hardwood|softwood|stone|two|one|face|faces|board|boards|mdf|pb|mfc|plywood|ply|hdf|melamine|raw|hpl|thick|mm)$/;
+      boardWords=String(b.color||'').toLowerCase().split(/[^a-z]+/).filter(function(w){ return w.length>2&&!notColour.test(w); }); });
+    var cands=boardWords.length?tcat.filter(function(c){ var low=String(c.name||'').toLowerCase();
+      return !/do not use|discontinued|floor sample/i.test(low)&&boardWords.every(function(w){ return low.indexOf(w)>=0; }); })
+      .map(function(c){ return c.name; }).sort(function(a,b){ return (/x\s*22\s*mm/i.test(a)?0:1)-(/x\s*22\s*mm/i.test(b)?0:1); }).slice(0,6):[];
+    mats.push({aiName:'Edge tape (not named in the list)',name:'',qty:Math.round(unTape.lm*100)/100,unit:'lm',include:true,price:0,
+      needsReview:true,matchCandidates:cands,
+      reviewNote:unTape.lm.toFixed(2)+' lm of edge banding has no tape named — pick the edge band'+(cands.length?' (tapes in the board colour shown first)':'')+', or untick if the client supplies it.'});
+  }
   var hws=[];var hwRaw=result.hardware||[];
   // One quotation line per item. With the optional Cabinet column the same hinge can sit on
   // several rows (4 for Cabinet 1, 8 for Cabinet 2); the quotation needs the TOTAL, while the
@@ -43147,7 +43183,7 @@ function prodBuildSummaryHtml(){
   }}
   h+='</div></div>';return h;
 }
-function prodAddSummaryRow(cat){if(!prodState.summary)return;if(cat==='materials')prodState.summary.materials.push({aiName:'',name:'',qty:1,unit:'sheet',include:true});else if(cat==='hardware')prodState.summary.hardware.push({aiName:'',name:'',qty:1,unit:'pcs',include:true});else if(cat==='services')prodState.summary.services.push({aiName:'',name:SERVICES[0].name,svcIdx:0,qty:1,unit:SERVICES[0].unit,include:true});var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
+function prodAddSummaryRow(cat){if(!prodState.summary)return;if(cat==='materials')prodState.summary.materials.push({aiName:'',name:'',qty:1,unit:'sheet',include:true,needsReview:true,matchCandidates:[],reviewNote:'New line — search the catalogue and pick the item.'});else if(cat==='hardware')prodState.summary.hardware.push({aiName:'',name:'',qty:1,unit:'pcs',include:true,needsReview:true,matchCandidates:[],reviewNote:'New line — search the catalogue and pick the item.'});else if(cat==='services')prodState.summary.services.push({aiName:'',name:SERVICES[0].name,svcIdx:0,qty:1,unit:SERVICES[0].unit,include:true});var slot=el('prod-summary-wrap');if(slot)slot.innerHTML=prodBuildSummaryHtml();}
 // One always-on searchable list for a flagged materials/hardware row -- replaces the earlier
 // two-step design (a narrow auto-matched dropdown, PLUS a separately-hidden "search manually"
 // link as a fallback). User feedback: capping the auto-match to a small scored shortlist isn't
@@ -43229,6 +43265,7 @@ function _prodCatalogRowPicked(cat,idx,itemName,isOutsource){
   var matched=catalogArr.find(function(c){return c.name===itemName;});
   if(matched){
     row.name=matched.name; row.unit=matched.unit||row.unit; row.price=matched.price||0; row.custom=false;
+    if(typeof _forceEdgeTapeUnit==='function') _forceEdgeTapeUnit(row,matched.name);
     // Carries the catalog SKU's own MTO tag through — same as a confident auto-match in catalogMatchRow.
     row.mto=(cat==='materials'&&!!matched.mto); row.mtoLeadDays=row.mto?_mtoDefaultLeadDays(row.texture):0;
   } else { row.name=itemName; row.mto=false; row.mtoLeadDays=0; }
