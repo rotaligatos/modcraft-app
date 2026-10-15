@@ -110,9 +110,10 @@ const PROFILES = {
                         return [window._prodPieceFitIssue(2000, 600, 'length', 'PB') === '',
                                 /swap Length and Width/.test(window._prodPieceFitIssue(600, 2000, 'length', 'PB')),
                                 /bigger board or split/.test(window._prodPieceFitIssue(2600, 500, 'length', 'PB')),
-                                window._prodPieceFitIssue(2440, 600, 'length', 'PB') !== ''];   // kerf: 2440 does not fit
+                                window._prodPieceFitIssue(2440, 600, 'length', 'PB') === '',    // a full-length piece needs no cut, so no kerf
+                                window._prodPieceFitIssue(2439, 600, 'length', 'PB') !== ''];   // 2439 leaves a 1mm sliver to cut: kerf applies
                       } finally { window.prodSettings.machineType = mt; } },
-              [true, true, true, true]);
+              [true, true, true, true, true]);
       if (typeof window._prodReflectStageBlock === 'function')
         check('_prodReflectStageBlock: locked stages and an unopened Final Quotation refuse a cutting list',
               () => {
