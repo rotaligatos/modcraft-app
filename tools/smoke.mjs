@@ -116,6 +116,13 @@ const PROFILES = {
                 const p = window.CLR.toPanel(r.rows[0], '');
                 return [r.rows[0].group, r.rows[0].material, r.rows[0].handgrabLm, r.rows[1].group, r.rows[1].handgrabLm, p.svcs[0]];
               }, ['CASHIER COUNTER', 'WARM WHITE STIPPLE', 1.364, '', 0.4, 'Handgrab tapering × 1.364 lm']);
+      /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
+      if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
+        check('a whole-board piece adds no cutting; a cut piece still does',
+              () => [window.prodComputeServices([{ material: 'PB', length: 2440, width: 1220, qty: 5, noCut: true }], [], []).cuttingLMNet,
+                     window.prodComputeServices([{ material: 'PB', length: 1220, width: 2440, qty: 1 }], [], []).cuttingLMNet,
+                     window.prodComputeServices([{ material: 'PB', length: 1000, width: 500, qty: 1 }], [], []).cuttingLMNet],
+              [0, 0, 3]);
       if (typeof window._prodPieceFitIssue === 'function')
         check('_prodPieceFitIssue: sideways and over-length pieces are caught, a fitting piece is not',
               () => { const mt = window.prodSettings.machineType;
