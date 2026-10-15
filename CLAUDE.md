@@ -12969,3 +12969,71 @@ Commits `d697730`..`340215a`, all deployed and confirmed served. QT-W00000261 us
 - Screen summary Assembly shows raw ₱6,800 vs printout ₱12,641.20 (with its markup) — asked Rommel
   whether to show it marked up on screen; no answer yet.
 - Everything in the 2026-10-13 list still stands (QT-M00000155 Prepared-by: leave as is).
+
+## What was changed on 2026-10-14/15 (session 3 — cutting list → stage → Job Order, training Job Orders, board fit)
+Commits `32f71c8`..`46c7ca5`, all deployed and confirmed served.
+
+### Checked first (no code): screen vs printout
+QT-W00000261 (2 options, both stages) and QT-C00000021 (Pueblo HQ) driven offline from their real
+saved states through all 4 print views × Mob/Install combined/separate: **grand total matches
+the screen in 40/40**, printed lines add up. Harness kept in scratch (not committed).
+
+### 1. Reflect a cutting list into Stage 1 or Stage 2 (`32f71c8`)
+Rommel: a Job Order is built only from a cutting list, not every job starts with one, so the tool
+must choose new / existing quotation, Stage 1 or 2.
+- Reflect window: **New quotation · Initial Quotation (Stage 1) · Final Quotation (Stage 2)**.
+  `_prodReflectStageBlock(stage)` disables a locked stage, Stage 2 before `qApproved`, and a paused
+  order — with the reason shown.
+- Stage 2: lines go into `fqAreas` via `goStage(2)` + `_fqEdit`; Stage 1 untouched.
+  **`fqDrawingAnalysis`** (new global, state + snapshot as lightweight summary) holds Stage 1's
+  pieces + Stage 2's; saved to Storage AT REFLECT TIME (`_saveFQDrawingAnalysis`, fixed path
+  `<base> — Final Quotation cutting list.json`, `_fqDrawingAnalysisPath`). Final lock
+  (`confirmSend` fq, `skipSend` fq) runs `_reserveJobOrder('fq')` when it exists; JO `data.stage`
+  = 'initial' | 'final'. `_joAnalysisForQuotation(base,'fq')` reads memory, else that file.
+- **Several lists add up** (`_daMergeResults`): components/holes/extras/hardware concatenated,
+  `_bom` + `_services` recomputed over every piece; a cabinet name both lists use gets
+  " · <file>" on the second list (holes match by part name AND cabinet). `parts[]` records each list.
+  An earlier list only in the lightweight summary is loaded from Storage first (`_daLoadFull`);
+  if it can't be (never locked + browser closed) the app warns and logs.
+- `_daLightweightSummary(da)` now takes an argument and keeps `componentCount` across reloads
+  (it used to reset to 0 after a reload+save — project size lost its count).
+
+### 2. Stage 2 summary service lines (`ec3c0ca`)
+`fq-sum-lines` priced each service as `SERVICES[svcIdx].price × qty`, ignoring a typed price and
+the client-supplied uplift. Now `_svcLineTotal(fsi)` like Stage 1. Display only.
+
+### 3. Job Orders in training mode (`0f9dd7b`)
+Training blocked every `job_orders` write, so a trainee could never see the Job Order a lock made.
+`_joTable()` = `supa.from('job_orders')` live, or `_trnJoQuery()` in training — same query shapes
+(select/eq/in/order/limit/maybeSingle/insert/update) against `localStorage mc_trn_job_orders`.
+Job Order window (with a training note), Print, Labels, supersede, ready all work. Never reaches
+KEYSTONE/PMES. Per browser only. **Next agreed step: test the KEYSTONE → PMES handoff** (needs its
+own setup — training stops at "ready").
+
+### 4. Piece too big for the board (`8b62666`, `46c7ca5`)
+A piece that does not fit was reported only after the layout, was on no board, and its boards were
+missing from the count — yet Reflect let it through.
+- `_prodBoardFor(material)` (moved out of `prodComputeBom`, same logic) + `_prodPieceFitIssue`
+  — the packer's own rule (kerf, machine rotation, grain).
+- Cutting List rows: Length/Width turn red as you type, reason on hover, footer counts the rows.
+- Reflect to quotation refuses while any piece is off the layout, naming piece, size and fix.
+- **Rommel, 2026-10-15: kerf only where a cut is made.** A piece using the whole remaining
+  length/width (2440 on a 2440 board) needs no kerf: `fitsIn(x,avail) = x===avail || x+kerf<=avail`
+  in `guillotinePackBoards` (orientation filter, shelf length, new-shelf width). Other pieces pack
+  exactly as before. 2439 still flagged (1 mm sliver to cut).
+
+### Notes
+- `index.html`'s working copy turned **CRLF** mid-session. Patch scripts must split/join on CRLF
+  when present (see `fit.cjs` pattern: `NL`/`CRLF` from `String.fromCharCode`); a `node -e` with
+  `\n` inside a bash single-quoted string failed twice — use Write + a script file.
+- A What's new entry was added for item 1 (feature). Items 2–4 are fixes: no entry.
+
+# OPEN — updated 2026-10-15
+- **Test the KEYSTONE → PMES handoff** for a Job Order (Rommel's next step).
+- Price urinal brackets/screws and the floating-shelf bracket (₱0 now).
+- Rename Vanity add-on lines to one name each ("Backing", "Top").
+- Full-height partition PPIC capacity — waiting on Rommel's data (keep 3/day).
+- Screen Assembly line raw vs printout marked up — Rommel to decide.
+- Job Order per option still uses one `drawing_analyses` row per serial (pre-existing): options with
+  different cutting lists share it. Not raised by Rommel; note only.
+- Everything in the 2026-10-13 list still stands (QT-M00000155 Prepared-by: leave as is).
