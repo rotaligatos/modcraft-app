@@ -13037,3 +13037,12 @@ missing from the count — yet Reflect let it through.
 - Job Order per option still uses one `drawing_analyses` row per serial (pre-existing): options with
   different cutting lists share it. Not raised by Rommel; note only.
 - Everything in the 2026-10-13 list still stands (QT-M00000155 Prepared-by: leave as is).
+
+## Parked 2026-10-16 (Rommel: test the import first)
+- **'+ Service column' in the client-list import**: point a client column at a catalogue service
+  and read it as count (holes), side (L/W -> lm), mm, or yes/tick (per piece); remembered with
+  the layout. Today only edge banding, grooving and tapered handgrab are read; other services are
+  added per row in the Cutting List after import. Ask for a real list with a boring column first.
+- Shipped today (2026-10-15/16): combined '+ Material' columns, Group/location column, Tapered
+  handgrab -> 'Handgrab tapering' lm, whole-board / NO CUTTING adds no cutting, groove+handgrab on
+  one column counts as handgrab only, reload prompt only when the app changed.
