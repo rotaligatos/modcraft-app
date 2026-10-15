@@ -18857,7 +18857,7 @@ function _cutListToAnalysis(cl,order){
           // than invent one, or the service silently prices at zero.
           review.push('"'+sv+'" arrived without a hole count - boring is priced per hole, so add it to the hole schedule');
         }
-      } else if(/groov|\brout|manual\s*edge/i.test(sv)&&!/min(imum)?\s*charge/i.test(sv)){
+      } else if(/groov|\brout|manual\s*edge|taper/i.test(sv)&&!/min(imum)?\s*charge/i.test(sv)){
         var lmMatch=sv.match(/[x×]\s*([\d.]+)\s*lm\b/i);
         var svcName=String(sv).replace(/\s*[x×]\s*[\d.]+\s*lm\b.*$/i,'').trim();
         // The MSSI website sends the run as the edge it follows, not a typed length:
@@ -37300,7 +37300,7 @@ var MCL=(function(){
   // is a flat "lot" floor rule, not something a run length applies to -- everything else that
   // names grooving, routing or manual edgebanding needs the same lm prompt Boring already gets.
   function svcNeedsLm(sv){
-    return !/\bbor/i.test(sv) && !/min(imum)?\s*charge/i.test(sv) && /groov|\brout|manual\s*edge/i.test(sv);
+    return !/\bbor/i.test(sv) && !/min(imum)?\s*charge/i.test(sv) && /groov|\brout|manual\s*edge|taper/i.test(sv);
   }
 
   function svcCell(p,i){
@@ -37983,6 +37983,10 @@ const isNum = v => /^\s*-?[\d,]+(\.\d+)?\s*(mm|pcs?|pc)?\s*$/i.test(String(v == 
 const FIELD_RULES = [
   { field: 'emat',   re: /(e-?matl|ebt material|edge ?(band(ing)?)? ?mat|tape|eb colou?r)/ },
   { field: 'groove', re: /groov/ },
+  // A tapered handgrab column says WHICH side gets it ("LENGTH" / "WIDTH"); the run follows that
+  // side of the piece (Rommel, 2026-10-15, ARBAU). A column that says groove is grooving, above.
+  { field: 'handgrab', re: /(taper|hand ?grab)/ },
+  { field: 'group',  re: /^(location|room|area)$/ },
   { field: 'edge',   re: /(edg|^eb$|sides to be eb|banding)/ },
   { field: 'remark', re: /(remark|comment|^notes?$)/ },
   { field: 'item',   re: /^(item( no\.?)?|no\.?|#|s\/n|label)$/ },
@@ -37995,6 +37999,11 @@ const FIELD_RULES = [
   { field: 'width',  re: /(width|^w$|breadth)/ },
   { field: 'material', re: /(material|^board( \/ hpl| colou?r)?$|^mat$|finish)/ },
 ];
+// A board described across several columns (ARBAU: COLOR · FINISH · TYPE · FACE) is read as one
+// material, the columns joined in order. material2-4 are the extra columns — chosen by a person in
+// the import window and remembered with the layout, never guessed: guessing would change the
+// material text of lists already mapped, and their remembered SKU mappings are keyed on it.
+const MAT_FIELDS = ['material', 'material2', 'material3', 'material4'];
 function classify(h) {
   const n = norm(h); if (!n) return null;
   for (const r of FIELD_RULES) if (r.re.test(n)) return r.field;
@@ -38071,6 +38080,17 @@ function parseEdgeDims(raw) {
   return seen ? { L: Math.min(L, 2), W: Math.min(W, 2), ok: true } : { L: 0, W: 0, ok: false };
 }
 
+// Which sides a groove / handgrab runs along. "1L", "2W", "1W 1L" as before, and the plain words
+// ARBAU writes: "LENGTH" = one run along the length, "WIDTH" = along the width, "BOTH" = one each.
+function runSides(txt) {
+  const t = String(txt == null ? '' : txt).toUpperCase();
+  const tokens = (t.match(/\b\d\s*[LWHS]\b/g) || []).join(' ');
+  if (tokens) return parseEdgeDims(tokens);
+  const w = t.replace(/[^A-Z ]+/g, ' ').trim();
+  const L = /\b(LENGTH|LONG|HEIGHT|L|H)\b/.test(w) ? 1 : 0, W = /\b(WIDTH|SHORT|W)\b/.test(w) ? 1 : 0;
+  if (/\bBOTH\b/.test(w) && !L && !W) return { L: 1, W: 1, ok: true };
+  return (L || W) ? { L, W, ok: true } : { L: 0, W: 0, ok: false };
+}
 // Our code is long/short, not length/width — so it depends on the actual size.
 function toOurCode(eL, eW, len, wid) {
   const long = len >= wid ? eL : eW, short = len >= wid ? eW : eL;
@@ -38084,7 +38104,7 @@ function parseMatCode(s) {
   const t = String(s || '').toUpperCase();
   let m = t.match(/(\d{1,2})([12])F\b/);
   if (m) return { thk: +m[1], faces: +m[2] };
-  const faces = /DOUBLE FACE|2 ?FACE|\b2F\b/.test(t) ? 2 : (/SINGLE FACE|1 ?FACE|\b1F\b/.test(t) ? 1 : 0);
+  const faces = /DOUBLE FACE|TWO FACES?|2 ?FACE|\b2F\b/.test(t) ? 2 : (/SINGLE FACE|ONE FACE|1 ?FACE|\b1F\b/.test(t) ? 1 : 0);
   m = t.match(/\b(\d{1,2}(?:\.\d)?)\s*MM\b/) || t.match(/[A-Z](\d{2})\b/);
   return m ? { thk: +m[1], faces } : { thk: 0, faces };
 }
@@ -38237,6 +38257,11 @@ function readClientSheet(aoa, force) {
   const boards = (res.ctx.materials || []).slice();
   for (let r = h + 1; r < aoa.length; r++) {
     const row = aoa[r] || [], g = f => res.map[f] == null ? '' : row[res.map[f]];
+    const gm = () => MAT_FIELDS.map(f => String(g(f) == null ? '' : g(f)).trim()).filter(Boolean).join(' ');
+    // "1 CASHIER COUNTER": a location cell can carry the row number in front.
+    // A cell that is ONLY a number (the location wrapped onto a heading line above) is no location:
+    // the row keeps the heading's group.
+    const gGroup = () => String(g('group') == null ? '' : g('group')).replace(/^\s*\d+(\s+|$)/, '').trim();
     // "2010 mm", "1,200", "2 PCS" — keep the number, drop the unit. A cell with no digits
     // at all stays 0, so a text heading is never mistaken for a size.
     const num = v => { const m = String(v == null ? '' : v).replace(/,/g, '').match(/-?\d+(\.\d+)?/); return m ? +m[0] : 0; };
@@ -38256,13 +38281,16 @@ function readClientSheet(aoa, force) {
       if (mhFirst) { curMat = mhFirst; boards.push(mhFirst); continue; }
       const q0 = num(g('qty')), p0 = String(g('part') || '').trim();
       if (q0 > 0 && p0 && (L > 0 || W > 0 || /see drawing|see dwg|refer/i.test(whole))) {
-        res.rows.push({ src: r + 1, group: [group, groupSub].filter(Boolean).join(' › '), part: p0,
-          material: String(g('material') || (curMat && curMat.material) || '').trim(), thk: 0, faces: 0,
+        res.rows.push({ src: r + 1, group: gGroup() || [group, groupSub].filter(Boolean).join(' › '), part: p0,
+          material: String(gm() || (curMat && curMat.material) || '').trim(), thk: 0, faces: 0,
           L, W, qty: q0, eL: 0, eW: 0, code: '', emat: '', grooveLm: 0, remark: whole,
           issues: ['no size given' + (/see drawing|see dwg/i.test(whole) ? ' — "see drawing"' : '') + ' — needs a person'] });
         continue;
       }
       // A row with words and no size is a heading: room, then module/cabinet under it.
+      // The header's own second and third lines ("TYPE | PARALLEL TO:", "SS (mm) | (mm) | ALONG")
+      // are not a room. Nor is any wordy row spread over three or more columns.
+      if (text.length >= 3 || (r <= h + 3 && text.length >= 2 && text.every(x => String(x).trim().length <= 15))) continue;
       if (text.length && whole.length < 90) {
         const t = whole;
         if (/^page\s*\d+$/i.test(t)) continue;           // a printed page marker, not a room
@@ -38276,10 +38304,10 @@ function readClientSheet(aoa, force) {
     const qty = num(g('qty')) > 0 ? num(g('qty')) : 0;
     const thkCol = parseFloat(String(g('thk')).replace(/[^\d.]/g, ''));      // "18 mm" → 18
     let rowMat = curMat;
-    if (!g('material') && thkCol > 0 && rowMat && rowMat.thk && rowMat.thk !== thkCol) {
+    if (!gm() && thkCol > 0 && rowMat && rowMat.thk && rowMat.thk !== thkCol) {
       for (let bi = boards.length - 1; bi >= 0; bi--) if (boards[bi].thk === thkCol) { rowMat = boards[bi]; break; }
     }
-    const matTxt = String(g('material') || (rowMat && rowMat.material) || res.ctx.finish || res.ctx.color || '').trim();
+    const matTxt = String(gm() || (rowMat && rowMat.material) || res.ctx.finish || res.ctx.color || '').trim();
     const mc = parseMatCode(matTxt);
     const thk = thkCol > 0 ? thkCol : (mc.thk || (rowMat && rowMat.thk) || 0);
 
@@ -38312,23 +38340,33 @@ function readClientSheet(aoa, force) {
     if (grooveTxt && !/^0(\.0+)?$/.test(grooveTxt)) {
       // The notation can sit before the word ("1W groove for grab bar") or after it
       // ("W/ GROOVING 1L"), so read only the count-and-side tokens wherever they are.
-      const tokens = (grooveTxt.toUpperCase().match(/\b\d\s*[LWHS]\b/g) || []).join(' ');
-      const gp = parseEdgeDims(tokens);
+      const gp = runSides(grooveTxt);
       if (gp.ok && (gp.L || gp.W)) grooveLm = (gp.L * L + gp.W * W) / 1000 * (qty || 1);
       else grooveOk = false;
     }
+    // Tapered handgrab: the column names the side ("LENGTH" / "WIDTH" / "1L"); the run is that side.
+    const hgTxt = String(g('handgrab') || '').trim();
+    let handgrabLm = 0, hgOk = true;
+    // "NO CUTTING" (ARBAU, on a whole-board backing) is a note, not a handgrab: kept with the remarks.
+    const hgNote = /^no\b/i.test(hgTxt) && !/^(no\.?\s*\d)/i.test(hgTxt);
+    if (hgTxt && !hgNote && !/^(0(\.0+)?|-|none|n\/?a)$/i.test(hgTxt)) {
+      const hp = runSides(hgTxt);
+      if (hp.ok && (hp.L || hp.W)) handgrabLm = (hp.L * L + hp.W * W) / 1000 * (qty || 1);
+      else hgOk = false;
+    }
     const issues = [];
     if (!qty) issues.push('no quantity');
+    if (!hgOk) issues.push('tapered handgrab "' + hgTxt + '" not understood');
     if (!edgeOk) issues.push('edge notation "' + edgeRaw + '" not understood');
     if (!grooveOk) issues.push('grooving "' + grooveTxt + '" not understood');
     if (!thk) issues.push('no thickness');
     if (!matTxt) issues.push('no material');
     res.rows.push({
-      src: r + 1, group: [group, groupSub].filter(Boolean).join(' › '),
+      src: r + 1, group: gGroup() || [group, groupSub].filter(Boolean).join(' › '),
       part: String(g('part') || g('item') || '').trim(), material: matTxt, thk, faces: mc.faces,
       L, W, qty, eL, eW, code: toOurCode(Math.min(eL, 2), Math.min(eW, 2), L, W),
       emat: String(g('emat') || row.__tape || '').trim().replace(/^0(\.0+)?$/, ''),
-      grooveLm, remark: rem, issues
+      grooveLm, handgrabLm, remark: [rem, hgNote ? hgTxt : ''].filter(Boolean).join(' · '), issues
     });
   }
   return res;
@@ -38337,7 +38375,7 @@ function readClientSheet(aoa, force) {
 function totals(rows) {
   const t = { rows: rows.length, pieces: 0, area: 0, edgeLm: 0, grooveLm: 0, flagged: 0 };
   rows.forEach(r => { const q = r.qty || 1; t.pieces += q; t.area += r.L * r.W / 1e6 * q;
-    t.edgeLm += (r.eL * r.L + r.eW * r.W) / 1000 * q; t.grooveLm += r.grooveLm; if (r.issues.length) t.flagged++; });
+    t.edgeLm += (r.eL * r.L + r.eW * r.W) / 1000 * q; t.grooveLm += r.grooveLm; t.handgrabLm = (t.handgrabLm || 0) + (r.handgrabLm || 0); if (r.issues.length) t.flagged++; });
   return t;
 }
 
@@ -38441,9 +38479,10 @@ function linesToAoa(lines) {
    MODCRAFT SIDE. Everything above is the prototype's reader, unchanged except that
    readClientSheet takes an optional `force` ({header, map}) so a person can correct it.
    ───────────────────────────────────────────────────────────────────────────── */
-  var FIELDS=[['part','Part / description'],['item','Item no.'],['material','Material'],['thk','Thickness'],
+  var FIELDS=[['group','Group / location'],['part','Part / description'],['item','Item no.'],['material','Material'],
+    ['material2','+ Material'],['material3','+ Material'],['material4','+ Material'],['thk','Thickness'],
     ['length','Length'],['width','Width'],['qty','Qty'],['edge','Edge banding'],['emat','Edge tape'],
-    ['groove','Grooving'],['remark','Remarks']];
+    ['groove','Grooving'],['handgrab','Tapered handgrab'],['remark','Remarks']];
   var ST={files:[],active:0,store:{templates:{},mats:{},clientMats:{}},matEdit:{},sugg:{}};
   var STORE_KEY='CLIENT_TEMPLATES', LS_KEY='mc_client_templates';
 
@@ -38863,14 +38902,14 @@ function linesToAoa(lines) {
     } else if(rows.length){
       var t=totals(rows);
       h+='<div style="font-size:12px;margin-bottom:6px"><b>'+t.rows+'</b> rows · <b>'+t.pieces+'</b> pieces · '+t.area.toFixed(2)+' m² · edge banding '
-        +t.edgeLm.toFixed(2)+' lm'+(t.grooveLm?' · grooving '+t.grooveLm.toFixed(2)+' lm':'')
+        +t.edgeLm.toFixed(2)+' lm'+(t.grooveLm?' · grooving '+t.grooveLm.toFixed(2)+' lm':'')+(t.handgrabLm?' · tapered handgrab '+t.handgrabLm.toFixed(2)+' lm':'')
         +(flagged.length?' · <span style="color:var(--pill-amber);font-weight:600">'+flagged.length+' to check</span>':' · <span style="color:var(--pill-teal)">nothing flagged</span>')+'</div>';
       h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Row</th><th '+th+'>Group</th><th '+th+'>Part</th><th '+th+'>Material</th><th '+th+'>Th</th><th '+th+'>L</th><th '+th+'>W</th><th '+th+'>Qty</th><th '+th+'>Edge</th><th '+th+'>Tape</th><th '+th+'>Groove lm</th><th '+th+'>Check</th></tr>';
       rows.slice(0,400).forEach(function(q){
         var bad=q.issues&&q.issues.length;
         h+='<tr style="'+(bad?'background:var(--wash-amber)':'')+'"><td '+td+'>'+q.src+'</td><td '+td+'>'+esc(q.group)+'</td><td '+td+'>'+esc(q.part)+'</td>'
           +'<td '+td+'>'+esc(q.material)+'</td><td '+td+'>'+(q.thk||'')+'</td><td '+td+'>'+(q.L||'')+'</td><td '+td+'>'+(q.W||'')+'</td><td '+td+'>'+(q.qty||'')+'</td>'
-          +'<td '+td+'>'+esc(q.code||'')+'</td><td '+td+'>'+esc(q.emat||'')+'</td><td '+td+'>'+(q.grooveLm?q.grooveLm.toFixed(2):'')+'</td>'
+          +'<td '+td+'>'+esc(q.code||'')+'</td><td '+td+'>'+esc(q.emat||'')+'</td><td '+td+'>'+(q.grooveLm?q.grooveLm.toFixed(2):'')+(q.handgrabLm?(q.grooveLm?' · ':'')+'<span title="Tapered handgrab">taper '+q.handgrabLm.toFixed(2)+'</span>':'')+'</td>'
           +'<td '+td+'><span style="font-size:11px;color:var(--pill-amber)">'+esc((q.issues||[]).join('; '))+'</span></td></tr>';
       });
       h+='</table>'+(rows.length>400?'<div style="font-size:11px;color:var(--text2)">Showing the first 400 of '+rows.length+' rows — all of them are imported.</div>':'');
@@ -38971,6 +39010,8 @@ function linesToAoa(lines) {
     // whole row. Left as plain "Grooving": which of the catalogue's grooving prices applies is
     // for the estimator to pick, and Designers Support flags the unmatched name until they do.
     p.svcs=r.grooveLm>0?['Grooving × '+(Math.round(r.grooveLm*1000)/1000)+' lm']:[];
+    // "Handgrab tapering" is the catalogue's per-lm service for a tapered handgrab.
+    if(r.handgrabLm>0) p.svcs.push('Handgrab tapering × '+(Math.round(r.handgrabLm*1000)/1000)+' lm');
     var rm=[];
     if(r.remark) rm.push(r.remark);
     if(sku&&mat&&sku!==mat) rm.push('client wrote: '+mat);
@@ -39148,7 +39189,7 @@ function linesToAoa(lines) {
     // Pure reader + conversion, exposed for tests.
     webRowSig:webRowSig, toWebMapping:toWebMapping, fromWebMapping:fromWebMapping,
     readClientSheet:readClientSheet, linesToAoa:linesToAoa, totals:totals, toPanel:toPanel,
-    _state:function(){ return ST; }
+    _state:function(){ return ST; }, _readFile:readFile
   };
 })();
 

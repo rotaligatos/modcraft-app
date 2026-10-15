@@ -103,6 +103,19 @@ const PROFILES = {
               }, ['B', 'superseded,reserved', 2]);
       /* 2026-10-14: a piece too big for its board was only reported after the layout, and its
          boards were left out of the count. _prodPieceFitIssue is the same rule as the packer. */
+      /* 2026-10-15 (ARBAU): a material spread over several columns is combined when a person picks
+         them; a LOCATION column names the group (a bare row number does not); a tapered-handgrab
+         column naming a side becomes that side's run, priced as "Handgrab tapering". */
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function')
+        check('CLR.readClientSheet: combined material columns, location group, tapered handgrab along a side',
+              () => {
+                const aoa = [['LOCATION', 'BOARD NAME', 'QTY', 'COLOR', 'FINISH', 'WIDTH', 'LENGTH', 'HANDGRAB'],
+                             ['1 CASHIER COUNTER', 'DOOR', 2, 'WARM WHITE', 'STIPPLE', 444, 682, 'LENGTH'],
+                             ['2', 'SIDE', 1, 'WARM WHITE', 'STIPPLE', 400, 700, 'WIDTH']];
+                const r = window.CLR.readClientSheet(aoa, { header: 0, map: { material: 3, material2: 4 } });
+                const p = window.CLR.toPanel(r.rows[0], '');
+                return [r.rows[0].group, r.rows[0].material, r.rows[0].handgrabLm, r.rows[1].group, r.rows[1].handgrabLm, p.svcs[0]];
+              }, ['CASHIER COUNTER', 'WARM WHITE STIPPLE', 1.364, '', 0.4, 'Handgrab tapering × 1.364 lm']);
       if (typeof window._prodPieceFitIssue === 'function')
         check('_prodPieceFitIssue: sideways and over-length pieces are caught, a fitting piece is not',
               () => { const mt = window.prodSettings.machineType;
