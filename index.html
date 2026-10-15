@@ -27483,14 +27483,42 @@ function _buildIsStale(mineMs,lastModifiedHeader){
   if(!isFinite(served)) return false;
   return (served-mineMs)>BUILD_STALE_MIN_GAP_MS;
 }
-function _checkForNewBuild(){
+// A newer publish date is not proof the APP changed: publishing anything in the repo (the project
+// notes, another app in the same site) re-stamps every file, so a notes-only push told everyone to
+// reload (Rommel, 2026-10-15). So the page's CONTENT is fingerprinted once, shortly after it loads,
+// and a newer date only counts when the content now served is different. If that first
+// fingerprint could not be taken reliably (failed, or the site was republished in the seconds
+// between this tab loading and the fetch), it falls back to the date alone — the old behaviour.
+var _buildBaseHash=null, _buildBaseTried=false, _buildMineMs=0;
+function _textHash(s){ var h=5381; for(var i=0;i<s.length;i++) h=((h<<5)+h+s.charCodeAt(i))|0; return (h>>>0).toString(36)+':'+s.length; }
+function _fetchServedPage(){
+  return fetch(location.pathname+'?cb='+Date.now(),{cache:'no-store'}).then(function(r){
+    var lm=r.headers.get('Last-Modified');
+    return r.text().then(function(t){ return {hash:_textHash(t),lm:lm}; });
+  });
+}
+function _takeBuildBaseline(loc){
+  if(_buildBaseTried||!_buildStaleGuardsAllow(loc||location)) return Promise.resolve();
+  _buildBaseTried=true;
+  var mine=_thisBuildTime();
+  return _fetchServedPage().then(function(p){
+    // Only a fetch of the SAME publish this tab loaded is a valid fingerprint of what is running.
+    if(mine&&p.lm&&!_buildIsStale(mine,p.lm)) _buildBaseHash=p.hash;
+  }).catch(function(){});
+}
+function _checkForNewBuild(loc){
   if(_buildStaleShown) return;                                     // already said so
-  if(!_buildStaleGuardsAllow(location)) return;
-  var mine=_thisBuildTime(); if(!mine) return;
-  fetch(location.pathname+'?cb='+Date.now(),{method:'HEAD',cache:'no-store'})
+  if(!_buildStaleGuardsAllow(loc||location)) return Promise.resolve();
+  var mine=_buildMineMs||_thisBuildTime(); if(!mine) return Promise.resolve();
+  return fetch(location.pathname+'?cb='+Date.now(),{method:'HEAD',cache:'no-store'})
     .then(function(r){
       var lm=r.headers.get('Last-Modified');
-      if(_buildIsStale(mine,lm)){ _buildStaleShown=true; _showStaleBuildBanner(Date.parse(lm)); }
+      if(!_buildIsStale(mine,lm)) return;
+      if(!_buildBaseHash){ _buildStaleShown=true; _showStaleBuildBanner(Date.parse(lm)); return; }
+      return _fetchServedPage().then(function(p){
+        if(p.hash===_buildBaseHash){ _buildMineMs=Date.parse(p.lm||lm)||Date.now(); return; }   // republished, app unchanged
+        _buildStaleShown=true; _showStaleBuildBanner(Date.parse(lm));
+      });
     }).catch(function(){});
 }
 // Keeps every existing parameter (fs, and anything added later) and only swaps the cache-buster,
@@ -29829,7 +29857,7 @@ function gShowApp(){
   // Stale-build check. Once shortly after login, then on a 15-min interval, and again whenever the
   // tab is brought back to the front — the realistic case is a tab (or a Google Sites page) left
   // open for days across several deploys, which is exactly how this keeps going unnoticed.
-  setTimeout(_checkForNewBuild,20000);
+  _takeBuildBaseline().then(function(){ setTimeout(_checkForNewBuild,20000); });
   if(!_buildCheckTimer) _buildCheckTimer=setInterval(_checkForNewBuild,15*60*1000);
   if(!window._buildVisHooked){
     window._buildVisHooked=true;
