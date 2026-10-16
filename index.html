@@ -35514,6 +35514,9 @@ function gSaveQuotation(opts){
     return;
   }
   _auditDiffAndLog();
+  // The reflected cutting list goes with the quotation from its first numbered save (a first save
+  // claims its number asynchronously, so give it a moment).
+  setTimeout(function(){ try{ _persistDrawingAnalysisForJo(); }catch(e){} },1500);
   opts=opts||{};
   if(opts.checkConflict && qLoadedSavedAt && qSerialCommitted){
     var _serial=qBaseSerial||qSerial;
@@ -39587,6 +39590,7 @@ function _joAnalysisForQuotation(baseSerial,stage){
   if(stage==='fq'){
     // The Final Quotation's own list: in memory, else the file saved when it was reflected.
     if(fqDrawingAnalysis&&fqDrawingAnalysis.result) return Promise.resolve({result:fqDrawingAnalysis.result,fileName:fqDrawingAnalysis.fileName||'',elevation:!!fqDrawingAnalysis.elevationResult});
+    if(window._TRN) return Promise.resolve(_trnDaGet(baseSerial+'|fq'));
     if(!supaReady()) return Promise.resolve(null);
     var fqPath=(fqDrawingAnalysis&&fqDrawingAnalysis.outputFilePath)||_fqDrawingAnalysisPath(baseSerial).path;
     return supa.storage.from('quotations').download(fqPath).then(function(d){
@@ -39595,6 +39599,7 @@ function _joAnalysisForQuotation(baseSerial,stage){
     }).catch(function(){ return null; });
   }
   if(qDrawingAnalysis&&qDrawingAnalysis.result) return Promise.resolve({result:qDrawingAnalysis.result,fileName:qDrawingAnalysis.fileName||'',elevation:!!qDrawingAnalysis.elevationResult});
+  if(window._TRN) return Promise.resolve(_trnDaGet(baseSerial));
   if(!supaReady()) return Promise.resolve(null);
   return supa.from('drawing_analyses').select('output_file_path,file_name').eq('serial',baseSerial).maybeSingle().then(function(r){
     var row=r&&r.data; if(!row||!row.output_file_path) return null;
@@ -39673,7 +39678,14 @@ function _reserveJobOrder(stage){
   var client=(el('cl-bizname')&&el('cl-bizname').value)||(el('cl-name')&&el('cl-name').value)||'';
   var project=(el('cl-project')&&el('cl-project').value)||'';
   return _joAnalysisForQuotation(base,stage).then(function(an){
-    if(!an||!an.result||!(an.result.components||[]).length) return null;   // no cutting list on this quotation
+    if(!an||!an.result||!(an.result.components||[]).length){
+      var had=stage==='fq'?fqDrawingAnalysis:qDrawingAnalysis;
+      if(had&&(had.componentCount||(had.result&&had.result.components||[]).length)){
+        logActivity('⚠ No Job Order reserved — a cutting list was reflected into this quotation but its full data was not saved. Reflect the cutting list again, then lock (or press Reserve a new version now).',base);
+        showToast('No Job Order — the reflected cutting list was not saved with this quotation. Reflect it again.');
+      }
+      return null;   // no cutting list on this quotation
+    }
     // Each reserve supersedes the one before, so only the newest few rows can still be live.
     return _joTable().select('id,version,status,jo_number,data').eq('serial',base).eq('option_id',optId)
       .order('version',{ascending:false}).limit(3).then(function(r){
@@ -40956,10 +40968,37 @@ function _fqDrawingAnalysisPath(base){
   var name=base+' — Final Quotation cutting list.json';
   return {name:name,path:_supaSafeStorageKey(base)+'/'+_supaSafeStorageKey(name)};
 }
+// Training never writes Storage, so the full list is kept in this browser instead (last 6 quotations).
+var TRN_DA_KEY='mc_trn_drawing_analyses';
+function _trnDaGet(k){ try{ var m=JSON.parse(localStorage.getItem(TRN_DA_KEY)||'{}'); return m[k]||null; }catch(e){ return null; } }
+function _trnDaPut(k,v){
+  try{ var m=JSON.parse(localStorage.getItem(TRN_DA_KEY)||'{}'); m[k]=Object.assign({at:Date.now()},v);
+    var ks=Object.keys(m).sort(function(a,b){ return (m[b].at||0)-(m[a].at||0); });
+    ks.slice(6).forEach(function(x){ delete m[x]; });
+    localStorage.setItem(TRN_DA_KEY,JSON.stringify(m)); }catch(e){ console.warn('[training] cutting list not kept in this browser',e); }
+}
+var _daPersistedSig='';
+function _persistDrawingAnalysisForJo(){
+  var da=qDrawingAnalysis, base=qBaseSerial||qSerial;
+  if(!da||!da.result||!base||qDraftKey) return;
+  var sig=base+'|'+(da.analyzedAt||'')+'|'+((da.result.components||[]).length);
+  if(sig===_daPersistedSig) return;
+  if(window._TRN){ _trnDaPut(base,{result:da.result,fileName:da.fileName||'',elevation:!!da.elevationResult}); _daPersistedSig=sig; return; }
+  if(typeof supaReady!=='function'||!supaReady()) return;
+  var outputFileName=qSerial+' — '+driveClientName()+' — analysis output.json';
+  var body=JSON.stringify({fileName:da.fileName||'',fileType:da.fileType||'',analyzedAt:da.analyzedAt||'',
+    result:da.result,elevationResult:da.elevationResult||null},null,2);
+  _daPersistedSig=sig;
+  supaUploadQuotationFile(base,outputFileName,'application/json',body).then(function(){
+    return supaReplaceDrawingAnalysis(base,{fileName:da.fileName||'',fileType:da.fileType||'',
+      componentCount:(da.result.components||[]).length,analyzedAt:da.analyzedAt||new Date().toISOString(),
+      savedBy:gUser?gUser.email:'',outputFilePath:_supaSafeStorageKey(base)+'/'+_supaSafeStorageKey(outputFileName),rawFilePath:''});
+  }).catch(function(e){ _daPersistedSig=''; console.warn('[da] cutting list not saved with the quotation',e); });
+}
 function _saveFQDrawingAnalysis(){
   var da=fqDrawingAnalysis, base=qBaseSerial||qSerial;
   if(!da||!da.result||!base||qDraftKey) return;
-  if(window._TRN) return;   // training never writes Storage; the Job Order is built from the copy in memory
+  if(window._TRN){ _trnDaPut(base+'|fq',{result:da.result,fileName:da.fileName||'',elevation:!!da.elevationResult,parts:da.parts||null}); return; }
   var loc=_fqDrawingAnalysisPath(base);
   da.outputFilePath=loc.path;
   var body=JSON.stringify({fileName:da.fileName||'',analyzedAt:da.analyzedAt||'',parts:da.parts||[],
@@ -43842,6 +43881,11 @@ function prodBuildResultHtml(result){
         // Special cut sends the piece to Special Cutting in production instead of the panel saw.
         // Blank = worked out from the name/remarks (taper, shaker, curve, L-shape…), shown as the hint.
         +'<div style="display:flex;align-items:center;gap:4px"><span style="color:var(--text2);flex-shrink:0">Special:</span><input type="text" value="'+escHtml(c.specialCut||'')+'" placeholder="'+escHtml(_joDetectSpecial(c)||'none')+'" title="Special cut (taper, shaker, curve, L-shape…). Leave blank to use what the name/remarks say." onchange="_prodComponentFieldCorrected('+origIdx+',\'specialCut\',this.value)" style="height:32px;font-size:13px;width:100%"></div>'
+        // The per-lm services priced for this piece (tapering, routering, board assembly …) — the
+        // same list the Job Order routes it by, shown so it can be checked before reflecting.
+        +(function(){ var xs=_joExtrasFor(c,(prodState.result&&prodState.result.extraServices)||[]);
+          return xs.length?'<div style="font-size:12px;color:var(--text2)"><span style="flex-shrink:0">Services:</span> <b style="color:var(--text)">'
+            +xs.map(function(x){ return escHtml(x.service)+(x.qty?' '+(Math.round(x.qty*1000)/1000)+' '+escHtml(x.unit||'lm'):''); }).join(' · ')+'</b></div>':''; })()
         +'</td>'
       +'<td style="font-size:11px;color:var(--text2)">'+escHtml(c.grain||'')+'</td>'
       +'</tr>';

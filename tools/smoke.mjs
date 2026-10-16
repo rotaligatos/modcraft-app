@@ -5265,6 +5265,23 @@ const PROFILES = {
         check('PMES area: commercial locations get a code, not MISC (ARBAU)', () =>
           ['Cashier counter', 'Medicine cabinet', 'Reception', 'Kitchen counter', 'Storage cabinet', 'CABINET 2'].map(window._joPmesArea),
           ['OFC', 'BTH', 'OFC', 'KIT', 'MISC', 'MISC']);
+        // ARBAU test 2026-10-16: reflected, saved, reopened, locked, client-approved — no Job Order,
+        // because the full cutting list only lived in memory until lock. It is now kept from the save.
+        await (async () => { const label='Job Order: a reflected cutting list survives reopening the quotation (training copy)'; let got;
+          {
+          const w = window, keep = { trn: w._TRN, da: w.qDrawingAnalysis, s: w.qSerial, dk: w.qDraftKey };
+          try {
+            w._TRN = true; localStorage.removeItem('mc_trn_drawing_analyses');
+            w.qSerial = 'QT-X00000099'; w.qDraftKey = '';
+            w.qDrawingAnalysis = { fileName: 'ARBAU.pdf', analyzedAt: 't1', result: { components: [{ name: 'Door' }, { name: 'Top' }] } };
+            w._persistDrawingAnalysisForJo();
+            w.qDrawingAnalysis = { fileName: 'ARBAU.pdf', componentCount: 2 };          // as after reopening
+            const an = await w._joAnalysisForQuotation('QT-X00000099', 's1');
+            got = an && an.result ? an.result.components.length : 'none';
+          } catch (e) { got = 'ERR '+String(e).slice(0,100); } finally { w._TRN = keep.trn; w.qDrawingAnalysis = keep.da; w.qSerial = keep.s; w.qDraftKey = keep.dk; localStorage.removeItem('mc_trn_drawing_analyses'); }
+          }
+          out.push({ label, got, want: 2, ok: got === 2 });
+        })();
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

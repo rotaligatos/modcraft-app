@@ -13072,3 +13072,9 @@ missing from the count — yet Reflect let it through.
   plus only substrate words (PB/MDF/plywood…) reuses the pick, only if the picked SKU is that substrate.
 - **Reflect merges same SKU/unit/price lines** (`_mergeInto` in `_prodReflectFill`, this pass only) — the
   named tape row and the picked tape for the rest were landing as two edgeband lines.
+- **No Job Order after lock (ARBAU training test)**: the full cutting list lived only in memory until lock;
+  reflect → save → reopen → lock left nothing to build from. `_persistDrawingAnalysisForJo` now saves it
+  on every numbered save (live: Storage output JSON + `drawing_analyses` row; training: localStorage
+  `mc_trn_drawing_analyses`, last 6). `_joAnalysisForQuotation` reads the training copy. A reflected list
+  that still can't be found logs + toasts instead of failing silently.
+- Analysis review rows show "Services:" (the per-lm services the Job Order routes by).
