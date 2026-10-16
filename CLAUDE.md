@@ -13060,3 +13060,10 @@ missing from the count — yet Reflect let it through.
 - PMES (`process-jo.js`, `schedule.js`): process JO for TPR/RTR/GLU shows the work per piece; load
   in lm from `extraServicesByName`. Capacity for the 3 new stages must be typed in PMES → IE.
 - PMES area keywords (Rommel chose option 1): counter/cashier/reception/display/store/shop/pharmacy/clinic → OFC; medicine/lavatory → BTH. No new codes.
+- **PDF import: wrapped header labels** (ARBAU "BOARD"/"TYPE" straddling the header line, "HASPE PARALLEL TO:"):
+  `linesToAoa` now gathers digit-free words within 1.6 text heights of the header line that overlap no
+  header label into their own column (stacked top→bottom) and drops those header lines from the data.
+  Board type "PB" no longer falls into Thickness. Lines carry `y`/`h`. Remembered layouts follow a header
+  that gained columns (`remapTemplate`, by label in order; PDFs or templates saved with `labels`).
+  Checked on all 15 sample PDFs: only ARBAU and the plant JO jo_sf123572 changed (its GROOVE SIDE column
+  is now read). BOARD TYPE is not auto-mapped — pick it once as "+ Material" (it is then remembered).

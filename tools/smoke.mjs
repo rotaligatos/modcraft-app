@@ -125,6 +125,29 @@ const PROFILES = {
               [0, 0, 3]);
       /* 2026-10-16 (ARBAU): the same words at 18mm and 6mm must not share one board SKU; a banded row
          with no tape named takes the tape picked for its board. */
+      // ARBAU.pdf 2026-10-16: "BOARD" above the header line and "TYPE" below it, so the column had
+      // no header and "PB" fell into Thickness. Wrapped labels now make their own column, and a layout
+      // remembered before the column existed still maps by label.
+      if (window.CLR && typeof window.CLR.linesToAoa === 'function')
+        check('PDF header: a label wrapped above/below the header line is its own column; a remembered layout follows it', () => {
+          const P = (s, x0, x1) => ({ s, x0, x1 });
+          const L = (y, ph) => ({ page: 1, y, h: 8, phrases: ph });
+          const lines = [L(391, [P('BOARD', 478, 501)]),
+            L(386.5, [P('LOCATION', 80, 112), P('BOARD NAME', 169, 213), P('QTY.', 256, 270), P('COLOR', 328, 349),
+                      P('FINISH', 423, 444), P('THICKNE', 513, 537), P('WIDTH', 550, 570), P('LENGTH', 589, 611), P('BANDING', 726, 756)]),
+            L(381.9, [P('TYPE', 482, 497)]), L(377.4, [P('SS (mm)', 513, 536)]),
+            L(363.3, [P('CASHIER COUNTER', 68, 125), P('AB TOP', 180, 202), P('2', 261, 265), P('WARM WHITE', 317, 361),
+                      P('STIPPLE', 422, 445), P('PB', 486, 494), P('18', 521, 529), P('500', 554, 566), P('1640', 593, 608), P('ALL EDGES', 725, 757)])];
+          const aoa = window.CLR.linesToAoa(lines);
+          const ST = window.CLR._state(), keep = ST.store.templates;
+          ST.store.templates = { 'location|board name|qty.|color|finish|thickne|width|length|banding':
+            { file: 'ARBAU.pdf', map: { group: 0, part: 1, qty: 2, material: 3, material2: 4, thk: 5, width: 6, length: 7, edge: 8 } } };
+          try {
+            const f = window.CLR._rememberedForce(aoa);
+            return { hdr: aoa[1].join('|'), row: aoa[2].join('|'), rows: aoa.length, thk: f && f.map.thk, m2: f && f.map.material2, edge: f && f.map.edge };
+          } finally { ST.store.templates = keep; }
+        }, { hdr: 'LOCATION|BOARD NAME|QTY.|COLOR|FINISH|BOARD TYPE|THICKNE|WIDTH|LENGTH|BANDING',
+             row: 'CASHIER COUNTER|AB TOP|2|WARM WHITE|STIPPLE|PB|18|500|1640|ALL EDGES', rows: 3, thk: 6, m2: 4, edge: 9 });
       if (window.CLR && typeof window.CLR.toPanel === 'function' && typeof window.CLR._state === 'function')
         check('CLR.toPanel: a words-only mapping applies only at its SKU\'s thickness; unnamed tape is filled per board',
               () => {

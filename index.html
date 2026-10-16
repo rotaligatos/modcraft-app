@@ -38440,7 +38440,8 @@ async function pdfToLines(buf) {
         if (last && it.x - (last.x1) < Math.max(2, it.h * 0.5)) { last.s += (it.x - last.x1 > 0.5 ? ' ' : '') + it.s; last.x1 = it.x + it.w; }
         else ph.push({ s: it.s, x0: it.x, x1: it.x + it.w });
       }
-      lines.push({ page: p, phrases: ph.map(q => ({ s: q.s.trim(), x0: q.x0, x1: q.x1 })) });
+      const hs = ln.items.map(it => it.h).sort((a, b) => a - b);
+      lines.push({ page: p, y: ln.y, h: hs[hs.length >> 1] || 8, phrases: ph.map(q => ({ s: q.s.trim(), x0: q.x0, x1: q.x1 })) });
     }
   }
   return lines;
@@ -38468,6 +38469,32 @@ function linesToAoa(lines) {
       consumed = hi + 1;
     }
   }
+  // Labels wrapped onto two lines that straddle the header row (ARBAU: "BOARD" above it, "TYPE"
+  // below; "HASPE" / "PARALLEL TO:") sit on neither line, so the column had no header and its
+  // values ("PB") fell into the next column. Words within ~1.6 text heights of the header line that
+  // overlap no header label become a column of their own, stacked top to bottom. Words that DO
+  // overlap a label ("TAPERED" over HANDGRAB, "(mm)" under WIDTH) are left out, as before.
+  const headerBand = new Set();
+  if (lines[hi].y != null) {
+    const H = lines[hi], band = (H.h || 8) * 1.6, ov = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > 0;
+    const orphans = [];
+    lines.forEach((l, i) => {
+      if (i === hi || l.page !== H.page || l.y == null || Math.abs(l.y - H.y) > band) return;
+      // Any digit means a data row or a wrapped remark ("10 2010 mm", "59MM GROMMET"), never a label.
+      if (l.phrases.some(p => /\d/.test(p.s))) return;
+      const loose = l.phrases.filter(p => !hdr.some(h => ov(p, h)));
+      loose.forEach(p => orphans.push({ s: p.s, x0: p.x0, x1: p.x1, y: l.y }));
+      if (i !== consumed && (i > hi)) headerBand.add(i);
+    });
+    orphans.sort((a, b) => b.y - a.y);
+    const groups = [];
+    orphans.forEach(o => {
+      const g = groups.find(g => ov(g, o));
+      if (g) { g.s += ' ' + o.s; g.x0 = Math.min(g.x0, o.x0); g.x1 = Math.max(g.x1, o.x1); }
+      else groups.push({ s: o.s, x0: o.x0, x1: o.x1 });
+    });
+    if (groups.length) hdr = hdr.concat(groups).sort((a, b) => a.x0 - b.x0);
+  }
   const cols = hdr.map(p => ({ x0: p.x0, x1: p.x1, c: (p.x0 + p.x1) / 2 }));
   const hdrKey = lines[hi].phrases.map(p => norm(p.s)).join('|');
   // Each column owns the space halfway to its neighbours' centres. Whole-phrase overlap was
@@ -38487,7 +38514,7 @@ function linesToAoa(lines) {
   lines.forEach((l, i) => {
     if (i < hi) { aoa.push([l.phrases.map(p => p.s).join(' ')]); return; }
     if (i > hi && l.phrases.map(p => norm(p.s)).join('|') === hdrKey) return;   // header repeated on the next page
-    if (i === consumed) return;                                                 // merged into the header
+    if (i === consumed || headerBand.has(i)) return;                            // merged into the header
     if (i === hi) { aoa.push(hdr.map(p => p.s)); return; }
     const row = new Array(cols.length).fill('');
     const put = (c, s) => { row[c] = row[c] ? row[c] + ' ' + s : s; };
@@ -38550,10 +38577,35 @@ function linesToAoa(lines) {
   function rememberedForce(aoa){
     var t=ST.store.templates||{};
     var hd=findHeader(aoa);
-    if(hd.row>=0){ var s=sigOf(aoa,hd.row); if(t[s]) return {header:hd.row,map:t[s].map,why:t[s]}; return null; }
+    if(hd.row>=0){ var s=sigOf(aoa,hd.row); if(t[s]) return {header:hd.row,map:t[s].map,why:t[s]};
+      var moved=remapTemplate(t,aoa[hd.row]||[]); if(moved) return {header:hd.row,map:moved.map,why:moved.why}; return null; }
     for(var r=0,seen=0;r<aoa.length&&seen<40;r++){
       if(!(aoa[r]||[]).some(function(v){return String(v).trim();})) continue; seen++;
       var s2=sigOf(aoa,r); if(t[s2]) return {header:r,map:t[s2].map,why:t[s2]};
+    }
+    return null;
+  }
+
+  function remapTemplate(t,hdrRow){
+    var cur=hdrRow.map(norm), keys=Object.keys(t);
+    for(var k=0;k<keys.length;k++){
+      var tp=t[keys[k]]; if(!tp||!tp.map) continue;
+      var labels=tp.labels?tp.labels.map(norm):(/\.pdf$/i.test(tp.file||'')?keys[k].split('|'):null);
+      if(!labels||labels.length>=cur.length) continue;
+      // Old labels must appear in the new header in the same order.
+      var pos=[], j=0;
+      for(var i=0;i<labels.length;i++){
+        if(!labels[i]){ pos.push(-1); continue; }
+        while(j<cur.length&&cur[j]!==labels[i]) j++;
+        if(j>=cur.length){ pos=null; break; }
+        pos.push(j++);
+      }
+      if(!pos) continue;
+      var map={}, ok=true;
+      Object.keys(tp.map).forEach(function(f){ var v=tp.map[f];
+        if(v==null||v<0){ map[f]=v; return; }
+        if(pos[v]==null||pos[v]<0){ ok=false; return; } map[f]=pos[v]; });
+      if(ok) return {map:map,why:Object.assign({},tp,{remapped:true})};
     }
     return null;
   }
@@ -39097,7 +39149,8 @@ function linesToAoa(lines) {
     var ck=clientKey();
     allSheets().forEach(function(x){
       if(!x.s.include||!x.s.sig||!x.s.force||!x.s.force.map) return;
-      ST.store.templates[x.s.sig]={map:x.s.res.map,file:x.f.name,at:now,by:who}; changed=true;
+      ST.store.templates[x.s.sig]={map:x.s.res.map,file:x.f.name,at:now,by:who,
+        labels:((x.s.aoa||[])[x.s.res.header]||[]).map(function(v){ return String(v==null?'':v); })}; changed=true;
     });
     Object.keys(ST.matEdit).forEach(function(k){
       var v=String(ST.matEdit[k]||'').trim();
@@ -39243,7 +39296,7 @@ function linesToAoa(lines) {
     // Pure reader + conversion, exposed for tests.
     webRowSig:webRowSig, toWebMapping:toWebMapping, fromWebMapping:fromWebMapping,
     readClientSheet:readClientSheet, linesToAoa:linesToAoa, totals:totals, toPanel:toPanel,
-    _state:function(){ return ST; }, _readFile:readFile
+    _state:function(){ return ST; }, _readFile:readFile, _rememberedForce:rememberedForce
   };
 })();
 
