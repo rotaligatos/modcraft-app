@@ -13067,3 +13067,8 @@ missing from the count — yet Reflect let it through.
   that gained columns (`remapTemplate`, by label in order; PDFs or templates saved with `labels`).
   Checked on all 15 sample PDFs: only ARBAU and the plant JO jo_sf123572 changed (its GROOVE SIDE column
   is now read). BOARD TYPE is not auto-mapped — pick it once as "+ Material" (it is then remembered).
+- **Cutting List edge tape box is searchable** (`MCL.tapeSearch`, edge-band items only via `_prodEdgeTapeCatalog`).
+- **Board picks survive a description gaining its board type** (`widerKey` in CLR): a remembered key
+  plus only substrate words (PB/MDF/plywood…) reuses the pick, only if the picked SKU is that substrate.
+- **Reflect merges same SKU/unit/price lines** (`_mergeInto` in `_prodReflectFill`, this pass only) — the
+  named tape row and the picked tape for the rest were landing as two edgeband lines.

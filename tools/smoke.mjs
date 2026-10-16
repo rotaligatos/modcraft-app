@@ -161,6 +161,24 @@ const PROFILES = {
                   return [a.mat, c.mat, a.emat, c.emat];
                 } finally { ST.store.mats = keepM; ST.matEdit = keepE; }
               }, ['WW PB 4x8 2F (18mm, Stipple)', 'WARM WHITE', 'WW 1mmx22mm Edgeband', '']);
+        // ARBAU 2026-10-16: reading BOARD TYPE added "PB" to the description and every board pick
+        // was asked again. A pick is reused when only a matching board-type word was added.
+        check('CLR.toPanel: a pick survives the description gaining its board type; never reused for another type',
+              () => {
+                const ST = window.CLR._state(), keepM = ST.store.mats, keepE = ST.matEdit;
+                try {
+                  ST.store.mats = { 'warm white stipple two face@18': 'WW PB 4x8 2F (18mm, Stipple)' };
+                  ST.matEdit = {};
+                  const base = { group: 'G', part: 'P', L: 600, W: 400, qty: 1, code: '', emat: '', issues: [], thk: 18 };
+                  const pb = window.CLR.toPanel(Object.assign({}, base, { material: 'WARM WHITE PB STIPPLE TWO FACE' }), '');
+                  const mdf = window.CLR.toPanel(Object.assign({}, base, { material: 'WARM WHITE MDF STIPPLE TWO FACE' }), '');
+                  const red = window.CLR.toPanel(Object.assign({}, base, { material: 'WARM WHITE RED STIPPLE TWO FACE' }), '');
+                  return [pb.mat, mdf.mat, red.mat, typeof window.MCL.tapeSearch];
+                } finally { ST.store.mats = keepM; ST.matEdit = keepE; }
+              }, ['WW PB 4x8 2F (18mm, Stipple)', 'WARM WHITE MDF STIPPLE TWO FACE', 'WARM WHITE RED STIPPLE TWO FACE', 'function']);
+        check('Reflect: two summary lines for the same SKU land as one quotation line',
+              () => /_mergeInto\(area\.matItems|_mergeInto\(mt\.outsource/.test(String(window._prodReflectFill || '')),
+              true);
       if (typeof window._prodPieceFitIssue === 'function')
         check('_prodPieceFitIssue: sideways and over-length pieces are caught, a fitting piece is not',
               () => { const mt = window.prodSettings.machineType;

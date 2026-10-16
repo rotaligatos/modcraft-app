@@ -37287,7 +37287,9 @@ var MCL=(function(){
     h+='<td><input '+inpLW+ca('W')+' type="number" min="0" value="'+(p.W||'')+'" oninput="MCL.set('+i+',\'W\',this.value)"></td>';
     h+='<td><select '+sel+' class="mcl-f-ebt" onchange="MCL.set('+i+',\'ebt\',this.value)">'+opts(EBT,p.ebt)+'</select></td>';
     var tmiss=tapeMissing(p), inpT=tmiss?inp.replace('border:.5px solid var(--border)','border:1.5px solid var(--amber)')+' title="Edge banding '+esc(p.ebt)+' but no edge tape named"':inp;
-    h+='<td><input '+inpT+ca('emat')+' value="'+esc(p.emat)+'" placeholder="'+(tmiss?'edge tape needed':'edge tape (optional)')+'" oninput="MCL.set('+i+',\'emat\',this.value)"></td>';
+    h+='<td><input '+inpT+ca('emat')+' list="mcl-tape-dl-'+i+'" value="'+esc(p.emat)+'" placeholder="'+(tmiss?'edge tape needed — type to search':'edge tape (optional)')+'"'
+      +' oninput="MCL.tapeSearch(this,'+i+')" onchange="MCL.tapeSearch(this,'+i+')" onfocus="MCL.tapeSearch(this,'+i+')">'
+      +'<datalist id="mcl-tape-dl-'+i+'"></datalist></td>';
     h+='<td><select '+sel+' class="mcl-f-grain" onchange="MCL.set('+i+',\'grain\',this.value)">'
       +opts(['','L','W'],p.grain)+'</select></td>';
     h+='<td>'+svcCell(p,i)+'</td>';
@@ -37884,6 +37886,11 @@ var MCL=(function(){
         if(ti) ti.value=th;                       // patch in place — a re-render would lose focus
         _mclFooter();
       }
+    },
+    // Edge tape: searched against the edge-band items only (never boards), like the analysis summary.
+    tapeSearch:function(inp,i){
+      set(i,'emat',inp.value);
+      _refillDatalist('mcl-tape-dl-'+i,(typeof _prodEdgeTapeCatalog==='function'?_prodEdgeTapeCatalog():getMatSource()),inp.value);
     },
     addSvc:function(i,v){ if(!v) return; if(S.panels[i].svcs.indexOf(v)<0) S.panels[i].svcs.push(v); rerender(); },
     removeSvc:function(i,s){ S.panels[i].svcs.splice(s,1); rerender(); },
@@ -38758,13 +38765,39 @@ function linesToAoa(lines) {
     if(ST.matEdit[k]!=null) return ST.matEdit[k];
     var v=clientMap()[k]||(ST.learned||{})[k]||(ST.store.mats||{})[k]||'';
     if(!v&&k.indexOf('@')>0){ var base=k.slice(0,k.lastIndexOf('@')), lv=mappedSku(base); if(legacyOk(k,lv)) v=lv; }
+    if(!v){ var w=widerKey(k); if(w) v=w.v; }
     return v;
+  }
+  // ARBAU, 2026-10-16: reading the BOARD TYPE column turned "WARM WHITE STIPPLE TWO FACE" into
+  // "WARM WHITE PB STIPPLE TWO FACE", and every board picked before had to be picked again. A key
+  // that is a remembered key plus only board-type words (PB, MDF, plywood …) reuses that pick —
+  // and only when the picked SKU is that board type, so a PB pick is never reused for MDF.
+  function widerKey(k){
+    var at=k.lastIndexOf('@'), thk=at>0?k.slice(at):'', words=(at>0?k.slice(0,at):k).split(' ').filter(Boolean);
+    var maps=[clientMap(),ST.learned||{},ST.store.mats||{}], best=null;
+    for(var m=0;m<maps.length&&!best;m++){
+      Object.keys(maps[m]).forEach(function(ok){
+        var v=maps[m][ok]; if(!v) return;
+        var oat=ok.lastIndexOf('@'), othk=oat>0?ok.slice(oat):'';
+        if(othk!==thk) return;
+        var ow=(oat>0?ok.slice(0,oat):ok).split(' ').filter(Boolean);
+        if(ow.length<2||ow.length>=words.length) return;
+        if(ow.some(function(x){ return words.indexOf(x)<0; })) return;
+        var extra=words.filter(function(x){ return ow.indexOf(x)<0; });
+        if(!extra.every(function(x){ return SUBSTRATE_WORDS[x]; })) return;
+        var sv=String(v).toLowerCase();
+        if(!extra.every(function(x){ var sb=SUBSTRATE_WORDS[x]; return sb==='pb'?/\b(pb|particle)/.test(sv):sv.indexOf(sb)>=0; })) return;
+        if(!best||ow.length>best.n) best={v:v,n:ow.length,from:m===0?'client':'shared'};
+      });
+    }
+    return best;
   }
   function mappedFrom(k){
     if(ST.matEdit[k]!=null) return '';
     if(clientMap()[k]) return 'client';
     if((ST.learned||{})[k]||(ST.store.mats||{})[k]) return 'shared';
     if(k.indexOf('@')>0){ var base=k.slice(0,k.lastIndexOf('@')); if(legacyOk(k,mappedSku(base))) return mappedFrom(base); }
+    var w=widerKey(k); if(w) return w.from;
     return '';
   }
 
@@ -44275,9 +44308,21 @@ function _prodReflectFill(sum,startNew,stageLabel){
   // Materials (board sheets) — a confident catalog match (custom:false) carries its real price
   // through instead of landing as an unpriced custom line; marked-Outsource rows go to the area's
   // outsource list instead of the regular catalog-linked materials list.
+  // Same SKU, unit and price twice (an edge tape named on one row and picked for the rest) is one
+  // line in the quotation, its quantities added — reflected in this pass only, never merged into
+  // lines already in the area.
+  var _mergeInto=function(list,start,row){
+    for(var q=start;q<list.length;q++){ var x=list[q];
+      if(x.name===row.name&&(x.unit||'')===(row.unit||'')&&(+x.price||0)===(+row.price||0)&&!!x.mto===!!row.mto){
+        x.qty=Math.round(((+x.qty||0)+(+row.qty||0))*100)/100; return true; } }
+    return false;
+  };
+  var _matStart=area.matItems.length, _outStart=area.outsourceMaterials.length;
   for(var m=0;m<sum.materials.length;m++){
     var mt=sum.materials[m];
     if(!mt.include||!mt.name||!(mt.qty>0)) continue;
+    if(_mergeInto(mt.outsource?area.outsourceMaterials:area.matItems,mt.outsource?_outStart:_matStart,
+      {name:mt.name,unit:mt.unit||(mt.outsource?'sheet':'sheet'),price:mt.price||0,qty:mt.qty,mto:!mt.outsource&&!!mt.mto})) continue;
     if(mt.outsource) area.outsourceMaterials.push({name:mt.name,unit:mt.unit||'sheet',qty:mt.qty,price:mt.price||0,saved:false});
     // MTO items land in the regular matItems list (normal cost rates), never outsourceMaterials —
     // the whole point of MTO vs Outsource is that MTO stays on standard material pricing.
