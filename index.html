@@ -18726,7 +18726,7 @@ function _cutListToAnalysis(cl,order){
   var comps=[], warn=[], facesUnknown=0, holes=[], extraSvcs=[];
   for(var p=0;p<panels.length;p++){
     var pn=panels[p];
-    var notes=[], review=[];
+    var notes=[], review=[], svcStart=extraSvcs.length;
     var L=+pn.L||0, W=+pn.W||0;
     var label=String(pn.mat||'').trim();
     var b=builds[label];
@@ -18945,12 +18945,16 @@ function _cutListToAnalysis(cl,order){
       needsReview:review.length>0, reviewNote:review.join('; '),
       notes:notes.join(' · '),
       // "NO CUTTING" (ARBAU, a backing): the piece IS a whole board — it takes a board, not a cut.
-      noCut:/\bno\s*cutting\b|\bwhole\s*board\b/i.test(String(pn.remark||''))
+      noCut:/\bno\s*cutting\b|\bwhole\s*board\b/i.test(String(pn.remark||'')),
+      // The per-lm services priced for THIS row (tapering, routering, manual edge banding, board
+      // assembly …) so the Job Order can route the piece to the station that does the work.
+      services:extraSvcs.slice(svcStart).map(function(x){ return {service:x.service,qty:x.qty,unit:x.unit||'lm'}; })
     };
     comps.push(baseComp);
     if(lam){
       for(var lb=2;lb<=lam.boards;lb++) comps.push(Object.assign({},baseComp,{
         name:String(pn.part||'')+' (board '+lb+' of '+lam.boards+')', ebt:'', edgeTape:'', grooving:'',
+        services:baseComp.services.filter(function(x){ return /board\s*assembl/i.test(x.service); }),
         notes:'glued to '+String(pn.part||'')+' — laminated build, see the first board',_gluedExtra:true}));
     }
   }
@@ -39329,11 +39333,35 @@ function _joDetectSpecial(c){
 }
 // Manual edge banding requested for this piece — a curved or special edge the machines can't band.
 function _joHasManualEb(c,extras){
-  var nm=String(c&&c.name||'').toLowerCase();
   if(/manual\s*edge/i.test(String(c&&c.notes||''))) return true;
-  return (extras||[]).some(function(x){
-    return x&&/manual\s*edge/i.test(x.service||'')&&nm&&String(x.notes||'').toLowerCase().indexOf(nm)===0;
+  return _joExtrasFor(c,extras).some(function(x){ return /manual\s*edge/i.test(x.service||''); });
+}
+// The extra per-lm services priced for this piece. A cutting list records them on the piece itself
+// (c.services, 2026-10-16); older analyses only have the job's list, whose notes read
+// "<part> - <group>", so those are matched by part name and, when given, the group.
+function _joExtrasFor(c,extras){
+  if(Array.isArray(c&&c.services)) return c.services.filter(function(x){ return x&&x.service; });
+  var nm=String(c&&c.name||'').toLowerCase(), ar=String(c&&c.area||'').toLowerCase();
+  if(!nm) return [];
+  return (extras||[]).filter(function(x){
+    var n=String(x&&x.notes||'').toLowerCase();
+    if(!x||!x.service||n.indexOf(nm)!==0) return false;
+    var rest=n.slice(nm.length);
+    if(!rest||rest.indexOf(' — ')===0) return true;
+    if(rest.indexOf(' - ')!==0) return false;
+    var g=rest.slice(3).split(' — ')[0].trim();
+    return !g||!ar||ar.indexOf(g)===0;
   });
+}
+// Which production station an extra service needs. Grooving (incl. router/sliding-door grooving)
+// is carried by the component's grooving field → GRV; manual edge banding → MEB via the bander.
+function _joSvcStage(name){
+  var n=String(name||'');
+  if(/taper/i.test(n)) return 'TPR';
+  if(/board\s*assembl/i.test(n)) return 'GLU';
+  if(/rout/i.test(n)&&!/groov/i.test(n)) return 'RTR';
+  if(/groov/i.test(n)) return 'GRV';
+  return '';
 }
 // The production route for one piece, in PMES stage codes (pmes_stage_types). HPL laminated first
 // (MDF/PB whole boards) goes HPL → CURE before cutting; HPL cut first goes to manual lamination
@@ -39343,10 +39371,16 @@ function _joRoute(o){
   var r=[];
   if(o.hplOrder==='laminate_first') r.push('HPL','CURE');
   r.push(o.special?'SCUT':'CUT');
+  // Boards glued into a thicker panel (Board Assembly) are glued before the panel is banded.
+  if(o.glued) r.push('GLU');
   if(o.hplOrder==='cut_first') r.push('MHPL');
   if(o.bander==='manual') r.push('MEB');
   else if(o.bander==='no_trimmer') r.push('EBA');
   else if(o.bander==='trimmer') r.push('EBB');
+  // Tapering (45° handgrab) and routering are priced services with their own stations, after edge
+  // banding. Before 2026-10-16 a tapered door routed CUT → EBB and production never saw the taper.
+  if(o.tapered) r.push('TPR');
+  if(o.routed) r.push('RTR');
   // Grooving has its own station (GRV), after edge banding like boring. Before 2026-09-26 a grooved
   // piece's route skipped it, so no station ever saw the groove.
   if(o.grooved) r.push('GRV');
@@ -39407,7 +39441,10 @@ function _joBuild(result,ctx){
     // AI-read hole schedules carry no cabinet, so they still match by name.
     var hasHoles=holes.some(function(hh){ return hh&&hh.component&&c.name&&String(hh.component).toLowerCase()===String(c.name).toLowerCase()
       &&(!hh.area||!c.area||String(hh.area).toLowerCase()===String(c.area).toLowerCase()); });
-    var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles,grooved:!!String(c.grooving||'').trim()});
+    var mySvcs=_joExtrasFor(c,extras), svcSt={};
+    mySvcs.forEach(function(x){ var st=_joSvcStage(x.service); if(st) svcSt[st]=1; });
+    var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles,
+      grooved:!!String(c.grooving||'').trim()||!!svcSt.GRV,tapered:!!svcSt.TPR,routed:!!svcSt.RTR,glued:!!svcSt.GLU});
     if(!ec.known) flags.push('edge code "'+c.ebt+'" not understood');
     if(!(L>0&&W>0)) flags.push('no size — cannot be cut from this list');
     if(c.needsReview) flags.push(c.reviewNote||'flagged for review');
@@ -39433,6 +39470,7 @@ function _joBuild(result,ctx){
       bander:pieceBander,special:special,hpl:isHpl,hplOrder:hplOrder,holes:hasHoles,route:route,
       boardOf:boardOf[i]||[],
       notes:c.notes||'',flags:flags,barcodes:codes,scan:scan});
+    if(mySvcs.length) parts[parts.length-1].services=mySvcs.map(function(x){ return {service:x.service,qty:+x.qty||0,unit:x.unit||'lm'}; });
   }
   var boards=bom.map(function(b){ return {material:b.material,color:b.color,texture:b.texture,thickness:b.thickness,
     faces:b.faces,boardSize:b.boardSize,boardW:b.boardW,boardH:b.boardH,boardsNeeded:b.boardsNeeded,
@@ -41765,7 +41803,8 @@ function _prodNormalizeComponent(c){
     ebt:String(c.ebt||''),edgeTape:String(c.edgeTape||''),grooving:String(c.grooving||''),
     specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),hplSku:String(c.hplSku||''),
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||''),
-    noCut:!!c.noCut
+    noCut:!!c.noCut,
+    services:Array.isArray(c.services)?c.services.map(function(x){ return {service:String(x&&x.service||''),qty:+(x&&x.qty)||0,unit:String(x&&x.unit||'lm')}; }):undefined
   };
 }
 

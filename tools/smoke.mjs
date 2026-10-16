@@ -5198,6 +5198,29 @@ const PROFILES = {
             { joNumber: 'JO-T-G1' });
           return jo.parts.map((p) => p.route.join('>'));
         }, ['CUT>EBB>GRV>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK']);
+        // 2026-10-16: priced extra services reach production. ARBAU's tapered doors routed CUT>EBB, so
+        // the taper was quoted but no station was told; routering and board glue-up the same.
+        check('Job Order: tapering, routering and board glue-up get their own stations, per piece', () => {
+          const w = window, mat = 'Real White PB 4x8 2F (18mm, Matte)';
+          const mk = (part, extra) => Object.assign({ group: 'Cashier counter', part, mat, th: 18, L: 700, W: 400, qty: 2,
+            ebt: '1L', emat: '', grain: '', svcs: [], remark: '' }, extra || {});
+          const a = w._cutListToAnalysis({ panels: [
+            mk('Door', { svcs: ['Handgrab tapering × 1.4 lm'] }),
+            mk('Door', { L: 600 }),
+            mk('Panel', { svcs: ['Routeriing (Special Cut) × 0.8 lm'] }),
+            mk('Worktop', { th: 36, L: 2400, W: 600, qty: 1 })], hpl: [], hardware: [] }, null);
+          const comps = a.components.map(w._prodNormalizeComponent);
+          const jo = w._joBuild({ components: comps, extraServices: a.extraServices, hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-S1' });
+          // An analysis saved before pieces carried their own services: matched from the job's list.
+          const old = w._joBuild({ components: [{ area: 'Cashier counter', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' },
+            { area: 'Medicine cabinet', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' }],
+            extraServices: [{ service: 'Handgrab tapering', qty: 1.4, unit: 'lm', notes: 'Door - Cashier counter' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-S2' });
+          return { routes: jo.parts.map((p) => p.route.join('>')), tapeSvc: (jo.parts[0].services || [])[0] && jo.parts[0].services[0].service,
+                   plainHasNoSvcKey: !('services' in jo.parts[1]), old: old.parts.map((p) => p.route.join('>')) };
+        }, { routes: ['CUT>EBB>TPR>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK', 'CUT>EBB>RTR>ASM>QC>PACK',
+                      'CUT>GLU>EBB>ASM>QC>PACK', 'CUT>GLU>ASM>QC>PACK'],
+             tapeSvc: 'Handgrab tapering', plainHasNoSvcKey: true,
+             old: ['CUT>EBB>TPR>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK'] });
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

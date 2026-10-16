@@ -13046,3 +13046,17 @@ missing from the count — yet Reflect let it through.
 - Shipped today (2026-10-15/16): combined '+ Material' columns, Group/location column, Tapered
   handgrab -> 'Handgrab tapering' lm, whole-board / NO CUTTING adds no cutting, groove+handgrab on
   one column counts as handgrab only, reload prompt only when the app changed.
+
+## What was changed on 2026-10-16 (session — priced extra services reach the Job Order route)
+- Each cutting-list piece now carries the per-lm services priced on its own row (`c.services`,
+  kept by `_prodNormalizeComponent`). `_joExtrasFor` reads it; older saved analyses fall back to the
+  job's `extraServices` matched by notes "<part> - <group>". `_joSvcStage`: taper → **TPR**,
+  board assembly → **GLU**, routering (not grooving) → **RTR**, grooving → GRV; manual edge → MEB.
+- Route order: HPL,CURE · CUT/SCUT · GLU · MHPL · EBA/EBB/MEB · TPR · RTR · GRV · DRL · ASM,QC,PACK.
+  Glued extra boards route CUT → GLU → ASM… ARBAU doors with Handgrab tapering now CUT>EBB>TPR.
+- Part carries `services` only when it has some, so an unchanged job keeps its Job Order signature.
+- Supabase (migration `pmes_stages_tapering_routering_glueup`): stage types GLU (25), TPR (52), RTR (87);
+  `adm_release_gate` stage order includes them and copies `services` into the component spec.
+- PMES (`process-jo.js`, `schedule.js`): process JO for TPR/RTR/GLU shows the work per piece; load
+  in lm from `extraServicesByName`. Capacity for the 3 new stages must be typed in PMES → IE.
+- Open: PMES area MISC for locations like "Cashier counter"/"Medicine cabinet" — asked Rommel.
