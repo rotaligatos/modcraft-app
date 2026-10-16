@@ -5299,6 +5299,16 @@ const PROFILES = {
             if (keep.jo == null) localStorage.removeItem('mc_trn_job_orders'); else localStorage.setItem('mc_trn_job_orders', keep.jo); }
           out.push({ label, got, want: 'JO-X00000098-V1', ok: got === 'JO-X00000098-V1' });
         })();
+        check('Job Order window: a locked quotation with no number says its save did not go through; boards come in pc', () => {
+          const w = window, keep = { dk: w.qDraftKey, s: w.qSerial, l: w.qLocked, c: w._confirm, t: w.showToast };
+          let msg = '';
+          try {
+            w.qDraftKey = 'DRAFT-smk'; w.qSerial = ''; w.qLocked = true; w._confirm = (m) => { msg = m; }; w.showToast = (m) => { msg = msg || m; };
+            w.openJobOrders();
+          } finally { w.qDraftKey = keep.dk; w.qSerial = keep.s; w.qLocked = keep.l; w._confirm = keep.c; w.showToast = keep.t; }
+          w.prodBuildSummary({ components: [], _bom: [{ material: 'PB', color: 'Nothing Like This', thickness: 6, faces: 2, boardsNeeded: 5 }], _services: {}, hardware: [] });
+          return [/no quotation number/.test(msg), w.prodState.summary.materials[0].unit];
+        }, [true, 'pc']);
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

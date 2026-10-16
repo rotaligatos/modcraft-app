@@ -13087,3 +13087,9 @@ missing from the count — yet Reflect let it through.
   the chip reads "Handgrab tapering (along length) × N lm"; `_cutListToAnalysis` strips "(along …)" from
   the name (catalogue price still matches) into `side` on the service; Job Order "Special" column and the
   PMES process JO show "Handgrab tapering — along length (N lm)" (`_joSvcLabel`).
+- **Boards always arrive in pc** (analysis summary, reflect defaults, BOM report defaults were 'sheet').
+- **Job Order window on a locked quotation with no number**: says its save did not go through and offers
+  to save now (then reserves). Button reads "Reserve the Job Order" when none exists, "Reserve a new
+  version" after. gSaveQuotation now toasts when signed out instead of returning silently.
+- Headless training sim (scratch): lock on an unsaved quotation → number assigned → JO reserved, works.
+  Rommel's case (locked, still no number) not reproduced — the new message/toasts will show the cause.
