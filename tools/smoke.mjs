@@ -5282,6 +5282,23 @@ const PROFILES = {
           }
           out.push({ label, got, want: 2, ok: got === 2 });
         })();
+        // 2026-10-16: lock on a never-saved quotation — the number is claimed during the lock, and the
+        // Job Order used to be skipped because it was still a draft. It now waits for the number.
+        await (async () => { const label = 'Job Order: locking an unsaved quotation still reserves one once its number arrives';
+          const w = window, keep = { trn: w._TRN, da: w.qDrawingAnalysis, s: w.qSerial, dk: w.qDraftKey, t: w.showToast, l: w.logActivity, jo: localStorage.getItem('mc_trn_job_orders') };
+          let got;
+          try {
+            w._TRN = true; w.showToast = () => {}; w.logActivity = () => {}; localStorage.removeItem('mc_trn_job_orders');
+            const comps = [{ area: 'A', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '4s' }];
+            w.qDrawingAnalysis = { fileName: 'x', analyzedAt: 'x', result: { components: comps, hardware: [], holeSchedule: [] } };
+            w.qSerial = ''; w.qDraftKey = 'DRAFT-smoke1';
+            setTimeout(() => { w.qSerial = 'QT-X00000098'; w.qDraftKey = ''; }, 500);
+            got = await w._reserveJobOrder();
+          } catch (e) { got = 'ERR ' + String(e).slice(0, 100); }
+          finally { w._TRN = keep.trn; w.qDrawingAnalysis = keep.da; w.qSerial = keep.s; w.qDraftKey = keep.dk; w.showToast = keep.t; w.logActivity = keep.l;
+            if (keep.jo == null) localStorage.removeItem('mc_trn_job_orders'); else localStorage.setItem('mc_trn_job_orders', keep.jo); }
+          out.push({ label, got, want: 'JO-X00000098-V1', ok: got === 'JO-X00000098-V1' });
+        })();
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

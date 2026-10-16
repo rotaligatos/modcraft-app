@@ -39623,9 +39623,21 @@ function _joAnalysisForQuotation(baseSerial,stage){
 function _joTable(){ return window._TRN?_trnJoQuery():supa.from('job_orders'); }
 var TRN_JO_KEY='mc_trn_job_orders';
 function _trnJoLoad(){ try{ return JSON.parse(localStorage.getItem(TRN_JO_KEY)||'[]')||[]; }catch(e){ return []; } }
-function _trnJoSave(all){
+function _trnJoSave(all,keepSerial){
   try{ localStorage.setItem(TRN_JO_KEY,JSON.stringify(all)); return null; }
-  catch(e){ return {message:'training Job Orders could not be kept in this browser (storage full) — clear some in the Job Order window'}; }
+  catch(e){}
+  var rows=all.slice(), drop=function(i){ rows.splice(i,1); };
+  for(var guard=0;guard<500&&rows.length;guard++){
+    var i=-1;
+    for(var k=0;k<rows.length;k++) if(rows[k].status==='superseded'&&rows[k].serial!==keepSerial){ i=k; break; }
+    if(i<0) for(var k2=0;k2<rows.length;k2++) if(rows[k2].status==='superseded'){ i=k2; break; }
+    if(i<0){ var old=-1; rows.forEach(function(r,ix){ if(r.serial!==keepSerial&&(old<0||String(r.reserved_at)<String(rows[old].reserved_at))) old=ix; }); i=old; }
+    if(i<0) break;
+    drop(i);
+    try{ localStorage.setItem(TRN_JO_KEY,JSON.stringify(rows)); all.length=0; Array.prototype.push.apply(all,rows); return null; }catch(e2){}
+  }
+  try{ localStorage.removeItem('mc_trn_drawing_analyses'); localStorage.setItem(TRN_JO_KEY,JSON.stringify(rows)); return null; }catch(e3){}
+  return {message:'training Job Orders could not be kept in this browser — its storage is full'};
 }
 function _trnJoQuery(){
   var q={op:'select',f:[],inF:null,ord:[],lim:0,single:false,rows:null,upd:null};
@@ -39637,11 +39649,11 @@ function _trnJoQuery(){
     var all=_trnJoLoad();
     if(q.op==='insert'){
       q.rows.forEach(function(r){ all.push(Object.assign({id:'trn-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),reserved_at:new Date().toISOString()},r)); });
-      return {data:null,error:_trnJoSave(all)};
+      return {data:null,error:_trnJoSave(all,q.rows[0]&&q.rows[0].serial)};
     }
     if(q.op==='update'){
-      all.forEach(function(r){ if(match(r)) Object.assign(r,q.upd); });
-      return {data:null,error:_trnJoSave(all)};
+      var ks=''; all.forEach(function(r){ if(match(r)){ Object.assign(r,q.upd); ks=ks||r.serial; } });
+      return {data:null,error:_trnJoSave(all,ks)};
     }
     var rows=all.filter(match);
     if(q.ord.length) rows.sort(function(a,b){
@@ -39669,7 +39681,24 @@ function _trnJoQuery(){
 }
 function _reserveJobOrder(stage){
   stage=stage==='fq'?'fq':'s1';
-  if(qDraftKey||!qSerial) return Promise.resolve(null);
+  // Locking a quotation that was never saved claims its number in the same moment, asynchronously —
+  // so the lock reached here while it was still a draft and the Job Order was skipped without a
+  // word (Rommel, 2026-10-16: "I locked instead of saved and no JO"). Wait for the number.
+  if(qDraftKey||!qSerial){
+    var _dk=qDraftKey, _t0=Date.now();
+    if(!_dk) return Promise.resolve(null);
+    return new Promise(function(res){
+      (function wait(){
+        if(qDraftKey!==_dk) return res(qDraftKey||!qSerial?null:_reserveJobOrder(stage));
+        if(Date.now()-_t0>20000){
+          try{ logActivity('⚠ Job Order not reserved — the quotation had no number yet. Open Job Order and press Reserve a new version now.'); }catch(e){}
+          try{ showToast('⚠ Job Order not reserved — the quotation had no number yet. Open Job Order → Reserve a new version now.'); }catch(e){}
+          return res(null);
+        }
+        setTimeout(wait,400);
+      })();
+    });
+  }
   if(!window._TRN&&(typeof supaReady!=='function'||!supaReady())){ console.warn('[jo] not reserved — Supabase not connected'); return Promise.resolve(null); }
   var base=qBaseSerial||qSerial, optId=qActiveOptionId||0;
   var optLabel=optId?((qOptionsList.find(function(o){return o.id===optId;})||{}).label||('Option '+optId)):'';
@@ -39719,12 +39748,14 @@ function _reserveJobOrder(stage){
         if(ins&&ins.error) throw ins.error;
         logActivity('Job Order '+jo+' reserved — '+data.pieceCount+' pieces, '+data.boardCount+' boards'
           +(data.flaggedParts?', '+data.flaggedParts+' part(s) flagged':'')+(live.length?' (replaces the earlier version)':''),base);
+        showToast('✓ Job Order '+jo+' reserved — '+data.pieceCount+' pieces');
         return jo;
       });
     });
   }).catch(function(e){
     console.warn('[jo] reserve failed',e);
     try{ logActivity('⚠ Job Order could NOT be reserved at this lock — '+((e&&e.message)||e)+'. Open Job Order on the quotation to retry.',base); }catch(x){}
+    try{ showToast('⚠ Job Order not reserved — '+((e&&e.message)||e)); }catch(x2){}
     return null;
   });
 }

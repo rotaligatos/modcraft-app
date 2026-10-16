@@ -13078,3 +13078,8 @@ missing from the count — yet Reflect let it through.
   `mc_trn_drawing_analyses`, last 6). `_joAnalysisForQuotation` reads the training copy. A reflected list
   that still can't be found logs + toasts instead of failing silently.
 - Analysis review rows show "Services:" (the per-lm services the Job Order routes by).
+- **Lock on a never-saved quotation reserved no Job Order**: the number is claimed asynchronously during
+  that lock, and `_reserveJobOrder` returned null on `qDraftKey`. It now waits (up to 20 s) for the number,
+  then reserves; if none arrives it logs + toasts. Every reservation now toasts its result.
+- Training Job Orders (`mc_trn_job_orders`, ~70 KB each) make room when storage is full: superseded
+  versions first, then other quotations' oldest — never this quotation's.
