@@ -115,7 +115,7 @@ const PROFILES = {
                 const r = window.CLR.readClientSheet(aoa, { header: 0, map: { material: 3, material2: 4 } });
                 const p = window.CLR.toPanel(r.rows[0], '');
                 return [r.rows[0].group, r.rows[0].material, r.rows[0].handgrabLm, r.rows[1].group, r.rows[1].handgrabLm, p.svcs[0]];
-              }, ['CASHIER COUNTER', 'WARM WHITE STIPPLE', 1.364, '', 0.4, 'Handgrab tapering × 1.364 lm']);
+              }, ['CASHIER COUNTER', 'WARM WHITE STIPPLE', 1.364, '', 0.4, 'Handgrab tapering (along length) × 1.364 lm']);
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',
@@ -5246,7 +5246,7 @@ const PROFILES = {
           const mk = (part, extra) => Object.assign({ group: 'Cashier counter', part, mat, th: 18, L: 700, W: 400, qty: 2,
             ebt: '1L', emat: '', grain: '', svcs: [], remark: '' }, extra || {});
           const a = w._cutListToAnalysis({ panels: [
-            mk('Door', { svcs: ['Handgrab tapering × 1.4 lm'] }),
+            mk('Door', { svcs: ['Handgrab tapering (along length) × 1.4 lm'] }),
             mk('Door', { L: 600 }),
             mk('Panel', { svcs: ['Routeriing (Special Cut) × 0.8 lm'] }),
             mk('Worktop', { th: 36, L: 2400, W: 600, qty: 1 })], hpl: [], hardware: [] }, null);
@@ -5256,11 +5256,11 @@ const PROFILES = {
           const old = w._joBuild({ components: [{ area: 'Cashier counter', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' },
             { area: 'Medicine cabinet', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' }],
             extraServices: [{ service: 'Handgrab tapering', qty: 1.4, unit: 'lm', notes: 'Door - Cashier counter' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-S2' });
-          return { routes: jo.parts.map((p) => p.route.join('>')), tapeSvc: (jo.parts[0].services || [])[0] && jo.parts[0].services[0].service,
+          return { routes: jo.parts.map((p) => p.route.join('>')), tapeSvc: (jo.parts[0].services || [])[0] && jo.parts[0].services[0].service, side: jo.parts[0].services[0].side, priced: (a.extraServices[0] || {}).service, onJo: /along length/.test(w._joDocHtml(jo, 'RESERVED')),
                    plainHasNoSvcKey: !('services' in jo.parts[1]), old: old.parts.map((p) => p.route.join('>')) };
         }, { routes: ['CUT>EBB>TPR>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK', 'CUT>EBB>RTR>ASM>QC>PACK',
                       'CUT>GLU>EBB>ASM>QC>PACK', 'CUT>GLU>ASM>QC>PACK'],
-             tapeSvc: 'Handgrab tapering', plainHasNoSvcKey: true,
+             tapeSvc: 'Handgrab tapering', side: 'length', priced: 'Handgrab tapering', onJo: true, plainHasNoSvcKey: true,
              old: ['CUT>EBB>TPR>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK'] });
         check('PMES area: commercial locations get a code, not MISC (ARBAU)', () =>
           ['Cashier counter', 'Medicine cabinet', 'Reception', 'Kitchen counter', 'Storage cabinet', 'CABINET 2'].map(window._joPmesArea),

@@ -13083,3 +13083,7 @@ missing from the count — yet Reflect let it through.
   then reserves; if none arrives it logs + toasts. Every reservation now toasts its result.
 - Training Job Orders (`mc_trn_job_orders`, ~70 KB each) make room when storage is full: superseded
   versions first, then other quotations' oldest — never this quotation's.
+- **Taper side carried through**: the reader keeps the side ("length", "2 lengths", "length + width");
+  the chip reads "Handgrab tapering (along length) × N lm"; `_cutListToAnalysis` strips "(along …)" from
+  the name (catalogue price still matches) into `side` on the service; Job Order "Special" column and the
+  PMES process JO show "Handgrab tapering — along length (N lm)" (`_joSvcLabel`).

@@ -18892,7 +18892,11 @@ function _cutListToAnalysis(cl,order){
         }
         if(/groov/i.test(svcName)) grooving=svcName;   // component-level trace, unchanged shape
         if(lmMatch&&(+lmMatch[1]>0)){
-          extraSvcs.push({service:svcName,qty:+lmMatch[1],unit:'lm',
+          // "Handgrab tapering (along length) × 1.4 lm": which side production tapers. Kept off the
+          // name so the catalogue price still matches "Handgrab tapering".
+          var sideM=svcName.match(/\s*\(\s*along\s+([^)]+)\)\s*/i), svcSide='';
+          if(sideM){ svcSide=sideM[1].trim(); svcName=svcName.replace(sideM[0],' ').trim(); }
+          extraSvcs.push({service:svcName,qty:+lmMatch[1],unit:'lm',side:svcSide,
             notes:String(pn.part||'')+(pn.group?' - '+pn.group:'')});
         } else {
           review.push('"'+svcName+'" arrived without a run length - it is priced per linear metre, so add the lm figure');
@@ -18948,7 +18952,7 @@ function _cutListToAnalysis(cl,order){
       noCut:/\bno\s*cutting\b|\bwhole\s*board\b/i.test(String(pn.remark||'')),
       // The per-lm services priced for THIS row (tapering, routering, manual edge banding, board
       // assembly …) so the Job Order can route the piece to the station that does the work.
-      services:extraSvcs.slice(svcStart).map(function(x){ return {service:x.service,qty:x.qty,unit:x.unit||'lm'}; })
+      services:extraSvcs.slice(svcStart).map(function(x){ var o={service:x.service,qty:x.qty,unit:x.unit||'lm'}; if(x.side) o.side=x.side; return o; })
     };
     comps.push(baseComp);
     if(lam){
@@ -38386,12 +38390,16 @@ function readClientSheet(aoa, force) {
     }
     // Tapered handgrab: the column names the side ("LENGTH" / "WIDTH" / "1L"); the run is that side.
     const hgTxt = String(g('handgrab') || '').trim();
-    let handgrabLm = 0, hgOk = true;
+    let handgrabLm = 0, hgOk = true, handgrabSide = '';
     // "NO CUTTING" (ARBAU, on a whole-board backing) is a note, not a handgrab: kept with the remarks.
     const hgNote = /^no\b/i.test(hgTxt) && !/^(no\.?\s*\d)/i.test(hgTxt);
     if (hgTxt && !hgNote && !/^(0(\.0+)?|-|none|n\/?a)$/i.test(hgTxt)) {
       const hp = runSides(hgTxt);
-      if (hp.ok && (hp.L || hp.W)) handgrabLm = (hp.L * L + hp.W * W) / 1000 * (qty || 1);
+      if (hp.ok && (hp.L || hp.W)) {
+        handgrabLm = (hp.L * L + hp.W * W) / 1000 * (qty || 1);
+        const sd = (n, w) => n ? (n > 1 ? n + ' ' + w + 's' : w) : '';
+        handgrabSide = [sd(hp.L, 'length'), sd(hp.W, 'width')].filter(Boolean).join(' + ');
+      }
       else hgOk = false;
     }
     const issues = [];
@@ -38406,7 +38414,7 @@ function readClientSheet(aoa, force) {
       part: String(g('part') || g('item') || '').trim(), material: matTxt, thk, faces: mc.faces,
       L, W, qty, eL, eW, code: toOurCode(Math.min(eL, 2), Math.min(eW, 2), L, W),
       emat: String(g('emat') || row.__tape || '').trim().replace(/^0(\.0+)?$/, ''),
-      grooveLm, handgrabLm, remark: [rem, hgNote ? hgTxt : ''].filter(Boolean).join(' · '), issues
+      grooveLm, handgrabLm, handgrabSide, remark: [rem, hgNote ? hgTxt : ''].filter(Boolean).join(' · '), issues
     });
   }
   return res;
@@ -39153,7 +39161,7 @@ function linesToAoa(lines) {
     // for the estimator to pick, and Designers Support flags the unmatched name until they do.
     p.svcs=r.grooveLm>0?['Grooving × '+(Math.round(r.grooveLm*1000)/1000)+' lm']:[];
     // "Handgrab tapering" is the catalogue's per-lm service for a tapered handgrab.
-    if(r.handgrabLm>0) p.svcs.push('Handgrab tapering × '+(Math.round(r.handgrabLm*1000)/1000)+' lm');
+    if(r.handgrabLm>0) p.svcs.push('Handgrab tapering'+(r.handgrabSide?' (along '+r.handgrabSide+')':'')+' × '+(Math.round(r.handgrabLm*1000)/1000)+' lm');
     var rm=[];
     if(r.remark) rm.push(r.remark);
     if(sku&&mat&&sku!==mat) rm.push('client wrote: '+mat);
@@ -39445,6 +39453,11 @@ function _joExtrasFor(c,extras){
 }
 // Which production station an extra service needs. Grooving (incl. router/sliding-door grooving)
 // is carried by the component's grooving field → GRV; manual edge banding → MEB via the bander.
+// "Handgrab tapering — along length (1.4 lm)" — what the station does, on the Job Order.
+function _joSvcLabel(x){
+  if(!x||!x.service) return '';
+  return x.service+(x.side?' — along '+x.side:'')+(x.qty?' ('+(Math.round(x.qty*1000)/1000)+' '+(x.unit||'lm')+')':'');
+}
 function _joSvcStage(name){
   var n=String(name||'');
   if(/taper/i.test(n)) return 'TPR';
@@ -39560,7 +39573,7 @@ function _joBuild(result,ctx){
       bander:pieceBander,special:special,hpl:isHpl,hplOrder:hplOrder,holes:hasHoles,route:route,
       boardOf:boardOf[i]||[],
       notes:c.notes||'',flags:flags,barcodes:codes,scan:scan});
-    if(mySvcs.length) parts[parts.length-1].services=mySvcs.map(function(x){ return {service:x.service,qty:+x.qty||0,unit:x.unit||'lm'}; });
+    if(mySvcs.length) parts[parts.length-1].services=mySvcs.map(function(x){ var o={service:x.service,qty:+x.qty||0,unit:x.unit||'lm'}; if(x.side) o.side=x.side; return o; });
   }
   var boards=bom.map(function(b){ return {material:b.material,color:b.color,texture:b.texture,thickness:b.thickness,
     faces:b.faces,boardSize:b.boardSize,boardW:b.boardW,boardH:b.boardH,boardsNeeded:b.boardsNeeded,
@@ -39815,7 +39828,7 @@ function _joDocHtml(jo,status){
       +'<td>'+e([p.material,p.color].filter(Boolean).join(' '))+'</td><td>'+(p.thickness||'')+'</td><td>'+p.L+' × '+p.W+'</td>'
       +'<td'+(diff?' style="font-weight:700"':'')+'>'+p.cutL+' × '+p.cutW+'</td><td>'+p.qty+'</td><td>'+e(p.ebt||'—')+'</td>'
       +'<td>'+e(p.tape)+(p.tapeMm&&cut?' ('+p.tapeMm+'mm)':'')+'</td><td>'+e(p.grain)+'</td><td>'+e(p.grooving)+'</td>'
-      +'<td'+(p.special?' style="font-weight:700"':'')+'>'+e(p.special||'')+'</td>'
+      +'<td'+(p.special||(p.services||[]).length?' style="font-weight:700"':'')+'>'+e([p.special||''].concat((p.services||[]).map(_joSvcLabel)).filter(Boolean).join(' · '))+'</td>'
       +'<td style="font-family:monospace;font-size:9px">'+e((p.route||[]).filter(function(s){return s!=='ASM'&&s!=='QC'&&s!=='PACK';}).join(' → '))+'</td>'
       +'<td style="white-space:nowrap'+(p.pmesArea==='MISC'||p.pmesPart==='MISC'?';color:#b45309':'')+'">'+e((p.pmesArea||'')+' / '+(p.pmesPart||''))+'</td>'
       +'<td style="font-family:monospace;font-size:9px">'+e(p.barcodes[0])+(p.qty>1?' … /'+_joPad(p.qty,2):'')+'</td></tr>';
@@ -41961,7 +41974,7 @@ function _prodNormalizeComponent(c){
     specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),hplSku:String(c.hplSku||''),
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||''),
     noCut:!!c.noCut,
-    services:Array.isArray(c.services)?c.services.map(function(x){ return {service:String(x&&x.service||''),qty:+(x&&x.qty)||0,unit:String(x&&x.unit||'lm')}; }):undefined
+    services:Array.isArray(c.services)?c.services.map(function(x){ var o={service:String(x&&x.service||''),qty:+(x&&x.qty)||0,unit:String(x&&x.unit||'lm')}; if(x&&x.side) o.side=String(x.side); return o; }):undefined
   };
 }
 
@@ -43916,7 +43929,7 @@ function prodBuildResultHtml(result){
         // same list the Job Order routes it by, shown so it can be checked before reflecting.
         +(function(){ var xs=_joExtrasFor(c,(prodState.result&&prodState.result.extraServices)||[]);
           return xs.length?'<div style="font-size:12px;color:var(--text2)"><span style="flex-shrink:0">Services:</span> <b style="color:var(--text)">'
-            +xs.map(function(x){ return escHtml(x.service)+(x.qty?' '+(Math.round(x.qty*1000)/1000)+' '+escHtml(x.unit||'lm'):''); }).join(' · ')+'</b></div>':''; })()
+            +xs.map(function(x){ return escHtml(_joSvcLabel(x)); }).join(' · ')+'</b></div>':''; })()
         +'</td>'
       +'<td style="font-size:11px;color:var(--text2)">'+escHtml(c.grain||'')+'</td>'
       +'</tr>';
