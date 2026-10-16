@@ -5221,6 +5221,9 @@ const PROFILES = {
                       'CUT>GLU>EBB>ASM>QC>PACK', 'CUT>GLU>ASM>QC>PACK'],
              tapeSvc: 'Handgrab tapering', plainHasNoSvcKey: true,
              old: ['CUT>EBB>TPR>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK'] });
+        check('PMES area: commercial locations get a code, not MISC (ARBAU)', () =>
+          ['Cashier counter', 'Medicine cabinet', 'Reception', 'Kitchen counter', 'Storage cabinet', 'CABINET 2'].map(window._joPmesArea),
+          ['OFC', 'BTH', 'OFC', 'KIT', 'MISC', 'MISC']);
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

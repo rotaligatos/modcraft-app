@@ -13059,4 +13059,4 @@ missing from the count — yet Reflect let it through.
   `adm_release_gate` stage order includes them and copies `services` into the component spec.
 - PMES (`process-jo.js`, `schedule.js`): process JO for TPR/RTR/GLU shows the work per piece; load
   in lm from `extraServicesByName`. Capacity for the 3 new stages must be typed in PMES → IE.
-- Open: PMES area MISC for locations like "Cashier counter"/"Medicine cabinet" — asked Rommel.
+- PMES area keywords (Rommel chose option 1): counter/cashier/reception/display/store/shop/pharmacy/clinic → OFC; medicine/lavatory → BTH. No new codes.
