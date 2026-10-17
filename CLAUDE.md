@@ -13180,3 +13180,19 @@ missing from the count — yet Reflect let it through.
   "Read by AI" with headers Part/Material/Thk/Qty/Length/Width/Edge/Hand grab/Groove/Remarks (same
   part on several boards summed), then the normal import/check. Only GEFFY of 16 samples is flagged.
   Not yet run against the live AI (no key here) — first real use is the test.
+- **Taper ≠ special cut** (2026-10-17): taper words removed from `JO_SPECIAL_RE`; a note segment about a
+  taper/hand grab is ignored for special cut; `_joMentionsTaper` sends the piece through TPR. GEFFY doors: CUT → TPR.
+- **Three-stage packer + grain rule** (2026-10-17, Rommel: "cut any direction end to end; the only
+  limitation is the wood grain"; patterned laminates — granite, stone, woodgrain, textile — keep the
+  client's grain; solid colours turn freely). `_gpack3Once(pieces,W,H,kerf,rot,order,dir)`: strips
+  ('L' along the length / 'W' across the width) → crosscut segments → pieces side by side; tried in both
+  directions inside `guillotinePackBoards` (ties keep the old pass). Every result has `plans` per board
+  (`{dir,strips:[{off,size,segs:[{off,len,pieces:[layout idx]}]}]}`); `_prodCutSequence` builds steps
+  from it (counts: rips, crosscuts = segs−1 per strip, side-by-side = pieces−1 per segment; last piece
+  to offcut not counted, as the reference sheet). `prodComputeBom` rotation always on; per-piece grain
+  from `_prodPieceGrain(c)`: row grain (`grainLock`, set by `_cutListToAnalysis` when the ROW had a grain)
+  wins; else `_isPlainBoard` (every colour word in `_PLAIN_WORDS`, raw MDF/PB) → 'none'; else locked
+  'length'. Unknown colours lock — costs a board, never a wrong grain. JO parts carry that grain and
+  boards carry `plans`; PMES `process-jo.js _pjoCutSequence` reads plans (905 boards, 0 differences vs
+  Modcraft). PMES defect re-plans are still the 2-stage packer. Real lists 234 → 230 boards.
+  ⚠ Turning a plain-board piece changes a re-locked quotation's Job Order version (`_joSig` has layouts).
