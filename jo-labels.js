@@ -44,10 +44,20 @@
     var edge = function (x1, y1, x2, y2, b) { return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" stroke="' + (b ? on : off) + '" stroke-width="' + (b ? tw : th) + '" stroke-linecap="square"/>'; };
     var s = '<svg class="pc" viewBox="0 0 80 48"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="#f3f4f6"/>';
     if (grain === 'length' || grain === 'width') {
-      var gl = '', step = 2.6;
-      if (grain === 'length') for (var gy = y + step; gy < y + h - 0.5; gy += step) gl += 'M' + (x + 0.8) + ' ' + gy + 'Q' + (x + w / 2) + ' ' + (gy + 0.7) + ' ' + (x + w - 0.8) + ' ' + gy;
-      else for (var gx = x + step; gx < x + w - 0.5; gx += step) gl += 'M' + gx + ' ' + (y + 0.8) + 'Q' + (gx + 0.7) + ' ' + (y + h / 2) + ' ' + gx + ' ' + (y + h - 0.8);
-      s += '<path d="' + gl + '" fill="none" stroke="#b8a98f" stroke-width="0.35"/>';
+      // Wavy grain lines: each line is a gentle wave along the grain, its phase and depth varied a
+      // little line to line so it reads as wood rather than ruled lines.
+      var gl = '', step = 2.6, along = grain === 'length', len = along ? w : h, span = along ? h : w;
+      var seg = 12, n = Math.max(2, Math.round(len / seg));
+      for (var k = 0, off = step; off < span - 0.5; off += step, k++) {
+        var amp = 0.4 + 0.3 * ((k * 7) % 3) / 2, ph = (k % 3) ? 1 : -1;
+        var p = function (t, o) { return along ? (x + t) + ' ' + (y + o) : (x + o) + ' ' + (y + t); };
+        gl += 'M' + p(0.6, off);
+        for (var i = 0; i < n; i++) {
+          var t0 = 0.6 + i * (len - 1.2) / n, t1 = 0.6 + (i + 1) * (len - 1.2) / n, sgn = (i % 2 ? -1 : 1) * ph;
+          gl += 'Q' + p((t0 + t1) / 2, off + sgn * amp * 2) + ' ' + p(t1, off);
+        }
+      }
+      s += '<path d="' + gl + '" fill="none" stroke="#b8a98f" stroke-width="0.35" stroke-linecap="round"/>';
     }
     s += edge(x, y, x + w, y, lc >= 1) + edge(x, y + h, x + w, y + h, lc >= 2);     // along the length
     s += edge(x, y, x, y + h, sc >= 2) + edge(x + w, y, x + w, y + h, sc >= 1);     // the ends (width)
