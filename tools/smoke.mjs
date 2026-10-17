@@ -171,6 +171,17 @@ const PROFILES = {
                     pt.drawing && pt.drawing.file, jo.drawings.length, /data-jo-dwg="0"/.test(window._joDocHtml(jo, 'RESERVED'))];
           } finally { window.SERVICES = keepS; }
         }, ['SPECIAL CUT', 'SPECIAL CUT', true, 'QT-W00000001 — drawing — X p2.jpg', 1, true]);
+      // 2026-10-17: a "SEE DRAWING" row under a board line had thickness 0, so the import listed the
+      // same board twice (once unmapped) and the analysis asked for it again.
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function')
+        check('"SEE DRAWING" row takes the board line\'s thickness (no duplicate material to map)', () => {
+          const aoa = [['MATERIALS : 18mm /MDF / 4\'x8\' /GRAPHITE/2F/SUPERMATTE/ EB= 1MM GRAPHITE'],
+                       ['No.', 'Designation', 'Quantity', 'Length', 'Width', 'Eb'],
+                       ['C', 'SIDE', 2, 700, 500, 'ALL SIDES'],
+                       ['C', 'FRONT RAIL - SC', 1, 'SEE DRAWING', '', 'ALL SIDES']];
+          const r = window.CLR.readClientSheet(aoa);
+          return [r.rows.length, r.rows[0].thk, r.rows[1].thk, r.rows[0].material === r.rows[1].material];
+        }, [2, 18, 18, true]);
       // 2026-10-17: "Read drawing" asks the AI for the special cut's size/lm/edges and shows them to check;
       // only the ticked figures are applied, the lm covers the whole row, the "⚠ special cut" note goes.
       if (window.MCL && typeof window.MCL.readDrawing === 'function') {
@@ -184,7 +195,7 @@ const PROFILES = {
           let sentImg = '';
           window.fetch = (u, o) => { sentImg = JSON.parse(o.body).messages[0].content[0].type;
             return Promise.resolve({ ok: true, json: () => Promise.resolve({ content: [{ type: 'text',
-              text: '{"found":true,"length_mm":2110,"width_mm":500,"cut_lm_per_piece":5.4,"ebt":"1L","confidence":"high","notes":""}' }] }) }); };
+              text: '{"found":true,"length_mm":2110,"width_mm":500,"special_cut_lm_per_piece":5.4,"ebt":"1L","confidence":"high","notes":""}' }] }) }); };
           window.MCL.readDrawing(0); await new Promise(r => setTimeout(r, 50));
           document.getElementById('mcl-ai-ebt').checked = false;
           window.MCL.aiApply(0);
