@@ -207,6 +207,31 @@ const PROFILES = {
         check('Read drawing: AI figures applied only where ticked, lm for the whole row', () => res,
               ['image', 2110, 500, '', 'Routeriing (Special Cut) × 10.8 lm', false]);
       }
+      // 2026-10-17: the AI read the WRONG piece on a 2-piece page and gave 0.261 lm for a U-shaped rail
+      // (339 + 2010 + 339). The prompt now names this row's size and the other rows on the page, and the
+      // total comes from OUR sum of the listed cuts, not the model's own figure.
+      if (window.MCL && typeof window.MCL.readDrawing === 'function') {
+        const S = window.MCL.state(), keepP = S.panels, keepD = S.drawings, keepF = window.fetch, keepK = window.prodSettings.claudeKey, keepT = window.showToast;
+        let res;
+        try {
+          window.showToast = () => {}; window.prodSettings.claudeKey = 'x';
+          S.drawings = [{ source: 'X.pdf', page: 2, dataUrl: 'data:image/jpeg;base64,AA' }];
+          const row = (part, L, W) => ({ group: 'C', part, mat: 'MDF', th: 18, qty: 1, L, W, ebt: '4S', emat: '', grain: '',
+            svcs: ['Routeriing (Special Cut)'], remark: '', specialCut: 'SPECIAL CUT', drawing: { source: 'X.pdf', page: 2 } });
+          S.panels = [row('FRONT RAIL - SC', 2110, 500), row('PULL OUT RAIL - SC', 0, 0)];
+          let prompt = '';
+          window.fetch = (u, o) => { prompt = JSON.parse(o.body).messages[0].content[1].text;
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({ content: [{ type: 'text',
+              text: '{"found":true,"length_mm":2110,"width_mm":500,"special_cuts":[{"what":"left leg","mm":339},{"what":"opening","mm":2010},{"what":"right leg","mm":339}],"special_cut_lm_per_piece":0.261,"ebt":"4S","confidence":"high","notes":""}' }] }) }); };
+          window.MCL.readDrawing(0); await new Promise(r => setTimeout(r, 50));
+          window.MCL.aiApply(0);
+          res = [/2110 x 500 mm/.test(prompt), /PULL OUT RAIL - SC/.test(prompt), S.panels[0].svcs[0]];
+          window.closeModal('ov-mcl-ai');
+        } catch (e) { res = String(e); }
+        finally { S.panels = keepP; S.drawings = keepD; window.fetch = keepF; window.prodSettings.claudeKey = keepK; window.showToast = keepT; }
+        check('Read drawing: prompt names the row size and the other rows; lm = sum of the listed cuts', () => res,
+              [true, true, 'Routeriing (Special Cut) × 2.688 lm']);
+      }
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',
