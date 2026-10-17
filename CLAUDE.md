@@ -13161,3 +13161,22 @@ missing from the count — yet Reflect let it through.
   window (`_mclAiShow`, `#ov-mcl-ai`) shows Now vs AI with tick boxes; `MCL.aiApply` applies only ticked figures
   (lm × row qty onto the special-cut chip), drops the "⚠ special cut" remark, notes "read by AI, checked by <user>",
   logs it. Needs the client file imported in the same session. What's new entry added.
+
+## What was changed on 2026-10-17 (session — Read drawing fix, better optimizer, scrambled PDFs)
+- **Read drawing** (`9221119`): AI read the wrong piece on a 2-drawing page (0.261 lm for a U-shaped
+  rail that is 339+2010+339 = 2.688). Prompt now gives the row's own size and names the other rows on
+  that page; AI lists each special cut (`special_cuts`), the app sums them (model's total ignored).
+- **Optimizer**: `guillotinePackBoards` = old single pass (`_guillotinePackOnce`, order 'width') +
+  orders length/area/perim/side (+ no rotation when rotation allowed); keeps fewest oversized →
+  fewest boards → waste on one board (min board fill 2% lower). Tie keeps the old layout. GEFFY with
+  rotation 4→3 boards; 600 random jobs: 20 save a board, 0 worse. Rommel has NO CNC (panel saw only).
+  ⚠ PMES `optimizer.js` mirrors it (`packBest`, `ORDERS`) — change both; `node optimizer.test.js` in
+  PMES compares one pass vs `_guillotinePackOnce` and best vs `guillotinePackBoards`. A re-lock whose
+  layout changes gives a new Job Order version (`_joSig` includes layouts).
+- **Scrambled / scanned PDFs**: `pdfToLines` marks a page garbled when ≥50% of its words have no
+  letter/digit (pdf.js gives glyph numbers as control chars/punctuation) or look like "/12/0"; such
+  pages and text-less pages are rendered to `lines.scans` and skipped as text. Import window says so
+  and offers **Read with AI** (`CLR.aiRead`): Sonnet 4.6 reads each page's parts table → sheet
+  "Read by AI" with headers Part/Material/Thk/Qty/Length/Width/Edge/Hand grab/Groove/Remarks (same
+  part on several boards summed), then the normal import/check. Only GEFFY of 16 samples is flagged.
+  Not yet run against the live AI (no key here) — first real use is the test.
