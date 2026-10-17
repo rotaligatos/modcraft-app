@@ -258,6 +258,24 @@ const PROFILES = {
           const best = window.guillotinePackBoards(pcs, 1220, 2440, 3, false);
           return [r.boardsNeeded, overlap, inside, seq.dir, seq.ripCount, seq.splitCount, /side by side/.test(seq.steps.join(' ')), best.boardsNeeded];
         }, [1, false, true, 'L', 1, 1, true, 1]);
+      // 2026-10-17 (Rommel): a special cut that is banded is banded BY HAND — Manual Edgebanding for the
+      // whole piece, along its real outline; not on the machine edgebanding line; the tape still counted;
+      // the Job Order sends it to manual edge banding. No length given = the overall size, flagged.
+      if (typeof window._cutListToAnalysis === 'function')
+        check('special cut + edge banding = Manual Edgebanding (real outline), not the edge bander', () => {
+          const keep = window.SERVICES;
+          try {
+            window.SERVICES = [{ name: 'Manual Edgebanding EVA', unit: 'lm', price: 40 }, { name: 'Edgebanding', unit: 'lm', price: 12 }];
+            const row = (part, svcs, sc) => ({ group: 'C', part, mat: 'MDF', th: 18, qty: 1, L: 2110, W: 500, ebt: '4S', emat: 'White', grain: '', svcs, remark: '', specialCut: sc });
+            const cl = { panels: [row('FRONT RAIL - SC', ['Manual Edgebanding EVA × 5.898 lm'], 'SPECIAL CUT'), row('PULL OUT RAIL - SC', [], 'SPECIAL CUT'), row('SIDE', [], '')], hpl: [], hardware: [], grain: 'L' };
+            const r = window._cutListToAnalysis(cl);
+            const svc = window.prodComputeServices(r.components, r.holeSchedule || [], r.extraServices || []);
+            const jo = window._joBuild(r, { joNumber: 'JO-T-V1' });
+            const meb = (svc.extraServicesByName.find(x => /manual/i.test(x.service)) || {}).qty;
+            return [Math.round(svc.edgebandingLM / (1 + (window.prodSettings.ebtWastage || 0) / 100) * 100) / 100, meb,
+                    jo.parts.map(p => p.bander).join(','), /overall size/.test(r.components[1].reviewNote), !!r.components[0].needsReview && /overall size/.test(r.components[0].reviewNote)];
+          } finally { window.SERVICES = keep; }
+        }, [5.22, 11.12, 'manual,manual,trimmer', true, false]);
       // 2026-10-17: the cutting-list grid selects like Excel — a selected block takes one pasted value in
       // every cell, Delete clears it.
       if (window.MCL && typeof window.MCL._sel === 'function')
