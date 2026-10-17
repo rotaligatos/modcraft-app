@@ -232,6 +232,49 @@ const PROFILES = {
         check('Read drawing: prompt names the row size and the other rows; lm = sum of the listed cuts', () => res,
               [true, true, 'Routeriing (Special Cut) × 2.688 lm']);
       }
+      // 2026-10-17: GEFFY EVANGELISTA (OpenCutList report, 52 pieces) — with rotation allowed the
+      // single greedy pass needed 4 boards, without it 3. The packer now tries several orders (and
+      // no rotation) and keeps the best, so it is never worse than the old pass.
+      if (typeof window._guillotinePackOnce === 'function')
+        check('cut optimizer: tries several orders, never worse than the single pass (GEFFY 4 → 3 boards)', () => {
+          const L = [[964,614,1],[964,582,2],[750,600,2],[650,582,2],[464,50,4],[464,26,2],[400,168,4],[1000,100,1],[614,564,2],
+                     [536,168,4],[536,118,8],[500,400,4],[400,118,8],[500,400,2],[488,224,2],[488,174,4]];
+          const pcs = []; L.forEach(x => { for (let k = 0; k < x[2]; k++) pcs.push({ length: x[0], width: x[1], grain: 'none' }); });
+          let seed = 3, worse = 0; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+          for (let j = 0; j < 60; j++) {
+            const q = []; for (let k = 0; k < 40; k++) q.push({ length: 100 + Math.round(rnd() * 1900), width: 50 + Math.round(rnd() * 650) });
+            for (const rot of [false, true]) if (window.guillotinePackBoards(q, 1220, 2440, 3, rot).boardsNeeded > window._guillotinePackOnce(q, 1220, 2440, 3, rot, 'width').boardsNeeded) worse++;
+          }
+          return [window._guillotinePackOnce(pcs, 1220, 2440, 3, true, 'width').boardsNeeded,
+                  window.guillotinePackBoards(pcs, 1220, 2440, 3, true).boardsNeeded,
+                  window.guillotinePackBoards(pcs, 1220, 2440, 3, false).boardsNeeded, worse];
+        }, [4, 3, 3, 0]);
+      // 2026-10-17: a PDF whose text is scrambled (or has none) is no longer a blank import: the
+      // window offers "Read with AI"; the parts tables become rows (same part on several boards
+      // added up) in the normal import, to be checked before anything is imported.
+      if (window.CLR && typeof window.CLR.aiRead === 'function') {
+        const ST = window.CLR._state(), keep = { files: ST.files, active: ST.active }, keepF = window.fetch, keepK = window.prodSettings.claudeKey, keepT = window.showToast, keepL = window.logActivity;
+        let res;
+        try {
+          window.showToast = () => {}; window.logActivity = () => {}; window.prodSettings.claudeKey = 'x';
+          const img = 'data:image/jpeg;base64,AA';
+          ST.files = [{ name: 'X.pdf', sheets: [], error: 'scrambled', aiOffer: true, scans: [{ page: 1, dataUrl: img }, { page: 2, dataUrl: img }, { page: 3, dataUrl: img }] }];
+          const pages = [{ has_parts: false, parts: [] },
+            { has_parts: true, material: 'Swiss Pear MDF', thickness_mm: 18, parts: [{ name: 'Door', qty: 2, length_mm: 488, width_mm: 174, edge: '', handgrab: '1L', groove: '', notes: '' }, { name: 'Side', qty: 1, length_mm: 536, width_mm: 118, edge: '', handgrab: '', groove: '', notes: '' }] },
+            { has_parts: true, material: 'Swiss Pear MDF', thickness_mm: 18, parts: [{ name: 'Side', qty: 7, length_mm: 536, width_mm: 118, edge: '', handgrab: '', groove: '', notes: '' }] }];
+          let n = 0;
+          window.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ content: [{ type: 'text', text: JSON.stringify(pages[n++]) }] }) });
+          window.CLR.render();
+          const offered = /CLR\.aiRead\(0\)/.test(document.getElementById('ov-clr-body').innerHTML);
+          window.CLR.aiRead(0); await new Promise(r => setTimeout(r, 100));
+          const f = ST.files[0], rows = f.sheets[0].res.rows;
+          res = [offered, n, rows.length, rows.map(r => r.part + ' ' + r.qty).join(', '), rows[0].handgrabSide, rows[0].thk, f.error, f.sheets[0].aiRead];
+          window.closeModal('ov-clr');
+        } catch (e) { res = String(e); }
+        finally { ST.files = keep.files; ST.active = keep.active; window.fetch = keepF; window.prodSettings.claudeKey = keepK; window.showToast = keepT; window.logActivity = keepL; }
+        check('scrambled PDF: offers Read with AI; parts tables become rows, same part added up', () => res,
+              [true, 3, 2, 'Door 2, Side 8', 'length', 18, '', true]);
+      }
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',

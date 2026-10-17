@@ -38628,10 +38628,30 @@ function totals(rows) {
    ───────────────────────────────────────────────────────────────────────────── */
 async function pdfToLines(buf) {
   const doc = await pdfjsLib.getDocument({ data: buf }).promise;
-  const lines = [], drawings = [];
+  const lines = [], drawings = [], scans = [];
+  let garbledPages = 0;
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
     const tc = await page.getTextContent();
+    // Scrambled text (GEFFY EVANGELISTA, an OpenCutList report): the PDF has text, but every word
+    // is a run of glyph numbers like "/12/0/6/13". Reading it gives garbage, so the page is read as
+    // a picture instead (by the AI, on request) and its "text" is not used.
+    const words = tc.items.filter(it => it.str && it.str.trim());
+    // pdf.js gives such text as glyph numbers turned into characters: control characters and
+    // punctuation ("\u0002", "!", "#"), almost never a letter or digit; other readers as "/12/0".
+    const junk = words.filter(it => !/[A-Za-z0-9]/.test(it.str) || /^(\s*\/i?\d+)+\s*$/.test(it.str)).length;
+    const garbled = words.length > 0 && junk / words.length >= 0.5;
+    if (garbled) garbledPages++;
+    if ((garbled || !words.length) && typeof document !== 'undefined') {
+      try {
+        const vp = page.getViewport({ scale: 1.6 }), cv = document.createElement('canvas');
+        cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+        const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+        await page.render({ canvasContext: cx, viewport: vp }).promise;
+        scans.push({ page: p, dataUrl: cv.toDataURL('image/jpeg', 0.85) });
+      } catch (e) { }
+    }
+    if (garbled) continue;
     // A page with a picture on it is a drawing page ("SEE DRAWING" rows point to it). The picture is
     // an image, so its sizes cannot be read without a person or the AI — but the page is kept as an
     // image so it travels with the Job Order to Special Cutting.
@@ -38671,6 +38691,8 @@ async function pdfToLines(buf) {
     }
   }
   lines.drawings = drawings;
+  lines.scans = scans;
+  lines.garbled = garbledPages > 0;
   return lines;
 }
 function linesToAoa(lines) {
@@ -38863,9 +38885,17 @@ function linesToAoa(lines) {
           _loadPdfJs(function(err){
             if(err){ f.error='PDF reader failed to load'; resolve(f); return; }
             pdfToLines(buf).then(function(lines){
-              if(!lines.length){ f.error='No text in this PDF — it is a scanned image or a drawing, so it cannot be read without AI.'; resolve(f); return; }
+              f.scans=(lines.scans||[]).filter(function(d){ return d.dataUrl; });
+              var why=lines.garbled?'The text in this PDF is scrambled, so it cannot be read as text. It looks like a cut-optimizer report (e.g. OpenCutList / SketchUp) or a PDF made with an unusual font.'
+                :'This PDF has no text — it is a scanned image or a drawing.';
+              if(!lines.length){
+                f.error=why; f.aiOffer=f.scans.length>0; resolve(f); return;
+              }
               f.drawings=(lines.drawings||[]).filter(function(d){ return d.dataUrl; }).map(function(d){ return {source:file.name,page:d.page,dataUrl:d.dataUrl}; });
-              addSheet(f,'PDF',linesToAoa(lines)); resolve(f);
+              addSheet(f,'PDF',linesToAoa(lines));
+              // Some pages read, some scrambled / pictures only: still offer the AI for those pages.
+              if(f.scans.length&&!f.sheets.some(function(sh){ return sh.res.rows.length; })){ f.error=why; f.aiOffer=true; }
+              resolve(f);
             }).catch(function(e){ f.error='Could not read this PDF ('+(e&&e.message||e)+')'; resolve(f); });
           });
         } else {
@@ -39190,8 +39220,15 @@ function linesToAoa(lines) {
     var td='style="font-size:12px;padding:3px 6px;border-bottom:.5px solid var(--border);vertical-align:top"';
     var sel='style="padding:3px 5px;border:.5px solid var(--border);border-radius:5px;font-size:11px;font-family:inherit;max-width:170px"';
     var h='';
-    ST.files.filter(function(f){ return f.error; }).forEach(function(f){
-      h+='<div style="padding:8px 10px;margin-bottom:8px;border-radius:6px;background:var(--wash-coral);color:var(--pill-coral);font-size:12px"><b>'+esc(f.name)+'</b> — '+esc(f.error)+'</div>';
+    ST.files.forEach(function(f,fi){
+      if(f.error){
+        h+='<div style="padding:8px 10px;margin-bottom:8px;border-radius:6px;background:var(--wash-coral);color:var(--pill-coral);font-size:12px"><b>'+esc(f.name)+'</b> — '+esc(f.error);
+        if(f.aiOffer) h+='<div style="margin-top:6px;color:var(--text)">'+(f.aiBusy?'<i class="ti ti-loader-2"></i> '+esc(f.aiBusy)
+          :'The AI can read its parts tables ('+f.scans.length+' page'+(f.scans.length===1?'':'s')+') and suggest the rows. Nothing is imported until you check them here. '
+          +'<button class="btn btn-primary" style="padding:3px 10px;font-size:12px;margin-left:4px" onclick="CLR.aiRead('+fi+')"><i class="ti ti-sparkles"></i> Read with AI</button>')+'</div>';
+        h+='</div>';
+      }
+      if(f.aiNote) h+='<div style="padding:8px 10px;margin-bottom:8px;border-radius:6px;background:var(--wash-amber);color:var(--pill-amber);font-size:12px"><b>'+esc(f.name)+'</b> — '+esc(f.aiNote)+'</div>';
     });
     var sheets=allSheets();
     if(!sheets.length){
@@ -39546,7 +39583,83 @@ function linesToAoa(lines) {
     }).then(sharedLearned).then(render);
   }
 
+  // Reads each page picture of a PDF that has no usable text and turns the parts tables into rows,
+  // in a sheet with the same headers the reader already understands. The rows then go through the
+  // normal import (material mapping, flags, check) — the AI only suggests, a person imports.
+  function aiRead(fi){
+    var f=ST.files[fi]; if(!f||!f.scans||!f.scans.length||f.aiBusy) return;
+    if(!prodSettings.claudeKey){ showToast('No Claude API key — set it in Settings → Designers Support.'); return; }
+    var parts=[], pagesWithParts=[], done=0, failed=[];
+    var prompt='This is one page of a cabinet-work PDF (sizes in mm). It may be a cut-optimizer report (e.g. OpenCutList), a cutting list, or a drawing. '
+      +'If it has a table of parts to cut, read EVERY row of it. Reply with JSON only, no other text: '
+      +'{"has_parts":true|false,"material":string,"thickness_mm":number|null,"parts":[{"name":string,"qty":number,"length_mm":number,"width_mm":number,'
+      +'"edge":string,"handgrab":string,"groove":string,"notes":string}]}. '
+      +'material and thickness_mm = the board these parts are cut from, as written on the page (e.g. the page title). '
+      +'qty = the quantity in THAT row on THIS page. length_mm and width_mm = the finished size as printed (L and W columns). '
+      +'edge = edge banding only if the page states it, written as counts of banded edges: "2L 2W", "1L", "4S" (all round) or "" if not stated. L = edges along the length, W = along the width. '
+      +'handgrab = a tapered/hand-grab edge, written the same way ("1L" = one long side), else "". groove = grooving the same way, else "". '
+      +'notes = any other note on the row, as written. Do not invent rows or figures; if a figure is unreadable, skip that row and say so in notes of the next row. '
+      +'If the page has no parts table (a 3D view, a summary only), reply {"has_parts":false,"parts":[]}.';
+    var step=function(k){
+      if(k>=f.scans.length) return finish();
+      f.aiBusy='Reading page '+(k+1)+' of '+f.scans.length+'…'; render();
+      var d=f.scans[k];
+      fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+        headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:8000,messages:[{role:'user',content:[
+          {type:'image',source:{type:'base64',media_type:'image/jpeg',data:String(d.dataUrl).replace(/^data:[^,]*,/,'')}},
+          {type:'text',text:prompt}]}]})
+      }).then(function(r){
+        if(!r.ok) return r.json().then(function(e){ throw new Error((e.error&&e.error.message)||r.statusText); });
+        return r.json();
+      }).then(function(res){
+        try{ _tkRecord('drawing',(res.usage&&res.usage.input_tokens)||0,(res.usage&&res.usage.output_tokens)||0); }catch(e){}
+        var txt=(res.content&&res.content[0]&&res.content[0].text)||'', m=txt.match(/\{[\s\S]*\}/), j=null;
+        try{ j=m?JSON.parse(m[0]):null; }catch(e){ j=null; }
+        if(!j) throw new Error('reply could not be read');
+        if(j.has_parts!==false&&Array.isArray(j.parts)&&j.parts.length){
+          pagesWithParts.push(d.page);
+          j.parts.forEach(function(q){ parts.push({page:d.page,material:String(j.material||''),thk:+j.thickness_mm||0,q:q}); });
+        }
+      }).catch(function(e){ failed.push(d.page+' ('+(e.message||e)+')'); })
+        .then(function(){ step(k+1); });
+    };
+    var finish=function(){
+      f.aiBusy='';
+      // An optimizer report lists the same part on several boards: one row per part, qty added up.
+      var merged={}, order=[];
+      parts.forEach(function(x){
+        var q=x.q, L=+q.length_mm||0, W=+q.width_mm||0;
+        var key=[String(q.name||'').trim().toLowerCase(),x.material.toLowerCase(),x.thk,L,W,String(q.edge||''),String(q.handgrab||''),String(q.groove||''),String(q.notes||'').trim().toLowerCase()].join('|');
+        if(!merged[key]){ merged[key]={name:String(q.name||'').trim(),material:x.material,thk:x.thk,L:L,W:W,qty:0,edge:String(q.edge||''),handgrab:String(q.handgrab||''),groove:String(q.groove||''),notes:String(q.notes||'').trim(),pages:[]}; order.push(key); }
+        merged[key].qty+=(+q.qty||0);
+        if(merged[key].pages.indexOf(x.page)<0) merged[key].pages.push(x.page);
+      });
+      if(!order.length){
+        f.aiOffer=false;
+        f.error='The AI found no parts table in this PDF'+(failed.length?' (could not read page '+failed.join(', ')+')':'')+'. Type the parts into the cutting list instead.';
+        render(); return;
+      }
+      var aoa=[['Part','Material','Thk','Qty','Length','Width','Edge','Hand grab','Groove','Remarks']];
+      order.forEach(function(k){ var r=merged[k];
+        aoa.push([r.name,r.material,r.thk||'',r.qty||'',r.L||'',r.W||'',r.edge,r.handgrab,r.groove,r.notes]); });
+      f.error=''; f.aiOffer=false;
+      var pcs=order.reduce(function(a,k){ return a+merged[k].qty; },0);
+      f.aiNote='Read by AI from page'+(pagesWithParts.length===1?' ':'s ')+pagesWithParts.join(', ')+': '+order.length+' parts, '+pcs+' pieces. '
+        +'Check every row against the PDF before importing'+(failed.length?' — page '+failed.join(', ')+' could not be read':'')+'. '
+        +'Edge banding is only filled where the PDF states it.';
+      addSheet(f,'Read by AI',aoa);
+      var sh=f.sheets[f.sheets.length-1]; sh.aiRead=true; sh.include=true;
+      f.sheets.forEach(function(o){ if(o!==sh&&!o.res.rows.length) o.include=false; });
+      ST.active=allSheets().map(function(x){ return x.s; }).indexOf(sh);
+      try{ logActivity('Client cutting list "'+f.name+'" read by AI ('+order.length+' parts, '+pcs+' pieces) — to be checked before import'); }catch(e){}
+      render();
+    };
+    step(0);
+  }
+
   return {
+    aiRead:aiRead,
     open:open, render:render, commit:commit,
     close:function(){ closeModal('ov-clr'); },
     pick:function(i){ ST.active=i; render(); },
@@ -43199,13 +43312,15 @@ function prodComputeServices(comps,holes,extraServices){
 // validated against samplesofcuttinglist/MARGARITA.xls (7/1/4-board result), so board counts and
 // utilization cannot move because of this. This is what makes a real cut-layout diagram possible
 // -- see prodComputeBom/_prodCutLayoutSvg for where it's consumed.
-function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
+// One packing pass in a given piece order. guillotinePackBoards (below) runs several orders and
+// keeps the best, so the result can only be as good as the old single pass or better.
+function _guillotinePackOnce(pieces,boardW,boardH,kerf,allowRotate,order){
   // Kerf is the saw cut between a piece and what is left beside it. A piece that uses the whole
   // remaining length (or width) leaves nothing to cut off, so it needs no kerf there — a 2440
   // piece fits a 2440 board (Rommel, 2026-10-15). Only exact fits change; every other piece packs
   // exactly as before.
   function fitsIn(x,avail){ return x===avail||x+kerf<=avail; }
-  var items=pieces.slice().sort(function(a,b){ return b.width-a.width; });
+  var items=pieces.slice().sort(_GPACK_ORDERS[order]||_GPACK_ORDERS.width);
   var oversized=0,usedArea=0,totalArea=0,boards=[],oversizedRefs=[];
   for(var i=0;i<items.length;i++){
     var p=items[i];
@@ -43277,6 +43392,42 @@ function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
     // subtracting it gives the strip's actual cut width.
     shelves:boards.map(function(bd){ return bd.shelves.map(function(s){ return {xStart:s.xStart,width:s.height-kerf}; }); })
   };
+}
+// Piece orders tried. "width" (widest first) is the original single pass and always runs first,
+// so a tie keeps exactly the layout the app produced before (2026-10-17).
+var _GPACK_ORDERS={
+  width:function(a,b){ return b.width-a.width; },
+  length:function(a,b){ return (b.length-a.length)||(b.width-a.width); },
+  area:function(a,b){ return (b.length*b.width-a.length*a.width)||(b.width-a.width); },
+  perim:function(a,b){ return ((b.length+b.width)-(a.length+a.width))||(b.width-a.width); },
+  side:function(a,b){ return (Math.max(b.length,b.width)-Math.max(a.length,a.width))||(b.width-a.width); }
+};
+// The packer is greedy: one order can need a board more than another, and allowing rotation
+// (CNC) could need MORE boards than not rotating (GEFFY EVANGELISTA, 2026-10-17: 4 boards with
+// rotation, 3 without). So several orders are tried, with and without rotation when rotation is
+// allowed (never rotation when it isn't — a panel saw or grain rule forbids it), and the best kept:
+// fewest pieces left off, then fewest boards, then the waste gathered on as few boards as possible
+// (the emptiest board emptier = one big usable offcut instead of scraps on every board).
+function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
+  var best=_guillotinePackOnce(pieces,boardW,boardH,kerf,allowRotate,'width');
+  best.strategy='width'+(allowRotate?' + rotate':'');
+  if(!pieces||pieces.length<2) return best;
+  var boardArea=boardW*boardH;
+  var minFill=function(r){ var m=Infinity; (r.layout||[]).forEach(function(bd){ var a=0; bd.forEach(function(q){ a+=q.w*q.h; }); if(a<m) m=a; }); return m===Infinity?0:m/boardArea; };
+  var better=function(r,b){
+    if(r.oversizedCount!==b.oversizedCount) return r.oversizedCount<b.oversizedCount;
+    if(r.boardsNeeded!==b.boardsNeeded) return r.boardsNeeded<b.boardsNeeded;
+    return minFill(r)<minFill(b)-0.02;
+  };
+  var rots=allowRotate?[true,false]:[false];
+  Object.keys(_GPACK_ORDERS).forEach(function(ord){
+    rots.forEach(function(rot){
+      if(ord==='width'&&rot===!!allowRotate) return;
+      var r=_guillotinePackOnce(pieces,boardW,boardH,kerf,rot,ord);
+      if(better(r,best)){ r.strategy=ord+(rot?' + rotate':''); best=r; }
+    });
+  });
+  return best;
 }
 
 function prodComputeBom(comps){
@@ -47337,6 +47488,14 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-17-pdf-ai-read', date:'17 Oct 2026', items:[
+    {id:'pdf-ai-read', icon:'ti-file-search', title:'PDFs the app cannot read: Read with AI',
+     text:'When a client\'s PDF has scrambled text (like an OpenCutList / SketchUp optimizer report) or is only a scan, the import window now says so and offers "Read with AI". The AI reads the parts tables into rows; you check them in the import window before anything is imported.',
+     show:'quotations'},
+    {id:'better-optimizer', icon:'ti-layout-grid', title:'Cutting layout tries harder',
+     text:'The board layout now tries several packing orders and keeps the best one: fewest boards first, then the waste kept together as one bigger offcut. It never uses more boards than before.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-17-read-drawing-ai', date:'17 Oct 2026', items:[
     {id:'read-drawing-ai', icon:'ti-sparkles', title:'Let the AI read a special-cut drawing',
      text:'On a special-cut row that has a drawing, press "Read drawing". The AI suggests the overall size, cut length and edge banding from the drawing. You check each figure, untick anything wrong, then apply.',
