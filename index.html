@@ -43445,8 +43445,24 @@ var EBT_CODE_MAP={
 // same shape prodBuildSummary already expects from svcConcepts below. A chip left with no lm
 // figure never reaches this array at all (see _cutListToAnalysis) -- it stays a flagged
 // review note instead, exactly the "loud, never short" rule the rest of this pipeline follows.
+// Which cutting rate a piece's board takes (Rommel, 2026-10-17 — the website already picks it by
+// board): Versaboard, compact laminate, acrylic or a 6x8 board, high gloss, and MDF/PB/Plywood 4x8
+// each have their own price. Found by pattern in the live catalogue so a renamed SKU still
+// resolves; '' when the board does not say what it is (a person picks).
+function _cutServiceForBoard(text){
+  var t=String(text||'').toLowerCase(), pat=null;
+  if(/\son\s/.test(t)) t=t.split(/\son\s/).pop();   // an HPL build is cut at its SUBSTRATE's rate (as the website does)
+  if(/versa/.test(t)) pat=/^cutting\s+versa/i;
+  else if(/compact/.test(t)) pat=/^cutting\s+compact/i;
+  else if(/acrylic|\b6\s*x\s*8\b|\b6'\s*x\s*8'/.test(t)) pat=/^cutting\s*\(acrylic/i;
+  else if(/high\s*gloss/.test(t)) pat=/^cutting\s*\(high\s*gloss/i;
+  else if(/\b(mdf|pb|particle|ply|plywood|hdf|mfc|melamine|board|boards)\b|mdf|plywood/.test(t)) pat=/^cutting\s+mdf/i;
+  if(!pat) return '';
+  for(var i=0;i<SERVICES.length;i++) if(SERVICES[i]&&pat.test(SERVICES[i].name||'')) return SERVICES[i].name;
+  return '';
+}
 function prodComputeServices(comps,holes,extraServices){
-  var cutLM=0; var ebtLM=0;
+  var cutLM=0; var ebtLM=0; var cutBy={}, cutOrder=[];
   var byTape={}; var tapeOrder=[];
   var extraByName={}; var extraOrder=[];
   var extraList=extraServices||[];
@@ -43463,7 +43479,12 @@ function prodComputeServices(comps,holes,extraServices){
     var l=(c.length||0)/1000; var w=(c.width||0)/1000; var qty=c.qty||1;
     // Rommel, 2026-09-25: the plant counts cutting as ALL FOUR SIDES of every piece (full
     // perimeter), not length + width once. The half-perimeter figure under-quoted cutting by half.
-    if(!_prodIsWholeBoard(c)) cutLM+=2*(l+w)*qty;
+    if(!_prodIsWholeBoard(c)){
+      var pcut=2*(l+w)*qty; cutLM+=pcut;
+      var cs=_cutServiceForBoard([c.catalogName,c.material,c.color,c.texture].filter(Boolean).join(' '));
+      if(cutBy[cs]===undefined){ cutBy[cs]=0; cutOrder.push(cs); }
+      cutBy[cs]+=pcut;
+    }
     var ebtRaw=(c.ebt||'').trim();
     var ebtKey=ebtRaw.toLowerCase();
     var sc=0,lc=0;
@@ -43495,7 +43516,9 @@ function prodComputeServices(comps,holes,extraServices){
   // 10%). Applied once, here, so every screen and the quotation line agree. cuttingLMNet is the
   // bare four-sides figure, kept for the cut sheet and for checking against a plant quote.
   var cutAllow=(+prodSettings.cutAllowance||0);
-  return {cuttingLM:Math.round(cutLM*(1+cutAllow/100)*100)/100,cuttingLMNet:Math.round(cutLM*100)/100,
+  // The same cutting, split by the rate each board takes ('' = board not identified).
+  var cuttingByService=cutOrder.map(function(k){ return {service:k,lm:Math.round(cutBy[k]*(1+cutAllow/100)*100)/100}; });
+  return {cuttingLM:Math.round(cutLM*(1+cutAllow/100)*100)/100,cuttingLMNet:Math.round(cutLM*100)/100,cuttingByService:cuttingByService,
     cutAllowancePct:cutAllow,edgebandingLM:Math.round(ebtLM*100)/100,
     edgebandingByTape:edgebandingByTape,holeCount:totalHoles,extraServicesByName:extraServicesByName};
 }
@@ -44038,8 +44061,19 @@ function prodBuildSummary(result) {
   // gets a row (flagged) instead of silently vanishing, so you can pick the right one from the
   // existing dropdown rather than never knowing it was missing.
   var svcs=[];var svc=result._services||{};
+  // Cutting is priced per board type: one line per rate, exact catalogue names. Only cutting on a
+  // board that does not say what it is falls back to the keyword concept below, flagged to pick.
+  var cutUnknown=svc.cuttingLM||0;
+  if(svc.cuttingByService&&svc.cuttingByService.length){
+    cutUnknown=0;
+    svc.cuttingByService.forEach(function(cb){
+      var ci2=-1; for(var x=0;x<SERVICES.length;x++) if(cb.service&&SERVICES[x].name===cb.service){ ci2=x; break; }
+      if(ci2<0){ cutUnknown+=cb.lm; return; }
+      svcs.push({aiName:'Panel cutting',name:SERVICES[ci2].name,svcIdx:ci2,qty:cb.lm,unit:SERVICES[ci2].unit,include:true,needsReview:false});
+    });
+  }
   var svcConcepts=[
-    {label:'Panel cutting',    keywords:['cut','cutting','saw'],              qty:svc.cuttingLM||0},
+    {label:'Panel cutting',    keywords:['cut','cutting','saw'],              qty:cutUnknown, flag:'Cutting on a board that does not say what it is (MDF/PB/Plywood, compact, Versaboard, acrylic/6x8, high gloss) — pick its cutting rate.'},
     {label:'Edgebanding',      keywords:['edge','band','ebt','tape'],         qty:svc.edgebandingLM||0},
     {label:'Boring/drilling',  keywords:['bor','drill','hole'],               qty:svc.holeCount||0},
     {label:'Assembly/Installation labor', keywords:['assembl','install','labor','labour'], qty:result.carcassCount||0}
@@ -44067,7 +44101,8 @@ function prodBuildSummary(result) {
     }
     if(matchIdx>=0){
       svcs.push({aiName:cpt.label,name:SERVICES[matchIdx].name,
-        svcIdx:matchIdx,qty:Math.round(cpt.qty*100)/100,unit:SERVICES[matchIdx].unit,include:true,needsReview:false});
+        svcIdx:matchIdx,qty:Math.round(cpt.qty*100)/100,unit:SERVICES[matchIdx].unit,include:true,needsReview:!!cpt.flag&&jargonName===cpt.label,
+        reviewNote:(cpt.flag&&jargonName===cpt.label)?cpt.flag:undefined});
     } else {
       svcs.push({aiName:cpt.label,name:cpt.label,
         svcIdx:SERVICES.length?0:-1,qty:Math.round(cpt.qty*100)/100,unit:(SERVICES[0]&&SERVICES[0].unit)||'',
@@ -47813,6 +47848,14 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-17-cut-by-board', date:'17 Oct 2026', items:[
+    {id:'cut-by-board', icon:'ti-cut', title:'Cutting priced by board type',
+     text:'A cutting list analysis now gives one cutting line per board type, each at its own rate: MDF/PB/Plywood 4x8, compact laminate, Versaboard, acrylic/6x8 and high gloss. Before, all cutting went on one line at one rate. A board that does not say what it is is flagged so you can pick the rate.',
+     show:'quotations'},
+    {id:'hpl-lam-only', icon:'ti-layers-intersect', title:'HPL lamination only',
+     text:'HPL builds in the cutting list take a board size, qty and “Cut to size”, like the MSSI website. Leave Cut to size off and the boards are laminated and handed over whole: substrate boards, HPL sheets and lamination, no cutting. Website orders like this used to arrive empty.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-17-cut-3stage', date:'17 Oct 2026', items:[
     {id:'cut-3stage', icon:'ti-layout-grid', title:'Cutting layout: first cut either way, pieces side by side',
      text:'The board layout now also tries cutting strips across the board, and cutting a strip into pieces side by side, and keeps whichever needs the fewest boards. Pieces on plain boards (white, grey, black, solid colours) may be turned; woodgrain, stone, granite, textile and other patterned boards keep the client\'s grain direction. The cutting sequence lists every cut, including the side-by-side ones.',

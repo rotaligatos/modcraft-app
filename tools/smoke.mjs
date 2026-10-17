@@ -258,6 +258,25 @@ const PROFILES = {
           const best = window.guillotinePackBoards(pcs, 1220, 2440, 3, false);
           return [r.boardsNeeded, overlap, inside, seq.dir, seq.ripCount, seq.splitCount, /side by side/.test(seq.steps.join(' ')), best.boardsNeeded];
         }, [1, false, true, 'L', 1, 1, true, 1]);
+      // 2026-10-17 (Rommel): cutting is priced by the board it is cut from — one line per rate, not one
+      // 'Panel cutting' line taking the first catalogue service with 'cut' in its name.
+      if (typeof window._cutServiceForBoard === 'function')
+        check('cutting priced per board type: one line per rate; an unnamed board is flagged', () => {
+          const keep = window.SERVICES, keepA = window.prodSettings.cutAllowance;
+          try {
+            window.prodSettings.cutAllowance = 0;
+            window.SERVICES = [{ name: "Cutting  MDF/PB/Plywood (4' x 8')", unit: '/lm', price: 16.5 }, { name: 'Cutting (acrylic,HPL,6x8)', unit: '/lm', price: 20 },
+              { name: 'Cutting Compact laminate', unit: '/lm', price: 34 }, { name: 'Cutting Versaboard', unit: '/lm', price: 65.5 },
+              { name: 'Cutting List Preparation', unit: 'carcass', price: 500 }, { name: 'Cutting (High Gloss)', unit: 'lm', price: 80 }];
+            const pc = (m, L, W) => ({ material: m, length: L, width: W, qty: 1, ebt: '' });
+            const comps = [pc('Real White PB 4x8 2F (18mm, Matte)', 1000, 500), pc('Compact Laminate 12mm', 1000, 500), pc('White High Gloss MDF 18mm', 500, 500),
+              pc('Pure white 6x8 0.7mm HPL on Raw Boards 4x8 18mm MDF', 500, 500), pc('XYZ', 500, 500)];
+            const svc = window.prodComputeServices(comps, [], []);
+            window.prodState.result = { components: comps, _services: svc, _bom: [], hardware: [], holeSchedule: [] };
+            window.prodBuildSummary(window.prodState.result);
+            return window.prodState.summary.services.filter(s => /cut/i.test(s.aiName || s.name)).map(s => s.name + ' ' + s.qty + (s.needsReview ? ' FLAG' : ''));
+          } finally { window.SERVICES = keep; window.prodSettings.cutAllowance = keepA; }
+        }, ["Cutting  MDF/PB/Plywood (4' x 8') 5", 'Cutting Compact laminate 3', 'Cutting (High Gloss) 2', "Cutting  MDF/PB/Plywood (4' x 8') 2 FLAG"]);
       // 2026-10-17: a lamination-only HPL row (website: Cut to size off) arrived as NOTHING — HPL was read
       // only through panels. It is now whole laminated boards: substrate boards, HPL sheets, lamination, no cutting.
       // And a website special cut (chip only) is a special cut: Special Cutting, then manual edge banding.
