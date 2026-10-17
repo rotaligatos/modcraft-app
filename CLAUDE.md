@@ -13155,3 +13155,9 @@ missing from the count — yet Reflect let it through.
   file}`; JO gets `drawings[]`; JO print shows each drawing page (from memory, else a signed URL from the
   quotation's Storage folder). Images saved at lock/reflect as `<base> — drawing — <file> p<N>.jpg`
   (`_uploadDaDrawings`), so PMES lists them in the job's files. `_prodPrintWindow` now returns the window.
+- **"Read drawing" on special-cut rows** (`ca7d2d9`, Rommel: AI only as needed, user checks): a cutting-list
+  row with a drawing page gets a button; `MCL.readDrawing(i)` sends that page image (kept in memory from the
+  import, `S.drawings`) to claude-sonnet-4-6 and asks for overall L×W, cut lm per piece and edge code. A check
+  window (`_mclAiShow`, `#ov-mcl-ai`) shows Now vs AI with tick boxes; `MCL.aiApply` applies only ticked figures
+  (lm × row qty onto the special-cut chip), drops the "⚠ special cut" remark, notes "read by AI, checked by <user>",
+  logs it. Needs the client file imported in the same session. What's new entry added.
