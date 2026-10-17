@@ -13093,3 +13093,6 @@ missing from the count — yet Reflect let it through.
   version" after. gSaveQuotation now toasts when signed out instead of returning silently.
 - Headless training sim (scratch): lock on an unsaved quotation → number assigned → JO reserved, works.
   Rommel's case (locked, still no number) not reproduced — the new message/toasts will show the cause.
+- Rommel confirmed 2026-10-17: lock now numbers the quotation and reserves the JO. Job Order and PMES
+  process JO show only the taper side ("Handgrab tapering — along length"), no metres; the metres stay
+  in the analysis review row and the quotation's service line (`_joSvcLabel(x, withQty)`).

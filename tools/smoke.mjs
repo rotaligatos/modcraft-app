@@ -5256,7 +5256,7 @@ const PROFILES = {
           const old = w._joBuild({ components: [{ area: 'Cashier counter', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' },
             { area: 'Medicine cabinet', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' }],
             extraServices: [{ service: 'Handgrab tapering', qty: 1.4, unit: 'lm', notes: 'Door - Cashier counter' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-S2' });
-          return { routes: jo.parts.map((p) => p.route.join('>')), tapeSvc: (jo.parts[0].services || [])[0] && jo.parts[0].services[0].service, side: jo.parts[0].services[0].side, priced: (a.extraServices[0] || {}).service, onJo: /along length/.test(w._joDocHtml(jo, 'RESERVED')),
+          return { routes: jo.parts.map((p) => p.route.join('>')), tapeSvc: (jo.parts[0].services || [])[0] && jo.parts[0].services[0].service, side: jo.parts[0].services[0].side, priced: (a.extraServices[0] || {}).service, onJo: /Handgrab tapering — along length<\/td>/.test(w._joDocHtml(jo, 'RESERVED')),
                    plainHasNoSvcKey: !('services' in jo.parts[1]), old: old.parts.map((p) => p.route.join('>')) };
         }, { routes: ['CUT>EBB>TPR>ASM>QC>PACK', 'CUT>EBB>ASM>QC>PACK', 'CUT>EBB>RTR>ASM>QC>PACK',
                       'CUT>GLU>EBB>ASM>QC>PACK', 'CUT>GLU>ASM>QC>PACK'],
