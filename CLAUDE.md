@@ -13126,3 +13126,6 @@ missing from the count — yet Reflect let it through.
   (`_webEbtUneven`) + no row grain. Reference note `EBT_SQUARE_NOTE`: ⓘ by "Edges" in the cutting list
   (`MCL.edgeNote`, stays until closed) and printed above the Job Order parts table. Labels draw faint
   grain lines for grained parts (JO part `grained:true`, set only when true so plain jobs keep their signature).
+- **Designers Support "Print part labels" = draft preview** in the real label layout (`prodPrintLabels` →
+  `_joBuild` DRAFT → `_joPrintLabels(jo,true)`); the QR place shows a red dashed "DRAFT — preview, not
+  for production" box, so a draft label can't be scanned onto a part. Real labels: Job Order → Labels / PMES.

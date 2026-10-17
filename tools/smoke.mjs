@@ -5133,7 +5133,8 @@ const PROFILES = {
             w.open = () => ({ document: { write: h => cap.push(h), close() {} }, focus() {}, print() {} });
             w.prodPrintCutSheets(); w.prodPrintLabels();
             return { sheets: (cap[0].match(/Cutting sequence/g) || []).length, groupedNote: /×3 identical/.test(cap[0]),
-                     labels: (cap[1].match(/class="lb"/g) || []).length, noTokens: !/var\(--/.test(cap.join('')) };
+                     // Labels render client-side from a JSON payload since the QR labels (2026-10-17).
+                     labels: ((cap[1].match(/"labels":\[(.*?)\],"logo"/) || ['', ''])[1].match(/"scan":/g) || []).length, noTokens: !/var\(--/.test(cap.join('')) };
           } finally { w.prodSettings.boardSizes = saved.bs; w.prodState.result = saved.r; w.open = saved.open; }
         }, { sheets: 1, groupedNote: true, labels: 3, noTokens: true });
 
@@ -5336,6 +5337,18 @@ const PROFILES = {
           const jo = w._joBuild({ components: [], hardware: [], holeSchedule: [] }, { joNumber: 'JO-SQ' });
           return { conv: [conv[0] !== conv[1], conv[2] === conv[0]], flagged, note: /Edge codes:/.test(w._joDocHtml(jo, 'RESERVED')) };
         }, { conv: [true, true], flagged: [true, false, false, false], note: true });
+        check('Draft labels (analysis preview): same label layout, marked DRAFT instead of a QR', () => {
+          const w = window, keepP = w._prodPrintWindow, keepR = w.prodState.result; let title = '', body = '';
+          w._prodPrintWindow = (t, b) => { title = t; body = b; };
+          try {
+            const comps = [{ area: 'A', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' }];
+            w.prodState.result = { components: comps, _bom: w.prodComputeBom(comps), hardware: [], holeSchedule: [] };
+            w.prodPrintLabels();
+          } finally { w._prodPrintWindow = keepP; w.prodState.result = keepR; }
+          const m = body.match(/JoLabels\.render\(document\.getElementById\("jl"\),(.*)\);\}\);/);
+          const pl = m ? JSON.parse(m[1]) : null;
+          return { draft: !!(pl && pl.draft), title: /^Draft labels/.test(title), n: pl ? pl.labels.length : 0 };
+        }, { draft: true, title: true, n: 1 });
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

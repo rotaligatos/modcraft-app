@@ -66,12 +66,12 @@
     return s + '</svg>';
   }
 
-  function labelHtml(l, logo) {
+  function labelHtml(l, logo, draft) {
     var banded = (+l.sc || 0) + (+l.lc || 0);
     return '<div class="lb">'
       + '<div class="top"><span class="nm">' + e(l.name) + '</span><span class="pn">' + e(l.p) + '</span></div>'
       + ((l.order || l.client || l.project) ? '<div class="cp">' + e([l.order, l.client, l.project].filter(Boolean).join(' · ')) + '</div>' : '')
-      + '<div class="mid">' + qrSvg(qrText(l), logo) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc, l.grain)
+      + '<div class="mid">' + (draft ? '<div class="dr">DRAFT<small>preview — not for production</small></div>' : qrSvg(qrText(l), logo)) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc, l.grain)
       + '<div class="eb">' + (banded ? '<b style="color:#dc2626">━</b> edge band ' + e(l.ebt || '') + (l.tape ? ' · ' + e(l.tape) : '') : 'no edge band') + '</div></div></div>'
       + '<div class="sz">Cut ' + e(l.cutL) + ' × ' + e(l.cutW) + '</div>'
       + '<div class="mt">' + e(l.material) + '</div>'
@@ -86,6 +86,7 @@
     + '.lb .mid{display:flex;gap:4px;align-items:center;margin:2px 0}.lb .qr{width:24mm;height:24mm;flex:none}.lb .rt{flex:1;min-width:0}.lb .pc{width:100%;height:18mm}'
     + '.lb .eb{font-size:7.5px;color:#333;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.lb .sz{font-weight:700;font-size:10px}.lb .mt{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}'
     + '.lb .cp{font-size:7.5px;color:#333;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}'
+    + '.lb .dr{width:24mm;height:24mm;flex:none;border:1.5px dashed #b91c1c;color:#b91c1c;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:700;font-size:14px;text-align:center;line-height:1.1}.lb .dr small{font-size:6.5px;font-weight:400;margin-top:3px;padding:0 2px}'
     + '.lb .wk{font-weight:700;color:#7c2d12}.lb .ft{margin-top:auto;display:flex;justify-content:space-between;align-items:flex-end;gap:4px;font-family:monospace;font-size:7px;color:#444}'
     + '.lb .by{font-family:Arial,Helvetica,sans-serif;font-size:5.5px;color:#9ca3af;white-space:nowrap}';
 
@@ -93,7 +94,7 @@
     css: CSS, qrText: qrText, qrSvg: qrSvg, pieceSvg: pieceSvg, labelHtml: labelHtml,
     render: function (el, o) {
       if (!document.getElementById('jl-css')) { var st = document.createElement('style'); st.id = 'jl-css'; st.textContent = CSS; document.head.appendChild(st); }
-      el.innerHTML = '<div class="jl-grid">' + (o.labels || []).map(function (l) { return labelHtml(l, o.logo || ''); }).join('') + '</div>';
+      el.innerHTML = '<div class="jl-grid">' + (o.labels || []).map(function (l) { return labelHtml(l, o.logo || '', !!o.draft); }).join('') + '</div>';
     }
   };
 })(typeof window !== 'undefined' ? window : this);
