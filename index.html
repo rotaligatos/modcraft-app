@@ -18762,9 +18762,23 @@ function _cutListToAnalysis(cl,order){
     if(!shortSub||!shortFin) continue;
     builds[shortFin+' on '+shortSub+' · '+(hr.faces||'')]={sub:hr.sub,fin:hr.fin,faces:hr.faces==='2F'?2:1};
   }
+  // LAMINATION ONLY (2026-10-17): an HPL row that is not "cut to size" is boards we laminate and
+  // hand over whole — no panel uses it, so reading HPL only through the panels lost the job
+  // entirely. Each such row becomes whole laminated boards (no cutting); the existing HPL rules then
+  // give the substrate boards, the HPL sheets (boards × faces) and the lamination service.
+  var lamPanels=[];
+  for(var lh=0;lh<hplRows.length;lh++){
+    var lr=hplRows[lh];
+    var lSub=String(lr.sub||'').split(' — ')[0].trim(), lFin=String(lr.fin||'').split(' — ')[0].trim();
+    if(lr.cut||!lSub||!lFin||!(+lr.qty>0&&+lr.L>0&&+lr.W>0)) continue;
+    lamPanels.push({group:'HPL lamination', part:'Laminated board', mat:lFin+' on '+lSub+' · '+(lr.faces||''),
+      th:(_prodParseMaterialDescriptor(lr.sub).thickness||0), qty:+lr.qty, L:Math.max(+lr.L,+lr.W), W:Math.min(+lr.L,+lr.W), ebt:'', emat:'', grain:'',
+      svcs:[], remark:'lamination only — whole board, no cutting', __lamOnly:true});
+  }
+  var allPanels=panels.concat(lamPanels);
   var comps=[], warn=[], facesUnknown=0, holes=[], extraSvcs=[];
-  for(var p=0;p<panels.length;p++){
-    var pn=panels[p];
+  for(var p=0;p<allPanels.length;p++){
+    var pn=allPanels[p];
     var notes=[], review=[], svcStart=extraSvcs.length;
     var L=+pn.L||0, W=+pn.W||0;
     var label=String(pn.mat||'').trim();
@@ -18984,6 +18998,11 @@ function _cutListToAnalysis(cl,order){
     // edges included), not the overall rectangle. A Manual Edgebanding chip on the row (typed, or
     // filled by Read drawing) is that length; without one the overall size stands in and is flagged.
     var manualEb=false, manualEbLm=0;
+    if(!String(pn.specialCut||'').trim()&&svcs.some(function(x){ return /special\s*cut|irregular/i.test(String(x||'')); })) pn=Object.assign({},pn,{specialCut:'SPECIAL CUT'});
+    if(pn.__lamOnly){
+      var bdL=_prodBoardFor(material);
+      if(!((L===bdL.h&&W===bdL.w)||(L===bdL.w&&W===bdL.h))) review.push('lamination only, but '+L+' × '+W+' is not a whole '+bdL.w+' × '+bdL.h+' board — confirm whether it is cut');
+    }
     if(String(pn.specialCut||'').trim()&&eb.ebt&&(EBT_CODE_MAP[String(eb.ebt).toLowerCase()]||[0,0]).some(function(n){ return n>0; })){
       manualEb=true;
       extraSvcs.slice(svcStart).forEach(function(x){ if(/manual\s*edge/i.test(x.service)) manualEbLm+=(+x.qty||0); });
@@ -19016,6 +19035,8 @@ function _cutListToAnalysis(cl,order){
       services:extraSvcs.slice(svcStart).map(function(x){ var o={service:x.service,qty:x.qty,unit:x.unit||'lm'}; if(x.side) o.side=x.side; return o; })
     };
     if(pn.drawing&&pn.drawing.source) baseComp.drawing={source:String(pn.drawing.source),page:+pn.drawing.page||0};
+    // A whole board handed over laminated has no cutting direction: 1220 × 2440 and 2440 × 1220 are the same board.
+    if(pn.__lamOnly){ baseComp._lamOnly=true; baseComp.grain='none'; baseComp.grainLock=true; }
     comps.push(baseComp);
     if(lam){
       for(var lb=2;lb<=lam.boards;lb++) comps.push(Object.assign({},baseComp,{
@@ -19046,7 +19067,7 @@ function _cutListToAnalysis(cl,order){
   // The extra boards of a glued (>25mm) panel are one client row, so they are not counted
   // against what the client sent — otherwise every glued worktop raised a false alarm.
   var gotRows=0, gotPieces=0;
-  for(var gp=0;gp<comps.length;gp++){ if(comps[gp]._gluedExtra) continue; gotRows++; gotPieces+=(+comps[gp].qty||0); }
+  for(var gp=0;gp<comps.length;gp++){ if(comps[gp]._gluedExtra||comps[gp]._lamOnly) continue; gotRows++; gotPieces+=(+comps[gp].qty||0); }
   var mismatch=[];
   if(t.rows!==undefined   && +t.rows   !== gotRows)   mismatch.push('the client sent '+t.rows+' rows, this parsed '+gotRows);
   if(t.pieces!==undefined && +t.pieces !== gotPieces) mismatch.push('the client sent '+t.pieces+' pieces, this parsed '+gotPieces);
@@ -19070,8 +19091,9 @@ function _cutListToAnalysis(cl,order){
       +(t.area?' · '+Number(t.area).toFixed(3)+' m²':'')
       +'. These values were typed by the client, not extracted — check them, do not re-derive them.';
   }
-  if(hplRows.length) head+=' '+hplRows.length+' HPL build'+(hplRows.length===1?' is':'s are')
+  if(hplRows.length-lamPanels.length>0) head+=' '+(hplRows.length-lamPanels.length)+' HPL build'+(hplRows.length-lamPanels.length===1?' is':'s are')
     +' applied through the panels that use them, so they are not listed again as their own components.';
+  if(lamPanels.length) head+=' '+lamPanels.length+' HPL row'+(lamPanels.length===1?' is':'s are')+' lamination only — added as whole laminated boards, no cutting.';
   if(warn.length) head+=' \u26a0 '+warn.join('. ')+'.';
   if(mismatch.length) head='\u26a0 THIS LIST DID NOT ARRIVE INTACT \u2014 '+mismatch.join('; ')
     +'. Do not quote it until the difference is understood; ask the client to resend if unsure. '+head;
@@ -37575,13 +37597,14 @@ var MCL=(function(){
       +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
       +'<span style="font-weight:600;font-size:13px">HPL builds</span>'
       +'<span style="font-size:11px;color:var(--text2);flex:1">HPL is a finish laminated onto a substrate, never a board on its own. '
-      +'Declare the build here and it becomes selectable as a panel material; the sheet and the substrate-correct lamination service are derived from the panels that use it.</span>'
+      +'Declare the build here and it becomes selectable as a panel material; the sheet and the substrate-correct lamination service are derived from the panels that use it. '
+      +'<b>Lamination only?</b> Give the board size and qty and leave “Cut to size” off — they are laminated and handed over whole (same as the MSSI website).</span>'
       +'<button class="btn" style="font-size:11px;padding:4px 9px" onclick="MCL.addHpl()"><i class="ti ti-plus"></i>Add build</button></div>';
     if(!S.hpl.length){
       h+='<div style="font-size:11px;color:var(--text2);font-style:italic">None — add one only if the job has HPL.</div>';
     } else {
       h+='<table style="width:100%;border-collapse:collapse"><tr>'
-        +'<th '+th+'>Substrate</th><th '+th+'>HPL finish</th><th '+th+'>Faces</th><th '+th+'>Selectable as</th><th></th></tr>';
+        +'<th '+th+'>Substrate</th><th '+th+'>HPL finish</th><th '+th+'>Faces</th><th '+th+'>Length</th><th '+th+'>Width</th><th '+th+'>Qty</th><th '+th+' title="Ticked: the laminated boards are cut into the panels below. Off: lamination only, whole boards.">Cut to size</th><th '+th+'>Selectable as</th><th></th></tr>';
       for(var i=0;i<S.hpl.length;i++){
         var hp=S.hpl[i];
         var ii='style="width:100%;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
@@ -37593,6 +37616,9 @@ var MCL=(function(){
           +'<datalist id="mcl-hfin-'+i+'"></datalist></td>'
           +'<td><select style="padding:4px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"'
           +' onchange="MCL.setHpl('+i+',\'faces\',this.value)">'+opts(['1F','2F'],hp.faces)+'</select></td>'
+          +['L','W','qty'].map(function(f){ return '<td><input type="number" min="0" style="width:72px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"'
+            +' value="'+(hp[f]||'')+'" placeholder="'+(f==='qty'?'boards':'mm')+'" onchange="MCL.setHpl('+i+',\''+f+'\',+this.value||0)"></td>'; }).join('')
+          +'<td style="text-align:center"><input type="checkbox"'+(hp.cut?' checked':'')+' onchange="MCL.setHpl('+i+',\'cut\',this.checked)"></td>'
           +'<td style="font-size:11px;color:var(--text2)">'+esc(hplLabel(hp)||'— fill both SKUs —')+'</td>'
           +'<td style="text-align:center"><button class="btn" style="padding:2px 7px" onclick="MCL.removeHpl('+i+')"><i class="ti ti-trash"></i></button></td></tr>';
       }
@@ -38039,7 +38065,9 @@ var MCL=(function(){
           hplSheet.slice(1).forEach(function(r){
             if(!r||!r[0]) return;
             newHpl.push({sub:String(r[0]||'').trim(),fin:String(r[1]||'').trim(),
-              faces:(String(r[2]||'').toUpperCase()==='2F')?'2F':'1F'});
+              faces:(String(r[2]||'').toUpperCase()==='2F')?'2F':'1F',
+              // Same columns as the MSSI website's HPL sheet: Length, Width, Qty, Cut to size (Y/N).
+              L:+r[3]||0, W:+r[4]||0, qty:+r[5]||0, cut:/^y/i.test(String(r[6]||''))});
           });
         }
         var newHw=[];
@@ -38297,7 +38325,7 @@ var MCL=(function(){
     },
     load:function(){
       var cl=MCL.toCl();
-      if(!cl.panels.length){ showToast('Add at least one panel row first.'); return; }
+      if(!cl.panels.length&&!(cl.hpl||[]).some(function(h){ return !h.cut&&+h.qty>0&&+h.L>0&&+h.W>0; })){ showToast('Add at least one panel row first (or an HPL lamination-only row with size and qty).'); return; }
       var payload=_cutListToAnalysis(cl,null);
       prodLoadStructuredList(payload,'Cutting list — entered in Modcraft');
       if(prodState.result){ prodState.result._bander=prodSettings.banderType||'trimmer'; prodState.result._hplOrder=prodSettings.hplOrder||'laminate_first'; }

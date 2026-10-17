@@ -258,6 +258,17 @@ const PROFILES = {
           const best = window.guillotinePackBoards(pcs, 1220, 2440, 3, false);
           return [r.boardsNeeded, overlap, inside, seq.dir, seq.ripCount, seq.splitCount, /side by side/.test(seq.steps.join(' ')), best.boardsNeeded];
         }, [1, false, true, 'L', 1, 1, true, 1]);
+      // 2026-10-17: a lamination-only HPL row (website: Cut to size off) arrived as NOTHING — HPL was read
+      // only through panels. It is now whole laminated boards: substrate boards, HPL sheets, lamination, no cutting.
+      // And a website special cut (chip only) is a special cut: Special Cutting, then manual edge banding.
+      if (typeof window._cutListToAnalysis === 'function')
+        check('website: lamination-only HPL rows are boards; a special-cut chip makes a special cut', () => {
+          const a = window._cutListToAnalysis({ grain: 'L', panels: [], hardware: [], hpl: [{ sub: 'Raw Boards 4x8 18mm MDF', fin: 'Pure white 4x8 0.7mm HPL', faces: '2F', L: 1220, W: 2440, qty: 4, cut: false }] });
+          const bom = window.prodComputeBom(a.components), sv = window.prodComputeServices(a.components, [], []);
+          const b = window._cutListToAnalysis({ grain: 'L', hpl: [], hardware: [], panels: [{ group: 'C', part: 'Rail', mat: 'MDF', th: 18, qty: 1, L: 2110, W: 500, ebt: '4S', emat: 'W', svcs: ['Routeriing (Special Cut) (2688mm)', 'Manual Edgebanding EVA (5898mm)'] }] });
+          const jo = window._joBuild(b, { joNumber: 'JO-T' });
+          return [bom.length && bom[0].boardsNeeded, bom.length && bom[0].hpl, sv.cuttingLM, a._integrity.ok, b.components[0].specialCut, b.components[0].manualEb, jo.parts[0].route.slice(0, 2).join('>')];
+        }, [4, true, 0, true, 'SPECIAL CUT', true, 'SCUT>MEB']);
       // 2026-10-17 (Rommel): a special cut that is banded is banded BY HAND — Manual Edgebanding for the
       // whole piece, along its real outline; not on the machine edgebanding line; the tape still counted;
       // the Job Order sends it to manual edge banding. No length given = the overall size, flagged.
