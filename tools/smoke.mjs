@@ -5315,14 +5315,16 @@ const PROFILES = {
           w._prodPrintWindow = (t, b) => { body = b; };
           try {
             const jo = w._joBuild({ components: [{ area: 'A', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' }],
-              hardware: [], holeSchedule: [] }, { joNumber: 'JO-X1-V1', company: 'Cebu World Laminate, Inc.' });
+              hardware: [], holeSchedule: [] }, { joNumber: 'JO-X1-V1', company: 'Cebu World Laminate, Inc.', client: 'ARBAU', project: 'Clinic', orderRef: 'Order #8864' });
             w._joPrintLabels(jo);
           } finally { w._prodPrintWindow = keep; }
           const m = body.match(/JoLabels\.render\(document\.getElementById\("jl"\),(.*)\);\}\);/);
           const pl = m ? JSON.parse(m[1]) : null;
           return { lib: /qrcode-generator/.test(body) && /jo-labels\.js/.test(body), logo: pl && /co-cwl\.png$/.test(pl.logo),
-                   scan: pl && pl.labels[0].scan, edges: pl && [pl.labels[0].sc, pl.labels[0].lc], noBarcode: !/JsBarcode/.test(body) };
-        }, { lib: true, logo: true, scan: 'X1-V1-P1-01', edges: [0, 1], noBarcode: true });
+                   scan: pl && pl.labels[0].scan, edges: pl && [pl.labels[0].sc, pl.labels[0].lc], noBarcode: !/JsBarcode/.test(body),
+                   text: pl && [pl.labels[0].order, pl.labels[0].client, pl.labels[0].project].join('|'),
+                   ref: (() => { const k = { o: w.qSourceOrderId, j: w.qJobSource }; try { w.qSourceOrderId = '8864'; const a1 = w._joOrderRef('QT-X1'); w.qSourceOrderId = null; w.qJobSource = 'walkin'; const a2 = w._joOrderRef('QT-X1'); return a1 + '|' + a2; } finally { w.qSourceOrderId = k.o; w.qJobSource = k.j; } })() };
+        }, { lib: true, logo: true, scan: 'X1-V1-P1-01', edges: [0, 1], noBarcode: true, text: 'Order #8864|ARBAU|Clinic', ref: 'Order #8864|Walk-in' });
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

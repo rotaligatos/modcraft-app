@@ -13110,3 +13110,12 @@ missing from the count — yet Reflect let it through.
   Blank / Client's own logo (upload, shrunk to 240px) stored in `pmes_production_jobs.label_logo`
   (null = company, 'blank', or data:image). Changing it: supervisor+. Scan screen: "Scan with camera"
   (html5-qrcode 2.3.8, cdnjs, loaded on first use); USB 2D scanners type into the box as before.
+- **QR content** (Rommel agreed): `CODE | cutLxcutWxth | board (≤44 chars, [..] stripped) | EB 4S`, ECC Q.
+  Part code first — PMES `findComponentByBarcode` takes the text before the first "|". Project, client,
+  order and people are printed/recorded, not packed in the QR (density at 24 mm).
+- Label text line: order (`_joOrderRef`: "Order #N" from qSourceOrderId or the Project List row's
+  sourceOrder, else "Walk-in" / "Email order") · client · project. JO data carries `orderRef`.
+- **Who did the work (PMES)**: `pmes_component_done.operators text[]`; `pmes_component_mark` gained
+  `p_operators` (old 5-arg version dropped). Blank → the operators the process JO was handed out to;
+  `done_by` stays the account that recorded it. Scan screen remembers the operator per device
+  (localStorage `pmes_operator`). Pieces grid tooltip: "Done by <operators> (recorded by <account>)".
