@@ -133,6 +133,22 @@ const PROFILES = {
                 return { remark: /groove: 1W groove for grab bar: not at ebt side/.test(jo.parts[0].remark || '') && /handle side up/.test(jo.parts[0].remark),
                          onJo: /not at ebt side/.test(doc), grv: jo.parts[0].route.indexOf('GRV') >= 0, specialClean: !/<td style="font-weight:700">Grooving/.test(doc) };
               }, { remark: true, onJo: true, grv: true, specialClean: true });
+      // CROWN MODULAR 2026-10-17: the board line's "EB= 1MM WARM WHITE" is the tape for its banded rows,
+      // and the material is shown tidied; an old mapping of the full wording still applies.
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function' && typeof window.CLR._state === 'function')
+        check('Board line above the table: tidied material, its EB= tape on banded rows, old mapping kept',
+              () => {
+                const raw = "MATERIALS : 18mm /PLYWOOD / 4'x8' /WARM WHITE/2F/S2/ EB= 1MM WARM WHITE / FINISH CUT SIZE W/ EBT";
+                const aoa = [[raw], ['No.', 'Designation', 'Quantity', 'Length', 'Width', 'Thickness', 'Eb'],
+                             ['A', 'BED SUPPORT', 10, '2010 mm', '120 mm', '18 mm', '2L'], ['M', 'HB-WEDGE', 6, '934 mm', '59 mm', '18 mm', '']];
+                const r = window.CLR.readClientSheet(aoa);
+                const ST = window.CLR._state(), keep = ST.store.mats, keepE = ST.matEdit;
+                try {
+                  ST.matEdit = {}; ST.store.mats = {}; ST.store.mats[raw.toLowerCase().replace(/\s+/g, ' ') + '@18'] = 'Warm White Plywood 4x8 2F (18mm, S2)';
+                  const p = window.CLR.toPanel(r.rows[0], '');
+                  return [r.rows[0].material, r.rows[0].emat, r.rows[1].emat, p.mat];
+                } finally { ST.store.mats = keep; ST.matEdit = keepE; }
+              }, ['18mm PLYWOOD 4x8 WARM WHITE 2F S2', '1MM WARM WHITE', '', 'Warm White Plywood 4x8 2F (18mm, S2)']);
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',

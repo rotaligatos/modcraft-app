@@ -38191,12 +38191,28 @@ function parseMatCode(s) {
 // ": 09mm /PLYWOOD / 4'x8' /WARM WHITE/2F", "boards 18mm PB 2 FACE MATT". Rows under it
 // that carry no material of their own inherit it.
 const BOARD_WORD = /\b(PB|MDF|MFC|PLY(WOOD)?|MELAMINE|PARTICLE|HPL|MARINE|BOARDS?|COMPACT|LAMINATE)\b/i;
+// A board line above (or inside) the table. CROWN MODULAR writes it as a slash-separated spec:
+// "MATERIALS : 18mm /PLYWOOD / 4'x8' /WARM WHITE/2F/S2/ EB= 1MM WARM WHITE / FINISH CUT SIZE W/ EBT".
+// The board is the spec parts; "EB= …" is the edge tape for the banded rows that use this board; the
+// finish/cut-size part is read elsewhere (sizeMode). Only lines in that form are tidied — any other
+// wording is kept exactly as written, so remembered mappings keyed on it still match.
 function matHeading(t) {
   const s = String(t || '');
   if (!/\d\s*mm\b/i.test(s) || !BOARD_WORD.test(s)) return null;
   const c = parseMatCode(s);
-  const tape = s.match(/(\d(?:\.\d)?)\s*mm\s*edge ?band/i);
-  return { material: s.replace(/^[:\s]+/, '').trim(), thk: c.thk, faces: c.faces, tapeMm: tape ? +tape[1] : 0 };
+  const tapeM = s.match(/(\d(?:\.\d)?)\s*mm\s*edge ?band/i);
+  const raw = s.replace(/^[:\s]+/, '').trim();
+  const eb = raw.match(/\bEB\s*[=:]\s*([^/|]+)/i);
+  let material = raw, tape = '';
+  if (eb || /^materials?\s*:/i.test(raw) || (raw.split('/').length >= 4 && /^\s*\d+\s*mm\b/i.test(raw))) {
+    tape = eb ? eb[1].replace(/\s+/g, ' ').trim() : '';
+    const parts = raw.replace(/^materials?\s*:\s*/i, '').split('/').map(x => x.trim())
+      .filter(x => x && !/^EB\s*[=:]/i.test(x) && !/finish|cut\s*size|^ebt$|^w$/i.test(x));
+    material = parts.join(' ').replace(/(\d+)\s*['’]\s*x\s*(\d+)\s*['’]?/gi, '$1x$2').replace(/\s+/g, ' ').trim() || raw;
+  }
+  let tapeMm = tapeM ? +tapeM[1] : 0;
+  if (!tapeMm && tape) { const m = tape.match(/(\d(?:\.\d)?)\s*mm/i); if (m) tapeMm = +m[1]; }
+  return { material, raw, tape, thk: c.thk, faces: c.faces, tapeMm };
 }
 
 // Notes above the header that change how sizes must be read.
@@ -38452,7 +38468,8 @@ function readClientSheet(aoa, force) {
       src: r + 1, group: gGroup() || [group, groupSub].filter(Boolean).join(' › '),
       part: String(g('part') || g('item') || '').trim(), material: matTxt, thk, faces: mc.faces,
       L, W, qty, eL, eW, code: toOurCode(Math.min(eL, 2), Math.min(eW, 2), L, W),
-      emat: String(g('emat') || row.__tape || '').trim().replace(/^0(\.0+)?$/, ''),
+      emat: String(g('emat') || row.__tape || ((eL || eW) && !gm() && rowMat && rowMat.tape) || '').trim().replace(/^0(\.0+)?$/, ''),
+      matRaw: (!gm() && rowMat && rowMat.raw && rowMat.raw !== matTxt) ? rowMat.raw : '',
       grooveLm, grooveTxt: (grooveTxt && !/^0(\.0+)?$/.test(grooveTxt) && grooveTxt !== rem) ? grooveTxt : '', handgrabLm, handgrabSide, remark: [rem, hgNote ? hgTxt : ''].filter(Boolean).join(' · '), issues
     });
   }
@@ -39179,6 +39196,8 @@ function linesToAoa(lines) {
   function toPanel(r,sizeMode){
     var p=MCL.blankPanel();
     var mat=String(r.material||'').trim(), sku=mat?mappedSku(rowMatKey(mat,r.thk)):'';
+    // A board line now shown tidied: a mapping made against its full original wording still applies.
+    if(!sku&&r.matRaw) sku=mappedSku(rowMatKey(r.matRaw,r.thk));
     p.group=r.group||'Cabinet 1';
     p.part=r.part||'Part';
     // "OUTSOURCE: Marine Plywood 18mm (raw)" — the board is bought in, not taken from stock. The

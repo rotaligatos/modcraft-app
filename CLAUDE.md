@@ -13135,3 +13135,9 @@ missing from the count — yet Reflect let it through.
   client wrote/tape lines); JO part `remark` (only when set) → new **Remarks** column on the Job Order,
   label work line, PMES component spec (`adm_release_gate`), and a Remarks column on every process JO.
   Grooving no longer repeats under Special (`_joWorkSvcs` = TPR/RTR/GLU only).
+- **Board lines above a client table (CROWN MODULAR)**: `matHeading` tidies slash-spec lines ("MATERIALS :
+  18mm /PLYWOOD / 4'x8' /WARM WHITE/2F/S2/ EB= 1MM WARM WHITE / FINISH CUT SIZE W/ EBT" → "18mm PLYWOOD 4x8
+  WARM WHITE 2F S2"; only lines with EB=, a MATERIALS label, or 4+ slash parts starting with "NNmm") and
+  keeps `raw` + `tape` ("1MM WARM WHITE"). Banded rows with no tape of their own take the line's tape.
+  `matRaw` on the row lets `toPanel` fall back to a mapping made against the full old wording.
+  All 15 sample PDFs re-read: only CROWN changed (14 rows now have tape; totals identical).
