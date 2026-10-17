@@ -258,6 +258,22 @@ const PROFILES = {
           const best = window.guillotinePackBoards(pcs, 1220, 2440, 3, false);
           return [r.boardsNeeded, overlap, inside, seq.dir, seq.ripCount, seq.splitCount, /side by side/.test(seq.steps.join(' ')), best.boardsNeeded];
         }, [1, false, true, 'L', 1, 1, true, 1]);
+      // 2026-10-17 (Rommel): an HPL build ordered as 10 boards and cut to size was charged for the 2 the
+      // panels use. The order is what is laminated: substrate, HPL sheets and lamination follow it; if
+      // the panels need more than ordered, the larger figure is used and it is flagged.
+      if (typeof window._cutListToAnalysis === 'function')
+        check('HPL cut to size: laminated boards follow the order (10), not the 2 the panels use', () => {
+          const keep = window.SERVICES;
+          try {
+            window.SERVICES = [{ name: 'HPL Lamination (MDF/PB, 2 Face)', unit: 'piece', price: 702 }, { name: "Cutting  MDF/PB/Plywood (4' x 8')", unit: '/lm', price: 16.5 }];
+            const run = (qty, n) => { const sub = 'Raw Boards 4x8 18mm MDF', fin = 'Green 4x8 0.7mm HPL', lab = fin + ' on ' + sub + ' · 2F';
+              const a = window._cutListToAnalysis({ grain: 'L', hardware: [], hpl: [{ sub, fin, faces: '2F', L: 2440, W: 1220, qty, cut: true }],
+                panels: Array.from({ length: n || 6 }, () => ({ group: 'C', part: 'Side', mat: lab, th: 18, qty: 1, L: 500, W: 500, ebt: '', svcs: [] })) });
+              window.prodLoadStructuredList(a, 't'); window.prodBuildSummary(window.prodState.result); const s = window.prodState.summary;
+              return [window.prodState.result._bom[0].boardsNeeded, s.materials[0].qty, s.materials[1].qty, (s.services.find(x => /lamination/i.test(x.name)) || {}).qty, !!s.materials[0].needsReview && /order says/.test(s.materials[0].reviewNote)]; };
+            return [run(10), run(0), run(1, 20)];
+          } finally { window.SERVICES = keep; }
+        }, [[1, 10, 20, 10, false], [1, 1, 2, 1, false], [3, 3, 6, 3, true]]);
       // 2026-10-17 (Rommel): cutting is priced by the board it is cut from — one line per rate, not one
       // 'Panel cutting' line taking the first catalogue service with 'cut' in its name.
       if (typeof window._cutServiceForBoard === 'function')

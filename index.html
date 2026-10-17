@@ -18760,7 +18760,12 @@ function _cutListToAnalysis(cl,order){
     var shortSub=String(hr.sub||'').split(' — ')[0].trim();
     var shortFin=String(hr.fin||'').split(' — ')[0].trim();
     if(!shortSub||!shortFin) continue;
-    builds[shortFin+' on '+shortSub+' · '+(hr.faces||'')]={sub:hr.sub,fin:hr.fin,faces:hr.faces==='2F'?2:1};
+    var bKey=shortFin+' on '+shortSub+' · '+(hr.faces||'');
+    // The boards ordered laminated and then cut (Rommel, 2026-10-17): the order is what is laminated
+    // and charged, even when the panels use fewer — 10 ordered, panels from 2 = 10 boards laminated.
+    var bOrd=(hr.cut&&+hr.qty>0)?+hr.qty:0;
+    if(builds[bKey]) builds[bKey].ordered=(builds[bKey].ordered||0)+bOrd;
+    else builds[bKey]={sub:hr.sub,fin:hr.fin,faces:hr.faces==='2F'?2:1,ordered:bOrd};
   }
   // LAMINATION ONLY (2026-10-17): an HPL row that is not "cut to size" is boards we laminate and
   // hand over whole — no panel uses it, so reading HPL only through the panels lost the job
@@ -19022,7 +19027,7 @@ function _cutListToAnalysis(cl,order){
       colorB:'', textureB:'',
       thickness:lam?lam.bt:th, length:L, width:W, qty:rowQty,
       faces:lam?1:faces, grain:gr||jobGrain, grainLock:!!gr,
-      ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName, hplSku:hplSku,
+      ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName, hplSku:hplSku, hplOrdered:(b&&!pn.__lamOnly&&b.ordered)||0,
       outsourceName:String(pn.outsource||''), specialCut:String(pn.specialCut||''),
       manualEb:manualEb, manualEbLm:manualEbLm,
       needsReview:review.length>0, reviewNote:review.join('; '),
@@ -42627,7 +42632,7 @@ function _prodNormalizeComponent(c){
     width:+c.width||0,qty:+c.qty||1,faces:+c.faces||0,
     grain:(c.grain==='length'||c.grain==='width')?c.grain:'none', grainLock:!!c.grainLock,
     ebt:String(c.ebt||''),edgeTape:String(c.edgeTape||''),grooving:String(c.grooving||''),
-    specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),hplSku:String(c.hplSku||''),
+    specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),hplSku:String(c.hplSku||''),hplOrdered:+c.hplOrdered||0,
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||''),
     noCut:!!c.noCut, remark:String(c.remark||''), manualEb:!!c.manualEb, manualEbLm:+c.manualEbLm||0,
     drawing:(c.drawing&&c.drawing.source)?{source:String(c.drawing.source),page:+c.drawing.page||0}:undefined,
@@ -43786,6 +43791,7 @@ function prodComputeBom(comps){
     var on=c.outsourceName||'';
     if(groups[key].outsourceName===undefined) groups[key].outsourceName=on;
     else if(groups[key].outsourceName!==on) groups[key].outsourceName='';
+    groups[key].hplOrdered=Math.max(groups[key].hplOrdered||0,+c.hplOrdered||0);
     var hs=c.hplSku||'';
     if(groups[key].hplSku===undefined) groups[key].hplSku=hs;
     else if(groups[key].hplSku!==hs) groups[key].hplSku='';
@@ -43807,7 +43813,7 @@ function prodComputeBom(comps){
     var areaList=Object.keys(g.areas||{}).sort().join(', ');
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,faces:g.faces,
-      colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,catalogName:g.catalogName||'',outsourceName:g.outsourceName||'',hplSku:g.hplSku||'',
+      colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,catalogName:g.catalogName||'',outsourceName:g.outsourceName||'',hplSku:g.hplSku||'',hplOrdered:g.hplOrdered||0,
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
@@ -43889,6 +43895,9 @@ function prodBuildSummary(result) {
   var pendingHplServices=[];
   for(var b=0;b<bom.length;b++){
     var bm=bom[b];
+    // Laminated boards: the client's ORDER when it is more than the panels use (the rest are laminated
+    // and handed over); the panels' count when they need more than was ordered — flagged below.
+    var bq=(bm.hpl&&(bm.hplOrdered||0)>(bm.boardsNeeded||0))?bm.hplOrdered:bm.boardsNeeded;
     // faces must be part of the search term — a 1-face and 2-face board are different catalog
     // SKUs/prices; leaving it out let two jobs with genuinely different face counts produce the
     // exact same search text, so the fuzzy matcher (and any saved jargon mapping from it) could
@@ -43902,19 +43911,24 @@ function prodBuildSummary(result) {
     if(bm.outsourceName){
       // Chosen as outsourced at import: lands in the quotation's outsource section, where the
       // supplier's price is entered (same as pressing "Outsource" on the line here).
-      var orow=catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'pc',bm.texture);
+      var orow=catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bq,'pc',bm.texture);
       orow.name=bm.outsourceName; orow.outsource=true; orow.mto=false; orow.needsReview=false; orow.reviewNote='';
       mats.push(orow);
     } else if(picked){
       // Already chosen as an exact SKU — resolved on arrival, candidates kept so it can be changed.
-      var prow=catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'pc',bm.texture);
+      var prow=catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bq,'pc',bm.texture);
       prow.name=picked.name; prow.unit=picked.unit||'pc'; prow.price=picked.price||0; prow.custom=false;
       prow.needsReview=false; prow.reviewNote='';
       if(prow.matchCandidates.indexOf(picked.name)<0) prow.matchCandidates.unshift(picked.name);
       if(picked.mto){ prow.mto=true; prow.mtoLeadDays=_mtoDefaultLeadDays(bm.texture); }
       mats.push(prow);
     } else {
-      mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bm.boardsNeeded,'pc',bm.texture));
+      mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bq,'pc',bm.texture));
+    }
+    if(bm.hpl&&bm.hplOrdered>0&&mats.length){
+      var srow=mats[mats.length-1];
+      if(bm.hplOrdered<(bm.boardsNeeded||0)){ srow.needsReview=true; srow.reviewNote=(srow.reviewNote?srow.reviewNote+' ':'')+'The panels need '+bm.boardsNeeded+' laminated boards but the order says '+bm.hplOrdered+' — confirm the quantity with the client.'; }
+      else if(bm.hplOrdered>(bm.boardsNeeded||0)) srow.orderNote=bm.hplOrdered+' boards laminated as ordered; the panels use '+bm.boardsNeeded+'.';
     }
     if(bm.hpl){
       // The HPL sheet itself — same catalog-match/review treatment as any other material.
@@ -43925,7 +43939,7 @@ function prodBuildSummary(result) {
       // Counted in SHEETS, as the catalogue sells HPL ("pc"). Plant rule (2026-09-26): a 2F board
       // takes 2 HPL sheets, a 1F board takes 1 — laminated as whole boards, then cut. This used to
       // be the panels' area in sqm against a per-sheet price, billing each square metre as a sheet.
-      var hplSheets=(bm.boardsNeeded||0)*(bm.faces===2?2:1);
+      var hplSheets=(bq||0)*(bm.faces===2?2:1);
       var hrow=catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,hplSheets,'pc',bm.texture);
       var hpk=bm.hplSku&&typeof lookupInSource==='function'?lookupInSource(dbMaterials,bm.hplSku):null;
       if(hpk){   // the exact HPL sheet the client picked — resolved on arrival, candidates kept
@@ -43954,13 +43968,13 @@ function prodBuildSummary(result) {
       if(!facesLabel){
         // The face count still flags, and must: 1 Face and 2 Face are separate SKUs priced about
         // 2x apart, so unlike the substrate there is no safe direction to guess in.
-        pendingHplServices.push({label:'HPL Lamination',qty:bm.boardsNeeded,query:'',
+        pendingHplServices.push({label:'HPL Lamination',qty:bq,query:'',
           needsReview:true,reviewNote:'HPL detected on "'+rn+'" but the face count isn\'t clear — 1 Face and 2 Face are priced about double apart, so pick the right lamination service from the dropdown.'});
       } else if(substrate==='PB'||substrate==='MDF'||substrate==='PB-MR'||substrate==='MDF-MR'){
-        pendingHplServices.push({label:'HPL Lamination (MDF/PB, '+facesLabel+')',qty:bm.boardsNeeded,
+        pendingHplServices.push({label:'HPL Lamination (MDF/PB, '+facesLabel+')',qty:bq,
           query:'HPL Lamination MDF PB '+facesLabel});
       } else {
-        pendingHplServices.push({label:'HPL Lamination (Plywood, '+facesLabel+')',qty:bm.boardsNeeded,
+        pendingHplServices.push({label:'HPL Lamination (Plywood, '+facesLabel+')',qty:bq,
           query:'HPL Lamination Plywood '+facesLabel});
       }
     }
@@ -44178,6 +44192,7 @@ function _prodCatalogRowHtml(cat,idx,row,uopts){
     +'<select onchange="prodState.summary.'+cat+'['+idx+'].unit=this.value" style="height:27px;font-size:11px;'+d+'">'+uopts(row.unit)+'</select>'
     +'<button class="btn" onclick="prodRemoveSummaryRow(\''+cat+'\','+idx+')" style="height:27px;width:26px;padding:0;justify-content:center;color:var(--coral)"><i class="ti ti-trash"></i></button>'
     +'</div>';
+  if(row.orderNote) h+='<div style="font-size:11px;color:var(--text2);margin:-1px 0 4px 26px"><i class="ti ti-info-circle" style="font-size:11px"></i> '+escHtml(row.orderNote)+'</div>';
   if(row.needsReview){
     // One always-on searchable list: no separate "narrow auto-list" vs "full manual search"
     // steps. With nothing typed, shows the AI-suggested candidates first (instant pick for the
