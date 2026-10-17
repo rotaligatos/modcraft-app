@@ -13194,5 +13194,5 @@ missing from the count — yet Reflect let it through.
   wins; else `_isPlainBoard` (every colour word in `_PLAIN_WORDS`, raw MDF/PB) → 'none'; else locked
   'length'. Unknown colours lock — costs a board, never a wrong grain. JO parts carry that grain and
   boards carry `plans`; PMES `process-jo.js _pjoCutSequence` reads plans (905 boards, 0 differences vs
-  Modcraft). PMES defect re-plans are still the 2-stage packer. Real lists 234 → 230 boards.
+  Modcraft). PMES defect re-plans now do the same: `pack3OnBoards` (optimizer.js) — three stages, both directions, defects no-cut, plan saved with the cut plan (`plans`). Real lists 234 → 230 boards.
   ⚠ Turning a plain-board piece changes a re-locked quotation's Job Order version (`_joSig` has layouts).
