@@ -37364,6 +37364,38 @@ var MCL=(function(){
     return !/\bbor/i.test(sv) && !/min(imum)?\s*charge/i.test(sv) && /groov|\brout|manual\s*edge|taper/i.test(sv);
   }
 
+  var _mclAi={i:-1,j:null};
+  function _mclAiShow(i,j,msg){
+    _mclAi={i:i,j:j};
+    var ov=el('ov-mcl-ai');
+    if(!ov){ ov=document.createElement('div'); ov.className='overlay'; ov.id='ov-mcl-ai'; document.body.appendChild(ov); }
+    var p=S.panels[i], h='<div class="modal" style="max-width:560px"><div class="modal-head"><h3><i class="ti ti-sparkles"></i> Drawing read by AI — please check</h3>'
+      +'<button class="modal-close" onclick="closeModal(\'ov-mcl-ai\')">×</button></div><div class="modal-body">'
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">'+esc(p.group)+' · '+esc(p.part)+' · qty '+(p.qty||1)
+      +' · drawing page '+esc(p.drawing.page)+'. These are suggestions — compare with the drawing, untick anything wrong.</div>';
+    if(msg) h+='<div style="padding:10px 0;font-size:13px">'+esc(msg)+'</div>';
+    if(j){
+      if(j.found===false) h+='<div class="alert alert-warn" style="margin-bottom:8px">The AI could not tell which piece this row is'+(j.notes?': '+esc(j.notes):'.')+'</div>';
+      var cur=svcLm((p.svcs.filter(function(x){ return /special\s*cut|irregular/i.test(x); })[0])||'');
+      var lmTot=+j.cut_lm_per_piece>0?Math.round(+j.cut_lm_per_piece*(p.qty||1)*1000)/1000:0;
+      var rows=[['L','Length (mm)',p.L||'—',+j.length_mm>0?Math.round(+j.length_mm):''],
+        ['W','Width (mm)',p.W||'—',+j.width_mm>0?Math.round(+j.width_mm):''],
+        ['lm','Special cut, whole row (lm)',cur||'—',lmTot?lmTot+' ('+(+j.cut_lm_per_piece)+' × '+(p.qty||1)+')':''],
+        ['ebt','Edge banding',p.ebt||'none',EBT.indexOf(String(j.ebt||''))>=0?(j.ebt||'none'):'']];
+      h+='<table style="width:100%;font-size:13px;border-collapse:collapse"><tr style="color:var(--text2);font-size:11px"><th style="text-align:left">Use</th><th style="text-align:left">Field</th><th style="text-align:left">Now</th><th style="text-align:left">AI suggests</th></tr>';
+      rows.forEach(function(r){
+        var has=r[3]!=='';
+        h+='<tr style="border-top:.5px solid var(--border)"><td style="padding:5px 0"><input type="checkbox" id="mcl-ai-'+r[0]+'"'+(has&&j.found!==false?' checked':'')+(has?'':' disabled')+'></td>'
+          +'<td>'+r[1]+'</td><td>'+esc(r[2])+'</td><td><b>'+(has?esc(r[3]):'—')+'</b></td></tr>';
+      });
+      h+='</table>';
+      if(+j.banded_lm_per_piece>0) h+='<div style="font-size:12px;margin-top:6px">Banded edge per piece on the drawing: '+(+j.banded_lm_per_piece)+' m</div>';
+      h+='<div style="font-size:12px;margin-top:8px;color:var(--text2)">Confidence: <b>'+esc(j.confidence||'?')+'</b>'+(j.notes?' · '+esc(j.notes):'')+'</div>';
+    }
+    h+='</div><div class="modal-foot"><button class="btn" onclick="closeModal(\'ov-mcl-ai\')">'+(j?'Cancel':'Close')+'</button>'
+      +(j?'<button class="btn btn-primary" onclick="MCL.aiApply('+i+')">Apply ticked</button>':'')+'</div></div>';
+    ov.innerHTML=h; openModal('ov-mcl-ai');
+  }
   function svcCell(p,i){
     var h='<div style="display:flex;flex-wrap:wrap;gap:3px;align-items:center">';
     for(var s=0;s<p.svcs.length;s++){
@@ -37398,6 +37430,11 @@ var MCL=(function(){
     h+='<select style="border:.5px dashed var(--border);border-radius:10px;font-size:11px;padding:1px 3px;'
       +'background:transparent;font-family:inherit;max-width:140px" onchange="MCL.addSvc('+i+',this.value);this.value=\'\'">'
       +'<option value="">+ service</option>'+opts(svcOptions(),'')+'</select>';
+    // A special-cut row whose sizes are only in a drawing (a picture in the client's PDF): the AI
+    // can read it and SUGGEST the figures. Nothing changes until a person ticks and applies them.
+    if(p.drawing) h+='<button class="btn" style="padding:1px 7px;font-size:11px" title="Ask the AI to read the drawing (page '
+      +esc(p.drawing.page)+') and suggest the size, cut length and edge banding — you check before anything changes"'
+      +' onclick="MCL.readDrawing('+i+')"><i class="ti ti-sparkles"></i> Read drawing</button>';
     return h+'</div>';
   }
 
@@ -37955,6 +37992,62 @@ var MCL=(function(){
       var base=svcBase(S.panels[i].svcs[s]);
       var n=parseFloat(v);
       S.panels[i].svcs[s]=(n>0)?(base+' × '+n+' lm'):base;
+    },
+    // AI reads the drawing for ONE special-cut row. Only on request; the reply is a suggestion
+    // shown beside the row's current figures, and only the ticked ones are applied.
+    readDrawing:function(i){
+      var p=S.panels[i]; if(!p||!p.drawing) return;
+      var d=(S.drawings||[]).filter(function(x){ return x.source===p.drawing.source&&x.page===p.drawing.page; })[0];
+      if(!d||!d.dataUrl){ showToast('The drawing picture is not here any more — import the client file again.'); return; }
+      if(!prodSettings.claudeKey){ showToast('No Claude API key — set it in Settings → Designers Support.'); return; }
+      _mclAiShow(i,null,'Reading the drawing…');
+      var prompt='This is page '+d.page+' of a client\'s cutting list for cabinet work (sizes in mm). '
+        +'Find the piece for this row: cabinet/group "'+p.group+'", part "'+p.part+'", quantity '+(p.qty||1)
+        +', material "'+(p.mat||'')+'", thickness '+(p.th||'?')+'mm. It is an irregular (special cut) piece. '
+        +'Reply with JSON only, no other text: {"found":true|false,"length_mm":number|null,"width_mm":number|null,'
+        +'"cut_lm_per_piece":number|null,"ebt":string,"banded_lm_per_piece":number|null,"confidence":"high"|"medium"|"low","notes":string}. '
+        +'length_mm and width_mm = the overall size of ONE piece (the rectangle it is cut from). '
+        +'cut_lm_per_piece = total length in METRES of the outline of ONE piece, straight and curved edges together. '
+        +'ebt = the edge banding as one of: "", "1L", "2L", "1S", "2S", "1L 1S", "2L 1S", "1L 2S", "4S" (L = long edges, S = short edges) — "" if the drawing does not show banding. '
+        +'banded_lm_per_piece = banded edge length per piece in metres if the drawing marks it, else null. '
+        +'Use only dimensions printed on the drawing; if you had to add figures up, say which in notes. '
+        +'If you cannot tell which piece on the page is this row, set found to false and say why in notes.';
+      fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+        headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1500,messages:[{role:'user',content:[
+          {type:'image',source:{type:'base64',media_type:'image/jpeg',data:String(d.dataUrl).replace(/^data:[^,]*,/,'')}},
+          {type:'text',text:prompt}]}]})
+      }).then(function(r){
+        if(!r.ok) return r.json().then(function(e){ throw new Error((e.error&&e.error.message)||r.statusText); });
+        return r.json();
+      }).then(function(res){
+        try{ _tkRecord('drawing',(res.usage&&res.usage.input_tokens)||0,(res.usage&&res.usage.output_tokens)||0); }catch(e){}
+        var txt=(res.content&&res.content[0]&&res.content[0].text)||'', m=txt.match(/\{[\s\S]*\}/), j=null;
+        try{ j=m?JSON.parse(m[0]):null; }catch(e){ j=null; }
+        if(!j) throw new Error('the reply could not be read');
+        _mclAiShow(i,j,'');
+      }).catch(function(e){ _mclAiShow(i,null,'Could not read the drawing: '+(e.message||e)); });
+    },
+    aiApply:function(i){
+      var p=S.panels[i], j=_mclAi.j; if(!p||!j||_mclAi.i!==i) return;
+      var tick=function(k){ var c=el('mcl-ai-'+k); return c&&c.checked; }, done=[];
+      if(tick('L')&&+j.length_mm>0){ p.L=Math.round(+j.length_mm); done.push('length '+p.L); }
+      if(tick('W')&&+j.width_mm>0){ p.W=Math.round(+j.width_mm); done.push('width '+p.W); }
+      if(tick('lm')&&+j.cut_lm_per_piece>0){
+        var tot=Math.round(+j.cut_lm_per_piece*(p.qty||1)*1000)/1000, k=-1;
+        for(var s2=0;s2<p.svcs.length;s2++) if(/special\s*cut|irregular/i.test(p.svcs[s2])){ k=s2; break; }
+        if(k<0){ var nm=(svcOptions().filter(function(x){ return /special\s*cut|irregular/i.test(x); })[0])||'Routing Special Cut (irregular)'; p.svcs.push(nm); k=p.svcs.length-1; }
+        p.svcs[k]=svcBase(p.svcs[k])+' × '+tot+' lm'; done.push('special cut '+tot+' lm');
+      }
+      if(tick('ebt')&&EBT.indexOf(String(j.ebt||''))>=0){ p.ebt=String(j.ebt||''); done.push('edges '+(p.ebt||'none')); }
+      if(!done.length){ closeModal('ov-mcl-ai'); return; }
+      var who=(gUser&&(gUser.name||gUser.email))||'';
+      var rm=String(p.remark||'').split(' · ').filter(function(x){ return x&&!/^⚠ special cut/i.test(x); });
+      rm.push('drawing p'+p.drawing.page+' read by AI, checked by '+(who||'user'));
+      p.remark=rm.join(' · ');
+      try{ logActivity('Special cut "'+p.part+'" ('+p.group+'): drawing page '+p.drawing.page+' read by AI — applied '+done.join(', ')); }catch(e){}
+      closeModal('ov-mcl-ai'); rerender();
+      showToast('Applied: '+done.join(', '));
     },
     addHpl:function(){ S.hpl.push({sub:'',fin:'',faces:'2F'}); rerender(); },
     removeHpl:function(i){ S.hpl.splice(i,1); rerender(); },
@@ -47208,6 +47301,11 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-17-read-drawing-ai', date:'17 Oct 2026', items:[
+    {id:'read-drawing-ai', icon:'ti-sparkles', title:'Let the AI read a special-cut drawing',
+     text:'On a special-cut row that has a drawing, press "Read drawing". The AI suggests the overall size, cut length and edge banding from the drawing. You check each figure, untick anything wrong, then apply.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-17-special-cut-drawing', date:'17 Oct 2026', items:[
     {id:'special-cut-drawing', icon:'ti-shape', title:'"See drawing" pieces become special cuts',
      text:'When a client\'s PDF list says "SEE DRAWING" (or a part ends in "- SC"), the row comes in as a special cut, priced per lm of cut. Enter its overall size, cut length and edge banding from the drawing. The drawing page goes with the Job Order to Special Cutting.',

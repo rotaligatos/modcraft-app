@@ -171,6 +171,31 @@ const PROFILES = {
                     pt.drawing && pt.drawing.file, jo.drawings.length, /data-jo-dwg="0"/.test(window._joDocHtml(jo, 'RESERVED'))];
           } finally { window.SERVICES = keepS; }
         }, ['SPECIAL CUT', 'SPECIAL CUT', true, 'QT-W00000001 — drawing — X p2.jpg', 1, true]);
+      // 2026-10-17: "Read drawing" asks the AI for the special cut's size/lm/edges and shows them to check;
+      // only the ticked figures are applied, the lm covers the whole row, the "⚠ special cut" note goes.
+      if (window.MCL && typeof window.MCL.readDrawing === 'function') {
+        const S = window.MCL.state(), keepP = S.panels, keepD = S.drawings, keepF = window.fetch, keepK = window.prodSettings.claudeKey, keepT = window.showToast;
+        let res;
+        try {
+          window.showToast = () => {}; window.prodSettings.claudeKey = 'x';
+          S.drawings = [{ source: 'X.pdf', page: 2, dataUrl: 'data:image/jpeg;base64,AA' }];
+          S.panels = [{ group: 'C', part: 'FRONT RAIL - SC', mat: 'PB', th: 18, qty: 2, L: 0, W: 0, ebt: '', emat: '', grain: '',
+            svcs: ['Routeriing (Special Cut)'], remark: 'x · ⚠ special cut — enter sizes', specialCut: 'SPECIAL CUT', drawing: { source: 'X.pdf', page: 2 } }];
+          let sentImg = '';
+          window.fetch = (u, o) => { sentImg = JSON.parse(o.body).messages[0].content[0].type;
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({ content: [{ type: 'text',
+              text: '{"found":true,"length_mm":2110,"width_mm":500,"cut_lm_per_piece":5.4,"ebt":"1L","confidence":"high","notes":""}' }] }) }); };
+          window.MCL.readDrawing(0); await new Promise(r => setTimeout(r, 50));
+          document.getElementById('mcl-ai-ebt').checked = false;
+          window.MCL.aiApply(0);
+          const p = S.panels[0];
+          res = [sentImg, p.L, p.W, p.ebt, p.svcs[0], /⚠/.test(p.remark)];
+          window.closeModal('ov-mcl-ai');
+        } catch (e) { res = String(e); }
+        finally { S.panels = keepP; S.drawings = keepD; window.fetch = keepF; window.prodSettings.claudeKey = keepK; window.showToast = keepT; }
+        check('Read drawing: AI figures applied only where ticked, lm for the whole row', () => res,
+              ['image', 2110, 500, '', 'Routeriing (Special Cut) × 10.8 lm', false]);
+      }
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',
