@@ -13129,3 +13129,9 @@ missing from the count — yet Reflect let it through.
 - **Designers Support "Print part labels" = draft preview** in the real label layout (`prodPrintLabels` →
   `_joBuild` DRAFT → `_joPrintLabels(jo,true)`); the QR place shows a red dashed "DRAFT — preview, not
   for production" box, so a draft label can't be scanned onto a part. Real labels: Job Order → Labels / PMES.
+- **Grooving position + remarks reach production** (St. Ignatius test): the importer keeps the client's
+  grooving words (`grooveTxt`) as "groove: 1W groove for grab bar: not at ebt side" in the row remark
+  (plain "1W"-style codes skipped); components carry `remark` (row remarks minus ⚠ checks and
+  client wrote/tape lines); JO part `remark` (only when set) → new **Remarks** column on the Job Order,
+  label work line, PMES component spec (`adm_release_gate`), and a Remarks column on every process JO.
+  Grooving no longer repeats under Special (`_joWorkSvcs` = TPR/RTR/GLU only).

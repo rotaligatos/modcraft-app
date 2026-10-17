@@ -116,6 +116,23 @@ const PROFILES = {
                 const p = window.CLR.toPanel(r.rows[0], '');
                 return [r.rows[0].group, r.rows[0].material, r.rows[0].handgrabLm, r.rows[1].group, r.rows[1].handgrabLm, p.svcs[0]];
               }, ['CASHIER COUNTER', 'WARM WHITE STIPPLE', 1.364, '', 0.4, 'Handgrab tapering (along length) × 1.364 lm']);
+      // St. Ignatius 2026-10-17: "1W groove for grab bar: not at ebt side" priced the metres but lost WHERE;
+      // remarks never reached the Job Order.
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function')
+        check('Grooving words and remarks reach the Job Order; grooving not repeated under Special',
+              () => {
+                const w = window;
+                const aoa = [['Item No.', 'Quantity', 'Width', 'Height', 'Material', 'Grooved sides', 'Sides to be EB', 'Description', 'Board thickness', 'Remarks'],
+                             [1, 1, 595, 190, 'MDF White', '1W groove for grab bar: not at ebt side', '1W, 2H', 'Drawer cover', 18, 'handle side up']];
+                const r = w.CLR.readClientSheet(aoa, { header: 0, map: { item: 0, qty: 1, width: 2, length: 3, material: 4, groove: 5, edge: 6, part: 7, thk: 8, remark: 9 } });
+                const p = w.CLR.toPanel(r.rows[0], '');
+                const a = w._cutListToAnalysis({ grain: 'L', panels: [{ group: 'Cabinet 1', part: p.part, mat: p.mat, th: 18, L: p.L, W: p.W, qty: 1, ebt: p.ebt, emat: 'x', grain: '', svcs: p.svcs, remark: p.remark }], hpl: [], hardware: [] }, null);
+                const comps = a.components.map(w._prodNormalizeComponent);
+                const jo = w._joBuild({ components: comps, extraServices: a.extraServices, hardware: [], holeSchedule: [] }, { joNumber: 'JO-G1' });
+                const doc = w._joDocHtml(jo, 'RESERVED');
+                return { remark: /groove: 1W groove for grab bar: not at ebt side/.test(jo.parts[0].remark || '') && /handle side up/.test(jo.parts[0].remark),
+                         onJo: /not at ebt side/.test(doc), grv: jo.parts[0].route.indexOf('GRV') >= 0, specialClean: !/<td style="font-weight:700">Grooving/.test(doc) };
+              }, { remark: true, onJo: true, grv: true, specialClean: true });
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',
