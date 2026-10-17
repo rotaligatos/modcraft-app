@@ -149,6 +149,28 @@ const PROFILES = {
                   return [r.rows[0].material, r.rows[0].emat, r.rows[1].emat, p.mat];
                 } finally { ST.store.mats = keep; ST.matEdit = keepE; }
               }, ['18mm PLYWOOD 4x8 WARM WHITE 2F S2', '1MM WARM WHITE', '', 'Warm White Plywood 4x8 2F (18mm, S2)']);
+      // CROWN MODULAR 2026-10-17: "FRONT RAIL - SC | 1 | SEE DRAWING" is a special cut: priced per lm,
+      // routed to Special Cutting, and the drawing page goes with the Job Order.
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function' && typeof window._daDrawingFileName === 'function')
+        check('"SEE DRAWING" row: special cut per lm, Special Cutting route, drawing on the Job Order', () => {
+          const aoa = [['No.', 'Designation', 'Quantity', 'Length', 'Width', 'Thickness', 'Eb'],
+                       ['C', 'FRONT RAIL - SC', 1, 'SEE DRAWING', '', '18 mm', 'ALL SIDES']];
+          aoa[1].__page = 2;
+          const r = window.CLR.readClientSheet(aoa);
+          const keepS = window.SERVICES;
+          try {
+            window.SERVICES = [{ name: 'Routeriing (Special Cut)', unit: '/lm', price: 150 }];
+            const p = window.CLR.toPanel(r.rows[0], '', { name: 'X.pdf', drawings: [{ source: 'X.pdf', page: 2, dataUrl: 'data:image/jpeg;base64,AA' }] });
+            p.L = 2110; p.W = 500; p.svcs = ['Routeriing (Special Cut) × 5.6 lm'];
+            const a = window._cutListToAnalysis({ grain: 'L', panels: [p], hpl: [], hardware: [] }, null);
+            const comps = a.components.map(window._prodNormalizeComponent);
+            const jo = window._joBuild({ components: comps, extraServices: a.extraServices, hardware: [], holeSchedule: [],
+              drawings: [{ source: 'X.pdf', page: 2, dataUrl: 'data:image/jpeg;base64,AA' }] }, { joNumber: 'JO-S1', serial: 'QT-W00000001' });
+            const pt = jo.parts[0];
+            return [r.rows[0].special, pt.special, pt.route.indexOf('SCUT') === 0 && pt.route.indexOf('RTR') < 0,
+                    pt.drawing && pt.drawing.file, jo.drawings.length, /data-jo-dwg="0"/.test(window._joDocHtml(jo, 'RESERVED'))];
+          } finally { window.SERVICES = keepS; }
+        }, ['SPECIAL CUT', 'SPECIAL CUT', true, 'QT-W00000001 — drawing — X p2.jpg', 1, true]);
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',
@@ -5282,7 +5304,7 @@ const PROFILES = {
           const a = w._cutListToAnalysis({ panels: [
             mk('Door', { svcs: ['Handgrab tapering (along length) × 1.4 lm'] }),
             mk('Door', { L: 600 }),
-            mk('Panel', { svcs: ['Routeriing (Special Cut) × 0.8 lm'] }),
+            mk('Panel', { svcs: ['Routering × 0.8 lm'] }),
             mk('Worktop', { th: 36, L: 2400, W: 600, qty: 1 })], hpl: [], hardware: [] }, null);
           const comps = a.components.map(w._prodNormalizeComponent);
           const jo = w._joBuild({ components: comps, extraServices: a.extraServices, hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-S1' });

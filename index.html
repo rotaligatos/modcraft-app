@@ -18962,7 +18962,7 @@ function _cutListToAnalysis(cl,order){
       thickness:lam?lam.bt:th, length:L, width:W, qty:rowQty,
       faces:lam?1:faces, grain:gr||jobGrain,
       ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName, hplSku:hplSku,
-      outsourceName:String(pn.outsource||''),
+      outsourceName:String(pn.outsource||''), specialCut:String(pn.specialCut||''),
       needsReview:review.length>0, reviewNote:review.join('; '),
       notes:notes.join(' · '),
       // "NO CUTTING" (ARBAU, a backing): the piece IS a whole board — it takes a board, not a cut.
@@ -18972,6 +18972,7 @@ function _cutListToAnalysis(cl,order){
       // assembly …) so the Job Order can route the piece to the station that does the work.
       services:extraSvcs.slice(svcStart).map(function(x){ var o={service:x.service,qty:x.qty,unit:x.unit||'lm'}; if(x.side) o.side=x.side; return o; })
     };
+    if(pn.drawing&&pn.drawing.source) baseComp.drawing={source:String(pn.drawing.source),page:+pn.drawing.page||0};
     comps.push(baseComp);
     if(lam){
       for(var lb=2;lb<=lam.boards;lb++) comps.push(Object.assign({},baseComp,{
@@ -37968,10 +37969,11 @@ var MCL=(function(){
       if(!t.rows&&!S.hpl.length&&!S.hardware.length) return;
       if(!confirm('Clear this cutting list?')) return;
       // Back to the same 10-row starting state a fresh open shows, not to zero.
-      S.panels=blankPanels(10); S.hpl=[]; S.hardware=[]; S.sourceFiles=[]; S.hplFaces=0; rerender();
+      S.panels=blankPanels(10); S.hpl=[]; S.hardware=[]; S.sourceFiles=[]; S.drawings=[]; S.hplFaces=0; rerender();
     },
     state:function(){ return S; },
     setSourceFiles:function(files){ S.sourceFiles=(files||[]).slice(); },
+    setSourceDrawings:function(d){ S.drawings=(d||[]).slice(); },
     thicknessFor:function(v){ return thicknessForMaterial(v); },
     blankPanel:function(){ return blankPanel(); },
     // The client-list importer (CLR) hands its rows over here. Same replace-not-append rule
@@ -37997,7 +37999,8 @@ var MCL=(function(){
         if(!p.L&&!p.W&&!p.mat) continue;
         panels.push({group:p.group,part:p.part,mat:p.mat,th:p.th,
                      L:p.L,W:p.W,qty:num(p.qty)||1,ebt:p.ebt,emat:p.emat||'',
-                     grain:p.grain,svcs:p.svcs.slice(),remark:p.remark||'',outsource:p.outsource||''});
+                     grain:p.grain,svcs:p.svcs.slice(),remark:p.remark||'',outsource:p.outsource||'',
+                     specialCut:p.specialCut||'',drawing:p.drawing||null});
       }
       // No totals block on purpose: they would be computed here from these same
       // rows, so comparing them against themselves proves nothing. The
@@ -38024,6 +38027,7 @@ var MCL=(function(){
       var payload=_cutListToAnalysis(cl,null);
       prodLoadStructuredList(payload,'Cutting list — entered in Modcraft');
       if(prodState.result){ prodState.result._bander=prodSettings.banderType||'trimmer'; prodState.result._hplOrder=prodSettings.hplOrder||'laminate_first'; }
+      if(prodState.result&&S.drawings&&S.drawings.length) prodState.result.drawings=S.drawings.slice();
       // An imported client list keeps its original file as the analysis's source (saved at lock).
       if(S.sourceFiles&&S.sourceFiles.length&&prodState.result){
         prodState.file=S.sourceFiles[0]; prodState.fileName=S.sourceFiles[0].name;
@@ -38380,10 +38384,15 @@ function readClientSheet(aoa, force) {
       if (mhFirst) { curMat = mhFirst; boards.push(mhFirst); continue; }
       const q0 = num(g('qty')), p0 = String(g('part') || '').trim();
       if (q0 > 0 && p0 && (L > 0 || W > 0 || /see drawing|see dwg|refer/i.test(whole))) {
+        // "SEE DRAWING" (CROWN MODULAR: "FRONT RAIL - SC", SC = special cut) is an irregular piece
+        // drawn elsewhere in the file: it is cut by Special Cutting and priced per lm of cut.
+        const dwg = /see drawing|see dwg/i.test(whole), sc = dwg || /(^|[\s\-])SC$/i.test(p0);
         res.rows.push({ src: r + 1, group: gGroup() || [group, groupSub].filter(Boolean).join(' › '), part: p0,
           material: String(gm() || (curMat && curMat.material) || '').trim(), thk: 0, faces: 0,
           L, W, qty: q0, eL: 0, eW: 0, code: '', emat: '', grooveLm: 0, remark: whole,
-          issues: ['no size given' + (/see drawing|see dwg/i.test(whole) ? ' — "see drawing"' : '') + ' — needs a person'] });
+          page: row.__page || 0, drawingRef: dwg, special: sc ? 'SPECIAL CUT' : '',
+          issues: [sc ? 'special cut' + (dwg ? ' — "see drawing"' : '') + ' — enter the overall size, the cut length (lm) and the edge banding from the drawing'
+            : 'no size given — needs a person'] });
         continue;
       }
       // A row with words and no size is a heading: room, then module/cabinet under it.
@@ -38490,10 +38499,24 @@ function totals(rows) {
    ───────────────────────────────────────────────────────────────────────────── */
 async function pdfToLines(buf) {
   const doc = await pdfjsLib.getDocument({ data: buf }).promise;
-  const lines = [];
+  const lines = [], drawings = [];
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
     const tc = await page.getTextContent();
+    // A page with a picture on it is a drawing page ("SEE DRAWING" rows point to it). The picture is
+    // an image, so its sizes cannot be read without a person or the AI — but the page is kept as an
+    // image so it travels with the Job Order to Special Cutting.
+    try {
+      const ol = await page.getOperatorList(), O = pdfjsLib.OPS || {};
+      const img = ol.fnArray.some(f => f === O.paintImageXObject || f === O.paintInlineImageXObject || f === O.paintJpegXObject || f === O.paintImageXObjectRepeat);
+      if (img && typeof document !== 'undefined') {
+        const vp = page.getViewport({ scale: 1.6 }), cv = document.createElement('canvas');
+        cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+        const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+        await page.render({ canvasContext: cx, viewport: vp }).promise;
+        drawings.push({ page: p, dataUrl: cv.toDataURL('image/jpeg', 0.82) });
+      }
+    } catch (e) { }
     const items = tc.items.filter(it => it.str && it.str.trim())
       .map(it => ({ s: it.str, x: it.transform[4], y: it.transform[5], w: it.width, h: Math.abs(it.transform[3]) || 8 }));
     // Same line = same height on the page, within a third of the text height.
@@ -38518,6 +38541,7 @@ async function pdfToLines(buf) {
       lines.push({ page: p, y: ln.y, h: hs[hs.length >> 1] || 8, phrases: ph.map(q => ({ s: q.s.trim(), x0: q.x0, x1: q.x1 })) });
     }
   }
+  lines.drawings = drawings;
   return lines;
 }
 function linesToAoa(lines) {
@@ -38601,6 +38625,7 @@ function linesToAoa(lines) {
       if (pureNums >= 2) splitWords(p).forEach(w => put(colAt(w.c), w.s));
       else put(colAt((p.x0 + p.x1) / 2), p.s);
     });
+    row.__page = l.page;
     aoa.push(row);
   });
   return aoa;
@@ -38710,6 +38735,7 @@ function linesToAoa(lines) {
             if(err){ f.error='PDF reader failed to load'; resolve(f); return; }
             pdfToLines(buf).then(function(lines){
               if(!lines.length){ f.error='No text in this PDF — it is a scanned image or a drawing, so it cannot be read without AI.'; resolve(f); return; }
+              f.drawings=(lines.drawings||[]).filter(function(d){ return d.dataUrl; }).map(function(d){ return {source:file.name,page:d.page,dataUrl:d.dataUrl}; });
               addSheet(f,'PDF',linesToAoa(lines)); resolve(f);
             }).catch(function(e){ f.error='Could not read this PDF ('+(e&&e.message||e)+')'; resolve(f); });
           });
@@ -39193,7 +39219,13 @@ function linesToAoa(lines) {
 
   // A read row → a cutting-list panel. Anything the reader flagged travels with the row as a
   // ⚠ remark, so it is still visible after import — never silently resolved.
-  function toPanel(r,sizeMode){
+  // The catalogue's per-lm special cut service ("Routeriing (Special Cut)" in the live catalogue).
+  function specialCutSvc(){
+    var list=(typeof SERVICES!=='undefined'&&SERVICES)||[], best='';
+    for(var i=0;i<list.length;i++){ var nm=String(list[i].name||''); if(/special\s*cut|irregular/i.test(nm)){ if(!best||/lm/i.test(String(list[i].unit||''))) best=nm; } }
+    return best||'Routing Special Cut (irregular)';
+  }
+  function toPanel(r,sizeMode,file){
     var p=MCL.blankPanel();
     var mat=String(r.material||'').trim(), sku=mat?mappedSku(rowMatKey(mat,r.thk)):'';
     // A board line now shown tidied: a mapping made against its full original wording still applies.
@@ -39219,6 +39251,14 @@ function linesToAoa(lines) {
     // for the estimator to pick, and Designers Support flags the unmatched name until they do.
     p.svcs=r.grooveLm>0?['Grooving × '+(Math.round(r.grooveLm*1000)/1000)+' lm']:[];
     // "Handgrab tapering" is the catalogue's per-lm service for a tapered handgrab.
+    if(r.special){
+      p.specialCut=r.special;
+      p.svcs.push(specialCutSvc());
+      // The drawing the row points to: the page the row is on when that page has a picture, else
+      // the file's drawing page(s). The first one is linked; production gets every drawing page.
+      var dw=(file&&file.drawings)||[];
+      if(r.drawingRef&&dw.length){ var hit=dw.filter(function(d){ return d.page===r.page; })[0]||dw[0]; p.drawing={source:hit.source,page:hit.page}; }
+    }
     if(r.handgrabLm>0) p.svcs.push('Handgrab tapering'+(r.handgrabSide?' (along '+r.handgrabSide+')':'')+' × '+(Math.round(r.handgrabLm*1000)/1000)+' lm');
     var rm=[];
     // How the client described the groove ("1W groove for grab bar: not at ebt side") — the metres
@@ -39237,7 +39277,7 @@ function linesToAoa(lines) {
     var panels=[], hw=[], srcNames=[];
     includedRows('panels').forEach(function(x){
       var sm=x.sh.res.ctx&&x.sh.res.ctx.sizeMode?x.sh.res.ctx.sizeMode.value:'';
-      panels.push(toPanel(x.r,sm));
+      panels.push(toPanel(x.r,sm,x.file));
     });
     includedRows('hardware').forEach(function(x){
       hw.push({name:x.r.name,qty:+x.r.qty||0,unit:x.r.unit||'pcs',note:(x.r.issues||[]).join('; '),cab:''});
@@ -39247,6 +39287,11 @@ function linesToAoa(lines) {
     // The client's own file travels with the list, so it is saved with the quotation at lock
     // ("customer cutting list") and reaches production with the Job Order.
     MCL.setSourceFiles((ST.rawFiles||[]).filter(function(f){ return srcNames.indexOf(f.name)>=0; }));
+    // Drawing pages a row points to, kept as images for the Job Order (Special Cutting).
+    var dws=[];
+    ST.files.forEach(function(f){ (f.drawings||[]).forEach(function(d){
+      if(panels.some(function(p){ return p.drawing&&p.drawing.source===d.source; })) dws.push(d); }); });
+    MCL.setSourceDrawings(dws);
 
     // Remember what a person corrected: layouts they changed, and every material mapping.
     var changed=false, who=(gUser&&(gUser.name||gUser.email))||'', now=new Date().toISOString();
@@ -39524,6 +39569,7 @@ function _joSvcLabel(x,withQty){
 function _joWorkSvcs(p){ return (p&&p.services||[]).filter(function(x){ var st=_joSvcStage(x.service); return st&&st!=='GRV'; }); }
 function _joSvcStage(name){
   var n=String(name||'');
+  if(/special\s*cut|irregular/i.test(n)) return 'SCUT';
   if(/taper/i.test(n)) return 'TPR';
   if(/board\s*assembl/i.test(n)) return 'GLU';
   if(/rout/i.test(n)&&!/groov/i.test(n)) return 'RTR';
@@ -39534,6 +39580,20 @@ function _joSvcStage(name){
 // (MDF/PB whole boards) goes HPL → CURE before cutting; HPL cut first goes to manual lamination
 // after cutting. Edge banding by the machine the piece needs; drilling when it has holes.
 // Grooving goes through its own station (GRV) after edge banding.
+// A client drawing page saved beside the quotation, one fixed name per source file and page.
+function _daDrawingFileName(base,d){
+  var stem=String(d&&d.source||'drawing').replace(/\.[^.]+$/,'').replace(/[\\/:*?"<>|]+/g,' ').substring(0,40).trim();
+  return String(base||'')+' — drawing — '+stem+' p'+(+(d&&d.page)||1)+'.jpg';
+}
+// Saved at lock / at reflect with the analysis, so Special Cutting (and PMES, which lists the
+// folder) gets the drawing the piece is cut from.
+function _uploadDaDrawings(base,result){
+  ((result&&result.drawings)||[]).forEach(function(d){
+    if(!d||!d.dataUrl||!base) return;
+    var c=d.dataUrl.indexOf(',');
+    supaUploadQuotationBinaryFile(base,_daDrawingFileName(base,d),'image/jpeg',c>=0?d.dataUrl.slice(c+1):d.dataUrl);
+  });
+}
 function _joRoute(o){
   var r=[];
   if(o.hplOrder==='laminate_first') r.push('HPL','CURE');
@@ -39595,6 +39655,9 @@ function _joBuild(result,ctx){
     }
     // Special cut: typed on the component, else read from its name/remarks.
     var special=String(c.specialCut||'').trim()||_joDetectSpecial(c);
+    var mySvcs=_joExtrasFor(c,extras), svcSt={};
+    mySvcs.forEach(function(x){ var st=_joSvcStage(x.service); if(st) svcSt[st]=1; });
+    if(!special&&svcSt.SCUT) special='SPECIAL CUT';
     // HPL order. Plywood (and any non-MDF/PB substrate) is cut first and laminated by hand; MDF/PB
     // is laminated as whole boards first, unless the job says the client asked for cutting (plant,
     // 2026-09-26, question 9).
@@ -39608,8 +39671,6 @@ function _joBuild(result,ctx){
     // AI-read hole schedules carry no cabinet, so they still match by name.
     var hasHoles=holes.some(function(hh){ return hh&&hh.component&&c.name&&String(hh.component).toLowerCase()===String(c.name).toLowerCase()
       &&(!hh.area||!c.area||String(hh.area).toLowerCase()===String(c.area).toLowerCase()); });
-    var mySvcs=_joExtrasFor(c,extras), svcSt={};
-    mySvcs.forEach(function(x){ var st=_joSvcStage(x.service); if(st) svcSt[st]=1; });
     var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles,
       grooved:!!String(c.grooving||'').trim()||!!svcSt.GRV,tapered:!!svcSt.TPR,routed:!!svcSt.RTR,glued:!!svcSt.GLU});
     if(!ec.known) flags.push('edge code "'+c.ebt+'" not understood');
@@ -39640,6 +39701,7 @@ function _joBuild(result,ctx){
     // Only when true, so an unchanged plain-board job keeps the same Job Order signature.
     if(_isGrainedMaterial([c.material,c.color,c.texture].join(' '))) parts[parts.length-1].grained=true;
     if(String(c.remark||'').trim()) parts[parts.length-1].remark=String(c.remark).trim();
+    if(c.drawing&&c.drawing.source) parts[parts.length-1].drawing={source:c.drawing.source,page:c.drawing.page,file:_daDrawingFileName(_serialRoot(ctx.serial||''),c.drawing)};
     if(mySvcs.length) parts[parts.length-1].services=mySvcs.map(function(x){ var o={service:x.service,qty:+x.qty||0,unit:x.unit||'lm'}; if(x.side) o.side=x.side; return o; });
   }
   var boards=bom.map(function(b){ return {material:b.material,color:b.color,texture:b.texture,thickness:b.thickness,
@@ -39657,6 +39719,7 @@ function _joBuild(result,ctx){
     pmesMisc:{area:parts.filter(function(p){return p.pmesArea==='MISC';}).length,
               part:parts.filter(function(p){return p.pmesPart==='MISC';}).length},
     boards:boards, boardCount:boards.reduce(function(n,b){return n+(b.boardsNeeded||0);},0),
+    drawings:((result&&result.drawings)||[]).map(function(d){ return {source:d.source,page:d.page,file:_daDrawingFileName(_serialRoot(ctx.serial||''),d)}; }),
     hardware:((result&&result.hardware)||[]).map(function(h){ return {name:h.name||h.item||'',qty:h.qty||0,unit:h.unit||'',cabinet:h.cabinet||'',notes:h.notes||''}; }),
     holes:(result&&result.holeSchedule)||[],
     services:{cuttingLM:sv.cuttingLM||0,edgebandingLM:sv.edgebandingLM||0,holeCount:sv.holeCount||0,
@@ -39920,6 +39983,12 @@ function _joDocHtml(jo,status){
     ex.forEach(function(s){ h+='<tr><td>'+e(s.service)+'</td><td>'+s.qty+' '+e(s.unit)+'</td></tr>'; });
     h+='</table>';
   }
+  (jo.drawings||[]).forEach(function(d,di){
+    var uses=jo.parts.filter(function(p){ return p.drawing&&p.drawing.source===d.source&&p.drawing.page===d.page; }).map(function(p){ return p.p+' '+p.name; });
+    h+='<div class="pb"><h2>Special cut drawing — '+e(d.source)+' page '+d.page+'</h2>'
+      +(uses.length?'<div class="sub">For: <b>'+e(uses.join(', '))+'</b></div>':'')
+      +'<img data-jo-dwg="'+di+'" src="'+e(_joDrawingSrc(d))+'" alt="Drawing — loading from the quotation folder…" style="max-width:100%;border:1px solid #bbb"></div>';
+  });
   jo.boards.forEach(function(bm){
     if(!(bm.layout&&bm.layout.length)) return;
     var t=[bm.material,bm.color,(bm.thickness?bm.thickness+'mm':'')].filter(Boolean).join(' · ');
@@ -39931,7 +40000,25 @@ function _joDocHtml(jo,status){
   });
   return h;
 }
-function _joPrint(jo,status){ _prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status)); }
+// The drawing image: from the analysis in memory when it is here, else '' (filled from Storage).
+function _joDrawingSrc(d){
+  var rs=[prodState&&prodState.result,qDrawingAnalysis&&qDrawingAnalysis.result,fqDrawingAnalysis&&fqDrawingAnalysis.result];
+  for(var i=0;i<rs.length;i++){ var ds=(rs[i]&&rs[i].drawings)||[];
+    for(var k=0;k<ds.length;k++) if(ds[k].dataUrl&&ds[k].source===d.source&&ds[k].page===d.page) return ds[k].dataUrl; }
+  return '';
+}
+function _joPrint(jo,status){
+  var w=_prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status));
+  // Drawings not in memory come from the quotation's Storage folder (saved at lock).
+  if(!w||!(jo.drawings||[]).length||!jo.storageFolder||window._TRN||typeof supaReady!=='function'||!supaReady()) return;
+  jo.drawings.forEach(function(d,di){
+    var img=w.document.querySelector('img[data-jo-dwg="'+di+'"]');
+    if(!img||img.getAttribute('src')) return;
+    supa.storage.from('quotations').createSignedUrl(jo.storageFolder+'/'+_supaSafeStorageKey(d.file),3600).then(function(r){
+      if(r&&r.data&&r.data.signedUrl) img.src=r.data.signedUrl; else img.alt='Drawing not found in the quotation folder ('+d.file+')';
+    });
+  });
+}
 // One sticker per piece with a Code128 barcode (the PMES scan format), in cutting order.
 function _joPrintLabels(jo,draft){
   // QR labels (Rommel, 2026-10-17): the QR holds the same short scan code the barcode did, so a 2D
@@ -41153,6 +41240,7 @@ function _saveFQDrawingAnalysis(){
     showToast('Not connected to the database — the Final Quotation cutting list is saved when you lock the Final Quotation.');
     return;
   }
+  _uploadDaDrawings(base,da.result);
   supaUploadQuotationFile(base,loc.name,'application/json',body).then(function(){
     logActivity('Final Quotation cutting list saved ('+((da.result.components||[]).length)+' pieces, '+((da.parts||[]).length||1)+' list'+(((da.parts||[]).length||1)>1?'s':'')+').');
   });
@@ -41181,6 +41269,7 @@ function _saveDrawingAnalysisToDrive(){
     result:da.result, elevationResult:da.elevationResult||null
   };
   var outputFileName=qSerial+' — '+client+' — analysis output.json';
+  _uploadDaDrawings(baseSerial,da.result);
   var componentCount=(da.result.components||[]).length;
   var meta={
     fileName:da.fileName||'', fileType:da.fileType||'', componentCount:componentCount,
@@ -42076,6 +42165,7 @@ function _prodNormalizeComponent(c){
     specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),hplSku:String(c.hplSku||''),
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||''),
     noCut:!!c.noCut, remark:String(c.remark||''),
+    drawing:(c.drawing&&c.drawing.source)?{source:String(c.drawing.source),page:+c.drawing.page||0}:undefined,
     services:Array.isArray(c.services)?c.services.map(function(x){ var o={service:String(x&&x.service||''),qty:+(x&&x.qty)||0,unit:String(x&&x.unit||'lm')}; if(x&&x.side) o.side=String(x.side); return o; }):undefined
   };
 }
@@ -43914,6 +44004,7 @@ function _prodPrintWindow(title,body,css){
     +body+'</body></html>');
   w.document.close();
   setTimeout(function(){ try{ w.focus(); w.print(); }catch(e){} },400);
+  return w;
 }
 function _prodPrintHeader(){
   var r=prodState.result||{};
@@ -44339,7 +44430,7 @@ function _daMergeResults(base,add,addLabel){
   var tag=' · '+(String(addLabel||'list 2').replace(/\.[^.]+$/,'').substring(0,30)||'list 2');
   function ren(x){ if(x&&x.area&&have[String(x.area).toLowerCase()]) x.area=x.area+tag; }
   (a.components||[]).forEach(ren); (a.holeSchedule||[]).forEach(ren); (a.extraServices||[]).forEach(ren);
-  ['components','holeSchedule','extraServices','hardware'].forEach(function(k){
+  ['components','holeSchedule','extraServices','hardware','drawings'].forEach(function(k){
     b[k]=(b[k]||[]).concat(a[k]||[]);
   });
   try{ b._bom=prodComputeBom(b.components); }catch(e){ delete b._bom; }
@@ -47117,6 +47208,11 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-17-special-cut-drawing', date:'17 Oct 2026', items:[
+    {id:'special-cut-drawing', icon:'ti-shape', title:'"See drawing" pieces become special cuts',
+     text:'When a client\'s PDF list says "SEE DRAWING" (or a part ends in "- SC"), the row comes in as a special cut, priced per lm of cut. Enter its overall size, cut length and edge banding from the drawing. The drawing page goes with the Job Order to Special Cutting.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-14-reflect-stage', date:'14 Oct 2026', items:[
     {id:'reflect-stage', icon:'ti-file-import', title:'Cutting lists into Stage 1 or Stage 2',
      text:'In Designers Support, Reflect to quotation now asks Initial (Stage 1) or Final (Stage 2). Several lists on one quotation all go into its Job Order. A locked stage cannot take a list.',

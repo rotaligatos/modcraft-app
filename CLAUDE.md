@@ -13141,3 +13141,17 @@ missing from the count — yet Reflect let it through.
   keeps `raw` + `tape` ("1MM WARM WHITE"). Banded rows with no tape of their own take the line's tape.
   `matRaw` on the row lets `toPanel` fall back to a mapping made against the full old wording.
   All 15 sample PDFs re-read: only CROWN changed (14 rows now have tape; totals identical).
+
+## What was changed on 2026-10-17 (session — "SEE DRAWING" rows become special cuts with their drawing)
+- CROWN MODULAR p2: "FRONT RAIL - SC | 1 | SEE DRAWING" — the drawing is a PICTURE in the PDF (no text
+  sizes), so the overall size / cut length cannot be read without a person or AI. The row now arrives as
+  **SPECIAL CUT** (`specialCut` on panel/component) with the per-lm special-cut service chip (live name
+  "Routeriing (Special Cut)", found by /special\s*cut|irregular/) and a review note to enter overall size,
+  cut lm and edge banding. Rows with a part ending "- SC" and no size count too.
+- `pdfToLines` marks pages that hold an image and renders each to a JPEG (`lines.drawings`); rows carry
+  `__page`. A row's drawing = picture on its own page, else the file's first drawing page. Only pages a row
+  points to are kept (`MCL.setSourceDrawings` → `result.drawings`, merged across lists).
+- Job Order: `_joSvcStage` sends special-cut services to **SCUT** (not RTR); part gets `drawing {source,page,
+  file}`; JO gets `drawings[]`; JO print shows each drawing page (from memory, else a signed URL from the
+  quotation's Storage folder). Images saved at lock/reflect as `<base> — drawing — <file> p<N>.jpg`
+  (`_uploadDaDrawings`), so PMES lists them in the job's files. `_prodPrintWindow` now returns the window.
