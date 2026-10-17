@@ -5325,6 +5325,17 @@ const PROFILES = {
                    text: pl && [pl.labels[0].order, pl.labels[0].client, pl.labels[0].project].join('|'),
                    ref: (() => { const k = { o: w.qSourceOrderId, j: w.qJobSource }; try { w.qSourceOrderId = '8864'; const a1 = w._joOrderRef('QT-X1'); w.qSourceOrderId = null; w.qJobSource = 'walkin'; const a2 = w._joOrderRef('QT-X1'); return a1 + '|' + a2; } finally { w.qSourceOrderId = k.o; w.qJobSource = k.j; } })() };
         }, { lib: true, logo: true, scan: 'X1-V1-P1-01', edges: [0, 1], noBarcode: true, text: 'Order #8864|ARBAU|Clinic', ref: 'Order #8864|Walk-in' });
+        // 2026-10-17: a square piece has no long side — on a woodgrain/patterned board L = along the grain.
+        check('Square pieces: L follows the grain; a square grained piece with uneven banding and no grain is flagged', () => {
+          const w = window;
+          const conv = [w._webEbtToModcraft('1L', 600, 600, 'L').ebt, w._webEbtToModcraft('1L', 600, 600, 'W').ebt, w._webEbtToModcraft('1L', 700, 600, 'W').ebt];
+          const mk = (mat, grain, ebt) => ({ group: 'G', part: 'Door', mat, th: 18, L: 600, W: 600, qty: 1, ebt, emat: 'x', grain, svcs: [], remark: '' });
+          const a = w._cutListToAnalysis({ grain: 'L', panels: [mk('Acacia PB 4x8 2F (18mm, Woodgrain)', '', '1L'), mk('Acacia PB 4x8 2F (18mm, Woodgrain)', 'W', '1L'),
+            mk('Real White PB 4x8 2F (18mm, Matte)', '', '1L'), mk('Acacia PB 4x8 2F (18mm, Woodgrain)', '', '4S')], hpl: [], hardware: [] }, null);
+          const flagged = a.components.map((c) => /square piece/.test(c.reviewNote || ''));
+          const jo = w._joBuild({ components: [], hardware: [], holeSchedule: [] }, { joNumber: 'JO-SQ' });
+          return { conv: [conv[0] !== conv[1], conv[2] === conv[0]], flagged, note: /Edge codes:/.test(w._joDocHtml(jo, 'RESERVED')) };
+        }, { conv: [true, true], flagged: [true, false, false, false], note: true });
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });

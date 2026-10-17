@@ -34,13 +34,21 @@
   }
 
   // The piece to scale, length across. Banded edges are thick and red; the rest thin grey.
-  function pieceSvg(L, W, sc, lc) {
+  // grain: 'length' | 'width' | '' — woodgrain/patterned boards get faint grain lines along that
+  // direction, so the operator sees which way the grain runs relative to the banded edges.
+  function pieceSvg(L, W, sc, lc, grain) {
     L = +L || 0; W = +W || 0;
     var bw = 64, bh = 34, k = (L && W) ? Math.min(bw / L, bh / W) : 1;
     var w = Math.max(10, L * k), h = Math.max(6, W * k), x = (bw - w) / 2 + 8, y = (bh - h) / 2 + 6;
     var on = '#dc2626', off = '#9ca3af', tw = 2.2, th = 0.6;
     var edge = function (x1, y1, x2, y2, b) { return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" stroke="' + (b ? on : off) + '" stroke-width="' + (b ? tw : th) + '" stroke-linecap="square"/>'; };
     var s = '<svg class="pc" viewBox="0 0 80 48"><rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="#f3f4f6"/>';
+    if (grain === 'length' || grain === 'width') {
+      var gl = '', step = 2.6;
+      if (grain === 'length') for (var gy = y + step; gy < y + h - 0.5; gy += step) gl += 'M' + (x + 0.8) + ' ' + gy + 'Q' + (x + w / 2) + ' ' + (gy + 0.7) + ' ' + (x + w - 0.8) + ' ' + gy;
+      else for (var gx = x + step; gx < x + w - 0.5; gx += step) gl += 'M' + gx + ' ' + (y + 0.8) + 'Q' + (gx + 0.7) + ' ' + (y + h / 2) + ' ' + gx + ' ' + (y + h - 0.8);
+      s += '<path d="' + gl + '" fill="none" stroke="#b8a98f" stroke-width="0.35"/>';
+    }
     s += edge(x, y, x + w, y, lc >= 1) + edge(x, y + h, x + w, y + h, lc >= 2);     // along the length
     s += edge(x, y, x, y + h, sc >= 2) + edge(x + w, y, x + w, y + h, sc >= 1);     // the ends (width)
     s += '<text x="' + (x + w / 2) + '" y="' + (y - 1.6) + '" font-size="4" text-anchor="middle" fill="#111">' + e(L) + '</text>';
@@ -53,7 +61,7 @@
     return '<div class="lb">'
       + '<div class="top"><span class="nm">' + e(l.name) + '</span><span class="pn">' + e(l.p) + '</span></div>'
       + ((l.order || l.client || l.project) ? '<div class="cp">' + e([l.order, l.client, l.project].filter(Boolean).join(' · ')) + '</div>' : '')
-      + '<div class="mid">' + qrSvg(qrText(l), logo) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc)
+      + '<div class="mid">' + qrSvg(qrText(l), logo) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc, l.grain)
       + '<div class="eb">' + (banded ? '<b style="color:#dc2626">━</b> edge band ' + e(l.ebt || '') + (l.tape ? ' · ' + e(l.tape) : '') : 'no edge band') + '</div></div></div>'
       + '<div class="sz">Cut ' + e(l.cutL) + ' × ' + e(l.cutW) + '</div>'
       + '<div class="mt">' + e(l.material) + '</div>'

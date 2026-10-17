@@ -13119,3 +13119,10 @@ missing from the count — yet Reflect let it through.
   `p_operators` (old 5-arg version dropped). Blank → the operators the process JO was handed out to;
   `done_by` stays the account that recorded it. Scan screen remembers the operator per device
   (localStorage `pmes_operator`). Pieces grid tooltip: "Done by <operators> (recorded by <account>)".
+- **Square pieces & grain** (Rommel, 2026-10-17): L = Width has no long side. On a woodgrain/patterned
+  board (`_isGrainedMaterial`: woodgrain/crosscut/textile/stone… or a wood species word) L = edges ALONG
+  THE GRAIN: `_webEbtToModcraft(code,L,W,grain)` swaps when square + grain W. Plain boards: Length column.
+  Flag (review note + amber Edges box in the cutting list) only for square + grained + uneven banding
+  (`_webEbtUneven`) + no row grain. Reference note `EBT_SQUARE_NOTE`: ⓘ by "Edges" in the cutting list
+  (`MCL.edgeNote`, stays until closed) and printed above the Job Order parts table. Labels draw faint
+  grain lines for grained parts (JO part `grained:true`, set only when true so plain jobs keep their signature).
