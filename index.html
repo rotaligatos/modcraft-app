@@ -4816,10 +4816,9 @@ function _prodPieceFitIssue(L,W,grain,material){
   var fits=function(l,w){ return dim(l,b.h)&&dim(w,b.w); };
   if(fits(L,W)) return '';
   var locked=(grain==='length'||grain==='width');
-  if(m.allowRotate&&!locked&&fits(W,L)) return '';
+  if(!locked&&fits(W,L)) return '';
   var maxL=b.h-k, maxW=b.w-k;
-  if(fits(W,L)) return 'Width '+W+' does not fit across the board ('+b.w+' exactly, or up to '+maxW+' with the saw cut). It fits turned — swap Length and Width'
-    +(m.allowRotate?', or set its grain to none':'')+'.';
+  if(fits(W,L)) return 'Width '+W+' does not fit across the board ('+b.w+' exactly, or up to '+maxW+' with the saw cut). It fits turned — swap Length and Width, or set its grain to none if the board has no grain.';
   return L+' × '+W+' does not fit a '+b.w+'×'+b.h+' board (a full '+b.h+' length or up to '+maxL+', and a full '+b.w+' width or up to '+maxW+', with the '+k+'mm saw cut). Use a bigger board or split it into two pieces.';
 }
 // "Panel Saw · 3mm kerf" — used wherever a report has to say what it simulated.
@@ -4838,7 +4837,7 @@ function _prodMachineTableHtml(){
       +'<td style="padding:5px 6px;font-weight:600">'+escHtml(m.label)+'</td>'
       +'<td style="padding:5px 6px"><input type="number" value="'+m.kerf+'" min="0" max="20" step="0.5" '
         +'onchange="_prodSetMachineKerf(\''+k+'\',this.value)" style="height:30px;font-size:12px;width:80px"></td>'
-      +'<td style="padding:5px 6px;font-size:11px;color:var(--text2)">'+(m.allowRotate?'Allowed — packs tighter':'Not allowed — guillotine')+'</td>'
+      +'<td style="padding:5px 6px;font-size:11px;color:var(--text2)">Plain boards only — woodgrain and patterns keep their direction</td>'
       +'<td style="padding:5px 6px">'+(m.owned
         ? '<span class="pill pill-teal" style="font-size:10px">In use</span>'
         : '<span class="pill" style="font-size:10px">Not owned — kerf is a placeholder</span>')+'</td>'
@@ -18649,6 +18648,31 @@ var EBT_SQUARE_NOTE='Edge codes follow the piece: L = the long edges, S = the sh
 function _isGrainedMaterial(t){
   return /wood\s*grain|woodgrain|cross\s*cut|softwood|hardwood|textile|fabric|linen|marble|granite|stone|concrete|cement|terrazzo|\b(oak|walnut|acacia|cherry|teak|maple|ash|beech|elm|wenge|mahogany|pine|narra|alder|emperado|bologna|zebrano|ebony|sapele|rosewood|birch|cedar|driftwood|chestnut|hickory|pecan|olive|timber|wood|grain)\b/i.test(String(t||''));
 }
+// A PLAIN board (white, grey, black, a solid colour; raw MDF/PB) has no grain, so a piece may be
+// turned to save boards — the saw cuts either way (Rommel, 2026-10-17: "your only limitation is the
+// wood grain"). Judged safe: only when every colour word is a known plain colour. Woodgrain,
+// patterns and any colour not on the list (Toast, Sakura, Chevron, Swiss Pear…) stay locked, so an
+// unknown name costs at most a board, never a piece cut against the grain. Raw plywood has veneer
+// grain and stays locked.
+var _PLAIN_WORDS=/^(real|warm|white|black|graphite|dark|light|gray|grey|beige|ivory|cream|yellow|blue|red|green|eco|italian|german|plain|solid|uni|orange|pink|brown|navy|anthracite|charcoal|almond|sand|taupe|off)$/;
+var _BOARD_WORDS=/^(pb|mdf|hdf|plywood|ply|mr|hmr|mfc|board|boards|raw|particle|particleboard|marine|melamine|laminate|laminated|matte|matt|supermatte|stipple|gloss|glossy|high|satin|smooth|face|faces|faced|sided|side|and|with|x|ft|mm)$/;
+function _isPlainBoard(t){
+  t=String(t||'').toLowerCase();
+  if(!t.trim()||_isGrainedMaterial(t)) return false;
+  if(/\bply(wood)?\b/.test(t)&&/\braw\b/.test(t)) return false;
+  var words=t.replace(/[^a-z]+/g,' ').split(' ').filter(function(w){ return w&&!/^\d*[fx]?$/.test(w)&&!_BOARD_WORDS.test(w); });
+  if(!words.length) return /\b(raw|mdf|pb|particle)\b/.test(t);
+  return words.every(function(w){ return _PLAIN_WORDS.test(w); });
+}
+// The grain the packer uses for a piece: a grain set on its row always wins (grainLock); otherwise a
+// plain board is free to turn and anything else runs along the length (or the width when asked).
+function _prodPieceGrain(c){
+  c=c||{};
+  var g=(c.grain==='length'||c.grain==='width')?c.grain:'none';
+  if(c.grainLock) return g;
+  if(_isPlainBoard([c.catalogName,c.material,c.color,c.texture].filter(Boolean).join(' '))) return 'none';
+  return g==='none'?'length':g;
+}
 // True when the banding is uneven (1L, 2S, 1L 1S …) — the only codes a square piece makes ambiguous.
 function _webEbtUneven(code){
   var ls=_WEB_EBT[_webEbtNormalise(String(code||'').trim().toUpperCase().replace(/\s+/g,' '))];
@@ -18960,7 +18984,7 @@ function _cutListToAnalysis(cl,order){
       material:material, color:color, texture:_webTextureOf(label),
       colorB:'', textureB:'',
       thickness:lam?lam.bt:th, length:L, width:W, qty:rowQty,
-      faces:lam?1:faces, grain:gr||jobGrain,
+      faces:lam?1:faces, grain:gr||jobGrain, grainLock:!!gr,
       ebt:eb.ebt, edgeTape:edgeTape, grooving:grooving, catalogName:catalogName, hplSku:hplSku,
       outsourceName:String(pn.outsource||''), specialCut:String(pn.specialCut||''),
       needsReview:review.length>0, reviewNote:review.join('; '),
@@ -37276,7 +37300,7 @@ var MCL=(function(){
   // of only after the layout leaves the piece off every board.
   function fitIssue(p){
     if(!p||!(num(p.L)>0&&num(p.W)>0)) return '';
-    var gr=p.grain?_webGrainToModcraft(p.grain):(S.grain||'length');
+    var gr=_prodPieceGrain({grain:p.grain?_webGrainToModcraft(p.grain):(S.grain||'length'),grainLock:!!p.grain,material:p.mat||''});
     var sub=(_prodParseMaterialDescriptor(p.mat||'').substrate)||p.mat||'';
     return _prodPieceFitIssue(num(p.L),num(p.W),gr,sub);
   }
@@ -39941,9 +39965,11 @@ function _joBuild(result,ctx){
     for(var n=1;n<=qty;n++){ codes.push(ctx.joNumber+'-'+pa+'-'+comp+'-'+pp+'-'+_joPad(n,2)+'/'+_joPad(qty,2)); scan.push(short+'-'+pn+'-'+_joPad(n,2)); }
     if(flags.length) flagged++;
     pieces+=qty;
+    // grain = the grain the layout used (_prodPieceGrain): blank on a plain board, which may be
+    // turned. PMES re-plans with it, so a woodgrain piece is never turned there either.
     parts.push({p:pn,ref:i,area:area,pmesArea:pa,pmesPart:pp,component:comp,name:c.name||'',material:c.material||'',color:c.color||'',
       texture:c.texture||'',thickness:+c.thickness||0,faces:+c.faces||0,L:L,W:W,qty:qty,cutL:cutL,cutW:cutW,
-      ebt:c.ebt||'',sc:ec.sc,lc:ec.lc,tape:c.edgeTape||'',tapeMm:tapeMm,grain:c.grain||'',grooving:c.grooving||'',
+      ebt:c.ebt||'',sc:ec.sc,lc:ec.lc,tape:c.edgeTape||'',tapeMm:tapeMm,grain:(_prodPieceGrain(c)==='none'?'':_prodPieceGrain(c)),grooving:c.grooving||'',
       bander:pieceBander,special:special,hpl:isHpl,hplOrder:hplOrder,holes:hasHoles,route:route,
       boardOf:boardOf[i]||[],
       notes:c.notes||'',flags:flags,barcodes:codes,scan:scan});
@@ -39956,7 +39982,7 @@ function _joBuild(result,ctx){
   var boards=bom.map(function(b){ return {material:b.material,color:b.color,texture:b.texture,thickness:b.thickness,
     faces:b.faces,boardSize:b.boardSize,boardW:b.boardW,boardH:b.boardH,boardsNeeded:b.boardsNeeded,
     utilizationPct:b.utilizationPct,oversizedCount:b.oversizedCount||0,oversizedRefs:b.oversizedRefs||[],
-    layout:b.layout||[],shelves:b.shelves||[],kerf:b.kerf,machineLabel:b.machineLabel,allowRotate:b.allowRotate}; });
+    layout:b.layout||[],shelves:b.shelves||[],plans:b.plans||undefined,kerf:b.kerf,machineLabel:b.machineLabel,allowRotate:b.allowRotate}; });
   var sv=(result&&result._services)||prodComputeServices(comps,(result&&result.holeSchedule)||[],(result&&result.extraServices)||[]);
   return {
     joNumber:ctx.joNumber||'', serial:ctx.serial||'', optionId:ctx.optionId||0, optionLabel:ctx.optionLabel||'',
@@ -42409,7 +42435,7 @@ function _prodNormalizeComponent(c){
     color:String(c.color||''),texture:String(c.texture||''),colorB:String(c.colorB||''),
     textureB:String(c.textureB||''),thickness:+c.thickness||0,length:+c.length||0,
     width:+c.width||0,qty:+c.qty||1,faces:+c.faces||0,
-    grain:(c.grain==='length'||c.grain==='width')?c.grain:'none',
+    grain:(c.grain==='length'||c.grain==='width')?c.grain:'none', grainLock:!!c.grainLock,
     ebt:String(c.ebt||''),edgeTape:String(c.edgeTape||''),grooving:String(c.grooving||''),
     specialCut:String(c.specialCut||''),catalogName:String(c.catalogName||''),outsourceName:String(c.outsourceName||''),hplSku:String(c.hplSku||''),
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||''),
@@ -43397,7 +43423,83 @@ function _guillotinePackOnce(pieces,boardW,boardH,kerf,allowRotate,order){
     // reads only this and layout, never re-derives shelf boundaries by inference. height carries
     // the kerf reserved when the shelf was opened (a capacity check, not a physical dimension);
     // subtracting it gives the strip's actual cut width.
-    shelves:boards.map(function(bd){ return bd.shelves.map(function(s){ return {xStart:s.xStart,width:s.height-kerf}; }); })
+    shelves:boards.map(function(bd){ return bd.shelves.map(function(s){ return {xStart:s.xStart,width:s.height-kerf}; }); }),
+    // The same layout as a cut plan (see _gpackPlanFromShelves): strips along the length, one
+    // piece per crosscut segment. _prodCutSequence reads plans; shelves stay for older readers.
+    plans:boards.map(function(bd){ return _gpackPlanFromShelves(bd.shelves,bd.layout,kerf); })
+  };
+}
+function _gpackPlanFromShelves(shelves,layout,kerf){
+  return {dir:'L',strips:shelves.map(function(s){
+    var segs=[];
+    layout.forEach(function(q,i){ if(q.x===s.xStart) segs.push({off:q.y,len:q.h,pieces:[i]}); });
+    segs.sort(function(a,b){ return a.off-b.off; });
+    return {off:s.xStart,size:s.height-kerf,segs:segs};
+  })};
+}
+// THREE-STAGE pass (2026-10-17). A panel saw cuts end to end, so a board is cut in three stages:
+// 1) strips, 2) each strip crosscut into segments, 3) a segment cut into pieces side by side.
+// The first cut can run either way: dir 'L' = strips along the board's length, 'W' = strips across
+// its width (worked as the same problem with the board turned, then turned back). Each placed piece
+// keeps the grain rule: it is turned only when allowRotate and its grain does not fix it.
+function _gpack3Once(pieces,boardW,boardH,kerf,allowRotate,order,dir){
+  var T=dir==='W', W=T?boardH:boardW, H=T?boardW:boardH;
+  function fitsIn(x,avail){ return x===avail||x+kerf<=avail; }
+  var items=pieces.slice().sort(_GPACK_ORDERS[order]||_GPACK_ORDERS.width);
+  var boards=[],oversized=0,oversizedRefs=[],usedArea=0,totalArea=0;
+  for(var i=0;i<items.length;i++){
+    var p=items[i]; totalArea+=p.length*p.width;
+    // In the turned problem a piece's length runs across: swap it, and turn it back when placing.
+    var pl=T?p.width:p.length, pw=T?p.length:p.width;
+    var ors=[{l:pl,w:pw,rot:false}];
+    var locked=(p.grain==='length'||p.grain==='width');
+    if(allowRotate&&!locked&&p.length!==p.width) ors.push({l:pw,w:pl,rot:true});
+    ors=ors.filter(function(o){ return fitsIn(o.l,H)&&fitsIn(o.w,W); });
+    if(!ors.length){ oversized++; if(p.ref!=null) oversizedRefs.push(p.ref); continue; }
+    var best=null;
+    for(var oi=0;oi<ors.length;oi++){
+      var o=ors[oi];
+      for(var bi=0;bi<boards.length;bi++){
+        var bd=boards[bi];
+        for(var si=0;si<bd.strips.length;si++){
+          var st=bd.strips[si];
+          for(var gi=0;gi<st.segs.length;gi++){
+            var sg=st.segs[gi];
+            if(o.l<=sg.len&&fitsIn(o.w,st.size-sg.used)){ var sc=(st.size-sg.used-o.w)+(sg.len-o.l)*0.01; if(!best||sc<best.sc) best={t:3,bi:bi,si:si,gi:gi,o:o,sc:sc}; }
+          }
+          var remL=H-st.lenUsed;
+          if(fitsIn(o.w,st.size)&&fitsIn(o.l,remL)){ var sc2=1e4+(st.size-o.w)*10+(remL-o.l)*0.01; if(!best||sc2<best.sc) best={t:2,bi:bi,si:si,o:o,sc:sc2}; }
+        }
+        var remW=W-bd.wUsed;
+        if(fitsIn(o.w,remW)){ var sc1=1e8+(remW-o.w); if(!best||sc1<best.sc) best={t:1,bi:bi,o:o,sc:sc1}; }
+      }
+    }
+    var x,y,o2;
+    if(best){
+      var b2=boards[best.bi]; o2=best.o;
+      if(best.t===3){ var st3=b2.strips[best.si], sg3=st3.segs[best.gi]; x=st3.off+sg3.used; y=sg3.off; sg3.used+=o2.w+kerf; sg3.items.push(b2.layout.length); }
+      else if(best.t===2){ var st2=b2.strips[best.si]; x=st2.off; y=st2.lenUsed; st2.segs.push({off:y,len:o2.l,used:o2.w+kerf,items:[b2.layout.length]}); st2.lenUsed+=o2.l+kerf; }
+      else { x=b2.wUsed; y=0; b2.strips.push({off:x,size:o2.w,lenUsed:o2.l+kerf,segs:[{off:0,len:o2.l,used:o2.w+kerf,items:[b2.layout.length]}]}); b2.wUsed+=o2.w+kerf; }
+    } else {
+      o2=ors[0]; x=0; y=0;
+      boards.push({wUsed:o2.w+kerf,strips:[{off:0,size:o2.w,lenUsed:o2.l+kerf,segs:[{off:0,len:o2.l,used:o2.w+kerf,items:[0]}]}],layout:[]});
+      best={bi:boards.length-1};
+    }
+    // Back to the real board: in the turned problem x runs along the length.
+    boards[best.bi].layout.push(T?{x:y,y:x,w:o2.l,h:o2.w,rotated:o2.rot,ref:p.ref}:{x:x,y:y,w:o2.w,h:o2.l,rotated:o2.rot,ref:p.ref});
+    usedArea+=p.length*p.width;
+  }
+  var boardArea=boardW*boardH;
+  return {
+    boardsNeeded:boards.length,
+    utilization:boards.length?usedArea/(boards.length*boardArea):0,
+    oversizedCount:oversized,oversizedRefs:oversizedRefs,totalPieceArea:totalArea,
+    layout:boards.map(function(bd){ return bd.layout; }),
+    // Older readers (and PMES) know strips along the length only.
+    shelves:boards.map(function(bd){ return T?[]:bd.strips.map(function(s){ return {xStart:s.off,width:s.size}; }); }),
+    plans:boards.map(function(bd){ return {dir:T?'W':'L',strips:bd.strips.map(function(s){
+      return {off:s.off,size:s.size,segs:s.segs.map(function(g){ return {off:g.off,len:g.len,pieces:g.items.slice()}; })};
+    })}; })
   };
 }
 // Piece orders tried. "width" (widest first) is the original single pass and always runs first,
@@ -43429,9 +43531,15 @@ function guillotinePackBoards(pieces,boardW,boardH,kerf,allowRotate){
   var rots=allowRotate?[true,false]:[false];
   Object.keys(_GPACK_ORDERS).forEach(function(ord){
     rots.forEach(function(rot){
-      if(ord==='width'&&rot===!!allowRotate) return;
-      var r=_guillotinePackOnce(pieces,boardW,boardH,kerf,rot,ord);
-      if(better(r,best)){ r.strategy=ord+(rot?' + rotate':''); best=r; }
+      if(!(ord==='width'&&rot===!!allowRotate)){
+        var r=_guillotinePackOnce(pieces,boardW,boardH,kerf,rot,ord);
+        if(better(r,best)){ r.strategy=ord+(rot?' + rotate':''); best=r; }
+      }
+      // Three stages, first cut along the length or across the width (2026-10-17).
+      ['L','W'].forEach(function(dir){
+        var r3=_gpack3Once(pieces,boardW,boardH,kerf,rot,ord,dir);
+        if(better(r3,best)){ r3.strategy='3-stage '+(dir==='W'?'across':'along')+' · '+ord+(rot?' + rotate':''); best=r3; }
+      });
     });
   });
   return best;
@@ -43469,12 +43577,13 @@ function prodComputeBom(comps){
     groups[key].totalAreaMm2+=(c.length||0)*(c.width||0)*qty;
     var ar=c.area||'General';
     groups[key].areas[ar]=(groups[key].areas[ar]||0)+(c.length||0)*(c.width||0)*qty;
-    if(c.length>0&&c.width>0){ for(var q=0;q<qty;q++) groups[key].pieces.push({length:c.length,width:c.width,grain:c.grain||'none',ref:i}); }
+    if(c.length>0&&c.width>0){ var pg=_prodPieceGrain(c); for(var q=0;q<qty;q++) groups[key].pieces.push({length:c.length,width:c.width,grain:pg,ref:i}); }
   }
   var bom=[]; var keys=Object.keys(groups);
   var _mach=prodMachine();
   var kerf=_mach.kerf;
-  var allowRotate=_mach.allowRotate;
+  // Every machine may turn a piece; the grain decides (_prodPieceGrain). Rommel, 2026-10-17.
+  var allowRotate=true;
   for(var j=0;j<keys.length;j++){
     var g=groups[keys[j]];
     var _bd=_prodBoardFor(g.material), boardW=_bd.w, boardH=_bd.h;
@@ -43488,7 +43597,7 @@ function prodComputeBom(comps){
       utilizationPct:Math.round(sim.utilization*1000)/10,
       oversizedCount:sim.oversizedCount,oversizedRefs:sim.oversizedRefs,
       boardW:boardW,boardH:boardH,layout:sim.layout,   // per-board placed-piece rectangles — see _prodCutLayoutSvg
-      shelves:sim.shelves,kerf:kerf,  // per-board rip-cut-strip geometry — see _prodCutSequence
+      shelves:sim.shelves,plans:sim.plans,strategy:sim.strategy,kerf:kerf,  // cut plan per board — see _prodCutSequence
       // Stamp the machine that actually produced this pack. Reports read THIS, never the live
       // setting — otherwise switching machines after an analysis would relabel an old cut sheet
       // with a kerf it was never packed at.
@@ -44112,23 +44221,47 @@ function _prodSvcDetailHtml(svc){
 //   - CROSSCUTS: (pieces_in_shelf - 1) per shelf -- the last piece's trailing edge is the strip's
 //     own end, already the board boundary, so it needs no separating cut -- each cut spans the
 //     strip's own width (not the board length).
+// Cutting instructions for one board, from its cut plan: stage 1 strips (along the length, or
+// across the width), stage 2 crosscuts down each strip, stage 3 pieces side by side in a segment.
+// A cut separating the last piece of a strip/segment from the offcut is not counted — the same
+// convention the reference cut sheet uses (10 pieces = 9 crosscuts).
 function _prodCutSequence(bm,boardIndex){
-  var boardH=bm.boardH;
-  var shelvesRaw=(bm.shelves&&bm.shelves[boardIndex])||[];
   var pieces=(bm.layout&&bm.layout[boardIndex])||[];
-  var shelves=shelvesRaw.slice().sort(function(a,b){ return a.xStart-b.xStart; }).map(function(s){
-    var sp=pieces.filter(function(p){ return p.x===s.xStart; }).sort(function(a,b){ return a.y-b.y; });
-    return {xStart:s.xStart,width:s.width,pieces:sp};
-  });
-  var ripCount=shelves.length, ripLenMm=ripCount*boardH;
-  var crosscutCount=0, crosscutLenMm=0;
-  for(var i=0;i<shelves.length;i++){
-    var n=shelves[i].pieces.length-1; if(n<0) n=0;
-    crosscutCount+=n; crosscutLenMm+=n*shelves[i].width;
+  var plan=bm.plans&&bm.plans[boardIndex];
+  if(!plan){
+    var sr=(bm.shelves&&bm.shelves[boardIndex])||[];
+    plan={dir:'L',strips:sr.map(function(s){
+      var segs=[]; pieces.forEach(function(q,i){ if(q.x===s.xStart) segs.push({off:q.y,len:q.h,pieces:[i]}); });
+      segs.sort(function(a,b){ return a.off-b.off; });
+      return {off:s.xStart,size:s.width,segs:segs};
+    })};
   }
+  var across=plan.dir==='W', stripLen=across?bm.boardW:bm.boardH;
+  var strips=plan.strips.slice().sort(function(a,b){ return a.off-b.off; });
+  var ripCount=strips.length, ripLenMm=ripCount*stripLen, crosscutCount=0, crosscutLenMm=0, splitCount=0, splitLenMm=0, steps=[];
+  var tag=function(q){ return (q.ref!=null?'P'+(q.ref+1)+' ':''); };
+  strips.forEach(function(s){
+    var segs=s.segs.slice().sort(function(a,b){ return a.off-b.off; });
+    steps.push((across?'Cut a '+Math.round(s.size)+'mm strip across the board ('+stripLen+'mm long).':'Rip cut a '+Math.round(s.size)+'mm wide strip from the board (length = '+stripLen+'mm).'));
+    var n=Math.max(0,segs.length-1); crosscutCount+=n; crosscutLenMm+=n*s.size;
+    var parts=segs.map(function(g){
+      var ps=g.pieces.map(function(k){ return pieces[k]; }).filter(Boolean);
+      if(ps.length===1) return tag(ps[0])+Math.round(g.len)+'mm';
+      return Math.round(g.len)+'mm ('+ps.map(function(q){ return tag(q).trim(); }).join(' + ')+')';
+    });
+    var txt=parts.length>8?(parts.slice(0,8).join(', ')+', +'+(parts.length-8)+' more'):parts.join(', ');
+    steps.push('Crosscut the '+Math.round(s.size)+'mm strip into '+segs.length+(segs.length===1?' piece':' pieces')+' ('+(txt||'—')+')'+(n?' — '+n+' crosscut'+(n===1?'':'s'):'')+'.');
+    segs.forEach(function(g){
+      var ps=g.pieces.map(function(k){ return pieces[k]; }).filter(Boolean);
+      if(ps.length<2) return;
+      splitCount+=ps.length-1; splitLenMm+=(ps.length-1)*g.len;
+      steps.push('Cut the '+Math.round(g.len)+'mm piece into '+ps.length+' side by side: '+ps.map(function(q){ return tag(q)+Math.round(across?q.h:q.w)+'mm'; }).join(', ')+'.');
+    });
+  });
   return {
-    shelves:shelves, ripCount:ripCount, ripLenMm:ripLenMm, crosscutCount:crosscutCount,
-    crosscutLenMm:crosscutLenMm, totalLenMm:ripLenMm+crosscutLenMm
+    shelves:strips.map(function(s){ return {xStart:s.off,width:s.size,pieces:[].concat.apply([],s.segs.map(function(g){ return g.pieces.map(function(k){ return pieces[k]; }); }))}; }),
+    dir:plan.dir, steps:steps, ripCount:ripCount, ripLenMm:ripLenMm, crosscutCount:crosscutCount, crosscutLenMm:crosscutLenMm,
+    splitCount:splitCount, splitLenMm:splitLenMm, totalLenMm:ripLenMm+crosscutLenMm+splitLenMm
   };
 }
 // Piece-placement diagram for ONE board -- each piece drawn to scale, labelled with its part
@@ -44202,23 +44335,14 @@ function _prodBoardSheetHtml(bm,bi,group,print){
   var utilPct=Math.round(usedMm2/boardAreaMm2*1000)/10;
   var wastePct=Math.round((1000-utilPct*10))/10;
   var seq=_prodCutSequence(bm,bi);
-  var steps='';
-  for(var si=0;si<seq.shelves.length;si++){
-    var sh=seq.shelves[si];
-    steps+='<li>Rip cut a '+Math.round(sh.width)+'mm wide strip from the board (length = '+boardH+'mm).</li>';
-    var lens=sh.pieces.map(function(p){ return (p.ref!=null?'P'+(p.ref+1)+' ':'')+Math.round(p.h)+'mm'; });
-    var lensTxt=lens.length>6?(lens.slice(0,6).join(', ')+', +'+(lens.length-6)+' more'):lens.join(', ');
-    var nCross=sh.pieces.length-1; if(nCross<0) nCross=0;
-    steps+='<li>Crosscut the '+Math.round(sh.width)+'mm strip into '+sh.pieces.length+' pcs ('+(lensTxt||'—')+')'
-      +(nCross?' — '+nCross+' crosscut'+(nCross===1?'':'s'):'')+'.</li>';
-  }
-  var ripM=(seq.ripLenMm/1000).toFixed(3), crossM=(seq.crosscutLenMm/1000).toFixed(3), totalM=(seq.totalLenMm/1000).toFixed(3);
+  var steps=seq.steps.map(function(t){ return '<li>'+escHtml(t)+'</li>'; }).join('');
+  var ripM=(seq.ripLenMm/1000).toFixed(3), crossM=(seq.crosscutLenMm/1000).toFixed(3), splitM=(seq.splitLenMm/1000).toFixed(3), totalM=(seq.totalLenMm/1000).toFixed(3);
   var usedM2=(usedMm2/1e6).toFixed(3), offcutM2=((boardAreaMm2-usedMm2)/1e6).toFixed(3), boardM2=(boardAreaMm2/1e6).toFixed(3);
   var list=(group&&group.boards)||[bi];
   var times=list.length>1?' <span style="background:#1f3a5f;color:#fff;border-radius:9px;padding:1px 7px;font-size:11px">×'+list.length+' identical</span>':'';
   var head=(list.length>1?_prodBoardsLabel(list):'Board '+(bi+1))+' of '+bm.layout.length;
   return '<div style="border:1px solid '+C.border+';border-radius:8px;padding:12px;margin-bottom:10px;background:'+C.card+(print?';page-break-inside:avoid;break-inside:avoid':'')+'">'
-    +'<div style="font-size:12px;font-weight:700;margin-bottom:8px">'+head+times+' <span style="font-weight:400;color:'+C.text2+'">— '+boardW+'×'+boardH+'mm, '+escHtml(bm.machineLabel||prodMachine().label)+', kerf '+(bm.kerf==null?prodKerf():bm.kerf)+'mm, '+(bm.allowRotate?'rotation allowed':'no rotation')+'</span></div>'
+    +'<div style="font-size:12px;font-weight:700;margin-bottom:8px">'+head+times+' <span style="font-weight:400;color:'+C.text2+'">— '+boardW+'×'+boardH+'mm, '+escHtml(bm.machineLabel||prodMachine().label)+', kerf '+(bm.kerf==null?prodKerf():bm.kerf)+'mm, '+(bm.allowRotate?'plain boards may turn, grain kept':'no rotation')+'</span></div>'
     +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:10px">'
     +'<div>'
       +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:'+C.text2+';margin-bottom:4px">Cutting sequence'+(list.length>1?' (per board)':'')+'</div>'
@@ -44226,6 +44350,7 @@ function _prodBoardSheetHtml(bm,bi,group,print){
       +'<table style="font-size:11px;width:100%;border-collapse:collapse">'
         +'<tr><td>Rip cut'+(seq.ripCount===1?'':'s')+' ('+seq.ripCount+')</td><td style="text-align:right">'+ripM+' m</td></tr>'
         +'<tr><td>Crosscut'+(seq.crosscutCount===1?'':'s')+' ('+seq.crosscutCount+')</td><td style="text-align:right">'+crossM+' m</td></tr>'
+        +(seq.splitCount?'<tr><td>Side-by-side cut'+(seq.splitCount===1?'':'s')+' ('+seq.splitCount+')</td><td style="text-align:right">'+splitM+' m</td></tr>':'')
         +'<tr style="font-weight:700;border-top:1px solid '+C.border+'"><td style="padding-top:3px">Total cutting length</td><td style="text-align:right;padding-top:3px">'+totalM+' m</td></tr>'
       +'</table>'
     +'</div>'
@@ -44481,7 +44606,7 @@ function prodBuildResultHtml(result){
   }
   var bomHtml='<div class="card" style="margin-bottom:14px">'
     +'<div class="card-head"><h3><i class="ti ti-layout-board"></i>Bill of Materials — boards needed</h3></div>'
-    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Simulated by cutting layout ('+escHtml(_bomMachLabel)+', '+(_bomMachRotate?'rotation allowed':'no rotation')+') — not a flat area estimate.</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:8px">Simulated by cutting layout ('+escHtml(_bomMachLabel)+', '+(_bomMachRotate?'plain boards may turn, woodgrain and patterns keep their direction':'no rotation')+') — not a flat area estimate.</div>'
     +'<div style="overflow-x:auto"><table class="data">'
     +'<thead><tr><th>Material</th><th>Color</th><th>Texture</th><th style="text-align:right">Thickness</th><th style="text-align:right">Total area</th><th>Board size</th><th style="text-align:right">Sheets needed</th><th style="text-align:right">Utilization</th><th>Used in areas</th></tr></thead>'
     +'<tbody>'+bomRows+'</tbody>'
@@ -44609,7 +44734,7 @@ function prodReflectToQuotation(){
       +(_over.length>1?'they are':'it is')+' on no cutting layout and '+(_over.length>1?'their':'its')+' boards are not counted.\n\n'
       +_over.slice(0,8).map(function(ref){ var c=_comps[ref]||{};
         return 'P'+(ref+1)+' '+(c.name||'piece')+(c.area?' ('+c.area+')':'')+' — '+(c.length||0)+' × '+(c.width||0)
-          +'\n   '+(_prodPieceFitIssue(c.length,c.width,c.grain,c.material)||'does not fit the board'); }).join('\n')
+          +'\n   '+(_prodPieceFitIssue(c.length,c.width,_prodPieceGrain(c),c.material)||'does not fit the board'); }).join('\n')
       +(_over.length>8?'\n…':'')
       +'\n\nFix the size in the cutting list (swap Length and Width if it is entered sideways), then load it again.');
     return;
@@ -47495,6 +47620,11 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-17-cut-3stage', date:'17 Oct 2026', items:[
+    {id:'cut-3stage', icon:'ti-layout-grid', title:'Cutting layout: first cut either way, pieces side by side',
+     text:'The board layout now also tries cutting strips across the board, and cutting a strip into pieces side by side, and keeps whichever needs the fewest boards. Pieces on plain boards (white, grey, black, solid colours) may be turned; woodgrain, stone, granite, textile and other patterned boards keep the client\'s grain direction. The cutting sequence lists every cut, including the side-by-side ones.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-17-pdf-ai-read', date:'17 Oct 2026', items:[
     {id:'pdf-ai-read', icon:'ti-file-search', title:'PDFs the app cannot read: Read with AI',
      text:'When a client\'s PDF has scrambled text (like an OpenCutList / SketchUp optimizer report) or is only a scan, the import window now says so and offers "Read with AI". The AI reads the parts tables into rows; you check them in the import window before anything is imported.',

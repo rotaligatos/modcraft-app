@@ -232,6 +232,32 @@ const PROFILES = {
         check('Read drawing: prompt names the row size and the other rows; lm = sum of the listed cuts', () => res,
               [true, true, 'Routeriing (Special Cut) × 2.688 lm']);
       }
+      // 2026-10-17: the grain decides turning, not the machine (Rommel: the only limit is the grain).
+      // A plain board may turn; woodgrain, stone, granite, textile and unknown colours keep the
+      // client's direction; a grain set on the row always wins.
+      if (typeof window._prodPieceGrain === 'function')
+        check('grain rule: plain boards may turn, patterned/unknown keep the client\'s direction', () => {
+          const g = c => window._prodPieceGrain(Object.assign({ material: 'PB', grain: 'length' }, c));
+          return [g({ catalogName: 'Real White PB 4x8 2F (18mm, Matte)' }), g({ color: 'Warm White', texture: 'stipple' }),
+                  g({ catalogName: 'Raw Boards 4x8 18mm MDF' }), g({ color: 'Light Gray' }),
+                  g({ color: 'Swiss Pear' }), g({ color: 'Volakas Marble' }), g({ color: 'Textile Cream' }), g({ color: 'Granite Black' }),
+                  g({ color: 'Toast' }), g({ material: 'Plywood', color: 'raw' }), g({ color: 'Swiss Pear', grain: 'width' }),
+                  g({ color: 'Real White', grain: 'width', grainLock: true })];
+        }, ['none', 'none', 'none', 'none', 'length', 'length', 'length', 'length', 'length', 'length', 'width', 'width']);
+      // 2026-10-17: three-stage packing, first cut either way. Each cut runs end to end; the plan
+      // the packer chose drives the cutting instructions, so they always describe the layout.
+      if (typeof window._gpack3Once === 'function')
+        check('three-stage packer: pieces side by side in a strip, either first-cut direction, instructions match', () => {
+          // A 700-wide piece opens a 700mm strip; two 340-wide pieces then share one 300mm segment, side by side.
+          const pcs = [{ length: 300, width: 700, grain: 'length', ref: 0 }, { length: 300, width: 340, grain: 'length', ref: 1 }, { length: 300, width: 340, grain: 'length', ref: 2 }];
+          const r = window._gpack3Once(pcs, 1220, 2440, 3, false, 'width', 'L');
+          const bm = { boardW: 1220, boardH: 2440, layout: r.layout, plans: r.plans };
+          const seq = window._prodCutSequence(bm, 0);
+          const overlap = r.layout[0].some((a, i) => r.layout[0].some((b, j) => i < j && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h));
+          const inside = r.layout[0].every(q => q.x >= 0 && q.y >= 0 && q.x + q.w <= 1220 && q.y + q.h <= 2440 && q.h === 300);
+          const best = window.guillotinePackBoards(pcs, 1220, 2440, 3, false);
+          return [r.boardsNeeded, overlap, inside, seq.dir, seq.ripCount, seq.splitCount, /side by side/.test(seq.steps.join(' ')), best.boardsNeeded];
+        }, [1, false, true, 'L', 1, 1, true, 1]);
       // 2026-10-17: GEFFY's tapered doors were routed SCUT → TPR with "45 DEG" as a special cut.
       if (typeof window._joBuild === 'function')
         check('Job Order: a 45° hand-grab taper goes CUT → TPR, never special cut', () => {
@@ -757,9 +783,9 @@ const PROFILES = {
             w.prodSettings.machineType = 'cnc';
             const comps = [
               { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
-                length: 80, width: 150, qty: 1, grain: 'length' },
+                length: 80, width: 150, qty: 1, grain: 'length', grainLock: true },
               { material: 'TestMat', color: '', texture: '', thickness: 18, faces: 0,
-                length: 80, width: 150, qty: 1, grain: 'none' }
+                length: 80, width: 150, qty: 1, grain: 'none', grainLock: true }
             ];
             const bom = w.prodComputeBom(comps);
             return {
@@ -978,7 +1004,7 @@ const PROFILES = {
               cncRowKerf: !!cncRow && cncRow.kerf === 9,
               sawRowNamesItsMachine: !!sawRow && sawRow.machineKey === 'panelsaw' && !!sawRow.machineLabel,
               cncRowNamesItsMachine: !!cncRow && cncRow.machineKey === 'cnc',
-              rotationStampedPerRow: !!sawRow && !!cncRow && sawRow.allowRotate === false && cncRow.allowRotate === true
+              rotationStampedPerRow: !!sawRow && !!cncRow && sawRow.allowRotate === true && cncRow.allowRotate === true
             };
           } finally {
             w.prodSettings.boardSizes = saved.boardSizes; w.prodSettings.machines = saved.machines;
