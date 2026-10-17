@@ -13096,3 +13096,17 @@ missing from the count — yet Reflect let it through.
 - Rommel confirmed 2026-10-17: lock now numbers the quotation and reserves the JO. Job Order and PMES
   process JO show only the taper side ("Handgrab tapering — along length"), no metres; the metres stay
   in the analysis review row and the quotation's service line (`_joSvcLabel(x, withQty)`).
+
+## What was changed on 2026-10-17 (session — QR part labels)
+- **Labels are QR** (Rommel): `jo-labels.js` (repo root) renders each label — QR (qrcode-generator 1.4.4
+  from cdnjs, ECC H) holding the same short scan code the Code128 held, a logo in the QR centre, the
+  piece drawn to scale with banded edges in red (`sc` = width-side edges, `lc` = length edges), cut size,
+  material, taper side, and a small grey "developed by RTmo" bottom-right (no RTmo image — his choice).
+  Verified: all three sample QRs decode with jsQR with the logo in place.
+- Centre logo = the quotation's company (`_joLabelLogo`: cebu→CWL, module→MSSI, else WCL) from
+  `icons/labels/co-*.png` (cropped from Rommel's logo files).
+- ⚠ `jo-labels.js` and `icons/labels/` are COPIED into the PMES repo — change both together.
+- PMES: job page → Parts tab → "Part labels" card: Print labels; logo in the QR = Company (default) /
+  Blank / Client's own logo (upload, shrunk to 240px) stored in `pmes_production_jobs.label_logo`
+  (null = company, 'blank', or data:image). Changing it: supervisor+. Scan screen: "Scan with camera"
+  (html5-qrcode 2.3.8, cdnjs, loaded on first use); USB 2D scanners type into the box as before.

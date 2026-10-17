@@ -5309,6 +5309,20 @@ const PROFILES = {
           w.prodBuildSummary({ components: [], _bom: [{ material: 'PB', color: 'Nothing Like This', thickness: 6, faces: 2, boardsNeeded: 5 }], _services: {}, hardware: [] });
           return [/no quotation number/.test(msg), w.prodState.summary.materials[0].unit];
         }, [true, 'pc']);
+        // 2026-10-17: labels are QR (same short scan code), company logo in the centre, piece drawing.
+        check('Labels: QR labels carry the scan code, the quotation company\'s logo and the edge counts', () => {
+          const w = window, keep = w._prodPrintWindow; let body = '';
+          w._prodPrintWindow = (t, b) => { body = b; };
+          try {
+            const jo = w._joBuild({ components: [{ area: 'A', name: 'Door', material: 'PB', thickness: 18, length: 700, width: 400, qty: 1, ebt: '1l' }],
+              hardware: [], holeSchedule: [] }, { joNumber: 'JO-X1-V1', company: 'Cebu World Laminate, Inc.' });
+            w._joPrintLabels(jo);
+          } finally { w._prodPrintWindow = keep; }
+          const m = body.match(/JoLabels\.render\(document\.getElementById\("jl"\),(.*)\);\}\);/);
+          const pl = m ? JSON.parse(m[1]) : null;
+          return { lib: /qrcode-generator/.test(body) && /jo-labels\.js/.test(body), logo: pl && /co-cwl\.png$/.test(pl.logo),
+                   scan: pl && pl.labels[0].scan, edges: pl && [pl.labels[0].sc, pl.labels[0].lc], noBarcode: !/JsBarcode/.test(body) };
+        }, { lib: true, logo: true, scan: 'X1-V1-P1-01', edges: [0, 1], noBarcode: true });
         check('E2E 4: barcode IDs carry no spaces or symbols from the cabinet name', () => {
           const jo = window._joBuild({ components: [{ area: 'MASTERS BEDROOM › 88T-2S 22.5H', name: 'Side', material: 'PB',
             thickness: 18, length: 700, width: 500, qty: 1, ebt: '' }], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-B1' });
