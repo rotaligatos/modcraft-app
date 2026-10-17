@@ -232,6 +232,15 @@ const PROFILES = {
         check('Read drawing: prompt names the row size and the other rows; lm = sum of the listed cuts', () => res,
               [true, true, 'Routeriing (Special Cut) × 2.688 lm']);
       }
+      // 2026-10-17: GEFFY's tapered doors were routed SCUT → TPR with "45 DEG" as a special cut.
+      if (typeof window._joBuild === 'function')
+        check('Job Order: a 45° hand-grab taper goes CUT → TPR, never special cut', () => {
+          const c = { area: 'Cabinet 1', name: 'TD-D2-Door Panel', material: 'MDF', thickness: 18, length: 488, width: 224, qty: 2, ebt: '',
+            notes: 'With 45 Deg. Hand Grab Tapering-Top-Long Side', services: [{ service: 'Handgrab tapering', qty: 0.976, unit: 'lm', side: 'length' }] };
+          const shaker = { area: 'Cabinet 1', name: 'Shaker door', material: 'MDF', thickness: 18, length: 700, width: 400, qty: 1, ebt: '' };
+          const jo = window._joBuild({ components: [c, Object.assign({}, c, { services: undefined }), shaker], hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1' });
+          return jo.parts.map(p => (p.special || '-') + ' ' + p.route.join('>'));
+        }, ['- CUT>TPR>ASM>QC>PACK', '- CUT>TPR>ASM>QC>PACK', 'SHAKER SCUT>ASM>QC>PACK']);
       // 2026-10-17: GEFFY EVANGELISTA (OpenCutList report, 52 pieces) — with rotation allowed the
       // single greedy pass needed 4 boards, without it 3. The packer now tries several orders (and
       // no rotation) and keeps the best, so it is never worse than the old pass.
@@ -5344,8 +5353,8 @@ const PROFILES = {
               { area: 'K', name: 'Side', material: 'MDF HPL', thickness: 18, length: 700, width: 560, qty: 1, ebt: '', notes: 'HPL' }],
             hardware: [], holeSchedule: [] }, { joNumber: 'JO-T-V1', hplOrder: 'cut_first' });
           return { special: r.parts[0].special, routes: r.parts.map(p => p.route.join('>')), mdfCutFirst: cutFirst.parts[0].route.join('>') };
-        }, { special: 'TAPERING',
-             routes: ['SCUT>MHPL>EBB>ASM>QC>PACK', 'HPL>CURE>CUT>EBB>DRL>ASM>QC>PACK', 'CUT>ASM>QC>PACK'],
+        }, { special: '',      // 2026-10-17: a taper is TPR's work, not special cut
+             routes: ['CUT>MHPL>EBB>TPR>ASM>QC>PACK', 'HPL>CURE>CUT>EBB>DRL>ASM>QC>PACK', 'CUT>ASM>QC>PACK'],
              mdfCutFirst: 'CUT>MHPL>ASM>QC>PACK' });
         check('Job Order: same content = same signature across versions; a change breaks it', () => {
           const a = window._joBuild(res, { joNumber: 'JO-T-V1' }), b = window._joBuild(res, { joNumber: 'JO-T-V2' });
