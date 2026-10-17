@@ -258,6 +258,33 @@ const PROFILES = {
           const best = window.guillotinePackBoards(pcs, 1220, 2440, 3, false);
           return [r.boardsNeeded, overlap, inside, seq.dir, seq.ripCount, seq.splitCount, /side by side/.test(seq.steps.join(' ')), best.boardsNeeded];
         }, [1, false, true, 'L', 1, 1, true, 1]);
+      // 2026-10-17: the cutting-list grid selects like Excel — a selected block takes one pasted value in
+      // every cell, Delete clears it.
+      if (window.MCL && typeof window.MCL._sel === 'function')
+        check('cutting list: paste fills a selected block, Delete clears it', () => {
+          const S = window.MCL.state(), keep = S.panels, keepR = window.renderProductionPage;
+          try {
+            window.renderProductionPage = () => {};
+            S.panels = [0, 1, 2].map(i => ({ group: 'G' + i, part: '', mat: 'M' + i, th: 18, qty: 1, L: 100, W: 50, ebt: '', emat: '', grain: '', svcs: [], remark: '' }));
+            window.MCL._sel({ ar: 0, ac: 0, fr: 1, fc: 1 });   // Cabinet..Material, rows 0-1
+            window.MCL.onCellPaste({ clipboardData: { getData: () => 'X' }, preventDefault() {} }, 0, 'group');
+            const filled = S.panels.map(p => p.group + p.mat).join(',');
+            window.MCL._sel({ ar: 1, ac: 0, fr: 2, fc: 0 });
+            window.MCL.onCellKey({ key: 'Delete', target: {}, preventDefault() {} }, 1, 'group');
+            return [filled, S.panels.map(p => p.group).join(',')];
+          } finally { S.panels = keep; window.renderProductionPage = keepR; window.MCL._sel(null); }
+        }, ['XX,XX,G2M2', 'X,,']);
+      // 2026-10-17: LIMSHEN — remark text that wraps onto its own lines in a PDF was read as a cabinet
+      // name, the HARDWARE list items too; PROJECT NAME lines are the cabinets.
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function')
+        check('client list: wrapped remark lines stay remarks; PROJECT NAME is the cabinet; HARDWARE items are not', () => {
+          const aoa = [['PROJECT NAME: RECEPTION DESK'], ['LABEL', 'QTY', 'DESCRIPTION', 'H', 'W', 'T', 'BOARD COLOR', 'EDGING', 'REMARKS'],
+            ['', '', '', '', '', '', '', '', 'WITH 2-PLASTIC GROMMET 59MM / MINIFIX'], ['', 4, 'TABLE TOP', 1600, 600, 18, 'WHITE', 'ALL SIDES', ''],
+            ['', '', '', '', '', '', '', '', 'TYPE'], ['', 4, 'BASE BOARD', 1550, 100, 18, 'WHITE', '2H', 'SCREW TYPE BY CLIENT'],
+            ['', 'HARDWARE:', '', '', '', '', '', '', ''], ['', 'MINIFIX SET', '', '', '', '', '', '', ''],
+            ['', 'PROJECT NAME: CLOSET CABINET', '', '', '', '', '', '', ''], ['', 1, 'CAB-TOP', 600, 382, 18, 'WHITE', 'ALL SIDES', '']];
+          return window.CLR.readClientSheet(aoa).rows.map(r => r.group + ' | ' + r.part + ' | ' + (r.remark || ''));
+        }, ['RECEPTION DESK | TABLE TOP | WITH 2-PLASTIC GROMMET 59MM / MINIFIX TYPE', 'RECEPTION DESK | BASE BOARD | SCREW TYPE BY CLIENT', 'CLOSET CABINET | CAB-TOP | ']);
       // 2026-10-17: GEFFY's tapered doors were routed SCUT → TPR with "45 DEG" as a special cut.
       if (typeof window._joBuild === 'function')
         check('Job Order: a 45° hand-grab taper goes CUT → TPR, never special cut', () => {
