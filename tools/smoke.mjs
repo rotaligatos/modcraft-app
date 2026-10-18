@@ -6102,6 +6102,12 @@ const PROFILES = {
         } finally { w.gUser = keep.u; w.pendingOrders = keep.po; w.orderFilesMap = keep.m; w._TRN = keep.trn; w._ofSet = keep.set;
           try { w.MCL.importRows([w.MCL.blankPanel()], [], '', 'replace'); } catch (e) {} }
       }, { onGoingDefault: '__me', mineOnGoing: ['A'], newCount: 1, newDefault: '', afterAdd: 2, afterReplace: 1, marked: ['a.xlsx:imported', 'b.pdf:imported'] });
+      check('Job Order prints NOT FOR PRODUCTION until released (with the reason); labels the same', () => {
+        const w = window, S = (st, stage) => w._joProdState({ stage }, st);
+        const r = { initial: S('reserved', 'initial'), finalRes: S('reserved', 'final'), ready: S('ready', 'final'), released: S('released', 'final') };
+        return { initial: r.initial.reason, finalRes: r.finalRes.reason, ready: r.ready.reason, released: r.released.ok, labelsGetReason: String(w.printJobOrder).indexOf('_joPrintLabels(row.data,ps.ok?false:ps.reason)') >= 0 };
+      }, { initial: 'Initial Quotation — waiting for client approval', finalRes: 'Final Quotation — waiting for payment (release in KEYSTONE)',
+           ready: 'Final Quotation — waiting for payment (release in KEYSTONE)', released: true, labelsGetReason: true });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',

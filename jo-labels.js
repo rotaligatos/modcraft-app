@@ -71,7 +71,7 @@
     return '<div class="lb">'
       + '<div class="top"><span class="nm">' + e(l.name) + '</span><span class="pn">' + e(l.p) + '</span></div>'
       + ((l.order || l.client || l.project) ? '<div class="cp">' + e([l.order, l.client, l.project].filter(Boolean).join(' · ')) + '</div>' : '')
-      + '<div class="mid">' + (draft ? '<div class="dr">DRAFT<small>preview — not for production</small></div>' : qrSvg(qrText(l), logo)) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc, l.grain)
+      + '<div class="mid">' + (draft ? '<div class="dr">' + (draft === true ? 'DRAFT' : 'NOT FOR PRODUCTION') + '<small>' + (draft === true ? 'preview — not for production' : e(draft)) + '</small></div>' : qrSvg(qrText(l), logo)) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc, l.grain)
       + '<div class="eb">' + (banded ? '<b style="color:#dc2626">━</b> edge band ' + e(l.ebt || '') + (l.tape ? ' · ' + e(l.tape) : '') : 'no edge band') + '</div></div></div>'
       + '<div class="sz">Cut ' + e(l.cutL) + ' × ' + e(l.cutW) + '</div>'
       + '<div class="mt">' + e(l.material) + '</div>'
@@ -94,7 +94,7 @@
     css: CSS, qrText: qrText, qrSvg: qrSvg, pieceSvg: pieceSvg, labelHtml: labelHtml,
     render: function (el, o) {
       if (!document.getElementById('jl-css')) { var st = document.createElement('style'); st.id = 'jl-css'; st.textContent = CSS; document.head.appendChild(st); }
-      el.innerHTML = '<div class="jl-grid">' + (o.labels || []).map(function (l) { return labelHtml(l, o.logo || '', !!o.draft); }).join('') + '</div>';
+      el.innerHTML = '<div class="jl-grid">' + (o.labels || []).map(function (l) { return labelHtml(l, o.logo || '', o.draft || false); }).join('') + '</div>';
     }
   };
 })(typeof window !== 'undefined' ? window : this);
