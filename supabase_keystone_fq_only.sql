@@ -89,3 +89,6 @@ $$;
 -- sched_set_target(serial,date,note) — company-scoped, staff only, logged in activity_log.
 -- sched_e2e() also returns plant (MSSI/CWLI from the gate's destination), cap (pmes_stage_capacity for that plant),
 -- jo.load (cutting/edge banding lm, holes, extra services from job_orders.data.services) and tgt.
+-- 2026-10-18 pmes_attach_job_order(jo_id) + trigger jo_ready_attach on job_orders: a Job Order that becomes ready
+-- AFTER release attaches to the (empty) PMES job — job code becomes the JO number, mother JO, parts, stages.
+-- Only while the PMES job has no parts. Repaired QT-X00000006: JO-261018-D34A → JO-X00000006-V1, 143 parts.
