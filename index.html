@@ -18284,6 +18284,13 @@ function renderOrdersTabs(){
     // rather than leaving you to guess which tab your order is sitting in.
     var n=pendingOrders.filter(t.match).filter(_orderPassesFilters).length;
     var on=(t.key===cur);
+    if(t.key==='all'&&_ofQueueOn()){
+      var fn=_ofWaitingItems().filter(function(x){ return _orderPassesFilters(x.o); }).length, fon=(cur==='files');
+      h+='<button onclick="setOrdersTab(\'files\')" style="border:none;background:none;cursor:pointer;'
+        +'padding:8px 14px;font-size:13px;font-weight:'+(fon?'600':'500')+';color:'+(fon?'var(--navy)':'var(--text2)')+';'
+        +'border-bottom:2px solid '+(fon?'var(--navy)':'transparent')+';margin-bottom:-1px"><i class="ti ti-paperclip"></i> Files waiting'
+        +(fn?' <span class="pill pill-amber" style="font-size:10px">'+fn+'</span>':'')+'</button>';
+    }
     h+='<button onclick="setOrdersTab(\''+t.key+'\')" style="border:none;background:none;cursor:pointer;'
       +'padding:8px 14px;font-size:13px;font-weight:'+(on?'600':'500')+';'
       +'color:'+(on?'var(--navy)':'var(--text2)')+';'
@@ -18386,8 +18393,16 @@ function _apprQuotLink(n,size){
     +'text-decoration:underline;font-family:ui-monospace,monospace;font-size:'+(size||12)+'px">'
     +escHtml(se)+'</span></a>'+optBadge;
 }
+function _ofQueueOn(){ return !!(window._TRN||(typeof supaReady==='function'&&supaReady())); }
 function renderOrders(){
+  if(_ofQueueOn()&&Date.now()-_orderFilesLoadedAt>20000){
+    gLoadOrderFiles().then(function(){ if(el('orders-wrap')) renderOrders(); });
+  }
   renderOrdersTabs();
+  if(((el('orders-filter')||{}).value||'')==='files'){
+    var fw=el('orders-wrap'); if(fw) renderOrderFilesWaiting(fw);
+    return;
+  }
   _ensureChannelSprite();   // the MSSI mark each website order's pill points at
   var wrap=el('orders-wrap'); if(!wrap) return;
   var filter=(el('orders-filter')||{}).value||'new';
@@ -18516,9 +18531,11 @@ function renderOrders(){
       if(!_p) continue;
       var _nm=((typeof _a==='object'&&_a.name)?_a.name:'')||('File '+(_ai+1));
       if(_nm.length>26) _nm=_nm.slice(0,24)+'…';
-      attachHtml+='<button class="btn" onclick="viewOrderAttachment(\''+escHtml(_p.replace(/'/g,"\\'"))+'\')" '
-        +'title="'+escHtml((typeof _a==='object'&&_a.name)?_a.name:_p)+'" '
-        +'style="font-size:11px;padding:2px 8px"><i class="ti ti-paperclip"></i> '+escHtml(_nm)+'</button> ';
+      attachHtml+='<div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:2px 0">'
+        +'<button class="btn" onclick="viewOrderAttachment(\''+escHtml(_p.replace(/'/g,"\\'"))+'\')" '
+        +'title="'+escHtml((typeof _a==='object'&&_a.name)?_a.name:_p)+' — look only" '
+        +'style="font-size:11px;padding:2px 8px"><i class="ti ti-paperclip"></i> '+escHtml(_nm)+'</button>'
+        +(_ofQueueOn()?_ofStatusHtml(o,{key:_p,name:(typeof _a==='object'&&_a.name)?_a.name:_nm}):'')+'</div>';
     }
     // A cutting-list order is summarised by its contents, not by yes/no service flags.
     var _cutSummary='';
@@ -19389,6 +19406,319 @@ function _closeAttachmentViewer(){
   var b=el('ov-att-body'); if(b) b.innerHTML='';
   if(_attBlobUrl){ URL.revokeObjectURL(_attBlobUrl); _attBlobUrl=null; }
   var dl=el('ov-att-dl'); if(dl){ dl.href='#'; dl.removeAttribute('download'); dl.style.display='none'; }
+}
+
+// ── Order file queue (2026-10-18) ──────────────────────────────────────────────────────────
+// Every attachment on an order is a queue item: Waiting → Taken by <user> → Imported →
+// Reflected into <serial>, or Needs a person (reason), or Done (a drawing/other file that needs
+// no import). Stored in Supabase table order_files (a file with no row is Waiting); the claim
+// rules live in the database (order_file_claim): someone else's claim can be taken over by
+// Supervisor and up any time, by anyone after 2 hours, and every takeover is kept in history.
+// Rommel, 2026-10-18: import runs when a person OPENS the file (nothing unattended); a claim
+// moves no credit — Prepared by, Team performance and the order's Handled by stay as they are.
+var orderFilesMap={};          // orderId+'\n'+fileKey → order_files row
+var _orderFilesLoadedAt=0;
+var ORDER_FILE_TAKEOVER_MS=2*3600*1000;
+var ORDER_FILE_STATUS={
+  waiting:{t:'Waiting',c:'pill-muted',i:'ti-clock'},
+  taken:{t:'Taken',c:'pill-navy',i:'ti-hand-grab'},
+  imported:{t:'Imported',c:'pill-teal',i:'ti-table-import'},
+  reflected:{t:'Reflected',c:'pill-teal',i:'ti-check'},
+  needs_person:{t:'Needs a person',c:'pill-amber',i:'ti-alert-triangle'},
+  done:{t:'Done',c:'pill-muted',i:'ti-check'}
+};
+var ORDER_FILE_LABEL={cutting_list:'Cutting list',drawing:'Drawing',other:'Other',unknown:''};
+function _ofKey(oid,k){ return String(oid)+'\n'+String(k); }
+// The files of one order, in the same order the card lists them.
+function _ofFiles(o){
+  var a=(o.attachAll&&o.attachAll.length)?o.attachAll
+        :[o.attach1,o.attach2].filter(Boolean).map(function(u){return {path:u,name:''};});
+  var out=[];
+  a.forEach(function(x,i){
+    var p=(typeof x==='string')?x:((x&&(x.path||x.url))||'');
+    if(!p) return;
+    var nm=((x&&typeof x==='object'&&x.name)?x.name:'')||'';
+    if(!nm){ var m=p.match(/[^\/?#]+(?=$|[?#])/); nm=(p.indexOf('supabase://')===0&&m)?m[0]:('File '+(i+1)); }
+    out.push({key:p,name:nm,idx:out.length});
+  });
+  return out;
+}
+function _ofRow(o,f){ return orderFilesMap[_ofKey(o.id,f.key)]||null; }
+// A first guess from the name, before the file is read.
+function _ofLabelGuess(name){
+  var n=String(name||'').toLowerCase();
+  if(/\.(xlsx|xls|xlsm|csv)$/.test(n)) return 'cutting_list';
+  if(/\.(png|jpe?g|gif|webp|heic|bmp|tiff?|dwg|dxf|skp)$/.test(n)) return 'drawing';
+  if(/\.pdf$/.test(n)) return 'unknown';
+  return 'other';
+}
+function _ofReadable(name){ return /\.(xlsx|xls|xlsm|csv|pdf)$/i.test(String(name||'')); }
+function _ofStatusOf(o,f){ var r=_ofRow(o,f); return r?r.status:'waiting'; }
+function _ofOpen(st){ return st==='waiting'||st==='taken'||st==='needs_person'; }
+function _ofMe(){ return (gUser&&(gUser.name||gUser.email))||''; }
+function _ofMyEmail(){ return String((gUser&&gUser.email)||'').trim().toLowerCase(); }
+function _ofCanOverride(){ return ['Supervisor','Manager','Director','Admin'].indexOf(currentRole)>=0; }
+// The quotation an order's actions are logged against: the real serial, else none.
+function _ofLogSerial(o){ var s=String((o&&o.quotSerial)||'').trim(); return (s&&!/^DRAFT-/.test(s))?s:''; }
+
+// ── storage: Supabase, or this browser's practice copy in training ──
+function _ofTrnStore(){ try{ return JSON.parse(localStorage.getItem('mc_trn_order_files')||'{}')||{}; }catch(e){ return {}; } }
+function _ofTrnSave(m){ try{ localStorage.setItem('mc_trn_order_files',JSON.stringify(m)); }catch(e){} }
+function gLoadOrderFiles(force){
+  if(!force&&Date.now()-_orderFilesLoadedAt<20000) return Promise.resolve(orderFilesMap);
+  _orderFilesLoadedAt=Date.now();
+  if(window._TRN){ orderFilesMap=_ofTrnStore(); return Promise.resolve(orderFilesMap); }
+  if(!supaReady()) return Promise.resolve(orderFilesMap);
+  return supa.from('order_files').select('order_id,file_key,file_name,label,status,reason,claimed_by,claimed_by_email,claimed_at,imported_by,imported_at,reflected_serial,reflected_at,updated_at')
+    .then(function(r){
+      if(r.error){ console.warn('[order files] load failed',r.error.message); return orderFilesMap; }
+      var m={}; (r.data||[]).forEach(function(x){ m[_ofKey(x.order_id,x.file_key)]=x; });
+      orderFilesMap=m; return m;
+    }).catch(function(e){ console.warn('[order files] load failed',e); return orderFilesMap; });
+}
+// Training mirror of order_file_claim — same rules, this browser only.
+function _ofTrnClaim(oid,key,name,who,force){
+  var m=_ofTrnStore(), k=_ofKey(oid,key), r=m[k]||{order_id:oid,file_key:key,file_name:name,label:'unknown',status:'waiting',history:[]};
+  var me=_ofMyEmail();
+  var held=(r.status==='taken'||r.status==='needs_person')&&r.claimed_by_email&&r.claimed_by_email!==me;
+  var finished=['imported','reflected','done'].indexOf(r.status)>=0;
+  var canTake=_ofCanOverride()||(Date.now()-Date.parse(r.claimed_at||0))>=ORDER_FILE_TAKEOVER_MS;
+  if(held&&(!force||!canTake)) return {ok:false,held:true,by:r.claimed_by,since:r.claimed_at,can_take:canTake,status:r.status};
+  if(finished&&!force) return {ok:false,finished:true,status:r.status,by:r.imported_by||r.claimed_by,at:r.reflected_at||r.imported_at||r.claimed_at,serial:r.reflected_serial};
+  var from=r.claimed_by, prev=r.status;
+  r.history=(r.history||[]).concat([{event:held?'takeover':(finished?'reopen':'claim'),by:who,at:new Date().toISOString(),from:(held||finished)?from:null,prev_status:prev}]);
+  r.file_name=name||r.file_name; r.status='taken'; r.reason=null; r.claimed_by=who; r.claimed_by_email=me; r.claimed_at=new Date().toISOString();
+  m[k]=r; _ofTrnSave(m); orderFilesMap[k]=r;
+  return {ok:true,takeover:!!held,reopened:finished,from:from,prev_status:prev};
+}
+function _ofTrnSet(oid,key,status,label,reason,serial,who){
+  var m=_ofTrnStore(), k=_ofKey(oid,key), r=m[k];
+  if(!r) return {ok:false,why:'not claimed'};
+  if(r.claimed_by_email!==_ofMyEmail()&&!_ofCanOverride()) return {ok:false,why:'held by '+(r.claimed_by||'someone else')};
+  var now=new Date().toISOString();
+  if(status){ r.status=status; r.reason=reason||null; }
+  if(label) r.label=label;
+  if(status==='imported'){ r.imported_by=who; r.imported_at=now; }
+  if(status==='reflected'){ r.reflected_serial=serial; r.reflected_at=now; }
+  r.history=(r.history||[]).concat([{event:status||'label',by:who,at:now,label:label,reason:reason,serial:serial}]);
+  m[k]=r; _ofTrnSave(m); orderFilesMap[k]=r;
+  return {ok:true};
+}
+function _ofClaim(o,f,force){
+  var who=_ofMe();
+  if(window._TRN) return Promise.resolve(_ofTrnClaim(o.id,f.key,f.name,who,!!force));
+  if(!supaReady()) return Promise.resolve({ok:false,why:'Connect to the fast database first (Settings → Company & DB).'});
+  return supa.rpc('order_file_claim',{p_order:String(o.id),p_key:f.key,p_name:f.name,p_who:who,p_force:!!force})
+    .then(function(r){
+      if(r.error) return {ok:false,why:r.error.message};
+      return r.data||{ok:false,why:'no answer'};
+    }).then(function(res){ return gLoadOrderFiles(true).then(function(){ return res; }); })
+    .catch(function(e){ return {ok:false,why:e.message||String(e)}; });
+}
+function _ofSet(o,f,status,label,reason,serial){
+  var who=_ofMe();
+  var done=function(res){ if(typeof renderOrders==='function'&&el('orders-wrap')) renderOrders(); return res; };
+  if(window._TRN) return Promise.resolve(done(_ofTrnSet(o.id,f.key,status,label,reason,serial,who)));
+  if(!supaReady()) return Promise.resolve({ok:false,why:'not connected'});
+  return supa.rpc('order_file_set',{p_order:String(o.id),p_key:f.key,p_status:status||null,p_label:label||null,
+      p_reason:reason||null,p_serial:serial||null,p_who:who})
+    .then(function(r){
+      var res=r.error?{ok:false,why:r.error.message}:(r.data||{ok:false});
+      if(!res.ok) console.warn('[order files] could not record',status,res.why);
+      return gLoadOrderFiles(true).then(function(){ return done(res); });
+    }).catch(function(e){ console.warn('[order files] could not record',e); return {ok:false,why:String(e)}; });
+}
+function _ofFind(orderId,key){
+  var o=null;
+  for(var i=0;i<pendingOrders.length;i++) if(String(pendingOrders[i].id)===String(orderId)){ o=pendingOrders[i]; break; }
+  if(!o) return null;
+  var fs=_ofFiles(o), f=null;
+  for(var j=0;j<fs.length;j++) if(fs[j].key===key){ f=fs[j]; break; }
+  return f?{o:o,f:f}:null;
+}
+
+// ── fetch the file itself ──
+function _ofFetchFile(f){
+  var p=f.key;
+  if(p.indexOf('supabase://')===0){
+    var path=p.replace(/^supabase:\/\/order-attachments\//,'');
+    if(window._TRN||!supaReady()) return Promise.reject(new Error('Connect to the fast database first.'));
+    return supa.storage.from('order-attachments').download(path).then(function(r){
+      if(r.error||!r.data) throw new Error((r.error&&r.error.message)||'download failed');
+      return new File([r.data],f.name,{type:r.data.type||''});
+    });
+  }
+  var id=_driveFileId(p);
+  if(!id) return Promise.reject(new Error('This is an old Wufoo link, not a Drive file — open it by hand.'));
+  if(!gToken) return Promise.reject(new Error('Sign in to Google first.'));
+  return gApiFetch('https://www.googleapis.com/drive/v3/files/'+id+'?fields=name%2CmimeType&supportsAllDrives=true')
+    .then(function(meta){
+      if(meta&&meta.error) throw new Error(meta.error.message||'Drive refused the file');
+      var nm=(meta&&meta.name)||f.name;
+      return _driveApiFetchBlob('https://www.googleapis.com/drive/v3/files/'+id+'?alt=media&supportsAllDrives=true')
+        .then(function(b){ return new File([b],nm,{type:(meta&&meta.mimeType)||b.type||''}); });
+    });
+}
+
+// ── make the order's quotation the open one, so the import lands where it belongs ──
+function _ofEnsureQuotation(o){
+  var linked=String(o.quotSerial||'').trim();
+  var isMine=function(){ return String(qSourceOrderId||'')===String(o.id); };
+  if(isMine()) return Promise.resolve(true);
+  var wait=function(test,ms){ return new Promise(function(res){ var t0=Date.now();
+    (function tick(){ if(test()) return res(true); if(Date.now()-t0>ms) return res(false); setTimeout(tick,200); })(); }); };
+  if(linked&&!/^DRAFT-/.test(linked)){
+    openQuotationFromOrder(linked);
+    return wait(function(){ return _serialRoot(qSerial||'')===_serialRoot(linked); },20000);
+  }
+  _exportOrderToQuotationForced(o.id);
+  return wait(function(){ return isMine()&&el('cl-name')&&String(el('cl-name').value||'')===String(o.clientName||el('cl-name').value||''); },20000);
+}
+
+// ── the main action: open a file to work on it ──
+function orderFileWork(orderId,key,force){
+  var hit=_ofFind(orderId,key); if(!hit){ showToast('File not found on that order.'); return; }
+  var o=hit.o, f=hit.f;
+  _ofClaim(o,f,force).then(function(res){
+    if(!res.ok){
+      if(res.held){
+        var since=res.since?fmtDT(res.since):'';
+        if(res.can_take){
+          _confirm('“'+f.name+'” is being worked on by '+(res.by||'someone else')+(since?' (since '+since+')':'')+'.\n\n'
+            +'Take it over? Both names are recorded.',function(){ orderFileWork(orderId,key,true); },function(){});
+        } else {
+          showToast((res.by||'Someone else')+' is working on '+f.name+(since?' since '+since:'')+'. You can take it over after 2 hours, or ask a Supervisor/Manager.');
+        }
+        return;
+      }
+      if(res.finished){
+        var what=res.status==='reflected'?('reflected into '+(res.serial||'a quotation')):(res.status==='done'?'marked done':'imported');
+        _confirm('“'+f.name+'” was already '+what+(res.by?' by '+res.by:'')+(res.at?' ('+fmtDT(res.at)+')':'')+'.\n\n'
+          +'Open it again? Importing it twice puts the same pieces in twice.',function(){ orderFileWork(orderId,key,true); },function(){});
+        return;
+      }
+      showToast('Could not take the file: '+(res.why||'unknown reason'));
+      return;
+    }
+    var serial=_ofLogSerial(o);
+    logActivity((res.takeover?'Took over':(res.reopened?'Reopened':'Took'))+' order #'+o.id+' file “'+f.name+'”'
+      +(res.takeover&&res.from?' from '+res.from:''),serial);
+    if(typeof renderOrders==='function'&&el('orders-wrap')) renderOrders();
+    var guess=_ofLabelGuess(f.name);
+    if(!_ofReadable(f.name)){
+      // A picture, a CAD file or a document: nothing to import — open it to look at.
+      _ofSet(o,f,'taken',guess==='unknown'?'other':guess,null,null);
+      viewOrderAttachment(f.key);
+      showToast('Opened '+f.name+' — press “Done” on the order when it no longer needs anyone.');
+      return;
+    }
+    showToast('Fetching '+f.name+'…');
+    Promise.all([_ofFetchFile(f),_ofEnsureQuotation(o)]).then(function(r){
+      var file=r[0];
+      if(!r[1]) showToast('Order #'+o.id+'’s quotation did not open in time — the list is imported into the cutting list; check which quotation is open before reflecting.');
+      prodTab='cutlist';
+      navigate('production'); setProdTab('cutlist');
+      var ctx={orderId:String(o.id),key:f.key,name:f.name};
+      return CLR.open({files:[file]},ctx).then(function(){
+        var a=CLR.assess();
+        if(a.label==='drawing'){
+          _ofSet(o,f,'needs_person','drawing','No cutting-list table — a drawing'+(a.aiOffer?'; “Read with AI” can read its parts tables':'')+'. Type the parts in, or read it with AI.',null);
+          return;
+        }
+        if(!a.ok){
+          _ofSet(o,f,'needs_person',a.label,a.reasons.join('; '),null);
+          showToast('Check the import window — '+a.reasons[0]);
+          return;
+        }
+        // Read cleanly: import, load into analysis, record it.
+        _ofSet(o,f,null,'cutting_list',null,null);
+        CLR.commit();
+      });
+    }).catch(function(e){
+      _ofSet(o,f,'needs_person',_ofLabelGuess(f.name),'Could not open the file: '+(e.message||e),null);
+      showToast('Could not open '+f.name+': '+(e.message||e));
+    });
+  });
+}
+// Called by CLR.commit when the rows came from a queued order file.
+function _orderFileImported(ctx,rows){
+  var hit=_ofFind(ctx.orderId,ctx.key); if(!hit) return;
+  _ofSet(hit.o,hit.f,'imported','cutting_list',null,null);
+  logActivity('Imported order #'+hit.o.id+' file “'+hit.f.name+'” into the cutting list — '+rows+' rows',_ofLogSerial(hit.o));
+  try{ MCL.load(); }catch(e){ console.warn('[order files] load into analysis failed',e); }
+}
+// Called by reflect when the analysis came from a queued order file.
+function _orderFileReflected(ctx,serial){
+  var hit=_ofFind(ctx.orderId,ctx.key); if(!hit) return;
+  _ofSet(hit.o,hit.f,'reflected','cutting_list',null,serial||'');
+  logActivity('Reflected order #'+hit.o.id+' file “'+hit.f.name+'” into '+(serial&&!/^DRAFT-/.test(serial)?serial:'the quotation (not yet numbered)'),
+    (serial&&!/^DRAFT-/.test(serial))?serial:_ofLogSerial(hit.o));
+}
+function orderFileDone(orderId,key){
+  var hit=_ofFind(orderId,key); if(!hit) return;
+  var o=hit.o, f=hit.f, r=_ofRow(o,f);
+  var finish=function(){
+    _ofSet(o,f,'done',null,null,null).then(function(res){
+      if(res&&res.ok) logActivity('Order #'+o.id+' file “'+f.name+'” marked done (no import needed)',_ofLogSerial(o));
+      else showToast('Could not mark it done: '+((res&&res.why)||''));
+    });
+  };
+  if(!r||!(r.status==='taken'||r.status==='needs_person')||r.claimed_by_email!==_ofMyEmail()){
+    // Take it first (same rules), then mark it.
+    _ofClaim(o,f,false).then(function(res){ if(res.ok) finish(); else showToast(res.held?((res.by||'Someone')+' has this file.'):'Could not take the file.'); });
+    return;
+  }
+  finish();
+}
+// The small status line under each attachment button.
+function _ofStatusHtml(o,f){
+  var r=_ofRow(o,f), st=r?r.status:'waiting', s=ORDER_FILE_STATUS[st]||ORDER_FILE_STATUS.waiting;
+  var lbl=ORDER_FILE_LABEL[(r&&r.label&&r.label!=='unknown')?r.label:_ofLabelGuess(f.name)]||'';
+  var who='';
+  if(st==='taken'||st==='needs_person') who=(r.claimed_by?' — '+escHtml(r.claimed_by):'')+(r.claimed_at?' · '+fmtDT(r.claimed_at):'');
+  if(st==='imported') who=(r.imported_by?' — '+escHtml(r.imported_by):'')+(r.imported_at?' · '+fmtDT(r.imported_at):'');
+  if(st==='reflected'){ var sr=r.reflected_serial||''; if(/^DRAFT-/.test(sr)&&_ofLogSerial(o)) sr=_ofLogSerial(o);
+    who=' into '+escHtml(sr&&!/^DRAFT-/.test(sr)?sr:'the quotation')+(r.reflected_at?' · '+fmtDT(r.reflected_at):''); }
+  var oid=escHtml(String(o.id).replace(/'/g,"\\'")), k=escHtml(f.key.replace(/\\/g,'\\\\').replace(/'/g,"\\'"));
+  return '<span style="font-size:11px;color:var(--text2)">'
+    +(lbl?'<span class="pill pill-muted" style="font-size:10px">'+lbl+'</span> ':'')
+    +'<span class="pill '+s.c+'" style="font-size:10px" title="'+escHtml(st==='needs_person'?(r&&r.reason)||'':'')+'"><i class="ti '+s.i+'"></i> '+s.t+'</span>'+who
+    +(st==='needs_person'&&r&&r.reason?' <span style="color:var(--pill-amber)">'+escHtml(String(r.reason).slice(0,140))+'</span>':'')
+    +(_ofOpen(st)?' <button class="btn" style="font-size:11px;padding:1px 7px" onclick="orderFileWork(\''+oid+'\',\''+k+'\')"><i class="ti ti-player-play"></i> '+(st==='waiting'?'Work on it':'Open')+'</button>'
+       +' <button class="btn" style="font-size:11px;padding:1px 7px" title="No import needed (e.g. a drawing for reference)" onclick="orderFileDone(\''+oid+'\',\''+k+'\')">Done</button>':'')
+    +'</span>';
+}
+// "Files waiting": every unprocessed file across the queue, oldest order first.
+function _ofWaitingItems(){
+  var out=[];
+  pendingOrders.forEach(function(o){
+    if(o.status==='Cancelled'||o.status==='Archived') return;
+    _ofFiles(o).forEach(function(f){ var st=_ofStatusOf(o,f); if(_ofOpen(st)) out.push({o:o,f:f,st:st}); });
+  });
+  out.sort(function(a,b){ return (Date.parse(a.o.receivedAt||'')||0)-(Date.parse(b.o.receivedAt||'')||0); });
+  return out;
+}
+function renderOrderFilesWaiting(wrap){
+  var items=_ofWaitingItems().filter(function(x){ return _orderPassesFilters(x.o); });
+  if(!window._TRN&&!supaReady()){
+    wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i><div>File status lives in the fast database — connect in Settings → Company &amp; DB to see who has which file.</div></div>';
+    return;
+  }
+  if(!items.length){ wrap.innerHTML='<div class="card"><div class="card-body" style="font-size:13px;color:var(--text2)">No files waiting — every attachment is imported, reflected or marked done.</div></div>'; return; }
+  var th='style="text-align:left;font-size:11px;color:var(--text2);font-weight:600;padding:6px 8px;border-bottom:.5px solid var(--border);white-space:nowrap"';
+  var td='style="font-size:12px;padding:6px 8px;border-bottom:.5px solid var(--border);vertical-align:top"';
+  var h='<div class="card"><div class="card-body" style="padding:0;overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+    +'<tr><th '+th+'>Order</th><th '+th+'>Received</th><th '+th+'>Client</th><th '+th+'>File</th><th '+th+'>Status</th></tr>';
+  items.forEach(function(x){
+    var o=x.o, f=x.f;
+    h+='<tr><td '+td+'><b>#'+escHtml(String(o.id))+'</b></td>'
+      +'<td '+td+'>'+fmtDT(o.receivedAt)+'</td>'
+      +'<td '+td+'>'+escHtml(o.clientName||o.companyName||'—')+(o.projectName?'<div style="font-size:11px;color:var(--text2)">'+escHtml(o.projectName)+'</div>':'')+'</td>'
+      +'<td '+td+'><a href="#" onclick="viewOrderAttachment(\''+escHtml(f.key.replace(/'/g,"\\'"))+'\');return false" title="Look only — does not take it">'+escHtml(f.name)+'</a></td>'
+      +'<td '+td+'>'+_ofStatusHtml(o,f)+'</td></tr>';
+  });
+  h+='</table></div></div>';
+  wrap.innerHTML=h;
 }
 
 function viewOrderAttachment(url){
@@ -38365,6 +38695,7 @@ var MCL=(function(){
               hardware:hw,
               _counts:t};
     },
+    setOrderFile:function(ctx){ S.orderFile=ctx||null; },
     load:function(){
       var cl=MCL.toCl();
       if(!cl.panels.length&&!(cl.hpl||[]).some(function(h){ return !h.cut&&+h.qty>0&&+h.L>0&&+h.W>0; })){ showToast('Add at least one panel row first (or an HPL lamination-only row with size and qty).'); return; }
@@ -38372,6 +38703,8 @@ var MCL=(function(){
       prodLoadStructuredList(payload,'Cutting list — entered in Modcraft');
       if(prodState.result){ prodState.result._bander=prodSettings.banderType||'trimmer'; prodState.result._hplOrder=prodSettings.hplOrder||'laminate_first'; }
       if(prodState.result&&S.drawings&&S.drawings.length) prodState.result.drawings=S.drawings.slice();
+      // Which order attachment these rows came from, so Reflect can record it (order file queue).
+      if(prodState.result) prodState.result._orderFile=S.orderFile||null;
       // An imported client list keeps its original file as the analysis's source (saved at lock).
       if(S.sourceFiles&&S.sourceFiles.length&&prodState.result){
         prodState.file=S.sourceFiles[0]; prodState.fileName=S.sourceFiles[0].name;
@@ -39743,7 +40076,10 @@ function linesToAoa(lines) {
     var flagged=panels.filter(function(p){ return p.remark.indexOf('⚠')>=0; }).length;
     try{ logActivity('Client cutting list imported ('+srcNames.join(', ')+') — '+panels.length+' rows'
       +(hw.length?', '+hw.length+' hardware':'')+(flagged?', '+flagged+' flagged':''),''); }catch(e){}
+    var ofc=ST.ofCtx; ST.ofCtx=null;
+    MCL.setOrderFile(ofc||null);
     closeModal('ov-clr');
+    if(ofc&&typeof _orderFileImported==='function') _orderFileImported(ofc,panels.length+hw.length);
     showToast('✓ Imported '+panels.length+' row'+(panels.length===1?'':'s')+(hw.length?' + '+hw.length+' hardware':'')
       +(flagged?' — '+flagged+' carry a ⚠ remark to check':''));
   }
@@ -39824,11 +40160,14 @@ function linesToAoa(lines) {
         .then(function(){},function(){});
   }
 
-  function open(inputEl){
+  function open(inputEl,ofCtx){
     var files=[].slice.call((inputEl&&inputEl.files)||[]);
-    if(inputEl) inputEl.value='';
+    if(inputEl&&inputEl.tagName) inputEl.value='';
     if(!files.length) return;
-    if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return; }
+    // Set when the file came from an order's attachment queue (orderFileWork); a file picked
+    // by hand clears it, so a later manual import is never recorded against an order.
+    ST.ofCtx=ofCtx||null;
+    if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return Promise.resolve(); }
     ST.files=[]; ST.active=0; ST.matEdit={}; ST.sugg={}; ST.learned={}; ST.rawFiles=files;
     ensureModal();
     el('ov-clr-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Reading '+files.length+' file'+(files.length===1?'':'s')+'…</div>';
@@ -39914,8 +40253,24 @@ function linesToAoa(lines) {
     step(0);
   }
 
+  // Read result of the file(s) just opened: clean (rows, nothing flagged, every material and tape
+  // mapped) or not, with the reasons a person needs. Used by the order file queue.
+  function assess(){
+    var reasons=[], aiOffer=false, pdf=false;
+    ST.files.forEach(function(f){ if(/\.pdf$/i.test(f.name||'')) pdf=true; if(f.error){ reasons.push(f.error); if(f.aiOffer) aiOffer=true; } });
+    var np=includedRows('panels'), nh=includedRows('hardware');
+    if(!np.length&&!nh.length) return {ok:false,label:pdf?'drawing':'other',reasons:reasons.length?reasons:['No cutting-list rows found'],aiOffer:aiOffer,rows:0,hardware:0};
+    allSheets().forEach(function(x){ if(x.s.include) (x.s.res.issues||[]).forEach(function(m){ reasons.push(m); }); });
+    var fl=np.concat(nh).filter(function(x){ return x.r.issues&&x.r.issues.length; }).length;
+    if(fl) reasons.push(fl+' row'+(fl===1?'':'s')+' to check');
+    var um=distinctMats().filter(function(m){ return !mappedSku(m.key); }).length;
+    if(um) reasons.push(um+' material'+(um===1?'':'s')+' not mapped to our SKUs');
+    var ut=distinctTapes().filter(function(t){ return !mappedSku(t.key); }).length;
+    if(ut) reasons.push(ut+' edge tape'+(ut===1?'':'s')+' not mapped');
+    return {ok:!reasons.length,label:'cutting_list',reasons:reasons,aiOffer:aiOffer,rows:np.length,hardware:nh.length};
+  }
   return {
-    aiRead:aiRead,
+    aiRead:aiRead, assess:assess,
     open:open, render:render, commit:commit,
     close:function(){ closeModal('ov-clr'); },
     pick:function(i){ ST.active=i; render(); },
@@ -41833,21 +42188,19 @@ function _copyOrderAttachmentsToQuotationFolder(){
   var order=null;
   for(var i=0;i<pendingOrders.length;i++){ if(pendingOrders[i].id===qSourceOrderId){ order=pendingOrders[i]; break; } }
   if(!order) return;
-  var atts=[order.attach1,order.attach2].filter(Boolean);
-  if(!atts.length) return;
+  // Every attachment — Wufoo (Drive links) and website (supabase://order-attachments) — not just
+  // the first two. Legacy wufoo.com links have no Drive file to copy and are skipped.
+  var files=_ofFiles(order);
+  if(!files.length) return;
   var client=driveClientName();
   var driveChain=ensureDriveFolder().then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);});
-  atts.forEach(function(url,idx){
-    var fileId=_driveFileId(url);
-    // Legacy pre-Drive-migration Wufoo attachments (raw wufoo.com cabinet URLs, not yet
-    // uploaded to Drive) have no extractable Drive file ID — nothing to copy from those.
-    if(!fileId) return;
-    var metaUrl='https://www.googleapis.com/drive/v3/files/'+fileId+'?fields=name%2CmimeType&supportsAllDrives=true';
-    gApiFetch(metaUrl).then(function(meta){
-      var mime=meta.mimeType||'application/octet-stream';
-      var origName=meta.name||'';
-      var dlUrl='https://www.googleapis.com/drive/v3/files/'+fileId+'?alt=media&supportsAllDrives=true';
-      return _driveApiFetchBlob(dlUrl).then(function(blob){
+  files.forEach(function(f,idx){
+    var isWeb=f.key.indexOf('supabase://')===0;
+    if(!isWeb&&!_driveFileId(f.key)) return;
+    _ofFetchFile(f).then(function(blob){
+      var mime=blob.type||'application/octet-stream';
+      var origName=blob.name||f.name||'';
+      return (function(){
         return new Promise(function(resolve){
           var reader=new FileReader();
           reader.onload=function(){
@@ -41855,18 +42208,18 @@ function _copyOrderAttachmentsToQuotationFolder(){
             var comma=dataUrl.indexOf(',');
             var b64=comma>=0?dataUrl.slice(comma+1):dataUrl;
             var ext=origName.indexOf('.')>=0?origName.split('.').pop():(mime.split('/').pop()||'bin');
-            var fileName=baseSerial+' — '+client+' — Wufoo attachment '+(idx+1)+'.'+ext;
+            var fileName=baseSerial+' — '+client+' — '+(isWeb?'Website attachment ':'Wufoo attachment ')+(idx+1)+'.'+ext;
             supaUploadQuotationBinaryFile(baseSerial,fileName,mime,b64);
             driveChain.then(function(fid){ return _driveUpsertBinaryFile(fid,fileName,mime,b64); })
               .then(function(r){
-                if(r&&r.id) logActivity('Wufoo attachment copied to quotation folder ('+fileName+')');
+                if(r&&r.id) logActivity((isWeb?'Website':'Wufoo')+' attachment copied to quotation folder ('+fileName+')');
                 else console.warn('Wufoo attachment copy to Drive failed:',r&&r.error&&r.error.message);
               }).then(resolve).catch(resolve);
           };
           reader.readAsDataURL(blob);
         });
-      });
-    }).catch(function(e){ console.warn('Wufoo attachment copy failed:',e); });
+      })();
+    }).catch(function(e){ console.warn('Order attachment copy failed:',e); });
   });
 }
 function _mobCallClaude(prompt, callback){
@@ -45246,6 +45599,8 @@ function _prodReflectCommit(startNew,stage,prior){
   } else {
     _prodReflectFill(sum,startNew,'');
   }
+  var _ofc=prodState.result&&prodState.result._orderFile;
+  if(_ofc&&typeof _orderFileReflected==='function'){ _orderFileReflected(_ofc,qSerial||qDraftKey||''); prodState.result._orderFile=null; }
   // Apply fab mode to DOM after render
   setTimeout(function(){
     var radios=document.querySelectorAll('input[name="fab-mode"]');
@@ -47922,6 +48277,11 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-18-order-files', date:'18 Oct 2026', items:[
+    {id:'order-files', icon:'ti-paperclip', title:'Order files: who has which, and Files waiting',
+     text:'Each file attached to an order now shows its status: Waiting, Taken by someone, Imported, Reflected into a quotation, or Needs a person (with the reason). Press “Work on it” and the file is yours: the order\'s quotation opens, the client\'s list goes into Designers Support › Cutting List, and if it reads cleanly it is imported for you. Others see it is taken; they can take it over after 2 hours (Supervisor and up any time), and every takeover is logged. Orders › Files waiting lists every unfinished file, oldest order first. Taking a file does not change who prepared the quotation.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-17-cut-by-board', date:'17 Oct 2026', items:[
     {id:'cut-by-board', icon:'ti-cut', title:'Cutting priced by board type',
      text:'A cutting list analysis now gives one cutting line per board type, each at its own rate: MDF/PB/Plywood 4x8, compact laminate, Versaboard, acrylic/6x8 and high gloss. Before, all cutting went on one line at one rate. A board that does not say what it is is flagged so you can pick the rate.',

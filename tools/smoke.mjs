@@ -5982,6 +5982,52 @@ const PROFILES = {
             return { unique: new Set(ids).size === ids.length, viewerOnlyGeneral: viewer };
           } finally { w.currentRole = keep.r; w.currentUserAcc = keep.a; }
         }, { unique: true, viewerOnlyGeneral: true });
+      /* 2026-10-18: order attachment queue. Files are listed per order with a status; a claim held
+         by someone else is refused to Staff for 2 hours, open to Supervisor+ at once; a finished file
+         is only reopened on purpose; Files waiting lists open files oldest order first. Not gated on
+         purpose — before this, none of it existed. */
+      check('Order file queue: claims, takeover after 2 h, Files waiting oldest first', () => {
+        const w = window, keep = { u: w.gUser, r: w.currentRole, po: w.pendingOrders, trn: w._TRN, m: w.orderFilesMap };
+        try {
+          localStorage.removeItem('mc_trn_order_files');
+          w._TRN = true; w.orderFilesMap = {};
+          w.pendingOrders = [
+            { id: '2', status: 'Pending', receivedAt: '2026-10-10T08:00:00Z', attachAll: [{ name: 'b.xlsx', path: 'supabase://order-attachments/2/b.xlsx' }] },
+            { id: '1', status: 'In Progress', receivedAt: '2026-10-01T08:00:00Z', attachAll: [{ name: 'a.pdf', path: 'https://drive.google.com/file/d/AAA/view' }, { name: 'c.jpg', path: 'https://drive.google.com/file/d/CCC/view' }] },
+            { id: '3', status: 'Cancelled', receivedAt: '2026-09-01T08:00:00Z', attachAll: [{ name: 'z.pdf', path: 'https://drive.google.com/file/d/ZZZ/view' }] }];
+          const f1 = w._ofFiles(w.pendingOrders[1])[0];
+          w.gUser = { email: 'jo@x.ph', name: 'Jo' }; w.currentRole = 'Staff';
+          const a = w._ofTrnClaim('1', f1.key, f1.name, 'Jo', false).ok;
+          w.gUser = { email: 'st@x.ph', name: 'St' };
+          const b = w._ofTrnClaim('1', f1.key, f1.name, 'St', true);
+          const st = JSON.parse(localStorage.getItem('mc_trn_order_files'));
+          st['1\n' + f1.key].claimed_at = new Date(Date.now() - 3 * 3600e3).toISOString();
+          localStorage.setItem('mc_trn_order_files', JSON.stringify(st));
+          const c = w._ofTrnClaim('1', f1.key, f1.name, 'St', true);
+          w._ofTrnSet('1', f1.key, 'imported', 'cutting_list', null, null, 'St');
+          w.gUser = { email: 'jo@x.ph', name: 'Jo' };
+          const d = w._ofTrnClaim('1', f1.key, f1.name, 'Jo', false);
+          w.gUser = { email: 'mg@x.ph', name: 'Mg' }; w.currentRole = 'Manager';
+          w._ofTrnClaim('2', 'supabase://order-attachments/2/b.xlsx', 'b.xlsx', 'Mg', false);
+          w.gUser = { email: 'jo@x.ph', name: 'Jo' }; w.currentRole = 'Staff';
+          w.gUser = { email: 'mg2@x.ph', name: 'Mg2' }; w.currentRole = 'Manager';
+          const e = w._ofTrnClaim('2', 'supabase://order-attachments/2/b.xlsx', 'b.xlsx', 'Mg2', true);
+          const hist = JSON.parse(localStorage.getItem('mc_trn_order_files'))['1\n' + f1.key].history.map(h => h.event);
+          const waiting = w._ofWaitingItems().map(x => x.o.id + ':' + x.f.name);
+          return { firstClaim: a, staffBlocked: b.ok === false && b.can_take === false, after2h: c.ok && c.takeover,
+                   finishedNeedsForce: d.finished === true, managerTakes: e.ok && e.takeover, hist,
+                   waiting, labels: ['a.pdf', 'b.xlsx', 'c.jpg', 'd.docx'].map(w._ofLabelGuess) };
+        } finally { w.gUser = keep.u; w.currentRole = keep.r; w.pendingOrders = keep.po; w._TRN = keep.trn; w.orderFilesMap = keep.m; localStorage.removeItem('mc_trn_order_files'); }
+      }, { firstClaim: true, staffBlocked: true, after2h: true, finishedNeedsForce: true, managerTakes: true,
+           hist: ['claim', 'takeover', 'imported'], waiting: ['1:c.jpg', '2:b.xlsx'],
+           labels: ['unknown', 'cutting_list', 'drawing', 'other'] });
+      check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
+        const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
+        return { assess: typeof (w.CLR && w.CLR.assess) === 'function',
+                 commitHook: /_orderFileImported/.test(String(w.CLR && w.CLR.commit)),
+                 reflectHook: /_orderFileReflected/.test(String(w._prodReflectCommit)),
+                 copiesWebsite: /_ofFiles\(order\)/.test(s) && /Website attachment/.test(s) };
+      }, { assess: true, commitHook: true, reflectHook: true, copiesWebsite: true });
       return out;
     }
   },
