@@ -85,3 +85,7 @@ $$;
 -- modcraft_logistics_scope() — the signed-in Modcraft user's company scope, for HATID's keystone-feed.
 -- HATID project: job_refs_status(refs, cos) — deliveries (jobs.quotation_serial) and pick-ups (pk_orders.so_no) by
 -- quotation no. or Odoo SO, with done_at; service role only. keystone-feed v5 accepts what='refs' from Modcraft users.
+-- 2026-10-18 Plan vs actual: sched_targets (serial, target_date, note, set_by, history) written only by
+-- sched_set_target(serial,date,note) — company-scoped, staff only, logged in activity_log.
+-- sched_e2e() also returns plant (MSSI/CWLI from the gate's destination), cap (pmes_stage_capacity for that plant),
+-- jo.load (cutting/edge banding lm, holes, extra services from job_orders.data.services) and tgt.

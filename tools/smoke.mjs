@@ -6170,6 +6170,18 @@ const PROFILES = {
         const done = w._e2eStages(full, [{ deliveries: [{ status: 'completed', done_at: d(-1) }] }]);
         return { fq: w._e2eStages({ serial: 'x', final_locked_at: d(-1) }, []).cur, pay, prod: prod.cur, pct: prod.prod.pct, shipping, done: done.cur, doneAt: !!done.doneAt };
       }, { fq: 'fq', pay: 'pay', prod: 'prod', pct: 60, shipping: 'dlv', done: null, doneAt: true });
+      check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
+        const w = window;
+        const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
+        const est = w._e2eEstimate({ cap, jo: { load: { cut: 2000, eb: 1000, holes: 100, extras: [{ service: 'Sliding Door Grooving', qty: 5, unit: 'lm' }] } } });
+        const d = n => new Date(Date.now() + n * 86400000).toISOString();
+        const p = { serial: 'QT-W2', cap, final_locked_at: d(-40), client_approved_at: d(-38), tgt: { date: d(1).slice(0, 10) },
+          gate: { balance: 0, paid_at: d(-35), released_at: d(-34) },
+          pmes: { approved_at: d(-30), material: 'complete', stages: [{ code: 'EBB', started_at: d(-20), last_at: d(-1), done: 1, planned: 10, planned_start: d(-20).slice(0, 10), planned_end: d(-5).slice(0, 10) }] } };
+        const s = w._e2eStages(p, [{ deliveries: [{ status: 'scheduled', scheduled: d(2).slice(0, 10) }] }]);
+        return { days: est.days, missing: est.missing, late: s.plan.risk, moved: /before production can finish/.test(s.plan.dhow),
+                 procLate: s.plan.procs[0].late > 0, noTarget: w._e2eStages({ serial: 'x', final_locked_at: d(-1) }, []).plan.risk };
+      }, { days: 6, missing: ['Sliding Door Grooving'], late: 'late', moved: true, procLate: true, noTarget: 'notarget' });
       return out;
     }
   },
