@@ -18722,6 +18722,21 @@ function _webTextureOf(s){
 // Converts one order_cutting_lists row into the exact shape prodLoadStructuredList
 // wants. Flags rather than guesses, in the same spirit as the AI path.
 // The catalogue service with exactly this name, or null.
+// The boring service a hole is priced at: the exact service the list named, else the one whose
+// name carries the hole type (Hinges, Minifix, Pegs…) — narrowed by diameter when two do — else
+// the only one of that diameter. '' when it cannot be told (the summary flags it).
+function _holeServiceFor(h){
+  var named=_svcByExactName(h&&h.service); if(named) return named.name;
+  var list=(typeof SERVICES!=='undefined'&&SERVICES)||[];
+  var bor=list.filter(function(s){ return /^boring/i.test(s.name||'')&&/hole/i.test(s.unit||''); });
+  var t=String((h&&h.holeType)||'').trim().toLowerCase(), d=+(h&&h.diameter)||0;
+  var dRe=d?new RegExp('(^|\\D)'+d+'\\s*mm','i'):null;
+  var cand=(t&&t!=='boring')?bor.filter(function(s){ return s.name.toLowerCase().indexOf(t)>=0; }):[];
+  if(cand.length>1&&dRe) cand=cand.filter(function(s){ return dRe.test(s.name); });
+  if(cand.length===1) return cand[0].name;
+  if(!cand.length&&dRe){ var c2=bor.filter(function(s){ return dRe.test(s.name); }); if(c2.length===1) return c2[0].name; }
+  return '';
+}
 function _svcByExactName(nm){
   var k=String(nm||'').trim().toLowerCase(); if(!k) return null;
   var list=(typeof SERVICES!=='undefined'&&SERVICES)||[];
@@ -18784,6 +18799,10 @@ function _cutListToAnalysis(cl,order){
   var comps=[], warn=[], facesUnknown=0, holes=[], extraSvcs=[];
   for(var p=0;p<allPanels.length;p++){
     var pn=allPanels[p];
+    // The MSSI website sends the row's remark as "remarks"; everything below reads "remark".
+    // Without this every website remark was dropped — "NO CUTTING" was cut and priced, and notes
+    // never reached the Job Order (end-to-end test, 2026-10-18).
+    if(pn.remark==null&&pn.remarks!=null) pn=Object.assign({},pn,{remark:pn.remarks});
     var notes=[], review=[], svcStart=extraSvcs.length;
     var L=+pn.L||0, W=+pn.W||0;
     var label=String(pn.mat||'').trim();
@@ -18861,7 +18880,9 @@ function _cutListToAnalysis(cl,order){
         notes.push('HPL on '+(faces===1?'1 face':'2 faces')+' — job setting (the row did not say)');
       }
       else facesUnknown++;
-      if(pn.matCustom) review.push('the client typed this material instead of picking it from the catalogue');
+      // Typed, but word for word a catalogue SKU: it is that SKU, nothing to check.
+      if(pn.matCustom&&!(exactSku&&String(exactSku.name).trim().toLowerCase()===label.toLowerCase()))
+        review.push('the client typed this material instead of picking it from the catalogue');
       // Rommel, 2026-09-22: the thickness is written in BOTH the SKU and the Th column, so the
       // two can disagree -- and the Th column is what prodComputeBom groups on, while the SKU is
       // what a person reads. A new row starts at th:18, so picking a 25mm SKU and not changing Th
@@ -18917,7 +18938,7 @@ function _cutListToAnalysis(cl,order){
           // client thinks "2 hinges per door", not "8 across the row". It used to be taken as
           // the row total, so 4 doors × 2 holes arrived as 2 and boring was under-quoted by the
           // row's quantity. Rommel, 2026-09-24: holes are per panel everywhere.
-          holes.push({component:String(pn.part||''),area:String(pn.group||'General'),holeType:kind?kind[1].trim():'boring',
+          holes.push({component:String(pn.part||''),area:String(pn.group||'General'),holeType:kind?kind[1].trim():'boring',service:hn,
             qty:(+hq[1]||0)*(+pn.qty||1),diameter:dia?+dia[1]:0,
             position:'',notes:hn+(pn.group?' - '+pn.group:'')});
         } else {
@@ -18925,6 +18946,16 @@ function _cutListToAnalysis(cl,order){
           // than invent one, or the service silently prices at zero.
           review.push('"'+sv+'" arrived without a hole count - boring is priced per hole, so add it to the hole schedule');
         }
+      } else if(/[x×]\s*\d+(?:\.\d+)?\s*(?:pcs?|pieces?)\s*$/i.test(sv)){
+        // Priced per PIECE (Flush Handle Groove, Routered Handgrab, Handle Installation…): the
+        // website sends "… × 1 pcs" = per panel, so × the row qty. They used to fall into the
+        // per-metre branch — flagged for a run length they do not have, or (a "Groove") re-priced
+        // as plain melamine grooving (end-to-end test, 2026-10-18).
+        var pcQ=sv.match(/[x×]\s*(\d+(?:\.\d+)?)\s*(?:pcs?|pieces?)\s*$/i);
+        var pcName=String(sv).replace(/\s*[x×]\s*\d+(?:\.\d+)?\s*(?:pcs?|pieces?)\s*$/i,'').trim();
+        var pcN=(+pcQ[1]||0)*(+pn.qty||1);
+        if(pcN>0) extraSvcs.push({service:pcName,qty:pcN,unit:'pc',notes:String(pn.part||'')+(pn.group?' - '+pn.group:'')});
+        else review.push('"'+pcName+'" arrived without a count — it is priced per piece, so add how many');
       } else if(/groov|\brout|manual\s*edge|taper/i.test(sv)&&!/min(imum)?\s*charge/i.test(sv)){
         var lmMatch=sv.match(/[x×]\s*([\d.]+)\s*lm\b/i);
         var svcName=String(sv).replace(/\s*[x×]\s*[\d.]+\s*lm\b.*$/i,'').trim();
@@ -19004,6 +19035,12 @@ function _cutListToAnalysis(cl,order){
     // filled by Read drawing) is that length; without one the overall size stands in and is flagged.
     var manualEb=false, manualEbLm=0;
     if(!String(pn.specialCut||'').trim()&&svcs.some(function(x){ return /special\s*cut|irregular/i.test(String(x||'')); })) pn=Object.assign({},pn,{specialCut:'SPECIAL CUT'});
+    // A straight piece with an edge code AND a Manual Edgebanding chip is priced twice — machine
+    // banding for the code, hand banding for the chip — and production gets only the hand
+    // banding. Ask which (end-to-end test, 2026-10-18).
+    if(!String(pn.specialCut||'').trim()&&String(pn.ebt||'').trim()&&!/^(none|n\/?a|0)$/i.test(String(pn.ebt).trim())
+      &&svcs.some(function(x){ return /manual\s*edge/i.test(String(x||'')); }))
+      review.push('edge code '+pn.ebt+' (machine banding) and a Manual Edgebanding chip are both on this row, so the edges are priced twice — keep the one that is meant');
     if(pn.__lamOnly){
       var bdL=_prodBoardFor(material);
       if(!((L===bdL.h&&W===bdL.w)||(L===bdL.w&&W===bdL.h))) review.push('lamination only, but '+L+' × '+W+' is not a whole '+bdL.w+' × '+bdL.h+' board — confirm whether it is cut');
@@ -40065,7 +40102,9 @@ function _uploadDaDrawings(base,result){
 function _joRoute(o){
   var r=[];
   if(o.hplOrder==='laminate_first') r.push('HPL','CURE');
-  r.push(o.special?'SCUT':'CUT');
+  // A whole board ("NO CUTTING", lamination only, or a piece the size of the board) is not cut —
+  // it used to go to the saw anyway (end-to-end test, 2026-10-18).
+  if(!o.noCut) r.push(o.special?'SCUT':'CUT');
   // Boards glued into a thicker panel (Board Assembly) are glued before the panel is banded.
   if(o.glued) r.push('GLU');
   if(o.hplOrder==='cut_first') r.push('MHPL');
@@ -40139,7 +40178,7 @@ function _joBuild(result,ctx){
     // AI-read hole schedules carry no cabinet, so they still match by name.
     var hasHoles=holes.some(function(hh){ return hh&&hh.component&&c.name&&String(hh.component).toLowerCase()===String(c.name).toLowerCase()
       &&(!hh.area||!c.area||String(hh.area).toLowerCase()===String(c.area).toLowerCase()); });
-    var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles,
+    var route=_joRoute({hplOrder:hplOrder,special:!!special,bander:pieceBander,holes:hasHoles,noCut:!special&&_prodIsWholeBoard(c),
       grooved:!!String(c.grooving||'').trim()||!!svcSt.GRV,tapered:!!svcSt.TPR||_joMentionsTaper(c),routed:!!svcSt.RTR,glued:!!svcSt.GLU});
     if(!ec.known) flags.push('edge code "'+c.ebt+'" not understood');
     if(!(L>0&&W>0)) flags.push('no size — cannot be cut from this list');
@@ -43469,15 +43508,15 @@ function _cutServiceForBoard(text){
 function prodComputeServices(comps,holes,extraServices){
   var cutLM=0; var ebtLM=0; var cutBy={}, cutOrder=[];
   var byTape={}; var tapeOrder=[];
-  var extraByName={}; var extraOrder=[];
+  var extraByName={}; var extraOrder=[]; var extraUnit={};
   var extraList=extraServices||[];
   for(var e=0;e<extraList.length;e++){
     var es=extraList[e]; var esName=String((es&&es.service)||'').trim(); if(!esName) continue;
     var esQty=+((es&&es.qty)||0); if(!(esQty>0)) continue;
-    if(extraByName[esName]===undefined){ extraByName[esName]=0; extraOrder.push(esName); }
+    if(extraByName[esName]===undefined){ extraByName[esName]=0; extraOrder.push(esName); extraUnit[esName]=(es&&es.unit)||'lm'; }
     extraByName[esName]+=esQty;
   }
-  var extraServicesByName=extraOrder.map(function(n){ return {service:n,qty:Math.round(extraByName[n]*100)/100,unit:'lm'}; });
+  var extraServicesByName=extraOrder.map(function(n){ return {service:n,qty:Math.round(extraByName[n]*100)/100,unit:extraUnit[n]||'lm'}; });
   var waste=1+(prodSettings.ebtWastage||0)/100;
   for(var i=0;i<comps.length;i++){
     var c=comps[i];
@@ -44086,10 +44125,30 @@ function prodBuildSummary(result) {
       svcs.push({aiName:'Panel cutting',name:SERVICES[ci2].name,svcIdx:ci2,qty:cb.lm,unit:SERVICES[ci2].unit,include:true,needsReview:false});
     });
   }
+  // Boring is priced per hole TYPE (hinge 10, minifix 5, pegs 3…): one line per rate. Every hole
+  // used to land on whichever boring service came first in the catalogue (Glider), so a hinge
+  // was quoted at half its price (end-to-end test, 2026-10-18). Holes whose type is unknown go
+  // to the keyword row below, flagged to pick.
+  var holeUnknown=svc.holeCount||0, hsList=result.holeSchedule||[];
+  if(hsList.length){
+    var hBy={}, hOrd=[], hKnown=0;
+    hsList.forEach(function(h){
+      var q=+(h&&h.qty)||0; if(!(q>0)) return;
+      var sn=_holeServiceFor(h); if(!sn) return;
+      if(hBy[sn]===undefined){ hBy[sn]=0; hOrd.push(sn); }
+      hBy[sn]+=q; hKnown+=q;
+    });
+    hOrd.forEach(function(sn){
+      var hx=-1; for(var x=0;x<SERVICES.length;x++) if(SERVICES[x].name===sn){ hx=x; break; }
+      if(hx<0){ hKnown-=hBy[sn]; return; }
+      svcs.push({aiName:'Boring/drilling',name:SERVICES[hx].name,svcIdx:hx,qty:hBy[sn],unit:SERVICES[hx].unit,include:true,needsReview:false});
+    });
+    holeUnknown=Math.max(0,(svc.holeCount||0)-hKnown);
+  }
   var svcConcepts=[
     {label:'Panel cutting',    keywords:['cut','cutting','saw'],              qty:cutUnknown, flag:'Cutting on a board that does not say what it is (MDF/PB/Plywood, compact, Versaboard, acrylic/6x8, high gloss) — pick its cutting rate.'},
     {label:'Edgebanding',      keywords:['edge','band','ebt','tape'],         qty:svc.edgebandingLM||0},
-    {label:'Boring/drilling',  keywords:['bor','drill','hole'],               qty:svc.holeCount||0},
+    {label:'Boring/drilling',  keywords:['bor','drill','hole'],               qty:holeUnknown, flag:'Holes whose type is not stated (hinge, minifix, pegs, glider…) — each is priced differently, pick the boring rate.'},
     {label:'Assembly/Installation labor', keywords:['assembl','install','labor','labour'], qty:result.carcassCount||0}
   ];
   for(var ci=0;ci<svcConcepts.length;ci++){
@@ -44886,7 +44945,7 @@ function prodBuildResultHtml(result){
   var flaggedN=comps.filter(function(c){return c.needsReview;}).length;
   var sumFlag=prodState.summary?['materials','hardware','services'].reduce(function(n,k){
     return n+(prodState.summary[k]||[]).filter(function(r){return r.needsReview&&r.include;}).length;},0):0;
-  var grooveLm=(svc.extraServicesByName||[]).reduce(function(n,x){return n+(/groov/i.test(x.service)?(+x.qty||0):0);},0);
+  var grooveLm=(svc.extraServicesByName||[]).reduce(function(n,x){return n+(/groov/i.test(x.service)&&x.unit!=='pc'?(+x.qty||0):0);},0);
   var totalBoardsAll=bom.reduce(function(n,b){return n+(b.boardsNeeded||0);},0);
   function stat(lbl,val,sub,col){
     return '<div style="padding:8px 12px;border-right:.5px solid var(--border);min-width:92px"><div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">'+lbl+'</div>'
@@ -45195,7 +45254,7 @@ function _prodReflectCommit(startNew,stage,prior){
   },350);
   if(!startNew){
     var n=da&&da.parts?da.parts.length:1;
-    showToast('Cutting list added to '+(stage==='fq'?'the Final Quotation of ':'')+qSerial
+    showToast('Cutting list added to '+(stage==='fq'?'the Final Quotation of ':'')+(qSerial||'this quotation (not yet numbered)')
       +(n>1?' — '+n+' lists, all go into the Job Order':'')+'. Review the new area, then save.');
     if(stage!=='fq'){
       if(typeof renderItems==='function') renderItems();

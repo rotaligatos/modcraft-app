@@ -274,6 +274,34 @@ const PROFILES = {
             return [run(10), run(0), run(1, 20)];
           } finally { window.SERVICES = keep; }
         }, [[1, 10, 20, 10, false], [1, 1, 2, 1, false], [3, 3, 6, 3, true]]);
+      // 2026-10-18 end-to-end test (website order -> ModCraft): remarks were dropped (website sends
+      // "remarks"), per-piece services ("× 1 pcs") were flagged as per-metre or re-priced as plain
+      // grooving, every hole was priced as the first boring service (Glider), a whole board still went
+      // to the saw in the Job Order, a typed-but-exact SKU was flagged, and 4S + a Manual Edgebanding
+      // chip on a straight piece was priced twice without a word.
+      if (typeof window._cutListToAnalysis === 'function')
+        check('website order: remarks, per-piece services, boring by hole type, whole boards, double banding', () => {
+          const keep = window.SERVICES, keepM = window.dbMaterials;
+          try {
+            window.SERVICES = [{ name: "Cutting  MDF/PB/Plywood (4' x 8')", unit: '/lm', price: 16.5 }, { name: 'Edgebanding EVA', unit: '/lm', price: 25.5 },
+              { name: 'Boring 8mm (Glider)', unit: 'hole', price: 5 }, { name: 'Boring 35mm (Hinges)', unit: 'hole', price: 10 }, { name: 'Boring 5mm (Pegs)', unit: 'hole', price: 3 },
+              { name: 'Flush Handle Groove', unit: '/pc', price: 50 }, { name: 'Routered Handgrab / Finger handgrab', unit: '/pc', price: 50 },
+              { name: 'Grooving (3mm width melamine)', unit: '/lm', price: 16.5 }, { name: 'Manual Edgebanding EVA', unit: '/lm', price: 40 }];
+            window.dbMaterials = [{ name: 'Real White PB 4x8 2F (18mm, Matte)', unit: 'pc', price: 2330 }];
+            const m = 'Real White PB 4x8 2F (18mm, Matte)';
+            const a = window._cutListToAnalysis({ grain: 'L', hpl: [], hardware: [], panels: [
+              { group: 'K', part: 'Side', mat: m, matCustom: true, th: 18, qty: 2, L: 720, W: 560, ebt: '4S', svcs: ['Boring 35mm (Hinges) × 2 holes', 'Boring 5mm (Pegs) × 8 holes'], remarks: 'check hinge side' },
+              { group: 'K', part: 'Door', mat: m, th: 18, qty: 2, L: 700, W: 400, ebt: '4S', svcs: ['Flush Handle Groove × 1 pcs', 'Routered Handgrab / Finger handgrab × 1 pcs'] },
+              { group: 'K', part: 'Back', mat: m, th: 18, qty: 1, L: 2440, W: 1220, ebt: '', svcs: [], remarks: 'NO CUTTING' },
+              { group: 'K', part: 'Top', mat: m, th: 18, qty: 1, L: 900, W: 500, ebt: '4S', svcs: ['Manual Edgebanding EVA (1200mm)'] }] });
+            window.prodLoadStructuredList(a, 't'); const r = window.prodState.result; window.prodBuildSummary(r);
+            const sv = window.prodState.summary.services.map(s => s.name + ' ' + s.qty + (s.needsReview ? ' FLAG' : ''));
+            const jo = window._joBuild(r, {}), route = n => (jo.parts.find(p => p.name === n) || {}).route.join('>');
+            return [r.components[0].remark, !!r.components[0].needsReview, !!r.components[1].needsReview, /priced twice/.test(r.components[3].reviewNote || ''),
+              sv.filter(s => /Boring|Flush|Handgrab/.test(s)).sort(), route('Back')];
+          } finally { window.SERVICES = keep; window.dbMaterials = keepM; }
+        }, ['check hinge side', false, false, true,
+          ['Boring 35mm (Hinges) 4', 'Boring 5mm (Pegs) 16', 'Flush Handle Groove 2', 'Routered Handgrab / Finger handgrab 2'], 'ASM>QC>PACK']);
       // 2026-10-17 (Rommel): cutting is priced by the board it is cut from — one line per rate, not one
       // 'Panel cutting' line taking the first catalogue service with 'cut' in its name.
       if (typeof window._cutServiceForBoard === 'function')

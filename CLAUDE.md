@@ -13196,3 +13196,30 @@ missing from the count — yet Reflect let it through.
   boards carry `plans`; PMES `process-jo.js _pjoCutSequence` reads plans (905 boards, 0 differences vs
   Modcraft). PMES defect re-plans now do the same: `pack3OnBoards` (optimizer.js) — three stages, both directions, defects no-cut, plan saved with the cut plan (`plans`). Real lists 234 → 230 boards.
   ⚠ Turning a plain-board piece changes a re-locked quotation's Job Order version (`_joSig` has layouts).
+
+## What was changed on 2026-10-17/18 (session — optimizer, manual edge banding, website alignment, HPL, end-to-end test)
+Earlier commits this session (all live): three-stage optimizer + grain rules, PMES defect re-plan on the
+same optimizer, Excel-style Cutting List grid, LIMSHEN reader, special cut + edge banding = Manual
+Edgebanding along the real outline (`manualEb`/`manualEbLm`), website aligned (lamination-only HPL rows
+`__lamOnly`, HPL L/W/qty/cut columns in ModCraft), cutting priced per board type (`_cutServiceForBoard`,
+`cuttingByService`), HPL cut-to-size charged by the boards ORDERED (`hplOrdered`).
+
+**End-to-end test 2026-10-18** (harness in scratch, not committed): a 9-row website list with 14 services,
+HPL cut-to-size ×10 and lamination-only ×3, special cut, glued 36mm, hardware — filled on the real
+portal.html, fed through Orders → Designers Support → reflect → lock (training) → Job Order (22 pieces).
+Wufoo path: export → Import client's list with MARGARITA.xls and STUDIO TILLE C11 → reflect → lock → JO.
+Fixed (one smoke check, proven failing pre-fix):
+- Website sends `remarks`, ModCraft read `remark` → every website remark was lost ("NO CUTTING", notes
+  to production). `_cutListToAnalysis` now takes either.
+- Per-piece chips ("Flush Handle Groove × 1 pcs", "Routered Handgrab × 1 pcs") were flagged as per-metre
+  or re-priced as melamine grooving. Now `unit:'pc'` × row qty; `extraServicesByName` keeps the unit.
+- **Every hole was priced at the first boring service (Glider ₱5)** — hinges are ₱10. Now one line per
+  hole type (`_holeServiceFor`: exact service the list named, else hole type, else diameter); unknown
+  types are flagged. Website holes carry `service`.
+- Job Order sent whole boards (NO CUTTING, lamination-only, board-size pieces) to CUT. `_joRoute` noCut.
+- A typed material that is word-for-word a catalogue SKU is no longer flagged as typed.
+- A straight row with an edge code AND a Manual Edgebanding chip is flagged (priced twice).
+- "Cutting list added to ." toast on an unnumbered quotation.
+Limits found, NOT changed (need a decision): a Wufoo order's attached cutting list is not imported
+automatically — staff download it and use Import client's list; website attachments (`supabase://`)
+are not copied into the quotation folder; training mode cannot open a website cutting-list order.
