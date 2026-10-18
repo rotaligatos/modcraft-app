@@ -6123,6 +6123,22 @@ const PROFILES = {
         return { newOne: s.indexOf('if(fqClientApproved) return _markJobOrderReady()') >= 0,
                  sameContent: s.indexOf("if(top.status==='reserved'&&fqClientApproved) _markJobOrderReady();") >= 0 };
       }, { newOne: true, sameContent: true });
+      { const label='Missing Final Quotation printout is saved when the quotation is open on its Final tab (for KEYSTONE)'; const want={ missing: 1, present: 0, stage1: 0 };
+        try { const got = await (async () => {
+        const w = window, keep = { s: w.supa, ss: w.supaSession, t: w.gToken, st: w.qStage, l: w.fqLocked, se: w.qSerial, dk: w.qDraftKey, sv: w.saveQuotationToDrive, lg: w.logActivity, trn: w._TRN };
+        try {
+          let saved = 0; w._TRN = false; w.gToken = 'x'; w.supaSession = {}; w.qStage = 2; w.fqLocked = true; w.qSerial = 'QT-M09999999'; w.qDraftKey = '';
+          let files = [];
+          w.supa = { storage: { from: () => ({ list: () => Promise.resolve({ data: files }) }) } };
+          w.saveQuotationToDrive = () => { saved++; }; w.logActivity = () => {};
+          w._finalPrintoutChecked = {}; w._ensureFinalPrintout(); await new Promise(r => setTimeout(r, 20));
+          const missing = saved;
+          files = [{ name: 'QT-M09999999 — X — Final Quotation.html' }]; w._finalPrintoutChecked = {}; w._ensureFinalPrintout(); await new Promise(r => setTimeout(r, 20));
+          const present = saved - missing;
+          w.qStage = 1; files = []; w._finalPrintoutChecked = {}; w._ensureFinalPrintout(); await new Promise(r => setTimeout(r, 20));
+          return { missing, present, stage1: saved - missing - present };
+        } finally { Object.assign(w, { supa: keep.s, supaSession: keep.ss, gToken: keep.t, qStage: keep.st, fqLocked: keep.l, qSerial: keep.se, qDraftKey: keep.dk, saveQuotationToDrive: keep.sv, logActivity: keep.lg, _TRN: keep.trn }); }
+      })(); out.push({ label, got, want, ok: JSON.stringify(got) === JSON.stringify(want) }); } catch (e) { out.push({ label, err: String(e).slice(0,120), ok: false }); } }
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',
