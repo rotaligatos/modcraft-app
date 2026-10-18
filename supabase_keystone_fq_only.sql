@@ -24,3 +24,17 @@ do $$ declare d text; n text; begin
   if n = d then raise exception 'adm_generate_pr_from_quotation: stage line not found'; end if;
   execute n;
 end $$;
+
+-- Advance canvassing, view only (applied as adm_canvass_list): quotations not yet final-approved that
+-- carry outsource items. Runs as the caller, so the release-queue view's company visibility applies.
+create or replace function public.adm_canvass_list()
+returns table(serial text, client_name text, company text, total numeric, project_name text, prepared_by text, lines bigint, est_total numeric)
+language sql stable security invoker set search_path = public as $$
+  select q.serial, q.client_name, q.company, q.total, q.project_name, q.prepared_by,
+         count(*) as lines, round(coalesce(sum(s.est_amount),0),2) as est_total
+    from public.adm_v_release_queue q
+    cross join lateral public.adm_material_summary(q.serial) s
+   where q.iq_client_approved and not q.fq_client_approved and s.kind like 'outsource%'
+   group by q.serial, q.client_name, q.company, q.total, q.project_name, q.prepared_by
+   order by q.total desc nulls last
+$$;
