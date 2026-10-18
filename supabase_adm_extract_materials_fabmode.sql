@@ -1,0 +1,10 @@
+-- APPLIED 2026-10-18 as migration adm_extract_materials_use_fab_mode.
+-- KEYSTONE material requests read the quotation's own fabrication mode (state.fabMode) first.
+-- Every quotation also carries Modcraft's starter cabinet, so inferring the mode from "which list
+-- exists" read 329 cutting-list and 80 carcass quotations as BOM and built empty or wrong material
+-- requests (QT-W00000052: 0 lines instead of its 5 materials).
+-- Measured on the 113 final-approved quotations: empty cutting-list requests 102 -> 11 (those have no
+-- materials); lines found 9 -> 487. No material request had been built yet, so nothing saved was wrong.
+-- The patch replaces the opening of the mode CASE in adm_extract_materials(text):
+--   mode := case lower(coalesce(st->>'fabMode','')) when 'bom' then 'bom' when 'carcass' then 'carcass'
+--           when 'services' then 'flat' else <the old inference> end;
