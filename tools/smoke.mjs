@@ -6118,6 +6118,11 @@ const PROFILES = {
           return { a, b, c };
         } finally { w.prodSettings.machines.panelsaw.kerf = keep; w.showToast = keepT; }
       }, { a: 3.5, b: 3.5, c: 3.5 });
+      check('A Job Order reserved after the client approved the Final Quotation becomes ready at once', () => {
+        const s = String(window._reserveJobOrder);
+        return { newOne: s.indexOf('if(fqClientApproved) return _markJobOrderReady()') >= 0,
+                 sameContent: s.indexOf("if(top.status==='reserved'&&fqClientApproved) _markJobOrderReady();") >= 0 };
+      }, { newOne: true, sameContent: true });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',
