@@ -13244,3 +13244,11 @@ are not copied into the quotation folder; training mode cannot open a website cu
   ("Website attachment N"), not just Wufoo's first two.
 - Simulated in the browser (training, MARGARITA.xls, stubbed fetch): flagged → person imports →
   analysis → reflect, all logged. Not yet run against a live order (needs a signed-in session).
+- **Same session, later (`4bbf054`, `d03906b`):** training gets **practice orders** (Orders → "New
+  practice order": files from this PC, order in localStorage `mc_trn_practice_orders`, files in
+  IndexedDB `mc_trn_files`, keys `trn://`). Live **TEST orders** (Rommel approved writing test data):
+  Orders → "New test order" (Admin/Director) inserts a pending_orders row id `TEST-YYMMDD-NNNN`,
+  is_test, files in order-attachments/<id>/. DB trigger `pending_orders_mark_test` now keeps is_test
+  only for admin tier (`supabase_admin_test_orders.sql`). Exporting ANY is_test order sets
+  `qTestDraft` → QT-X test quotation (the existing QT-X chain: approvals to self, Job Order, KEYSTONE,
+  PMES, hidden from reports). Not yet run with a real signed-in Admin (needs the live app).
