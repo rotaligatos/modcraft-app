@@ -18437,6 +18437,9 @@ function renderOrders(){
       +(_pN?' <button class="btn" style="font-size:12px;padding:3px 10px" onclick="trnClearPracticeOrders()">Remove practice orders ('+_pN+')</button>':'')
       +'</div></div>';
   }
+  if(_canMakeTestOrder()){
+    _partial+='<div style="display:flex;justify-content:flex-end;margin:-4px 0 8px"><button class="btn" style="font-size:12px;padding:3px 10px;border-color:#fca5a5;color:#b91c1c" onclick="openTestOrder()"><i class="ti ti-flask"></i> New test order</button></div>';
+  }
   if(testOrders.length){
     var _tOn=_showTestOrders(), _tN=testOrders.length, _tS=_tN!==1?'s':'';
     _partial+='<div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-flask"></i><div>'
@@ -19243,6 +19246,9 @@ function _exportOrderToQuotationForced(orderId){
   initQuotation();
   // Set AFTER initQuotation (which clears qSourceOrderId) so the badge sticks
   qSourceOrderId=orderId;
+  // A TEST order (website test account, or "New test order") always becomes a QT-X test quotation,
+  // so it can run the whole chain without touching the real W/M/C series or any KPI.
+  if(o.isTest&&!window._TRN){ qTestDraft=true; try{ _refreshSerialTag(); }catch(e){} }
   _updateOrderBadge();
   // Wait for initQuotation DOM render, then fill — poll until cl-name exists
   var _fillAttempts=0;
@@ -19783,8 +19789,14 @@ function _trnSavePracticeOrder(o){
   }
   _trnSavePracticeList(list);
 }
+var _poMode='practice';   // 'practice' (training, this browser) | 'test' (live, is_test order)
+function _canMakeTestOrder(){ return !window._TRN&&(currentRole==='Admin'||currentRole==='Director')&&supaReady(); }
+function openTestOrder(){ if(!_canMakeTestOrder()){ showToast('Test orders: Admin/Director, signed in to the fast database.'); return; } _poMode='test'; _poOpen(); }
 function trnOpenPracticeOrder(){
   if(!window._TRN) return;
+  _poMode='practice'; _poOpen();
+}
+function _poOpen(){
   var ov=el('ov-trn-po');
   if(!ov){
     ov=document.createElement('div'); ov.id='ov-trn-po'; ov.className='overlay';
@@ -19800,11 +19812,18 @@ function trnOpenPracticeOrder(){
       +'<button class="btn btn-primary" onclick="trnCreatePracticeOrder()"><i class="ti ti-plus"></i> Create practice order</button></div></div>';
     document.body.appendChild(ov);
   }
+  var t=_poMode==='test';
+  ov.querySelector('h3').innerHTML=t?'<i class="ti ti-flask"></i> New TEST order':'<i class="ti ti-school"></i> New practice order';
+  ov.querySelector('.modal-body > div').textContent=t
+    ?'Live test, Admin only. Saved as a real order marked TEST: hidden unless “Show test orders”, never in KPIs or the SLA. Exporting it makes a QT-X test quotation, so it can go through Job Order, KEYSTONE and PMES like a real one.'
+    :'Training only. The order and its files stay in this browser — nothing reaches the live queue, the database or Google Drive.';
+  el('trn-po-client').value=t?'TEST client':'Practice client';
   openModal('ov-trn-po');
 }
 function trnCreatePracticeOrder(){
   var files=[].slice.call((el('trn-po-files')||{}).files||[]);
   if(!files.length){ showToast('Attach at least one file.'); return; }
+  if(_poMode==='test') return _createTestOrder(files);
   var id='P'+String(Date.now()).slice(-6);
   var kind=(el('trn-po-kind')||{}).value||'Wufoo';
   var att=files.map(function(f,i){ return {name:f.name,path:'trn://'+id+'/'+i}; });
@@ -19821,6 +19840,43 @@ function trnCreatePracticeOrder(){
     _updateOrdersBadge(); setOrdersTab('files');
     showToast('Practice order #'+id+' created — press “Work on it” on its file.');
   }).catch(function(e){ showToast('Could not keep the practice file: '+(e.message||e)); });
+}
+// A live order marked TEST (is_test). Only an Admin/Director can make one — the database keeps
+// is_test only for them (pending_orders_mark_test). Files go to the order-attachments bucket under
+// the order's id, exactly where a website order's files go.
+function _createTestOrder(files){
+  if(!_canMakeTestOrder()){ showToast('Test orders: Admin/Director only.'); return; }
+  var d=new Date(), p2=function(n){ return ('0'+n).slice(-2); };
+  var id='TEST-'+String(d.getFullYear()).slice(2)+p2(d.getMonth()+1)+p2(d.getDate())+'-'+String(Math.floor(1000+Math.random()*9000));
+  var kind=(el('trn-po-kind')||{}).value||'Wufoo';
+  var client=String((el('trn-po-client')||{}).value||'TEST client').trim();
+  var project=String((el('trn-po-project')||{}).value||'').trim();
+  var who=(gUser&&(gUser.name||gUser.email))||'';
+  showToast('Saving test order '+id+'…');
+  var att=[];
+  Promise.all(files.map(function(f,i){
+    var path=id+'/'+i+'-'+String(f.name).replace(/[^\w.\-]+/g,'_');
+    att[i]={name:f.name,path:'supabase://order-attachments/'+path,size:f.size};
+    return supa.storage.from('order-attachments').upload(path,f,{contentType:f.type||'application/octet-stream',upsert:false})
+      .then(function(r){ if(r.error) throw new Error(f.name+': '+r.error.message); });
+  })).then(function(){
+    var row={id:id,received_at:d.toISOString(),client_name:client,project_name:project||null,order_kind:kind,
+      status:'Pending',is_test:true,source_company:(typeof currentUserCompany!=='undefined'&&currentUserCompany)||null,
+      attachments:att,attachment_1:att[0]?att[0].path:null,attachment_2:att[1]?att[1].path:null,
+      notes:'TEST order made in Modcraft by '+who};
+    if(kind!=='Wufoo') row.consent_at=d.toISOString();
+    return supa.from('pending_orders').insert(row).select('id,is_test').then(function(r){
+      if(r.error) throw new Error(r.error.message);
+      var got=(r.data||[])[0];
+      if(!got||got.is_test!==true) throw new Error('the database did not keep it as a TEST — check your role');
+    });
+  }).then(function(){
+    closeModal('ov-trn-po');
+    if(el('trn-po-files')) el('trn-po-files').value='';
+    logActivity('TEST order '+id+' created ('+files.length+' file'+(files.length===1?'':'s')+')','');
+    try{ localStorage.setItem('mc_show_test_orders','1'); }catch(e){}
+    gLoadPendingOrders(function(){ setOrdersTab('files'); showToast('TEST order '+id+' saved — “Work on it” on its file; exporting it makes a QT-X test quotation.'); });
+  }).catch(function(e){ showToast('Could not save the test order: '+(e.message||e)); });
 }
 function trnClearPracticeOrders(){
   _confirm('Remove all practice orders and their files from this browser?',function(){
@@ -48397,6 +48453,14 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-18-test-orders', date:'18 Oct 2026', items:[
+    {id:'test-orders', icon:'ti-flask', title:'Test orders, end to end',
+     text:'Admins and Directors can make a TEST order on the Orders page (“New test order”) with your own files. It is hidden unless “Show test orders” and never counts in KPIs. Exporting it — or any order from a website test account — makes a QT-X test quotation, so a whole job can be tested from order and files to Job Order, KEYSTONE and PMES without touching real numbers.',
+     show:'settings'},
+    {id:'practice-orders', icon:'ti-school', title:'Training: practice orders',
+     text:'In training mode, Orders has “New practice order”: attach a file from your computer and practise the file queue and import. It stays in your browser.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-18-order-files', date:'18 Oct 2026', items:[
     {id:'order-files', icon:'ti-paperclip', title:'Order files: who has which, and Files waiting',
      text:'Each file attached to an order now shows its status: Waiting, Taken by someone, Imported, Reflected into a quotation, or Needs a person (with the reason). Press “Work on it” and the file is yours: the order\'s quotation opens, the client\'s list goes into Designers Support › Cutting List, and if it reads cleanly it is imported for you. Others see it is taken; they can take it over after 2 hours (Supervisor and up any time), and every takeover is logged. Orders › Files waiting lists every unfinished file, oldest order first. Taking a file does not change who prepared the quotation.',

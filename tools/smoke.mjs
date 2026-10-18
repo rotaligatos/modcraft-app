@@ -6031,6 +6031,16 @@ const PROFILES = {
                    viewReadsTrn: /trn:\/\//.test(String(w.viewOrderAttachment)) };
         } finally { w._TRN = keep.trn; w.pendingOrders = keep.po; localStorage.removeItem('mc_trn_practice_orders'); }
       }, { merged: 1, fetchReadsTrn: true, viewReadsTrn: true });
+      check('TEST orders: Admin makes one (is_test, files in order-attachments); exporting it makes a QT-X quotation', () => {
+        const w = window, keep = { r: w.currentRole, trn: w._TRN };
+        try {
+          w._TRN = false; w.currentRole = 'Staff';
+          const staffCan = w._canMakeTestOrder();
+          return { staffCan,
+                   exportMakesTest: /o\.isTest&&!window\._TRN\)\{ qTestDraft=true/.test(String(w._exportOrderToQuotationForced)),
+                   savesTest: /is_test:true/.test(String(w._createTestOrder)) && /order-attachments/.test(String(w._createTestOrder)) };
+        } finally { w.currentRole = keep.r; w._TRN = keep.trn; }
+      }, { staffCan: false, exportMakesTest: true, savesTest: true });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',
