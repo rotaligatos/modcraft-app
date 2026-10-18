@@ -6042,6 +6042,12 @@ const PROFILES = {
                    savesTest: /is_test:true/.test(String(w._createTestOrder)) && /order-attachments/.test(String(w._createTestOrder)) };
         } finally { w.currentRole = keep.r; w._TRN = keep.trn; }
       }, { staffCan: false, exportMakesTest: true, savesTest: true });
+      check('Files waiting lives in Designers Support; an imported file stops at the Cutting List for review', () => {
+        const w = window;
+        return { tab: !!document.getElementById('prod-tab-files'), view: typeof w._ofRenderProdFiles === 'function',
+                 noAutoLoad: !/MCL\.load\(/.test(String(w._orderFileImported)),
+                 goesToCutlist: /setProdTab\('cutlist'\)/.test(String(w._orderFileImported)) };
+      }, { tab: true, view: true, noAutoLoad: true, goesToCutlist: true });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',
