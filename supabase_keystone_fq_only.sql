@@ -52,3 +52,9 @@ $$;
 -- public.adm_outsource_counts(p_serials text[]) returns (serial, n, problem) — outsource item count per
 -- quotation (same rule as adm_generate_pr_from_quotation), company-scoped; a quotation whose materials
 -- cannot be read returns problem instead of failing the whole call. KEYSTONE greys out Generate PR when n=0.
+
+-- 2026-10-18: migration keystone_vouch_name_and_proof (applied). adm_release_gates gains vouch_name +
+-- vouch_proof (guarded); private bucket keystone-vouch (<gate id>/<file>, upload = can_vouch, read =
+-- KEYSTONE users who see the gate's company); adm_vouch_gate(gate, reason, vouch_name, proof, expires,
+-- confirm) requires both and checks the file exists; the old 4-argument call now refuses;
+-- adm_v_release_queue adds payment_option, vouch_name, vouch_proof, vouch_reason, vouch_expires_at.
