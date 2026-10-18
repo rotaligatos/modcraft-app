@@ -79,3 +79,9 @@ $$;
 
 -- 2026-10-18: migration cc_ks_signing_status (applied): cc_ks_signing_status() (passcode source, signature, locked; no hashes)
 -- and adm_passcode_unlock(email) for the Command Center KEYSTONE users list.
+
+-- 2026-10-18 Schedule end to end (Modcraft project): sched_e2e() — one row per project from Final Quotation lock,
+-- company-scoped (app_company_visible / ks_company_visible), with gate, Job Order, MRFs and PMES stages.
+-- modcraft_logistics_scope() — the signed-in Modcraft user's company scope, for HATID's keystone-feed.
+-- HATID project: job_refs_status(refs, cos) — deliveries (jobs.quotation_serial) and pick-ups (pk_orders.so_no) by
+-- quotation no. or Odoo SO, with done_at; service role only. keystone-feed v5 accepts what='refs' from Modcraft users.

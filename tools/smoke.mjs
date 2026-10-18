@@ -6157,6 +6157,19 @@ const PROFILES = {
         return { section: /Purchases for this job/.test(t), over: /Over by\s+₱\s*2,000\.00/.test(t), after: /direct cost\s+₱\s*62,000\.00/.test(t) && /profit\s+₱\s*38,000\.00/.test(t),
                  none: !/Purchases for this job/.test(w._buildCostReportHtml('QT-W1', { client: {} }, Object.assign({}, cr, { _purch: null }))) };
       }, { section: true, over: true, after: true, none: true });
+      check('Schedule: end-to-end stage follows payment, production and HATID delivery', () => {
+        const w = window;
+        const d = n => new Date(Date.now() + n * 86400000).toISOString();
+        const base = { serial: 'QT-W1', final_locked_at: d(-30), client_approved_at: d(-28) };
+        const pay = w._e2eStages(Object.assign({}, base, { gate: { opened_at: d(-27), paid: 1, required: 2, balance: 1 } }), []).cur;
+        const prod = w._e2eStages(Object.assign({}, base, { gate: { balance: 0, paid_at: d(-25), released_at: d(-24) },
+          pmes: { approved_at: d(-20), material: 'complete', stages: [{ code: 'CUT', started_at: d(-19), last_at: d(-2), done: 3, planned: 5 }] } }), []);
+        const full = Object.assign({}, base, { gate: { balance: 0, paid_at: d(-25), released_at: d(-24) },
+          pmes: { approved_at: d(-20), material: 'complete', stages: [{ code: 'CUT', started_at: d(-19), last_at: d(-12), done: 5, planned: 5 }] } });
+        const shipping = w._e2eStages(full, [{ deliveries: [{ status: 'scheduled', scheduled: d(2).slice(0, 10) }] }]).cur;
+        const done = w._e2eStages(full, [{ deliveries: [{ status: 'completed', done_at: d(-1) }] }]);
+        return { fq: w._e2eStages({ serial: 'x', final_locked_at: d(-1) }, []).cur, pay, prod: prod.cur, pct: prod.prod.pct, shipping, done: done.cur, doneAt: !!done.doneAt };
+      }, { fq: 'fq', pay: 'pay', prod: 'prod', pct: 60, shipping: 'dlv', done: null, doneAt: true });
       return out;
     }
   },

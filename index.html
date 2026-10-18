@@ -1555,13 +1555,12 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
 <!-- SCHEDULE -->
 <div class="page" id="page-schedule">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px">
-    <div><h2 style="font-size:20px;font-weight:500">Fabrication & installation schedule</h2><p style="color:var(--text2);font-size:13px;margin-top:2px">From each quotation's Scheduling card · PH holidays highlighted</p></div>
-    <div style="display:flex;gap:6px">
-      <button class="btn" id="gantt-btn" onclick="setSchedView('gantt')" style="background:var(--wash-navy);color:var(--navy)"><i class="ti ti-chart-gantt"></i>Gantt chart</button>
-      <button class="btn" id="cal-btn" onclick="setSchedView('calendar')"><i class="ti ti-calendar-event"></i>Calendar</button>
-    </div>
+    <div><h2 style="font-size:20px;font-weight:500">Project schedule &amp; status</h2><p style="color:var(--text2);font-size:13px;margin-top:2px">Every project from the Final Quotation to delivery — Modcraft, KEYSTONE payment, PMES production and HATID delivery / pick-up</p></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap" id="sched-views"></div>
   </div>
-  <div class="kpi-grid">
+  <div id="sched-filters" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px"></div>
+  <div class="kpi-grid" id="sched-kpis" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))"></div>
+  <div class="kpi-grid" id="sched-old-kpis" style="display:none">
     <div class="kpi"><div class="lbl">Active fabrications</div><div class="val" style="color:var(--navy)" id="kpi-sched-active">—</div></div>
     <div class="kpi"><div class="lbl">Pending installation</div><div class="val" style="color:var(--teal)" id="kpi-sched-inst">—</div></div>
     <div class="kpi"><div class="lbl">Completed</div><div class="val" style="color:var(--green)" id="kpi-sched-done">—</div></div>
@@ -1571,7 +1570,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
     <div class="card-head" id="sched-head" style="display:flex;align-items:center;gap:8px"><h3><i class="ti ti-chart-gantt"></i>Gantt chart</h3></div>
     <div class="card-body" id="sched-body"></div>
   </div>
-  <div class="card">
+  <div class="card" id="sched-hol-card" style="display:none">
     <div class="card-head"><h3><i class="ti ti-flag"></i>Philippine holidays</h3></div>
     <div class="card-body" id="holidays-wrap"></div>
   </div>
@@ -15174,15 +15173,276 @@ function submitEditClient(id) {
 }
 
 // ── Schedule ──────────────────────────────────────────────────────────────
-function setSchedView(v) {
-  schedView=v;
-  el("gantt-btn").style.cssText=v==="gantt"?"background:var(--wash-navy);color:var(--navy)":"";
-  el("cal-btn").style.cssText=v==="calendar"?"background:var(--wash-navy);color:var(--navy)":"";
+// ── Schedule: end-to-end status ───────────────────────────────────────────
+// One row per project from the Final Quotation onward: Modcraft (approval), KEYSTONE (payment, release,
+// materials), PMES (Job Order check, production per process) and HATID (delivery or pick-up).
+// Read-only. Data: sched_e2e() (this project) + HATID's keystone-feed "refs" (by quotation no. and Odoo SO).
+var E2E_STAGES=[
+  {k:'fq',  l:'Final Quotation', c:'#6366f1'},
+  {k:'pay', l:'Payment',         c:'#d97706'},
+  {k:'rel', l:'Release',         c:'#0891b2'},
+  {k:'mat', l:'Materials',       c:'#7c3aed'},
+  {k:'chk', l:'Job Order check', c:'#db2777'},
+  {k:'prod',l:'Production',      c:'#16a34a'},
+  {k:'dlv', l:'Delivery / pick-up', c:'#0f766e'}
+];
+var E2E_DONE_HIDE_DAYS=15;
+var _e2e={rows:null,hat:{},hatErr:'',at:0,loading:false};
+var _e2eFilt={q:'',co:'',stage:'',finished:false};
+try{ var _sv=localStorage.getItem('mc_sched_view'); if(_sv) schedView=_sv; }catch(e){}
+try{ var _sf=JSON.parse(localStorage.getItem('mc_sched_filters')||'null'); if(_sf) _e2eFilt=Object.assign(_e2eFilt,_sf,{q:''}); }catch(e){}
+var _e2eGanttFrom=null;      // first day shown on the Gantt (Date); null = auto
+var _e2eCalY=new Date().getFullYear(), _e2eCalM=new Date().getMonth();
+
+function _e2eD(s){ if(!s) return null; var d=new Date(String(s).length===10?s+'T00:00:00':s); return isNaN(d)?null:d; }
+function _e2eDay(d){ return d?d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'):''; }
+function _e2eShort(s){ var d=_e2eD(s); return d?d.toLocaleDateString('en-PH',{month:'short',day:'numeric'}):''; }
+function _e2eMin(a){ a=a.filter(Boolean); return a.length?a.reduce(function(x,y){return x<y?x:y}):null; }
+function _e2eMax(a){ a=a.filter(Boolean); return a.length?a.reduce(function(x,y){return x>y?x:y}):null; }
+
+// Works out each stage for one project. state: done | now | wait.
+function _e2eStages(p, hat){
+  var g=p.gate||null, jo=p.jo||null, pm=p.pmes||null, mrf=p.mrf||[], out={};
+  out.fq={state:p.client_approved_at?'done':'now', start:p.final_locked_at, end:p.client_approved_at,
+    note:p.client_approved_at?'Client approved '+_e2eShort(p.client_approved_at):'Waiting for the client'};
+  if(!g) out.pay={state:'wait',note:'No payment gate yet'};
+  else{
+    var paidOk=!!(g.paid_at||g.vouched_at||g.released_at||(g.balance!=null&&Number(g.balance)<=0)||
+      (/term/i.test(g.option||'')&&g.status&&g.status!=='open'&&g.status!=='pending'));
+    var pn=g.vouched_at?'Vouched by '+(g.vouched_by||'—'):(g.option?g.option+' · ':'')+fmtMoney(g.paid||0)+' of '+fmtMoney(g.required||g.due||0);
+    out.pay={state:paidOk?'done':'now',start:g.opened_at,end:g.paid_at||g.vouched_at||(paidOk?g.released_at:null),note:pn+(g.odoo_so?' · SO '+g.odoo_so:'')};
+  }
+  var relAt=(g&&g.released_at)||(jo&&jo.released_at);
+  out.rel={state:relAt?'done':(out.pay.state==='done'?'now':'wait'),start:(g&&(g.paid_at||g.vouched_at))||(jo&&jo.ready_at),end:relAt,
+    note:relAt?'Released '+_e2eShort(relAt)+(jo&&jo.no?' · '+jo.no:''):(jo?(jo.no||'Job Order')+' '+(jo.status||''):'No Job Order yet')};
+  var mrfAll=mrf.length&&mrf.every(function(m){return m.received_at});
+  var matOk=mrfAll||(pm&&/in_stock|complete|received/i.test(pm.material||''));
+  out.mat={state:matOk?'done':(relAt?'now':'wait'),start:_e2eMin(mrf.map(function(m){return m.authorized_at}))||relAt,
+    end:matOk?(_e2eMax(mrf.map(function(m){return m.received_at}))||relAt):null,
+    note:mrf.length?mrf.filter(function(m){return m.received_at}).length+' of '+mrf.length+' material request'+(mrf.length>1?'s':'')+' received':(pm?'Materials: '+String(pm.material||'').replace(/_/g,' '):'—')};
+  out.chk={state:pm&&pm.approved_at?'done':(pm?'now':'wait'),start:pm&&(pm.checked_at||null),end:pm&&pm.approved_at,
+    note:!pm?'Not in production yet':(pm.approved_at?'Approved '+_e2eShort(pm.approved_at):'Job Order '+String(pm.review||'waiting').replace(/_/g,' '))};
+  var st=(pm&&pm.stages)||[], pl=0, dn=0;
+  st.forEach(function(s){ pl+=Number(s.planned||0); dn+=Math.min(Number(s.done||0),Number(s.planned||0)); });
+  var prodDone=st.length&&pl>0&&dn>=pl;
+  out.prod={state:prodDone?'done':(pm&&pm.approved_at?'now':'wait'),start:_e2eMin(st.map(function(s){return s.started_at})),
+    end:prodDone?_e2eMax(st.map(function(s){return s.last_at})):null,
+    planStart:_e2eMin(st.map(function(s){return s.planned_start})),planEnd:_e2eMax(st.map(function(s){return s.planned_end})),
+    pct:pl?Math.round(dn/pl*100):0,stages:st,
+    note:st.length?(pl?Math.round(dn/pl*100):0)+'% of pieces done'+(pm.schedule&&pm.schedule!=='none'?' · schedule '+String(pm.schedule).replace(/_/g,' '):''):'No processes yet'};
+  var dl=[], pk=[]; (hat||[]).forEach(function(h){ dl=dl.concat(h.deliveries||[]); pk=pk.concat(h.pickups||[]); });
+  var dlvDone=dl.filter(function(d){return d.status==='completed'}), pkDone=pk.filter(function(o){return o.status==='done'});
+  var dlvAt=_e2eMax(dlvDone.map(function(d){return d.done_at}).concat(pkDone.map(function(o){return o.closed_at})));
+  var anyDone=(dl.length&&dlvDone.length===dl.length)||(pk.length&&pkDone.length===pk.length&&!dl.length);
+  var dNote='Not booked in HATID yet';
+  if(dl.length){ var d0=dl.filter(function(d){return d.status!=='completed'})[0]||dl[dl.length-1];
+    dNote=(dl.length>1?dl.length+' deliveries · ':'Delivery ')+(d0.status==='completed'?'delivered'+(d0.received_by?' to '+d0.received_by:''):(d0.status||'')+(d0.scheduled?' '+_e2eShort(d0.scheduled):'')+(d0.loaded_at?' · loaded':(d0.prepared_at?' · prepared':''))); }
+  else if(pk.length){ var o0=pk[pk.length-1]; dNote='Pick-up '+String(o0.status||'').replace(/_/g,' ')+(o0.pickup_date?' '+_e2eShort(o0.pickup_date):''); }
+  out.dlv={state:anyDone?'done':((dl.length||pk.length||prodDone)?'now':'wait'),
+    start:_e2eMin(dl.map(function(d){return d.scheduled}).concat(pk.map(function(o){return o.pickup_date}))),end:anyDone?dlvAt:null,note:dNote,dl:dl,pk:pk};
+  var cur=null; E2E_STAGES.forEach(function(s){ if(!cur&&out[s.k].state!=='done') cur=s.k; });
+  out.cur=cur; out.doneAt=cur?null:(dlvAt||out.prod.end);
+  return out;
+}
+
+function _e2eRefs(p){ var r=[p.serial]; if(p.gate&&p.gate.odoo_so) r.push(String(p.gate.odoo_so).trim()); return r; }
+function _e2eHatFor(p){ return _e2eRefs(p).map(function(r){return _e2e.hat[String(r).toUpperCase()]}).filter(Boolean); }
+function _e2eCoKey(p){ return (typeof _quotCompanyKey==='function')?_quotCompanyKey({id:p.serial,company:p.company}):''; }
+
+function _e2eLoad(force, cb){
+  if(_e2e.rows&&!force&&Date.now()-_e2e.at<60000){ cb&&cb(); return; }
+  if(!supa||!supaSession){ _e2e.err='Connect to the fast database first (Settings › Company & DB).'; cb&&cb(); return; }
+  _e2e.loading=true;
+  supa.rpc('sched_e2e').then(function(r){
+    if(r.error){ _e2e.err=r.error.message; _e2e.loading=false; cb&&cb(); return; }
+    _e2e.err=''; _e2e.rows=r.data||[]; _e2e.at=Date.now();
+    var refs=[]; _e2e.rows.forEach(function(p){ refs=refs.concat(_e2eRefs(p)); });
+    var tok=supaSession&&supaSession.access_token;
+    fetch('https://nssviuuagtlvxjvvvagt.supabase.co/functions/v1/keystone-feed',{method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},body:JSON.stringify({what:'refs',args:{refs:refs.slice(0,500)}})})
+      .then(function(x){return x.json().then(function(j){return {ok:x.ok,j:j}})})
+      .then(function(res){
+        _e2e.hat={}; _e2e.hatErr=res.ok?'':((res.j&&res.j.error)||'HATID could not answer.');
+        var d=(res.j&&res.j.data)||{}; Object.keys(d).forEach(function(k){ _e2e.hat[k.toUpperCase()]=d[k]; });
+      }).catch(function(){ _e2e.hatErr='HATID could not be reached — delivery status not shown.'; })
+      .then(function(){ _e2e.loading=false; cb&&cb(); });
+  }).catch(function(e){ _e2e.err=String(e&&e.message||e); _e2e.loading=false; cb&&cb(); });
+}
+
+function _e2eItems(anyStage){
+  var now=Date.now();
+  return (_e2e.rows||[]).map(function(p){ return {p:p,s:_e2eStages(p,_e2eHatFor(p))}; }).filter(function(it){
+    var p=it.p, s=it.s;
+    if(/declin|cancel/i.test(p.status||'')) return false;
+    if(!s.cur&&!_e2eFilt.finished){ var d=_e2eD(s.doneAt); if(d&&now-d.getTime()>E2E_DONE_HIDE_DAYS*86400000) return false; }
+    if(_e2eFilt.co&&_e2eCoKey(p)!==_e2eFilt.co) return false;
+    if(!anyStage&&_e2eFilt.stage&&(s.cur||'done')!==_e2eFilt.stage) return false;
+    if(_e2eFilt.q){ var hay=(p.serial+' '+(p.client||'')+' '+(p.project||'')+' '+(p.prepared_by||'')+' '+((p.gate&&p.gate.odoo_so)||'')+' '+((p.jo&&p.jo.no)||'')).toLowerCase();
+      if(!_e2eFilt.q.toLowerCase().split(/\s+/).filter(Boolean).every(function(w){return hay.indexOf(w)>=0})) return false; }
+    return true;
+  });
+}
+function _e2eStageLabel(k){ if(!k) return 'Done'; var s=E2E_STAGES.filter(function(x){return x.k===k})[0]; return s?s.l:k; }
+function _e2eStageColor(k){ if(!k) return '#16a34a'; var s=E2E_STAGES.filter(function(x){return x.k===k})[0]; return s?s.c:'#64748b'; }
+function _e2eOpen(serial){ openQuotationFromDir(serial); }
+function _e2eQ(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+function setSchedView(v){
+  schedView=v; try{localStorage.setItem('mc_sched_view',v)}catch(e){}
   renderSchedule();
 }
+function _e2eSetFilt(k,v){ _e2eFilt[k]=v; try{localStorage.setItem('mc_sched_filters',JSON.stringify({co:_e2eFilt.co,stage:_e2eFilt.stage,finished:_e2eFilt.finished}))}catch(e){}
+  if(k==='q'){ clearTimeout(_e2eSetFilt._t); _e2eSetFilt._t=setTimeout(_e2eDraw,180); } else _e2eDraw(); }
+
+function renderSchedule(){
+  var views=[['gantt','ti-chart-gantt','Gantt'],['kanban','ti-layout-kanban','Kanban'],['calendar','ti-calendar-event','Calendar'],['list','ti-list','List'],['target','ti-target','Target dates']];
+  if(!views.some(function(v){return v[0]===schedView})) schedView='gantt';
+  var vb=el('sched-views'); if(vb) vb.innerHTML=views.map(function(v){
+    return '<button class="btn" onclick="setSchedView(\''+v[0]+'\')" style="'+(schedView===v[0]?'background:var(--wash-navy);color:var(--navy)':'')+'"><i class="ti '+v[1]+'"></i>'+v[2]+'</button>'; }).join('');
+  var fb=el('sched-filters'); if(fb){
+    var hasCo=function(k){return _e2eFilt.co===k?' selected':''}, hasSt=function(k){return _e2eFilt.stage===k?' selected':''};
+    fb.style.display=schedView==='target'?'none':'flex';
+    fb.innerHTML='<input class="inp" id="sched-q" placeholder="Search client, project, QT, SO, JO…" value="'+escHtml(_e2eFilt.q)+'" oninput="_e2eSetFilt(\'q\',this.value)" style="flex:1;min-width:200px;max-width:340px">'
+      +'<select class="inp" style="width:auto" onchange="_e2eSetFilt(\'co\',this.value)"><option value="">All companies</option><option value="W"'+hasCo('W')+'>World Class Laminate</option><option value="M"'+hasCo('M')+'>Module System</option><option value="C"'+hasCo('C')+'>Cebu World Laminate</option></select>'
+      +'<select class="inp" style="width:auto" onchange="_e2eSetFilt(\'stage\',this.value)"><option value="">Every stage</option>'+E2E_STAGES.map(function(s){return '<option value="'+s.k+'"'+hasSt(s.k)+'>'+s.l+'</option>'}).join('')+'<option value="done"'+hasSt('done')+'>Done</option></select>'
+      +'<label style="font-size:12px;display:flex;align-items:center;gap:5px;color:var(--text2)"><input type="checkbox"'+(_e2eFilt.finished?' checked':'')+' onchange="_e2eSetFilt(\'finished\',this.checked)">Show finished over '+E2E_DONE_HIDE_DAYS+' days</label>'
+      +'<button class="btn" onclick="_e2eLoad(true,_e2eDraw)" style="margin-left:auto"><i class="ti ti-refresh"></i>Refresh</button>';
+  }
+  var kp=el('sched-kpis'); if(kp) kp.style.display=schedView==='target'?'none':'';
+  var ok=el('sched-old-kpis'); if(ok) ok.style.display=schedView==='target'?'':'none';
+  var hc=el('sched-hol-card'); if(hc) hc.style.display=schedView==='target'?'':'none';
+  if(schedView==='target'){ _renderTargetDates(); return; }
+  var b=el('sched-body'); if(b&&!_e2e.rows) b.innerHTML='<p style="font-size:12px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Loading every project from Modcraft, KEYSTONE, PMES and HATID…</p>';
+  _e2eLoad(false,_e2eDraw);
+}
+
+function _e2eDraw(){
+  if(schedView==='target') return;
+  var head=el('sched-head'), body=el('sched-body'); if(!head||!body) return;
+  if(_e2e.err&&!_e2e.rows){ head.innerHTML='<h3><i class="ti ti-route"></i>Project status</h3>'; body.innerHTML='<p style="font-size:12px;color:var(--coral)">'+escHtml(_e2e.err)+'</p>'; return; }
+  var items=_e2eItems(), all=_e2eItems(true).map(function(it){return it.s});
+  var cnt={}; all.forEach(function(s){ var k=s.cur||'done'; cnt[k]=(cnt[k]||0)+1; });
+  var kp=el('sched-kpis'); if(kp) kp.innerHTML=E2E_STAGES.concat([{k:'done',l:'Done',c:'#16a34a'}]).map(function(s){
+    return '<div class="kpi" style="cursor:pointer;'+(_e2eFilt.stage===s.k?'outline:2px solid '+s.c:'')+'" onclick="_e2eSetFilt(\'stage\',_e2eFilt.stage===\''+s.k+'\'?\'\':\''+s.k+'\')"><div class="lbl">'+s.l+'</div><div class="val" style="color:'+s.c+'">'+(cnt[s.k]||0)+'</div></div>'; }).join('');
+  var titles={gantt:['ti-chart-gantt','Gantt — where each project is'],kanban:['ti-layout-kanban','Kanban — by stage'],calendar:['ti-calendar-event','Calendar — key dates'],list:['ti-list','List — every stage']};
+  var t=titles[schedView]||titles.gantt;
+  head.innerHTML='<h3><i class="ti '+t[0]+'"></i>'+t[1]+'</h3><span style="font-size:12px;color:var(--text2);margin-left:6px">'+items.length+' project'+(items.length===1?'':'s')+'</span>'
+    +(schedView==='gantt'?'<div style="display:flex;gap:4px;margin-left:auto"><button class="btn" onclick="_e2eGanttStep(-30)" style="height:28px;padding:0 8px"><i class="ti ti-chevron-left"></i></button><button class="btn" onclick="_e2eGanttFrom=null;_e2eDraw()" style="height:28px;padding:0 8px;font-size:12px">Today</button><button class="btn" onclick="_e2eGanttStep(30)" style="height:28px;padding:0 8px"><i class="ti ti-chevron-right"></i></button></div>':'')
+    +(schedView==='calendar'?'<div style="display:flex;gap:4px;margin-left:auto"><button class="btn" onclick="_e2eCalStep(-1)" style="height:28px;padding:0 8px"><i class="ti ti-chevron-left"></i></button><button class="btn" onclick="_e2eCalStep(0)" style="height:28px;padding:0 8px;font-size:12px">Today</button><button class="btn" onclick="_e2eCalStep(1)" style="height:28px;padding:0 8px"><i class="ti ti-chevron-right"></i></button></div>':'');
+  var warn=_e2e.hatErr?'<div style="font-size:12px;color:var(--amber);margin-bottom:8px"><i class="ti ti-alert-triangle"></i> '+escHtml(_e2e.hatErr)+'</div>':'';
+  if(!items.length){ body.innerHTML=warn+'<p style="font-size:12px;color:var(--text2)">No project matches. Projects appear here once their Final Quotation is locked.</p>'; return; }
+  body.innerHTML=warn+(schedView==='kanban'?_e2eKanban(items):schedView==='calendar'?_e2eCalendar(items):schedView==='list'?_e2eList(items):_e2eGantt(items))+_e2eLegend();
+}
+function _e2eLegend(){
+  return '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;font-size:11px;color:var(--text2)">'+E2E_STAGES.map(function(s){
+    return '<span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:2px;background:'+s.c+'"></span>'+s.l+'</span>'}).join('')
+    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:2px;border:1.5px dashed var(--text2)"></span>Production plan (PMES)</span>'
+    +'<span style="display:flex;align-items:center;gap:4px"><span style="width:2px;height:10px;background:var(--coral)"></span>Today</span></div>';
+}
+function _e2eRowHead(p,s){
+  return '<div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(p.client||'—')+'</div>'
+    +'<div style="font-size:10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(p.serial)+(p.project?' · '+escHtml(p.project):'')+'</div>';
+}
+function _e2eNowPill(s){
+  var k=s.cur, c=_e2eStageColor(k);
+  return '<span style="display:inline-block;font-size:10px;padding:1px 7px;border-radius:9px;background:'+c+'1f;color:'+c+';font-weight:600;white-space:nowrap">'+_e2eStageLabel(k)+'</span>';
+}
+function _e2eGanttStep(n){ var f=_e2eGanttFrom||new Date(Date.now()-60*86400000); _e2eGanttFrom=new Date(f.getTime()+n*86400000); _e2eDraw(); }
+function _e2eGantt(items){
+  var today=new Date(); today.setHours(0,0,0,0);
+  var from=_e2eGanttFrom?new Date(_e2eGanttFrom):new Date(today.getTime()-60*86400000); from.setHours(0,0,0,0);
+  var days=105, to=new Date(from.getTime()+days*86400000);
+  function x(d){ d=_e2eD(d); if(!d) return null; return Math.max(0,Math.min(100,(d-from)/(to-from)*100)); }
+  var h='<div style="overflow-x:auto"><div style="min-width:760px">';
+  h+='<div style="display:flex;margin-left:230px;position:relative;height:18px;border-bottom:.5px solid var(--border)">';
+  for(var i=0;i<days;i+=7){ var d=new Date(from.getTime()+i*86400000); h+='<div style="position:absolute;left:'+(i/days*100)+'%;font-size:10px;color:var(--text2)">'+d.toLocaleDateString('en-PH',{month:'short',day:'numeric'})+'</div>'; }
+  h+='</div>';
+  var tx=x(today);
+  items.forEach(function(it){
+    var p=it.p, s=it.s;
+    h+='<div style="display:flex;align-items:center;border-bottom:.5px solid var(--border);cursor:pointer" onclick="_e2eOpen(\''+_e2eQ(p.serial)+'\')" title="'+escHtml(_e2eStageLabel(s.cur)+' — '+((s[s.cur]||{}).note||''))+'">'
+      +'<div style="width:230px;flex-shrink:0;font-size:11px;padding:5px 10px 5px 0;display:flex;gap:6px;align-items:center"><div style="min-width:0;flex:1">'+_e2eRowHead(p,s)+'</div>'+_e2eNowPill(s)+'</div>'
+      +'<div style="flex:1;position:relative;height:34px">';
+    for(var w=0;w<days;w+=7) h+='<div style="position:absolute;left:'+(w/days*100)+'%;top:0;bottom:0;width:.5px;background:var(--border)"></div>';
+    var pr=s.prod;
+    if(pr.planStart&&pr.planEnd){ var a=x(pr.planStart), b=x(pr.planEnd); if(b>0&&a<100) h+='<div title="Production plan '+_e2eShort(pr.planStart)+' → '+_e2eShort(pr.planEnd)+'" style="position:absolute;left:'+a+'%;width:'+Math.max(.6,b-a)+'%;top:20px;height:9px;border:1.5px dashed var(--text2);border-radius:3px"></div>'; }
+    E2E_STAGES.forEach(function(st){
+      var v=s[st.k]; if(!v||v.state==='wait'||!v.start) return;
+      var a=x(v.start), e=v.end?x(v.end):tx; if(a==null) return;
+      if(e<a) e=a; if(e<=0||a>=100) return;
+      var op=v.state==='done'?'1':'.55'; var tipx=st.k==='prod'?(' · '+(v.stages||[]).map(function(x){return (x.label||x.code)+' '+Math.min(+x.done||0,+x.planned||0)+'/'+(+x.planned||0)}).join(', ')):'';
+      h+='<div title="'+escHtml(st.l+': '+_e2eShort(v.start)+(v.end?' → '+_e2eShort(v.end):' → now')+' · '+v.note+tipx)+'" style="position:absolute;left:'+a+'%;width:'+Math.max(.6,e-a)+'%;top:6px;height:12px;background:'+st.c+';opacity:'+op+';border-radius:3px"></div>';
+    });
+    var tg=p.target||{};
+    if(tg.inst){ var ti=x(tg.inst); if(ti>0&&ti<100) h+='<div title="Target installation '+escHtml(tg.inst)+'" style="position:absolute;left:'+ti+'%;top:3px;font-size:10px;color:var(--teal);transform:translateX(-50%)">◆</div>'; }
+    if(tx>0&&tx<100) h+='<div style="position:absolute;left:'+tx+'%;top:0;bottom:0;width:2px;background:var(--coral)"></div>';
+    h+='</div></div>';
+  });
+  h+='</div></div><div style="font-size:11px;color:var(--text2);margin-top:6px">Solid = finished stage · faded = in progress (runs to today) · ◆ = target installation date from the quotation. Click a row to open the quotation.</div>';
+  return h;
+}
+function _e2eKanban(items){
+  var cols=E2E_STAGES.concat([{k:'done',l:'Done',c:'#16a34a'}]);
+  var h='<div style="display:grid;grid-template-columns:repeat('+cols.length+',minmax(140px,1fr));gap:8px;overflow-x:auto">';
+  cols.forEach(function(c){
+    var list=items.filter(function(it){return (it.s.cur||'done')===c.k});
+    h+='<div style="background:var(--bg);border-radius:8px;padding:6px;min-height:120px"><div style="font-size:11px;font-weight:600;color:'+c.c+';padding:2px 4px 6px;border-bottom:2px solid '+c.c+';margin-bottom:6px">'+c.l+' <span style="color:var(--text2);font-weight:400">'+list.length+'</span></div>';
+    list.forEach(function(it){ var p=it.p, s=it.s, v=s[c.k]||{};
+      h+='<div onclick="_e2eOpen(\''+_e2eQ(p.serial)+'\')" style="background:var(--card);border:.5px solid var(--border);border-left:3px solid '+c.c+';border-radius:6px;padding:6px 8px;margin-bottom:6px;cursor:pointer;font-size:11px">'
+        +_e2eRowHead(p,s)+'<div style="margin-top:4px;color:var(--text2)">'+escHtml(c.k==='done'?('Finished '+_e2eShort(s.doneAt)):(v.note||''))+'</div>'
+        +(c.k==='prod'&&s.prod.stages.length?'<div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px"><div style="height:4px;width:'+s.prod.pct+'%;background:'+c.c+';border-radius:2px"></div></div>'+_e2eProcLines(s.prod.stages):'')
+        +'</div>'; });
+    h+='</div>';
+  });
+  return h+'</div>';
+}
+function _e2eProcLines(st){
+  return '<div style="margin-top:4px;color:var(--text2);font-size:10px;line-height:1.5">'+(st||[]).map(function(x){var pl=Number(x.planned||0),d=Math.min(Number(x.done||0),pl);
+    return '<div>'+(pl&&d>=pl?'✓ ':'')+escHtml(x.label||x.code)+' '+d+'/'+pl+'</div>'}).join('')+'</div>';
+}
+function _e2eList(items){
+  var h='<div style="overflow-x:auto"><table class="data" style="font-size:11px"><thead><tr><th>Project</th><th>Now at</th>'+E2E_STAGES.map(function(s){return '<th>'+s.l+'</th>'}).join('')+'</tr></thead><tbody>';
+  items.forEach(function(it){ var p=it.p, s=it.s;
+    h+='<tr style="cursor:pointer" onclick="_e2eOpen(\''+_e2eQ(p.serial)+'\')"><td style="max-width:200px">'+_e2eRowHead(p,s)+'</td><td>'+_e2eNowPill(s)+'</td>';
+    E2E_STAGES.forEach(function(st){ var v=s[st.k];
+      var ic=v.state==='done'?'<i class="ti ti-circle-check" style="color:#16a34a"></i>':v.state==='now'?'<i class="ti ti-progress" style="color:'+st.c+'"></i>':'<i class="ti ti-circle-dashed" style="color:var(--muted)"></i>';
+      h+='<td style="min-width:120px">'+ic+' <span style="color:var(--text2)">'+escHtml(v.note||'')+'</span>'+(st.k==='prod'&&v.stages&&v.stages.length?_e2eProcLines(v.stages):'')+'</td>'; });
+    h+='</tr>'; });
+  return h+'</tbody></table></div>';
+}
+function _e2eCalStep(n){ if(!n){ var d=new Date(); _e2eCalY=d.getFullYear(); _e2eCalM=d.getMonth(); } else { _e2eCalM+=n; if(_e2eCalM<0){_e2eCalM=11;_e2eCalY--;} if(_e2eCalM>11){_e2eCalM=0;_e2eCalY++;} } _e2eDraw(); }
+function _e2eCalendar(items){
+  var y=_e2eCalY, m=_e2eCalM, ev={};
+  function add(d,label,color,p){ var k=_e2eDay(_e2eD(d)); if(!k) return; (ev[k]=ev[k]||[]).push({l:label,c:color,p:p}); }
+  items.forEach(function(it){ var p=it.p, s=it.s, g=p.gate||{};
+    add(p.client_approved_at,'Approved','#6366f1',p);
+    add(g.paid_at||g.vouched_at,g.vouched_at?'Vouched':'Paid','#d97706',p);
+    add(s.rel.end,'Released','#0891b2',p);
+    add(s.mat.end,'Materials in','#7c3aed',p);
+    add(s.chk.end,'JO approved','#db2777',p);
+    add(s.prod.start,'Production starts','#16a34a',p);
+    add(s.prod.planEnd,'Production plan ends','#16a34a',p);
+    (s.dlv.dl||[]).forEach(function(d){ add(d.scheduled,d.status==='completed'?'Delivered':'Delivery','#0f766e',p); });
+    (s.dlv.pk||[]).forEach(function(o){ add(o.pickup_date,'Pick-up','#0f766e',p); });
+    if(p.target&&p.target.inst) add(p.target.inst,'Target install','#0f766e',p);
+  });
+  var months=["January","February","March","April","May","June","July","August","September","October","November","December"];
+  var first=new Date(y,m,1).getDay(), n=new Date(y,m+1,0).getDate(), today=_e2eDay(new Date());
+  var h='<div style="font-weight:600;margin-bottom:6px">'+months[m]+' '+y+'</div><div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px">';
+  ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(function(d){ h+='<div style="text-align:center;font-size:11px;color:var(--text2)">'+d+'</div>'; });
+  for(var i=0;i<first;i++) h+='<div></div>';
+  for(var d=1;d<=n;d++){ var k=y+'-'+String(m+1).padStart(2,'0')+'-'+String(d).padStart(2,'0'), list=ev[k]||[], hol=isHoliday(k);
+    h+='<div style="min-height:70px;border:'+(k===today?'1.5px solid var(--navy)':'.5px solid var(--border)')+';border-radius:5px;padding:3px 4px;'+(hol?'background:var(--wash-coral)':'')+'"><div style="font-size:11px;font-weight:500">'+d+'</div>';
+    list.slice(0,4).forEach(function(e){ h+='<div onclick="_e2eOpen(\''+_e2eQ(e.p.serial)+'\')" title="'+escHtml(e.l+' — '+(e.p.client||'')+' '+e.p.serial)+'" style="font-size:9px;border-left:3px solid '+e.c+';background:var(--bg);padding:1px 3px;margin-bottom:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer">'+escHtml(e.l+': '+(e.p.client||e.p.serial))+'</div>'; });
+    if(list.length>4) h+='<div style="font-size:9px;color:var(--text2)">+'+(list.length-4)+' more</div>';
+    h+='</div>'; }
+  return h+'</div>';
+}
+
+// ── Target dates (the quotation's own Scheduling card dates) ─────────────
 var _schedGanttYear=new Date().getFullYear();
 var _schedCalYear=new Date().getFullYear(), _schedCalMonth=new Date().getMonth();   // 0-indexed
-function schedGanttYearStep(n){ _schedGanttYear+=n; renderSchedule(); }
+function schedGanttYearStep(n){ _schedGanttYear+=n; _renderTargetDates(); }
 function schedCalStep(n){
   _schedCalMonth+=n;
   if(_schedCalMonth<0){ _schedCalMonth=11; _schedCalYear--; }
@@ -15192,7 +15452,7 @@ function schedCalStep(n){
 function schedCalToday(){
   var now=new Date(); _schedCalYear=now.getFullYear(); _schedCalMonth=now.getMonth(); renderSchedule();
 }
-function renderSchedule() {
+function _renderTargetDates() {
   var headEl=el("sched-head"); var bodyEl=el("sched-body");
   if(!headEl||!bodyEl) return;
   bodyEl.innerHTML='<p style="font-size:12px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Loading schedule…</p>';
@@ -15222,14 +15482,14 @@ function _renderScheduleWith(jobs) {
   var hy=el('kpi-sched-hol-lbl'); if(hy) hy.textContent='PH holidays '+thisYear;
 
   if(!jobs.length){
-    headEl.innerHTML='<h3><i class="ti ti-chart-gantt"></i>'+(schedView==='gantt'?'Gantt chart':'Calendar')+'</h3>';
+    headEl.innerHTML='<h3><i class="ti ti-target"></i>Target dates</h3>';
     bodyEl.innerHTML='<p style="font-size:12px;color:var(--text2)">No quotation has a fabrication or installation date set yet. '
       +'Dates are entered on the quotation form (Scheduling card) and appear here once saved.</p>';
     html('holidays-wrap',_schedHolidaysHtml());
     return;
   }
 
-  if(schedView==="gantt") {
+  if(schedView==="target") {
     var y=_schedGanttYear;
     headEl.innerHTML='<h3><i class="ti ti-chart-gantt"></i>Gantt chart — fabrication &amp; installation '+y+'</h3>'
       +'<div style="display:flex;gap:4px;margin-left:auto"><button class="btn" onclick="schedGanttYearStep(-1)" style="height:28px;padding:0 8px;font-size:12px"><i class="ti ti-chevron-left"></i></button>'
@@ -48708,6 +48968,10 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-18-schedule-e2e', date:'18 Oct 2026', items:[
+    {id:'schedule-e2e', icon:'ti-route', title:'Schedule shows every project end to end',
+     text:'Schedule now follows each project from the Final Quotation to delivery: client approval, payment (KEYSTONE), release, materials, Job Order check and each production process (PMES), then delivery or pick-up (HATID). View it as Gantt, Kanban, Calendar or List — the app remembers your choice. Finished projects drop off 15 days after delivery. The old fabrication/installation dates are under “Target dates”.'}
+  ]},
   {id:'2026-10-18-order-files-v2', date:'18 Oct 2026', items:[
     {id:'order-files-v2', icon:'ti-paperclip', title:'Order files in Designers Support',
      text:'Export an order as usual, fill in the client, then open Designers Support › Order files. It has the same stages as Orders; the order you just opened is at the top, highlighted. “Work on it” reads the list into the Cutting List of that quotation — no save prompt. Tick several lists and press “Work on selected” to read them into one Cutting List; a later list asks “Add to the current list” or “Replace”. On Orders, New shows everyone\'s orders and the other stages open on your own.',
