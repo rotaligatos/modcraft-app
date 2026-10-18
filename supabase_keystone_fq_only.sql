@@ -64,3 +64,9 @@ $$;
 
 -- 2026-10-18: migration keystone_audit_cleanup: CONFIG paymentOptions = Bank transfer, Cheque, Cash, Online,
 -- With payment terms (Credit / vouched removed); old 4-argument adm_vouch_gate overload dropped.
+
+-- 2026-10-18: KEYSTONE purchasing migrations (applied): keystone_suppliers_accreditation_docs, keystone_supplier_import_dedupe,
+-- keystone_canvass_award_odoo_handoff, keystone_canvass_view_and_guard, keystone_rfq_guard_fix. Tables adm_supplier_docs,
+-- adm_rfq_quotes, adm_pr_odoo_pos; view adm_v_rfq_offers; functions adm_supplier_set_status, adm_supplier_import,
+-- adm_offer_landed, adm_pr_award, adm_pr_record_odoo_po; adm_pr_sign now needs a supplier on every line. Buckets
+-- keystone-supplier-docs, keystone-quotes. Edge Function keystone-ai (search / quote / doc, ANTHROPIC_API_KEY secret).
