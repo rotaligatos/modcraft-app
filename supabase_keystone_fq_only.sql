@@ -45,3 +45,5 @@ $$;
 
 -- Applied as release_queue_vouched_cols: adm_v_release_queue gains g.vouched_by, g.vouched_at (appended
 -- after jo_number), so KEYSTONE can split released jobs into fully paid / with balance / vouched.
+
+-- Applied as adm_fq_waiting_list: adm_canvass_list rows plus quotations.final_locked_at, for the KEYSTONE date filter.
