@@ -38,3 +38,7 @@ language sql stable security invoker set search_path = public as $$
    group by q.serial, q.client_name, q.company, q.total, q.project_name, q.prepared_by
    order by q.total desc nulls last
 $$;
+
+-- Revised same day (applied as adm_canvass_list_fq_awaiting): the list is now the Final Quotations
+-- waiting for the client (status FQ Locked / FQ Awaiting Client Approval), all of them, with their
+-- outsource item count (0 allowed). Initial Quotation stage quotations never appear in KEYSTONE.
