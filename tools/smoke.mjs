@@ -6021,6 +6021,16 @@ const PROFILES = {
       }, { firstClaim: true, staffBlocked: true, after2h: true, finishedNeedsForce: true, managerTakes: true,
            hist: ['claim', 'takeover', 'imported'], waiting: ['1:c.jpg', '2:b.xlsx'],
            labels: ['unknown', 'cutting_list', 'drawing', 'other'] });
+      check('Training practice orders: kept in this browser, merged into the queue, files read back', () => {
+        const w = window, keep = { trn: w._TRN, po: w.pendingOrders };
+        try {
+          w._TRN = true; w.pendingOrders = [];
+          localStorage.setItem('mc_trn_practice_orders', JSON.stringify([{ id: 'P1', _practice: true, status: 'Pending', attachAll: [{ name: 'a.xls', path: 'trn://P1/0' }] }]));
+          w._trnMergePracticeOrders(); w._trnMergePracticeOrders();
+          return { merged: w.pendingOrders.length, fetchReadsTrn: /trn:\/\//.test(String(w._ofFetchFile)),
+                   viewReadsTrn: /trn:\/\//.test(String(w.viewOrderAttachment)) };
+        } finally { w._TRN = keep.trn; w.pendingOrders = keep.po; localStorage.removeItem('mc_trn_practice_orders'); }
+      }, { merged: 1, fetchReadsTrn: true, viewReadsTrn: true });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',

@@ -18112,6 +18112,7 @@ function supaMigrateOrders(){
 }
 
 function _updateOrdersBadge(){
+  if(window._TRN&&typeof _trnMergePracticeOrders==='function') _trnMergePracticeOrders();
   // live work only — Completed/Cancelled/Archived are not waiting on anyone
   var cnt=pendingOrders.filter(function(o){return o.status==='Pending'||o.status==='In Progress';}).length;
   var b=el('orders-badge');
@@ -18223,6 +18224,7 @@ function _setOrderHandler(orderId){
     var prev=pendingOrders[i].handledBy||'';
     pendingOrders[i].handledBy=name||email; pendingOrders[i].handledByEmail=email; pendingOrders[i].handledAt=at;
     if(prev&&prev!==(name||email)) logActivity('Order #'+orderId+' taken over from '+prev+' by '+(name||email)+'.','');
+    _trnSavePracticeOrder(pendingOrders[i]);
     break;
   }
   if(SUPA_DUAL_WRITE&&supaReady()){
@@ -18395,6 +18397,7 @@ function _apprQuotLink(n,size){
 }
 function _ofQueueOn(){ return !!(window._TRN||(typeof supaReady==='function'&&supaReady())); }
 function renderOrders(){
+  _trnMergePracticeOrders();
   if(_ofQueueOn()&&Date.now()-_orderFilesLoadedAt>20000){
     gLoadOrderFiles().then(function(){ if(el('orders-wrap')) renderOrders(); });
   }
@@ -18426,6 +18429,14 @@ function renderOrders(){
       +'<a href="#" onclick="navigate(\'settings\');setTimeout(function(){setStTab(\'company\');},150);return false" '
       +'style="color:var(--navy);font-weight:600">Connect in Settings → Company &amp; DB</a> to see the whole queue.</div></div>'
     : '';
+  if(window._TRN){
+    var _pN=_trnPracticeOrders().length;
+    _partial+='<div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-school"></i><div>'
+      +'<b>Training.</b> Practise the order file queue on your own file: a practice order stays in this browser and never reaches the live queue. '
+      +'<button class="btn btn-primary" style="font-size:12px;padding:3px 10px;margin-left:4px" onclick="trnOpenPracticeOrder()"><i class="ti ti-plus"></i> New practice order</button>'
+      +(_pN?' <button class="btn" style="font-size:12px;padding:3px 10px" onclick="trnClearPracticeOrders()">Remove practice orders ('+_pN+')</button>':'')
+      +'</div></div>';
+  }
   if(testOrders.length){
     var _tOn=_showTestOrders(), _tN=testOrders.length, _tS=_tN!==1?'s':'';
     _partial+='<div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-flask"></i><div>'
@@ -19540,6 +19551,7 @@ function _ofFind(orderId,key){
 // ── fetch the file itself ──
 function _ofFetchFile(f){
   var p=f.key;
+  if(p.indexOf('trn://')===0) return _trnFileGet(p).then(function(b){ return new File([b],f.name,{type:b.type||''}); });
   if(p.indexOf('supabase://')===0){
     var path=p.replace(/^supabase:\/\/order-attachments\//,'');
     if(window._TRN||!supaReady()) return Promise.reject(new Error('Connect to the fast database first.'));
@@ -19721,8 +19733,115 @@ function renderOrderFilesWaiting(wrap){
   wrap.innerHTML=h;
 }
 
+// ── Training: practice orders with your own files (2026-10-18) ─────────────────────────────
+// In training, real orders are not readable (the guard returns them empty) and nothing may be
+// written, so the order file queue had nothing to practise on. A practice order is made here
+// from a file on this computer: the order lives in this browser (localStorage), its files in
+// IndexedDB, and its attachments use trn:// keys that _ofFetchFile reads back. Exporting it
+// makes a training quotation, exactly like the practice quotations. Nothing leaves the browser.
+var TRN_PRACTICE_KEY='mc_trn_practice_orders';
+function _trnPracticeOrders(){ try{ return JSON.parse(localStorage.getItem(TRN_PRACTICE_KEY)||'[]')||[]; }catch(e){ return []; } }
+function _trnSavePracticeList(list){ try{ localStorage.setItem(TRN_PRACTICE_KEY,JSON.stringify(list)); }catch(e){ showToast('Browser storage is full — remove some practice orders.'); } }
+function _trnIsPractice(o){ return !!(o&&o._practice); }
+function _trnIdb(){
+  return new Promise(function(res,rej){
+    var r=indexedDB.open('mc_trn_files',1);
+    r.onupgradeneeded=function(){ r.result.createObjectStore('f'); };
+    r.onsuccess=function(){ res(r.result); }; r.onerror=function(){ rej(r.error); };
+  });
+}
+function _trnFilePut(k,file){
+  return _trnIdb().then(function(db){ return new Promise(function(res,rej){
+    var t=db.transaction('f','readwrite'); t.objectStore('f').put(file,k);
+    t.oncomplete=function(){ res(); }; t.onerror=function(){ rej(t.error); }; }); });
+}
+function _trnFileGet(k){
+  return _trnIdb().then(function(db){ return new Promise(function(res,rej){
+    var q=db.transaction('f','readonly').objectStore('f').get(k);
+    q.onsuccess=function(){ q.result?res(q.result):rej(new Error('Practice file not found in this browser')); };
+    q.onerror=function(){ rej(q.error); }; }); });
+}
+function _trnClearFiles(){
+  return _trnIdb().then(function(db){ return new Promise(function(res){
+    var t=db.transaction('f','readwrite'); t.objectStore('f').clear(); t.oncomplete=res; t.onerror=res; }); }).catch(function(){});
+}
+// Put the practice orders into the queue (after every load, which replaces pendingOrders).
+function _trnMergePracticeOrders(){
+  if(!window._TRN) return;
+  _trnPracticeOrders().forEach(function(o){
+    for(var i=0;i<pendingOrders.length;i++) if(String(pendingOrders[i].id)===String(o.id)) return;
+    pendingOrders.push(Object.assign({},o));
+  });
+}
+// Keep a practice order's status/quotation across reloads.
+function _trnSavePracticeOrder(o){
+  if(!window._TRN||!_trnIsPractice(o)) return;
+  var list=_trnPracticeOrders();
+  for(var i=0;i<list.length;i++) if(String(list[i].id)===String(o.id)){
+    list[i].status=o.status; list[i].quotSerial=o.quotSerial||''; list[i].sentAt=o.sentAt||'';
+    list[i].handledBy=o.handledBy||''; list[i].handledByEmail=o.handledByEmail||''; list[i].handledAt=o.handledAt||'';
+  }
+  _trnSavePracticeList(list);
+}
+function trnOpenPracticeOrder(){
+  if(!window._TRN) return;
+  var ov=el('ov-trn-po');
+  if(!ov){
+    ov=document.createElement('div'); ov.id='ov-trn-po'; ov.className='overlay';
+    ov.innerHTML='<div class="modal" style="max-width:480px"><div class="modal-head"><h3><i class="ti ti-school"></i> New practice order</h3>'
+      +'<button class="modal-close" onclick="closeModal(\'ov-trn-po\')">×</button></div>'
+      +'<div class="modal-body" style="display:flex;flex-direction:column;gap:10px;font-size:13px">'
+      +'<div style="font-size:12px;color:var(--text2)">Training only. The order and its files stay in this browser — nothing reaches the live queue, the database or Google Drive.</div>'
+      +'<label>Client name<input id="trn-po-client" style="width:100%;display:block;margin-top:3px" value="Practice client"></label>'
+      +'<label>Project<input id="trn-po-project" style="width:100%;display:block;margin-top:3px" placeholder="optional"></label>'
+      +'<label>Arrived as<select id="trn-po-kind" style="width:100%;display:block;margin-top:3px"><option value="Wufoo">Wufoo order</option><option value="Cutting List">Website cutting list order</option></select></label>'
+      +'<label>Files (the client\'s cutting list, drawings…)<input id="trn-po-files" type="file" multiple style="width:100%"></label>'
+      +'</div><div class="modal-foot"><button class="btn" onclick="closeModal(\'ov-trn-po\')">Cancel</button>'
+      +'<button class="btn btn-primary" onclick="trnCreatePracticeOrder()"><i class="ti ti-plus"></i> Create practice order</button></div></div>';
+    document.body.appendChild(ov);
+  }
+  openModal('ov-trn-po');
+}
+function trnCreatePracticeOrder(){
+  var files=[].slice.call((el('trn-po-files')||{}).files||[]);
+  if(!files.length){ showToast('Attach at least one file.'); return; }
+  var id='P'+String(Date.now()).slice(-6);
+  var kind=(el('trn-po-kind')||{}).value||'Wufoo';
+  var att=files.map(function(f,i){ return {name:f.name,path:'trn://'+id+'/'+i}; });
+  Promise.all(files.map(function(f,i){ return _trnFilePut(att[i].path,f); })).then(function(){
+    var o={id:id,_practice:true,receivedAt:new Date().toISOString(),status:'Pending',kind:kind,
+      clientName:String((el('trn-po-client')||{}).value||'Practice client').trim(),
+      projectName:String((el('trn-po-project')||{}).value||'').trim(),
+      sourceCompany:(typeof currentUserCompany!=='undefined'&&currentUserCompany)||'',
+      attachAll:att,attach1:'',attach2:'',quotSerial:'',sentAt:'',pauseHistory:[],wufooExtra:[]};
+    var list=_trnPracticeOrders(); list.push(o); _trnSavePracticeList(list);
+    _trnMergePracticeOrders();
+    closeModal('ov-trn-po');
+    if(el('trn-po-files')) el('trn-po-files').value='';
+    _updateOrdersBadge(); setOrdersTab('files');
+    showToast('Practice order #'+id+' created — press “Work on it” on its file.');
+  }).catch(function(e){ showToast('Could not keep the practice file: '+(e.message||e)); });
+}
+function trnClearPracticeOrders(){
+  _confirm('Remove all practice orders and their files from this browser?',function(){
+    var ids=_trnPracticeOrders().map(function(o){ return String(o.id); });
+    _trnSavePracticeList([]);
+    pendingOrders=pendingOrders.filter(function(o){ return ids.indexOf(String(o.id))<0; });
+    try{ var m=_ofTrnStore(); Object.keys(m).forEach(function(k){ if(ids.indexOf(k.split('\n')[0])>=0) delete m[k]; }); _ofTrnSave(m); orderFilesMap=m; }catch(e){}
+    _trnClearFiles().then(function(){ _updateOrdersBadge(); renderOrders(); showToast('Practice orders removed.'); });
+  },function(){});
+}
+
 function viewOrderAttachment(url){
   if(!url){ showToast('No attachment on this order.'); return; }
+  // A practice order's file (training) is kept in this browser.
+  if(url.indexOf('trn://')===0){
+    _trnFileGet(url).then(function(f){
+      var w=window.open(URL.createObjectURL(f),'_blank','noopener');
+      if(!w) showToast('Pop-up blocked — allow pop-ups for this site to open attachments.');
+    }).catch(function(e){ showToast(e.message||String(e)); });
+    return;
+  }
 
   // Attachments filed through the MSSI website live in a PRIVATE Supabase
   // bucket and are stored as a reference, not an address. The bucket used to be
@@ -19907,6 +20026,7 @@ function _setOrderStatus(orderId, status, quotSerial, sentAtOverride){
         sheetsUpdate('Pending Orders!X'+row+':Z'+row,[[status,quotSerial||pendingOrders[i].quotSerial||'',sentAt]]).catch(function(){});
       }
       supaUpdateOrderStatus(orderId,status,quotSerial||pendingOrders[i].quotSerial||'',pendingOrders[i].sentAt||null);
+      _trnSavePracticeOrder(pendingOrders[i]);
       _updateOrdersBadge();
       break;
     }
