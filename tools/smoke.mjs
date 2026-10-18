@@ -5994,7 +5994,8 @@ const PROFILES = {
           w.pendingOrders = [
             { id: '2', status: 'Pending', receivedAt: '2026-10-10T08:00:00Z', attachAll: [{ name: 'b.xlsx', path: 'supabase://order-attachments/2/b.xlsx' }] },
             { id: '1', status: 'In Progress', receivedAt: '2026-10-01T08:00:00Z', attachAll: [{ name: 'a.pdf', path: 'https://drive.google.com/file/d/AAA/view' }, { name: 'c.jpg', path: 'https://drive.google.com/file/d/CCC/view' }] },
-            { id: '3', status: 'Cancelled', receivedAt: '2026-09-01T08:00:00Z', attachAll: [{ name: 'z.pdf', path: 'https://drive.google.com/file/d/ZZZ/view' }] }];
+            { id: '3', status: 'Cancelled', receivedAt: '2026-09-01T08:00:00Z', attachAll: [{ name: 'z.pdf', path: 'https://drive.google.com/file/d/ZZZ/view' }] },
+            { id: '4', status: 'Done', receivedAt: '2026-08-01T08:00:00Z', attachAll: [{ name: 'old.pdf', path: 'https://drive.google.com/file/d/OLD/view' }] }];
           const f1 = w._ofFiles(w.pendingOrders[1])[0];
           w.gUser = { email: 'jo@x.ph', name: 'Jo' }; w.currentRole = 'Staff';
           const a = w._ofTrnClaim('1', f1.key, f1.name, 'Jo', false).ok;
