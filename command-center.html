@@ -301,7 +301,8 @@ async function loadAll(){
     supa.from('pmes_delegations').select('*').order('starts_at',{ascending:false}).limit(200),
     supa.from('jobboard_users').select('*').order('active',{ascending:false}).order('name'),
     supa.from('shelfsync_users').select('*').order('active',{ascending:false}).order('name'),
-    supa.from('cc_access').select('*').order('active',{ascending:false}).order('level',{ascending:false}).order('name')
+    supa.from('cc_access').select('*').order('active',{ascending:false}).order('level',{ascending:false}).order('name'),
+    supa.rpc('cc_ks_signing_status')
   ]);
   // The ShelfSync list is added by its own setup script; until then its tab says so instead of an error on every page.
   SS.missing=!!(q[9].error&&/shelfsync_users|does not exist|schema cache/i.test(q[9].error.message||''));
@@ -310,6 +311,7 @@ async function loadAll(){
   if(bad.length) toast('Some lists could not load: '+bad[0].error.message);
   D.modcraft=q[0].data||[]; D.ks=q[1].data||[]; D.pmes=q[2].data||[];
   D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[]; D.deleg=q[7].data||[]; D.jb=q[8].data||[]; D.ss=q[9].data||[]; D.cc=q[10].data||[];
+  D.ksSign={}; (q[11].data||[]).forEach(function(x){D.ksSign[x.email]=x});
 }
 
 function drawNav(){
@@ -1283,21 +1285,41 @@ function viewKs(){
       +'<div class="capgrid">'+CAP_GROUPS.map(function(g){return '<div><div class="sub" style="margin:0 0 2px"><b>'+g[0]+'</b></div>'+g[1].map(function(k){
         return '<label class="chk"><input type="checkbox" class="f-cap" value="'+k+'"'+(c[k]?' checked':'')+'>'+esc(capLabel(k))+'</label><br>'}).join('')+'</div>'}).join('')+'</div>'
       +'<div class="grid-add" style="margin-top:10px">'+fld('Approve limit (₱)','<input class="f-alim" type="number" min="0" value="'+(c.approve_limit==null?'':c.approve_limit)+'" style="width:100%">')
-      +fld('Vouch limit (₱)','<input class="f-vlim" type="number" min="0" value="'+(c.vouch_limit==null?'':c.vouch_limit)+'" style="width:100%">')+'</div>','saveKs('+e+')','ks','removeKs('+e+')','Remove from KEYSTONE');
+      +fld('Vouch limit (₱)','<input class="f-vlim" type="number" min="0" value="'+(c.vouch_limit==null?'':c.vouch_limit)+'" style="width:100%">')+'</div>'
+      +ksSignBox(u.email),'saveKs('+e+')','ks','removeKs('+e+')','Remove from KEYSTONE');
   }
   return '<div class="card"><p class="sub" style="margin:0">Role and company decide what each person sees (Admin/Director see every company; “Sees all companies” too). Capabilities decide what they may do.</p></div>'
     +form+'<div class="card">'+listBar("openEd('ks','add')",'+ Add user')
-    +'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role</th><th>Sees</th><th>Permissions</th><th>Status</th><th></th></tr></thead><tbody>'
+    +'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role</th><th>Sees</th><th>Permissions</th><th>Signing</th><th>Status</th><th></th></tr></thead><tbody>'
     +D.ks.map(function(u,i){
       if(!passCo(u.company)) return '';
       var c=capsOf(u.email), caps=CAPS.filter(function(k){return c[k[0]]}).map(function(k){return k[1]});
       var sees=u.receive_all?'All companies':[coShort(u.company)].concat((u.access_companies||[]).map(function(x){return x.toUpperCase()})).filter(Boolean).filter(function(v,ix,a){return a.indexOf(v)===ix}).join(', ');
       return '<tr'+sAttr([u.name,u.email,u.role,u.company,coShort(u.company),caps.join(' ')],!u.active)+(u.active?'':' class="off"')+'><td><b>'+esc(u.name||'—')+'</b></td><td class="mono">'+esc(u.email)+'</td>'
         +'<td>'+esc(coShort(u.company)||'—')+'</td><td>'+rolePill(u,u.role==='Admin'||u.role==='Director')+'</td><td>'+esc(sees||'—')+'</td>'
-        +'<td>'+tagList(caps)+'</td><td>'+actPill(u.active)+'</td><td><button class="btn" onclick="openEd(\'ks\','+i+')">Edit</button></td></tr>'}).join('')
+        +'<td>'+tagList(caps)+'</td><td>'+ksSignPills(u.email)+'</td><td>'+actPill(u.active)+'</td><td><button class="btn" onclick="openEd(\'ks\','+i+')">Edit</button></td></tr>'}).join('')
     +'</tbody></table></div></div>';
 }
 
+
+/* ── KEYSTONE signing (Rommel 2026-10-18) ── who can sign purchase requests: their passcode (Modcraft PIN, or a
+   KEYSTONE passcode they set themselves), signature on file, and the lock after 5 wrong tries. A passcode is never
+   shown or set here — only reset, so the person sets a new one. */
+function ksSignOf(e){ return (D.ksSign||{})[String(e||'').toLowerCase().trim()]||{passcode:'none',signature:false,locked:false}; }
+function ksSignPills(e){ var s=ksSignOf(e);
+  return '<span class="pill '+(s.passcode==='none'?'p-amber':'p-none')+'">'+({modcraft:'Modcraft PIN',keystone:'Passcode set',none:'No passcode'}[s.passcode]||'No passcode')+'</span> '+
+    '<span class="pill '+(s.signature?'p-none':'p-amber')+'">'+(s.signature?'Signature ✓':'No signature')+'</span>'+(s.locked?' <span class="pill p-red">Locked</span>':''); }
+function ksSignBox(e){ var s=ksSignOf(e), q=esc(String(e).replace(/'/g,''));
+  return '<div class="sub" style="margin-top:12px"><b>Signing purchase requests</b> — '+ksSignPills(e)+'</div><p class="sub" style="margin:4px 0">'+
+    (s.passcode==='modcraft'?'Uses their Modcraft PIN. To reset it, use <b>Reset PIN</b> in Modcraft users.':
+     s.passcode==='keystone'?'Uses a KEYSTONE passcode they set. Reset it if they forgot it — they then set a new one in KEYSTONE (My passcode &amp; signature).':
+     'No passcode yet — they set one in KEYSTONE under My passcode &amp; signature the first time they sign.')+
+    (s.signature?'':' No signature on file: the purchase request form shows their name only until they upload one in KEYSTONE (or save one in Modcraft).')+'</p>'+
+    '<div style="display:flex;gap:6px">'+(s.passcode==='keystone'?'<button class="btn" onclick="ksResetPass(\''+q+'\')">Reset passcode</button>':'')+
+    (s.locked?'<button class="btn" onclick="ksUnlockPass(\''+q+'\')">Unlock (wrong tries)</button>':'')+'</div>'; }
+async function ksResetPass(e){ if(!confirm('Reset the KEYSTONE passcode for '+e+'? They will set a new one the next time they sign.')) return;
+  var r=await supa.rpc('adm_passcode_clear',{p_email:e}); if(r.error){toast(r.error.message);return} toast('Passcode reset for '+e); await refresh(); }
+async function ksUnlockPass(e){ var r=await supa.rpc('adm_passcode_unlock',{p_email:e}); if(r.error){toast(r.error.message);return} toast('Unlocked '+e); await refresh(); }
 
 /* ── HATID signature + signing passcode (Rommel 2026-09-28) ──
    Drawing a signature with a finger is poor on most phones, so a signer's signature can be set here:

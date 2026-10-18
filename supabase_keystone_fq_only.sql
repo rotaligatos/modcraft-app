@@ -76,3 +76,6 @@ $$;
 -- (Modcraft PIN from user_pins, else KEYSTONE passcode; 5 wrong in 15 min locks); adm_pr_sign(uuid,text,bool) and
 -- adm_pr_approve(uuid,text,bool,text,bool) need the passcode (old overloads refuse); adm_purchase_requests.charge_to
 -- project/opex/capex + department; adm_pr_create; adm_signatures; adm_quotation_purchases(serial) feeds the Modcraft cost report.
+
+-- 2026-10-18: migration cc_ks_signing_status (applied): cc_ks_signing_status() (passcode source, signature, locked; no hashes)
+-- and adm_passcode_unlock(email) for the Command Center KEYSTONE users list.
