@@ -6048,6 +6048,24 @@ const PROFILES = {
                  noAutoLoad: !/MCL\.load\(/.test(String(w._orderFileImported)),
                  goesToCutlist: /setProdTab\('cutlist'\)/.test(String(w._orderFileImported)) };
       }, { tab: true, view: true, noAutoLoad: true, goesToCutlist: true });
+      check('Files waiting: open quotation\'s order first (TEST included, finished file can be reopened); clicking another order asks first', () => {
+        const w = window, keep = { po: w.pendingOrders, to: w.testOrders, m: w.orderFilesMap, src: w.qSourceOrderId, ser: w.qSerial, dk: w.qDraftKey, cf: w._confirm, trn: w._TRN, cl: w._ofClaim };
+        try {
+          w._TRN = true;
+          const t = { id: 'TEST-1', isTest: true, status: 'In Progress', receivedAt: '2026-10-18T03:00:00Z', clientName: 'TEST client', attachAll: [{ name: 'AC.pdf', path: 'supabase://order-attachments/TEST-1/AC.pdf' }] };
+          const r = { id: '9007', status: 'Pending', receivedAt: '2026-10-01T03:00:00Z', clientName: 'ROMMEL', attachAll: [{ name: 't.xlsx', path: 'https://drive.google.com/file/d/T94/view' }] };
+          w.pendingOrders = [r]; w.testOrders = [t];
+          w.orderFilesMap = { ['TEST-1\nsupabase://order-attachments/TEST-1/AC.pdf']: { status: 'imported' } };
+          w.qSourceOrderId = 'TEST-1'; w.qSerial = ''; w.qDraftKey = 'DRAFT-abc123';
+          const box = document.createElement('div'); w.renderOrderFilesWaiting(box);
+          const html = box.innerHTML;
+          let asked = '', claimed = false;
+          w._confirm = (msg) => { asked = msg; }; w._ofClaim = () => { claimed = true; return Promise.resolve({ ok: false }); };
+          w.orderFileWork('9007', 'https://drive.google.com/file/d/T94/view');
+          return { mineFirst: html.indexOf('TEST client') >= 0 && html.indexOf('TEST client') < html.indexOf('ROMMEL'),
+                   reopen: /Open again/.test(html), asksBeforeSwitch: /DIFFERENT order/.test(asked) && /9007/.test(asked), notClaimed: !claimed };
+        } finally { Object.assign(w, { pendingOrders: keep.po, testOrders: keep.to, orderFilesMap: keep.m, qSourceOrderId: keep.src, qSerial: keep.ser, qDraftKey: keep.dk, _confirm: keep.cf, _TRN: keep.trn, _ofClaim: keep.cl }); }
+      }, { mineFirst: true, reopen: true, asksBeforeSwitch: true, notClaimed: true });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',

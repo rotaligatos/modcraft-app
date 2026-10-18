@@ -19565,9 +19565,16 @@ function _ofSet(o,f,status,label,reason,serial){
       return gLoadOrderFiles(true).then(function(){ return done(res); });
     }).catch(function(e){ console.warn('[order files] could not record',e); return {ok:false,why:String(e)}; });
 }
+// The queue plus TEST orders hidden behind "Show test orders" — a test order's files must still be
+// findable from Designers Support, or the person testing cannot see their own file.
+function _ofAllOrders(){
+  var out=pendingOrders.slice();
+  (typeof testOrders!=='undefined'&&testOrders||[]).forEach(function(t){ if(out.indexOf(t)<0) out.push(t); });
+  return out;
+}
 function _ofFind(orderId,key){
-  var o=null;
-  for(var i=0;i<pendingOrders.length;i++) if(String(pendingOrders[i].id)===String(orderId)){ o=pendingOrders[i]; break; }
+  var o=null, all=_ofAllOrders();
+  for(var i=0;i<all.length;i++) if(String(all[i].id)===String(orderId)){ o=all[i]; break; }
   if(!o) return null;
   var fs=_ofFiles(o), f=null;
   for(var j=0;j<fs.length;j++) if(fs[j].key===key){ f=fs[j]; break; }
@@ -19614,9 +19621,20 @@ function _ofEnsureQuotation(o){
 }
 
 // ── the main action: open a file to work on it ──
-function orderFileWork(orderId,key,force){
+function _ofOrderLabel(o){ return 'Order #'+o.id+((o.clientName||o.companyName)?' ('+(o.clientName||o.companyName)+')':'')+(o.isTest?' — TEST':''); }
+function orderFileWork(orderId,key,force,switchOk){
   var hit=_ofFind(orderId,key); if(!hit){ showToast('File not found on that order.'); return; }
   var o=hit.o, f=hit.f;
+  var openId=qSourceOrderId?String(qSourceOrderId):'';
+  if(!switchOk&&openId&&openId!==String(o.id)&&(qSerial||qDraftKey)){
+    var curO=null, all=_ofAllOrders();
+    for(var ci=0;ci<all.length;ci++) if(String(all[ci].id)===openId){ curO=all[ci]; break; }
+    _confirm('The quotation open now belongs to '+(curO?_ofOrderLabel(curO):'Order #'+openId)+'.\n\n'
+      +'“'+f.name+'” belongs to a DIFFERENT order: '+_ofOrderLabel(o)+'.\n\n'
+      +'Switch to '+_ofOrderLabel(o)+'? Its own quotation will open (you will be asked to save the current one first).',
+      function(){ orderFileWork(orderId,key,force,true); },function(){});
+    return;
+  }
   _ofClaim(o,f,force).then(function(res){
     if(!res.ok){
       if(res.held){
@@ -19713,7 +19731,7 @@ function orderFileDone(orderId,key){
   finish();
 }
 // The small status line under each attachment button.
-function _ofStatusHtml(o,f){
+function _ofStatusHtml(o,f,ownOrder){
   var r=_ofRow(o,f), st=r?r.status:'waiting', s=ORDER_FILE_STATUS[st]||ORDER_FILE_STATUS.waiting;
   var lbl=ORDER_FILE_LABEL[(r&&r.label&&r.label!=='unknown')?r.label:_ofLabelGuess(f.name)]||'';
   var who='';
@@ -19727,13 +19745,14 @@ function _ofStatusHtml(o,f){
     +'<span class="pill '+s.c+'" style="font-size:10px" title="'+escHtml(st==='needs_person'?(r&&r.reason)||'':'')+'"><i class="ti '+s.i+'"></i> '+s.t+'</span>'+who
     +(st==='needs_person'&&r&&r.reason?' <span style="color:var(--pill-amber)">'+escHtml(String(r.reason).slice(0,140))+'</span>':'')
     +(_ofOpen(st)?' <button class="btn" style="font-size:11px;padding:1px 7px" onclick="orderFileWork(\''+oid+'\',\''+k+'\')"><i class="ti ti-player-play"></i> '+(st==='waiting'?'Work on it':'Open')+'</button>'
-       +' <button class="btn" style="font-size:11px;padding:1px 7px" title="No import needed (e.g. a drawing for reference)" onclick="orderFileDone(\''+oid+'\',\''+k+'\')">Done</button>':'')
+       +' <button class="btn" style="font-size:11px;padding:1px 7px" title="No import needed (e.g. a drawing for reference)" onclick="orderFileDone(\''+oid+'\',\''+k+'\')">Done</button>'
+       :(ownOrder&&_ofReadable(f.name)?' <button class="btn" style="font-size:11px;padding:1px 7px" title="Read the file into the Cutting List again" onclick="orderFileWork(\''+oid+'\',\''+k+'\')"><i class="ti ti-refresh"></i> Open again</button>':''))
     +'</span>';
 }
 // "Files waiting": every unprocessed file across the queue, oldest order first.
 function _ofWaitingItems(){
   var out=[];
-  pendingOrders.forEach(function(o){
+  _ofAllOrders().forEach(function(o){
     // Open orders only (New, On going). Orders already quoted and sent, cancelled or archived were
     // handled before the queue existed — counting their files made the list meaningless (305).
     if(o.status!=='Pending'&&o.status!=='In Progress') return;
@@ -19743,26 +19762,46 @@ function _ofWaitingItems(){
   return out;
 }
 function renderOrderFilesWaiting(wrap){
-  var items=_ofWaitingItems().filter(function(x){ return _orderPassesFilters(x.o); });
+  var openId=qSourceOrderId?String(qSourceOrderId):'';
+  var items=_ofWaitingItems().filter(function(x){ return String(x.o.id)!==openId&&(x.o.isTest||_orderPassesFilters(x.o)); });
+  var mine='';
+  if(openId){
+    var oo=null, all=_ofAllOrders();
+    for(var oi=0;oi<all.length;oi++) if(String(all[oi].id)===openId){ oo=all[oi]; break; }
+    if(oo){
+      var fs=_ofFiles(oo);
+      mine='<div class="card" style="border-left:4px solid var(--navy);margin-bottom:12px"><div class="card-body" style="padding:10px 14px">'
+        +'<div style="font-size:12px;color:var(--text2);margin-bottom:6px"><i class="ti ti-file-text"></i> The quotation open now'+(qSerial?' ('+escHtml(qSerial)+')':' (not yet numbered)')+' is for</div>'
+        +'<div style="font-weight:600;font-size:14px;margin-bottom:8px">Order #'+escHtml(String(oo.id))+' — '+escHtml(oo.clientName||oo.companyName||'—')
+        +(oo.isTest?' <span class="pill" style="background:#dc2626;color:#fff;font-size:10px">TEST</span>':'')
+        +(oo.projectName?' <span style="font-weight:400;color:var(--text2);font-size:12px">'+escHtml(oo.projectName)+'</span>':'')+'</div>'
+        +(fs.length?fs.map(function(f){
+            return '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:4px 0;border-top:.5px solid var(--border)">'
+              +'<a href="#" onclick="viewOrderAttachment(\''+escHtml(f.key.replace(/'/g,"\\'"))+'\');return false" style="font-size:12px">'+escHtml(f.name)+'</a>'
+              +_ofStatusHtml(oo,f,true)+'</div>'; }).join('')
+          :'<div style="font-size:12px;color:var(--text2)">This order has no files attached.</div>')
+        +'</div></div>';
+    }
+  }
   if(!window._TRN&&!supaReady()){
     wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i><div>File status lives in the fast database — connect in Settings → Company &amp; DB to see who has which file.</div></div>';
     return;
   }
-  if(!items.length){ wrap.innerHTML='<div class="card"><div class="card-body" style="font-size:13px;color:var(--text2)">No files waiting on New or On going orders — every file there is imported, reflected or marked done.</div></div>'; return; }
+  if(!items.length){ wrap.innerHTML=mine+'<div class="card"><div class="card-body" style="font-size:13px;color:var(--text2)">No '+(mine?'other ':'')+'files waiting on New or On going orders — every file there is imported, reflected or marked done.</div></div>'; return; }
   var th='style="text-align:left;font-size:11px;color:var(--text2);font-weight:600;padding:6px 8px;border-bottom:.5px solid var(--border);white-space:nowrap"';
   var td='style="font-size:12px;padding:6px 8px;border-bottom:.5px solid var(--border);vertical-align:top"';
   var h='<div class="card"><div class="card-body" style="padding:0;overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
     +'<tr><th '+th+'>Order</th><th '+th+'>Received</th><th '+th+'>Client</th><th '+th+'>File</th><th '+th+'>Status</th></tr>';
   items.forEach(function(x){
     var o=x.o, f=x.f;
-    h+='<tr><td '+td+'><b>#'+escHtml(String(o.id))+'</b></td>'
+    h+='<tr><td '+td+'><b>#'+escHtml(String(o.id))+'</b>'+(o.isTest?' <span class="pill" style="background:#dc2626;color:#fff;font-size:10px">TEST</span>':'')+'</td>'
       +'<td '+td+'>'+fmtDT(o.receivedAt)+'</td>'
       +'<td '+td+'>'+escHtml(o.clientName||o.companyName||'—')+(o.projectName?'<div style="font-size:11px;color:var(--text2)">'+escHtml(o.projectName)+'</div>':'')+'</td>'
       +'<td '+td+'><a href="#" onclick="viewOrderAttachment(\''+escHtml(f.key.replace(/'/g,"\\'"))+'\');return false" title="Look only — does not take it">'+escHtml(f.name)+'</a></td>'
       +'<td '+td+'>'+_ofStatusHtml(o,f)+'</td></tr>';
   });
   h+='</table></div></div>';
-  wrap.innerHTML=h;
+  wrap.innerHTML=mine+(mine?'<div style="font-size:12px;color:var(--text2);margin:4px 0 6px">Other orders</div>':'')+h;
 }
 
 // ── Training: practice orders with your own files (2026-10-18) ─────────────────────────────
