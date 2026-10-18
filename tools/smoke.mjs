@@ -6108,6 +6108,16 @@ const PROFILES = {
         return { initial: r.initial.reason, finalRes: r.finalRes.reason, ready: r.ready.reason, released: r.released.ok, labelsGetReason: String(w.printJobOrder).indexOf('_joPrintLabels(row.data,ps.ok?false:ps.reason)') >= 0 };
       }, { initial: 'Initial Quotation — waiting for client approval', finalRes: 'Final Quotation — waiting for payment (release in KEYSTONE)',
            ready: 'Final Quotation — waiting for payment (release in KEYSTONE)', released: true, labelsGetReason: true });
+      check('Cutting List: panel saw kerf set per job, 3-4 mm only, same value the board layout uses', () => {
+        const w = window, keep = w.prodSettings.machines.panelsaw.kerf, keepT = w.showToast;
+        try {
+          w.showToast = () => {};
+          w.MCL.setKerf('3.5'); const a = w.prodMachine('panelsaw').kerf;
+          w.MCL.setKerf('5'); const b = w.prodMachine('panelsaw').kerf;
+          w.MCL.setKerf('2.5'); const c = w.prodMachine('panelsaw').kerf;
+          return { a, b, c };
+        } finally { w.prodSettings.machines.panelsaw.kerf = keep; w.showToast = keepT; }
+      }, { a: 3.5, b: 3.5, c: 3.5 });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',
