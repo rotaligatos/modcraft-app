@@ -70,3 +70,9 @@ $$;
 -- adm_rfq_quotes, adm_pr_odoo_pos; view adm_v_rfq_offers; functions adm_supplier_set_status, adm_supplier_import,
 -- adm_offer_landed, adm_pr_award, adm_pr_record_odoo_po; adm_pr_sign now needs a supplier on every line. Buckets
 -- keystone-supplier-docs, keystone-quotes. Edge Function keystone-ai (search / quote / doc, ANTHROPIC_API_KEY secret).
+
+-- 2026-10-18: migrations keystone_prf_passcode_charge_to, keystone_pr_sign_approve_passcode, keystone_passcode_wrong_returns,
+-- keystone_pr_set_charge, keystone_people_names (applied). ks_passcodes / ks_passcode_fails (no client access); adm_passcode_ok
+-- (Modcraft PIN from user_pins, else KEYSTONE passcode; 5 wrong in 15 min locks); adm_pr_sign(uuid,text,bool) and
+-- adm_pr_approve(uuid,text,bool,text,bool) need the passcode (old overloads refuse); adm_purchase_requests.charge_to
+-- project/opex/capex + department; adm_pr_create; adm_signatures; adm_quotation_purchases(serial) feeds the Modcraft cost report.

@@ -6146,6 +6146,17 @@ const PROFILES = {
                  reflectHook: /_orderFileReflected/.test(String(w._prodReflectCommit)),
                  copiesWebsite: /_ofFiles\(order\)/.test(s) && /Website attachment/.test(s) };
       }, { assess: true, commitHook: true, reflectHook: true, copiesWebsite: true });
+      // 2026-10-18: purchases made in KEYSTONE replace the quotation's estimate for those lines in the profit.
+      check('Cost report: approved KEYSTONE purchases adjust direct cost and profit', () => {
+        const w = window;
+        const cr = { revenueExVat: 100000, directCost: 60000, profit: 40000, marginPct: 40, grand: 112000, vatAmt: 12000,
+          _purch: { lines: [{ pr_no: 'PR-1', item: 'HPL', qty: 10, unit: 'pc', budget_price: 1000, purchase_price: 1200, supplier: 'S', status: 'approved' }],
+                    committed_budget: 10000, committed_total: 12000, pending_total: 0 } };
+        const h = w._buildCostReportHtml('QT-W1', { client: {} }, cr);
+        const t = h.replace(/<[^>]+>/g, ' ');
+        return { section: /Purchases for this job/.test(t), over: /Over by\s+₱\s*2,000\.00/.test(t), after: /direct cost\s+₱\s*62,000\.00/.test(t) && /profit\s+₱\s*38,000\.00/.test(t),
+                 none: !/Purchases for this job/.test(w._buildCostReportHtml('QT-W1', { client: {} }, Object.assign({}, cr, { _purch: null }))) };
+      }, { section: true, over: true, after: true, none: true });
       return out;
     }
   },
