@@ -61,3 +61,6 @@ $$;
 
 -- 2026-10-18: migrations keystone_gate_odoo_so(+_fix): adm_release_gates.odoo_so; trigger adm_gate_needs_so refuses a WCL
 -- gate on "With payment terms" without it (company via app_normalize_company = wcl); view adds odoo_so.
+
+-- 2026-10-18: migration keystone_audit_cleanup: CONFIG paymentOptions = Bank transfer, Cheque, Cash, Online,
+-- With payment terms (Credit / vouched removed); old 4-argument adm_vouch_gate overload dropped.
