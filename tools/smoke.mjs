@@ -6014,13 +6014,18 @@ const PROFILES = {
           w.gUser = { email: 'mg2@x.ph', name: 'Mg2' }; w.currentRole = 'Manager';
           const e = w._ofTrnClaim('2', 'supabase://order-attachments/2/b.xlsx', 'b.xlsx', 'Mg2', true);
           const hist = JSON.parse(localStorage.getItem('mc_trn_order_files'))['1\n' + f1.key].history.map(h => h.event);
-          const waiting = w._ofWaitingItems().map(x => x.o.id + ':' + x.f.name);
+          // Order files tabs: New = every unclaimed order with files; later stages = MY orders only
+          const ids = k => w._ofTabOrders(k).map(o => o.id);
+          const newTab = ids('new');
+          w.gUser = { email: 'st@x.ph', name: 'St' }; const stActive = ids('active');
+          w.gUser = { email: 'jo@x.ph', name: 'Jo' }; const joActive = ids('active');
+          const waiting = { newTab, stActive, joActive };
           return { firstClaim: a, staffBlocked: b.ok === false && b.can_take === false, after2h: c.ok && c.takeover,
                    finishedNeedsForce: d.finished === true, managerTakes: e.ok && e.takeover, hist,
                    waiting, labels: ['a.pdf', 'b.xlsx', 'c.jpg', 'd.docx'].map(w._ofLabelGuess) };
         } finally { w.gUser = keep.u; w.currentRole = keep.r; w.pendingOrders = keep.po; w._TRN = keep.trn; w.orderFilesMap = keep.m; localStorage.removeItem('mc_trn_order_files'); }
       }, { firstClaim: true, staffBlocked: true, after2h: true, finishedNeedsForce: true, managerTakes: true,
-           hist: ['claim', 'takeover', 'imported'], waiting: ['1:c.jpg', '2:b.xlsx'],
+           hist: ['claim', 'takeover', 'imported'], waiting: { newTab: ['2'], stActive: ['1'], joActive: [] },
            labels: ['unknown', 'cutting_list', 'drawing', 'other'] });
       check('Training practice orders: kept in this browser, merged into the queue, files read back', () => {
         const w = window, keep = { trn: w._TRN, po: w.pendingOrders };
@@ -6057,15 +6062,46 @@ const PROFILES = {
           w.pendingOrders = [r]; w.testOrders = [t];
           w.orderFilesMap = { ['TEST-1\nsupabase://order-attachments/TEST-1/AC.pdf']: { status: 'imported' } };
           w.qSourceOrderId = 'TEST-1'; w.qSerial = ''; w.qDraftKey = 'DRAFT-abc123';
-          const box = document.createElement('div'); w.renderOrderFilesWaiting(box);
-          const html = box.innerHTML;
+          t.handledByEmail = 'me@x.ph'; const keepU = w.gUser; w.gUser = { email: 'me@x.ph', name: 'Me' }; w._ofJumpedFor = '';
+          const box = document.createElement('div'); document.body.appendChild(box); w.renderOrderFilesWaiting(box);
+          const html = box.innerHTML; const tabAfterOpen = w.ofTab; box.remove();
+          w.ofSetTab('new'); const box2 = document.createElement('div'); document.body.appendChild(box2); w.renderOrderFilesWaiting(box2);
+          const newHtml = box2.innerHTML; box2.remove(); w.gUser = keepU; w.ofTab = 'active';
           let asked = '', claimed = false;
           w._confirm = (msg) => { asked = msg; }; w._ofClaim = () => { claimed = true; return Promise.resolve({ ok: false }); };
           w.orderFileWork('9007', 'https://drive.google.com/file/d/T94/view');
-          return { mineFirst: html.indexOf('TEST client') >= 0 && html.indexOf('TEST client') < html.indexOf('ROMMEL'),
+          return { mineFirst: tabAfterOpen === 'active' && /OPEN NOW/.test(html) && html.indexOf('TEST client') >= 0 && html.indexOf('ROMMEL') < 0,
+                   newViewOnly: /ROMMEL/.test(newHtml) && !/Work on it/.test(newHtml),
                    reopen: /Open again/.test(html), asksBeforeSwitch: /DIFFERENT order/.test(asked) && /9007/.test(asked), notClaimed: !claimed };
         } finally { Object.assign(w, { pendingOrders: keep.po, testOrders: keep.to, orderFilesMap: keep.m, qSourceOrderId: keep.src, qSerial: keep.ser, qDraftKey: keep.dk, _confirm: keep.cf, _TRN: keep.trn, _ofClaim: keep.cl }); }
-      }, { mineFirst: true, reopen: true, asksBeforeSwitch: true, notClaimed: true });
+      }, { mineFirst: true, newViewOnly: true, reopen: true, asksBeforeSwitch: true, notClaimed: true });
+      check('Orders: New shows everyone, later stages default to my orders; Cutting List adds to existing rows; several files mark together', () => {
+        const w = window, keep = { u: w.gUser, po: w.pendingOrders, m: w.orderFilesMap, trn: w._TRN, set: w._ofSet };
+        try {
+          w._TRN = true; w.gUser = { email: 'me@x.ph', name: 'Me' }; w.orderFilesMap = {};
+          w.pendingOrders = [{ id: 'A', status: 'In Progress', handledByEmail: 'me@x.ph', handledBy: 'Me', attachAll: [] },
+                             { id: 'B', status: 'In Progress', handledByEmail: 'x@x.ph', handledBy: 'X', attachAll: [] },
+                             { id: 'C', status: 'Pending', attachAll: [] }];
+          w.setOrdersTab('active'); const onGoingDefault = (document.getElementById('orders-handler') || {}).value;
+          const mineOnGoing = w.pendingOrders.filter(o => o.status === 'In Progress').filter(o => w._orderPassesFilters(o, 'active')).map(o => o.id);
+          const newCount = w.pendingOrders.filter(o => o.status === 'Pending').filter(o => w._orderPassesFilters(o, 'new')).length;
+          w.setOrdersTab('new'); const newDefault = (document.getElementById('orders-handler') || {}).value;
+          // add vs replace
+          const P = (n) => Object.assign(w.MCL.blankPanel(), { part: n, mat: 'PB', L: 100, W: 100, qty: 1 });
+          w.MCL.importRows([P('one')], [], 'x', 'replace');
+          w.MCL.importRows([P('two')], [], 'y', 'add');
+          const afterAdd = w.MCL.rowCount();
+          w.MCL.importRows([P('three')], [], 'z', 'replace');
+          const afterReplace = w.MCL.rowCount();
+          // two files of one order recorded together
+          const marked = [];
+          w.pendingOrders = [{ id: 'D', status: 'In Progress', attachAll: [{ name: 'a.xlsx', path: 'k1' }, { name: 'b.pdf', path: 'k2' }] }];
+          w._ofSet = (o, f, st) => { marked.push(f.name + ':' + st); return Promise.resolve({ ok: true }); };
+          w._orderFileImported({ orderId: 'D', keys: ['k1', 'k2'] }, 7);
+          return { onGoingDefault, mineOnGoing, newCount, newDefault, afterAdd, afterReplace, marked };
+        } finally { w.gUser = keep.u; w.pendingOrders = keep.po; w.orderFilesMap = keep.m; w._TRN = keep.trn; w._ofSet = keep.set;
+          try { w.MCL.importRows([w.MCL.blankPanel()], [], '', 'replace'); } catch (e) {} }
+      }, { onGoingDefault: '__me', mineOnGoing: ['A'], newCount: 1, newDefault: '', afterAdd: 2, afterReplace: 1, marked: ['a.xlsx:imported', 'b.pdf:imported'] });
       check('Order files: CLR hands queued imports back, reflect records them, website files copied at lock', () => {
         const w = window, s = String(w._copyOrderAttachmentsToQuotationFolder);
         return { assess: typeof (w.CLR && w.CLR.assess) === 'function',
