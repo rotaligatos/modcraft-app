@@ -42,3 +42,6 @@ $$;
 -- Revised same day (applied as adm_canvass_list_fq_awaiting): the list is now the Final Quotations
 -- waiting for the client (status FQ Locked / FQ Awaiting Client Approval), all of them, with their
 -- outsource item count (0 allowed). Initial Quotation stage quotations never appear in KEYSTONE.
+
+-- Applied as release_queue_vouched_cols: adm_v_release_queue gains g.vouched_by, g.vouched_at (appended
+-- after jo_number), so KEYSTONE can split released jobs into fully paid / with balance / vouched.
