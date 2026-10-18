@@ -47,3 +47,8 @@ $$;
 -- after jo_number), so KEYSTONE can split released jobs into fully paid / with balance / vouched.
 
 -- Applied as adm_fq_waiting_list: adm_canvass_list rows plus quotations.final_locked_at, for the KEYSTONE date filter.
+
+-- 2026-10-18 (APPLIED as migrations adm_outsource_counts / adm_outsource_counts_v2):
+-- public.adm_outsource_counts(p_serials text[]) returns (serial, n, problem) — outsource item count per
+-- quotation (same rule as adm_generate_pr_from_quotation), company-scoped; a quotation whose materials
+-- cannot be read returns problem instead of failing the whole call. KEYSTONE greys out Generate PR when n=0.
