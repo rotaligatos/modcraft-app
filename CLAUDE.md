@@ -13223,3 +13223,24 @@ Fixed (one smoke check, proven failing pre-fix):
 Limits found, NOT changed (need a decision): a Wufoo order's attached cutting list is not imported
 automatically — staff download it and use Import client's list; website attachments (`supabase://`)
 are not copied into the quotation folder; training mode cannot open a website cutting-list order.
+
+## What was changed on 2026-10-18 (session 2 — order attachment queue, `8352e84`)
+- **Supabase `order_files`** (`supabase_order_files.sql`, applied): one row per touched attachment,
+  key (order_id, file_key = the attachment path). No row = Waiting. Status taken / imported /
+  reflected / needs_person / done, label cutting_list / drawing / other, history jsonb. Staff only,
+  only for orders they can see. Rules in RPCs `order_file_claim` (someone else's claim: Supervisor+
+  any time, anyone after 2 h; finished file needs p_force) and `order_file_set` (holder or
+  Supervisor+). Tested by impersonation, rolled back. Supabase only — no Sheets path.
+- Rommel's decisions: import runs when a person opens the file (nothing unattended); a claim moves
+  NO credit (Prepared by, Team performance, Handled by unchanged).
+- App: `orderFileWork` → claim → `_ofEnsureQuotation` (opens/exports the order's quotation) →
+  `_ofFetchFile` (Drive API / Supabase download) → `CLR.open({files},ctx)` → `CLR.assess()`:
+  clean = rows, no flags, all materials + tapes mapped → auto `CLR.commit()` → `MCL.load()`; else
+  needs_person with reasons. CLR.commit → `_orderFileImported`; `MCL.setOrderFile` puts
+  `_orderFile` on the analysis; `_prodReflectCommit` → `_orderFileReflected`. Pictures/CAD/docs
+  open to look and get "Done". Orders tab **Files waiting** (`renderOrderFilesWaiting`), status
+  line per file on the card. Training: `mc_trn_order_files` (`_ofTrnClaim/_ofTrnSet` mirror the rules).
+- `_copyOrderAttachmentsToQuotationFolder` now copies EVERY attachment, website ones too
+  ("Website attachment N"), not just Wufoo's first two.
+- Simulated in the browser (training, MARGARITA.xls, stubbed fetch): flagged → person imports →
+  analysis → reflect, all logged. Not yet run against a live order (needs a signed-in session).
