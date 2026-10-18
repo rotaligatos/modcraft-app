@@ -58,3 +58,6 @@ $$;
 -- KEYSTONE users who see the gate's company); adm_vouch_gate(gate, reason, vouch_name, proof, expires,
 -- confirm) requires both and checks the file exists; the old 4-argument call now refuses;
 -- adm_v_release_queue adds payment_option, vouch_name, vouch_proof, vouch_reason, vouch_expires_at.
+
+-- 2026-10-18: migrations keystone_gate_odoo_so(+_fix): adm_release_gates.odoo_so; trigger adm_gate_needs_so refuses a WCL
+-- gate on "With payment terms" without it (company via app_normalize_company = wcl); view adds odoo_so.
