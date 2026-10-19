@@ -6182,8 +6182,11 @@ const PROFILES = {
         w.pendingOrders[0].status = 'Done'; w.orderMarkSentFromQuotation();      // re-share: order already done
         const recovered = w._orderForQuotation('QT-W00000200.R1');
         w.pendingOrders = keepO; w._setOrderStatus = keepS; w._updateOrdersBadge = keepB; w._isTestQuotation = keepT; w.qSourceOrderId = null; w.qSerial = '';
-        return { kept, closes: calls, recovered };
-      }, { kept: '8858', closes: ['8858:Done'], recovered: '8800' });
+        w.pendingOrders = [{ id: 'MSSI-260930-6380', kind: 'Cutting List' }, { id: '8858', kind: 'Wufoo' }];
+        const labels = [w._orderRefLabel('8858'), w._orderRefLabel('MSSI-260930-6380'), w._orderRefLabel('9001'), w._orderRefLabel('MSSI-1')];
+        w.pendingOrders = keepO;
+        return { kept, closes: calls, recovered, labels };
+      }, { kept: '8858', closes: ['8858:Done'], recovered: '8800', labels: ['Wufoo #8858', 'Web order #MSSI-260930-6380', 'Wufoo #9001', 'Web order #MSSI-1'] });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
