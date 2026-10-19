@@ -19324,9 +19324,15 @@ function _cutListToAnalysis(cl,order){
       // is the DEFAULT slip, and it silently packed a 25mm panel onto an 18mm board with the two
       // merged into one group. Flag it; never pick a winner, because either field could be the
       // mistaken one and guessing would mix materials just as quietly in the other direction.
-      var _thN=(+pn.th||0), _lamOk=_thN>25&&md&&md.thickness&&md.thickness<_thN&&(_thN%md.thickness===0);
-      if(md&&md.thickness&&_thN&&md.thickness!==_thN&&!_lamOk){
-        review.push('the SKU says '+md.thickness+'mm but the Th column says '+(+pn.th)
+      // An HPL build names two thicknesses ("HPL Walnut 0.8mm on 18mm MDF"): the laminate's and the
+      // board's. Only the board's is a cutting thickness, so compare the Th column with that one —
+      // the first "…mm" is the laminate and flagged every typed HPL row (2026-10-19).
+      var _skuTh=md&&md.thickness;
+      if(/\bhpl\b/i.test(label)){ var _mmAll=(label.match(/(\d+(?:\.\d+)?)\s*mm/gi)||[]).map(function(x){return parseFloat(x);}).filter(function(x){return x>=3;});
+        _skuTh=_mmAll.length?Math.max.apply(null,_mmAll):null; }
+      var _thN=(+pn.th||0), _lamOk=_thN>25&&_skuTh&&_skuTh<_thN&&(_thN%_skuTh===0);
+      if(_skuTh&&_thN&&_skuTh!==_thN&&!_lamOk){
+        review.push('the SKU says '+_skuTh+'mm but the Th column says '+(+pn.th)
           +'mm — set them to the same thickness, or this panel is cut from the wrong board');
       }
     }
@@ -41388,7 +41394,8 @@ function _joBuild(result,ctx){
   var boards=bom.map(function(b){ return {material:b.material,color:b.color,texture:b.texture,thickness:b.thickness,
     faces:b.faces,boardSize:b.boardSize,boardW:b.boardW,boardH:b.boardH,boardsNeeded:b.boardsNeeded,
     utilizationPct:b.utilizationPct,oversizedCount:b.oversizedCount||0,oversizedRefs:b.oversizedRefs||[],
-    layout:b.layout||[],shelves:b.shelves||[],plans:b.plans||undefined,kerf:b.kerf,machineLabel:b.machineLabel,allowRotate:b.allowRotate}; });
+    layout:b.layout||[],shelves:b.shelves||[],plans:b.plans||undefined,kerf:b.kerf,machineLabel:b.machineLabel,allowRotate:b.allowRotate,
+    hpl:!!b.hpl||undefined,hplOrdered:b.hpl?(b.hplOrdered||0):undefined}; });
   var sv=(result&&result._services)||prodComputeServices(comps,(result&&result.holeSchedule)||[],(result&&result.extraServices)||[]);
   return {
     joNumber:ctx.joNumber||'', serial:ctx.serial||'', optionId:ctx.optionId||0, optionLabel:ctx.optionLabel||'',
@@ -41686,6 +41693,7 @@ function _joDocHtml(jo,status){
     ex.forEach(function(s){ h+='<tr><td>'+e(s.service)+'</td><td>'+s.qty+' '+e(s.unit)+'</td></tr>'; });
     h+='</table>';
   }
+  h+=_joHplSectionHtml(jo,e);
   (jo.drawings||[]).forEach(function(d,di){
     var uses=jo.parts.filter(function(p){ return p.drawing&&p.drawing.source===d.source&&p.drawing.page===d.page; }).map(function(p){ return p.p+' '+p.name; });
     h+='<div class="pb"><h2>Special cut drawing — '+e(d.source)+' page '+d.page+'</h2>'
@@ -41709,6 +41717,39 @@ function _joDrawingSrc(d){
   for(var i=0;i<rs.length;i++){ var ds=(rs[i]&&rs[i].drawings)||[];
     for(var k=0;k<ds.length;k++) if(ds[k].dataUrl&&ds[k].source===d.source&&ds[k].page===d.page) return ds[k].dataUrl; }
   return '';
+}
+// HPL lamination, spelled out for production (Rommel 2026-10-19: it was only visible in the route text).
+// Per HPL board build: how it is laminated (whole boards first, or cut first), how many boards / pieces
+// are laminated, on how many faces, the HPL sheets that means (boards × faces, the quotation's rule), and
+// which pieces. The process codes match PMES: HPL + CURE (whole boards), MHPL (cut first, by hand).
+function _joHplRows(jo){
+  var rows=[];
+  (jo.boards||[]).forEach(function(b){
+    if(!b.hpl) return;
+    var key=function(o){ return [String(o.material||'').toLowerCase(),String(o.color||'').toLowerCase(),+o.thickness||0].join('|'); };
+    var parts=(jo.parts||[]).filter(function(p){ return p.hpl&&key(p)===key(b); });
+    var lamFirst=parts.length?parts[0].hplOrder==='laminate_first':(/^(MDF|PB)/i.test(b.material||'')&&jo.hplOrder!=='cut_first');
+    var faces=+b.faces||0, boards=Math.max(+b.boardsNeeded||0,+b.hplOrdered||0);
+    var pcs=parts.reduce(function(n,p){ return n+(+p.qty||1); },0);
+    var area=parts.reduce(function(n,p){ return n+(+p.cutL||+p.L||0)*(+p.cutW||+p.W||0)*(+p.qty||1)/1e6; },0);
+    var bl=[b.material,b.color].filter(Boolean).join(' ');
+    if(b.thickness&&bl.toLowerCase().indexOf(b.thickness+'mm')<0) bl+=' '+b.thickness+'mm';
+    rows.push({ build:bl, lamFirst:lamFirst, faces:faces,
+      boards:boards, pieces:pcs, area:area, sheets:faces?boards*faces:null, process:lamFirst?'HPL → CURE, then CUT':'CUT, then MHPL',
+      refs:parts.map(function(p){ return p.p+(+p.qty>1?' ×'+p.qty:''); }) });
+  });
+  return rows;
+}
+function _joHplSectionHtml(jo,e){
+  var rows=_joHplRows(jo); if(!rows.length) return '';
+  var h='<h2>HPL lamination</h2><table class="pl"><tr><th>Board build</th><th>Method</th><th>Laminate</th><th>Faces</th><th>HPL sheets</th><th>Process</th><th>Pieces</th></tr>';
+  rows.forEach(function(r){
+    h+='<tr><td>'+e(r.build)+'</td><td>'+(r.lamFirst?'Whole boards first, then cut':'Cut first, then laminated by hand')+'</td>'
+      +'<td>'+(r.lamFirst?r.boards+' board'+(r.boards===1?'':'s'):r.pieces+' piece'+(r.pieces===1?'':'s')+' · '+r.area.toFixed(2)+' m²')+'</td>'
+      +'<td>'+(r.faces?r.faces+(r.faces===1?' face':' faces'):'<b style="color:#b45309">not stated — check</b>')+'</td>'
+      +'<td>'+(r.sheets!=null?r.sheets:'—')+'</td><td style="font-family:monospace;font-size:10px">'+e(r.process)+'</td><td>'+e(r.refs.join(', '))+'</td></tr>';
+  });
+  return h+'</table><div class="sub">HPL sheets = boards × faces. Laminated whole boards cure before cutting (CURE).</div>';
 }
 function _joPrint(jo,status){
   var w=_prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status));

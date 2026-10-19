@@ -6170,6 +6170,14 @@ const PROFILES = {
         const done = w._e2eStages(full, [{ deliveries: [{ status: 'completed', done_at: d(-1) }] }]);
         return { fq: w._e2eStages({ serial: 'x', final_locked_at: d(-1) }, []).cur, pay, prod: prod.cur, pct: prod.prod.pct, shipping, done: done.cur, doneAt: !!done.doneAt };
       }, { fq: 'fq', pay: 'pay', prod: 'prod', pct: 60, shipping: 'dlv', done: null, doneAt: true });
+      check('HPL: typed HPL build not flagged on thickness; Job Order lists HPL lamination per build', () => {
+        const w = window;
+        const P = (part, mat, L, W, qty) => ({ group: 'C1', part, mat, th: 18, L, W, qty, ebt: '1L', emat: 'PVC 1mm', grain: '', svcs: [], remark: '' });
+        const pay = w._cutListToAnalysis({ origin: 'typed', grain: 'length', panels: [P('Door', 'HPL Walnut 0.8mm on 18mm MDF 1F', 716, 297, 2), P('Top', 'HPL White 0.7mm on 18mm Plywood 2F', 1200, 600, 1)], hpl: [], hardware: [] }, null);
+        const jo = w._joBuild({ components: pay.components, holeSchedule: [], extraServices: [], hardware: [], _structured: true }, { joNumber: 'JO-T', hplOrder: 'laminate_first' });
+        const rows = w._joHplRows(jo);
+        return { flags: pay.components.filter((c) => /SKU says/.test(c.reviewNote || '')).length, rows: rows.map((r) => [r.lamFirst, r.faces, r.sheets]), inDoc: /HPL lamination/.test(w._joDocHtml(jo, 'reserved')) };
+      }, { flags: 0, rows: [[true, 1, 1], [false, 2, 2]], inDoc: true });
       check('Order number survives sharing and is recovered from the order for older quotations', () => {
         const w = window;
         const keepO = w.pendingOrders, keepS = w._setOrderStatus, keepB = w._updateOrdersBadge, keepT = w._isTestQuotation;
