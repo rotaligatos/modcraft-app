@@ -6170,6 +6170,20 @@ const PROFILES = {
         const done = w._e2eStages(full, [{ deliveries: [{ status: 'completed', done_at: d(-1) }] }]);
         return { fq: w._e2eStages({ serial: 'x', final_locked_at: d(-1) }, []).cur, pay, prod: prod.cur, pct: prod.prod.pct, shipping, done: done.cur, doneAt: !!done.doneAt };
       }, { fq: 'fq', pay: 'pay', prod: 'prod', pct: 60, shipping: 'dlv', done: null, doneAt: true });
+      check('Order number survives sharing and is recovered from the order for older quotations', () => {
+        const w = window;
+        const keepO = w.pendingOrders, keepS = w._setOrderStatus, keepB = w._updateOrdersBadge, keepT = w._isTestQuotation;
+        const calls = [];
+        w._setOrderStatus = (id, st) => { calls.push(id + ':' + st); }; w._updateOrdersBadge = () => {}; w._isTestQuotation = () => false;
+        w.pendingOrders = [{ id: '8858', status: 'In Progress', quotSerial: 'QT-W00000300' }, { id: '8800', status: 'Done', quotSerial: 'QT-W00000200-2' }];
+        w.qSerial = 'QT-W00000300'; w.qSourceOrderId = '8858';
+        w.orderMarkSentFromQuotation();
+        const kept = w.qSourceOrderId;
+        w.pendingOrders[0].status = 'Done'; w.orderMarkSentFromQuotation();      // re-share: order already done
+        const recovered = w._orderForQuotation('QT-W00000200.R1');
+        w.pendingOrders = keepO; w._setOrderStatus = keepS; w._updateOrdersBadge = keepB; w._isTestQuotation = keepT; w.qSourceOrderId = null; w.qSerial = '';
+        return { kept, closes: calls, recovered };
+      }, { kept: '8858', closes: ['8858:Done'], recovered: '8800' });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
