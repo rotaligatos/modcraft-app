@@ -6210,6 +6210,14 @@ const PROFILES = {
         const rows = w._joHplRows(jo);
         return { flags: pay.components.filter((c) => /SKU says/.test(c.reviewNote || '')).length, rows: rows.map((r) => [r.lamFirst, r.faces, r.sheets]), inDoc: /HPL lamination/.test(w._joDocHtml(jo, 'reserved')) };
       }, { flags: 0, rows: [[true, 1, 1], [false, 2, 2]], inDoc: true });
+      check('Job Order exports to Excel/CSV rows: one row per part, one per piece barcode, HPL section', () => {
+        const w = window;
+        const P = (part, mat, L, W, qty) => ({ group: 'C1', part, mat, th: 18, L, W, qty, ebt: '1L', emat: 'PVC 1mm', grain: '', svcs: [], remark: '' });
+        const pay = w._cutListToAnalysis({ origin: 'typed', grain: 'length', panels: [P('Door', 'HPL Walnut 0.8mm on 18mm MDF 1F', 716, 297, 2), P('Side', 'Real White PB 4x8 2F (18mm, Matte)', 720, 560, 3)], hpl: [], hardware: [] }, null);
+        const jo = w._joBuild({ components: pay.components, holeSchedule: [], extraServices: [], hardware: [], _structured: true }, { joNumber: 'JO-T', hplOrder: 'laminate_first' });
+        const t = w._joExportRows(jo);
+        return { parts: t.parts.length - 1, pieces: t.pieces.length - 1, hpl: t.hpl.length - 1, cutL: t.parts[1][8] > 0, scan: !!t.pieces[1][3] };
+      }, { parts: 2, pieces: 5, hpl: 1, cutL: true, scan: true });
       check('Order number survives sharing and is recovered from the order for older quotations', () => {
         const w = window;
         const keepO = w.pendingOrders, keepS = w._setOrderStatus, keepB = w._updateOrdersBadge, keepT = w._isTestQuotation;

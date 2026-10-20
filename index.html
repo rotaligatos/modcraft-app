@@ -41770,6 +41770,52 @@ function _joHplSectionHtml(jo,e){
   });
   return h+'</table><div class="sub">HPL sheets = boards × faces. Laminated whole boards cure before cutting (CURE).</div>';
 }
+// Job Order as a spreadsheet (Rommel 2026-10-20: "a choice beside pdf, like csv or excel").
+// Same data as the printed Job Order — read from the stored JO, nothing recomputed.
+// Excel: one sheet per section. CSV: the parts cut list only (one file, for a saw or another system).
+function _joExportRows(jo){
+  var r=function(v){ return Math.round((+v||0)*100)/100; };
+  var parts=[['Part','Area','Component','Material','Colour','Th (mm)','Finished L','Finished W','Cut L','Cut W','Qty','Edge code','Tape','Tape mm','Grain','Groove','Special','Remarks','Route','PMES area','PMES part','Edge bander','Board']];
+  (jo.parts||[]).forEach(function(p){
+    parts.push([p.p,p.area,p.name,p.material,p.color,p.thickness||'',p.L,p.W,p.cutL,p.cutW,p.qty,p.ebt||'',p.tape||'',p.tapeMm||'',p.grain||'',p.grooving||'',
+      [p.special||''].concat(_joWorkSvcs(p).map(_joSvcLabel)).filter(Boolean).join(' · '),p.remark||'',(p.route||[]).join(' > '),
+      p.pmesArea||'',p.pmesPart||'',p.bander||'',(p.boardOf||[]).map(function(n){return n+1;}).join(', ')]);
+  });
+  var pieces=[['Part','Component','Piece','Scan code','Barcode ID','Cut L','Cut W','Th (mm)','Material']];
+  (jo.parts||[]).forEach(function(p){ (p.barcodes||[]).forEach(function(b,n){
+    pieces.push([p.p,p.name,(n+1)+' of '+p.qty,(p.scan||[])[n]||'',b,p.cutL,p.cutW,p.thickness||'',[p.material,p.color].filter(Boolean).join(' ')]); }); });
+  var sv=jo.services||{};
+  var summary=[['Job Order',jo.joNumber||'(draft)'],['Quotation',jo.serial||''],['Option',jo.optionLabel||''],['Client',jo.client||''],['Project',jo.project||''],
+    ['Company',jo.company||''],['Prepared by',jo.preparedBy||''],['Created',String(jo.createdAt||'').slice(0,16).replace('T',' ')],
+    ['Pieces',jo.pieceCount||0],['Parts',(jo.parts||[]).length],['Boards',jo.boardCount||0],['Cutting (lm)',r(sv.cuttingLM)],['Edge banding (lm)',r(sv.edgebandingLM)],
+    ['Holes',sv.holeCount||0],['Machine',jo.machine?jo.machine.label+' · kerf '+jo.machine.kerf+'mm':''],['HPL on MDF/PB',jo.hplOrder==='cut_first'?'cut first':'laminate first']];
+  var boards=[['Material','Colour','Th (mm)','Board size','Boards','Utilisation %','Pieces not on a layout']];
+  (jo.boards||[]).forEach(function(b){ boards.push([b.material,b.color,b.thickness||'',b.boardSize||'',b.boardsNeeded||0,b.utilizationPct||0,b.oversizedCount||0]); });
+  var hw=[['Item','Cabinet','Qty','Unit','Notes']]; (jo.hardware||[]).forEach(function(x){ hw.push([x.name,x.cabinet||'',x.qty,x.unit||'',x.notes||'']); });
+  var holes=[['Component','Type','Qty','Diameter (mm)','Notes']]; (jo.holes||[]).forEach(function(x){ holes.push([x.component,x.holeType,x.qty,x.diameter||'',x.notes||'']); });
+  var svc=[['Item','Quantity','Unit']];
+  (sv.edgebandingByTape||[]).forEach(function(t){ svc.push(['Edge tape — '+t.tape,r(t.lm),'lm']); });
+  (sv.extraServicesByName||[]).forEach(function(s){ svc.push([s.service,s.qty,s.unit||'']); });
+  var hpl=[['Board build','Method','Boards','Pieces','Area (m²)','Faces','HPL sheets','Process','Parts']];
+  _joHplRows(jo).forEach(function(x){ hpl.push([x.build,x.lamFirst?'Whole boards first, then cut':'Cut first, then by hand',x.boards,x.pieces,r(x.area),x.faces||'',x.sheets!=null?x.sheets:'',x.process,x.refs.join(', ')]); });
+  return {summary:summary,parts:parts,pieces:pieces,boards:boards,hw:hw,holes:holes,svc:svc,hpl:hpl};
+}
+function _joExport(jo,status,fmt){
+  if(typeof XLSX==='undefined'){ showToast('Spreadsheet library not loaded — try again in a moment.'); return; }
+  var t=_joExportRows(jo), ps=_joProdState(jo,status);
+  var base=String(jo.joNumber||('JO-'+(jo.serial||'draft'))).replace(/[^\w.-]+/g,'_')+(ps.ok?'':'_NOT-FOR-PRODUCTION');
+  if(fmt==='csv'){
+    var csv=XLSX.utils.sheet_to_csv(XLSX.utils.aoa_to_sheet(t.parts));
+    var a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'}));
+    a.download=base+'_parts.csv'; document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },1000);
+    return;
+  }
+  if(!ps.ok) t.summary.unshift(['NOT FOR PRODUCTION',ps.reason]);
+  var wb=XLSX.utils.book_new(), add=function(rows,name){ if(rows.length>1||name==='Summary') XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),name); };
+  add(t.summary,'Summary'); add(t.parts,'Parts'); add(t.pieces,'Pieces & barcodes'); add(t.boards,'Boards');
+  add(t.hw,'Hardware'); add(t.holes,'Holes'); add(t.svc,'Edge banding & services'); add(t.hpl,'HPL lamination');
+  XLSX.writeFile(wb,base+'.xlsx');
+}
 function _joPrint(jo,status){
   var w=_prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status));
   // Drawings not in memory come from the quotation's Storage folder (saved at lock).
@@ -41878,7 +41924,9 @@ function openJobOrders(){
             +'<td style="text-align:right">'+(x.piece_count||0)+'</td><td style="text-align:right">'+(x.board_count||0)+'</td>'
             +'<td style="font-size:11px">'+escHtml(fmtDT(x.reserved_at))+'<br><span style="color:var(--text2)">'+escHtml(x.reserved_by||'')+'</span></td>'
             +'<td style="white-space:nowrap"><button class="btn" style="font-size:11px;padding:3px 8px" onclick="printJobOrder(\''+x.id+'\',false)"><i class="ti ti-printer"></i>Job Order</button> '
-            +'<button class="btn" style="font-size:11px;padding:3px 8px" onclick="printJobOrder(\''+x.id+'\',true)"><i class="ti ti-barcode"></i>Labels</button></td></tr>';
+            +'<button class="btn" style="font-size:11px;padding:3px 8px" onclick="printJobOrder(\''+x.id+'\',true)"><i class="ti ti-barcode"></i>Labels</button> '
+            +'<button class="btn" style="font-size:11px;padding:3px 8px" onclick="exportJobOrder(\''+x.id+'\',\'xlsx\')" title="Every section of the Job Order, one sheet each"><i class="ti ti-file-spreadsheet"></i>Excel</button> '
+            +'<button class="btn" style="font-size:11px;padding:3px 8px" onclick="exportJobOrder(\''+x.id+'\',\'csv\')" title="Parts cut list only"><i class="ti ti-file-text"></i>CSV</button></td></tr>';
         });
         h+='</tbody></table>';
       }
@@ -41957,6 +42005,12 @@ function printJobOrder(id,labels){
     var row=r&&r.data; if(!row){ showToast('Could not load that Job Order.'); return; }
     var ps=_joProdState(row.data,row.status);
     if(labels) _joPrintLabels(row.data,ps.ok?false:ps.reason); else _joPrint(row.data,String(row.status).toUpperCase());
+  });
+}
+function exportJobOrder(id,fmt){
+  _joTable().select('data,status').eq('id',id).maybeSingle().then(function(r){
+    var row=r&&r.data; if(!row){ showToast('Could not load that Job Order.'); return; }
+    _joExport(row.data,String(row.status).toUpperCase(),fmt);
   });
 }
 
