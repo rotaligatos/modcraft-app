@@ -3790,6 +3790,20 @@ const PROFILES = {
             w.supaReplaceTable = saved.supaReplaceTable; w.showToast = saved.showToast;
           }
         })();
+        // Ticket 0b0c7423: signing before Settings had loaded the signature said "No signature on file"
+        // to someone who has one. It must fetch the signature and open the PIN prompt.
+        await (async () => {
+          const w = window, keep = { supa: w.supa, supaReady: w.supaReady, gUser: w.gUser, NOTIFS: w.NOTIFS, open: w._openPinModal, toast: w.showToast, sig: w.userSignatures };
+          let opened = false, toast = '';
+          w.gUser = { email: 'signer@example.com' }; w.userSignatures = {};
+          w.NOTIFS = [{ type: 'signature', approverEmail: 'signer@example.com', sigSlot: 'checked', serial: 'QT-T', status: 'pending' }];
+          w.supaReady = () => true;
+          w.supa = { from: () => ({ select: () => ({ eq: (k, v) => ({ maybeSingle: () => Promise.resolve({ data: v === 'SIG_signer@example.com' ? { value: 'data:image/png;base64,AAA' } : null }) }) }) }) };
+          w._openPinModal = () => { opened = true; }; w.showToast = (m) => { toast = m; };
+          try { w.openSignatureAction(0); await new Promise((r) => setTimeout(r, 50)); }
+          finally { Object.assign(w, { supa: keep.supa, supaReady: keep.supaReady, gUser: keep.gUser, NOTIFS: keep.NOTIFS, _openPinModal: keep.open, showToast: keep.toast, userSignatures: keep.sig }); }
+          check('Signing fetches a signature that has not loaded yet instead of refusing', () => ({ opened, toast }), { opened: true, toast: '' });
+        })();
         // 2026-10-20 (QT-M00000217): a Sheets request that never answers held the per-quotation row
         // write chain forever, so the Project List kept an old total. It must abort and fail instead.
         await (async () => {
