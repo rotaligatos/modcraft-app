@@ -6170,6 +6170,20 @@ const PROFILES = {
         const done = w._e2eStages(full, [{ deliveries: [{ status: 'completed', done_at: d(-1) }] }]);
         return { fq: w._e2eStages({ serial: 'x', final_locked_at: d(-1) }, []).cur, pay, prod: prod.cur, pct: prod.prod.pct, shipping, done: done.cur, doneAt: !!done.doneAt };
       }, { fq: 'fq', pay: 'pay', prod: 'prod', pct: 60, shipping: 'dlv', done: null, doneAt: true });
+      check('Outsource qty on a sized cabinet keeps what was typed after a redraw', () => {
+        const w = window, keep = {};
+        ['_cabRef', '_cabSizeActive', '_addonFactor', '_scaleAuto', '_scaleFactor', '_partitionActive', 'updateBOMCostHeader', 'updateBOMAreaSubtotal', 'recalc'].forEach((k) => { keep[k] = w[k]; });
+        w._cabRef = () => ({ w: 1, h: 1, d: 1 }); w._cabSizeActive = () => true; w._partitionActive = () => false; w._addonFactor = () => 1; w._scaleAuto = () => 'area'; w._scaleFactor = () => 1.47;
+        w.updateBOMCostHeader = () => {}; w.updateBOMAreaSubtotal = () => {}; w.recalc = () => {};
+        const keepA = w.qAreas;
+        const bi = { type: 'X', qty: 1, materials: [], hardware: [], services: [], outsourceMaterials: [{ name: '18MM PLY', unit: 'pc', qty: 1, price: 1473.92 }], outsourceHardware: [] };
+        w.qAreas = [{ name: 'A', bomItems: [bi] }];
+        w._applyCabScale(bi); const sized = bi.outsourceMaterials[0].qty;
+        w.onOutsourceRowChange(0, 0, 'outsourceMaterials', 0, 'qty', '3');
+        w._applyCabScale(bi); const after = bi.outsourceMaterials[0].qty;
+        Object.keys(keep).forEach((k) => { w[k] = keep[k]; }); w.qAreas = keepA;
+        return { sized, after };
+      }, { sized: 1.47, after: 3 });
       check('HPL: typed HPL build not flagged on thickness; Job Order lists HPL lamination per build', () => {
         const w = window;
         const P = (part, mat, L, W, qty) => ({ group: 'C1', part, mat, th: 18, L, W, qty, ebt: '1L', emat: 'PVC 1mm', grain: '', svcs: [], remark: '' });
