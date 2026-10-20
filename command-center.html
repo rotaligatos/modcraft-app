@@ -142,7 +142,7 @@ var JB_STEPS=[['review','Review'],['confirm','Confirm'],['approve','Approve']];
 var JB_SYNC_URL='https://nssviuuagtlvxjvvvagt.supabase.co/functions/v1/job-staff-sync';
 
 var _qTab=new URLSearchParams(location.search).get('tab');
-var ME=null, TAB=({sign:'sign',hatid:'jb',shelfsync:'ss',ss:'ss',access:'cc',cc:'cc',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb',web:'web',website:'web'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],ss:[],cc:[],caps:[],stages:[],log:[],shadow:[]};
+var ME=null, TAB=({sign:'sign',hatid:'jb',shelfsync:'ss',ss:'ss',access:'cc',cc:'cc',deleg:'pmes',log:'mc',people:'people',mc:'mc',pmes:'pmes',ks:'ks',jb:'jb',web:'web',website:'web',tickets:'tk',tk:'tk'})[_qTab]||'people', D={modcraft:[],ks:[],pmes:[],jb:[],ss:[],cc:[],caps:[],stages:[],log:[],shadow:[]};
 // Company filter across every list ('' = all, 'none' = no company set). Keys: wcl / mssi / cwl.
 var CO_FILTER='';
 try{ CO_FILTER=sessionStorage.getItem('cc_co')||''; }catch(e){}
@@ -312,6 +312,7 @@ async function loadAll(){
   D.modcraft=q[0].data||[]; D.ks=q[1].data||[]; D.pmes=q[2].data||[];
   D.caps=q[3].data||[]; D.stages=q[4].data||[]; D.log=q[5].data||[]; D.shadow=q[6].data||[]; D.deleg=q[7].data||[]; D.jb=q[8].data||[]; D.ss=q[9].data||[]; D.cc=q[10].data||[];
   D.ksSign={}; (q[11].data||[]).forEach(function(x){D.ksSign[x.email]=x});
+  if(!TK.loading) tkLoad();   // the Tickets tab shows how many are open, so read them in the background
 }
 
 function drawNav(){
@@ -321,6 +322,7 @@ function drawNav(){
     var l=cnt[t[0]], n=l?l.filter(function(r){return r.active!==false&&passCo(r.company)}).length:null;
     if(t[0]==='cc') n=ccN;
     if(t[0]==='web') n=WEB.clients?WEB.clients.length:null;
+    if(t[0]==='tk') n=TK.rows?TK.rows.filter(function(r){return TK_OPEN.indexOf(r.status)>=0}).length:null;
     return '<button class="'+(TAB===t[0]?'on':'')+'" onclick="setMain(\''+t[0]+'\')">'+t[1]+(n!=null?'<span class="n">'+n+'</span>':'')+'</button>'}).join('')
     +'<select onchange="setCo(this.value)" style="margin-left:6px" title="Show one company">'
     +[['','All companies']].concat(CO_KEYS,[['none','No company']]).map(function(o){
@@ -330,6 +332,7 @@ function draw(){
   var sub=curSub(), subs=SUBS[TAB]||[], fn;
   if(TAB==='people') fn=viewPeople;
   else if(TAB==='sign') fn=viewSign;
+  else if(TAB==='tk') fn=viewTickets;
   else if(sub==='log') fn=function(){return viewLog(TAB)};
   else if(sub==='shadow') fn=mcShadowCard;
   else if(sub==='deleg') fn=viewDeleg;
@@ -1169,8 +1172,8 @@ function diffText(b,a){
 /* ── Layout (Rommel 2026-09-27): People first, then ONE main tab per app, each with its own sub-tabs.
    Lists are read-only rows; one Edit opens a form for that person. Search, company filter and
    "show inactive" on every list. The change log lives inside each app, showing only that app. */
-var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['ss','ShelfSync'],['web','Website'],['sign','Who signs'],['cc','Access']];
-var SUBS={people:[],sign:[],mc:[['users','Users'],['shadow','Sign-in check'],['log','Change log']],
+var MAIN=[['people','People'],['mc','Modcraft'],['pmes','PMES'],['ks','KEYSTONE'],['jb','HATID'],['ss','ShelfSync'],['web','Website'],['sign','Who signs'],['tk','Tickets'],['cc','Access']];
+var SUBS={people:[],sign:[],tk:[],mc:[['users','Users'],['shadow','Sign-in check'],['log','Change log']],
   pmes:[['users','Users'],['deleg','Approval delegation'],['log','Change log']],
   ks:[['users','Users'],['log','Change log']],jb:[['users','Users'],['log','Change log']],ss:[['users','Users'],['log','Change log']],web:[['clients','Clients'],['switches','Switches'],['log','Change log']],cc:[['users','Who may use this page'],['log','Change log']]};
 var LOG_APPS={mc:['MODCRAFT','MODCRAFT-SHEET'],pmes:['PMES'],ks:['KEYSTONE'],jb:['HATID','JOBBOARD'],ss:['SHELFSYNC'],cc:['COMMAND CENTER'],web:['WEBSITE']};
@@ -1657,6 +1660,88 @@ function viewCc(){
         +'<td>'+(own?'<button class="btn" onclick="openEd(\'cc\','+i+')">Edit</button>':'')+'</td></tr>'}).join('')
       :'<tr><td colspan="7" class="muted">Nobody yet.</td></tr>')
     +'</tbody></table></div></div>';
+}
+
+/* ── Tickets (Rommel 2026-10-20) ──────────────────────────────────────────────
+   Every "Report a problem" from the apps, what the fixer found and did, and its screenshot.
+   Read: any Command Center user. Change status: Command Center managers, through cc_ticket_set,
+   which appends who/when/why to the ticket and records it in the change log (app TICKETS). */
+var TK={rows:null,loading:false,err:'',open:null,filter:'open',shots:{}};
+var TK_STATUS={new:['New','p-none'],triaging:['Being looked at','p-none'],needs_human:['Needs you','p-off'],in_progress:['In progress','p-adm'],
+  pr_open:['Fix waiting for OK','p-adm'],deployed:['Fixed (live)','p-on'],closed:['Closed','p-on'],wont_fix:['Won’t fix','p-none']};
+var TK_OPEN=['new','triaging','needs_human','in_progress','pr_open'];
+async function tkLoad(){
+  TK.loading=true; TK.err='';
+  var r=await supa.from('tickets').select('id,app,created_at,updated_at,reporter_name,reporter_email,title,body,screenshots,url_route,severity,category,status,triage_notes,diagnosis,resolution,pr_url,deploy_commit').order('created_at',{ascending:false});
+  TK.loading=false;
+  if(r.error){ TK.err=dbErr(r.error); TK.rows=[]; } else TK.rows=r.data||[];
+  drawNav(); if(TAB==='tk') draw();
+}
+function tkTier(t){ var m=String((t.resolution||'')+' '+(t.diagnosis||'')).match(/Tier\s*([ABC])\b/i); return m?m[1].toUpperCase():''; }
+function tkPill(s){ var x=TK_STATUS[s]||[s,'p-none']; return '<span class="pill '+x[1]+'">'+esc(x[0])+'</span>'; }
+function viewTickets(){
+  if(TK.rows===null&&!TK.loading) setTimeout(tkLoad,0);
+  if(TK.rows===null) return '<div class="card"><p class="sub">Loading tickets…</p></div>';
+  if(TK.err) return '<div class="card"><div class="note err">Could not read tickets: '+esc(TK.err)+'</div></div>';
+  var rows=TK.rows.filter(function(t){ return TK.filter==='all'?true:TK.filter==='open'?TK_OPEN.indexOf(t.status)>=0:t.status===TK.filter; });
+  var counts={}; TK.rows.forEach(function(t){ counts[t.status]=(counts[t.status]||0)+1; });
+  var openN=TK.rows.filter(function(t){return TK_OPEN.indexOf(t.status)>=0}).length;
+  var opt=function(v,l){ return '<option value="'+v+'"'+(TK.filter===v?' selected':'')+'>'+l+'</option>'; };
+  var h='<div class="card"><div class="flex" style="gap:10px;flex-wrap:wrap"><h2 style="margin:0">Tickets</h2>'
+    +'<span class="sub">Problems people reported with “Report a problem”, and what was done about each.</span>'
+    +'<button class="btn" style="margin-left:auto" onclick="TK.rows=null;draw()">Refresh</button></div>'
+    +'<div class="note" style="background:var(--wash-blue);margin-top:10px">Fixes are sorted into three tiers. <b>A</b> (wording, colours, layout): fixed and put live automatically. '
+    +'<b>B</b> (what a screen calculates or shows): fixed, then waits for your OK. <b>C</b> (saved quotations, prices, approvals, signatures, sign-in, deleting): never automatic — a person fixes it with you.</div>'
+    +'<div class="toolbar"><input id="lfQ" placeholder="Search title, description, reporter…" value="'+esc(LQ)+'" oninput="LQ=this.value;applyLF()">'
+    +'<select onchange="TK.filter=this.value;TK.open=null;draw()">'+opt('open','Open ('+openN+')')+opt('all','All ('+TK.rows.length+')')
+    +Object.keys(TK_STATUS).map(function(k){ return counts[k]?opt(k,TK_STATUS[k][0]+' ('+counts[k]+')'):''; }).join('')+'</select>'
+    +'<span class="muted" id="lfN"></span></div>';
+  h+='<div class="tbl-wrap"><table><thead><tr><th>Reported</th><th>App</th><th>Problem</th><th>By</th><th>Tier</th><th>Status</th><th>Updated</th></tr></thead><tbody>'
+    +(rows.length?rows.map(function(t){
+      var i=TK.rows.indexOf(t), tier=tkTier(t);
+      return '<tr'+sAttr([t.title,t.body,t.reporter_name,t.reporter_email,t.app,t.status,t.diagnosis],false)+' style="cursor:pointer" onclick="TK.open='+(TK.open===i?'null':i)+';draw()">'
+        +'<td style="white-space:nowrap">'+fmt(t.created_at)+'</td><td>'+esc(t.app||'')+'</td>'
+        +'<td><b>'+esc(t.title||'(no title)')+'</b><div class="sub">'+esc(String(t.body||'').slice(0,110))+(String(t.body||'').length>110?'…':'')+'</div></td>'
+        +'<td>'+esc(t.reporter_name||t.reporter_email||'—')+'</td><td>'+(tier?'<span class="pill p-none">'+tier+'</span>':'—')+'</td>'
+        +'<td>'+tkPill(t.status)+'</td><td style="white-space:nowrap">'+fmt(t.updated_at)+'</td></tr>'
+        +(TK.open===i?'<tr><td colspan="7">'+tkDetail(t,i)+'</td></tr>':'');
+    }).join(''):'<tr><td colspan="7" class="muted">No tickets in this view.</td></tr>')
+    +'</tbody></table></div></div>';
+  return h;
+}
+function tkDetail(t,i){
+  var sec=function(l,v){ return v?'<div style="margin-top:10px"><div class="sub" style="font-weight:600">'+l+'</div><div style="white-space:pre-wrap;font-size:13px">'+esc(v)+'</div></div>':''; };
+  var shots=(t.screenshots||[]).map(function(p){
+    var u=TK.shots[p]; if(u===undefined){ TK.shots[p]=null; tkShot(p); }
+    return u?'<a href="'+esc(u)+'" target="_blank" rel="noopener"><img src="'+esc(u)+'" alt="Screenshot" style="max-width:460px;max-height:300px;border:1px solid var(--line);border-radius:6px;margin:4px 6px 0 0"></a>'
+      :'<span class="sub">Loading screenshot…</span>';
+  }).join('');
+  var mgr=ME&&(ME.level==='owner'||ME.level==='manager');
+  var btn=function(s,l,cls){ return '<button class="btn'+(cls?' '+cls:'')+'" onclick="event.stopPropagation();tkSet('+i+',\''+s+'\')">'+l+'</button>'; };
+  return '<div onclick="event.stopPropagation()" style="padding:6px 4px">'
+    +sec('What they wrote',t.body)
+    +(shots?'<div style="margin-top:10px"><div class="sub" style="font-weight:600">Screenshot</div>'+shots+'</div>':'')
+    +(t.url_route?'<div class="sub" style="margin-top:6px">Page: <span class="mono">'+esc(t.url_route)+'</span></div>':'')
+    +sec('Diagnosis',t.diagnosis)+sec('Still needed',t.triage_notes)+sec('What was done',t.resolution)
+    +(t.pr_url?'<div class="sub" style="margin-top:6px">Change: <a href="'+esc(t.pr_url)+'" target="_blank" rel="noopener">'+esc(t.pr_url)+'</a></div>':'')
+    +(mgr?'<div class="flex" style="gap:6px;margin-top:12px;flex-wrap:wrap">'
+      +(TK_OPEN.indexOf(t.status)>=0?btn('closed','Close — done','primary')+btn('wont_fix','Won’t fix'):btn('new','Reopen'))
+      +(t.status!=='needs_human'&&TK_OPEN.indexOf(t.status)>=0?btn('needs_human','Needs me'):'')+'</div>'
+      :'<div class="sub" style="margin-top:10px">Only Command Center managers can change a ticket’s status.</div>')
+    +'</div>';
+}
+async function tkShot(path){
+  var r=await supa.storage.from('ticket-attachments').createSignedUrl(path,3600);
+  TK.shots[path]=(r&&r.data&&r.data.signedUrl)||'';
+  if(TAB==='tk') draw();
+}
+async function tkSet(i,status){
+  var t=TK.rows[i]; if(!t) return;
+  var note=prompt('Change “'+(t.title||'ticket')+'” to '+(TK_STATUS[status]||[status])[0]+'.\n\nNote (optional) — saved on the ticket:','');
+  if(note===null) return;
+  var r=await supa.rpc('cc_ticket_set',{p_id:t.id,p_status:status,p_note:note||null});
+  if(r.error) return toast(dbErr(r.error));
+  TK.rows[i]=r.data||Object.assign(t,{status:status}); toast('Ticket updated'); drawNav(); draw();
 }
 
 /* ── Change log (per app) ── */
