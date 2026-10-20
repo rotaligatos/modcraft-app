@@ -3790,6 +3790,24 @@ const PROFILES = {
             w.supaReplaceTable = saved.supaReplaceTable; w.showToast = saved.showToast;
           }
         })();
+        // 2026-10-20 (QT-M00000217): a Sheets request that never answers held the per-quotation row
+        // write chain forever, so the Project List kept an old total. It must abort and fail instead.
+        await (async () => {
+          const w = window, keep = { fetch: w.fetch, gValidToken: w.gValidToken, gToken: w.gToken };
+          let sawSignal = false;
+          w.gValidToken = () => true; w.gToken = 't';
+          w.fetch = (u, o) => new Promise((res, rej) => { sawSignal = !!(o && o.signal); if (o && o.signal) o.signal.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' }))); });
+          let outcome = 'hung';
+          try {
+            await Promise.race([
+              w.gApiFetch('https://sheets.googleapis.com/x', { _timeoutMs: 50 }).then(() => { outcome = 'resolved'; }, (e) => { outcome = e.name; }),
+              new Promise((r) => setTimeout(r, 1500))
+            ]);
+          } finally { w.fetch = keep.fetch; w.gValidToken = keep.gValidToken; w.gToken = keep.gToken; }
+          const usesTimeout = /_timeoutMs:\s*45000/.test(String(w.sheetsGet)) && /_timeoutMs:\s*45000/.test(String(w.sheetsUpdate)) && /_timeoutMs:\s*45000/.test(String(w.sheetsAppend));
+          check('Google Sheets calls give up on a request that never answers (no stuck Project List row)',
+            () => ({ outcome, sawSignal, usesTimeout }), { outcome: 'AbortError', sawSignal: true, usesTimeout: true });
+        })();
       /* Rommel, 2026-08-25 (audit follow-up): asked for the FULL list of every place this pattern
          appears, not just the one that bit him. Two more genuinely dangerous ones, both fixed the
          same way as _saveServicesToPriceDb -- a pre-flight Supabase count check before any

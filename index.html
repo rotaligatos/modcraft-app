@@ -31560,6 +31560,16 @@ function gApiFetch(url,opts,_retried){
   var pre=gValidToken()?Promise.resolve(gToken):gRefreshToken().catch(_gExpire);
   return pre.then(function(tok){
     opts.headers.Authorization='Bearer '+tok;
+    // A request that never answers must fail, not hang. The Quotations row write is serialised per
+    // quotation, so one hung read held back every later save of that quotation's row in that tab —
+    // the Project List kept an old total while the quotation itself had moved on (QT-M00000217,
+    // 2026-10-20: list ₱510,760 vs saved ₱582,812). Aborting means it cannot land late either.
+    var ms=opts._timeoutMs;
+    if(ms&&!opts.signal&&typeof AbortController!=='undefined'){
+      var ac=new AbortController(); opts.signal=ac.signal;
+      var t=setTimeout(function(){ ac.abort(); },ms);
+      return fetch(url,opts).then(function(r){ clearTimeout(t); return r; },function(e){ clearTimeout(t); throw e; });
+    }
     return fetch(url,opts);
   }).then(function(r){
     if(r.status===401){
@@ -31571,13 +31581,13 @@ function gApiFetch(url,opts,_retried){
 }
 // ── Google Sheets helpers ─────────────────────────────────────────────────
 function sheetsGet(range){
-  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range),{});
+  return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range),{_timeoutMs:45000});
 }
 // Writes must surface failures (permission/quota/etc.) — throw on any error so callers don't show a false "saved".
 function _sheetsThrowOnError(j){ if(j&&j.error) throw new Error(j.error.message||'Google Sheets write failed'); return j; }
 function sheetsAppend(range,values){
   return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+':append?valueInputOption=USER_ENTERED',{
-    method:'POST',
+    method:'POST', _timeoutMs:45000,
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({values:values})
   }).then(_sheetsThrowOnError);
@@ -31597,7 +31607,7 @@ function _rowRange(tab,rowIdx,row){
 }
 function sheetsUpdate(range,values){
   return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values/'+encodeURIComponent(range)+'?valueInputOption=USER_ENTERED',{
-    method:'PUT',
+    method:'PUT', _timeoutMs:45000,
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({range:range,majorDimension:'ROWS',values:values})
   }).then(_sheetsThrowOnError);
@@ -37331,6 +37341,10 @@ function _proceedSaveQuotation(){
       return;
     }
     showSheetsToast(false,'Sheets save failed — check connection ('+serial+')');
+    // Recorded, not just toasted: a missed row write leaves the Project List on an older total
+    // until the next save, and without a trace nobody can tell why the two disagree.
+    try{ logActivity('Project List row for '+serial+' was not updated ('+((e&&e.name==='AbortError')?'no answer from Google Sheets':((e&&e.message)||'error'))
+      +'). The quotation itself is saved; the row catches up on the next save.',serial); }catch(_){}
   });
   });   // ← end of the per-serial row-write chain opened above
   saveQuotationJson();
