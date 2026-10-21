@@ -2559,6 +2559,18 @@ const PROFILES = {
           return { inst: noInst.inst, standalone: noInst.standalone, label: (noInst.standaloneItems[0] || {}).label,
                    withInstStillFolds: withInst.instItems.length === 1 && withInst.standalone === 0 };
         }, { inst: 0, standalone: 2000, label: 'Safety officer', withInstStillFolds: true });
+      /* 2026-10-21 (Rommel): KEYSTONE not deployed yet. With the gate OFF a client-approved ("ready")
+         Job Order is good for production; with it ON (default) it still waits for KEYSTONE. Reserved
+         Job Orders are never good for production either way. */
+      if (typeof window._joProdState === 'function')
+        check('_joProdState: KEYSTONE gate switch', () => {
+          const keep = window.KEYSTONE_GATE;
+          window.KEYSTONE_GATE = true;  const on = window._joProdState({ stage: 'final' }, 'ready').ok;
+          window.KEYSTONE_GATE = false; const off = window._joProdState({ stage: 'final' }, 'ready').ok;
+          const reservedOff = window._joProdState({ stage: 'final' }, 'reserved').ok;
+          window.KEYSTONE_GATE = keep;
+          return { defaultOn: keep === true, readyGateOn: on, readyGateOff: off, reservedGateOff: reservedOff };
+        }, { defaultOn: true, readyGateOn: false, readyGateOff: true, reservedGateOff: false });
       /* Proves the property that actually matters, not just the code shape above: run the real
          formula twice with fabrication's own inputs held fixed and Installation raised sharply
          (mirroring the real report -- installation cost revised upward on the Final Quotation) --
