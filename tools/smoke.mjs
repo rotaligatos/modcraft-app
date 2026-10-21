@@ -2538,6 +2538,14 @@ const PROFILES = {
           };
         }, { oldFixedSplitGone: true, fabSharesFromOwnBucket: true, mobSharesFromOwnBucket: true,
              instSharesFromOwnBucket: true, fabRegroupIsBucketPlusOwnShare: true, leftoverFoldsIntoInstNotFab: true });
+      /* 2026-10-21 (QT-W00000320): a Standalone other cost prints as its own row, but overheadAmt
+         still contained it, so on Fabrication-only it ALSO printed as "Other charges" — the same
+         ₱2,000 twice, printed lines over the grand total. */
+      if (typeof window._buildPrintBodyCore === 'function')
+        check('_buildPrintBodyCore: standalone other costs are taken out of overheadAmt (no double print)', () => {
+          const src = window._buildPrintBodyCore.toString();
+          return { subtractsStandalone: /overheadAmt\s*=[^;]*-\s*\(pC\.otherCostStandaloneTotal\|\|0\)/.test(src) };
+        }, { subtractsStandalone: true });
       /* Proves the property that actually matters, not just the code shape above: run the real
          formula twice with fabrication's own inputs held fixed and Installation raised sharply
          (mirroring the real report -- installation cost revised upward on the Final Quotation) --
