@@ -10627,7 +10627,7 @@ function _recalcCore(fast) {
   var _matRnd=_materialRoundingTopUps(!!qLocked); fabBase+=_matRnd.total+_matRnd.outTotal; outsourceBase+=_matRnd.outTotal;
   var clCost=qCuttingList.enabled?calcCuttingListCost():0;
   var dcCost=qDesignCharge.enabled?calcDesignChargeCost():0;
-  var ocTotals=getOtherCostTotals();
+  var ocTotals=getOtherCostTotals(na);
   var regularBase=fabBase-outsourceBase+clCost; // cutting list silently folded into fab
   var outRates=getOutRates();
   var outsourceFinal=outsourceBase*(1+outRates.contingency/100)*(1+outRates.buffer/100)*(1+outRates.markup/100);
@@ -27182,7 +27182,23 @@ function updateFQBondInsCostDisplay(biCosts){
 // 'fabrication' was removed (2026-07-19) — Carcass-mode pricing already bundles
 // materials+hardware+service per unit; folding an ad-hoc cost into that same
 // pool double-counted against a price that's already a complete package.
-function getOtherCostTotals(){
+// Rommel, 2026-10-21 (QT-W00000320): an Install-mode item on a quotation with no installation and no
+// assembly has no Installation total to fold into — it used to create one, and the printout showed an
+// "Installation" line on a fabrication-only job. Now it prints as its own line at the amount entered,
+// with no installation markup (option A).
+function _ocHasInstall(){
+  var svc=el('cl-service')?el('cl-service').value:'';
+  var ni=svc.indexOf('Installation')>=0;
+  return ni||(svc==='Fabrication only'&&!!(qAssembly&&qAssembly.enabled));
+}
+function _ocItemAmount(o,hasInst,cap,units){
+  if(o.mode==='standalone') return (parseFloat(o.days)||0)*(parseFloat(o.rate)||0);
+  var rate=parseFloat(o.amount)||0;
+  if(!hasInst) return rate;
+  return cap>0?(rate/cap)*units:rate;
+}
+function getOtherCostTotals(hasInst){
+  if(hasInst===undefined) hasInst=_ocHasInstall();
   var list=qOtherCosts||[];
   var cap=_ppicCapacity();
   var units=getInstallCarcassUnits();
@@ -27190,7 +27206,11 @@ function getOtherCostTotals(){
   for(var i=0;i<list.length;i++){
     var o=list[i];
     if(!o||!o.active) continue;
-    if(o.mode==='installation'){
+    if(o.mode==='installation'&&!hasInst){
+      var amt0=_ocItemAmount(o,false,cap,units);
+      standalone+=amt0;
+      standaloneItems.push({label:o.label||'Other cost',amount:amt0,fromInstall:true});
+    } else if(o.mode==='installation'){
       var rate=parseFloat(o.amount)||0;
       var amt=cap>0?(rate/cap)*units:rate; // fallback: flat one-time if PPIC capacity isn't set yet
       inst+=amt;
@@ -27241,6 +27261,7 @@ function setOtherCostMode(i,mode){
 }
 function _otherCostDetailText(o){
   if(o.mode==='standalone') return '';
+  if(!_ocHasInstall()) return 'No installation on this quotation — prints as its own line at '+fmtMoney(parseFloat(o.amount)||0)+', no installation markup.';
   var cap=_ppicCapacity(), units=getInstallCarcassUnits();
   var rate=parseFloat(o.amount)||0;
   if(cap>0) return fmtMoney(rate)+'/day ÷ '+cap.toFixed(2)+' units/day × '+units+' unit'+(units===1?'':'s');
@@ -27248,10 +27269,7 @@ function _otherCostDetailText(o){
 }
 function _otherCostRefreshAmt(i){
   var o=qOtherCosts[i]; if(!o) return;
-  var cap=_ppicCapacity(), units=getInstallCarcassUnits();
-  var amt;
-  if(o.mode==='standalone') amt=(parseFloat(o.days)||0)*(parseFloat(o.rate)||0);
-  else { var rate=parseFloat(o.amount)||0; amt=cap>0?(rate/cap)*units:rate; }
+  var amt=_ocItemAmount(o,_ocHasInstall(),_ppicCapacity(),getInstallCarcassUnits());
   // Stage 1 and Stage 2 bodies can both exist in the DOM at once (see renderOtherCosts), so the
   // same id can appear twice — patch every match via querySelectorAll, not just the first (el()).
   document.querySelectorAll('[id="oc-amt-'+i+'"]').forEach(function(d){ d.textContent=fmtMoney(amt); });
@@ -27270,10 +27288,8 @@ function renderOtherCosts(){
   }
   for(var i=0;i<qOtherCosts.length;i++){
     var o=qOtherCosts[i];
-    var cap=_ppicCapacity(), units=getInstallCarcassUnits();
-    var amt;
-    if(o.mode==='standalone') amt=(parseFloat(o.days)||0)*(parseFloat(o.rate)||0);
-    else { var rate=parseFloat(o.amount)||0; amt=cap>0?(rate/cap)*units:rate; }
+    var cap=_ppicCapacity(), units=getInstallCarcassUnits(), hasInst=_ocHasInstall();
+    var amt=_ocItemAmount(o,hasInst,cap,units);
     var toggle='<div style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;flex-shrink:0">'
       +'<button type="button" onclick="setOtherCostMode('+i+',\'installation\')" style="padding:6px 9px;font-size:11px;border:none;cursor:pointer;background:'+(o.mode==='installation'?'var(--navy)':'transparent')+';color:'+(o.mode==='installation'?'var(--card)':'var(--text2)')+'">Install</button>'
       +'<button type="button" onclick="setOtherCostMode('+i+',\'standalone\')" style="padding:6px 9px;font-size:11px;border:none;border-left:1px solid var(--border);cursor:pointer;background:'+(o.mode==='standalone'?'var(--navy)':'transparent')+';color:'+(o.mode==='standalone'?'var(--card)':'var(--text2)')+'">Standalone</button>'
@@ -27300,8 +27316,8 @@ function renderOtherCosts(){
         +'<input type="number" min="0" value="'+(o.amount||'')+'" oninput="setOtherCostField('+i+',\'amount\',parseFloat(this.value)||0);_otherCostRefreshAmt('+i+')" style="height:32px;font-size:13px;width:110px">'
         +'<div id="oc-amt-'+i+'" style="font-size:12px;font-weight:700;color:var(--navy);margin-left:auto">'+fmtMoney(amt)+'</div>'
         +'</div>'
-        +'<div id="oc-detail-'+i+'" style="font-size:10.5px;color:'+(cap>0?'var(--text2)':'var(--amber)')+';margin-top:4px">'+_otherCostDetailText(o)+'</div>'
-        +'<div style="font-size:10px;color:var(--text2);margin-top:2px">Folded into the Installation/Assembly total — not its own line on the printout.</div>';
+        +'<div id="oc-detail-'+i+'" style="font-size:10.5px;color:'+((cap>0||!hasInst)?'var(--text2)':'var(--amber)')+';margin-top:4px">'+_otherCostDetailText(o)+'</div>'
+        +(hasInst?'<div style="font-size:10px;color:var(--text2);margin-top:2px">Folded into the Installation/Assembly total — not its own line on the printout.</div>':'');
     }
     h+='</div>';
   }
@@ -28151,7 +28167,7 @@ function _recalcFQCore() {
   // never enters mobBase and never picks up contingency/buffer/markup.
   var svSep=qSiteVisit.enabled&&(qSiteVisit.chargeMode==='separate'||qSiteVisit.onlyRequest);
   var _fqsvd=el('fq-sv-cost-disp'); if(_fqsvd) _fqsvd.textContent=fmtMoney(svCost);
-  var ocTotals=getOtherCostTotals();
+  var ocTotals=getOtherCostTotals(na);
   var regularBase=fabBase-outsourceBase+clCost;
   var regularFabC=regularBase*(1+cf/100)*(ni?(1+fabBuf/100):1);
   var fabC=regularFabC+outsourceFinal;

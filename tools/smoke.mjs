@@ -2546,6 +2546,19 @@ const PROFILES = {
           const src = window._buildPrintBodyCore.toString();
           return { subtractsStandalone: /overheadAmt\s*=[^;]*-\s*\(pC\.otherCostStandaloneTotal\|\|0\)/.test(src) };
         }, { subtractsStandalone: true });
+      /* 2026-10-21 (Rommel, option A): an Install-mode other cost on a job with no installation and
+         no assembly prints as its own line at the amount entered — it must not create an
+         installation amount (which printed an "Installation" line on a fabrication-only job). */
+      if (typeof window.getOtherCostTotals === 'function')
+        check('getOtherCostTotals: Install-mode item with no installation becomes its own line, no install amount', () => {
+          const keep = window.qOtherCosts;
+          window.qOtherCosts = [{ label: 'Safety officer', active: true, mode: 'installation', amount: 2000 }];
+          const noInst = window.getOtherCostTotals(false);
+          const withInst = window.getOtherCostTotals(true);
+          window.qOtherCosts = keep;
+          return { inst: noInst.inst, standalone: noInst.standalone, label: (noInst.standaloneItems[0] || {}).label,
+                   withInstStillFolds: withInst.instItems.length === 1 && withInst.standalone === 0 };
+        }, { inst: 0, standalone: 2000, label: 'Safety officer', withInstStillFolds: true });
       /* Proves the property that actually matters, not just the code shape above: run the real
          formula twice with fabrication's own inputs held fixed and Installation raised sharply
          (mirroring the real report -- installation cost revised upward on the Final Quotation) --
