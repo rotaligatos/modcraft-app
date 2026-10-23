@@ -13252,3 +13252,17 @@ are not copied into the quotation folder; training mode cannot open a website cu
   only for admin tier (`supabase_admin_test_orders.sql`). Exporting ANY is_test order sets
   `qTestDraft` → QT-X test quotation (the existing QT-X chain: approvals to self, Job Order, KEYSTONE,
   PMES, hidden from reports). Not yet run with a real signed-in Admin (needs the live app).
+
+## What was changed on 2026-10-23 (session — Orders filter, Nikki's access, Job Order printing)
+- **Orders tabs** (`543541b`): the "My orders" default on stage tabs (set 2026-10-18) was meant for
+  test mode only. `setOrdersTab` now forces it only when `window._TRN`; live keeps the person's
+  "Handled by" choice (default Anyone).
+- **Nikki Soriano (designer-ce1)** could not see orders: her account is Cebu World Laminate and every
+  Wufoo order is WCL. Rommel fixed the setup (access_companies wcl+mssi); verified as her: 207 orders.
+  Note the shared mailboxes changed hands: designer-ce1 = Nikki, ce2 = Sonny Quinton, ce3 = Raven Reyes.
+- **Job Order printing** (`c5b447f`, PMES `4a7f892`): `_prodPrintWindow` prints when the page is ready
+  (loaded, `#jl .jl-grid` drawn, images complete; 20 s cap) instead of a fixed 400 ms; QR path drawn
+  per run of modules (identical code, ~1/3 less markup). Freeze NOT reproduced on JO-W00000350.
+- **PARKED (Rommel):** the freeze report is Jhover printing from **Designers Support** (draft Job Order,
+  `prodPrintJobOrderDraft` → `_joBuild`), not the quotation's Job Orders window. Wait for Rommel's
+  details before investigating.
