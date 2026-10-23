@@ -23,7 +23,12 @@
   function qrSvg(text, logo) {
     var q = root.qrcode(0, 'Q'); q.addData(String(text)); q.make();
     var n = q.getModuleCount(), m = 2, size = n + m * 2, d = '';
-    for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) d += 'M' + (c + m) + ' ' + (r + m) + 'h1v1h-1z';
+    // One rectangle per horizontal run of dark modules (not per module): same picture, a fraction
+    // of the markup — 300 labels were ~3.6 MB of path data and made the print preview crawl.
+    for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) {
+      var c0 = c; while (c + 1 < n && q.isDark(r, c + 1)) c++;
+      d += 'M' + (c0 + m) + ' ' + (r + m) + 'h' + (c - c0 + 1) + 'v1h-' + (c - c0 + 1) + 'z';
+    }
     var s = '<svg class="qr" viewBox="0 0 ' + size + ' ' + size + '" shape-rendering="crispEdges"><rect width="' + size + '" height="' + size + '" fill="#fff"/><path d="' + d + '" fill="#000"/>';
     if (logo) {
       var w = Math.round(n * 0.26), x = (size - w) / 2;
