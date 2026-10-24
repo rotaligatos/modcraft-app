@@ -446,10 +446,13 @@ function refreshPushState(){
   _swInit().then(function(reg){
     if(!reg){ m.textContent='Not available on this browser.'; return; }
     return reg.pushManager.getSubscription().then(function(sub){
-      if(sub){ m.innerHTML='<span style="color:var(--teal)">On</span> — this device will be alerted.'; return; }
-      m.innerHTML='Allowed, but this device is not subscribed yet. '
-        +'<button class="btn" id="push-on2" style="min-height:44px;margin-top:8px">Subscribe</button>';
-      var b=el('push-on2'); if(b) b.onclick=function(){ b.disabled=true; enablePush(); };
+      // Already allowed: never ask again. If the phone dropped its subscription (Android does,
+      // e.g. after an update or battery-saver cleanup) re-subscribe on our own — no click needed
+      // once permission is granted — and re-save the row every time, so a row that was cleaned
+      // up as dead comes back (Rommel, 2026-10-24: "I keep on subscribing").
+      if(sub){ _savePushSub(sub); m.innerHTML='<span style="color:var(--teal)">On</span> — this device will be alerted.'; return; }
+      m.textContent='Reconnecting this device…';
+      enablePush(true);
     });
   });
 }
@@ -482,10 +485,21 @@ function _pushStatus(msg,isErr){
 function _pushResetButtons(){
   ['push-on','push-on2'].forEach(function(id){ var b=el(id); if(b) b.disabled=false; });
 }
-function enablePush(){
+function _savePushSub(sub){
+  var j=sub.toJSON();
+  // One row per endpoint. Upserting on endpoint means re-subscribing the same device
+  // replaces its row instead of accumulating duplicates that would each get a copy.
+  return supa.from('push_subscriptions').upsert({
+    endpoint:j.endpoint, p256dh:j.keys&&j.keys.p256dh, auth:j.keys&&j.keys.auth,
+    user_email:ME.trim().toLowerCase(),
+    user_agent:(navigator.userAgent||'').slice(0,300)
+  },{onConflict:'endpoint'});
+}
+// silent=true: permission is already granted, so subscribe without the permission step.
+function enablePush(silent){
   if(!pushSupported()) return;
-  _pushStatus('Requesting permission…');
-  Notification.requestPermission().then(function(p){
+  _pushStatus(silent?'Reconnecting this device…':'Requesting permission…');
+  (silent?Promise.resolve(Notification.permission):Notification.requestPermission()).then(function(p){
     if(p!=='granted'){ _pushResetButtons(); alert('Notifications were not allowed, so nothing will be sent to this device.'); return; }
     _pushStatus('Registering this device with your browser…');
     return _withTimeout(_swInit().then(function(reg){
@@ -494,14 +508,7 @@ function enablePush(){
         applicationServerKey:_urlB64ToUint8(VAPID_PUBLIC_KEY)});
     }),PUSH_TIMEOUT_MS,'Device registration').then(function(sub){
       _pushStatus('Saving…');
-      var j=sub.toJSON();
-      // One row per endpoint. Upserting on endpoint means re-subscribing the same device
-      // replaces its row instead of accumulating duplicates that would each get a copy.
-      return supa.from('push_subscriptions').upsert({
-        endpoint:j.endpoint, p256dh:j.keys&&j.keys.p256dh, auth:j.keys&&j.keys.auth,
-        user_email:ME.trim().toLowerCase(),
-        user_agent:(navigator.userAgent||'').slice(0,300)
-      },{onConflict:'endpoint'});
+      return _savePushSub(sub);
     }).then(function(r){
       if(r&&r.error){ _pushResetButtons(); _pushStatus('Could not save this device — try again.',true); alert('Could not save this device. '+r.error.message); return; }
       _pushStatus('<span style="color:var(--teal)">On</span> — this device will be alerted.');
