@@ -8630,6 +8630,21 @@ function _lookupIndexFor(src){
     var cached=_lookupIdxCache.get(src);
     if(cached) return cached;
   }
+  function rankOf(it){ return (it.unit&&String(it.unit).trim()?2:0)+((parseFloat(it.price)||0)>0?1:0); }
+  // The merged list (getMatSource/getHwSource) is the Price DB list plus a few built-in extras.
+  // Reuse the Price DB list's index and add only the extras, instead of reading ~150k items a
+  // second time (half of the "Load into analysis" freeze, 2026-10-24).
+  var baseArr=(src===_matSrcCache)?_matSrcFor:((src===_hwSrcCache)?_hwSrcFor:null);
+  if(_lookupIdxCache&&baseArr&&baseArr.length&&src.length>=baseArr.length&&src[0]===baseArr[0]){
+    var base=_lookupIndexFor(baseArr), dx=Object.create(base);
+    for(var e=baseArr.length;e<src.length;e++){
+      var ex=src[e]; if(!ex||!ex.name) continue;
+      var nx=String(ex.name).trim().toLowerCase();
+      if(!(nx in dx)||rankOf(ex)>rankOf(dx[nx])) dx[nx]=ex;
+    }
+    _lookupIdxCache.set(src,dx);
+    return dx;
+  }
   var idx=Object.create(null), ranks=Object.create(null);
   for(var k=0;k<src.length;k++){
     var it=src[k];
@@ -35177,6 +35192,7 @@ function _loadPriceDbFromMirror(showFeedback){
       supaLoadPmesCapacity();
       _syncHardwareFromDb();
       dbLoaded=true;
+      _warmCatalogIndexes();
       renderPriceDbSettings();
       if(qFabMode==='bom') renderItems();
       if(qFabMode==='services') syncSvcMatHwPricesFromDB();
@@ -35208,6 +35224,7 @@ function _loadPriceDatabaseFromSheets(showFeedback) {
       supaLoadPmesCapacity();
       _syncHardwareFromDb();
       dbLoaded=true;
+      _warmCatalogIndexes();
       priceDbFromSheet=true;   // read straight from the sheet — nothing can be "behind" in this session
       renderPriceDbSettings(); // always refresh settings panel counts
       if(qFabMode==='bom') renderItems(); // refresh BOM dropdowns
@@ -41190,7 +41207,7 @@ function _joPmesPart(name){
 function _joSig(d){
   if(!d) return '';
   return _canonicalJson({b:d.bander,o:d.optionLabel,
-    p:(d.parts||[]).map(function(p){ var q={}; for(var k in p) if(k!=='barcodes'&&k!=='scan') q[k]=p[k]; return q; }),
+    p:(d.parts||[]).map(function(p){ var q={}; for(var k in p) if(k!=='barcodes'&&k!=='scan'&&k!=='sku') q[k]=p[k]; return q; }),
     bo:(d.boards||[]).map(function(x){ return [x.material,x.color,x.thickness,x.boardsNeeded,x.layout]; }),
     h:d.hardware,ho:d.holes});
 }
@@ -41386,6 +41403,8 @@ function _joBuild(result,ctx){
     // Only when true, so an unchanged plain-board job keeps the same Job Order signature.
     if(_isGrainedMaterial([c.material,c.color,c.texture].join(' '))) parts[parts.length-1].grained=true;
     if(String(c.remark||'').trim()) parts[parts.length-1].remark=String(c.remark).trim();
+    // The exact catalogue SKU, so the printout names the board in full (left out of _joSig).
+    if(c.catalogName) parts[parts.length-1].sku=String(c.catalogName);
     if(c.drawing&&c.drawing.source) parts[parts.length-1].drawing={source:c.drawing.source,page:c.drawing.page,file:_daDrawingFileName(_serialRoot(ctx.serial||''),c.drawing)};
     if(mySvcs.length) parts[parts.length-1].services=mySvcs.map(function(x){ var o={service:x.service,qty:+x.qty||0,unit:x.unit||'lm'}; if(x.side) o.side=x.side; return o; });
   }
@@ -41687,12 +41706,12 @@ function _joDocHtml(jo,status){
     +(pm.area&&pm.part?'; ':'')+(pm.part?pm.part+' part(s) have no recognised part type (filed as MISC)':'')
     +' — shown in orange in the PMES column.</div>';
   h+='<div class="sub" style="border-left:3px solid #2563eb;padding-left:6px"><b>Edge codes:</b> '+escHtml(EBT_SQUARE_NOTE)+'</div>';
-  h+='<h2>Parts — cut list</h2><table class="pl"><tr><th>Part</th><th>Area</th><th>Component</th><th>Material</th><th>Th</th>'
+  h+='<h2>Parts — cut list</h2><table class="pl"><tr><th>Part</th><th>Area</th><th>Component</th><th style="min-width:150px">Material</th><th>Th</th>'
     +'<th>Finished L×W</th><th>'+(cut?'<b>Cut</b> L×W':'Cut L×W')+'</th><th>Qty</th><th>Edge</th><th>Tape</th><th>Grain</th><th>Groove</th><th>Special</th><th>Remarks</th><th>Route</th><th>PMES</th><th>Barcodes</th></tr>';
   jo.parts.forEach(function(p){
     var diff=p.cutL!==p.L||p.cutW!==p.W;
     h+='<tr'+(p.flags.length?' style="background:#fff7ed"':'')+'><td><b>'+p.p+'</b></td><td>'+e(p.area)+'</td><td>'+e(p.name)+'</td>'
-      +'<td>'+e([p.material,p.color].filter(Boolean).join(' '))+'</td><td>'+(p.thickness||'')+'</td><td>'+p.L+' × '+p.W+'</td>'
+      +'<td>'+e(_joMatText(p))+'</td><td>'+(p.thickness||'')+'</td><td>'+p.L+' × '+p.W+'</td>'
       +'<td'+(diff?' style="font-weight:700"':'')+'>'+p.cutL+' × '+p.cutW+'</td><td>'+p.qty+'</td><td>'+e(p.ebt||'—')+'</td>'
       +'<td>'+e(p.tape)+(p.tapeMm&&cut?' ('+p.tapeMm+'mm)':'')+'</td><td>'+e(p.grain)+'</td><td>'+e(p.grooving)+'</td>'
       +'<td'+(p.special||_joWorkSvcs(p).length?' style="font-weight:700"':'')+'>'+e([p.special||''].concat(_joWorkSvcs(p).map(_joSvcLabel)).filter(Boolean).join(' · '))+'</td>'
@@ -41790,7 +41809,7 @@ function _joExportRows(jo){
   });
   var pieces=[['Part','Component','Piece','Scan code','Barcode ID','Cut L','Cut W','Th (mm)','Material']];
   (jo.parts||[]).forEach(function(p){ (p.barcodes||[]).forEach(function(b,n){
-    pieces.push([p.p,p.name,(n+1)+' of '+p.qty,(p.scan||[])[n]||'',b,p.cutL,p.cutW,p.thickness||'',[p.material,p.color].filter(Boolean).join(' ')]); }); });
+    pieces.push([p.p,p.name,(n+1)+' of '+p.qty,(p.scan||[])[n]||'',b,p.cutL,p.cutW,p.thickness||'',_joMatText(p)]); }); });
   var sv=jo.services||{};
   var summary=[['Job Order',jo.joNumber||'(draft)'],['Quotation',jo.serial||''],['Option',jo.optionLabel||''],['Client',jo.client||''],['Project',jo.project||''],
     ['Company',jo.company||''],['Prepared by',jo.preparedBy||''],['Created',String(jo.createdAt||'').slice(0,16).replace('T',' ')],
@@ -41823,8 +41842,18 @@ function _joExport(jo,status,fmt){
   add(t.hw,'Hardware'); add(t.holes,'Holes'); add(t.svc,'Edge banding & services'); add(t.hpl,'HPL lamination');
   XLSX.writeFile(wb,base+'.xlsx');
 }
+// The board in full: the exact catalogue SKU when one was picked, else everything known about it
+// (Rommel, 2026-10-24 — the printout showed "PB real white 4x8" for a 2F stipple board).
+function _joMatText(p){
+  if(p.sku) return p.sku;
+  var t=[p.material,p.color].filter(Boolean).join(' '), lt=t.toLowerCase();
+  if(p.faces&&!/\b[12]\s*f\b/i.test(t)) t+=' '+p.faces+'F';
+  if(p.texture&&lt.indexOf(String(p.texture).toLowerCase())<0) t+=' ('+p.texture+')';
+  return t;
+}
 function _joPrint(jo,status){
-  var w=_prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status));
+  // Landscape: the cut list has 17 columns; portrait squeezed the material and tape names.
+  var w=_prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status),'@page{size:A4 landscape;margin:8mm}');
   // Drawings not in memory come from the quotation's Storage folder (saved at lock).
   if(!w||!(jo.drawings||[]).length||!jo.storageFolder||window._TRN||typeof supaReady!=='function'||!supaReady()) return;
   jo.drawings.forEach(function(d,di){
@@ -44561,6 +44590,27 @@ function _prodFieldMatchScore(qd,cd){
 // distance of the best match (not just the single top result), since near-ties (e.g. "Real White"
 // vs "Warm White" both matching a generic "White" mention) are exactly the case that needs a human
 // to pick, not an auto-guess.
+// Reads the catalogue ahead of time, in small slices while the app is idle, so the first
+// "Load into analysis" / catalogue match does not have to read ~150k items in one go (that was a
+// "Page Unresponsive" freeze, 2026-10-24). Same cached fields _prodFindCatalogMatches and
+// lookupInSource would fill on first use; a new catalogue array starts it over.
+var _catWarmFor=null;
+function _warmCatalogIndexes(){
+  var arr=(typeof dbMaterials!=='undefined'&&dbMaterials)||[];
+  if(!arr.length||_catWarmFor===arr) return;
+  _catWarmFor=arr;
+  var i=0;
+  function slice(){
+    if(_catWarmFor!==arr) return;            // catalogue reloaded — the new run takes over
+    var end=Math.min(arr.length,i+1500);
+    for(;i<end;i++){ var it=arr[i]; if(!it||!it.name) continue;
+      if(!it.__tok) it.__tok=_prodTokenize(it.name);
+      if(!it.__matDesc) it.__matDesc=_prodParseMaterialDescriptor(it.name); }
+    if(i<arr.length){ setTimeout(slice,15); return; }
+    try{ lookupInSource(arr,'_'); if(typeof getMatSource==='function') lookupInSource(getMatSource(),'_'); lookupInSource(_prodEdgeTapeCatalog(),'_'); }catch(e){}
+  }
+  setTimeout(slice,1500);
+}
 function _prodFindCatalogMatches(query,catalogArr,maxResults){
   var qTokens=_prodTokenize(query);
   if(!qTokens.length||!catalogArr||!catalogArr.length) return [];
@@ -45237,6 +45287,15 @@ function prodBuildSummary(result) {
     }
     return row;
   }
+  // An exact SKU already chosen (picked in the cutting list, mapped at import): resolved on
+  // arrival WITHOUT the fuzzy search. That search reads the whole ~150k-item catalogue and was
+  // most of the 30+ s "Load into analysis" freeze (2026-10-24). The other candidates are only
+  // needed if someone presses "Change match", so they are found then (_prodCatalogRowReopenPicker).
+  function pickedRow(aiName,mappedName,picked,qty,unit,texture,lazyCat){
+    return {aiName:aiName,name:picked.name,qty:qty,unit:picked.unit||unit,include:true,price:picked.price||0,custom:false,
+      outsource:false,mto:false,mtoLeadDays:0,texture:texture||'',
+      matchCandidates:[picked.name],_lazyQ:{q:mappedName,cat:lazyCat},needsReview:false,reviewNote:''};
+  }
   var mats=[];var bom=result._bom||[];
   // HPL-laminated groups (bm.hpl, set by prodComputeBom from "hpl" appearing in the component's
   // material/notes) need two extra lines beyond the substrate board itself: the HPL sheet material,
@@ -45264,15 +45323,13 @@ function prodBuildSummary(result) {
     if(bm.outsourceName){
       // Chosen as outsourced at import: lands in the quotation's outsource section, where the
       // supplier's price is entered (same as pressing "Outsource" on the line here).
-      var orow=catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bq,'pc',bm.texture);
-      orow.name=bm.outsourceName; orow.outsource=true; orow.mto=false; orow.needsReview=false; orow.reviewNote='';
+      var orow={aiName:rn,name:bm.outsourceName,qty:bq,unit:'pc',include:true,price:0,custom:true,
+        outsource:true,mto:false,mtoLeadDays:0,texture:bm.texture||'',matchCandidates:[],
+        _lazyQ:{q:applyJargon(rn,'materials'),cat:'mat'},needsReview:false,reviewNote:''};
       mats.push(orow);
     } else if(picked){
-      // Already chosen as an exact SKU — resolved on arrival, candidates kept so it can be changed.
-      var prow=catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bq,'pc',bm.texture);
-      prow.name=picked.name; prow.unit=picked.unit||'pc'; prow.price=picked.price||0; prow.custom=false;
-      prow.needsReview=false; prow.reviewNote='';
-      if(prow.matchCandidates.indexOf(picked.name)<0) prow.matchCandidates.unshift(picked.name);
+      // Already chosen as an exact SKU — resolved on arrival; other candidates found on "Change match".
+      var prow=pickedRow(rn,applyJargon(rn,'materials'),picked,bq,'pc',bm.texture,'mat');
       if(picked.mto){ prow.mto=true; prow.mtoLeadDays=_mtoDefaultLeadDays(bm.texture); }
       mats.push(prow);
     } else {
@@ -45293,13 +45350,10 @@ function prodBuildSummary(result) {
       // takes 2 HPL sheets, a 1F board takes 1 — laminated as whole boards, then cut. This used to
       // be the panels' area in sqm against a per-sheet price, billing each square metre as a sheet.
       var hplSheets=(bq||0)*(bm.faces===2?2:1);
-      var hrow=catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,hplSheets,'pc',bm.texture);
       var hpk=bm.hplSku&&typeof lookupInSource==='function'?lookupInSource(dbMaterials,bm.hplSku):null;
-      if(hpk){   // the exact HPL sheet the client picked — resolved on arrival, candidates kept
-        hrow.name=hpk.name; hrow.unit=hpk.unit||'pc'; hrow.price=hpk.price||0; hrow.custom=false;
-        hrow.needsReview=false; hrow.reviewNote='';
-        if(hrow.matchCandidates.indexOf(hpk.name)<0) hrow.matchCandidates.unshift(hpk.name);
-      }
+      // The exact HPL sheet the client picked — resolved on arrival, no catalogue-wide search.
+      var hrow=hpk?pickedRow(hplName,applyJargon(hplName,'materials'),hpk,hplSheets,'pc',bm.texture,'mat')
+        :catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,hplSheets,'pc',bm.texture);
       mats.push(hrow);
       // Substrate determines WHICH lamination service — reuse the same field parser built for
       // catalog matching so "Plywood"/"PB"/"MDF"/"PB-MR"/"MDF-MR" are recognized regardless of how
@@ -45351,13 +45405,10 @@ function prodBuildSummary(result) {
     // own: 81 m of tape priced as 81 boards (end-to-end run, 2026-09-26). A tape can only ever be
     // tape, so boards are never offered for it.
     var tapeHit=(typeof lookupInSource==='function')?lookupInSource(_prodEdgeTapeCatalog(),etg.tape):null;
-    var trow=catalogMatchRow(etg.tape,applyJargon(etg.tape,'materials'),_prodEdgeTapeCatalog(),etg.lm,'lm',null,true);
-    if(tapeHit){
-      // Named as an exact edge-band SKU (mapped at import, or picked) — resolved on arrival.
-      trow.name=tapeHit.name; trow.unit='lm'; trow.price=tapeHit.price||0; trow.custom=false;
-      trow.needsReview=false; trow.reviewNote='';
-      if(trow.matchCandidates.indexOf(tapeHit.name)<0) trow.matchCandidates.unshift(tapeHit.name);
-    }
+    // Named as an exact edge-band SKU (mapped at import, or picked) — resolved on arrival.
+    var trow=tapeHit?pickedRow(etg.tape,applyJargon(etg.tape,'materials'),tapeHit,etg.lm,'lm',null,'tape')
+      :catalogMatchRow(etg.tape,applyJargon(etg.tape,'materials'),_prodEdgeTapeCatalog(),etg.lm,'lm',null,true);
+    if(tapeHit) trow.unit='lm';
     mats.push(trow);
   }
   // Edge banding nobody named a tape for still uses tape — it has to be priced (Rommel, 2026-10-16).
@@ -45598,6 +45649,14 @@ function _prodCatalogRowHtml(cat,idx,row,uopts){
 function _prodCatalogRowReopenPicker(cat,idx){
   var row=prodState.summary&&prodState.summary[cat]&&prodState.summary[cat][idx]; if(!row) return;
   var isMaterial=(cat==='materials');
+  // Rows resolved on arrival skipped the catalogue search; find the other candidates now.
+  if(row._lazyQ){
+    var lz=row._lazyQ; delete row._lazyQ;
+    var src=lz.cat==='tape'?_prodEdgeTapeCatalog():(lz.cat==='hw'?((typeof getHwSource==='function')?getHwSource():dbHardware):dbMaterials);
+    var found=_prodFindCatalogMatches(lz.q,src,6).map(function(c){ return c.name; });
+    (row.matchCandidates||[]).forEach(function(n){ if(found.indexOf(n)<0) found.unshift(n); });
+    row.matchCandidates=found;
+  }
   row.needsReview=true; row._searchQuery=''; row.mto=false; row.mtoLeadDays=0; // start fresh — a genuinely wrong pick shouldn't carry a stale MTO tag into whatever's picked next
   row.reviewNote=(row.matchCandidates&&row.matchCandidates.length)
     ? (row.matchCandidates.length+' possible catalog match'+(row.matchCandidates.length>1?'es':'')+' found for "'+row.aiName+'" — pick the right one, or mark it Outsource'+(isMaterial?' / Made to Order':'')+'.')
@@ -46059,7 +46118,7 @@ function prodPrintCutSheets(){
   var parts='<table class="pl"><tr><th>Part</th><th>Area</th><th>Component</th><th>Material</th><th>Th</th><th>L</th><th>W</th><th>Qty</th><th>Edge</th><th>Tape</th><th>Grain</th></tr>';
   for(var i=0;i<comps.length;i++){
     var c=comps[i];
-    parts+='<tr><td><b>P'+(i+1)+'</b></td><td>'+escHtml(c.area||'')+'</td><td>'+escHtml(c.name||'')+'</td><td>'+escHtml([c.material,c.color].filter(Boolean).join(' '))+'</td>'
+    parts+='<tr><td><b>P'+(i+1)+'</b></td><td>'+escHtml(c.area||'')+'</td><td>'+escHtml(c.name||'')+'</td><td>'+escHtml(c.catalogName||_joMatText(c))+'</td>'
       +'<td>'+(c.thickness||'')+'</td><td>'+(c.length||'')+'</td><td>'+(c.width||'')+'</td><td>'+(c.qty||1)+'</td><td>'+escHtml(c.ebt||'')+'</td><td>'+escHtml(c.edgeTape||'')+'</td><td>'+escHtml(c.grain||'')+'</td></tr>';
   }
   parts+='</table>';

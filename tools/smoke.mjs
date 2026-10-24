@@ -6234,6 +6234,23 @@ const PROFILES = {
         const rows = w._joHplRows(jo);
         return { flags: pay.components.filter((c) => /SKU says/.test(c.reviewNote || '')).length, rows: rows.map((r) => [r.lamFirst, r.faces, r.sheets]), inDoc: /HPL lamination/.test(w._joDocHtml(jo, 'reserved')) };
       }, { flags: 0, rows: [[true, 1, 1], [false, 2, 2]], inDoc: true });
+      // 2026-10-24: Load into analysis froze — a picked SKU still ran the whole-catalogue fuzzy search.
+      check('Picked SKU resolves without the catalogue search; Job Order prints the full SKU, landscape', () => {
+        const w = window, keepM = w.dbMaterials, keepF = w._prodFindCatalogMatches;
+        const sku = 'Marino Walnut PB 4x8 2F (18mm, Stipple)';
+        w.dbMaterials = [{ name: sku, unit: 'pc', price: 1500 }, { name: 'Warm White PB 4x8 2F (18mm, Matte)', unit: 'pc', price: 1400 }];
+        let calls = 0; w._prodFindCatalogMatches = function () { calls++; return keepF.apply(this, arguments); };
+        const P = { group: 'C1', part: 'Side', mat: sku, th: 18, L: 720, W: 560, qty: 2, ebt: '', emat: '', grain: '', svcs: [], remark: '' };
+        const pay = w._cutListToAnalysis({ origin: 'typed', grain: 'length', panels: [P], hpl: [], hardware: [] }, null);
+        const r = w.prodLoadStructuredList(pay, 't'); w.prodBuildSummary(r);
+        const row = w.prodState.summary.materials[0], searched = calls, review = row.needsReview, lazy = !!row._lazyQ;
+        w._prodCatalogRowReopenPicker('materials', 0);
+        const jo = w._joBuild({ components: pay.components, holeSchedule: [], extraServices: [], hardware: [], _structured: true }, { joNumber: 'JO-T' });
+        const doc = w._joDocHtml(jo, 'reserved');
+        w._prodFindCatalogMatches = keepF; w.dbMaterials = keepM;
+        return { searched, name: row.name, review, lazy, changeMatchSearched: calls > searched && !row._lazyQ,
+          full: doc.indexOf(sku) >= 0, landscape: /size:A4 landscape/.test(String(w._joPrint)) };
+      }, { searched: 0, name: 'Marino Walnut PB 4x8 2F (18mm, Stipple)', review: false, lazy: true, changeMatchSearched: true, full: true, landscape: true });
       check('Job Order exports to Excel/CSV rows: one row per part, one per piece barcode, HPL section', () => {
         const w = window;
         const P = (part, mat, L, W, qty) => ({ group: 'C1', part, mat, th: 18, L, W, qty, ebt: '1L', emat: 'PVC 1mm', grain: '', svcs: [], remark: '' });
