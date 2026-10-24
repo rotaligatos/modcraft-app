@@ -5477,7 +5477,7 @@ const PROFILES = {
         }, { partOnPiece: true, reflectAfterLayout: true, hasPrintButtons: true });
       if (typeof window.prodPrintCutSheets === 'function' && typeof window.prodPrintLabels === 'function')
         check('print: one label per placed piece, one sheet per board group, no theme tokens on paper', () => {
-          const w = window, saved = { bs: w.prodSettings.boardSizes, r: w.prodState.result, open: w.open };
+          const w = window, saved = { bs: w.prodSettings.boardSizes, r: w.prodState.result, open: w.open, Blob: w.Blob, cu: w.URL.createObjectURL };
           const cap = [];
           try {
             w.prodSettings.boardSizes = [{ material: 'TestMat', sizes: [{ w: 1220, h: 2440 }] }];
@@ -5485,13 +5485,15 @@ const PROFILES = {
                              length: 2400, width: 1200, qty: 3, faces: 2, grain: 'none' }];
             const res = { components: comps, hardware: [], holeSchedule: [] };
             res._bom = w.prodComputeBom(comps); w.prodState.result = res;
-            w.open = () => ({ document: { write: h => cap.push(h), close() {} }, focus() {}, print() {} });
+            // 2026-10-24: printed from a blob page in its own process (noopener) so the app never freezes.
+            const feats = []; w.Blob = function (parts) { cap.push(parts.join('')); }; w.URL.createObjectURL = () => 'blob:x'; w.open = (u, t, f) => { feats.push(f); return null; };
             w.prodPrintCutSheets(); w.prodPrintLabels();
             return { sheets: (cap[0].match(/Cutting sequence/g) || []).length, groupedNote: /×3 identical/.test(cap[0]),
                      // Labels render client-side from a JSON payload since the QR labels (2026-10-17).
-                     labels: ((cap[1].match(/"labels":\[(.*?)\],"logo"/) || ['', ''])[1].match(/"scan":/g) || []).length, noTokens: !/var\(--/.test(cap.join('')) };
-          } finally { w.prodSettings.boardSizes = saved.bs; w.prodState.result = saved.r; w.open = saved.open; }
-        }, { sheets: 1, groupedNote: true, labels: 3, noTokens: true });
+                     labels: ((cap[1].match(/"labels":\[(.*?)\],"logo"/) || ['', ''])[1].match(/"scan":/g) || []).length, noTokens: !/var\(--/.test(cap.join('')),
+                     ownWindow: feats.length === 2 && feats.every((x) => x === 'noopener') };
+          } finally { w.prodSettings.boardSizes = saved.bs; w.prodState.result = saved.r; w.open = saved.open; w.Blob = saved.Blob; w.URL.createObjectURL = saved.cu; }
+        }, { sheets: 1, groupedNote: true, labels: 3, noTokens: true, ownWindow: true });
 
       /* 2026-09-25: Job Order. Reserved at every Initial lock (frozen, versioned), ready at Final
          client approval. Cut size = finished on a standard bander; minus tape per banded edge on a

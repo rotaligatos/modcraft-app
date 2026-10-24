@@ -41853,15 +41853,23 @@ function _joMatText(p){
 }
 function _joPrint(jo,status){
   // Landscape: the cut list has 17 columns; portrait squeezed the material and tape names.
-  var w=_prodPrintWindow('Job Order '+(jo.joNumber||''),_joDocHtml(jo,status),'@page{size:A4 landscape;margin:8mm}');
-  // Drawings not in memory come from the quotation's Storage folder (saved at lock).
-  if(!w||!(jo.drawings||[]).length||!jo.storageFolder||window._TRN||typeof supaReady!=='function'||!supaReady()) return;
-  jo.drawings.forEach(function(d,di){
-    var img=w.document.querySelector('img[data-jo-dwg="'+di+'"]');
-    if(!img||img.getAttribute('src')) return;
-    supa.storage.from('quotations').createSignedUrl(jo.storageFolder+'/'+_supaSafeStorageKey(d.file),3600).then(function(r){
-      if(r&&r.data&&r.data.signedUrl) img.src=r.data.signedUrl; else img.alt='Drawing not found in the quotation folder ('+d.file+')';
+  var html=_joDocHtml(jo,status), css='@page{size:A4 landscape;margin:8mm}';
+  var open=function(){ _prodPrintWindow('Job Order '+(jo.joNumber||''),html,css); };
+  // Drawings not in memory come from the quotation's Storage folder (saved at lock). Their links
+  // are fetched first: the print page is its own window and cannot be filled in afterwards.
+  var need=(jo.drawings||[]).map(function(d,di){ return {d:d,di:di}; })
+    .filter(function(x){ return !_joDrawingSrc(x.d); });
+  if(!need.length||!jo.storageFolder||window._TRN||typeof supaReady!=='function'||!supaReady()) return open();
+  Promise.all(need.map(function(x){
+    return supa.storage.from('quotations').createSignedUrl(jo.storageFolder+'/'+_supaSafeStorageKey(x.d.file),3600)
+      .then(function(r){ return {di:x.di,url:r&&r.data&&r.data.signedUrl,file:x.d.file}; },function(){ return {di:x.di,file:x.d.file}; });
+  })).then(function(res){
+    res.forEach(function(x){
+      var tag='<img data-jo-dwg="'+x.di+'" src=""';
+      html=html.split(tag).join(x.url?'<img data-jo-dwg="'+x.di+'" src="'+escHtml(x.url)+'"'
+        :'<img data-jo-dwg="'+x.di+'" alt="Drawing not found in the quotation folder ('+escHtml(x.file)+')" src=""');
     });
+    open();
   });
 }
 // One sticker per piece with a Code128 barcode (the PMES scan format), in cutting order.
@@ -46079,33 +46087,29 @@ function _prodLayoutBlockHtml(bm,lb){
 // silently dropping a background — the rule every printable builder in this file follows).
 function _prodPrintWindow(title,body,css){
   body=coShow(body);
-  var w=window.open('','_blank');
-  if(!w){ showToast('Pop-up blocked — allow pop-ups for this site to print.'); return; }
-  w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+escHtml(title)+'</title>'
+  // The print page runs in its OWN window process (a blob page opened with noopener), so while
+  // the printer dialog waits ("Waiting for printer connection…") or spools a long Job Order, only
+  // that window waits — Modcraft stays usable (2026-10-24: Jhover's print froze the whole app;
+  // a window opened with window.open('') shares the app's process, and printing blocks it).
+  // The page prints itself once loaded, labels drawn and images finished (20 s cap).
+  var auto='<script>(function(){var t0=Date.now(),ok=0;function tick(){var d=document;'
+    +'var r=d.readyState==="complete"&&(!d.getElementById("jl")||!!d.querySelector("#jl .jl-grid"))'
+    +'&&[].every.call(d.images,function(im){return im.complete;});ok=r?ok+1:0;'
+    +'if(ok>=2||Date.now()-t0>20000){window.focus();window.print();return;}setTimeout(tick,250);}'
+    +'window.addEventListener("load",function(){setTimeout(tick,250);});})();<\/script>';
+  var doc='<!doctype html><html><head><meta charset="utf-8"><base href="'+escHtml(location.href)+'"><title>'+escHtml(title)+'</title>'
     +'<style>body{font-family:Arial,Helvetica,sans-serif;color:#111;background:#fff;margin:18px}'
     +'h1{font-size:16px;margin:0 0 4px}h2{font-size:13px;margin:16px 0 6px}.sub{font-size:11px;color:#555;margin-bottom:10px}'
     +'table.pl{border-collapse:collapse;width:100%;font-size:10px}table.pl th,table.pl td{border:1px solid #bbb;padding:3px 5px;text-align:left}'
     +'table.pl th{background:#eee}.pb{page-break-before:always;break-before:page}'
     +'@media print{.noprint{display:none}body{margin:8mm}}'+(css||'')+'</style></head><body>'
     +'<div class="noprint" style="margin-bottom:10px"><button onclick="window.print()">Print</button></div>'
-    +body+'</body></html>');
-  w.document.close();
-  // Print only once the page is actually ready: loaded, labels drawn (they render on load from a
-  // CDN script), images finished. A fixed 400 ms fired the print dialog mid-load, which blocks the
-  // page — labels never drew and the window looked frozen. Gives up waiting after 20 s.
-  var t0=Date.now(), okTicks=0;
-  (function tick(){
-    var ready=false;
-    try{
-      var d=w.document;
-      ready=d.readyState==='complete'&&(!d.getElementById('jl')||!!d.querySelector('#jl .jl-grid'))
-        &&[].every.call(d.images,function(im){ return im.complete; });
-    }catch(e){ return; }   // window closed
-    okTicks=ready?okTicks+1:0;
-    if(okTicks>=2||Date.now()-t0>20000){ try{ w.focus(); w.print(); }catch(e){} return; }
-    setTimeout(tick,250);
-  })();
-  return w;
+    +body+auto+'</body></html>';
+  var url=URL.createObjectURL(new Blob([doc],{type:'text/html'}));
+  // With noopener the browser cannot tell us whether a pop-up blocker stopped it.
+  window.open(url,'_blank','noopener');
+  setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },120000);
+  showToast('Print window opened — if it does not appear, allow pop-ups for this site.');
 }
 function _prodPrintHeader(){
   var r=prodState.result||{};
