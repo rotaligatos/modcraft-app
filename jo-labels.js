@@ -17,7 +17,7 @@
   function qrText(l) {
     var mat = String(l.material || '').replace(/\[[^\]]*\]\s*/g, '').replace(/\s+/g, ' ').trim();
     if (mat.length > 44) mat = mat.slice(0, 44);
-    return [l.scan, (l.cutL || l.L || '') + 'x' + (l.cutW || l.W || ''), mat, 'EB ' + (String(l.ebt || '').toUpperCase() || 'NONE')].join(' | ');
+    return [l.scan, (l.cutW || l.W || '') + 'x' + (l.cutL || l.L || ''), mat, 'EB ' + (String(l.ebt || '').toUpperCase() || 'NONE')].join(' | ');
   }
 
   function qrSvg(text, logo) {
@@ -78,7 +78,7 @@
       + ((l.order || l.client || l.project) ? '<div class="cp">' + e([l.order, l.client, l.project].filter(Boolean).join(' · ')) + '</div>' : '')
       + '<div class="mid">' + (draft ? '<div class="dr">' + (draft === true ? 'DRAFT' : 'NOT FOR PRODUCTION') + '<small>' + (draft === true ? 'preview — not for production' : e(draft)) + '</small></div>' : qrSvg(qrText(l), logo)) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc, l.grain)
       + '<div class="eb">' + (banded ? '<b style="color:#dc2626">━</b> edge band ' + e(l.ebt || '') + (l.tape ? ' · ' + e(l.tape) : '') : 'no edge band') + '</div></div></div>'
-      + '<div class="sz">Cut ' + e(l.cutL) + ' × ' + e(l.cutW) + '</div>'
+      + '<div class="sz">Cut ' + e(l.cutW) + ' × ' + e(l.cutL) + '</div>'
       + '<div class="mt">' + e(l.material) + '</div>'
       + (l.work ? '<div class="wk">' + e(l.work) + '</div>' : '')
       + '<div class="ft"><span class="sc">' + e(l.scan) + (l.where ? ' · ' + e(l.where) : '') + '</span><span class="by">developed by RTmo</span></div>'

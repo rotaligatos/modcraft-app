@@ -5471,10 +5471,20 @@ const PROFILES = {
             w.prodState.result = res;
             const html = w.prodBuildResultHtml(res);
             const iLayout = html.indexOf('Cutting layout'), iReflect = html.indexOf('<div id="prod-summary-wrap"');
-            return { partOnPiece: />P1( · |<\/text><text[^>]*>)600×400</.test(html), reflectAfterLayout: iLayout >= 0 && iReflect > iLayout,
+            // Size reads W×L (Rommel, 2026-10-26): the 600 long × 400 wide piece shows 400×600.
+            return { partOnPiece: />P1( · |<\/text><text[^>]*>)400×600</.test(html), reflectAfterLayout: iLayout >= 0 && iReflect > iLayout,
                      hasPrintButtons: html.includes('prodPrintCutSheets()') && html.includes('prodPrintLabels()') };
           } finally { w.prodSettings.boardSizes = saved.bs; w.prodState.result = saved.r; w.prodState.summary = saved.s; }
         }, { partOnPiece: true, reflectAfterLayout: true, hasPrintButtons: true });
+      // 2026-10-26: operators read Width then Length. The entry grid, its paste order, the template
+      // and the Job Order all show W before L; stored values stay L / W.
+      if (window.MCL && typeof window._joDocHtml === 'function')
+        check('width before length: cutting list paste order, template header, Job Order table', () => {
+          const src = document.documentElement.outerHTML;
+          return { paste: src.includes("var PASTE_COLS=['group','mat','th','qty','W','L',"),
+                   tpl: src.includes("'Qty','Width (mm)','Length (mm)','Edge Band'"),
+                   jo: src.includes('<th>Finished W×L</th>') };
+        }, { paste: true, tpl: true, jo: true });
       if (typeof window.prodPrintCutSheets === 'function' && typeof window.prodPrintLabels === 'function')
         check('print: one label per placed piece, one sheet per board group, no theme tokens on paper', () => {
           const w = window, saved = { bs: w.prodSettings.boardSizes, r: w.prodState.result, open: w.open, Blob: w.Blob, cu: w.URL.createObjectURL };
