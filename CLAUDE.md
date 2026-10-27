@@ -13307,3 +13307,9 @@ uneven banding. Also hit W362 P41 and QT-W00000355 P1/P5/P6/P7/P10.
   in process-jo.js (edge-banding layout + Edges column) and jo-export.js. Legend `EBT_LS_NOTE`. The analysis
   review shows "= 2L" beside the internal code. Stored codes unchanged — reprints of W362/W355 are correct.
 - ⚠ Never print a raw `ebt` field to the floor — always through `_ebtLS` / `pjoEbtLS` / `JoLabels.ebtLS`.
+- **Job Order cut list grouped by board** (`f122a1b`, team request): `_joPartGroups(jo)` puts each part under
+  the board whose layout (or `oversizedRefs`) holds it, in `jo.boards` order; header = the board name
+  (`_joMatText`), thickness, board size, and boards · parts · pieces. Material/Th columns dropped in those
+  blocks; parts on no layout go in a last grey block that keeps them. Part numbers/labels unchanged, parts
+  table 12px. Display only — `_joSig` unaffected. Mockups shown first; Rommel chose the board name as the
+  header (no "Board 1 of 2" / "Board type A" — read as a board count).
