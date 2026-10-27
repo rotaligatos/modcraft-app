@@ -13292,4 +13292,4 @@ so a missing number must be explainable.
   Order 9041 → Pending, unlinked. Both logged.
 - Not fixed, found the same day: QT-W00000360's Checked-by signature was requested at lock while the quotation
   still had no number (DRAFT-6d7a3b); the phone approval then failed ("raised before its quotation was ever saved").
-  Re-requested and worked. A signature request should wait for the number like the Job Order does.
+  Re-requested and worked. **Fixed same day (`fa42417`)**: `requestSignatures` waits for the number via `_whenNumbered` (20 s, like `_reserveJobOrder`); `_sendSignatureRequest` refuses a draft/missing serial.
