@@ -13293,3 +13293,17 @@ so a missing number must be explainable.
 - Not fixed, found the same day: QT-W00000360's Checked-by signature was requested at lock while the quotation
   still had no number (DRAFT-6d7a3b); the phone approval then failed ("raised before its quotation was ever saved").
   Re-requested and worked. **Fixed same day (`fa42417`)**: `requestSignatures` waits for the number via `_whenNumbered` (20 s, like `_reserveJobOrder`); `_sendSignatureRequest` refuses a draft/missing serial.
+
+## What was changed on 2026-10-27 (session 2 — edge code printed backwards on wide pieces)
+QT-W00000362 cut sheet: P5 (564 W × 100 L) typed **2L** printed **2s**; P6 typed 1S printed 1l; P11 typed 1L
+printed 1s. Verified against the saved Job Order with the app's own `_webEbtToModcraft`: each printed code
+comes from exactly one typed code. Cause: the stored code (`EBT_CODE_MAP`, `_joEdgeCounts`) is keyed on the
+Length/Width FIELDS ('s' = edges along W, 'l' = edges along L). The banding metres and the label drawing used
+the real sides and were right; only the printed letter was wrong, and only on pieces wider than long with
+uneven banding. Also hit W362 P41 and QT-W00000355 P1/P5/P6/P7/P10.
+- Fix (Modcraft `be4ad90`, PMES `5ac84b5`), display only: `_ebtLS(code,L,W,grain)` / `_ebtLSCounts(sc,lc,…)`
+  print L/S of the real piece (`4S` = all four; square follows grain) on cut sheets, shop drawing, Job Order,
+  JO Excel/CSV, analysis Excel; `JoLabels.ebtLS` in jo-labels.js (label text + QR "EB …"); PMES `pjoEbtLS`
+  in process-jo.js (edge-banding layout + Edges column) and jo-export.js. Legend `EBT_LS_NOTE`. The analysis
+  review shows "= 2L" beside the internal code. Stored codes unchanged — reprints of W362/W355 are correct.
+- ⚠ Never print a raw `ebt` field to the floor — always through `_ebtLS` / `pjoEbtLS` / `JoLabels.ebtLS`.
