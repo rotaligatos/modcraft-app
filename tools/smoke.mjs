@@ -6288,6 +6288,62 @@ const PROFILES = {
         w.pendingOrders = keepO;
         return { kept, closes: calls, recovered, labels };
       }, { kept: '8858', closes: ['8858:Done'], recovered: '8800', labels: ['Wufoo #8858', 'Web order #MSSI-260930-6380', 'Wufoo #9001', 'Web order #MSSI-1'] });
+      check('A numbered draft is voided, not deleted; its order goes back to New; it drops out of totals', () => {
+        const w = window;
+        const keep = { o: w.pendingOrders, save: w.gSaveQuotation, del: w.supaDeleteQuotation, sd: w.sheetsDeleteRowByKey, su: w.sheetsUpdate,
+          tok: w.gToken, user: w.gUser, role: w.currentRole, dir: w.dirData, sess: w.sessionQuotations, flags: w._stageFlags, conf: w._confirm };
+        let saved = 0, deleted = 0, confirmed = 0;
+        w.gSaveQuotation = (o) => { if (o && o.voiding) saved++; }; w.supaDeleteQuotation = () => { deleted++; };
+        w.sheetsDeleteRowByKey = () => { deleted++; }; w.sheetsUpdate = () => Promise.resolve();
+        w._confirm = (m, ok) => { confirmed++; ok(); };
+        w.gToken = 't'; w.gUser = { name: 'Tester', email: 't@x' }; w.currentRole = 'Admin'; w._stageFlags = null;
+        w.initQuotation();
+        w.qSerial = 'QT-W00000999'; w.qDraftKey = ''; w.qSerialCommitted = true; w.qSourceOrderId = '9999';
+        w.sessionQuotations = { 'QT-W00000999': { id: 'QT-W00000999', user: 'Tester', value: 100, status: 'Draft' } };
+        w.pendingOrders = [{ id: '9999', status: 'In Progress', quotSerial: 'QT-W00000999', handledBy: 'Nikki' },
+                           { id: '9998', status: 'Done', quotSerial: 'QT-W00000999-2', handledBy: 'Kaye' }];
+        w.discardQuotation();
+        const modal = document.getElementById('ov-void-quotation').classList.contains('show');
+        w.confirmVoidQuotation();                                    // no reason → refused
+        const refused = !w.qVoided;
+        document.getElementById('void-reason').value = 'Made twice by mistake';
+        w.confirmVoidQuotation();
+        const st = w._computeQuotationStatus();
+        w.updateLockUI();
+        const ro = !!document.querySelector('#s1-wrap input') && document.querySelector('#s1-wrap input').disabled;
+        const o1 = w.pendingOrders[0], o2 = w.pendingOrders[1];
+        const state = w.getFullQuotationState();
+        w.dirData = [{ id: 'QT-W00000999', status: 'Voided', value: 100 }, { id: 'QT-W00000998', status: 'Draft', value: 50 }];
+        w.sessionQuotations = {};
+        const counted = w._dashAllEntries().map(e => e.id);
+        // a draft that never got a number still just clears, and frees its order
+        w.initQuotation(); w.qDraftKey = 'DRAFT-abc123'; w.qSerialCommitted = false; w.qSerial = '';
+        w.pendingOrders = [{ id: '9997', status: 'In Progress', quotSerial: 'DRAFT-abc123', handledBy: 'Nikki' }];
+        w.discardQuotation();
+        const draftOrder = w.pendingOrders[0].status + ':' + (w.pendingOrders[0].quotSerial || '-');
+        const delRefused = (() => { let t = ''; const k = w.showToast; w.showToast = m => { t = m; }; w.deleteQuotation('QT-M00000001'); w.showToast = k; return /voided, not deleted/.test(t); })();
+        Object.assign(w, { pendingOrders: keep.o, gSaveQuotation: keep.save, supaDeleteQuotation: keep.del, sheetsDeleteRowByKey: keep.sd,
+          sheetsUpdate: keep.su, gToken: keep.tok, gUser: keep.user, currentRole: keep.role, dirData: keep.dir, sessionQuotations: keep.sess,
+          _stageFlags: keep.flags, _confirm: keep.conf });
+        w.initQuotation();
+        return { modal, refused, st, ro, saved, deleted, order: o1.status + ':' + (o1.quotSerial || '-') + ':' + (o1.handledBy || '-'),
+          doneUntouched: o2.status + ':' + o2.quotSerial, voidSaved: !!state.voided && state.voidReason, counted, draftOrder, delRefused };
+      }, { modal: true, refused: true, st: 'Voided', ro: true, saved: 1, deleted: 0, order: 'Pending:-:-',
+           doneUntouched: 'Done:QT-W00000999-2', voidSaved: 'Made twice by mistake', counted: ['QT-W00000998'], draftOrder: 'Pending:-', delRefused: true });
+      check('Series register lists every number and explains each gap from the activity log', () => {
+        const w = window;
+        const rows = w._srBuild({ logStart: '2026-07-02T00:00:00Z',
+          q: [{ serial: 'QT-W00000001', status: 'IQ Locked', total: 10, client_name: 'A', created_at: '2026-07-10T00:00:00Z' },
+              { serial: 'QT-W00000004', status: 'Voided', total: 20, client_name: 'D', created_at: '2026-07-12T00:00:00Z' },
+              { serial: 'QT-W00000006', status: 'Draft', total: 5, client_name: 'F', created_at: '2026-07-14T00:00:00Z' }],
+          ev: [{ at: '2026-07-11T00:00:00Z', user_email: 'k@x', action: 'Quotation renumbered QT-W00000002 → QT-M00000009 (company changed to Module)' },
+               { at: '2026-07-11T01:00:00Z', user_email: 'n@x', action: 'Draft DISCARDED: QT-W00000003 — Ivi (₱1,915.10).' },
+               { at: '2026-07-13T00:00:00Z', user_email: 'n@x', action: 'Quotation VOIDED: QT-W00000004 — D. Reason: duplicate', serial: 'QT-W00000004' }] }, null);
+        const W = rows.filter(r => r.series === 'W').map(r => r.serial.slice(-1) + ':' + r.kind);
+        const M = rows.filter(r => r.series === 'M').length;
+        return { W, M, v: rows.find(r => r.serial === 'QT-W00000003').value, why: /duplicate/.test(rows.find(r => r.serial === 'QT-W00000004').note),
+          to: /QT-M00000009/.test(rows.find(r => r.serial === 'QT-W00000002').note) };
+      }, { W: ['1:active', '2:renumbered', '3:discarded', '4:voided', '5:norecord', '6:active'], M: 9, v: 1915.1, why: true, to: true });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
