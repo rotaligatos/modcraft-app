@@ -1302,7 +1302,7 @@ const EVENT_LABEL = { proposed:'Ticket received', scheduled:'Scheduled', rejecte
 const ACTOR_ROLE = { field:'driver/crew', dispatcher:'dispatcher', manager:'manager', admin:'admin', viewer:'office' };
 const CH_LABEL = { chat:'Google Chat', email:'Email', sms:'SMS' };
 const OB_STATUS = { pending:'Sending…', sending:'Sending…', sent:'Sent', failed:'Failed', skipped:'Not sent' };
-const OB_KIND = { delivered:'Delivered', partial:'Partial', returned:'Refused', issue:'Problem', delay:'Delay', daily:'Daily summary', daily_auto:'Daily summary', sched_client:'Schedule confirmed → client', sched_agent:'Schedule confirmed → agent' };
+const OB_KIND = { pkready_client:'Pick-up ready → client', pkready_agent:'Pick-up ready → agent', pkdone_client:'Pick-up released → client', pkdone_agent:'Pick-up released → agent', pkmissed_client:'Pick-up missed → client', pkmissed_agent:'Pick-up missed → agent', delivered:'Delivered', partial:'Partial', returned:'Refused', issue:'Problem', delay:'Delay', daily:'Daily summary', daily_auto:'Daily summary', sched_client:'Schedule confirmed → client', sched_agent:'Schedule confirmed → agent' };
 const CHAT_WEBHOOK_RE = /^https:\/\/chat\.googleapis\.com\/v1\/spaces\/\S+$/;
 function actorText(ev){ return ev.actor_name ? `${ev.actor_name}${ACTOR_ROLE[ev.actor_role] ? ' (' + ACTOR_ROLE[ev.actor_role] + ')' : ''}` : ''; }
 
@@ -2486,7 +2486,7 @@ function simPickupRpc(fn, a){
         return { i: n, desc: x.desc, qty: Number(x.qty || 0), unit: x.unit || null, amount: Number(x.amount || 0), want: x.want !== false && Number(x.qty || 0) > taken, prep: false, taken, ...(plan != null ? { plan } : {}) }; });
       const f = { company: co, site: p.site || state.me.pickup_site || 'plant1', kind, ticket_no: p.ticket_no || null, client_name: p.client || old?.client_name || '', salesperson: p.salesperson || null,
         pickup_date: date, ticket_created_at: kind === 'walkin' ? now : p.ticket_created_at || null, created_est: !!p.created_est, on_time: on, mssi_qt: !!p.mssi_qt,
-        instructions: p.instructions || null, lines, status: 'open', no_show_at: null, late_allowed_at: null, late_allowed_name: null, prepared_at: null, prepared_name: null, updated_at: now };
+        instructions: p.instructions || null, lines, status: 'open', no_show_at: null, client_contact: p.contact || old?.client_contact || null, client_phone: p.phone || old?.client_phone || null, client_email: p.email || old?.client_email || null, late_allowed_at: null, late_allowed_name: null, prepared_at: null, prepared_name: null, updated_at: now };
       if (old){
         if (old.status === 'in_queue') return fail(`SO ${old.so_no} is in the queue right now — finish that pick-up first.`);
         if (old.status === 'done') return fail(`SO ${old.so_no} was already fully picked up.`);
@@ -2504,6 +2504,13 @@ function simPickupRpc(fn, a){
         if (a.p_field === 'plan'){ const left = l.qty - l.taken; if (v === '' || v == null || Number(v) >= left) delete l.plan; else if (Number(v) <= 0){ delete l.plan; l.want = false; } else { l.plan = Number(v); l.want = true; } }
         else l[a.p_field] = v === true || v === 'true'; });
       o.updated_at = now; prepCheck(o); return ok({ ...o });
+    }
+    case 'pk_set_contact': {
+      if (!can('sales_support')) return fail('Only Sales Support can change the client contact.');
+      const o = O(a.p_order); if (!o) return fail('Ticket not found.'); const ph = String(a.p_phone || '').replace(/[^0-9+]/g, '');
+      if (ph && !/^(\+?63|0)9\d{9}$/.test(ph)) return fail('Client mobile: enter a Philippine mobile number, e.g. 0917 123 4567');
+      Object.assign(o, { client_contact: (a.p_contact || '').trim() || null, client_phone: ph || null, client_email: (a.p_email || '').trim().toLowerCase() || null, updated_at: now });
+      log(o.id, null, 'contact', 'Client contact updated'); return ok({ ...o });
     }
     case 'pk_set_date': {
       const o = O(a.p_order); if (!o) return fail('Ticket not found.');
@@ -6170,7 +6177,8 @@ async function openPkOrder(id, opt = {}){
   const edit = ['open','balance','in_queue'].includes(o.status) && (pkCan('sales_support') || pkCan('warehouse'));
   m.innerHTML = `<div class="chart-h" style="margin:0 0 6px"><h2 style="margin:0">${esc(o.so_no)} · ${esc(o.client_name || '')}</h2><span>${pkCutTag(o)} <span class="pill">${esc(PK_OST[o.status])}</span></span></div>
     <dl class="kv"><dt>Type</dt><dd>${esc(PK_KIND[o.kind])}${o.mssi_qt ? ' · MSSI quotation' : ''}</dd><dt>Pick-up</dt><dd>${esc(fmtDay(o.pickup_date))} · ${esc(PK_SITE[o.site])} · ${esc(o.company)}</dd>
-      ${o.ticket_no ? `<dt>Ticket</dt><dd>#${esc(o.ticket_no)}</dd>` : ''}${o.salesperson ? `<dt>Salesperson</dt><dd>${esc(o.salesperson)}</dd>` : ''}
+      ${o.ticket_no ? `<dt>Ticket</dt><dd>#${esc(o.ticket_no)}</dd>` : ''}${o.salesperson ? `<dt>Salesperson</dt><dd>${esc(o.salesperson)}${o.agent_id ? '' : ' <span class="ft" style="color:var(--warn)">— not in Settings › Sales agents, so no updates go to the agent</span>'}</dd>` : ''}
+      <dt>Client contact</dt><dd>${pkContactLine(o)}${pkCan('sales_support') && !['done','cancelled'].includes(o.status) ? ' <button class="lnk" id="pko-contact">' + (o.client_phone || o.client_email ? 'Edit' : 'Add') + '</button>' : ''}</dd>
       <dt>Ticket created</dt><dd>${o.ticket_created_at ? fmtTime(o.ticket_created_at) : '—'}${o.created_est ? ' <span class="ft">(estimated — the ticket log wasn’t copied)</span>' : ''}</dd>
       <dt>Loaded to HATID</dt><dd>${fmtTime(o.uploaded_at)}${o.uploaded_name ? ' · ' + esc(o.uploaded_name) : ''}</dd>
       ${o.prepared_at ? `<dt>Prepared</dt><dd>${fmtTime(o.prepared_at)} · ${esc(o.prepared_name || '')}</dd>` : ''}
@@ -6196,6 +6204,18 @@ async function openPkOrder(id, opt = {}){
     $('pkd-ok').addEventListener('click', async e => { e.target.disabled = true;
       try { await pkRpc('Changing the date', 'pk_set_date', { p_order: o.id, p_date: $('pkd-d').value, p_reason: $('pkd-r').value });
         toast(`${o.so_no}: pick-up moved to ${fmtDay($('pkd-d').value)}`, 'ok'); closeOverlay(); loadPk(state.view); } catch { e.target.disabled = false; } });
+  });
+  $('pko-contact')?.addEventListener('click', () => {
+    const box = document.createElement('div'); box.className = 'card pad'; box.style.marginTop = '8px';
+    box.innerHTML = `<div class="ft" style="margin-bottom:6px">The client gets a text/email when the order is ready, when it is released, and if they miss the pick-up.</div>
+      <div class="grid2"><label class="f">Contact person<input class="i" id="pkc-n" value="${esc(o.client_contact || '')}" placeholder="Optional"></label>
+      <label class="f">Mobile<input class="i" id="pkc-p" inputmode="tel" value="${esc(o.client_phone || '')}" placeholder="0917 000 0000"></label>
+      <label class="f">Email<input class="i" type="email" id="pkc-e" value="${esc(o.client_email || '')}" placeholder="Optional"></label></div>
+      <div class="row-btns" style="justify-content:flex-end"><button class="btn primary" id="pkc-ok">Save contact</button></div>`;
+    $('pko-contact').closest('dl').after(box); $('pko-contact').remove();
+    $('pkc-ok').addEventListener('click', async e => { e.target.disabled = true;
+      try { await pkRpc('Saving the contact', 'pk_set_contact', { p_order: o.id, p_contact: $('pkc-n').value, p_phone: $('pkc-p').value, p_email: $('pkc-e').value });
+        toast('Client contact saved', 'ok'); openPkOrder(o.id, opt); } catch { e.target.disabled = false; } });
   });
   $('pko-save')?.addEventListener('click', async e => { e.target.disabled = true;
     try {
@@ -6238,10 +6258,19 @@ function pkFromTicket(txt){
   const kind = /same ?day/.test(dt) ? 'same_day' : /pick/.test(dt) ? 'scheduled' : null;
   const sd = F('Scheduled Date'), dm = sd.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/), di = sd.match(/(\d{4})-(\d{2})-(\d{2})/);
   const date = di ? `${di[1]}-${di[2]}-${di[3]}` : dm ? `${dm[3]}-${dm[1].padStart(2, '0')}-${dm[2].padStart(2, '0')}` : null;
-  const cr = pkParseCreated(txt, sd);
+  const cr = pkParseCreated(txt, sd), J = (() => { try { return odooToJob(t); } catch { return {}; } })();
   const lines = t.lines.filter(l => (l.desc || '').trim() && Number(l.qty) > 0).map(l => ({ desc: l.desc.replace(/\s+/g, ' ').trim(), qty: l.qty, unit: l.unit, amount: l.subtotal || 0, want: true }));
   return { so_no: (F('Ref. Sales Order') || t.ticket?.so || t.lines[0]?.so || '').toUpperCase(), ticket_no: t.ticket?.no || null, client: F('CUSTOMER NAME') || F('Customer Name') || t.lines[0]?.customer || '',
-    salesperson: F('Salesperson') || null, company, kind, pickup_date: date, ticket_created_at: cr.at, created_est: cr.est, instructions: F('Delivery Instructions') || null, lines, deliveryType: F('Delivery Type') };
+    salesperson: F('Salesperson') || null, company, kind, pickup_date: date, ticket_created_at: cr.at, created_est: cr.est, instructions: F('Delivery Instructions') || null, lines, deliveryType: F('Delivery Type'),
+    ...pkContactOf(J) };
+}
+function pkContactOf(j){   // client contact from an Odoo ticket — only a PH mobile and a real email are kept (they get the pick-up texts)
+  const ph = String(j.phone || '').replace(/[^0-9+]/g, ''), em = String(j.email || '').trim().toLowerCase();
+  return { contact: (j.contact || '').trim() || null, phone: /^(\+?63|0)9\d{9}$/.test(ph) ? ph : null, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em) ? em : null };
+}
+function pkContactLine(p){   // "Mr. Cruz · 0917… · a@b.c" or a warning that the client won't get updates
+  const c = [p.contact || p.client_contact, p.phone || p.client_phone, p.email || p.client_email].filter(Boolean);
+  return (p.phone || p.client_phone || p.email || p.client_email) ? `<span class="ft">📱 ${esc(c.join(' · '))}</span>` : '<span class="ft" style="color:var(--warn)">No client mobile or email — the client won’t get pick-up texts</span>';
 }
 function pkOnTime(p){
   const s = state.pkSet?.[p.company] || {};
@@ -6268,7 +6297,7 @@ async function openPkPaste(){
     const bad = !P.so_no ? 'No SO number found — copy the whole ticket page.' : !P.kind ? (P.deliveryType ? `${P.so_no} is a ${P.deliveryType} ticket, not a pick-up — not added. Only pick-up tickets go here. Upload it in Delivery mode › Delivery tickets.` : `${P.so_no}: the ticket has no Delivery Type, so it can’t be told apart from a delivery. Set it to Pickup in Odoo and copy it again.`) : !P.pickup_date && !dateOv ? '' : '';
     const on = !bad && pkOnTime(P);
     $('pkp-prev').innerHTML = bad ? `<div class="pk-alarm" style="margin-top:8px">${esc(bad)}</div>` : `<div class="card pad" style="margin-top:8px">
-      <div class="grid2"><div><b>${esc(P.so_no)}</b>${P.ticket_no ? ` <span class="ft">#${esc(P.ticket_no)}</span>` : ''}<div>${esc(P.client)}</div><div class="ft">${esc(P.salesperson || '')}</div></div>
+      <div class="grid2"><div><b>${esc(P.so_no)}</b>${P.ticket_no ? ` <span class="ft">#${esc(P.ticket_no)}</span>` : ''}<div>${esc(P.client)}</div><div class="ft">${esc(P.salesperson || '')}</div><div>${pkContactLine(P)}</div></div>
       <div><div>${esc(PK_KIND[P.kind])} · pick-up <input class="i" type="date" id="pkp-date" min="${localDate()}" value="${esc(P.pickup_date || '')}" style="width:auto;display:inline-block;padding:4px 6px">${!P.pickup_date ? ' <span class="tag warn">no date on the ticket — set one</span>' : was && was !== P.pickup_date && !dateOv ? ` <span class="tag warn">ticket said ${esc(fmtDay(was))} — set to today, check it</span>` : ''}</div>
         <div class="ft">Ticket created ${esc(fmtTime(P.ticket_created_at))}${P.created_est ? ' <b>(estimated — the ticket log wasn’t in the paste)</b>' : ' (from the ticket log)'}</div>
         <div>${on ? '<span class="tag ok">On time</span>' : `<span class="tag bad">Past the ${P.kind === 'same_day' ? (state.pkSet?.[P.company]?.cut_same || '11:00').slice(0, 5) + ' same-day' : (state.pkSet?.[P.company]?.cut_sched || '15:00').slice(0, 5) + ' (day before)'} cut-off</span> <span class="ft">The Warehouse Manager must allow it; not counted in promptness.</span>`}</div></div></div>
@@ -6305,7 +6334,7 @@ function pkFromRow(t){
   const kind = /same ?day/.test(dt) ? 'same_day' : /pick/.test(dt) ? 'scheduled' : null;
   const at = pkCreatedOf(F('Created on'));
   return { so_no: (j.so || '').toUpperCase(), ticket_no: t.ticket?.no || null, client: j.client || '', salesperson: F('Salesperson') || null, company: j.company, kind,
-    pickup_date: j.date, ticket_created_at: at || new Date().toISOString(), created_est: !at, instructions: F('Delivery Instructions') || null, deliveryType: F('Delivery Type'),
+    pickup_date: j.date, ticket_created_at: at || new Date().toISOString(), created_est: !at, instructions: F('Delivery Instructions') || null, deliveryType: F('Delivery Type'), ...pkContactOf(j),
     lines: t.lines.filter(l => (l.desc || '').trim() && Number(l.qty) > 0 && !/^site\s*:/i.test(l.desc)).map(l => ({ desc: l.desc.replace(/\s+/g, ' ').trim(), qty: l.qty, unit: l.unit, amount: l.subtotal || 0, want: true })) };
 }
 async function openPkUpload(){
@@ -6768,20 +6797,22 @@ async function renderWeightSettings(){
 async function renderPkSettings(){
   setSetHead('Promptness target, early warning, cut-offs and who gets the 6:30 PM no-show email', '');
   const S = await pkSettings(true);
-  $('set-body').innerHTML = `<div class="card pad"><div class="tbl-wrap"><table class="rt ut"><thead><tr><th>Company</th><th>Target (min per SO)</th><th>Early warning at (min)</th><th>Scheduled cut-off (day before)</th><th>Same-day cut-off</th><th>No-show email to</th><th></th></tr></thead><tbody>
+  $('set-body').innerHTML = `<div class="card pad"><div class="tbl-wrap"><table class="rt ut"><thead><tr><th>Company</th><th>Target (min per SO)</th><th>Early warning at (min)</th><th>Scheduled cut-off (day before)</th><th>Same-day cut-off</th><th>No-show email to</th><th>Updates to</th><th></th></tr></thead><tbody>
     ${['WCLI','MSSI','CWLI'].map(c => { const s = S[c] || {}; return `<tr data-pkco="${c}"><td><b>${c}</b></td>
       <td><input class="i" type="number" min="1" step="1" data-f="target_min" value="${esc(s.target_min ?? 15)}" style="width:80px" aria-label="${c} target"></td>
       <td><input class="i" type="number" min="1" step="1" data-f="warn_min" value="${esc(s.warn_min ?? 10)}" style="width:80px" aria-label="${c} warning"></td>
       <td><input class="i" type="time" data-f="cut_sched" value="${esc((s.cut_sched || '15:00').slice(0, 5))}" aria-label="${c} scheduled cut-off"></td>
       <td><input class="i" type="time" data-f="cut_same" value="${esc((s.cut_same || '11:00').slice(0, 5))}" aria-label="${c} same-day cut-off"></td>
       <td><textarea class="i" data-f="noshow_emails" style="min-width:220px;min-height:44px" placeholder="one email per line" aria-label="${c} no-show emails">${esc((s.noshow_emails || []).join('\n'))}</textarea></td>
+      <td style="white-space:nowrap"><label class="chk"><input type="checkbox" data-f="msg_client"${s.msg_client !== false ? ' checked' : ''}> Client</label><br><label class="chk"><input type="checkbox" data-f="msg_agent"${s.msg_agent !== false ? ' checked' : ''}> Sales agent</label></td>
       <td><button class="btn primary sm" data-pksave="${c}">Save</button></td></tr>`; }).join('')}
     </tbody></table></div>
+    <div class="ft" style="margin-top:8px"><b>Updates to:</b> the client (by text and email, from the ticket’s contact) and the sales agent (Chat, email, text) are told when the order is <b>ready</b>, when it is <b>released</b>, and if the client <b>misses</b> the pick-up — the client is asked to contact their agent to rebook. Each goes once.</div>
     <div class="ft" style="margin-top:8px">The no-show list also goes to each company’s Delivery Status Chat space, and each sales agent gets their own clients’ no-shows in their Chat. Pick-up jobs and sites for people are set in the Command Center (HATID users).</div>
     <div class="ft" style="margin-top:6px">TV queue screen: open <b>${esc(location.origin + location.pathname)}?tv=plant1</b> on the waiting-area TV (no sign-in; shows queue and SO numbers, never names). Annex: <b>?tv=annex</b>. Ready numbers are called out in English, Tagalog and Cebuano — add <b>&amp;lang=tl,en</b> to choose which and in what order. Christmas look runs 1 Sep – 6 Jan (<b>&amp;xmas=0</b> turns it off).</div></div>`;
   document.querySelectorAll('[data-pksave]').forEach(b => b.addEventListener('click', async () => {
     const tr = b.closest('tr'), p = {};
-    tr.querySelectorAll('[data-f]').forEach(i => { p[i.dataset.f] = i.dataset.f === 'noshow_emails' ? i.value.split(/[\s,;]+/).filter(Boolean) : i.value; });
+    tr.querySelectorAll('[data-f]').forEach(i => { p[i.dataset.f] = i.type === 'checkbox' ? i.checked : i.dataset.f === 'noshow_emails' ? i.value.split(/[\s,;]+/).filter(Boolean) : i.value; });
     if (Number(p.warn_min) >= Number(p.target_min)) return toast('The early warning must come before the target', 'error');
     b.disabled = true; try { await pkRpc('Saving', 'pk_save_settings', { p_company: tr.dataset.pkco, p }); toast('Saved', 'ok'); await pkSettings(true); } catch {} b.disabled = false;
   }));
