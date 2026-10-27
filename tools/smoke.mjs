@@ -6364,6 +6364,16 @@ const PROFILES = {
         check('A signature request waits for the quotation number, and never goes out without one',
           () => ({ before, after, guarded }), { before: 0, after: ['checked:QT-W00000777'], guarded: true });
       }
+      if (typeof window._ebtLS === 'function')
+        check('Edge code prints by the piece\'s real long/short sides, even when Width > Length (QT-W00000362)', () => {
+          const w = window, t = [['2s', 100, 564], ['1l', 200, 500], ['1s', 480, 564], ['1l', 2064, 500], ['1s/1l', 114, 480], ['4s', 150, 600], ['', 100, 100]];
+          const ls = t.map(([c, L, W]) => w._ebtLS(c, L, W, ''));
+          const sq = w._ebtLS('1s', 400, 400, 'width');
+          const jo = w._joBuild({ components: [{ name: 'T', area: 'TV', material: 'MDF', color: 'honey oak', thickness: 18, length: 100, width: 564, qty: 2, ebt: '2s', faces: 2 }],
+            holeSchedule: [], extraServices: [], hardware: [], _structured: true }, { joNumber: 'JO-T' });
+          const doc = w._joDocHtml(jo, 'reserved');
+          return { ls, sq, doc2L: /<td>2L<\/td>/.test(doc), noRaw: !/<td>2s<\/td>/.test(doc) };
+        }, { ls: ['2L', '1S', '1L', '1L', '1L 1S', '4S', ''], sq: '1L', doc2L: true, noRaw: true });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };

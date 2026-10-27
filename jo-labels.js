@@ -14,10 +14,20 @@
   // cut size, the board and the edge banding, so any phone camera shows what the piece is.
   // Project, client, order and who worked on it are printed and kept in PMES, not packed in here:
   // more text makes the squares smaller and the label harder to scan.
+  // Edge banding as the floor reads it: L = long sides, S = short sides of the real piece. The stored
+  // code is keyed on the length/width fields, so a piece entered wider than long printed backwards.
+  function ebtLS(l) {
+    var sc = +l.sc || 0, lc = +l.lc || 0; if (!sc && !lc) return '';
+    var L = +(l.cutL || l.L) || 0, W = +(l.cutW || l.W) || 0;
+    var lenIsLong = L > W || (L === W && String(l.grain || '').charAt(0).toLowerCase() !== 'w');
+    var lo = lenIsLong ? lc : sc, sh = lenIsLong ? sc : lc;
+    if (lo === 2 && sh === 2) return '4S';
+    return [lo ? lo + 'L' : '', sh ? sh + 'S' : ''].filter(Boolean).join(' ');
+  }
   function qrText(l) {
     var mat = String(l.material || '').replace(/\[[^\]]*\]\s*/g, '').replace(/\s+/g, ' ').trim();
     if (mat.length > 44) mat = mat.slice(0, 44);
-    return [l.scan, (l.cutW || l.W || '') + 'x' + (l.cutL || l.L || ''), mat, 'EB ' + (String(l.ebt || '').toUpperCase() || 'NONE')].join(' | ');
+    return [l.scan, (l.cutW || l.W || '') + 'x' + (l.cutL || l.L || ''), mat, 'EB ' + (ebtLS(l) || 'NONE')].join(' | ');
   }
 
   function qrSvg(text, logo) {
@@ -77,7 +87,7 @@
       + '<div class="top"><span class="nm">' + e(l.name) + '</span><span class="pn">' + e(l.p) + '</span></div>'
       + ((l.order || l.client || l.project) ? '<div class="cp">' + e([l.order, l.client, l.project].filter(Boolean).join(' · ')) + '</div>' : '')
       + '<div class="mid">' + (draft ? '<div class="dr">' + (draft === true ? 'DRAFT' : 'NOT FOR PRODUCTION') + '<small>' + (draft === true ? 'preview — not for production' : e(draft)) + '</small></div>' : qrSvg(qrText(l), logo)) + '<div class="rt">' + pieceSvg(l.L, l.W, l.sc, l.lc, l.grain)
-      + '<div class="eb">' + (banded ? '<b style="color:#dc2626">━</b> edge band ' + e(l.ebt || '') + (l.tape ? ' · ' + e(l.tape) : '') : 'no edge band') + '</div></div></div>'
+      + '<div class="eb">' + (banded ? '<b style="color:#dc2626">━</b> edge band ' + e(ebtLS(l)) + (l.tape ? ' · ' + e(l.tape) : '') : 'no edge band') + '</div></div></div>'
       + '<div class="sz">Cut ' + e(l.cutW) + ' × ' + e(l.cutL) + '</div>'
       + '<div class="mt">' + e(l.material) + '</div>'
       + (l.work ? '<div class="wk">' + e(l.work) + '</div>' : '')
@@ -95,7 +105,7 @@
     + '.lb .wk{font-weight:700;color:#7c2d12}.lb .ft{margin-top:auto;display:flex;justify-content:space-between;align-items:flex-end;gap:4px;font-family:monospace;font-size:7px;color:#444}'
     + '.lb .by{font-family:Arial,Helvetica,sans-serif;font-size:5.5px;color:#9ca3af;white-space:nowrap}';
 
-  root.JoLabels = {
+  root.JoLabels = { ebtLS: ebtLS,
     css: CSS, qrText: qrText, qrSvg: qrSvg, pieceSvg: pieceSvg, labelHtml: labelHtml,
     render: function (el, o) {
       if (!document.getElementById('jl-css')) { var st = document.createElement('style'); st.id = 'jl-css'; st.textContent = CSS; document.head.appendChild(st); }
