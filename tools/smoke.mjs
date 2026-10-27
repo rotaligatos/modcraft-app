@@ -6395,6 +6395,17 @@ const PROFILES = {
           return { normFin: /Finished Size W×L/.test(norm), normNoCut: !/Cut Size W×L|Cut W×L/.test(norm),
             oldCut: /Cut Size W×L/.test(old), oldPiece: /679 × 2299 Finished Size 680 × 2300/.test(old), backOnce: /1064 × 2264 1/.test(old) };
         }, { normFin: true, normNoCut: true, oldCut: true, oldPiece: true, backOnce: true });
+      if (typeof window._apprRouteReason === 'function')
+        check('A discount above the limit says why it goes to the Director (Stiffany 20% → Kathleen)', () => {
+          const w = window, keep = w.sheetUsers, kt = w.CF.discountEscalationThreshold;
+          w.sheetUsers = [{ email: 'k@x', name: 'Kathleen', pos: 'Director', active: true }, { email: 'r@x', name: 'Rommel', pos: 'Admin', active: true }];
+          w.CF.discountEscalationThreshold = 10;
+          const k = { email: 'k@x', name: 'Kathleen' };
+          const r = { above: w._apprRouteReason('discount', { discPct: 20 }, k), below: w._apprRouteReason('discount', { discPct: 5 }, { email: 'r@x' }),
+            vat: w._apprRouteReason('nonvat', {}, k) };
+          w.sheetUsers = keep; w.CF.discountEscalationThreshold = kt;
+          return { above: /above 10%.*Director.*20% request/.test(r.above), below: r.below, vat: r.vat };
+        }, { above: true, below: '', vat: '' });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
