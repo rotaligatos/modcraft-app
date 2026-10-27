@@ -6374,6 +6374,16 @@ const PROFILES = {
           const doc = w._joDocHtml(jo, 'reserved');
           return { ls, sq, doc2L: /<td>2L<\/td>/.test(doc), noRaw: !/<td>2s<\/td>/.test(doc) };
         }, { ls: ['2L', '1S', '1L', '1L', '1L 1S', '4S', ''], sq: '1L', doc2L: true, noRaw: true });
+      if (typeof window._joPartGroups === 'function')
+        check('Job Order parts list is grouped by board, each block headed by the board (QT-W00000362 6mm among 18mm)', () => {
+          const w = window, P = (part, mat, th, L, W, qty) => ({ group: 'TV', part, mat, th, L, W, qty, ebt: '', emat: '', grain: '', svcs: [], remark: '' });
+          const pay = w._cutListToAnalysis({ origin: 'typed', grain: 'length', panels: [P('TOP', 'Honey Oak MDF 18mm', 18, 2064, 500, 2),
+            P('BACKING', 'Honey Oak MDF 6mm', 6, 2064, 164, 1), P('SIDE', 'Honey Oak MDF 18mm', 18, 700, 480, 2), P('RB', 'Honey Oak MDF 6mm', 6, 564, 564, 2)], hpl: [], hardware: [] }, null);
+          const jo = w._joBuild({ components: pay.components, holeSchedule: [], extraServices: [], hardware: [], _structured: true }, { joNumber: 'JO-T' });
+          const g = w._joPartGroups(jo).map(x => x.parts.map(p => p.p).join(',') + (/18mm/.test(x.title) ? '@18' : /6mm/.test(x.title) ? '@6' : '@?'));
+          const doc = w._joDocHtml(jo, 'reserved');
+          return { g, oneHeader: (doc.match(/by board/g) || []).length, noMatCol: !/<th style="min-width:150px">Material<\/th>/.test(doc) };
+        }, { g: ['P1,P3@18', 'P2,P4@6'], oneHeader: 1, noMatCol: true });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
