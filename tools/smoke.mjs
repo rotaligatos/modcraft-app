@@ -5483,7 +5483,7 @@ const PROFILES = {
           const src = document.documentElement.outerHTML;
           return { paste: src.includes("var PASTE_COLS=['group','mat','th','qty','W','L',"),
                    tpl: src.includes("'Qty','Width (mm)','Length (mm)','Edge Band'"),
-                   jo: src.includes('<th>Finished W×L</th>') };
+                   jo: src.includes("'Cut Size W×L':'Finished Size W×L'") };
         }, { paste: true, tpl: true, jo: true });
       if (typeof window.prodPrintCutSheets === 'function' && typeof window.prodPrintLabels === 'function')
         check('print: one label per placed piece, one sheet per board group, no theme tokens on paper', () => {
@@ -6384,6 +6384,17 @@ const PROFILES = {
           const doc = w._joDocHtml(jo, 'reserved');
           return { g, oneHeader: (doc.match(/by board/g) || []).length, noMatCol: !/<th style="min-width:150px">Material<\/th>/.test(doc) };
         }, { g: ['P1,P3@18', 'P2,P4@6'], oneHeader: 1, noMatCol: true });
+      if (typeof window._joPartGroups === 'function')
+        check('Job Order shows one size column: Finished Size on a trimming bander, Cut Size (+ finished underneath) on the old bander', () => {
+          const w = window, P = (part, L, W, ebt, emat) => ({ group: 'C1', part, mat: 'Real White PB 18mm', th: 18, L, W, qty: 1, ebt, emat, grain: '', svcs: [], remark: '' });
+          const pay = w._cutListToAnalysis({ origin: 'typed', grain: 'length', panels: [P('SIDE', 2300, 680, '4S', 'Real White 0.5mm Edgeband'), P('BACK', 2264, 1064, '', '')], hpl: [], hardware: [] }, null);
+          const a = { components: pay.components, holeSchedule: [], extraServices: [], hardware: [], _structured: true };
+          const strip = d => d.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+          const norm = strip(w._joDocHtml(w._joBuild(a, { joNumber: 'JO-T' }), 'reserved'));
+          const old = strip(w._joDocHtml(w._joBuild(a, { joNumber: 'JO-T', bander: 'no_trimmer' }), 'reserved'));
+          return { normFin: /Finished Size W×L/.test(norm), normNoCut: !/Cut Size W×L|Cut W×L/.test(norm),
+            oldCut: /Cut Size W×L/.test(old), oldPiece: /679 × 2299 Finished Size 680 × 2300/.test(old), backOnce: /1064 × 2264 1/.test(old) };
+        }, { normFin: true, normNoCut: true, oldCut: true, oldPiece: true, backOnce: true });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
