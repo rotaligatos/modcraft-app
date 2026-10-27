@@ -6344,6 +6344,26 @@ const PROFILES = {
         return { W, M, v: rows.find(r => r.serial === 'QT-W00000003').value, why: /duplicate/.test(rows.find(r => r.serial === 'QT-W00000004').note),
           to: /QT-M00000009/.test(rows.find(r => r.serial === 'QT-W00000002').note) };
       }, { W: ['1:active', '2:renumbered', '3:discarded', '4:voided', '5:norecord', '6:active'], M: 9, v: 1915.1, why: true, to: true });
+      if (typeof window._whenNumbered === 'function') {
+        const w = window, keepS = w._sendSignatureRequest, keepT = w.showToast, keepSt = w._sigState, keepP = w._sigPendingFor;
+        const sent = [], toasts = [];
+        w._sendSignatureRequest = (slot) => { sent.push(slot + ':' + w.qSerial); };
+        w.showToast = m => toasts.push(m); w._sigState = () => ({ complete: false, checked: false });
+        w._sigPendingFor = () => false;
+        w.qLocked = true; w.qSerial = ''; w.qDraftKey = 'DRAFT-aaaaaa';
+        w.requestSignatures();
+        const before = sent.length;
+        w.qDraftKey = ''; w.qSerial = 'QT-W00000777';                // the number arrives
+        await new Promise(r => setTimeout(r, 900));
+        const after = sent.slice();
+        w._sendSignatureRequest = keepS;                             // the real function also refuses a missing number
+        w.qSerial = ''; w.qDraftKey = 'DRAFT-bbbbbb'; toasts.length = 0;
+        w._sendSignatureRequest('checked', false);
+        const guarded = toasts.some(t => /no number yet/.test(t));
+        w.showToast = keepT; w._sigState = keepSt; w._sigPendingFor = keepP; w.qLocked = false; w.qDraftKey = ''; w.qSerial = '';
+        check('A signature request waits for the quotation number, and never goes out without one',
+          () => ({ before, after, guarded }), { before: 0, after: ['checked:QT-W00000777'], guarded: true });
+      }
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
