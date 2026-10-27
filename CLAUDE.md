@@ -13313,3 +13313,6 @@ uneven banding. Also hit W362 P41 and QT-W00000355 P1/P5/P6/P7/P10.
   blocks; parts on no layout go in a last grey block that keeps them. Part numbers/labels unchanged, parts
   table 12px. Display only — `_joSig` unaffected. Mockups shown first; Rommel chose the board name as the
   header (no "Board 1 of 2" / "Board type A" — read as a board count).
+- **One size column on the Job Order** (`988aabf`): `anyCut` = some part's cut ≠ finished. None → one
+  column "Finished Size W×L". Otherwise (old no-trimmer bander) "Cut Size W×L" in bold with "Finished Size …"
+  in grey under only the differing rows. Rommel chose the labels "Finished Size" / "Cut Size" after a mockup.
