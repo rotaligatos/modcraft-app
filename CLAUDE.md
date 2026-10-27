@@ -13266,3 +13266,30 @@ are not copied into the quotation folder; training mode cannot open a website cu
 - **PARKED (Rommel):** the freeze report is Jhover printing from **Designers Support** (draft Job Order,
   `prodPrintJobOrderDraft` → `_joBuild`), not the quotation's Job Orders window. Wait for Rommel's
   details before investigating.
+
+## What was changed on 2026-10-27 (session — numbered drafts voided, Series register, order release)
+Commit `217aad5`, live. Found from QT-W00000361: Nikki discarded a numbered draft (deleted from both
+stores) and Order #9041 stayed In Progress pointing at it. Rommel: accounting tracks the W/M/C series,
+so a missing number must be explainable.
+- **Void, not delete** (`qVoided/qVoidedAt/qVoidedBy/qVoidReason`, state keys `voided/voidedAt/voidedBy/voidReason`).
+  `discardQuotation()` on a saved series number (`_isSeriesSerial`: `^QT-[WMC]\d{8}`) opens `ov-void-quotation`
+  (reason required) → `confirmVoidQuotation()`: flag, release order, log `Quotation VOIDED: … Reason: …`,
+  `gSaveQuotation({voiding:true})`. Status `Voided` (first in `_statusFromState`; ladder/pill/rank),
+  read-only via `updateLockUI`, `gSaveQuotation` refuses any other save while voided. Admin `restoreVoidedQuotation()`
+  (banner in `q-decline-wrap`). Unnumbered (DRAFT-) drafts still discard outright.
+- Excluded everywhere: `_dashAllEntries` (`_isVoidedEntry`), client transaction history, ageing (`_quotAges`).
+  Project List hides voided unless Status filter = Voided (count shown beside the total).
+- `deleteQuotation` / bulk delete refuse series numbers; bulk delete now logs each delete.
+- **`_releaseOrdersForQuotation(ref,why,orderId)`**: on discard/void, orders still open (not Done/Archived/Cancelled)
+  linked by serial root or draft key go back to Pending, quotation serial + handler cleared (Sheet X:Z + Supabase), logged.
+- **Reports › Series register** (`renderSeriesRegister`, `_srBuild` pure, Admin/Director/Manager): every number
+  1..highest per series from Supabase `quotations` + activity log events (renumbered / DELETED / DISCARDED /
+  VOIDED / restored, serial parsed from the action TEXT — the log's own serial column is the screen's, wrong on
+  deletes). Missing with no event = "no record" with a between-dates estimate. Excel + Print.
+  At ship: W gaps 67 (13 renumbered, 13 deleted, 2 discarded, 39 no record), M 100 (24/8/0/68), C 4 (2 deleted, 2 none).
+- DB: `quotation_stage_flags` gained `voided`. W361 inserted into `quotations` + `quotation_states` as Voided
+  (Supabase only — no Sheets access from here, so it is in the register but not in the Project List).
+  Order 9041 → Pending, unlinked. Both logged.
+- Not fixed, found the same day: QT-W00000360's Checked-by signature was requested at lock while the quotation
+  still had no number (DRAFT-6d7a3b); the phone approval then failed ("raised before its quotation was ever saved").
+  Re-requested and worked. A signature request should wait for the number like the Job Order does.
