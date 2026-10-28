@@ -6414,6 +6414,14 @@ const PROFILES = {
         w.prodState.fileName = keep; if (pj) pj.value = pv;
         return r;
       }, { typed: 'Kitchen', order: 'Area 2', file: 'MARGARITA' });
+      check('Analysis EBT box: typed L/S of the real piece round-trips to the same banded edges', () => {
+        const w = window, r = {};
+        // 564 W x 100 L: the long sides are along the WIDTH field
+        r.wide2L = w._ebtFromLS('2L', 100, 564, ''); r.wide2Lback = w._ebtLS(r.wide2L, 100, 564, '');
+        r.tall1L = w._ebtFromLS('1L', 806, 400, ''); r.mixed = w._ebtLS(w._ebtFromLS('1L 2S', 806, 850, ''), 806, 850, '');
+        r.all = w._ebtFromLS('4S', 100, 564, ''); r.none = w._ebtFromLS('none', 100, 564, ''); r.other = w._ebtFromLS('manual', 1, 2, '');
+        return r;
+      }, { wide2L: '2s', wide2Lback: '2L', tall1L: '1l', mixed: '1L 2S', all: '4s', none: 'n/a', other: 'manual' });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
