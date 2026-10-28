@@ -6406,6 +6406,14 @@ const PROFILES = {
           w.sheetUsers = keep; w.CF.discountEscalationThreshold = kt;
           return { above: /above 10%.*Director.*20% request/.test(r.above), below: r.below, vat: r.vat };
         }, { above: true, below: '', vat: '' });
+      check('Reflected area name: a typed list / website order takes the project name, a real file keeps its name', () => {
+        const w = window, keep = w.prodState.fileName, pj = document.getElementById('cl-project'), pv = pj ? pj.value : '';
+        const at = (fn, p) => { w.prodState.fileName = fn; if (pj) pj.value = p; return w._prodReflectAreaName(2); };
+        const r = { typed: at('Cutting list — entered in Modcraft', 'Kitchen'), order: at('Order 9041 — cutting list', ''),
+          file: at('MARGARITA.xls', 'Kitchen') };
+        w.prodState.fileName = keep; if (pj) pj.value = pv;
+        return r;
+      }, { typed: 'Kitchen', order: 'Area 2', file: 'MARGARITA' });
       check('Schedule: plan from Job Order load ÷ capacity; a delivery booked before production can finish moves', () => {
         const w = window;
         const cap = { CUT: { daily: 1000, unit: 'lm', wk: 6 }, EBB: { daily: 500, unit: 'lm', wk: 6 }, DRL: { daily: 200, unit: 'holes', wk: 6 } };
