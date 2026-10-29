@@ -138,6 +138,16 @@ const PROFILES = {
                         r.rows[3].svcs[0], r.rows[3].remark, h.kind, h.rows[0].faces + ' ' + h.rows[0].qty];
               }, ['1S|1L 2S|4S|1L 2S', 'W|L|L|', 1.796, 'width', '', 'L', 'Handgrab tapering (along width) × 1.796 lm',
                   'Routeriing (Special Cut)', '915 x 300', 'hpl', '2F 4']);
+      // Same day: a layout remembered from before the Grain box had the Grain column under Grooving,
+      // so "W" was priced as a groove along every piece's width.
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function')
+        check('A remembered layout with Grain under Grooving: the grain column is not grooving',
+              () => {
+                const aoa = [['Part', 'Material SKU', 'Thickness (mm)', 'Qty', 'Width (mm)', 'Length (mm)', 'Edge Band', 'Grain (L/W)'],
+                             ['Shelf', 'Board A', 18, 1, 490, 1307, '1L 1S', 'W']];
+                const r = window.CLR.readClientSheet(aoa, { header: 0, map: { groove: 7 } });
+                return [r.rows[0].grooveLm, r.rows[0].grain, r.map.groove === undefined];
+              }, [0, 'W', true]);
       // St. Ignatius 2026-10-17: "1W groove for grab bar: not at ebt side" priced the metres but lost WHERE;
       // remarks never reached the Job Order.
       if (window.CLR && typeof window.CLR.readClientSheet === 'function')
