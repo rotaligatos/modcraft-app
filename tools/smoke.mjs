@@ -116,6 +116,28 @@ const PROFILES = {
                 const p = window.CLR.toPanel(r.rows[0], '');
                 return [r.rows[0].group, r.rows[0].material, r.rows[0].handgrabLm, r.rows[1].group, r.rows[1].handgrabLm, p.svcs[0]];
               }, ['CASHIER COUNTER', 'WARM WHITE STIPPLE', 1.364, '', 0.4, 'Handgrab tapering (along length) × 1.364 lm']);
+      /* 2026-10-29: ModCraft's own template read through "Import client's list". "1S" means one SHORT
+         edge, but it was read as a Width edge, so on a 490 wide × 306 long piece the 490 edge was
+         banded (shown as 1L). Grain had no column to map, the taper in the Services column (side in
+         Remarks) was lost, and the HPL Lamination sheet became a panel. */
+      if (window.CLR && typeof window.CLR.readClientSheet === 'function')
+        check('Own template via client import: L/S edges by real size, grain, taper from Services, HPL sheet',
+              () => {
+                const aoa = [['Group (cabinet/area)', 'Part', 'Material SKU', 'Thickness (mm)', 'Qty', 'Width (mm)', 'Length (mm)', 'Edge Band', 'Edge Material', 'Grain (L/W)', 'Services', 'Remarks'],
+                             ['', 'Shelf', 'Board A', 18, 1, 490, 306, '1S', 'Tape A', 'W', '', ''],
+                             ['', 'Side', 'Board A', 18, 1, 850, 806, '1L 2S', 'Tape A', 'L', '', ''],
+                             ['', 'Door', 'Board A', 18, 2, 898, 105, '4S', 'Tape A', 'L', 'Handgrab tapering', '1L'],
+                             ['', 'Rail', 'Board A', 18, 1, 450, 825, '1L 2S', 'Tape A', '', 'Routeriing (Special Cut)', '915 x 300']];
+                const r = window.CLR.readClientSheet(aoa);
+                const p2 = window.CLR.toPanel(r.rows[2], '');
+                const hplAoa = [['Substrate', 'HPL finish', 'Faces', 'Width (mm)', 'Length (mm)', 'Qty', 'Cut to size (Y/N)'],
+                                ['Raw board MDF 18mm', 'White HPL', '2F', 1220, 2440, 4, 'N']];
+                const h = window.CLR.readClientSheet(hplAoa);
+                return [r.rows.map(q => q.code).join('|'), r.rows.map(q => q.grain).join('|'),
+                        r.rows[2].handgrabLm, r.rows[2].handgrabSide, r.rows[2].remark, p2.grain, p2.svcs[0],
+                        r.rows[3].svcs[0], r.rows[3].remark, h.kind, h.rows[0].faces + ' ' + h.rows[0].qty];
+              }, ['1S|1L 2S|4S|1L 2S', 'W|L|L|', 1.796, 'width', '', 'L', 'Handgrab tapering (along width) × 1.796 lm',
+                  'Routeriing (Special Cut)', '915 x 300', 'hpl', '2F 4']);
       // St. Ignatius 2026-10-17: "1W groove for grab bar: not at ebt side" priced the metres but lost WHERE;
       // remarks never reached the Job Order.
       if (window.CLR && typeof window.CLR.readClientSheet === 'function')

@@ -39876,21 +39876,23 @@ var MCL=(function(){
     // The client-list importer (CLR) hands its rows over here. Same replace-not-append rule
     // and the same "don't silently overwrite typed work" confirm the template upload uses.
     // mode: 'add' (keep the rows already here) | 'replace' | undefined (old behaviour: ask to replace)
-    importRows:function(panels,hardware,label,mode){
-      panels=panels||[]; hardware=hardware||[];
-      if(!panels.length&&!hardware.length){ showToast('Nothing to import.'); return false; }
+    importRows:function(panels,hardware,label,mode,hpl){
+      panels=panels||[]; hardware=hardware||[]; hpl=hpl||[];
+      if(!panels.length&&!hardware.length&&!hpl.length){ showToast('Nothing to import.'); return false; }
       var t=totals();
       var hit=(panels.length&&t.rows>0)||(hardware.length&&S.hardware.length);
       if(mode==='add'){
         var keep=S.panels.filter(function(p){ return p.L||p.W||p.mat; });
         S.panels=keep.concat(panels);
         S.hardware=S.hardware.filter(function(x){ return String(x.name||'').trim(); }).concat(hardware);
+        S.hpl=S.hpl.filter(function(x){ return x.sub||x.fin; }).concat(hpl);
         rerender(); return true;
       }
       if(hit&&mode!=='replace'&&!confirm('This replaces what is already on this list with '
         +(label||'the imported list')+'. Continue?')) return false;
       if(panels.length) S.panels=panels;
       if(hardware.length) S.hardware=hardware;
+      if(hpl.length) S.hpl=hpl;
       rerender();
       return true;
     },
@@ -39985,7 +39987,11 @@ const FIELD_RULES = [
   // A tapered handgrab column says WHICH side gets it ("LENGTH" / "WIDTH"); the run follows that
   // side of the piece (Rommel, 2026-10-15, ARBAU). A column that says groove is grooving, above.
   { field: 'handgrab', re: /(taper|hand ?grab)/ },
-  { field: 'group',  re: /^(location|room|area)$/ },
+  // Grain / "haspe": which way the pattern runs ("L" = along the Length column, "W" = along Width).
+  { field: 'grain',  re: /(grain|haspe)/ },
+  // ModCraft's own template and the MSSI website: catalogue service names, several per cell.
+  { field: 'services', re: /^(services?|process(es)?)$/ },
+  { field: 'group',  re: /^(location|room|area|cabinet|group\b.*)$/ },
   { field: 'edge',   re: /(edg|^eb$|sides to be eb|banding)/ },
   { field: 'remark', re: /(remark|comment|^notes?$)/ },
   { field: 'item',   re: /^(item( no\.?)?|no\.?|#|s\/n|label)$/ },
@@ -40217,6 +40223,25 @@ function readClientSheet(aoa, force) {
   const h = res.header = hd.row;
   const { notes, ctx } = readNotes(aoa, h); res.notes = notes; res.ctx = ctx;
 
+  // ModCraft's own template (and the MSSI website's) has an "HPL Lamination" sheet: Substrate · HPL
+  // finish · Faces · sizes · Qty · Cut to size. Those are HPL builds, not pieces — read as a panel
+  // the HPL finish became the board and the substrate was lost.
+  const hdrCells = (aoa[h] || []).map(norm);
+  const hcol = re => hdrCells.findIndex(x => re.test(x));
+  if (!force && hcol(/^substrate/) >= 0 && hcol(/hpl/) >= 0) {
+    res.kind = 'hpl';
+    const cS = hcol(/^substrate/), cF = hcol(/hpl/), cFa = hcol(/^faces?$/), cL = hcol(/length/), cW = hcol(/width/),
+      cQ = hcol(/qty|quantity/), cC = hcol(/cut/);
+    for (let r = h + 1; r < aoa.length; r++) {
+      const row = aoa[r] || [], v = c => c < 0 ? '' : String(row[c] == null ? '' : row[c]).trim();
+      if (!v(cS) && !v(cF)) continue;
+      res.rows.push({ src: r + 1, sub: v(cS), fin: v(cF), faces: /2/.test(v(cFa)) ? '2F' : '1F',
+        L: +v(cL) || 0, W: +v(cW) || 0, qty: +v(cQ) || 0, cut: /^y/i.test(v(cC)),
+        issues: (v(cS) && v(cF)) ? [] : ['substrate or HPL finish missing'] });
+    }
+    return res;
+  }
+
   res.edgeFlags = findEdgeFlagCols(aoa, h);
   const taken = new Set(res.edgeFlags.map(f => f.col));
   const byField = {};
@@ -40261,6 +40286,7 @@ function readClientSheet(aoa, force) {
       if (!name) continue;
       const qm = qRaw.match(/^(\d+(?:\.\d+)?)\s*([a-z]*)/i);
       res.rows.push({ src: r + 1, name, qty: qm ? +qm[1] : 0, unit: qm && qm[2] ? qm[2].toLowerCase() : '',
+                      cab: res.map.group != null ? String(row[res.map.group] || '').trim() : '',
                       issues: qm ? [] : ['no quantity'] });
     }
     return res;
@@ -40269,6 +40295,30 @@ function readClientSheet(aoa, force) {
     if (res.map[need] == null) res.issues.push('No column found for ' + need + '.');
   if (res.issues.length) return res;
 
+  // Two ways of writing edge codes. Per DIMENSION ("2L 1W": L = the Length column, W = Width) and
+  // per SIDE of the real piece (ModCraft's own template, the MSSI website: "1L" = one LONG edge,
+  // "1S" = one SHORT edge). A column that uses S and never W/H is the long/short kind. Read as
+  // dimensions, "1S" on a 490 wide × 306 long piece banded the 490 edge instead of the 306 one.
+  const lsDialect = (() => {
+    if (res.map.edge == null) return false;
+    let s = 0, wh = 0;
+    for (let r = h + 1; r < aoa.length; r++) {
+      const t = String((aoa[r] || [])[res.map.edge] == null ? '' : (aoa[r] || [])[res.map.edge]).toUpperCase();
+      if (/\d\s*S\b/.test(t)) s++;
+      if (/\d\s*[WH]\b|^\s*[WH]\s*$/.test(t)) wh++;
+    }
+    return s > 0 && wh === 0;
+  })();
+  if (lsDialect) res.how.edge = (res.how.edge ? res.how.edge + ' · ' : '') + 'L/S = long/short side of the piece';
+  // parseEdgeDims counts L-tokens as .L and S-tokens as .W; in the long/short dialect turn that into
+  // edges along the Length / Width columns by the piece's real size.
+  const lsToDims = (p, L, W) => {
+    if (!lsDialect || !p || !p.ok) return p;
+    const lenLong = L >= W;
+    return { L: lenLong ? p.L : p.W, W: lenLong ? p.W : p.L, ok: p.ok };
+  };
+  // A side written on its own ("1L", "LENGTH") — used when the taper side sits in the Remarks cell.
+  const isSideOnly = t => /^\s*(\d\s*[LWSH]\s*)+$/i.test(t) || /^\s*(length|width|long|short)( side)?\s*$/i.test(t);
   let group = '', groupSub = '', curMat = res.ctx.material || null;
   // "PROJECT NAME: RECEPTION DESK" (LIMSHEN, 2026-10-17) names the cabinet/project the table below
   // belongs to. One above the header starts the first group; one inside the table starts the next.
@@ -40376,7 +40426,7 @@ function readClientSheet(aoa, force) {
       res.edgeFlags.forEach(f => { const v = +row[f.col] || 0; if (f.dim === 'W') eW += v; else eL += v; });
     } else if (res.map.edge != null) {
       edgeRaw = String(g('edge') || '');
-      const p = parseEdgeDims(edgeRaw); eL = p.L; eW = p.W; edgeOk = p.ok;
+      const p = lsToDims(parseEdgeDims(edgeRaw), L, W); eL = p.L; eW = p.W; edgeOk = p.ok;
       if (!edgeOk) {
         // "EBT ALONG '337' & '1236'" names each banded edge by its own length: one quoted
         // number = one edge. Only counted when every number matches this piece's L or W,
@@ -40396,23 +40446,35 @@ function readClientSheet(aoa, force) {
     let grooveTxt = String(g('groove') || '').trim();
     // Remark lines that wrapped above this row are part of its remark.
     const wrapAbove = pendingRemark.length; inHardware = false;
-    const rem = [pendingRemark.join(' '), String(g('remark') || '').trim()].filter(Boolean).join(' '); pendingRemark = [];
+    let rem = [pendingRemark.join(' '), String(g('remark') || '').trim()].filter(Boolean).join(' '); pendingRemark = [];
     if (!grooveTxt && /groov/i.test(rem)) grooveTxt = rem;
     let grooveLm = 0, grooveOk = true;
     if (grooveTxt && !/^0(\.0+)?$/.test(grooveTxt)) {
       // The notation can sit before the word ("1W groove for grab bar") or after it
       // ("W/ GROOVING 1L"), so read only the count-and-side tokens wherever they are.
-      const gp = runSides(grooveTxt);
+      const gp = lsToDims(runSides(grooveTxt), L, W);
       if (gp.ok && (gp.L || gp.W)) grooveLm = (gp.L * L + gp.W * W) / 1000 * (qty || 1);
       else grooveOk = false;
     }
     // Tapered handgrab: the column names the side ("LENGTH" / "WIDTH" / "1L"); the run is that side.
-    const hgTxt = String(g('handgrab') || '').trim();
+    // Services column (ModCraft's own template): catalogue names, several per cell. A tapered handgrab
+    // named there often has its side in the Remarks cell ("1L"), which is where it is taken from.
+    const svcs = [];
+    let svcTaper = '';
+    String(g('services') || '').split(/[\r\n;,]+/).map(x => x.replace(/\s+/g, ' ').trim()).filter(Boolean).forEach(x => {
+      if (/taper|hand ?grab/i.test(x) && !svcTaper) svcTaper = x; else if (svcs.indexOf(x) < 0) svcs.push(x);
+    });
+    let hgTxt = String(g('handgrab') || '').trim();
+    if (!hgTxt && svcTaper) {
+      const inChip = svcTaper.replace(/^.*?(taper\w*|hand ?grab)/i, '').replace(/[()]/g, ' ').trim();
+      if (inChip && runSides(inChip).ok) hgTxt = inChip;
+      else if (isSideOnly(rem)) { hgTxt = rem.trim(); rem = ''; }
+    }
     let handgrabLm = 0, hgOk = true, handgrabSide = '';
     // "NO CUTTING" (ARBAU, on a whole-board backing) is a note, not a handgrab: kept with the remarks.
     const hgNote = /^no\b/i.test(hgTxt) && !/^(no\.?\s*\d)/i.test(hgTxt);
     if (hgTxt && !hgNote && !/^(0(\.0+)?|-|none|n\/?a)$/i.test(hgTxt)) {
-      const hp = runSides(hgTxt);
+      const hp = lsToDims(runSides(hgTxt), L, W);
       if (hp.ok && (hp.L || hp.W)) {
         handgrabLm = (hp.L * L + hp.W * W) / 1000 * (qty || 1);
         const sd = (n, w) => n ? (n > 1 ? n + ' ' + w + 's' : w) : '';
@@ -40423,6 +40485,10 @@ function readClientSheet(aoa, force) {
     const issues = [];
     if (!qty) issues.push('no quantity');
     if (!hgOk) issues.push('tapered handgrab "' + hgTxt + '" not understood');
+    // Named but no side anywhere: kept as a chip (its lm box asks for the length) and flagged.
+    if (svcTaper && !handgrabLm) { svcs.unshift(svcTaper); if (hgOk) issues.push('tapered handgrab — which side? not given'); }
+    const grTxt = String(g('grain') || '').trim().toUpperCase();
+    const grain = /^(L|LENGTH|H|HEIGHT)\b/.test(grTxt) ? 'L' : /^(W|WIDTH)\b/.test(grTxt) ? 'W' : '';
     if (!edgeOk) issues.push('edge notation "' + edgeRaw + '" not understood');
     if (!grooveOk) issues.push('grooving "' + grooveTxt + '" not understood');
     if (!thk) issues.push('no thickness');
@@ -40433,7 +40499,7 @@ function readClientSheet(aoa, force) {
       L, W, qty, eL, eW, code: toOurCode(Math.min(eL, 2), Math.min(eW, 2), L, W),
       emat: String(g('emat') || row.__tape || ((eL || eW) && !gm() && rowMat && rowMat.tape) || '').trim().replace(/^0(\.0+)?$/, ''),
       matRaw: (!gm() && rowMat && rowMat.raw && rowMat.raw !== matTxt) ? rowMat.raw : '',
-      grooveLm, grooveTxt: (grooveTxt && !/^0(\.0+)?$/.test(grooveTxt) && grooveTxt !== rem) ? grooveTxt : '', handgrabLm, handgrabSide, remark: [rem, hgNote ? hgTxt : ''].filter(Boolean).join(' · '), issues, __wrapLeft: wrapAbove
+      grooveLm, grooveTxt: (grooveTxt && !/^0(\.0+)?$/.test(grooveTxt) && grooveTxt !== rem) ? grooveTxt : '', handgrabLm, handgrabSide, grain, svcs, remark: [rem, hgNote ? hgTxt : ''].filter(Boolean).join(' · '), issues, __wrapLeft: wrapAbove
     });
   }
   // A wrapped remark with no row after it stays with the last row rather than being lost.
@@ -40617,7 +40683,7 @@ function linesToAoa(lines) {
   var FIELDS=[['group','Group / location'],['part','Part / description'],['item','Item no.'],['material','Material'],
     ['material2','+ Material'],['material3','+ Material'],['material4','+ Material'],['thk','Thickness'],
     ['length','Length'],['width','Width'],['qty','Qty'],['edge','Edge banding'],['emat','Edge tape'],
-    ['groove','Grooving'],['handgrab','Tapered handgrab'],['remark','Remarks']];
+    ['groove','Grooving'],['handgrab','Tapered handgrab'],['grain','Grain'],['services','Services'],['remark','Remarks']];
   var ST={files:[],active:0,store:{templates:{},mats:{},clientMats:{}},matEdit:{},sugg:{}};
   var STORE_KEY='CLIENT_TEMPLATES', LS_KEY='mc_client_templates';
 
@@ -40757,8 +40823,8 @@ function linesToAoa(lines) {
     var out=[];
     allSheets().forEach(function(x){
       if(!x.s.include) return;
-      var isHw=x.s.res.kind==='hardware';
-      if((kind==='hardware')!==isHw) return;
+      var k=x.s.res.kind==='hardware'?'hardware':(x.s.res.kind==='hpl'?'hpl':'panels');
+      if(k!==(kind||'panels')) return;
       x.s.res.rows.forEach(function(r){ out.push({r:r,sh:x.s,file:x.f}); });
     });
     return out;
@@ -41070,7 +41136,7 @@ function linesToAoa(lines) {
     sheets.forEach(function(x,i){
       var r=x.s.res, fl=r.rows.filter(function(q){return q.issues&&q.issues.length;}).length;
       var lbl=x.f.name+(x.s.sheetName!=='PDF'&&x.f.sheets.length>1?' › '+x.s.sheetName:'');
-      var stat=r.kind==='hardware'?r.rows.length+' hardware':(r.rows.length+' rows');
+      var stat=r.kind==='hardware'?r.rows.length+' hardware':(r.kind==='hpl'?r.rows.length+' HPL build'+(r.rows.length===1?'':'s'):(r.rows.length+' rows'));
       h+='<div style="display:flex;align-items:center;gap:5px;padding:5px 8px;border-radius:7px;cursor:pointer;'
         +'border:.5px solid '+(i===ST.active?'var(--navy)':'var(--border)')+';background:'+(i===ST.active?'var(--wash-navy)':'var(--card)')+'" onclick="CLR.pick('+i+')">'
         +'<input type="checkbox" '+(x.s.include?'checked':'')+' onclick="event.stopPropagation();CLR.include('+i+',this.checked)" title="Import this sheet">'
@@ -41085,6 +41151,7 @@ function linesToAoa(lines) {
     if(s.remembered) facts.push('<span class="pill pill-teal">Recognised layout</span> remembered from '+esc(s.remembered.file||'an earlier list')+(s.remembered.at?' ('+esc(String(s.remembered.at).slice(0,10))+')':''));
     if(res.kind==='blocks') facts.push('No table — read as one block of lines per piece.');
     if(res.kind==='hardware') facts.push('No sizes, but quantities and names — read as a <b>hardware</b> list.');
+    if(res.kind==='hpl') facts.push('Substrate + HPL finish — read as <b>HPL builds</b> (they go to the HPL Lamination table, not to the pieces).');
     if(res.ctx&&res.ctx.sizeMode) facts.push('<b>Sizes are '+esc(res.ctx.sizeMode.value)+' sizes</b> — “'+esc(String(res.ctx.sizeMode.why).slice(0,120))+'”');
     if(res.ctx&&res.ctx.material) facts.push('Board stated above the table: <b>'+esc(res.ctx.material.material)+'</b>');
     if(res.edgeFlags&&res.edgeFlags.length) facts.push('Edge banding read from per-edge count columns.');
@@ -41092,7 +41159,7 @@ function linesToAoa(lines) {
     if(facts.length) h+='<div style="font-size:12px;line-height:1.7;margin-bottom:8px">'+facts.join('<br>')+'</div>';
 
     // Column mapping — the part a person corrects.
-    if(res.kind!=='blocks'){
+    if(res.kind!=='blocks'&&res.kind!=='hpl'){
       var hdr=res.header>=0?(s.aoa[res.header]||[]):[];
       var hopts='', seen=0;
       for(var r=0;r<s.aoa.length&&seen<40;r++){
@@ -41118,7 +41185,11 @@ function linesToAoa(lines) {
 
     // The rows as read.
     var rows=res.rows, flagged=rows.filter(function(q){return q.issues&&q.issues.length;});
-    if(res.kind==='hardware'){
+    if(res.kind==='hpl'){
+      h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Row</th><th '+th+'>Substrate</th><th '+th+'>HPL finish</th><th '+th+'>Faces</th><th '+th+'>W</th><th '+th+'>L</th><th '+th+'>Qty</th><th '+th+'>Cut to size</th><th '+th+'>Check</th></tr>';
+      rows.forEach(function(q){ h+='<tr><td '+td+'>'+q.src+'</td><td '+td+'>'+esc(q.sub)+'</td><td '+td+'>'+esc(q.fin)+'</td><td '+td+'>'+esc(q.faces)+'</td><td '+td+'>'+(q.W||'')+'</td><td '+td+'>'+(q.L||'')+'</td><td '+td+'>'+(q.qty||'')+'</td><td '+td+'>'+(q.cut?'Yes':'No')+'</td><td '+td+'><span style="color:var(--pill-amber);font-size:11px">'+esc((q.issues||[]).join('; '))+'</span></td></tr>'; });
+      h+='</table>';
+    } else if(res.kind==='hardware'){
       h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Row</th><th '+th+'>Item</th><th '+th+'>Qty</th><th '+th+'>Unit</th><th '+th+'>Check</th></tr>';
       rows.forEach(function(q){ h+='<tr><td '+td+'>'+q.src+'</td><td '+td+'>'+esc(q.name)+'</td><td '+td+'>'+(q.qty||'')+'</td><td '+td+'>'+esc(q.unit)+'</td><td '+td+'><span style="color:var(--pill-amber);font-size:11px">'+esc((q.issues||[]).join('; '))+'</span></td></tr>'; });
       h+='</table>';
@@ -41129,12 +41200,12 @@ function linesToAoa(lines) {
         +(flagged.length?' · <span style="color:var(--pill-amber);font-weight:600">'+flagged.length+' to check</span>':' · <span style="color:var(--pill-teal)">nothing flagged</span>')
         +(function(){ var n=rows.filter(noTape).length;
           return n?' · <span style="color:var(--pill-amber);font-weight:600">'+n+' row'+(n===1?'':'s')+' banded with no edge tape — pick it under “Their edge tapes” below</span>':''; })()+'</div>';
-      h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Row</th><th '+th+'>Group</th><th '+th+'>Part</th><th '+th+'>Material</th><th '+th+'>Th</th><th '+th+'>W</th><th '+th+'>L</th><th '+th+'>Qty</th><th '+th+'>Edge</th><th '+th+'>Tape</th><th '+th+'>Groove lm</th><th '+th+' title="Tapered handgrab: the side it runs along × qty">Handgrab lm</th><th '+th+'>Check</th></tr>';
+      h+='<table style="width:100%;border-collapse:collapse"><tr><th '+th+'>Row</th><th '+th+'>Group</th><th '+th+'>Part</th><th '+th+'>Material</th><th '+th+'>Th</th><th '+th+'>W</th><th '+th+'>L</th><th '+th+'>Qty</th><th '+th+'>Edge</th><th '+th+'>Tape</th><th '+th+'>Groove lm</th><th '+th+' title="Tapered handgrab: the side it runs along × qty">Handgrab lm</th><th '+th+' title="Grain: L = along Length, W = along Width">Grain</th><th '+th+'>Services</th><th '+th+'>Check</th></tr>';
       rows.slice(0,400).forEach(function(q){
         var bad=q.issues&&q.issues.length;
         h+='<tr style="'+(bad?'background:var(--wash-amber)':'')+'"><td '+td+'>'+q.src+'</td><td '+td+'>'+esc(q.group)+'</td><td '+td+'>'+esc(q.part)+'</td>'
           +'<td '+td+'>'+esc(q.material)+'</td><td '+td+'>'+(q.thk||'')+'</td><td '+td+'>'+(q.W||'')+'</td><td '+td+'>'+(q.L||'')+'</td><td '+td+'>'+(q.qty||'')+'</td>'
-          +'<td '+td+'>'+esc(q.code||'')+'</td><td '+td+(noTape(q)?' style="font-size:12px;padding:3px 6px;border-bottom:.5px solid var(--border);background:var(--wash-amber);color:var(--pill-amber)"':'')+'>'+(noTape(q)?'needed':esc(q.emat||mappedSku('tapenone:'+matKey(String(q.material||'').trim()||'board'))||''))+'</td><td '+td+'>'+(q.grooveLm?q.grooveLm.toFixed(2):'')+'</td><td '+td+'>'+(q.handgrabLm?q.handgrabLm.toFixed(2):'')+'</td>'
+          +'<td '+td+'>'+esc(q.code||'')+'</td><td '+td+(noTape(q)?' style="font-size:12px;padding:3px 6px;border-bottom:.5px solid var(--border);background:var(--wash-amber);color:var(--pill-amber)"':'')+'>'+(noTape(q)?'needed':esc(q.emat||mappedSku('tapenone:'+matKey(String(q.material||'').trim()||'board'))||''))+'</td><td '+td+'>'+(q.grooveLm?q.grooveLm.toFixed(2):'')+'</td><td '+td+'>'+(q.handgrabLm?q.handgrabLm.toFixed(2)+(q.handgrabSide?'<div style="font-size:10px;color:var(--text2)">along '+esc(q.handgrabSide)+'</div>':''):'')+'</td><td '+td+'>'+esc(q.grain||'')+'</td><td '+td+'><span style="font-size:11px">'+esc((q.svcs||[]).join(', '))+'</span></td>'
           +'<td '+td+'><span style="font-size:11px;color:var(--pill-amber)">'+esc((q.issues||[]).join('; '))+'</span></td></tr>';
       });
       h+='</table>'+(rows.length>400?'<div style="font-size:11px;color:var(--text2)">Showing the first 400 of '+rows.length+' rows — all of them are imported.</div>':'');
@@ -41204,11 +41275,11 @@ function linesToAoa(lines) {
     }
     body.innerHTML=h;
 
-    var np=includedRows('panels').length, nh=includedRows('hardware').length;
+    var np=includedRows('panels').length, nh=includedRows('hardware').length, nhp=includedRows('hpl').length;
     foot.innerHTML='<span style="font-size:11px;color:var(--text2);margin-right:auto;flex:1;min-width:0">Rows land in the cutting list below, where they can still be edited before “Load into analysis”.</span>'
       +'<button class="btn" onclick="CLR.close()">Cancel</button>'
-      +'<button class="btn btn-primary" '+(np||nh?'':'disabled')+' onclick="CLR.commit()">Import '
-      +(np?np+' row'+(np===1?'':'s'):'')+(np&&nh?' + ':'')+(nh?nh+' hardware':'')+'</button>';
+      +'<button class="btn btn-primary" '+(np||nh||nhp?'':'disabled')+' onclick="CLR.commit()">Import '
+      +[np?np+' row'+(np===1?'':'s'):'',nhp?nhp+' HPL build'+(nhp===1?'':'s'):'',nh?nh+' hardware':''].filter(Boolean).join(' + ')+'</button>';
   }
 
   // A read row → a cutting-list panel. Anything the reader flagged travels with the row as a
@@ -41237,6 +41308,7 @@ function linesToAoa(lines) {
     p.L=+r.L||0; p.W=+r.W||0;
     p.qty=+r.qty||1;
     p.ebt=r.code||'';
+    p.grain=r.grain||'';
     var tapeTxt=String(r.emat||'').trim(), tapeSku=tapeTxt?mappedSku(tapeKey(tapeTxt)):'';
     if(!tapeTxt&&r.code) tapeSku=mappedSku('tapenone:'+matKey(mat||'board'));
     p.emat=tapeSku||tapeTxt;
@@ -41254,6 +41326,8 @@ function linesToAoa(lines) {
       if(r.drawingRef&&dw.length){ var hit=dw.filter(function(d){ return d.page===r.page; })[0]||dw[0]; p.drawing={source:hit.source,page:hit.page}; }
     }
     if(r.handgrabLm>0) p.svcs.push('Handgrab tapering'+(r.handgrabSide?' (along '+r.handgrabSide+')':'')+' × '+(Math.round(r.handgrabLm*1000)/1000)+' lm');
+    // Other services named in the list (Services column): kept as chips, the same as typed ones.
+    (r.svcs||[]).forEach(function(s){ if(p.svcs.indexOf(s)<0) p.svcs.push(s); });
     var rm=[];
     // How the client described the groove ("1W groove for grab bar: not at ebt side") — the metres
     // are priced from it, but WHERE it goes is only in these words, so production must get them.
@@ -41280,10 +41354,11 @@ function linesToAoa(lines) {
       panels.push(toPanel(x.r,sm,x.file));
     });
     includedRows('hardware').forEach(function(x){
-      hw.push({name:x.r.name,qty:+x.r.qty||0,unit:x.r.unit||'pcs',note:(x.r.issues||[]).join('; '),cab:''});
+      hw.push({name:x.r.name,qty:+x.r.qty||0,unit:x.r.unit||'pcs',note:(x.r.issues||[]).join('; '),cab:x.r.cab||''});
     });
+    var hpl=includedRows('hpl').map(function(x){ var r=x.r; return {sub:r.sub,fin:r.fin,faces:r.faces,L:r.L,W:r.W,qty:r.qty,cut:!!r.cut}; });
     ST.files.forEach(function(f){ if(f.sheets.some(function(s){return s.include;})) srcNames.push(f.name); });
-    if(!MCL.importRows(panels,hw,srcNames.join(', '),mode||'replace')) return;
+    if(!MCL.importRows(panels,hw,srcNames.join(', '),mode||'replace',hpl)) return;
     // The client's own file travels with the list, so it is saved with the quotation at lock
     // ("customer cutting list") and reaches production with the Job Order.
     MCL.setSourceFiles((ST.rawFiles||[]).filter(function(f){ return srcNames.indexOf(f.name)>=0; }));
