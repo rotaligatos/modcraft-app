@@ -138,6 +138,18 @@ const PROFILES = {
                         r.rows[3].svcs[0], r.rows[3].remark, h.kind, h.rows[0].faces + ' ' + h.rows[0].qty];
               }, ['1S|1L 2S|4S|1L 2S', 'W|L|L|', 1.796, 'width', '', 'L', 'Handgrab tapering (along width) × 1.796 lm',
                   'Routeriing (Special Cut)', '915 x 300', 'hpl', '2F 4']);
+      // 2026-10-29 (Dennis Ching): a row already naming one of our exact catalogue SKUs (and tape) was
+      // still listed as "not mapped". It now counts as mapped — only when the thickness agrees.
+      if (window.CLR && typeof window.CLR._mappedSku === 'function')
+        check('Import: an exact catalogue name counts as mapped (thickness must agree)',
+              () => {
+                const w = window, keep = w.dbMaterials;
+                w.dbMaterials = [{ name: '[Brand] Oak 2F 4x8 MDF 18mm', unit: 'pc', price: 1 }, { name: 'Oak 1mmx22mm Edgeband', unit: 'lm', price: 1 }];
+                try {
+                  return [w.CLR._mappedSku('[brand] oak 2f 4x8 mdf 18mm@18'), w.CLR._mappedFrom('[brand] oak 2f 4x8 mdf 18mm@18'),
+                          w.CLR._mappedSku('[brand] oak 2f 4x8 mdf 18mm@6'), w.CLR._mappedSku('tape:oak 1mmx22mm edgeband')];
+                } finally { w.dbMaterials = keep; }
+              }, ['[Brand] Oak 2F 4x8 MDF 18mm', 'catalogue', '', 'Oak 1mmx22mm Edgeband']);
       // Same day: a layout remembered from before the Grain box had the Grain column under Grooving,
       // so "W" was priced as a groove along every piece's width.
       if (window.CLR && typeof window.CLR.readClientSheet === 'function')
