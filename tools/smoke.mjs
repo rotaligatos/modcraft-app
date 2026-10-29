@@ -473,6 +473,33 @@ const PROFILES = {
         check('scrambled PDF: offers Read with AI; parts tables become rows, same part added up', () => res,
               [true, 3, 2, 'Door 2, Side 8', 'length', 18, '', true]);
       }
+      /* 2026-10-29 (Dennis Ching): a drawing of the pieces was not readable and the AI was never offered —
+         a picture was not accepted at all. A picture now opens straight to "Read with AI", and a drawn
+         piece (size, "= 2 PCS", edge marks, grain arrow) becomes a row with its grain. */
+      if (window.CLR && typeof window.CLR._readFile === 'function' && typeof window.CLR.aiRead === 'function') {
+        const ST = window.CLR._state(), keep = { files: ST.files, active: ST.active }, keepF = window.fetch, keepK = window.prodSettings.claudeKey, keepT = window.showToast, keepL = window.logActivity;
+        let res;
+        try {
+          window.showToast = () => {}; window.logActivity = () => {}; window.prodSettings.claudeKey = 'x';
+          const cv = document.createElement('canvas'); cv.width = 40; cv.height = 30;
+          const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+          const f = await window.CLR._readFile(new File([blob], 'drawing.png', { type: 'image/png' }));
+          const wasOffered = !!f.aiOffer;
+          ST.files = [f];
+          window.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ content: [{ type: 'text', text: JSON.stringify(
+            { has_parts: true, material: '', thickness_mm: 18, parts: [{ name: 'DOORS - TOP & BELOW', qty: 2, length_mm: 600, width_mm: 598, edge: '2L 2W', grain: 'L', handgrab: '', groove: '', notes: '' },
+                                                                      { name: 'OVER HEAD SHELF', qty: 1, length_mm: 1800, width_mm: 300, edge: '1L', grain: 'L', handgrab: '', groove: '', notes: '' }] }) }] }) });
+          window.CLR.render();
+          const offered = /CLR\.aiRead\(0\)/.test(document.getElementById('ov-clr-body').innerHTML);
+          window.CLR.aiRead(0); await new Promise(r => setTimeout(r, 100));
+          const rows = ST.files[0].sheets[0].res.rows;
+          res = [wasOffered, f.scans.length, offered, rows.map(r => r.part + ' ' + r.qty + ' ' + r.code + ' ' + r.grain).join(', ')];
+          window.closeModal('ov-clr');
+        } catch (e) { res = String(e); }
+        finally { ST.files = keep.files; ST.active = keep.active; window.fetch = keepF; window.prodSettings.claudeKey = keepK; window.showToast = keepT; window.logActivity = keepL; }
+        check('a picture of a drawing: offers Read with AI; drawn pieces become rows with edges and grain', () => res,
+              [true, 1, true, 'DOORS - TOP & BELOW 2 4S L, OVER HEAD SHELF 1 1L L']);
+      }
       /* 2026-10-16: a whole board ("NO CUTTING", or exactly the board size) takes a board but no cutting. */
       if (typeof window._prodIsWholeBoard === 'function' && typeof window.prodComputeServices === 'function')
         check('a whole-board piece adds no cutting; a cut piece still does',

@@ -39176,7 +39176,7 @@ var MCL=(function(){
       +'<label class="btn" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Upload a filled-in copy of the template"><i class="ti ti-upload"></i>Upload filled Excel'
       +'<input type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="MCL.uploadExcel(this)"></label>'
       +'<label class="btn btn-primary" style="font-size:11px;padding:6px 10px;cursor:pointer;margin:0" title="Read a client\'s own cutting list — their Excel or PDF, in their layout. You check the columns before anything is imported."><i class="ti ti-file-import"></i>Import client\'s list'
-      +'<input type="file" accept=".xlsx,.xls,.csv,.pdf" multiple style="display:none" onchange="CLR.open(this)"></label>'
+      +'<input type="file" accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png,.webp" multiple style="display:none" onchange="CLR.open(this)"></label>'
       +'</div></div>';
 
     // HPL builds — declared first, because a panel's material can be one of them.
@@ -40595,6 +40595,37 @@ async function pdfToLines(buf) {
   lines.garbled = garbledPages > 0;
   return lines;
 }
+// Every page as a picture, for the AI. Used when a PDF has text but no table in it: a drawing of
+// each piece with its sizes and edge marks (Dennis Ching, 2026-10-29) — the words are real text, so
+// it was neither "scanned" nor "scrambled", and the AI was never offered.
+async function pdfRenderPages(buf, maxPages) {
+  const doc = await pdfjsLib.getDocument({ data: buf }).promise, out = [];
+  for (let p = 1; p <= Math.min(doc.numPages, maxPages || 12); p++) {
+    try {
+      const page = await doc.getPage(p), vp = page.getViewport({ scale: 1.6 }), cv = document.createElement('canvas');
+      cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+      const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+      await page.render({ canvasContext: cx, viewport: vp }).promise;
+      out.push({ page: p, dataUrl: cv.toDataURL('image/jpeg', 0.85) });
+    } catch (e) { }
+  }
+  return out;
+}
+// A photo or screenshot of the client's list or drawing → one JPEG page the AI can read (kept under
+// ~2000px so it stays well inside the API's image limit).
+function imageToScan(file) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file), im = new Image();
+    im.onload = () => {
+      const k = Math.min(1, 2000 / Math.max(im.width, im.height)), cv = document.createElement('canvas');
+      cv.width = Math.round(im.width * k); cv.height = Math.round(im.height * k);
+      const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(im, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url); resolve({ page: 1, dataUrl: cv.toDataURL('image/jpeg', 0.88) });
+    };
+    im.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    im.src = url;
+  });
+}
 function linesToAoa(lines) {
   // Find the header line the same way readClientSheet finds a header row.
   let hi = -1, best = 0;
@@ -40781,6 +40812,14 @@ function linesToAoa(lines) {
       var rd=new FileReader();
       rd.onload=function(){
         var buf=new Uint8Array(rd.result), f={name:file.name,sheets:[],error:''};
+        if(/\.(jpe?g|png|webp|gif|bmp)$/i.test(file.name)||/^image\//.test(file.type||'')){
+          imageToScan(file).then(function(sc){
+            f.scans=sc?[sc]:[];
+            f.error=sc?'A picture, not a table — the AI can read the pieces from it.':'Could not open this picture.';
+            f.aiOffer=!!sc; resolve(f);
+          });
+          return;
+        }
         if(/\.pdf$/i.test(file.name)){
           _loadPdfJs(function(err){
             if(err){ f.error='PDF reader failed to load'; resolve(f); return; }
@@ -40794,7 +40833,17 @@ function linesToAoa(lines) {
               f.drawings=(lines.drawings||[]).filter(function(d){ return d.dataUrl; }).map(function(d){ return {source:file.name,page:d.page,dataUrl:d.dataUrl}; });
               addSheet(f,'PDF',linesToAoa(lines));
               // Some pages read, some scrambled / pictures only: still offer the AI for those pages.
-              if(f.scans.length&&!f.sheets.some(function(sh){ return sh.res.rows.length; })){ f.error=why; f.aiOffer=true; }
+              var noRows=!f.sheets.some(function(sh){ return sh.res.rows.length; });
+              if(f.scans.length&&noRows){ f.error=why; f.aiOffer=true; resolve(f); return; }
+              // Text, but no table found: most likely a drawing of the pieces. Offer the AI on every page.
+              if(noRows){
+                pdfRenderPages(buf).then(function(sc){
+                  f.scans=sc;
+                  if(sc.length){ f.error='No cutting-list table found — this PDF looks like a drawing of the pieces.'; f.aiOffer=true; }
+                  resolve(f);
+                }).catch(function(){ resolve(f); });
+                return;
+              }
               resolve(f);
             }).catch(function(e){ f.error='Could not read this PDF ('+(e&&e.message||e)+')'; resolve(f); });
           });
@@ -41138,7 +41187,7 @@ function linesToAoa(lines) {
       if(f.error){
         h+='<div style="padding:8px 10px;margin-bottom:8px;border-radius:6px;background:var(--wash-coral);color:var(--pill-coral);font-size:12px"><b>'+esc(f.name)+'</b> — '+esc(f.error);
         if(f.aiOffer) h+='<div style="margin-top:6px;color:var(--text)">'+(f.aiBusy?'<i class="ti ti-loader-2"></i> '+esc(f.aiBusy)
-          :'The AI can read its parts tables ('+f.scans.length+' page'+(f.scans.length===1?'':'s')+') and suggest the rows. Nothing is imported until you check them here. '
+          :'The AI can read the parts from it ('+f.scans.length+' page'+(f.scans.length===1?'':'s')+') and suggest the rows. Nothing is imported until you check them here. '
           +'<button class="btn btn-primary" style="padding:3px 10px;font-size:12px;margin-left:4px" onclick="CLR.aiRead('+fi+')"><i class="ti ti-sparkles"></i> Read with AI</button>')+'</div>';
         h+='</div>';
       }
@@ -41528,10 +41577,14 @@ function linesToAoa(lines) {
     var prompt='This is one page of a cabinet-work PDF (sizes in mm). It may be a cut-optimizer report (e.g. OpenCutList), a cutting list, or a drawing. '
       +'If it has a table of parts to cut, read EVERY row of it. Reply with JSON only, no other text: '
       +'{"has_parts":true|false,"material":string,"thickness_mm":number|null,"parts":[{"name":string,"qty":number,"length_mm":number,"width_mm":number,'
-      +'"edge":string,"handgrab":string,"groove":string,"notes":string}]}. '
+      +'"edge":string,"grain":string,"handgrab":string,"groove":string,"notes":string}]}. '
+      +'A DRAWING of pieces (each piece drawn as a rectangle with its label, its two sizes and "= 1 PC" / "= 2 PCS" under it) counts as parts: one part per rectangle. '
+      +'For a drawn piece: width_mm = the size written along the horizontal side, length_mm = the size along the vertical side, qty = the "= N PCS" figure. '
+      +'Edge marks ("1MM EDGEBOND", a thick or double line, an arrow pointing at an edge) show which edges are banded: count them as L = vertical edges (left/right), W = horizontal edges (top/bottom). '
+      +'grain = "L" if a grain arrow inside the piece points up/down, "W" if it points left/right, "" if there is no arrow. name = the label above the piece; if a label is missing, describe it briefly. '
       +'material and thickness_mm = the board these parts are cut from, as written on the page (e.g. the page title). '
       +'qty = the quantity in THAT row on THIS page. length_mm and width_mm = the finished size as printed (L and W columns). '
-      +'edge = edge banding only if the page states it, written as counts of banded edges: "2L 2W", "1L", "4S" (all round) or "" if not stated. L = edges along the length, W = along the width. '
+      +'edge = edge banding only if the page states or marks it, written as counts of banded edges: "2L 2W", "1L", "1L 1W" or "" if not stated. L = edges along the length, W = along the width (never use S). '
       +'handgrab = a tapered/hand-grab edge, written the same way ("1L" = one long side), else "". groove = grooving the same way, else "". '
       +'notes = any other note on the row, as written. Do not invent rows or figures; if a figure is unreadable, skip that row and say so in notes of the next row. '
       +'If the page has no parts table (a 3D view, a summary only), reply {"has_parts":false,"parts":[]}.';
@@ -41565,8 +41618,8 @@ function linesToAoa(lines) {
       var merged={}, order=[];
       parts.forEach(function(x){
         var q=x.q, L=+q.length_mm||0, W=+q.width_mm||0;
-        var key=[String(q.name||'').trim().toLowerCase(),x.material.toLowerCase(),x.thk,L,W,String(q.edge||''),String(q.handgrab||''),String(q.groove||''),String(q.notes||'').trim().toLowerCase()].join('|');
-        if(!merged[key]){ merged[key]={name:String(q.name||'').trim(),material:x.material,thk:x.thk,L:L,W:W,qty:0,edge:String(q.edge||''),handgrab:String(q.handgrab||''),groove:String(q.groove||''),notes:String(q.notes||'').trim(),pages:[]}; order.push(key); }
+        var key=[String(q.name||'').trim().toLowerCase(),x.material.toLowerCase(),x.thk,L,W,String(q.edge||''),String(q.grain||''),String(q.handgrab||''),String(q.groove||''),String(q.notes||'').trim().toLowerCase()].join('|');
+        if(!merged[key]){ merged[key]={name:String(q.name||'').trim(),material:x.material,thk:x.thk,L:L,W:W,qty:0,edge:String(q.edge||''),grain:String(q.grain||'').toUpperCase().slice(0,1),handgrab:String(q.handgrab||''),groove:String(q.groove||''),notes:String(q.notes||'').trim(),pages:[]}; order.push(key); }
         merged[key].qty+=(+q.qty||0);
         if(merged[key].pages.indexOf(x.page)<0) merged[key].pages.push(x.page);
       });
@@ -41575,9 +41628,9 @@ function linesToAoa(lines) {
         f.error='The AI found no parts table in this PDF'+(failed.length?' (could not read page '+failed.join(', ')+')':'')+'. Type the parts into the cutting list instead.';
         render(); return;
       }
-      var aoa=[['Part','Material','Thk','Qty','Length','Width','Edge','Hand grab','Groove','Remarks']];
+      var aoa=[['Part','Material','Thk','Qty','Length','Width','Edge','Grain','Hand grab','Groove','Remarks']];
       order.forEach(function(k){ var r=merged[k];
-        aoa.push([r.name,r.material,r.thk||'',r.qty||'',r.L||'',r.W||'',r.edge,r.handgrab,r.groove,r.notes]); });
+        aoa.push([r.name,r.material,r.thk||'',r.qty||'',r.L||'',r.W||'',r.edge,r.grain,r.handgrab,r.groove,r.notes]); });
       f.error=''; f.aiOffer=false;
       var pcs=order.reduce(function(a,k){ return a+merged[k].qty; },0);
       f.aiNote='Read by AI from page'+(pagesWithParts.length===1?' ':'s ')+pagesWithParts.join(', ')+': '+order.length+' parts, '+pcs+' pieces. '
