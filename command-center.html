@@ -274,7 +274,11 @@ async function boot(){
     ' · <a href="#" onclick="supa.auth.signOut().then(function(){location.reload()});return false">Sign out</a>';
   if(!ME.allowed) return fatal('<b>'+esc(ME.email)+'</b> has not been given Command Center access. An Owner can add you under Command Center › Access.');
   await loadAll();
+  // PMES's Setup → Users links here as ?tab=pmes&edit=<email>: open that person's editor.
+  var _qEdit=norm(new URLSearchParams(location.search).get('edit')||'');
+  if(_qEdit&&TAB==='pmes'){ var _qi=D.pmes.findIndex(function(u){return norm(u.email)===_qEdit}); if(_qi>=0) ED.pmes=_qi; }
   drawNav(); draw();
+  if(ED.pmes!=null){ var _c=document.querySelector('.editcard'); if(_c) _c.scrollIntoView({block:'start'}); }
   var cameBack=false; try{ cameBack=sessionStorage.getItem('cc_gconnect')==='1'; sessionStorage.removeItem('cc_gconnect'); }catch(e){}
   if(TAB==='mc'&&gToken()) readSheet();
   else if(TAB==='mc'&&cameBack){
@@ -825,6 +829,7 @@ async function savePmes(i){
   var u=D.pmes[i], tr=el('pm-'+i);
   var patch={name:tr.querySelector('.f-name').value.trim(),role:tr.querySelector('.f-role').value,company:tr.querySelector('.f-co').value||null,
     stations:picked(tr,'f-st'),active:tr.querySelector('.f-act').checked,notes:tr.querySelector('.f-notes').value.trim()};
+  if(PMACC.ready&&tr.querySelector('.pa-wrap')){ var acc=pmAccRead(tr,u); if(acc===false) return; patch.access=acc; }
   var r=await supa.from('pmes_users').update(patch).eq('email',u.email).select();
   if(r.error) return toast(dbErr(r.error));
   if(!r.data||!r.data.length) return toast('Not saved — the database refused the change.');
@@ -835,6 +840,77 @@ async function addPmes(){
   var r=await supa.from('pmes_users').insert({email:e,name:el('pmNewName').value.trim(),role:el('pmNewRole').value,company:el('pmNewCo').value||null,stations:picked(el('pmNewSt'),'f-st')});
   if(r.error) return toast(dbErr(r.error));
   toast('Added '+e+' to PMES'); ED.pmes=null; await refresh();
+}
+
+/* ── PMES screens & actions per user (Rommel 2026-10-30) ──────────────────────
+   pmes_users.access overrides the role's defaults for one person:
+     tabs / more / home — which bottom tabs, which More items, which screen they land on;
+     actions — an on/off switch per key action (Allow / Block; approvals can only be blocked).
+   The catalog and every role's defaults come from the database (pmes_access_catalog,
+   pmes_role_defaults), the same rules PMES and the database enforce (pmes_allow). */
+var PMES_APP_URL='https://rotaligatos.github.io/PMES/';
+var PMACC={ready:false,missing:false,loading:false,catalog:null,defaults:{}};
+async function pmAccLoad(){
+  if(PMACC.ready||PMACC.loading) return; PMACC.loading=true;
+  try{
+    var c=await supa.rpc('pmes_access_catalog');
+    if(c.error){ PMACC.missing=true; return; }
+    var d=await Promise.all(PMES_ROLES.map(function(r){return supa.rpc('pmes_role_defaults',{p_role:r})}));
+    PMACC.catalog=c.data; PMES_ROLES.forEach(function(r,i){PMACC.defaults[r]=d[i].data||{}});
+    PMACC.ready=true;
+  } finally { PMACC.loading=false; if(TAB==='pmes') draw(); }
+}
+function pmAccCustom(a){ a=a||{}; return Array.isArray(a.tabs)||Array.isArray(a.more)||!!a.home||Object.keys(a.actions||{}).length>0; }
+function pmAccBlock(u){
+  if(PMACC.missing) return '<div class="note err" style="margin-top:12px">Screens &amp; actions need the PMES access update in the database (supabase_pmes_user_access.sql). Until then the role decides.</div>';
+  if(!PMACC.ready){ pmAccLoad(); return '<div class="sub" style="margin-top:12px">Loading screens &amp; actions…</div>'; }
+  var a=u.access||{}, d=PMACC.defaults[u.role]||{}, cat=PMACC.catalog;
+  var onScr=Array.isArray(a.tabs)||Array.isArray(a.more)||!!a.home;
+  var tabs=Array.isArray(a.tabs)?a.tabs:(d.tabs||[]), more=Array.isArray(a.more)?a.more:(d.more||[]), home=a.home||d.home;
+  var box=function(list,sel,cls){return list.map(function(x){return '<label class="chk"><input type="checkbox" class="'+cls+'" value="'+esc(x[0])+'"'+(sel.indexOf(x[0])>=0?' checked':'')+'>'+esc(x[1])+'</label>'}).join('')};
+  var dflt=function(list,sel){return list.filter(function(x){return sel.indexOf(x[0])>=0}).map(function(x){return x[1]}).join(', ')||'none'};
+  var acts=(cat.actions||[]).map(function(x){
+    var dv=!!(d.actions||{})[x.key], o=(a.actions||{})[x.key], v=o===true?'allow':o===false?'block':'';
+    return '<tr><td>'+esc(x.label)+'<div class="sub">'+esc(x.step)+'</div></td><td>'+(dv?'<span class="pill p-on">On</span>':'<span class="pill p-none">Off</span>')+'</td>'
+      +'<td><select class="pa-act" data-k="'+esc(x.key)+'" style="width:100%">'
+      +'<option value=""'+(v===''?' selected':'')+'>Role default ('+(dv?'on':'off')+')</option>'
+      +(x.grant||v==='allow'?'<option value="allow"'+(v==='allow'?' selected':'')+'>Allow</option>':'')
+      +'<option value="block"'+(v==='block'?' selected':'')+'>Block</option></select></td></tr>';
+  }).join('');
+  return '<div class="pa-wrap" style="margin-top:16px;border-top:1px solid var(--line,#ddd);padding-top:12px">'
+    +'<div class="flex" style="gap:8px;align-items:center"><h3 style="margin:0">Screens &amp; actions</h3>'
+    +(pmAccCustom(a)?'<span class="pill p-on">Custom</span>':'<span class="pill p-none">Role default</span>')
+    +'<a class="btn" style="margin-left:auto" href="'+PMES_APP_URL+'?viewas='+encodeURIComponent(u.email)+'" target="_blank" rel="noopener" title="Opens PMES showing exactly what this person sees. Read-only; you must be a PMES admin.">View in PMES ↗</a></div>'
+    +'<p class="sub">Defaults below are for the saved role (<b>'+esc(u.role)+'</b>). Change the role first and save, then fine-tune here.</p>'
+    +'<label class="chk"><input type="checkbox" class="pa-scr-on"'+(onScr?' checked':'')+' onchange="this.closest(\'.pa-wrap\').querySelector(\'.pa-scr\').style.display=this.checked?\'\':\'none\'">Customise screens</label>'
+    +'<div class="sub">Role default — tabs: '+esc(dflt(cat.tabs,d.tabs||[]))+' · More: '+esc(dflt(cat.more,d.more||[]))+' · lands on: '+esc(dflt(cat.tabs,[d.home]))+'</div>'
+    +'<div class="pa-scr" style="'+(onScr?'':'display:none')+';margin:8px 0 4px">'
+      +'<div class="sub">Bottom tabs</div><div>'+box(cat.tabs,tabs,'pa-tab')+'</div>'
+      +'<div class="sub" style="margin-top:6px">More menu</div><div>'+box(cat.more,more,'pa-more')+'</div>'
+      +'<div class="sub" style="margin-top:6px">Lands on</div><select class="pa-home">'+cat.tabs.filter(function(x){return x[0]!=='more'}).map(function(x){return '<option value="'+x[0]+'"'+(x[0]===home?' selected':'')+'>'+esc(x[1])+'</option>'}).join('')+'</select>'
+      +'<div class="sub" style="margin-top:4px">Showing a screen does not let them change anything there — the actions below and their role decide that.</div>'
+    +'</div>'
+    +'<div class="sub" style="margin-top:10px">Actions — enforced by the database, not just hidden. Approvals of the Job Order and schedule can only be blocked (their two-person rules depend on rank).</div>'
+    +'<div class="tbl-wrap"><table><thead><tr><th>Action</th><th>Role</th><th>For this person</th></tr></thead><tbody>'+acts+'</tbody></table></div>'
+    +'<button class="btn" style="margin-top:6px" onclick="pmAccReset(this)">Reset to role default</button>'
+    +'</div>';
+}
+function pmAccReset(btn){
+  var w=btn.closest('.pa-wrap'); w.querySelector('.pa-scr-on').checked=false; w.querySelector('.pa-scr').style.display='none';
+  [].forEach.call(w.querySelectorAll('.pa-act'),function(s){s.value=''}); toast('Reset — press Save to keep it.');
+}
+function pmAccRead(root,u){
+  var w=root.querySelector('.pa-wrap'), acc={}, acts={};
+  if(w.querySelector('.pa-scr-on').checked){
+    acc.tabs=picked(w,'pa-tab'); acc.more=picked(w,'pa-more'); acc.home=w.querySelector('.pa-home').value;
+    if(!acc.tabs.length){ toast('Tick at least one bottom tab, or untick Customise screens.'); return false; }
+    if(acc.tabs.indexOf(acc.home)<0){ toast('The screen they land on must be one of their tabs.'); return false; }
+    if(acc.more.length&&acc.tabs.indexOf('more')<0){ toast('More menu items need the More tab — tick it, or clear the More items.'); return false; }
+  }
+  [].forEach.call(w.querySelectorAll('.pa-act'),function(s){ if(s.value==='allow') acts[s.dataset.k]=true; else if(s.value==='block') acts[s.dataset.k]=false; });
+  if(Object.keys(acts).length) acc.actions=acts;
+  if(norm(u.email)===norm(ME&&ME.email)&&u.role==='admin'&&(acc.tabs&&acc.more&&acc.more.indexOf('settings')<0)&&!confirm('You are hiding Setup from your own PMES. Continue?')) return false;
+  return acc;
 }
 
 /* ── KEYSTONE users + capabilities ───────────────────────────────────────── */
@@ -1277,19 +1353,21 @@ function viewPmes(){
       +fld('Company','<select class="f-co" style="width:100%"><option value="">—</option>'+COMPANIES.map(function(x){return '<option value="'+esc(x)+'"'+(coKey(x)===coKey(u.company)?' selected':'')+'>'+esc(coShow(x))+'</option>'}).join('')+'</select>')
       +fld('Notes','<input class="f-notes" value="'+esc(u.notes)+'" style="width:100%">')
       +'<div><label class="chk"><input type="checkbox" class="f-act"'+(u.active?' checked':'')+'>Active (can sign in)</label></div>'
-      +'</div><div class="sub" style="margin-top:10px">Stations (operators only — none ticked = any)</div><div>'+stationBoxes(u.stations||[],'f-st')+'</div>','savePmes('+e+')','pmes','removePmes('+e+')','Remove from PMES');
+      +'</div><div class="sub" style="margin-top:10px">Stations (operators only — none ticked = any)</div><div>'+stationBoxes(u.stations||[],'f-st')+'</div>'+pmAccBlock(u),'savePmes('+e+')','pmes','removePmes('+e+')','Remove from PMES');
   }
   return '<div class="card"><p class="sub" style="margin:0"><b>Staff</b>: office production staff — sees everything, changes nothing yet. '
     +'<b>Materials</b>: confirms what arrived on each MRF and inspects boards. <b>Operator</b> (rank and file): scans and logs work, only at ticked stations (none = any). <b>Shift head</b> (foreman): hands out process Job Orders to machines/operators and updates accomplishment. <b>Production engineer</b>: prepares the loading schedule. '
     +'<b>Supervisor</b>: all stations, jobs, job materials, packing. <b>Manager</b>: + setup lists, machines, standards. <b>Admin</b>: + manages PMES users.</p></div>'
     +form+'<div class="card">'+listBar("openEd('pmes','add')",'+ Add user')
-    +'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role</th><th>Stations</th><th>Notes</th><th>Status</th><th></th></tr></thead><tbody>'
+    +'<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Role</th><th>Stations</th><th>Access</th><th>Notes</th><th>Status</th><th></th></tr></thead><tbody>'
     +D.pmes.map(function(u,i){
       if(!passCo(u.company)) return '';
       return '<tr'+sAttr([u.name,u.email,u.role,u.company,coShort(u.company),(u.stations||[]).join(' '),u.notes],!u.active)+(u.active?'':' class="off"')+'><td><b>'+esc(u.name||'—')+'</b></td><td class="mono">'+esc(u.email)+'</td>'
         +'<td>'+esc(coShort(u.company)||'—')+'</td><td>'+rolePill(u,u.role==='admin')+'</td>'
-        +'<td>'+(u.role==='operator'?tagList(u.stations):'<span class="muted">—</span>')+'</td><td class="muted">'+esc(u.notes||'')+'</td>'
-        +'<td>'+actPill(u.active)+'</td><td><button class="btn" onclick="openEd(\'pmes\','+i+')">Edit</button></td></tr>'}).join('')
+        +'<td>'+(u.role==='operator'?tagList(u.stations):'<span class="muted">—</span>')+'</td>'
+        +'<td>'+(pmAccCustom(u.access)?'<span class="pill p-on" title="Screens or actions set for this person">Custom</span>':'<span class="muted">Role</span>')+'</td><td class="muted">'+esc(u.notes||'')+'</td>'
+        +'<td>'+actPill(u.active)+'</td><td style="white-space:nowrap"><button class="btn" onclick="openEd(\'pmes\','+i+')">Edit</button>'
+        +(u.active?' <a class="btn" href="'+PMES_APP_URL+'?viewas='+encodeURIComponent(u.email)+'" target="_blank" rel="noopener" title="See PMES as this person (read-only, PMES admins)">View ↗</a>':'')+'</td></tr>'}).join('')
     +'</tbody></table></div></div>';
 }
 
