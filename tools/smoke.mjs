@@ -5275,6 +5275,28 @@ const PROFILES = {
              pickedUpServerLock: { locked: true, uiRefreshed: true },
              noOpWhenUnchanged: true,
              pickedUpFQUnlock: { fqLocked: false, qLockedUntouched: true, uiRefreshed: true } });
+      /* Rommel, 2026-10-30: a quotation with options gets one price in the Project List (the option
+         edited last), with each option's own price on lines under it; a value that was another
+         option's locked price is shown as the active option's own. */
+      check('Project List: option lines under a multi-option quotation, one price in Value', () => {
+        const w = window;
+        const saved = { d: w.dirData, ol: w._dirOptLines, op: w.dirOptOpen, dsa: w.dirShowArchived, s: document.getElementById('dir-search').value };
+        try {
+          w.dirShowArchived = true; document.getElementById('dir-search').value = 'QT-M00000943';
+          w.dirData = [{ id:'QT-M00000943', baseSerial:'QT-M00000943', created:'2026-10-01T00:00:00Z', client:'Opt Co', type:'Fabrication only',
+            value:177496.26, user:'T', status:'FQ Awaiting Client Approval', stage:'Final', options:2, updatedAt:'2026-10-29T00:00:00Z' }];
+          w._dirOptLines = { 'QT-M00000943': { active:2, activeGrand:136654.56, opts:[
+            { id:1, label:'Option 1', grand:177496.26, locked:true, status:'active' }, { id:2, label:'Option 2', grand:136654.56, locked:true, status:'active' }] } };
+          w._applyDirOptLines();
+          const value = w.dirData[0].value;
+          w.dirOptOpen = {}; w.renderDirectoryTable();
+          const closed = document.querySelectorAll('#dir-table .dir-opt-row').length;
+          w._dirToggleOpts('QT-M00000943');
+          const html = document.getElementById('dir-table').innerHTML;
+          return { value, closed, open: document.querySelectorAll('#dir-table .dir-opt-row').length,
+            both: html.indexOf('177,496.26') >= 0 && html.indexOf('136,654.56') >= 0 };
+        } finally { w.dirData = saved.d; w._dirOptLines = saved.ol; w.dirOptOpen = saved.op; w.dirShowArchived = saved.dsa; document.getElementById('dir-search').value = saved.s; }
+      }, { value:136654.56, closed:0, open:1, both:true });
       /* Rommel, 2026-10-30 (QT-M00000217): the locked price was one figure shared by every option,
          so Option 1 was held at Option 2's ₱484,491.20. Each option now keeps its own. */
       check('Options: each option keeps its own locked price', () => {

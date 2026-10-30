@@ -13595,9 +13595,68 @@ function gLoadDirData(cb){
         dirData.push(entry); seen[baseS]=entry;
       }
     }
-    if(!d.error) _dirLoadedAt=Date.now();
+    if(!d.error){ _dirLoadedAt=Date.now(); _applyDirOptLines(); _loadDirOptLines(); }
     dirLoading=false; if(cb) cb();
   }).catch(function(){dirLoading=false; if(cb) cb();});
+}
+
+// ── Quotations with several options (Rommel, 2026-10-30) ───────────────────────────────
+// The Project List gives a quotation ONE price (the Value column, which the dashboard and reports
+// also use). With options, that is the option edited last (or the approved one, which is switched
+// to when approved). Each option's own price is listed under the row on request, never added up.
+// Read from the saved quotation (quotation_option_lines), so it needs no new Sheet column.
+var _dirOptLines={};      // base serial -> {active, activeGrand, opts:[{id,label,grand,locked,status}]}
+var dirOptOpen={};        // base serial -> true while its option lines are shown
+function _loadDirOptLines(){
+  if(typeof supaReady!=='function'||!supaReady()) return;
+  supa.from('quotation_option_lines').select('serial,active_id,active_grand,opts').then(function(r){
+    if(!r||r.error||!r.data) return;
+    var m={};
+    r.data.forEach(function(x){ m[x.serial]={active:Number(x.active_id)||0,activeGrand:Number(x.active_grand)||0,opts:x.opts||[]}; });
+    _dirOptLines=m; _applyDirOptLines();
+    var pg=el('page-directory'); if(pg&&pg.classList.contains('active')&&typeof renderDirectoryTable==='function') renderDirectoryTable();
+  });
+}
+// A locked option used to be held at ANOTHER option's locked price, and that wrong figure reached
+// the Value column. Where the row's value is some other option's price and not the active one's,
+// show the active option's own price. Any other difference (e.g. a locked price the recompute has
+// drifted from) is left alone — that one is deliberate.
+function _dirMainValue(e,info){
+  if(!info||!info.opts||info.opts.length<2) return e.value;
+  var near=function(a,b){ return Math.abs((Number(a)||0)-(Number(b)||0))<1; };
+  var act=info.opts.find(function(o){ return Number(o.id)===info.active; });
+  var actGrand=info.activeGrand||(act&&Number(act.grand))||0;
+  if(!(actGrand>0)||near(e.value,actGrand)) return e.value;
+  var isOther=info.opts.some(function(o){ return Number(o.id)!==info.active&&near(e.value,o.grand); });
+  return isOther?actGrand:e.value;
+}
+function _applyDirOptLines(){
+  (dirData||[]).forEach(function(e){
+    var info=_dirOptLines[e.baseSerial||e.id]; if(!info) return;
+    if(e._sheetValue===undefined) e._sheetValue=e.value;
+    e.value=_dirMainValue({value:e._sheetValue},info);
+  });
+}
+function _dirToggleOpts(base){ dirOptOpen[base]=!dirOptOpen[base]; renderDirectoryTable(); }
+function _dirOptRowsHtml(p,info,ncols){
+  var h='<tr class="dir-opt-row" style="background:var(--card2)"><td colspan="'+ncols+'" style="padding:6px 12px 8px 48px">'
+    +'<div style="display:flex;flex-direction:column;gap:3px">';
+  info.opts.forEach(function(o){
+    var id=Number(o.id), isAct=id===info.active, arch=o.status==='archived';
+    var g=isAct?(info.activeGrand||o.grand):o.grand;
+    var st=o.status==='approved'?'<span class="pill pill-teal" style="font-size:10px">approved</span>'
+      :arch?'<span class="pill pill-muted" style="font-size:10px">archived</span>'
+      :o.locked?'<span class="pill pill-navy" style="font-size:10px">locked</span>'
+      :'<span class="pill pill-muted" style="font-size:10px">open</span>';
+    h+='<div onclick="event.stopPropagation();openQuotationFromDir(\''+escHtml(p.id)+'\','+id+')" title="Open this quotation on '+escHtml(o.label||('Option '+id))+'"'
+      +' style="display:flex;align-items:center;gap:10px;font-size:12px;cursor:pointer;padding:2px 0'+(arch?';opacity:.6':'')+'">'
+      +'<span style="color:var(--text2)">'+(isAct?'└':'├')+'</span>'
+      +'<b style="min-width:70px">'+escHtml(o.label||('Option '+id))+'</b>'
+      +'<span style="min-width:110px;font-weight:500">'+fmtMoney(Number(g)||0)+'</span>'+st
+      +(isAct?'<span style="font-size:11px;color:var(--text2)">← price shown in the list</span>':'')
+      +'</div>';
+  });
+  return h+'</div></td></tr>';
 }
 
 // ── The list must show the LATEST change, not YOUR latest change ─────────────────────────
@@ -27062,7 +27121,11 @@ function renderDirectoryTable(){
     h+='<tr style="cursor:pointer'+(dirSelected[p.id]?';background:var(--wash-amber)':'')+'" onclick="openQuotationFromDir(\''+p.id+'\')">';
     if(currentRole==='Admin') h+='<td style="text-align:center" onclick="event.stopPropagation()"><input type="checkbox" '+(dirSelected[p.id]?'checked':'')+' onchange="toggleDirSelect(\''+escHtml(p.id)+'\',this.checked)"></td>';
     h+='<td style="text-align:center" onclick="event.stopPropagation()"><button onclick="toggleFollow(\''+p.id+'\')" style="background:none;border:none;cursor:pointer;padding:4px;color:'+(fol?"var(--amber)":"var(--line2)")+'"><i class="ti ti-star'+(fol?"-filled":"")+'" style="font-size:15px"></i></button></td>';
-    if(dirColPrefs.serial)        h+='<td style="font-family:monospace;font-size:11px;color:var(--text2)">'+escHtml(p.id)+(optCount>1?' <span class="pill pill-navy" style="font-size:10px;vertical-align:middle">'+optCount+' opts</span>':'')+'</td>';
+    var _oi=_dirOptLines[p.baseSerial||p.id], _ob=p.baseSerial||p.id;
+    var _optTag=(_oi&&_oi.opts.length>1)
+      ?' <button onclick="event.stopPropagation();_dirToggleOpts(\''+escHtml(_ob)+'\')" class="pill pill-navy" style="font-size:10px;vertical-align:middle;border:none;cursor:pointer" title="Show each option&#39;s price">'+(dirOptOpen[_ob]?'▾':'▸')+' '+optCount+' options</button>'
+      :(optCount>1?' <span class="pill pill-navy" style="font-size:10px;vertical-align:middle">'+optCount+' opts</span>':'');
+    if(dirColPrefs.serial)        h+='<td style="font-family:monospace;font-size:11px;color:var(--text2)">'+escHtml(p.id)+_optTag+'</td>';
     if(dirColPrefs.client)        h+='<td style="font-weight:500">'+escHtml(p.client||'—')+'</td>';
     if(dirColPrefs.project)       h+='<td style="font-size:12px">'+escHtml(p.project||'—')+'</td>';
     if(dirColPrefs.contact)       h+='<td style="font-size:12px;color:var(--text2)">'+escHtml(p.contact||'—')+'</td>';
@@ -27089,6 +27152,7 @@ function renderDirectoryTable(){
       +(currentRole==='Admin'?' <button class="btn" style="font-size:11px;padding:3px 8px;color:var(--coral);border-color:var(--coral)" onclick="deleteQuotation(\''+escHtml(p.id)+'\')" title="Delete quotation"><i class="ti ti-trash"></i></button>':'')
       +'</td>';
     h+='</tr>';
+    if(_oi&&_oi.opts.length>1&&dirOptOpen[_ob]) h+=_dirOptRowsHtml(p,_oi,(th.match(/<th/g)||[]).length);
   }
   var dirHead=el('dir-thead'); if(dirHead) dirHead.innerHTML=th;
   html('dir-table',h||'<tr><td colspan="15" style="text-align:center;padding:24px;color:var(--text2)">No quotations found.</td></tr>');
@@ -27112,7 +27176,7 @@ function _dirSyncScrollbarTop(){
   bar.style.top=(52+h)+'px';
 }
 window.addEventListener('resize',function(){ try{ _dirSyncScrollbarTop(); }catch(e){} });
-function openQuotationFromDir(quotId){
+function openQuotationFromDir(quotId,optId){
   confirmUnsavedThen(function(){
     // Show loading toast
     var t=el('drive-toast');
@@ -27121,6 +27185,8 @@ function openQuotationFromDir(quotId){
       if(t){t.style.display='none';}
       if(state){
         restoreFullQuotationState(state);
+        // Opened from an option line in the Project List: show that option.
+        if(optId&&qActiveOptionId!==optId&&(qOptionsList||[]).some(function(o){return o.id===optId;})) switchToOption(optId);
       } else {
         // JSON state not found — quotation was saved before the state feature
         // Show the Drive HTML printout link if available, or helpful message
