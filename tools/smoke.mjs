@@ -5275,6 +5275,25 @@ const PROFILES = {
              pickedUpServerLock: { locked: true, uiRefreshed: true },
              noOpWhenUnchanged: true,
              pickedUpFQUnlock: { fqLocked: false, qLockedUntouched: true, uiRefreshed: true } });
+      /* Rommel, 2026-10-30: a Designers Support analysis / typed cutting list must survive a closed
+         tab or a PC that went off. The work is copied to this browser and offered back; a saved
+         draft restores the same list. */
+      check('Designers Support: unsaved work is kept on this PC and can be restored', () => {
+        const w = window;
+        const saved = { u: w.gUser, r: w.prodState.result, m: JSON.parse(JSON.stringify(w.MCL.state())) };
+        try {
+          w.gUser = { email: 'smoke@test' };
+          w.prodState.result = null; w.prodState.summary = null; w.prodState.elevationResult = null;
+          const st = w.MCL.state(); st.panels = [Object.assign(w.MCL.blankPanel(), { L: 600, W: 400, mat: 'Real White PB 4x8 2F (18mm, Matte)' })];
+          w._dsAutosaveNow(true);
+          w.MCL.setState({ panels: [w.MCL.blankPanel()] });
+          const banner = w._dsRestoreBanner().indexOf('Unsaved work') >= 0;
+          w._dsRestoreAuto();
+          const back = w.MCL.state().panels[0];
+          return { banner, L: back.L, mat: back.mat, noBannerNow: w._dsRestoreBanner() === '' };
+        } finally { try { localStorage.removeItem('mc_ds_autosave_smoke@test'); } catch (e) {}
+          w.gUser = saved.u; w.prodState.result = saved.r; w.MCL.setState(saved.m); }
+      }, { banner:true, L:600, mat:'Real White PB 4x8 2F (18mm, Matte)', noBannerNow:true });
       /* Rommel, 2026-10-30: a quotation with options gets one price in the Project List (the option
          edited last), with each option's own price on lines under it; a value that was another
          option's locked price is shown as the active option's own. */

@@ -38977,7 +38977,7 @@ function renderProductionPage() {
   // Route to correct tab
   if(prodTab==='mobility'){w.innerHTML=_buildMobilityCard();return;}
   if(prodTab==='saved'){w.innerHTML=_buildSavedAnalysesTab();return;}
-  if(prodTab==='cutlist'){w.innerHTML=MCL.build();MCL.afterRender();return;}
+  if(prodTab==='cutlist'){w.innerHTML=_dsRestoreBanner()+MCL.build();MCL.afterRender();return;}
   if(prodTab==='files'){ _ofRenderProdFiles(w); return; }
   // Sync tab button state (in case page was navigated to directly)
   var dt=el('prod-tab-drawing'); if(dt) dt.classList.toggle('active',prodTab==='drawing');
@@ -39032,11 +39032,11 @@ function renderProductionPage() {
   // of this fix added a second header duplicating both; caught by reading the actual rendered HTML,
   // not just the numbers, and removed. Nothing added here beyond skipping the irrelevant card.
   if(showResult){
-    w.innerHTML=resultHtml;
+    w.innerHTML=_dsDraftNote()+resultHtml;
     if(!el('prod-spin-style')){var st2=document.createElement('style');st2.id='prod-spin-style';st2.textContent='@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}';document.head.appendChild(st2);}
     return;
   }
-  w.innerHTML=(noKey?'<div class="alert alert-warn" style="margin-bottom:14px"><i class="ti ti-alert-triangle"></i>No Claude API key configured. <a href="#" onclick="navigate(\'settings\');setTimeout(function(){setStTab(\'production\')},150);return false" style="font-weight:500">Set it in Settings → Designers Support</a>.</div>':'')
+  w.innerHTML=_dsRestoreBanner()+(noKey?'<div class="alert alert-warn" style="margin-bottom:14px"><i class="ti ti-alert-triangle"></i>No Claude API key configured. <a href="#" onclick="navigate(\'settings\');setTimeout(function(){setStTab(\'production\')},150);return false" style="font-weight:500">Set it in Settings → Designers Support</a>.</div>':'')
     +'<div class="card" style="margin-bottom:14px">'
     +'<div class="card-head"><h3><i class="ti ti-upload"></i>Upload file for analysis</h3></div>'
     +'<div class="card-body">'
@@ -39591,6 +39591,7 @@ var MCL=(function(){
     h+='<div class="card" style="padding:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
       +'<div style="font-size:12px;color:var(--text2)">'+footerText()+'</div><div style="flex:1"></div>'
       +'<button class="btn" style="font-size:12px;padding:6px 12px" onclick="MCL.clear()">Clear</button>'
+      +'<button class="btn" style="font-size:12px;padding:6px 12px" onclick="prodSaveDraft()" title="Keep this cutting list to come back to later, on any PC"><i class="ti ti-device-floppy"></i>Save draft</button>'
       +'<button class="btn btn-navy" style="font-size:12px;padding:6px 14px" onclick="MCL.load()">'
       +'<i class="ti ti-arrow-right"></i>Load into analysis</button></div>';
     return h;
@@ -40184,6 +40185,8 @@ var MCL=(function(){
       S.panels=blankPanels(10); S.hpl=[]; S.hardware=[]; S.sourceFiles=[]; S.drawings=[]; S.hplFaces=0; rerender();
     },
     state:function(){ return S; },
+    // A saved draft brought back (Designers Support drafts). Files and drawing pages are not kept.
+    setState:function(st){ if(!st) return; ['grain','groupBy','panels','hpl','hardware','hplFaces'].forEach(function(k){ if(st[k]!==undefined) S[k]=JSON.parse(JSON.stringify(st[k])); }); S.sourceFiles=[]; S.drawings=[]; },
     setSourceFiles:function(files){ S.sourceFiles=(files||[]).slice(); },
     setSourceDrawings:function(d){ S.drawings=(d||[]).slice(); },
     thicknessFor:function(v){ return thicknessForMaterial(v); },
@@ -42976,6 +42979,7 @@ var _prodSavedAnalyses=[];   // cached rows from supaGetDrawingAnalyses()
 var _prodSavedFilter='';
 var _prodSavedLoading=false;
 function _prodLoadSavedAnalysesList(){
+  _dsLoadDrafts();
   _prodSavedLoading=true;
   supaGetDrawingAnalyses().then(function(rows){
     _prodSavedAnalyses=rows||[];
@@ -42994,6 +42998,7 @@ function _buildSavedAnalysesTab(){
   });
   var h='<div style="margin-bottom:14px"><h3 style="margin:0 0 4px"><i class="ti ti-history"></i> Saved Analyses</h3>'
     +'<p style="font-size:12px;color:var(--text2);margin:0">Past Designers Support analyses that were reflected into a quotation and saved when that quotation was locked/approved. View/edit, download the original upload, or reprint.</p></div>'
+    +_dsDraftsListHtml()
     +'<input type="text" placeholder="Search by serial, client, or file name…" value="'+escHtml(_prodSavedFilter)+'" oninput="_prodSetSavedFilter(this.value)" style="height:36px;width:100%;max-width:360px;margin-bottom:12px">';
   if(!supaReady()){
     h+='<div class="alert alert-info" style="margin-bottom:12px"><i class="ti ti-info-circle"></i>Connect to the fast database to browse saved analyses — Settings → Company &amp; DB → "Fast database (Supabase)".</div>';
@@ -44515,10 +44520,150 @@ function prodHandleFiles(files){
   renderProductionPage();
 }
 function prodClearFile(){
+  prodState._draftId=null; prodState._draftName='';
   prodState.file=null; prodState.fileName=''; prodState.result=null;
   prodState.elevationResult=null; prodState.phase='upload'; prodState.summary=null;
   prodState.expandedLayout={}; prodState.selBoard={};
   renderProductionPage();
+}
+
+// ── Designers Support drafts (Rommel, 2026-10-30) ─────────────────────────────────────────
+// An analysis or a typed cutting list lived only in the open tab: a closed browser or a PC that
+// went off lost it. "Save draft" keeps it in ds_drafts (yours only, any PC); on top of that the
+// work is copied to this browser every 30 s, and offered back if the page was left unsaved.
+// The uploaded file itself and drawing-page images are not kept — re-attach the file if needed.
+var _dsDrafts=[], _dsDraftsLoaded=false, _dsAutoSig='', _dsAutoDismissed=false;
+function _dsAutoKey(){ return 'mc_ds_autosave_'+String((typeof gUser!=='undefined'&&gUser&&gUser.email)||'anon').toLowerCase(); }
+function _dsPayload(){
+  var r=prodState.result?JSON.parse(JSON.stringify(prodState.result)):null;
+  if(r){ delete r.drawings; delete r._orderFile; }
+  var mcl=(typeof MCL!=='undefined'&&MCL.state)?MCL.state():null;
+  return {v:1, fileName:prodState.fileName||'', fileType:prodState.fileType||'', phase:prodState.phase||'',
+    woodgrainDir:prodState.woodgrainDir||'length', result:r,
+    summary:prodState.summary?JSON.parse(JSON.stringify(prodState.summary)):null,
+    elevationResult:prodState.elevationResult?JSON.parse(JSON.stringify(prodState.elevationResult)):null,
+    mcl:mcl?JSON.parse(JSON.stringify({grain:mcl.grain,groupBy:mcl.groupBy,panels:mcl.panels,hpl:mcl.hpl,hardware:mcl.hardware,hplFaces:mcl.hplFaces})):null,
+    serial:qSerial||'', savedAt:new Date().toISOString()};
+}
+function _dsCounts(d){
+  var comps=((d&&d.result&&d.result.components)||[]).length;
+  var rows=((d&&d.mcl&&d.mcl.panels)||[]).filter(function(p){ return (+p.L>0&&+p.W>0)||String(p.mat||'').trim(); }).length;
+  return {comps:comps, rows:rows};
+}
+function _dsHasWork(d){ var c=_dsCounts(d); return c.comps>0||c.rows>0||!!(d&&d.elevationResult); }
+function _dsApply(d){
+  if(!d) return;
+  prodState.file=null; prodState.fileName=d.fileName||''; prodState.fileType=d.fileType||'shop-drawing';
+  prodState.woodgrainDir=d.woodgrainDir||'length'; prodState.phase=d.phase||'upload';
+  prodState.result=d.result||null; prodState.summary=d.summary||null; prodState.elevationResult=d.elevationResult||null;
+  prodState.expandedLayout={}; prodState.selBoard={};
+  if(d.mcl&&typeof MCL!=='undefined'&&MCL.setState) MCL.setState(d.mcl);
+}
+function prodSaveDraft(){
+  var d=_dsPayload();
+  if(!_dsHasWork(d)){ showToast('Nothing to save yet — type a cutting list or load an analysis first.'); return; }
+  if(typeof supaReady!=='function'||!supaReady()){ _dsAutosaveNow(true); showToast('Saved on this PC only — connect the fast database (Settings → Company & DB) to keep drafts on any PC.'); return; }
+  var cl=(el('cl-bizname')&&el('cl-bizname').value)||(el('cl-name')&&el('cl-name').value)||'';
+  var fn=(d.fileName&&!/— entered in Modcraft$/.test(d.fileName))?d.fileName:'';
+  var def=prodState._draftName||[fn,cl,qSerial].filter(Boolean).join(' — ')||('Draft '+new Date().toLocaleString());
+  var name=prompt('Name this draft:',def);
+  if(name===null) return;
+  name=String(name).trim()||def;
+  var c=_dsCounts(d);
+  var row={name:name, serial:qSerial||null, data:d, components:c.comps, rows:c.rows,
+    owner_name:(gUser&&(gUser.name||gUser.email))||''};
+  var q=prodState._draftId?supa.from('ds_drafts').update(row).eq('id',prodState._draftId).select('id').maybeSingle()
+    :supa.from('ds_drafts').insert(row).select('id').maybeSingle();
+  q.then(function(r){
+    if(r.error||!r.data){ _dsAutosaveNow(true); showToast('Could not save the draft ('+((r.error&&r.error.message)||'not saved')+') — kept on this PC.'); return; }
+    prodState._draftId=r.data.id; prodState._draftName=name;
+    _dsAutosaveNow(true);
+    showToast('Draft saved — “'+name+'”. Open it again from Designers Support → Saved Analyses.');
+    _dsLoadDrafts();
+    renderProductionPage();
+  });
+}
+function _dsLoadDrafts(){
+  if(typeof supaReady!=='function'||!supaReady()) return;
+  supa.from('ds_drafts').select('id,name,serial,components,rows,updated_at,owner_email,owner_name')
+    .eq('owner_email',String((gUser&&gUser.email)||'').toLowerCase()).order('updated_at',{ascending:false}).limit(100)
+    .then(function(r){ _dsDrafts=(r&&!r.error&&r.data)||[]; _dsDraftsLoaded=true; if(prodTab==='saved') renderProductionPage(); });
+}
+function _dsDraftsListHtml(){
+  var h='<div class="card" style="margin-bottom:16px"><div class="card-head"><h3><i class="ti ti-device-floppy"></i>My drafts</h3></div><div class="card-body" style="padding:8px 14px">';
+  if(!_dsDraftsLoaded) return h+'<div style="font-size:12px;color:var(--text2)">Loading…</div></div></div>';
+  if(!_dsDrafts.length) return h+'<div style="font-size:12px;color:var(--text2)">No drafts yet. Press <b>Save draft</b> on a cutting list or an analysis to keep it here.</div></div></div>';
+  _dsDrafts.forEach(function(x){
+    h+='<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:.5px solid var(--border);font-size:13px">'
+      +'<b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(x.name)+'</b>'
+      +'<span style="font-size:12px;color:var(--text2)">'+(x.components?x.components+' components':(x.rows||0)+' rows')+(x.serial?' · '+escHtml(x.serial):'')+'</span>'
+      +'<span style="font-size:12px;color:var(--text2);min-width:110px">'+fmtDT(x.updated_at)+'</span>'
+      +'<button class="btn btn-primary" style="font-size:12px;padding:4px 10px" onclick="prodOpenDraft(\''+x.id+'\')">Open</button>'
+      +'<button class="btn" style="font-size:12px;padding:4px 8px;color:var(--coral)" onclick="prodDeleteDraft(\''+x.id+'\')" title="Delete draft"><i class="ti ti-trash"></i></button>'
+      +'</div>';
+  });
+  return h+'</div></div>';
+}
+function prodOpenDraft(id){
+  var go=function(){
+    supa.from('ds_drafts').select('id,name,data').eq('id',id).maybeSingle().then(function(r){
+      if(!r||r.error||!r.data){ showToast('Could not open the draft.'); return; }
+      _dsApply(r.data.data); prodState._draftId=r.data.id; prodState._draftName=r.data.name;
+      var d=r.data.data||{};
+      setProdTab(d.result||d.elevationResult?'drawing':'cutlist');
+      showToast('Draft opened — “'+r.data.name+'”.');
+    });
+  };
+  if(_dsHasWork(_dsPayload())&&prodState._draftId!==id) _confirm('Open this draft? The cutting list / analysis on screen now will be replaced (save it as a draft first if you need it).',go);
+  else go();
+}
+function prodDeleteDraft(id){
+  var x=_dsDrafts.find(function(d){return d.id===id;});
+  _confirm('Delete the draft “'+((x&&x.name)||'')+'”? This cannot be undone.',function(){
+    supa.from('ds_drafts').delete().eq('id',id).then(function(r){
+      if(r&&r.error){ showToast('Could not delete: '+r.error.message); return; }
+      if(prodState._draftId===id){ prodState._draftId=null; prodState._draftName=''; }
+      _dsLoadDrafts();
+    });
+  });
+}
+// Copy of the work on this PC, every 30 s while it changes — survives a closed tab or a PC that went off.
+function _dsAutosaveNow(force){
+  try{
+    var d=_dsPayload(); if(!_dsHasWork(d)) return;
+    var j=JSON.stringify({result:d.result,summary:d.summary,mcl:d.mcl,elev:d.elevationResult});
+    var sig=j.length+':'+j.slice(0,200)+j.slice(-200);
+    if(!force&&sig===_dsAutoSig) return;
+    _dsAutoSig=sig;
+    localStorage.setItem(_dsAutoKey(),JSON.stringify({at:Date.now(),draftId:prodState._draftId||null,draftName:prodState._draftName||'',data:d}));
+  }catch(e){}
+}
+setInterval(function(){ if(typeof gUser!=='undefined'&&gUser) _dsAutosaveNow(false); },30000);
+window.addEventListener('beforeunload',function(){ if(typeof gUser!=='undefined'&&gUser) _dsAutosaveNow(false); });
+function _dsReadAuto(){ try{ var a=JSON.parse(localStorage.getItem(_dsAutoKey())||'null'); return a&&a.data&&_dsHasWork(a.data)?a:null; }catch(e){ return null; } }
+function _dsRestoreBanner(){
+  if(_dsAutoDismissed||_dsHasWork(_dsPayload())) return '';
+  var a=_dsReadAuto(); if(!a) return '';
+  var c=_dsCounts(a.data);
+  return '<div class="alert alert-info" style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><i class="ti ti-history"></i>'
+    +'<span style="flex:1">Unsaved work from '+escHtml(new Date(a.at).toLocaleString())+' — '
+    +(c.comps?c.comps+' components':c.rows+' cutting-list rows')+(a.draftName?' (draft “'+escHtml(a.draftName)+'”)':'')+'.</span>'
+    +'<button class="btn btn-primary" style="font-size:12px;padding:4px 12px" onclick="_dsRestoreAuto()">Restore</button>'
+    +'<button class="btn" style="font-size:12px;padding:4px 10px" onclick="_dsDismissAuto()">Discard</button></div>';
+}
+function _dsRestoreAuto(){
+  var a=_dsReadAuto(); if(!a) return;
+  _dsApply(a.data); prodState._draftId=a.draftId||null; prodState._draftName=a.draftName||'';
+  setProdTab(a.data.result||a.data.elevationResult?'drawing':'cutlist');
+  showToast('Restored. Press Save draft to keep it on any PC.');
+}
+function _dsDismissAuto(){
+  _confirm('Discard the unsaved work? It cannot be brought back (saved drafts are not affected).',function(){
+    _dsAutoDismissed=true; try{ localStorage.removeItem(_dsAutoKey()); }catch(e){} renderProductionPage();
+  });
+}
+function _dsDraftNote(){
+  return prodState._draftName?'<div style="font-size:12px;color:var(--text2);margin-bottom:6px"><i class="ti ti-device-floppy"></i> Draft: <b>'+escHtml(prodState._draftName)+'</b> — press Save draft again to update it.</div>':'';
 }
 
 // ── Claude API call ───────────────────────────────────────────────────────
@@ -47282,6 +47427,7 @@ function prodBuildResultHtml(result){
       ?'<button class="btn" onclick="prodPrintCutSheets()" title="Parts list plus one cut sheet per board (identical boards printed once)"><i class="ti ti-printer"></i>Print cut sheets</button>'
        +'<button class="btn" onclick="prodPrintJobOrderDraft()" title="Preview the Job Order this list would produce. Nothing is saved — it is reserved when the quotation is locked."><i class="ti ti-file-barcode"></i>Job Order (draft)</button>'
        +'<button class="btn" onclick="prodPrintLabels()" title="One label per piece, in cutting order, with its part number"><i class="ti ti-tag"></i>Print part labels</button>':'')
+    +'<button class="btn" onclick="prodSaveDraft()" title="Keep this analysis to come back to later, on any PC"><i class="ti ti-device-floppy"></i>Save draft</button>'
     +'<button class="btn" onclick="prodClearFile()"><i class="ti ti-refresh"></i>New analysis</button>'
     +'</div>';
   // Summary strip — the whole job on one line, so nobody has to scroll to learn the totals.
@@ -50390,6 +50536,16 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-30-drafts-options', date:'30 Oct 2026', items:[
+    {id:'ds-drafts', icon:'ti-device-floppy', title:'Save a cutting list or analysis as a draft',
+     text:'Designers Support: press Save draft (on the Cutting List or on the analysis) to keep your work and open it again later, on any PC, from Saved Analyses › My drafts. Work you did not save is also kept on this PC and offered back with Restore if the browser closed or the PC went off.',
+     show:'quotations'},
+    {id:'proj-options', icon:'ti-layers-difference', title:'Each option\'s price in the Project List',
+     text:'A quotation with options shows a ▸ button in the Options column. Click it to see every option\'s own price; click an option to open the quotation on it. The Value column keeps one price — the option edited last, or the approved one.'},
+    {id:'reflect-option', icon:'ti-transfer', title:'Reflect into a chosen option',
+     text:'When a quotation has options, the Reflect window asks which option the cutting list goes into.',
+     show:'quotations'}
+  ]},
   {id:'2026-10-30-highlight-bulk', date:'30 Oct 2026', items:[
     {id:'reflect-highlight', icon:'ti-highlight', title:'New cutting-list lines are highlighted',
      text:'After Reflect to quotation, every line the cutting list added has a teal background, so you can see exactly what came in and check it. The highlight goes away when you save or lock.',
