@@ -5275,6 +5275,30 @@ const PROFILES = {
              pickedUpServerLock: { locked: true, uiRefreshed: true },
              noOpWhenUnchanged: true,
              pickedUpFQUnlock: { fqLocked: false, qLockedUntouched: true, uiRefreshed: true } });
+      /* Rommel, 2026-10-30 (QT-M00000217, Raven): saved on the open Option 3, switched to a locked
+         option, and the lock poll compared Option 3's saved "unlocked" with it and unlocked it — a
+         cutting list then went into a locked option. Saved flags only count for the same option. */
+      if (typeof window._refreshOpenQuotationLockState === 'function')
+        check('_refreshOpenQuotationLockState: another option\'s saved lock never unlocks the option on screen', () => {
+          const w = window;
+          const saved = { gToken: w.gToken, qSerial: w.qSerial, qLocked: w.qLocked, ol: w.qOptionsList, a: w.qActiveOptionId,
+                          loadFn: w.loadQuotationJson, u1: w.updateLockUI, u2: w.updateFQLockUI, u3: w.updateSentStatus, u4: w._updateQStatusBadge };
+          try {
+            w.gToken = 'test-token'; w.qSerial = 'QT-W00000902';
+            w.updateLockUI = w.updateFQLockUI = w.updateSentStatus = w._updateQStatusBadge = () => {};
+            w.qOptionsList = [{ id:1, label:'Option 1', status:'active', locked:true }, { id:3, label:'Option 3', status:'active', locked:false }];
+            w.qActiveOptionId = 1; w.qLocked = true;
+            w.loadQuotationJson = (s, cb) => cb({ locked: false, activeOptionId: 3 });
+            w._refreshOpenQuotationLockState();
+            const otherOption = w.qLocked;
+            w.loadQuotationJson = (s, cb) => cb({ locked: false, activeOptionId: 1 });
+            w._refreshOpenQuotationLockState();
+            return { otherOption, sameOption: w.qLocked, optFlag: w.qOptionsList[0].locked };
+          } finally {
+            w.gToken = saved.gToken; w.qSerial = saved.qSerial; w.qLocked = saved.qLocked; w.qOptionsList = saved.ol; w.qActiveOptionId = saved.a;
+            w.loadQuotationJson = saved.loadFn; w.updateLockUI = saved.u1; w.updateFQLockUI = saved.u2; w.updateSentStatus = saved.u3; w._updateQStatusBadge = saved.u4;
+          }
+        }, { otherOption: true, sameOption: false, optFlag: false });
       if (typeof window._pollApprovalsNow === 'function')
         check('_pollApprovalsNow: the lock-reconcile pass is wired into the same poll as everything else',
           () => /_refreshOpenQuotationLockState\(\)/.test(window._pollApprovalsNow.toString()), true);
