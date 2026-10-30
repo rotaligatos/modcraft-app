@@ -3221,6 +3221,24 @@ const PROFILES = {
           };
         }, { stageAssignPresent: true, togglesS1Wrap: true, togglesS2Wrap: true, togglesTabClasses: true,
              neverCallsInitFinalQuotation: true, refreshesBarAtEnd: true, realDomHooksExist: true });
+      /* Rommel, 2026-10-30: reflecting a cutting list offered only the option on screen — Option 1
+         was locked, so Stage 1 was blocked and Options 2/3 could not be picked. The Reflect window
+         now lists the options; picking an open one makes Stage 1 available. */
+      check('Reflect window: picking an open option unblocks Stage 1', () => {
+        const w = window;
+        const saved = { ol: w.qOptionsList, a: w.qActiveOptionId, l: w.qLocked, sw: w.switchToOption };
+        try {
+          w.qOptionsList = [{ id:1, label:'Option 1', status:'active', locked:true }, { id:2, label:'Option 2', status:'active', locked:false }];
+          w.qActiveOptionId = 1; w.qLocked = true;
+          w.switchToOption = function(id){ w.qActiveOptionId = id; w.qLocked = !!w.qOptionsList.find(o => o.id === id).locked; };
+          w._prodReflectRefreshTargets();
+          const before = document.getElementById('reflect-to-current-btn').disabled;
+          const pills = document.querySelectorAll('#reflect-option-pick button').length;
+          w._prodReflectPickOption(2);
+          const after = document.getElementById('reflect-to-current-btn').disabled;
+          return { before, pills, after, active: w.qActiveOptionId };
+        } finally { w.qOptionsList = saved.ol; w.qActiveOptionId = saved.a; w.qLocked = saved.l; w.switchToOption = saved.sw; }
+      }, { before:true, pills:2, after:false, active:2 });
       /* 2026-10-03: a renumbered quotation must still be found by its OLD number in the Project
          List (Rommel: "should still be traceable to the original number especially when searched
          in the project"). The old numbers ride in Quotations column AC / prevSerials. */
