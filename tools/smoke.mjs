@@ -5275,6 +5275,29 @@ const PROFILES = {
              pickedUpServerLock: { locked: true, uiRefreshed: true },
              noOpWhenUnchanged: true,
              pickedUpFQUnlock: { fqLocked: false, qLockedUntouched: true, uiRefreshed: true } });
+      /* Rommel, 2026-10-30 (QT-M00000217): the locked price was one figure shared by every option,
+         so Option 1 was held at Option 2's ₱484,491.20. Each option now keeps its own. */
+      check('Options: each option keeps its own locked price', () => {
+        const w = window;
+        const saved = { ol: w.qOptionsList, a: w.qActiveOptionId, l: w.qLocked, lt: w.qLockedTotal, snap: w.captureQuotationSnapshot() };
+        try {
+          const base = w.captureQuotationSnapshot();
+          const s1 = Object.assign(JSON.parse(JSON.stringify(base)), { locked:true, lockedTotal:557075.41 });
+          const s2 = Object.assign(JSON.parse(JSON.stringify(base)), { locked:true, lockedTotal:484491.20 });
+          const s3 = JSON.parse(JSON.stringify(base)); s3.locked = true; delete s3.lockedTotal;   // saved before this fix
+          w.qOptionsList = [{ id:1, label:'Option 1', status:'active', locked:true, snapshot:s1, grand:557075.41 },
+                            { id:2, label:'Option 2', status:'active', locked:true, snapshot:s2, grand:484491.20 },
+                            { id:3, label:'Option 3', status:'active', locked:true, snapshot:s3, grand:300000 }];
+          w.qActiveOptionId = 0;
+          w.switchToOption(2); const on2 = w.qLockedTotal;
+          w.switchToOption(1); const on1 = w.qLockedTotal;
+          w.switchToOption(3); const on3 = w.qLockedTotal;
+          w.switchToOption(2); const back2 = w.qLockedTotal;
+          return { on2, on1, on3, back2 };
+        } finally {
+          w.qOptionsList = saved.ol; w.qActiveOptionId = saved.a; w.restoreQuotationSnapshot(saved.snap); w.qLocked = saved.l; w.qLockedTotal = saved.lt;
+        }
+      }, { on2:484491.20, on1:557075.41, on3:300000, back2:484491.20 });
       /* Rommel, 2026-10-30 (QT-M00000217, Raven): saved on the open Option 3, switched to a locked
          option, and the lock poll compared Option 3's saved "unlocked" with it and unlocked it — a
          cutting list then went into a locked option. Saved flags only count for the same option. */
