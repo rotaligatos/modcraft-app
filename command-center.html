@@ -729,6 +729,9 @@ function mcEditor(){
     +'<div><label class="chk"><input type="checkbox" id="me-act"'+(b.active?' checked':'')+'>Active (can sign in)</label><br>'
     +'<label class="chk"><input type="checkbox" id="me-kpi"'+(b.includeKpi?' checked':'')+'>In Team performance</label><br>'
     +'<label class="chk" title="Always on for Manager, Director and Admin"><input type="checkbox" id="me-reqpin"'+(b.requirePin||always?' checked':'')+(always?' disabled':'')+'>Require own PIN</label></div>'
+    // Modcraft switches kept only in the database (not on the Sheet) — Settings → Users in Modcraft has the same two.
+    +'<div><label class="chk" title="Lami, the assistant, on the phone approvals app"><input type="checkbox" id="me-lami"'+(mcFlags(b.email).lami?' checked':'')+'>Lami</label><br>'
+    +'<label class="chk" title="Gives a Price list tab to add new materials and hardware, without the rest of Settings"><input type="checkbox" id="me-sku"'+(mcFlags(b.email).sku?' checked':'')+'>Can add SKUs</label></div>'
     +'</div>'
     +'<div style="margin-top:14px"><button class="btn primary" '+(MC.busy?'disabled':'')+' onclick="mcSaveEditor()">'+(MC.busy?'Saving…':(add?'Add to the Sheet':'Save to the Sheet'))+'</button> '
     +'<button class="btn" onclick="MC.edit=null;draw()">Cancel</button>'
@@ -744,8 +747,21 @@ function mcCollect(b){
     accessCompanies:ac,includeKpi:el('me-kpi').checked,requirePin:_mcPinAlways(pos)?true:el('me-reqpin').checked,
     pinHash:b.pinHash||'',pinSalt:b.pinSalt||''};
 }
+// Lami and Can add SKUs live in the database only (users.lami_enabled / can_add_skus), never on
+// the Sheet, so they are read from the database row and saved straight to it.
+function mcFlags(email){
+  var e=norm(email), r=(D.modcraft||[]).find(function(x){ return norm(x.email)===e; })||{};
+  return {lami:!!r.lami_enabled, sku:!!r.can_add_skus};
+}
+async function mcSaveFlags(email,lami,sku){
+  var r=await supa.from('users').update({lami_enabled:!!lami,can_add_skus:!!sku}).ilike('email',norm(email)).select('email');
+  if(r.error) return 'Lami / Can add SKUs not saved ('+r.error.message+')';
+  if(!r.data||!r.data.length) return 'Lami / Can add SKUs not saved — the person is not in the database copy yet';
+  return '';
+}
 function mcSaveEditor(){
   if(!MC.edit) return;
+  var fl={lami:el('me-lami').checked, sku:el('me-sku').checked};
   if(MC.edit.mode==='add'){
     var e=norm(el('me-email').value);
     if(!validEmail(e)) return toast('Enter a valid email.');
@@ -753,15 +769,28 @@ function mcSaveEditor(){
     if(mcFind(e)) return toast(e+' is already on the Sheet — edit that row instead.');
     var n=mcCollect({email:e,accessCompanies:[]}); n.active=el('me-act').checked; n.pinHash=''; n.pinSalt='';
     if(!confirm('Add '+n.name+' ('+e+') as '+n.pos+(n.company?' at '+n.company:'')+'? They can sign in to Modcraft straight away.')) return;
-    return mcAddUser(n);
+    return mcAddUser(n).then(async function(){
+      if(MC.edit||(!fl.lami&&!fl.sku)) return;
+      var w=await mcSaveFlags(e,fl.lami,fl.sku); if(w) toast(w); await loadAll(); draw();
+    });
   }
   var u=mcFind(MC.edit.email); if(!u) return;
   var next=mcCollect(u);
   if(!next.name) return toast('Enter the full name.');
   var ch=mcDiffs(next,mcDbRow(u)).map(function(x){ return x.label; });
-  if(!ch.length) return toast('Nothing changed.');
-  if(!confirm('Save '+(u.name||u.email)+' — '+ch.join(', ')+'? Modcraft picks this up at their next sign-in.')) return;
-  mcWriteUser(u,next,'edited: '+ch.join(', '));
+  var was=mcFlags(u.email), flCh=[];
+  if(fl.lami!==was.lami) flCh.push('Lami '+(fl.lami?'on':'off'));
+  if(fl.sku!==was.sku) flCh.push('Can add SKUs '+(fl.sku?'on':'off'));
+  if(!ch.length&&!flCh.length) return toast('Nothing changed.');
+  if(!confirm('Save '+(u.name||u.email)+' — '+ch.concat(flCh).join(', ')+'? Modcraft picks this up at their next sign-in.')) return;
+  var saveFlags=async function(){
+    if(!flCh.length) return;
+    var w=await mcSaveFlags(u.email,fl.lami,fl.sku);
+    toast(w||(norm(u.email)+': '+flCh.join(', ')+' — saved.'));
+    MC.edit=null; await loadAll(); draw();
+  };
+  if(!ch.length) return saveFlags();   // the two database-only switches need no Sheet access
+  mcWriteUser(u,next,'edited: '+ch.join(', ')).then(function(){ if(!MC.edit) saveFlags(); });   // only once the Sheet save went through
 }
 
 /* Phase 3 — shadow sign-in. Modcraft records, after every sign-in, whether the Sheet row and the
