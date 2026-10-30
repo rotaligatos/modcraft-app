@@ -47211,7 +47211,7 @@ function _prodReflectDo(startNew,stage){
   // Rommel, 2026-10-23: always ask. Reflecting the same list again ADDED it a second time
   // (QT-W00000323: 20 boards quoted, 40 on the Job Order), and there was no way back.
   if(known&&(known.componentCount||0)>0&&!_prodReflectAsked){
-    _prodAskReplaceOrAdd(known,function(){ _prodReflectCommit(false,stage,null);
+    _prodAskReplaceOrAdd(known,function(){ _prodReflectCommit(false,stage,null,known);
         logActivity('Cutting list replaced: '+(known.fileName||'earlier list')+' → '+(prodState.fileName||'this list')+' (the Job Order holds only this list).'); },
       function(){ _prodReflectAsked=true; try{ _prodReflectDo(false,stage); } finally{ _prodReflectAsked=false; } });
     return;
@@ -47241,15 +47241,15 @@ function _prodAskReplaceOrAdd(known,onReplace,onAdd){
   }
   el('ov-reflect-ra-body').innerHTML='<p style="margin:0 0 8px">Already on it: <b>'+escHtml(known.fileName||'a cutting list')+'</b>'
     +' ('+(known.componentCount||0)+' parts).</p>'
-    +'<p style="margin:0 0 8px"><b>Replace it</b> — the Job Order holds only this list. Use this when you corrected the list.</p>'
-    +'<p style="margin:0"><b>Add as another list</b> — both lists together, for a separate part of the job. Adding the same list again doubles the pieces.</p>'
-    +'<p style="margin:8px 0 0;font-size:11px;color:var(--text2)">The quotation lines are added as usual either way — remove old lines you no longer need.</p>';
+    +'<p style="margin:0 0 8px"><b>Replace it</b> — the earlier list\'s lines in the quotation are replaced by this list\'s, and the Job Order holds only this list. Use this when you corrected the list.</p>'
+    +'<p style="margin:0"><b>Add as another list</b> — both lists together, for a separate part of the job. Its lines go into a new area. Adding the same list again doubles the pieces and the price.</p>';
   el('ov-reflect-ra-rep').onclick=function(){ closeModal('ov-reflect-ra'); onReplace(); };
   el('ov-reflect-ra-add').onclick=function(){ closeModal('ov-reflect-ra'); onAdd(); };
   openModal('ov-reflect-ra');
 }
-function _prodReflectCommit(startNew,stage,prior){
+function _prodReflectCommit(startNew,stage,prior,replaceOf){
   var sum=prodState.summary;
+  var _rep=replaceOf?{known:replaceOf,removed:0,found:false}:null;
   // Init first (resets qAreas, qFabMode, etc. — including qBoardLayout), then populate — NOT before
   if(startNew) initQuotation();
   _showPage('quotation');
@@ -47300,10 +47300,14 @@ function _prodReflectCommit(startNew,stage,prior){
   if(stage==='fq'){
     goStage(2);
     if(!fqAreas){ showToast('Could not open the Final Quotation scope — nothing was added.'); return; }
-    _fqEdit(function(){ _prodReflectFill(sum,false,'Final Quotation'); });
+    _fqEdit(function(){ _prodReflectFill(sum,false,'Final Quotation',_rep); });
     if(da) _saveFQDrawingAnalysis();
   } else {
-    _prodReflectFill(sum,startNew,'');
+    _prodReflectFill(sum,startNew,'',_rep);
+  }
+  if(_rep&&!_rep.found){
+    showToast('The earlier list\'s lines could not be found in the quotation (area renamed?) — this list was added as a new area. Remove the old lines by hand.');
+    logActivity('Cutting list replaced, but the earlier list\'s quotation lines could not be found — added as a new area; old lines left in place.');
   }
   var _ofc=prodState.result&&prodState.result._orderFile;
   if(_ofc&&typeof _orderFileReflected==='function'){ _orderFileReflected(_ofc,qSerial||qDraftKey||''); prodState.result._orderFile=null; }
@@ -47315,7 +47319,9 @@ function _prodReflectCommit(startNew,stage,prior){
   },350);
   if(!startNew){
     var n=da&&da.parts?da.parts.length:1;
-    showToast('Cutting list added to '+(stage==='fq'?'the Final Quotation of ':'')+(qSerial||'this quotation (not yet numbered)')
+    if(_rep&&_rep.found) showToast('Cutting list replaced in '+(stage==='fq'?'the Final Quotation of ':'')+(qSerial||'this quotation (not yet numbered)')
+      +' — the earlier lines were taken out. Review the area, then save.');
+    else showToast('Cutting list added to '+(stage==='fq'?'the Final Quotation of ':'')+(qSerial||'this quotation (not yet numbered)')
       +(n>1?' — '+n+' lists, all go into the Job Order':'')+'. Review the new area, then save.');
     if(stage!=='fq'){
       if(typeof renderItems==='function') renderItems();
@@ -47335,12 +47341,42 @@ function _prodReflectAreaName(n){
   return pj?pj.substring(0,40):('Area '+n);
 }
 // Puts the reflected lines into the scope currently in qAreas (Stage 1's, or Stage 2's inside _fqEdit).
-function _prodReflectFill(sum,startNew,stageLabel){
+// Areas a cutting list was reflected into. Marked since 2026-10-30 (fromCutList); older ones are
+// found by the name the reflect gave them (the list's file name), only when no area is marked.
+function _prodCutListAreas(known){
+  var idx=[];
+  qAreas.forEach(function(a,i){ if(a&&a.fromCutList) idx.push(i); });
+  if(idx.length) return idx;
+  var files=(known&&known.parts&&known.parts.length)?known.parts.map(function(p){return p.fileName||'';})
+    :String((known&&known.fileName)||'').split(' + ');
+  var names={};
+  files.forEach(function(fn){ fn=String(fn||'');
+    if(!fn||/— entered in Modcraft$/.test(fn)||/^Order .* — cutting list$/.test(fn)) return;
+    names[fn.replace(/\.[^.]+$/,'').substring(0,40).toLowerCase()]=1; });
+  qAreas.forEach(function(a,i){ if(a&&names[String(a.name||'').toLowerCase()]) idx.push(i); });
+  return idx;
+}
+function _prodReflectFill(sum,startNew,stageLabel,rep){
   // Adding to an existing quotation must never overwrite what is already there. Land in the
   // first area only while it is still empty (a fresh quotation, or the one initQuotation just
   // made); otherwise append a new area named after the analysed file.
+  // Replacing a list (Rommel, 2026-10-30): the earlier list's area is emptied and reused, other
+  // areas it landed in are removed — otherwise the old lines stay and the price doubles.
   var area;
-  if(_prodAreaIsEmpty(qAreas[0])){
+  var _repIdx=rep?_prodCutListAreas(rep.known):[];
+  if(rep&&_repIdx.length){
+    rep.found=true;
+    area=qAreas[_repIdx[0]];
+    var _lines=0;
+    _repIdx.forEach(function(i){ var a=qAreas[i];
+      ['svcItems','matItems','hwItems','outsourceMaterials','outsourceHardware'].forEach(function(k){ _lines+=(a[k]||[]).length; }); });
+    for(var r=_repIdx.length-1;r>=1;r--) qAreas.splice(_repIdx[r],1);
+    area.svcItems=[]; area.matItems=[]; area.hwItems=[]; area.outsourceMaterials=[]; area.outsourceHardware=[];
+    if(prodState.fileName) area.name=_prodReflectAreaName(_repIdx[0]+1);
+    rep.removed=_lines;
+    logActivity('Cutting list replaced in '+(qSerial||qDraftKey)+(stageLabel?' ('+stageLabel+')':'')+': '+_lines+' earlier line'+(_lines===1?'':'s')
+      +' taken out of '+_repIdx.length+' area'+(_repIdx.length===1?'':'s')+', new lines in "'+area.name+'".');
+  } else if(_prodAreaIsEmpty(qAreas[0])){
     area=qAreas[0];
     if(!startNew&&prodState.fileName) area.name=_prodReflectAreaName(1);
   } else {
@@ -47350,6 +47386,7 @@ function _prodReflectFill(sum,startNew,stageLabel){
     area=qAreas[qAreas.length-1];
     logActivity('Drawing analysis reflected into '+qSerial+(stageLabel?' ('+stageLabel+')':'')+' as a new area: '+_nm);
   }
+  area.fromCutList=true;
   if(!area.svcItems) area.svcItems=[];
   if(!area.matItems) area.matItems=[];
   if(!area.hwItems)  area.hwItems=[];

@@ -574,6 +574,28 @@ const PROFILES = {
                                 window._prodPieceFitIssue(2439, 600, 'length', 'PB') !== ''];   // 2439 leaves a 1mm sliver to cut: kerf applies
                       } finally { window.prodSettings.machineType = mt; } },
               [true, true, true, true, true]);
+      check('_prodReflectFill: Replace takes the earlier list\'s lines out instead of adding a second copy (2026-10-30)',
+            () => {
+              const w = window, keep = { a: w.qAreas, f: w.prodState.fileName, l: w.logActivity };
+              try {
+                w.logActivity = function () {};
+                w.prodState.fileName = 'kitchen.xlsx';
+                const sum = { materials: [{ include: true, name: 'PB 18', qty: 4, unit: 'pc', price: 1000 }], hardware: [],
+                              services: [{ include: true, svcIdx: 0, qty: 10 }] };
+                w.qAreas = [{ name: 'Manual', svcItems: [{ svcIdx: 0, qty: 1 }], matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+                w._prodReflectFill(sum, false, '');                                     // first reflect → new area
+                const known = { fileName: 'kitchen.xlsx', componentCount: 5 };
+                sum.materials[0].qty = 3;                                               // corrected list
+                const rep = { known: known, removed: 0, found: false };
+                w._prodReflectFill(sum, false, '', rep);
+                const main = w.qAreas.length === 2 && w.qAreas[0].svcItems.length === 1 && w.qAreas[1].matItems.length === 1
+                  && w.qAreas[1].matItems[0].qty === 3 && w.qAreas[1].svcItems.length === 1;
+                const legacy = [{ name: 'kitchen', svcItems: [{ svcIdx: 0, qty: 9 }], matItems: [{ name: 'X', qty: 1 }], hwItems: [] }];
+                w.qAreas = legacy; const rep2 = { known: known, found: false };
+                w._prodReflectFill(sum, false, '', rep2);                               // area from before the marker existed
+                return [main, rep.found, w.qAreas.length === 1 && legacy[0].matItems.length === 1 && legacy[0].matItems[0].qty === 3, rep2.found];
+              } finally { w.qAreas = keep.a; w.prodState.fileName = keep.f; w.logActivity = keep.l; }
+            }, [true, true, true, true]);
       if (typeof window._prodReflectStageBlock === 'function')
         check('_prodReflectStageBlock: locked stages and an unopened Final Quotation refuse a cutting list',
               () => {
