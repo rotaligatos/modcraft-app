@@ -673,6 +673,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
     <button class="nav-btn" data-pg="approvals"><i class="ti ti-checkbox"></i>Approvals<span id="nav-appr-cnt" style="display:none;margin-left:5px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--coral);color:var(--on-accent);font-size:9px;font-weight:700;align-items:center;justify-content:center">0</span></button>
     <button class="nav-btn" data-pg="reports"><i class="ti ti-chart-bar"></i>Reports</button>
     <button class="nav-btn" data-pg="settings"><i class="ti ti-settings"></i>Settings</button>
+    <button class="nav-btn" data-pg="pricelist" style="display:none"><i class="ti ti-list-search"></i>Price list</button>
     <button class="nav-btn" data-pg="help" style="color:var(--teal)"><i class="ti ti-help-circle"></i>Help</button>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
@@ -2129,6 +2130,10 @@ Everything not in the file is removed. To add a few items instead, use the save 
 </div>
 
 <!-- HELP -->
+<div class="page" id="page-pricelist">
+  <div style="margin-bottom:14px"><h2 style="font-size:20px;font-weight:500">Price list</h2><p style="color:var(--text2);font-size:13px;margin-top:2px">Add new materials and hardware. Every line is checked against the price list first.</p></div>
+  <div id="pl-bulk-wrap"></div>
+</div>
 <div class="page" id="page-help">
   <div style="margin-bottom:18px"><h2 style="font-size:20px;font-weight:500">Help & AI assistant</h2><p style="color:var(--text2);font-size:13px;margin-top:2px">Ask anything about using this system — powered by AI</p></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
@@ -5313,6 +5318,7 @@ function navigate(pg) {
   else if(pg==="settings") { stTab="company"; renderSettings(); }
   else if(pg==="quotation"){ if(!qSerial&&!qDraftKey) initQuotation(); try{ _buildQuotationLayout(); }catch(e){} } // only init if no quotation loaded
   else if(pg==="help") renderHelp();
+  else if(pg==="pricelist") renderMatBulkAdd('pl-bulk-wrap');
   else if(pg==="production") renderProductionPage();
   else if(pg==="orders") { if(!ordersLoaded){gLoadPendingOrders(function(){renderOrders();});}else{renderOrders();} }
 }
@@ -5369,16 +5375,46 @@ function _pinGenSalt() {
 // because a signatory can now be any active user.
 function _mergeLamiFlags(){
   if(typeof supaReady!=='function'||!supaReady()) return;
-  supa.from('users').select('email,lami_enabled').then(function(r){
+  supa.from('users').select('email,lami_enabled,can_add_skus').then(function(r){
     if(!r||r.error||!r.data) return;
-    var by={};
-    r.data.forEach(function(x){ by[String(x.email||'').trim().toLowerCase()]=!!x.lami_enabled; });
+    var by={}, sk={};
+    r.data.forEach(function(x){ var k=String(x.email||'').trim().toLowerCase(); by[k]=!!x.lami_enabled; sk[k]=!!x.can_add_skus; });
     var changed=false;
     sheetUsers.forEach(function(u){
-      var v=by[String(u.email||'').trim().toLowerCase()];
+      var k=String(u.email||'').trim().toLowerCase(), v=by[k];
       if(v!==undefined&&u.lamiEnabled!==v){ u.lamiEnabled=v; changed=true; }
+      if(sk[k]!==undefined&&u.canAddSkus!==sk[k]){ u.canAddSkus=sk[k]; changed=true; }
     });
     if(changed) renderUsers();
+  });
+}
+// ── Adding SKUs to the price list (Rommel, 2026-10-30) ─────────────────────────────────────
+// PPIC staff add new materials/hardware without the rest of Settings. Granted per person in
+// Settings → Users ("Can add SKUs"), stored in users.can_add_skus (Supabase only, like Lami).
+// Such a person gets a "Price list" tab holding the add tool and a read-only search — never the
+// Replace / Initialize / delete buttons, and never an edit to an existing item's price.
+var mySkuAccess=false;
+function _canAddSkus(){ return currentRole==='Admin'||currentRole==='Director'||!!(currentUserAcc&&currentUserAcc['Settings'])||mySkuAccess; }
+function _loadMySkuAccess(tries){
+  tries=tries||0;
+  if(typeof supaReady!=='function'||!supaReady()){ if(tries<20) setTimeout(function(){ _loadMySkuAccess(tries+1); },3000); return; }
+  var me=String((gUser&&gUser.email)||'').trim(); if(!me) return;
+  supa.from('users').select('can_add_skus').ilike('email',me).limit(1).then(function(r){
+    var on=!!(r&&!r.error&&r.data&&r.data[0]&&r.data[0].can_add_skus);
+    if(on!==mySkuAccess){ mySkuAccess=on; if(typeof applyNavAccess==='function') applyNavAccess(); }
+  });
+}
+function _setCanAddSkus(i,on){
+  if(currentRole!=='Admin'&&currentRole!=='Director'){ showToast('Only an Admin can change this.'); return; }
+  var u=sheetUsers[i]; if(!u) return;
+  var put=function(){ var cb=el('u'+i+'sku'); if(cb) cb.checked=!!u.canAddSkus; };
+  if(typeof supaReady!=='function'||!supaReady()){ showToast('Connect the fast database first (Settings → Company & DB) — this setting lives there.'); put(); return; }
+  supa.from('users').update({can_add_skus:!!on}).ilike('email',(u.email||'').trim()).select('email').then(function(r){
+    if(r&&r.error){ showToast('Could not save that: '+(r.error.message||r.error)); put(); return; }
+    if(!r||!r.data||!r.data.length){ showToast('Could not save that — '+(u.name||u.email)+' is not in the fast database yet. Save the user first.'); put(); return; }
+    u.canAddSkus=!!on;
+    logActivity('Adding SKUs to the price list '+(on?'allowed':'removed')+' for '+(u.name||u.email)+'.','');
+    showToast((u.name||u.email)+(on?' can now add SKUs (Price list tab).':' can no longer add SKUs.'));
   });
 }
 /* Lami-on-the-phone access. Saved the moment it is ticked, straight to Supabase — it is the only
@@ -24373,6 +24409,12 @@ function renderUsers(){
       +' onchange="_setLamiEnabled('+i+',this.checked)">'
       +'Can ask Lami in the approval app</label>'
       +'<div style="font-size:11px;color:var(--text2);margin-top:4px">She answers about the quotation and what the client was quoted before. Cost and margin are only included for Admin, Director and Manager. Each question costs API tokens, so this is off unless you switch it on.</div>'
+      +'<div class="dvdr" style="margin:10px 0 8px"><span>Price list</span></div>'
+      +'<label style="display:flex;align-items:center;gap:7px;font-size:12px;'+(isAdmin?'cursor:pointer':'cursor:default;opacity:.55')+'">'
+      +'<input type="checkbox" id="u'+i+'sku" '+(u.canAddSkus?'checked':'')+(isAdmin?'':' disabled')
+      +' onchange="_setCanAddSkus('+i+',this.checked)">'
+      +'Can add SKUs (materials and hardware)</label>'
+      +'<div style="font-size:11px;color:var(--text2);margin-top:4px">For PPIC. Opens a Price list tab where they can add new items, checked for duplicates first. They cannot change or remove existing items, or open the rest of Settings.</div>'
       // Manager / Director / Admin approve things, so their own PIN is not optional — offering a
       // tickbox there would imply it could be turned off. It is stated instead. The choice only
       // exists for the other roles, who can now be named as Checked by or Noted by signatories.
@@ -31453,6 +31495,7 @@ function gCheckRole(){
       currentRole=role;
       _roleResolved=true;
       gShowApp();
+      setTimeout(_loadMySkuAccess,2500);
       setTimeout(_shadowUserCheck,3000); // phase 3: compare the Sheet with the database copy, record only
     })
     .catch(function(err){
@@ -31754,6 +31797,7 @@ function _isSignatory(){
 function canNavigate(pg){
   if(pg==='help') return true;
   if(pg==='users') return currentRole==='Admin'||currentRole==='Director';
+  if(pg==='pricelist') return _canAddSkus();
   if(pg==='approvals'&&_isSignatory()) return true;
 
   if(pg==='quotation'||pg==='directory') return !!(currentUserAcc['Quotations']||currentUserAcc['Projects']);
@@ -31769,6 +31813,8 @@ function applyNavAccess(){
   document.querySelectorAll('.nav-btn[data-pg]').forEach(function(btn){
     var pg=btn.getAttribute('data-pg');
     if(pg==='help'){btn.style.display='';return;}
+    // Only for someone allowed to add SKUs WITHOUT Settings — Settings already holds the same tool.
+    if(pg==='pricelist'){btn.style.display=(mySkuAccess&&!currentUserAcc['Settings'])?'':'none';return;}
     if(pg==='quotation'||pg==='directory'){btn.style.display=(hasQ||hasP)?'':'none';return;}
     // Same exemption as canNavigate: hiding the tab from a signatory would leave
     // them reaching Approvals only through a notification, with no way back.
@@ -36322,13 +36368,54 @@ function _pdbRenderCountsOnly(){
   var n=_tplIssueCount();
   e.innerHTML='<span style="font-size:10px;color:'+(n?'var(--coral)':'var(--text2)')+';font-weight:600">'+(n?(n+' to fix'):dbTemplates.length)+'</span>';
 }
-// ── Add many materials at once (Rommel, 2026-10-30: "too many to manual") ──────────────────
+// ── Add many SKUs at once (Rommel, 2026-10-30: "too many to manual") ────────────────────────
 // Paste one name per line; a price may follow after a TAB (as copied from Excel) or " | ".
 // Commas are NOT a separator — SKU names contain them ("(3mm, Gridwork)"). Writes the Sheet and
-// the app's Supabase copy together (same as _priceDbAddRow), skips names already in the
-// catalogue, and can tag every new one Made to Order in the same step.
-function _matBulkParse(text,defUnit,defPrice){
-  var have={}; (dbMaterials||[]).forEach(function(m){ have[String(m.name||'').trim().toLowerCase()]=1; });
+// the app's Supabase copy together (same as _priceDbAddRow) and can tag new materials Made to
+// Order in the same step. Lives in Settings › Price Database › Materials, and on the Price list
+// tab for people allowed to add SKUs without Settings (PPIC).
+//
+// Duplicate checker (Rommel: "a checker capability ... to avoid duplication"), two levels:
+//  - SAME: the list already has it, only written differently — capitals, spacing, brackets/commas,
+//    "Super Matte"/"Supermatte", "18 mm"/"18mm", "1 Face"/"1F", "4 x 8"/"4x8". Refused outright,
+//    naming the existing item to use.
+//  - SIMILAR: the same words in another order. NOT refused automatically: on a split board the
+//    order is the product — "Acacia/Graphite (Stipple/Hardwood)" is not "(Hardwood/Stipple)", and
+//    the real catalogue holds ~34,000 such pairs as separate SKUs. Shown with the look-alike, and
+//    added only when the person ticks "Different item".
+var _MAT_BULK_WRAPS=['mat-bulk-wrap','pl-bulk-wrap'];
+var _matBulkKind='Materials';
+var _matBulkOk={};   // lower-case names the person confirmed are a different item from their look-alike
+function _matBulkConfirm(lo,on){ if(on) _matBulkOk[lo]=1; else delete _matBulkOk[lo]; _matBulkPreview(); }
+function _skuKey(name,loose){
+  var s=' '+String(name||'').toLowerCase()+' ';
+  s=s.replace(/[×]/g,'x').replace(/(\d)\s*['′"″]?\s*x\s*(\d)/g,'$1x$2').replace(/(\d)['′"″]/g,'$1');
+  s=s.replace(/super\s+matte/g,'supermatte').replace(/wood\s+grain/g,'woodgrain').replace(/cross\s+cut/g,'crosscut')
+     .replace(/(\d+(?:\.\d+)?)\s*mm\b/g,'$1mm').replace(/\b(?:1|one)\s*-?\s*face(?:d)?\b/g,'1f').replace(/\b(?:2|two)\s*-?\s*faces?\b/g,'2f')
+     .replace(/\bpcs?\b|\bpieces?\b/g,'').replace(/\//g,' / ').replace(/[()\[\],.\\_;:+&-]/g,' ');
+  var t=s.split(/\s+/).filter(Boolean);
+  if(!loose) return t.join(' ');
+  var seen={}, out=[];
+  t.forEach(function(w){ if(w!=='/'&&!seen[w]){ seen[w]=1; out.push(w); } });
+  return out.sort().join(' ');
+}
+var _skuKeyIdx=new WeakMap();
+function _skuIndexFor(list){
+  if(!list) return {exact:{},key:{},loose:{}};
+  var ix=_skuKeyIdx.get(list); if(ix) return ix;
+  ix={exact:{},key:{},loose:{}};
+  for(var i=0;i<list.length;i++){ var n=String(list[i]&&list[i].name||'').trim(); if(!n) continue;
+    var lo=n.toLowerCase(); if(!ix.exact[lo]) ix.exact[lo]=n;
+    var k=_skuKey(n); if(k&&!ix.key[k]) ix.key[k]=n;
+    var lk=_skuKey(n,true); if(lk&&!ix.loose[lk]) ix.loose[lk]=n; }
+  _skuKeyIdx.set(list,ix);
+  return ix;
+}
+function _matBulkParse(text,defUnit,defPrice,kind){
+  kind=kind==='Hardware'?'Hardware':'Materials';
+  var mine=_skuIndexFor(kind==='Hardware'?dbHardware:dbMaterials);
+  var other=_skuIndexFor(kind==='Hardware'?dbMaterials:dbHardware);
+  var otherLbl=kind==='Hardware'?'Materials':'Hardware';
   var seen={}, rows=[];
   String(text||'').split(/\r?\n/).forEach(function(line){
     var raw=line.trim(); if(!raw) return;
@@ -36337,72 +36424,122 @@ function _matBulkParse(text,defUnit,defPrice){
     if(!name) return;
     var p=parts.length>1?parseFloat(String(parts[parts.length-1]).replace(/[₱,\s]/g,'')):NaN;
     var price=isNaN(p)?(parseFloat(defPrice)||0):p;
-    var k=name.toLowerCase(), status='new';
-    if(have[k]) status='exists'; else if(seen[k]) status='dup'; else if(!(price>0)) status='noprice';
-    seen[k]=1;
-    rows.push({name:name,unit:defUnit||'pc',price:price,status:status});
+    var lo=name.toLowerCase(), k=_skuKey(name), lk=_skuKey(name,true), status='new', same='';
+    if(mine.exact[lo]){ status='exists'; same=mine.exact[lo]; }
+    else if(k&&mine.key[k]){ status='same'; same=mine.key[k]; }
+    else if(other.exact[lo]||(k&&other.key[k])){ status='other'; same=(other.exact[lo]||other.key[k])+' ('+otherLbl+')'; }
+    else if(lk&&(mine.loose[lk]||other.loose[lk])&&!_matBulkOk[lo]){ status='similar'; same=mine.loose[lk]||(other.loose[lk]+' ('+otherLbl+')'); }
+    else if(seen[k||lo]){ status='dup'; same=seen[k||lo]; }
+    else if(!(price>0)) status='noprice';
+    if(!seen[k||lo]) seen[k||lo]=name;
+    rows.push({name:name,unit:defUnit||'pc',price:price,status:status,same:same});
   });
   return rows;
 }
-function renderMatBulkAdd(){
-  var w=el('mat-bulk-wrap'); if(!w) return;
-  if(w.getAttribute('data-built')) { _matBulkPreview(); return; }   // keep what was typed
+function renderMatBulkAdd(wrapId){
+  wrapId=wrapId||'mat-bulk-wrap';
+  var w=el(wrapId); if(!w) return;
+  // One copy of the tool at a time — the Settings card and the Price list page share element ids.
+  _MAT_BULK_WRAPS.forEach(function(id){ if(id!==wrapId){ var o=el(id); if(o&&o.innerHTML){ o.innerHTML=''; o.removeAttribute('data-built'); } } });
+  if(w.getAttribute('data-built')){ _matBulkPreview(); return; }   // keep what was typed
   w.setAttribute('data-built','1');
-  w.innerHTML='<div class="card"><div class="card-head"><h3><i class="ti ti-playlist-add"></i>Add materials in bulk</h3></div>'
+  var kb=function(k,ic){ return '<button class="btn'+(_matBulkKind===k?' btn-primary':'')+'" onclick="_matBulkSetKind(\''+k+'\')" style="font-size:12px;padding:4px 12px"><i class="ti '+ic+'"></i> '+k+'</button>'; };
+  w.innerHTML='<div class="card"><div class="card-head"><h3><i class="ti ti-playlist-add"></i>Add SKUs in bulk</h3></div>'
     +'<div class="card-body">'
-    +'<p style="font-size:12px;color:var(--text2);margin:0 0 8px">Paste one material per line. A price can follow on the same line after a tab (copied from Excel) or " | ". Names already in the list are skipped.</p>'
+    +'<div id="mat-bulk-kind" style="display:flex;gap:6px;margin-bottom:8px">'+kb('Materials','ti-stack-2')+kb('Hardware','ti-tool')+'</div>'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 8px">Paste one item per line. A price can follow on the same line after a tab (copied from Excel) or " | ". '
+    +'Each line is checked against the price list first: anything already there — even written in a different order or format — is not added.</p>'
     +'<textarea id="mat-bulk-text" oninput="_matBulkPreview()" placeholder="Granada MDF 4x8 1F (3mm, Gridwork)&#9;1250" style="width:100%;height:150px;font-family:monospace;font-size:12px"></textarea>'
     +'<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:8px 0">'
     +'<label style="font-size:12px">Unit <input id="mat-bulk-unit" value="pc" oninput="_matBulkPreview()" style="width:60px;height:28px"></label>'
     +'<label style="font-size:12px">Price for lines with none ₱ <input id="mat-bulk-price" type="number" min="0" step="0.01" oninput="_matBulkPreview()" style="width:100px;height:28px"></label>'
-    +'<label style="font-size:12px;display:flex;align-items:center;gap:5px"><input id="mat-bulk-mto" type="checkbox" checked> Tag as Made to Order</label>'
+    +'<label id="mat-bulk-mto-wrap" style="font-size:12px;display:'+(_matBulkKind==='Materials'?'flex':'none')+';align-items:center;gap:5px"><input id="mat-bulk-mto" type="checkbox" checked> Tag as Made to Order</label>'
     +'</div>'
     +'<div id="mat-bulk-preview"></div>'
     +'</div></div>';
   _matBulkPreview();
 }
+function _matBulkSetKind(k){
+  _matBulkKind=k==='Hardware'?'Hardware':'Materials';
+  var wrapId=_MAT_BULK_WRAPS.filter(function(id){ var o=el(id); return o&&o.getAttribute('data-built'); })[0]||'mat-bulk-wrap';
+  var txt=(el('mat-bulk-text')||{}).value||'', pr=(el('mat-bulk-price')||{}).value||'', un=(el('mat-bulk-unit')||{}).value||'pc';
+  var w=el(wrapId); if(w){ w.removeAttribute('data-built'); }
+  renderMatBulkAdd(wrapId);
+  if(el('mat-bulk-text')) el('mat-bulk-text').value=txt;
+  if(el('mat-bulk-price')) el('mat-bulk-price').value=pr;
+  if(el('mat-bulk-unit')) el('mat-bulk-unit').value=un;
+  _matBulkPreview();
+}
 function _matBulkRows(){
-  return _matBulkParse((el('mat-bulk-text')||{}).value,((el('mat-bulk-unit')||{}).value||'pc').trim()||'pc',(el('mat-bulk-price')||{}).value);
+  return _matBulkParse((el('mat-bulk-text')||{}).value,((el('mat-bulk-unit')||{}).value||'pc').trim()||'pc',(el('mat-bulk-price')||{}).value,_matBulkKind);
 }
 function _matBulkPreview(){
   var slot=el('mat-bulk-preview'); if(!slot) return;
   var rows=_matBulkRows();
   if(!rows.length){ slot.innerHTML=''; return; }
   var add=rows.filter(function(r){return r.status==='new';}).length;
-  var lbl={new:['Will add','var(--teal)'],exists:['Already in list','var(--text2)'],dup:['Repeated above','var(--text2)'],noprice:['No price','var(--coral)']};
+  var lbl={new:['Will add','var(--teal)'],exists:['Already in list','var(--text2)'],same:['Same item already in list','var(--coral)'],
+    other:['Already in the other list','var(--coral)'],dup:['Repeated above','var(--text2)'],noprice:['No price','var(--coral)'],
+    similar:['Looks similar — check','var(--amber)']};
   var noP=rows.filter(function(r){return r.status==='noprice';}).length;
-  slot.innerHTML='<div style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:8px">'
+  var dupN=rows.filter(function(r){return r.status!=='new'&&r.status!=='noprice'&&r.status!=='similar';}).length;
+  var simN=rows.filter(function(r){return r.status==='similar';}).length;
+  slot.innerHTML='<div style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:8px">'
     +rows.map(function(r){ var l=lbl[r.status];
-      return '<div style="display:flex;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border)"><span style="flex:1">'+escHtml(r.name)+'</span>'
+      return '<div style="padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border)">'
+        +'<div style="display:flex;gap:8px"><span style="flex:1">'+escHtml(r.name)+'</span>'
         +'<span style="width:90px;text-align:right">'+(r.price>0?fmtMoney(r.price):'—')+'</span>'
-        +'<span style="width:110px;color:'+l[1]+';font-weight:600">'+l[0]+'</span></div>'; }).join('')+'</div>'
+        +'<span style="width:170px;color:'+l[1]+';font-weight:600">'+l[0]+'</span></div>'
+        +(r.status==='similar'
+          ?'<div style="font-size:11px;color:var(--text2);padding-left:10px">Same words as: '+escHtml(r.same)
+            +' <label style="margin-left:8px;color:var(--text);cursor:pointer"><input type="checkbox" data-lo="'+escHtml(r.name.toLowerCase())+'" onchange="_matBulkConfirm(this.getAttribute(\'data-lo\'),this.checked)"> Different item — add it</label></div>'
+          :(r.same&&r.status!=='exists'?'<div style="font-size:11px;color:var(--text2);padding-left:10px">Use: '+escHtml(r.same)+'</div>':''))
+        +'</div>'; }).join('')+'</div>'
+    +(dupN?'<div style="font-size:11px;color:var(--text2);margin-bottom:6px">'+dupN+' line'+(dupN>1?'s are':' is')+' already in the price list and will not be added.</div>':'')
+    +(simN?'<div style="font-size:11px;color:var(--amber);margin-bottom:6px">'+simN+' line'+(simN>1?'s use':' uses')+' the same words as an existing item in another order. On split boards the order matters, so check each one and tick "Different item" only if it really is.</div>':'')
     +(noP?'<div style="font-size:11px;color:var(--coral);margin-bottom:6px">'+noP+' line'+(noP>1?'s have':' has')+' no price — add one on the line or fill "Price for lines with none". They are left out until then.</div>':'')
-    +'<button class="btn btn-primary" id="mat-bulk-go" onclick="_matBulkAdd()"'+(add?'':' disabled')+'><i class="ti ti-plus"></i> Add '+add+' material'+(add===1?'':'s')+'</button>';
+    +'<button class="btn btn-primary" id="mat-bulk-go" onclick="_matBulkAdd()"'+(add?'':' disabled')+'><i class="ti ti-plus"></i> Add '+add+' '+(_matBulkKind==='Hardware'?'hardware item':'material')+(add===1?'':'s')+'</button>';
 }
 function _matBulkAdd(){
-  var rows=_matBulkRows().filter(function(r){return r.status==='new';});
+  if(!_canAddSkus()){ showToast('You do not have access to add SKUs.'); return; }
+  var kind=_matBulkKind, rows=_matBulkRows().filter(function(r){return r.status==='new';});
   if(!rows.length) return;
-  var mto=!!(el('mat-bulk-mto')&&el('mat-bulk-mto').checked);
-  _confirm('Add '+rows.length+' material'+(rows.length>1?'s':'')+' to the price list'+(mto?' as Made to Order':'')+'?\n\nCheck the spelling — these are the names everyone will pick from.',function(){
-    var btn=el('mat-bulk-go'); if(btn){ btn.disabled=true; btn.textContent='Adding…'; }
-    priceDbAppend('Materials!A:C',rows.map(function(r){return [r.name,r.unit,r.price];})).then(function(res){
-      if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
-      if(typeof supaReady==='function'&&supaReady())
-        return supa.from('price_materials').insert(rows.map(function(r){return {name:r.name,unit:r.unit,price:r.price};})).then(function(x){
-          if(x&&x.error) console.warn('[supa] price_materials bulk insert error:',x.error.message||x.error);
-        });
-    }).then(function(){
-      dbMaterials=dbMaterials.concat(rows.map(function(r){return {name:r.name,unit:r.unit,price:r.price};}));
-      if(mto){ rows.forEach(function(r){ setMtoMaterialName(r.name,true); }); if(typeof gSaveAppSettings==='function') gSaveAppSettings(); }
-      else _applyMtoTags();
-      logActivity('Added '+rows.length+' material'+(rows.length>1?'s':'')+' to the price list'+(mto?' (Made to Order)':'')+': '
-        +rows.slice(0,5).map(function(r){return r.name;}).join('; ')+(rows.length>5?'; and '+(rows.length-5)+' more':'')+'.','');
-      showToast(rows.length+' material'+(rows.length>1?'s':'')+' added'+(mto?' and tagged Made to Order':'')+'.');
-      var t=el('mat-bulk-text'); if(t) t.value='';
-      _matBulkPreview(); renderMtoTagTool();
-      var c=el('pdb-cnt-materials'); if(c) c.textContent=dbMaterials.length.toLocaleString();
+  var tbl=kind==='Hardware'?'price_hardware':'price_materials';
+  var mto=kind==='Materials'&&!!(el('mat-bulk-mto')&&el('mat-bulk-mto').checked);
+  _confirm('Add '+rows.length+' '+(kind==='Hardware'?'hardware item':'material')+(rows.length>1?'s':'')+' to the price list'+(mto?' as Made to Order':'')+'?\n\nCheck the spelling — these are the names everyone will pick from.',function(){
+    var btn=el('mat-bulk-go'); if(btn){ btn.disabled=true; btn.textContent='Checking…'; }
+    // Someone else may have added the same names since this page loaded — ask the database first.
+    var live=(typeof supaReady==='function'&&supaReady())
+      ? supa.from(tbl).select('name').in('name',rows.map(function(r){return r.name;})).then(function(r){ return (r&&!r.error&&r.data)?r.data.map(function(x){return String(x.name).toLowerCase();}):[]; }).catch(function(){ return []; })
+      : Promise.resolve([]);
+    live.then(function(taken){
+      var skip=rows.filter(function(r){ return taken.indexOf(r.name.toLowerCase())>=0; });
+      rows=rows.filter(function(r){ return taken.indexOf(r.name.toLowerCase())<0; });
+      if(skip.length) showToast(skip.length+' already added by someone else just now — left out: '+skip.slice(0,3).map(function(r){return r.name;}).join('; ')+(skip.length>3?'…':''));
+      if(!rows.length){ _matBulkPreview(); return null; }
+      if(btn) btn.textContent='Adding…';
+      return priceDbAppend(kind+'!A:C',rows.map(function(r){return [r.name,r.unit,r.price];})).then(function(res){
+        if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
+        if(typeof supaReady==='function'&&supaReady())
+          return supa.from(tbl).insert(rows.map(function(r){return {name:r.name,unit:r.unit,price:r.price};})).then(function(x){
+            if(x&&x.error) console.warn('[supa] '+tbl+' bulk insert error:',x.error.message||x.error);
+          });
+      }).then(function(){
+        var items=rows.map(function(r){return {name:r.name,unit:r.unit,price:r.price};});
+        if(kind==='Hardware'){ dbHardware=dbHardware.concat(items); if(typeof _syncHardwareFromDb==='function') _syncHardwareFromDb(); }
+        else dbMaterials=dbMaterials.concat(items);
+        if(mto){ rows.forEach(function(r){ setMtoMaterialName(r.name,true); }); if(typeof gSaveAppSettings==='function') gSaveAppSettings(); }
+        else _applyMtoTags();
+        logActivity('Added '+rows.length+' '+(kind==='Hardware'?'hardware item':'material')+(rows.length>1?'s':'')+' to the price list'+(mto?' (Made to Order)':'')+': '
+          +rows.slice(0,5).map(function(r){return r.name;}).join('; ')+(rows.length>5?'; and '+(rows.length-5)+' more':'')+'.','');
+        showToast(rows.length+' '+(kind==='Hardware'?'hardware item':'material')+(rows.length>1?'s':'')+' added'+(mto?' and tagged Made to Order':'')+'.');
+        var t=el('mat-bulk-text'); if(t) t.value='';
+        _matBulkPreview(); if(el('mto-tag-wrap')) renderMtoTagTool();
+        var c=el('pdb-cnt-materials'); if(c) c.textContent=dbMaterials.length.toLocaleString();
+      });
     }).catch(function(e){
-      showToast('Could not add them: '+(e&&e.message?e.message:e)+' — nothing was saved to the app\'s copy.');
+      var m=(e&&e.message?e.message:String(e||''));
+      showToast('Could not add them: '+m+(/permission|403|PERMISSION/i.test(m)?' — your Google account needs edit access to the Price Database sheet.':'')+' Nothing was added.');
       _matBulkPreview();
     });
   });
@@ -50137,8 +50274,10 @@ var WHATS_NEW=[
     {id:'reflect-highlight', icon:'ti-highlight', title:'New cutting-list lines are highlighted',
      text:'After Reflect to quotation, every line the cutting list added has a teal background, so you can see exactly what came in and check it. The highlight goes away when you save or lock.',
      show:'quotations'},
-    {id:'mat-bulk-add', icon:'ti-playlist-add', title:'Add many materials at once',
-     text:'Settings › Price Database › Materials › Add materials in bulk: paste one name per line (a price can follow after a tab, as copied from Excel), set a price for the rest, and tick Made to Order if they are. Names already in the list are skipped.',
+    {id:'mat-bulk-add', icon:'ti-playlist-add', title:'Add many SKUs at once',
+     text:'Settings › Price Database › Materials › Add SKUs in bulk (or the Price list tab, for people allowed to add SKUs): choose Materials or Hardware, paste one name per line (a price can follow after a tab, as copied from Excel), and tick Made to Order if they are. Every line is checked first: anything already in the list, even written differently, is not added, and look-alikes in a different word order have to be confirmed.'},
+    {id:'sku-access', icon:'ti-key', title:'Let PPIC add SKUs',
+     text:'Settings › Users › Can add SKUs: gives that person a Price list tab for adding new materials and hardware, without the rest of Settings. They cannot change or remove existing items. Their Google account also needs edit access to the Price Database sheet.',
      show:'settings'}
   ]},
   {id:'2026-10-27-void-series', date:'27 Oct 2026', items:[

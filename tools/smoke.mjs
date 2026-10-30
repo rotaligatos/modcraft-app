@@ -598,13 +598,18 @@ const PROFILES = {
             }, [true, true, true, true]);
       check('_matBulkParse: names with commas stay whole, price after a tab, existing/repeated/unpriced lines are not added (2026-10-30)',
             () => {
-              const w = window, keep = w.dbMaterials;
+              const w = window, keep = w.dbMaterials, keepH = w.dbHardware;
               try {
-                w.dbMaterials = [{ name: 'Acacia MDF 4x8 1F (3mm, Matte)', unit: 'pc', price: 900 }];
-                const r = w._matBulkParse('Granada MDF 4x8 1F (3mm, Gridwork)\t1,250\nacacia mdf 4x8 1F (3mm, Matte)\nGranada MDF 4x8 1F (3mm, Gridwork)\nElmo MDF 4x8 1F (3mm, Featherlight)\nSwiss Pear MDF 4x8 1F (3mm, Gridwork) | 1100\n\n', 'pc', '');
-                return r.map(x => x.name + '|' + x.price + '|' + x.status).join(';');
-              } finally { w.dbMaterials = keep; }
-            }, 'Granada MDF 4x8 1F (3mm, Gridwork)|1250|new;acacia mdf 4x8 1F (3mm, Matte)|0|exists;Granada MDF 4x8 1F (3mm, Gridwork)|0|dup;Elmo MDF 4x8 1F (3mm, Featherlight)|0|noprice;Swiss Pear MDF 4x8 1F (3mm, Gridwork)|1100|new');
+                w.dbMaterials = [{ name: 'Acacia MDF 4x8 1F (3mm, Matte)', unit: 'pc', price: 900 }, { name: 'Real White PB 4x8 2F (18mm, Super Matte)', unit: 'pc', price: 1 }];
+                w.dbHardware = [{ name: 'Soft-close Hinge 35mm', unit: 'pc', price: 1 }];
+                const r = w._matBulkParse('Granada MDF 4x8 1F (3mm, Gridwork)\t1,250\nacacia mdf 4x8 1F (3mm, Matte)\nGranada MDF 4x8 1F (3mm, Gridwork)\nElmo MDF 4x8 1F (3mm, Featherlight)\nSwiss Pear MDF 4x8 1F (3mm, Gridwork) | 1100\nreal white pb 4 x 8 2 Face 18 mm super matte\t5\nReal White PB 2F 4x8 (18mm, Super Matte)\t5\nSoft-close hinge 35 mm\t5\nAcacia MDF 4x8 1F (3mm, Gridwork)\t5\n\n', 'pc', '', 'Materials');
+                const ok1 = r.map(x => x.name + '|' + x.price + '|' + x.status).join(';');
+                w._matBulkOk['real white pb 2f 4x8 (18mm, super matte)'] = 1;      // person ticked "Different item"
+                const r2 = w._matBulkParse('Real White PB 2F 4x8 (18mm, Super Matte)\t5', 'pc', '', 'Materials');
+                delete w._matBulkOk['real white pb 2f 4x8 (18mm, super matte)'];
+                return ok1 + '#' + r2[0].status;
+              } finally { w.dbMaterials = keep; w.dbHardware = keepH; }
+            }, 'Granada MDF 4x8 1F (3mm, Gridwork)|1250|new;acacia mdf 4x8 1F (3mm, Matte)|0|exists;Granada MDF 4x8 1F (3mm, Gridwork)|0|dup;Elmo MDF 4x8 1F (3mm, Featherlight)|0|noprice;Swiss Pear MDF 4x8 1F (3mm, Gridwork)|1100|new;real white pb 4 x 8 2 Face 18 mm super matte|5|same;Real White PB 2F 4x8 (18mm, Super Matte)|5|similar;Soft-close hinge 35 mm|5|other;Acacia MDF 4x8 1F (3mm, Gridwork)|5|new#new');
       check('reflected lines are highlighted until the next save, and the highlight is never saved (2026-10-30)',
             () => {
               const w = window, keep = { a: w.qAreas, f: w.prodState.fileName, l: w.logActivity };
