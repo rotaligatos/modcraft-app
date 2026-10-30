@@ -13316,3 +13316,71 @@ uneven banding. Also hit W362 P41 and QT-W00000355 P1/P5/P6/P7/P10.
 - **One size column on the Job Order** (`988aabf`): `anyCut` = some part's cut ≠ finished. None → one
   column "Finished Size W×L". Otherwise (old no-trimmer bander) "Cut Size W×L" in bold with "Finished Size …"
   in grey under only the differing rows. Rommel chose the labels "Finished Size" / "Cut Size" after a mockup.
+
+## What was changed on 2026-10-30 (session — serial series, options, Project List option lines, Designers Support drafts)
+All live, each with a smoke check (proven failing on the old code where it fixes a bug).
+
+### Serial number series (QT-M00000179)
+- **Claim race** (`5d1f295`): "Save & continue" on the unsaved-work prompt continued immediately, so the
+  previous draft's in-flight serial claim (prefix M) landed on the new WCL draft. `_afterPendingSave()`
+  waits for `_serialClaimWaiters` / the conflict check; the claim callback refuses if `qDraftKey` changed
+  (claimed number pocketed via `_pendingSerialSet`). Same guard in `_fallbackSerialCheck`.
+- **Move to the company's series** (`57f03f1`): Settings → Company & DB → Check Project List lists
+  quotations whose prefix ≠ company (`_reportSeriesMismatch`, `_seriesPrefixFor`), Admin button
+  `renumberToSeries(serial,prefix)` (Sheet + Supabase together, FKs cascade, approvals/orders repointed,
+  logged). Old numbers kept in **Quotations column AC "Previous Numbers"** (ranges A:AB → A:AC, 3 header
+  arrays) and `quotations.prev_serials`; Project List search finds a quotation by an old number.
+  QT-M00000179 still to be moved by Rommel (click "Move to W"); 12 other mismatches listed, many were
+  deliberately on M (client copy) — move only on his decision.
+
+### Options
+- **Reflect into a chosen option** (`2f7c95d`): Reflect window has "Which option?" pills
+  (`_prodReflectRefreshTargets`, `_prodReflectPickOption` → `switchToOption`).
+- **A locked option was unlocked by another option's save** (`ebe3033`, Raven, QT-M00000217):
+  `_refreshOpenQuotationLockState` compared the saved top-level `locked` (belongs to the option active at
+  the last save) with the option on screen. Now only when `state.activeOptionId === qActiveOptionId`; also
+  keeps the option's own `.locked` in step. Checked: no cutting list was actually saved into M217.
+- **Locked price per option** (`e4613c4`): `qLockedTotal`/`fqLockedTotal` were one figure for the whole
+  quotation, so a locked option was held at another option's price. Now in `captureQuotationSnapshot` /
+  `restoreQuotationSnapshot`; new option starts null; legacy snapshots take `newOpt.grand` on switch.
+  Data: QT-M00000043, QT-M00000171, QT-W00000122 `lockedTotal` + `quotations.total` set to their active
+  option's total (Supabase; the Sheet value follows on the next save). QT-M00000164's lockedTotal matches
+  no option but the list was already right — left.
+
+### Project List option lines (`239df80`, `d2f5f23`)
+- Value column = ONE price per quotation (option edited last; approved one once approved) — the
+  dashboard/reports sum it; options are never added together.
+- **▸ N** button in the **Options column** (serial column cut it off) opens a line per option: price,
+  open/locked/approved/archived, "price shown in the list"; click opens the quotation on that option
+  (`openQuotationFromDir(id, optId)`).
+- Data from new view **`quotation_option_lines`** (security_invoker; optionsList + active pCalc).
+  `_loadDirOptLines` (on list load and render, 60 s), `_applyDirOptLines` / `_dirMainValue`: where the
+  Value equals ANOTHER option's price and not the active one's, show the active option's own price (a
+  normal locked-vs-recompute drift is left alone).
+
+### Designers Support drafts (`dfc5387`)
+- **Save draft** (analysis results row + Cutting List footer) → table **`ds_drafts`** (owner only via
+  `app_current_email()`, staff only; RLS tested by impersonation). Listed under Saved Analyses → **My
+  drafts** (Open/Delete). Re-saving an opened draft updates it (`prodState._draftId`).
+- Unsaved work copied to localStorage `mc_ds_autosave_<email>` every 30 s + on close; blue **Restore /
+  Discard** bar when Designers Support opens empty. `MCL.setState()` added.
+- Not kept: the uploaded file and drawing-page images (`result.drawings`, `S.sourceFiles`).
+- What's new entry `2026-10-30-drafts-options` (drafts, option lines, reflect option picker).
+
+### Command Center (`a75899d`)
+- Modcraft user editor gained **Lami** and **Can add SKUs** (`users.lami_enabled` / `can_add_skus`,
+  database only): `mcFlags`, `mcSaveFlags`; saved without Sheet access when only these change.
+- ⚠ `tools/sim_cc_phase2.mjs` is stale — fails on the unchanged file too (`q[11].data.forEach`, its stub
+  of `loadAll`'s queries is out of date). Fix the stub before relying on it.
+
+### Notes
+- Bash heredocs broke again (quotes, `\'` eaten in template literals, CRLF doubled to `\r\r\n` when a
+  patch script joined already-CRLF text). Use Write + a .cjs file; check `\r\r` count after patching.
+
+# OPEN — updated 2026-10-30
+- Rommel: move QT-M00000179 to W (Settings → Company & DB → Check Project List → Move to W); decide the
+  12 other series mismatches (default: leave).
+- Raven: reflect the cutting list again into the intended option of QT-M00000217 (nothing was saved).
+- Stephanie's Acacia draft (₱3,326.40) was never saved — re-enter.
+- Fix the stale `tools/sim_cc_phase2.mjs` stub.
+- Everything in the 2026-10-27 and earlier lists still stands.
