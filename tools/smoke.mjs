@@ -596,6 +596,25 @@ const PROFILES = {
                 return [main, rep.found, w.qAreas.length === 1 && legacy[0].matItems.length === 1 && legacy[0].matItems[0].qty === 3, rep2.found];
               } finally { w.qAreas = keep.a; w.prodState.fileName = keep.f; w.logActivity = keep.l; }
             }, [true, true, true, true]);
+      check('reflected lines are highlighted until the next save, and the highlight is never saved (2026-10-30)',
+            () => {
+              const w = window, keep = { a: w.qAreas, f: w.prodState.fileName, l: w.logActivity };
+              try {
+                w.logActivity = function () {};
+                w.prodState.fileName = 'k.xlsx';
+                const old = { svcIdx: 0, qty: 1 };
+                w.qAreas = [{ name: 'Manual', svcItems: [old], matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+                w._prodReflectFill({ materials: [{ include: true, name: 'PB 18', qty: 2, unit: 'pc', price: 100 }],
+                  hardware: [{ include: true, name: 'Hinge', qty: 4, unit: 'pcs', price: 10 }], services: [{ include: true, svcIdx: 0, qty: 5 }] }, false, '');
+                const ar = w.qAreas[1];
+                const marked = !!w._reflectNewStyle(ar.matItems[0]) && !!w._reflectNewStyle(ar.hwItems[0]) && !!w._reflectNewStyle(ar.svcItems[0]);
+                const oldPlain = w._reflectNewStyle(old) === '';
+                const notInJson = JSON.stringify(w.qAreas).indexOf('wash-teal') < 0 && JSON.stringify(w.qAreas).indexOf('reflectNew') < 0;
+                const hooked = /_auditDiffAndLog\(\);\s*_reflectNewClear\(\)/.test(String(w.gSaveQuotation));
+                w._reflectNewClear();
+                return [marked, oldPlain, notInJson, hooked, w._reflectNewStyle(ar.matItems[0]) === ''];
+              } finally { w.qAreas = keep.a; w.prodState.fileName = keep.f; w.logActivity = keep.l; }
+            }, [true, true, true, true, true]);
       if (typeof window._prodReflectStageBlock === 'function')
         check('_prodReflectStageBlock: locked stages and an unopened Final Quotation refuse a cutting list',
               () => {
