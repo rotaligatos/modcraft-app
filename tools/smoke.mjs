@@ -596,6 +596,15 @@ const PROFILES = {
                 return [main, rep.found, w.qAreas.length === 1 && legacy[0].matItems.length === 1 && legacy[0].matItems[0].qty === 3, rep2.found];
               } finally { w.qAreas = keep.a; w.prodState.fileName = keep.f; w.logActivity = keep.l; }
             }, [true, true, true, true]);
+      check('_matBulkParse: names with commas stay whole, price after a tab, existing/repeated/unpriced lines are not added (2026-10-30)',
+            () => {
+              const w = window, keep = w.dbMaterials;
+              try {
+                w.dbMaterials = [{ name: 'Acacia MDF 4x8 1F (3mm, Matte)', unit: 'pc', price: 900 }];
+                const r = w._matBulkParse('Granada MDF 4x8 1F (3mm, Gridwork)\t1,250\nacacia mdf 4x8 1F (3mm, Matte)\nGranada MDF 4x8 1F (3mm, Gridwork)\nElmo MDF 4x8 1F (3mm, Featherlight)\nSwiss Pear MDF 4x8 1F (3mm, Gridwork) | 1100\n\n', 'pc', '');
+                return r.map(x => x.name + '|' + x.price + '|' + x.status).join(';');
+              } finally { w.dbMaterials = keep; }
+            }, 'Granada MDF 4x8 1F (3mm, Gridwork)|1250|new;acacia mdf 4x8 1F (3mm, Matte)|0|exists;Granada MDF 4x8 1F (3mm, Gridwork)|0|dup;Elmo MDF 4x8 1F (3mm, Featherlight)|0|noprice;Swiss Pear MDF 4x8 1F (3mm, Gridwork)|1100|new');
       check('reflected lines are highlighted until the next save, and the highlight is never saved (2026-10-30)',
             () => {
               const w = window, keep = { a: w.qAreas, f: w.prodState.fileName, l: w.logActivity };

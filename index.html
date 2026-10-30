@@ -1973,6 +1973,7 @@ Everything not in the file is removed.', importMaterialsExcel)" style="font-size
             </div>
           <div id="pdb-mat-list"></div>
           <div id="pdb-out-list"></div>
+          <div id="mat-bulk-wrap" style="margin-top:14px"></div>
           <div id="mto-tag-wrap" style="margin-top:14px"></div>
         </div>
         <div id="pdb-panel-hardware" style="display:none">
@@ -35834,6 +35835,7 @@ function _pdbRenderAll(){
   _pdbRenderSvcList();
   _pdbRenderMatSearch();
   var ol=el('pdb-out-list'); if(ol) ol.innerHTML=_pdbOutsourceHtml();
+  renderMatBulkAdd();
   renderMtoTagTool();
   if(pdbTab==='templates') renderTplCheck();
   setPdbTab(pdbTab);
@@ -36319,6 +36321,91 @@ function _pdbRenderCountsOnly(){
   var e=el('pdb-cnt-templates'); if(!e) return;
   var n=_tplIssueCount();
   e.innerHTML='<span style="font-size:10px;color:'+(n?'var(--coral)':'var(--text2)')+';font-weight:600">'+(n?(n+' to fix'):dbTemplates.length)+'</span>';
+}
+// ── Add many materials at once (Rommel, 2026-10-30: "too many to manual") ──────────────────
+// Paste one name per line; a price may follow after a TAB (as copied from Excel) or " | ".
+// Commas are NOT a separator — SKU names contain them ("(3mm, Gridwork)"). Writes the Sheet and
+// the app's Supabase copy together (same as _priceDbAddRow), skips names already in the
+// catalogue, and can tag every new one Made to Order in the same step.
+function _matBulkParse(text,defUnit,defPrice){
+  var have={}; (dbMaterials||[]).forEach(function(m){ have[String(m.name||'').trim().toLowerCase()]=1; });
+  var seen={}, rows=[];
+  String(text||'').split(/\r?\n/).forEach(function(line){
+    var raw=line.trim(); if(!raw) return;
+    var parts=raw.indexOf('\t')>=0?raw.split('\t'):raw.split(/\s+\|\s+/);
+    var name=String(parts[0]||'').trim().replace(/\s+/g,' ');
+    if(!name) return;
+    var p=parts.length>1?parseFloat(String(parts[parts.length-1]).replace(/[₱,\s]/g,'')):NaN;
+    var price=isNaN(p)?(parseFloat(defPrice)||0):p;
+    var k=name.toLowerCase(), status='new';
+    if(have[k]) status='exists'; else if(seen[k]) status='dup'; else if(!(price>0)) status='noprice';
+    seen[k]=1;
+    rows.push({name:name,unit:defUnit||'pc',price:price,status:status});
+  });
+  return rows;
+}
+function renderMatBulkAdd(){
+  var w=el('mat-bulk-wrap'); if(!w) return;
+  if(w.getAttribute('data-built')) { _matBulkPreview(); return; }   // keep what was typed
+  w.setAttribute('data-built','1');
+  w.innerHTML='<div class="card"><div class="card-head"><h3><i class="ti ti-playlist-add"></i>Add materials in bulk</h3></div>'
+    +'<div class="card-body">'
+    +'<p style="font-size:12px;color:var(--text2);margin:0 0 8px">Paste one material per line. A price can follow on the same line after a tab (copied from Excel) or " | ". Names already in the list are skipped.</p>'
+    +'<textarea id="mat-bulk-text" oninput="_matBulkPreview()" placeholder="Granada MDF 4x8 1F (3mm, Gridwork)&#9;1250" style="width:100%;height:150px;font-family:monospace;font-size:12px"></textarea>'
+    +'<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:8px 0">'
+    +'<label style="font-size:12px">Unit <input id="mat-bulk-unit" value="pc" oninput="_matBulkPreview()" style="width:60px;height:28px"></label>'
+    +'<label style="font-size:12px">Price for lines with none ₱ <input id="mat-bulk-price" type="number" min="0" step="0.01" oninput="_matBulkPreview()" style="width:100px;height:28px"></label>'
+    +'<label style="font-size:12px;display:flex;align-items:center;gap:5px"><input id="mat-bulk-mto" type="checkbox" checked> Tag as Made to Order</label>'
+    +'</div>'
+    +'<div id="mat-bulk-preview"></div>'
+    +'</div></div>';
+  _matBulkPreview();
+}
+function _matBulkRows(){
+  return _matBulkParse((el('mat-bulk-text')||{}).value,((el('mat-bulk-unit')||{}).value||'pc').trim()||'pc',(el('mat-bulk-price')||{}).value);
+}
+function _matBulkPreview(){
+  var slot=el('mat-bulk-preview'); if(!slot) return;
+  var rows=_matBulkRows();
+  if(!rows.length){ slot.innerHTML=''; return; }
+  var add=rows.filter(function(r){return r.status==='new';}).length;
+  var lbl={new:['Will add','var(--teal)'],exists:['Already in list','var(--text2)'],dup:['Repeated above','var(--text2)'],noprice:['No price','var(--coral)']};
+  var noP=rows.filter(function(r){return r.status==='noprice';}).length;
+  slot.innerHTML='<div style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:8px">'
+    +rows.map(function(r){ var l=lbl[r.status];
+      return '<div style="display:flex;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border)"><span style="flex:1">'+escHtml(r.name)+'</span>'
+        +'<span style="width:90px;text-align:right">'+(r.price>0?fmtMoney(r.price):'—')+'</span>'
+        +'<span style="width:110px;color:'+l[1]+';font-weight:600">'+l[0]+'</span></div>'; }).join('')+'</div>'
+    +(noP?'<div style="font-size:11px;color:var(--coral);margin-bottom:6px">'+noP+' line'+(noP>1?'s have':' has')+' no price — add one on the line or fill "Price for lines with none". They are left out until then.</div>':'')
+    +'<button class="btn btn-primary" id="mat-bulk-go" onclick="_matBulkAdd()"'+(add?'':' disabled')+'><i class="ti ti-plus"></i> Add '+add+' material'+(add===1?'':'s')+'</button>';
+}
+function _matBulkAdd(){
+  var rows=_matBulkRows().filter(function(r){return r.status==='new';});
+  if(!rows.length) return;
+  var mto=!!(el('mat-bulk-mto')&&el('mat-bulk-mto').checked);
+  _confirm('Add '+rows.length+' material'+(rows.length>1?'s':'')+' to the price list'+(mto?' as Made to Order':'')+'?\n\nCheck the spelling — these are the names everyone will pick from.',function(){
+    var btn=el('mat-bulk-go'); if(btn){ btn.disabled=true; btn.textContent='Adding…'; }
+    priceDbAppend('Materials!A:C',rows.map(function(r){return [r.name,r.unit,r.price];})).then(function(res){
+      if(res&&res.error) throw new Error(res.error.message||'Sheets write error');
+      if(typeof supaReady==='function'&&supaReady())
+        return supa.from('price_materials').insert(rows.map(function(r){return {name:r.name,unit:r.unit,price:r.price};})).then(function(x){
+          if(x&&x.error) console.warn('[supa] price_materials bulk insert error:',x.error.message||x.error);
+        });
+    }).then(function(){
+      dbMaterials=dbMaterials.concat(rows.map(function(r){return {name:r.name,unit:r.unit,price:r.price};}));
+      if(mto){ rows.forEach(function(r){ setMtoMaterialName(r.name,true); }); if(typeof gSaveAppSettings==='function') gSaveAppSettings(); }
+      else _applyMtoTags();
+      logActivity('Added '+rows.length+' material'+(rows.length>1?'s':'')+' to the price list'+(mto?' (Made to Order)':'')+': '
+        +rows.slice(0,5).map(function(r){return r.name;}).join('; ')+(rows.length>5?'; and '+(rows.length-5)+' more':'')+'.','');
+      showToast(rows.length+' material'+(rows.length>1?'s':'')+' added'+(mto?' and tagged Made to Order':'')+'.');
+      var t=el('mat-bulk-text'); if(t) t.value='';
+      _matBulkPreview(); renderMtoTagTool();
+      var c=el('pdb-cnt-materials'); if(c) c.textContent=dbMaterials.length.toLocaleString();
+    }).catch(function(e){
+      showToast('Could not add them: '+(e&&e.message?e.message:e)+' — nothing was saved to the app\'s copy.');
+      _matBulkPreview();
+    });
+  });
 }
 function renderMtoTagTool(){
   var w=el('mto-tag-wrap'); if(!w) return;
@@ -50046,6 +50133,14 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-10-30-highlight-bulk', date:'30 Oct 2026', items:[
+    {id:'reflect-highlight', icon:'ti-highlight', title:'New cutting-list lines are highlighted',
+     text:'After Reflect to quotation, every line the cutting list added has a teal background, so you can see exactly what came in and check it. The highlight goes away when you save or lock.',
+     show:'quotations'},
+    {id:'mat-bulk-add', icon:'ti-playlist-add', title:'Add many materials at once',
+     text:'Settings › Price Database › Materials › Add materials in bulk: paste one name per line (a price can follow after a tab, as copied from Excel), set a price for the rest, and tick Made to Order if they are. Names already in the list are skipped.',
+     show:'settings'}
+  ]},
   {id:'2026-10-27-void-series', date:'27 Oct 2026', items:[
     {id:'void-draft', icon:'ti-ban', title:'Numbered drafts are voided, not deleted',
      text:'Once a draft has its quotation number, the Discard button reads “Void draft”. It asks for a reason and keeps the quotation as Voided, so the number stays on record for accounting. A voided quotation counts in no total and is hidden from the Project List (choose Status: Voided to see it). Discarding or voiding also puts the order it came from back to New, so someone can pick it up.',
