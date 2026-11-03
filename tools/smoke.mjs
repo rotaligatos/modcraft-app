@@ -6685,6 +6685,49 @@ const PROFILES = {
         check('A device connected as the previous person is disconnected when someone else signs in',
           () => acct, { switched: true, cleared: true, signedOut: 1, same: false, banner: true });
       }
+      if (typeof window._supaAccountState === 'function') {
+        check('Renamed mailbox: Google says it is you but the database record is still the previous name',
+          () => {
+            const f = window._supaAccountState;
+            return { same: f('karen@x', 'karen@x', 'Karen@X '), renamed: f('allan@x', 'karen@x', 'karen@x'),
+                     other: f('allan@x', 'allan@x', 'karen@x'), noId: f('allan@x', '', 'karen@x'), noSess: f('', 'karen@x', 'karen@x') };
+          }, { same: 'ok', renamed: 'renamed', other: 'other', noId: 'other', noSess: 'ok' });
+        const ren = await (async () => {
+          const w = window, keepS = w.supaSession, keepSupa = w.supa, keepU = w.gUser, keepSend = w.gSendMessage, keepUsers = w.sheetUsers, keepSU = w.sheetUsers;
+          let out = 0, sent = [];
+          try { localStorage.removeItem('mc_supa_renamed_karen.dolor@x'); localStorage.removeItem('mc_supa_renamed_told_karen.dolor@x'); } catch (e) {}
+          w.supa = { auth: { signOut: () => { out++; return Promise.resolve({}); } } };
+          w.gUser = { email: 'karen.dolor@x', name: 'Karen' };
+          w.sheetUsers = [{ email: 'rommel@x', name: 'Rommel', pos: 'Admin', active: true }, { email: 'staff@x', name: 'S', pos: 'Staff', active: true }];
+          w.gSendMessage = (to, nm, text, pri) => { sent.push({ to, pri, text }); };
+          w.supaSession = { user: { email: 'allan.lagsao@x', user_metadata: { email: 'karen.dolor@x' } } };
+          const r1 = await w._supaCheckAccountMatch();
+          const cleared = w.supaSession === null;
+          const flag = localStorage.getItem('mc_supa_renamed_karen.dolor@x');
+          const b = document.getElementById('supa-connect-banner');
+          const bannerKind = b && b.getAttribute('data-kind'), bannerNames = !!b && /allan\.lagsao@x/.test(b.innerHTML) && /karen\.dolor@x/.test(b.innerHTML);
+          const noConnectAsMe = !!b && !/Connect as me/.test(b.innerHTML);
+          // Auto-connect must not reopen the popup while the flag stands.
+          let closed = 0; w._supaConnectInFlight = false;
+          w._supaAutoConnect({ closed: false, close: () => { closed++; } });
+          const popupClosed = closed, notInFlight = w._supaConnectInFlight === false;
+          // Admin told once, not the Staff, and not twice.
+          w.supaSession = { user: { email: 'allan.lagsao@x', user_metadata: { email: 'karen.dolor@x' } } };
+          await w._supaCheckAccountMatch();
+          const told = sent.map(x => x.to), urgent = sent.every(x => x.pri === 'urgent'), tellsFix = sent.every(x => /change the email to karen\.dolor@x/.test(x.text));
+          // Admin fixed the record: the next check as herself clears the flag and the banner.
+          w.supaSession = { user: { email: 'karen.dolor@x', user_metadata: { email: 'karen.dolor@x' } } };
+          const r2 = await w._supaCheckAccountMatch();
+          const flagGone = !localStorage.getItem('mc_supa_renamed_karen.dolor@x'), bannerGone = !document.getElementById('supa-connect-banner');
+          const b2 = document.getElementById('supa-connect-banner'); if (b2) b2.remove();
+          try { localStorage.removeItem('mc_supa_renamed_karen.dolor@x'); localStorage.removeItem('mc_supa_renamed_told_karen.dolor@x'); localStorage.removeItem('mc_supa_autotried_karen.dolor@x'); } catch (e) {}
+          w.supaSession = keepS; w.supa = keepSupa; w.gUser = keepU; w.gSendMessage = keepSend; w.sheetUsers = keepSU;
+          return { r1, cleared, signedOut: out, flag, bannerKind, bannerNames, noConnectAsMe, popupClosed, notInFlight, told, urgent, tellsFix, r2, flagGone, bannerGone };
+        })().catch(e => ({ err: String(e) }));
+        check('Renamed mailbox: disconnect, banner, no reconnect loop, Admin told once, clears once the record is fixed',
+          () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
+                       popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
+      }
       return out;
     }
   },

@@ -29093,7 +29093,10 @@ function initSupabase(){
   try{
     supa=window.supabase.createClient(SUPA_URL,SUPA_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'pkce'}});
     supa.auth.getSession().then(function(r){ supaSession=(r&&r.data&&r.data.session)||null; if(supaSession){console.log('[supa] restored session:',supaSession.user&&supaSession.user.email);_supaCheckAccountMatch().then(function(sw){ if(!sw) _supaSessionArrived(); });} });
-    supa.auth.onAuthStateChange(function(_evt,sess){ var was=!!supaSession; supaSession=sess||null; if(supaSession&&!was)_supaSessionArrived(); });
+    supa.auth.onAuthStateChange(function(_evt,sess){ var was=!!supaSession; supaSession=sess||null; if(supaSession&&!was)_supaSessionArrived();
+      // A refreshed token carries the auth record's CURRENT email — after an Admin corrects a renamed
+      // mailbox this is where the session becomes the person's own, so re-check and let the flag clear.
+      if(supaSession&&gUser&&gUser.email&&_supaRenamedFlag(gUser.email)) _supaCheckAccountMatch(); });
     console.log('[supa] client initialized');
   }catch(e){ console.warn('[supa] init failed',e); }
 }
@@ -29104,12 +29107,58 @@ function supaReady(){ return !!(supa&&supaSession); }
 // When the person signed in to Modcraft is not the person the connection belongs to, the
 // connection is dropped and the reconnect is offered (or done, when sign-in opened a popup).
 function _supaSessEmail(){ return String((supaSession&&supaSession.user&&supaSession.user.email)||'').trim().toLowerCase(); }
+// The address Google itself reported for this session's identity. Supabase keeps the login email
+// it first saw on the auth record; Google keeps reporting whatever the mailbox is called NOW. When
+// a mailbox is renamed to a new person (Allan's became Karen's, 2026-11-03) the two differ, and
+// every database call runs as the OLD name — a name that may no longer be on any user list.
+function _supaIdentityEmail(){
+  var u=supaSession&&supaSession.user; if(!u) return '';
+  var meta=u.user_metadata||{}, ids=u.identities||[];
+  var e=meta.email||(ids[0]&&ids[0].identity_data&&ids[0].identity_data.email)||'';
+  return String(e).trim().toLowerCase();
+}
+// Pure. sessEmail = what the database calls this session; idEmail = what Google calls the account;
+// googleEmail = who is signed in to Modcraft.
+//   'ok'      — the connection is this person's.
+//   'other'   — the connection belongs to somebody else (a shared machine). Reconnecting as
+//               yourself fixes it.
+//   'renamed' — Google says this IS the signed-in person, but the database record still carries a
+//               retired address. Reconnecting lands on the SAME record, so it cannot fix anything;
+//               only an Admin changing the email on the auth record can.
+function _supaAccountState(sessEmail,idEmail,googleEmail){
+  var s=String(sessEmail||'').trim().toLowerCase(), i=String(idEmail||'').trim().toLowerCase(), g=String(googleEmail||'').trim().toLowerCase();
+  if(!s||!g||s===g) return 'ok';
+  if(i&&i===g) return 'renamed';
+  return 'other';
+}
+function _supaRenamedKey(g){ return 'mc_supa_renamed_'+String(g||'').trim().toLowerCase(); }
+function _supaRenamedFlag(g){ try{ return localStorage.getItem(_supaRenamedKey(g))||''; }catch(e){ return ''; } }
 function _supaCheckAccountMatch(){
   if(!supa||!supaSession||!gUser||!gUser.email||gUser.email==='local') return Promise.resolve(false);
   var s=_supaSessEmail(), g=String(gUser.email).trim().toLowerCase();
-  if(!s||s===g) return Promise.resolve(false);
-  console.warn('[supa] this device is connected as '+s+' but '+g+' is signed in — reconnecting');
+  var state=_supaAccountState(s,_supaIdentityEmail(),g);
+  if(state==='ok'){
+    // A record an Admin has since corrected: the flag and its banner are no longer true.
+    if(_supaRenamedFlag(g)){
+      try{ localStorage.removeItem(_supaRenamedKey(g)); }catch(e){}
+      var rb=el('supa-connect-banner'); if(rb&&rb.getAttribute('data-kind')==='renamed') rb.remove();
+      try{ if(typeof logActivity==='function') logActivity('Fast database record for '+g+' is correct again — reconnected as themselves.',''); }catch(e){}
+    }
+    return Promise.resolve(false);
+  }
   supaSession=null;
+  if(state==='renamed'){
+    console.warn('[supa] '+g+' signed in, but the database record for this Google account is still named '+s+' — a renamed mailbox. Standing down to Sheets; reconnecting cannot fix it.');
+    try{ localStorage.setItem(_supaRenamedKey(g),s); }catch(e){}
+    return supa.auth.signOut({scope:'local'}).catch(function(){}).then(function(){
+      try{ if(typeof logActivity==='function') logActivity('Fast database OFF for '+g+': this Google account\'s database record is still named '+s+' (renamed mailbox). Working from the Google Sheet until an Admin updates the record.',''); }catch(e){}
+      showSupaConnectBanner('renamed',s);
+      _supaNotifyAdminsRenamed(g,s);
+      try{ if(typeof renderSupaStatus==='function') renderSupaStatus(); }catch(e){}
+      return 'renamed';
+    });
+  }
+  console.warn('[supa] this device is connected as '+s+' but '+g+' is signed in — reconnecting');
   try{ localStorage.removeItem('mc_supa_autotried_'+g); }catch(e){}
   return supa.auth.signOut({scope:'local'}).catch(function(){}).then(function(){
     try{ if(typeof logActivity==='function') logActivity('Fast database was connected as '+s+' on this device — disconnected so '+g+' can connect as themselves.',''); }catch(e){}
@@ -29117,6 +29166,18 @@ function _supaCheckAccountMatch(){
     try{ if(typeof renderSupaStatus==='function') renderSupaStatus(); }catch(e){}
     return true;
   });
+}
+// Tell the Admins once a day per browser. The database is disconnected at this point, so this goes
+// out through the Sheet + email/Chat relay, which is exactly the path that still works.
+function _supaNotifyAdminsRenamed(g,s){
+  var tk='mc_supa_renamed_told_'+g;
+  try{ var last=parseInt(localStorage.getItem(tk))||0; if(Date.now()-last<24*3600*1000) return; localStorage.setItem(tk,String(Date.now())); }catch(e){}
+  if(typeof gSendMessage!=='function'||typeof sheetUsers==='undefined') return;
+  var admins=(sheetUsers||[]).filter(function(u){ return u&&u.active&&(u.pos==='Admin'||u.pos==='Director')&&u.email&&String(u.email).trim().toLowerCase()!==g; });
+  var text=((gUser&&gUser.name)||g)+' ('+g+') cannot use the fast database: their Google account is still attached to the database record for '+s
+    +' (a renamed mailbox). Their approval requests and messages will not reach the database until the record is fixed. '
+    +'Fix: Supabase → Authentication → Users → open '+s+' → change the email to '+g+'. They then sign out and back in.';
+  admins.forEach(function(a){ try{ gSendMessage(a.email,a.name||a.email,text,'urgent','supa_renamed_mailbox:'+g,function(){},{noLog:true}); }catch(e){} });
 }
 // gSignIn() must decide whether to pre-open the connect popup before it knows who will sign in.
 // Pre-open when the saved connection belongs to someone other than the last person who signed in.
@@ -29350,6 +29411,20 @@ function _maybeShowSupaConnectBanner(){
   showSupaConnectBanner();
 }
 function showSupaConnectBanner(urgent,wasEmail){
+  if(urgent==='renamed'){
+    var me=String((gUser&&gUser.email)||'').trim().toLowerCase();
+    var r=el('supa-connect-banner');
+    if(!r){ r=document.createElement('div'); r.id='supa-connect-banner'; document.body.appendChild(r); }
+    r.setAttribute('data-kind','renamed');
+    r.style.cssText='position:fixed;bottom:16px;left:16px;z-index:9998;color:var(--on-accent);padding:12px 16px;font-size:13px;display:flex;align-items:center;gap:12px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.25);max-width:460px;background:#8a2c1f';
+    r.innerHTML='<i class="ti ti-user-exclamation" style="font-size:18px;flex-shrink:0"></i>'
+      +'<span style="flex:1">Your Google account (<b>'+escHtml(me)+'</b>) is still attached to the database record of <b>'+escHtml(wasEmail||'a retired account')+'</b>. '
+      +'Reconnecting cannot fix this, so the fast database is off and you are working from the Google Sheet. Your Admin has been told; once the record is corrected, press Try again.</span>'
+      +'<button onclick="_supaManualConnect();" style="background:var(--card);color:#8a2c1f;border:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0">Try again</button>'
+      +'<button onclick="var b=el(\'supa-connect-banner\');if(b)b.style.display=\'none\';" title="Hide until next sign-in" style="background:transparent;color:var(--on-accent);border:none;font-size:16px;cursor:pointer;flex-shrink:0;opacity:.7;line-height:1">&times;</button>';
+    r.style.display='flex';
+    return;
+  }
   if(urgent==='account'){
     var a=el('supa-connect-banner');
     if(!a){ a=document.createElement('div'); a.id='supa-connect-banner'; document.body.appendChild(a); }
@@ -29603,6 +29678,10 @@ function _supaAutoConnect(popup){
   if(supaSession){ closeUnusedPopup(); return; } // already connected (restored from localStorage)
   if(_supaConnectInFlight){ closeUnusedPopup(); return; } // a manual/earlier attempt is already running — never overlap (see _supaConnectInFlight)
   var key='mc_supa_autotried_'+gUser.email.toLowerCase();
+  // A renamed mailbox (see _supaAccountState): the popup would sign the same Google account back in
+  // and land on the same retired record — a loop that fixes nothing and nags on every login. The
+  // banner's "Try again" (manual connect) is the way back once an Admin has corrected the record.
+  if(_supaRenamedFlag(gUser.email)){ closeUnusedPopup(); showSupaConnectBanner('renamed',_supaRenamedFlag(gUser.email)); return; }
   try{
     if(localStorage.getItem(key)){ closeUnusedPopup(); return; } // already attempted once — never nag/loop
     localStorage.setItem(key,'1');
@@ -48064,6 +48143,7 @@ if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
         supaSession=(r.data&&r.data.session)||null;
         console.log('[supa] session established via popup handoff:',supaSession&&supaSession.user&&supaSession.user.email);
         _supaCheckAccountMatch().then(function(wrong){
+          if(wrong==='renamed'){ if(typeof showToast==='function') showToast('Your Google account is still attached to a retired database record — an Admin has to correct it before this can connect. Working from the Sheet meanwhile.'); return; }
           if(wrong){ if(typeof showToast==='function') showToast('That was a different Google account — pick your own account and connect again.'); return; }
           if(typeof renderSupaStatus==='function') renderSupaStatus();
           if(typeof showToast==='function') showToast('Connected to the faster database ✓');
