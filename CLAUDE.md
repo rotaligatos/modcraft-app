@@ -13384,3 +13384,55 @@ All live, each with a smoke check (proven failing on the old code where it fixes
 - Stephanie's Acacia draft (₱3,326.40) was never saved — re-enter.
 - Fix the stale `tools/sim_cc_phase2.mjs` stub.
 - Everything in the 2026-10-27 and earlier lists still stands.
+
+## What was changed on 2026-11-03 (session — Karen's signature: a renamed mailbox, not the printout)
+
+Report: "Karen's signature is not appearing on the quotation preview and print." The printout was never
+at fault — Karen Dolor had not signed anything: her two Checked-by requests (QT-W00000382, QT-M00000217)
+were still pending and no saved state carried her name.
+
+**Cause.** Karen's Google account is Allan Lagsao's old mailbox, renamed by Workspace. Google keeps the
+same account id (`sub`), so Supabase kept the auth record's ORIGINAL email: `auth.users.email` stayed
+`allan.lagsao@` while `auth.identities.identity_data.email` said `karen.dolor@`. Every database call she
+made ran as Allan — an address Rommel had deleted from `users` the same morning (08:34). Proven by
+impersonating that token (rolled back): `approval_requests` **0 of 610** visible, `quotations` 0,
+`users` 0 → her requests never appeared on the laptop or the phone. A message she sent to Rommel was
+refused by the "send messages as self" rule (JWT email ≠ from_email) while the Sheet row and the
+email/Chat relay still went out — he received it, and could not find it in the app. Her activity-log
+lines carry `[karen.dolor@… on this device]` under Allan's email — the signature of this fault.
+
+**Fixes.**
+1. **Data**: `auth.users.email` for id `106f67e7-a8ed-40af-afd5-c33362476917` set to `karen.dolor@…`
+   (SQL; no other row touched; logged). Re-impersonated as her: Manager, 2 pending requests visible.
+   She must sign out/in once (or Settings → Company & DB → Connect now) for a token with the new email.
+2. **Code** (`867b786`, PR #14, merged, live): `b6911e0` (same day, other session) already disconnects a
+   device connected as someone else and offers "Connect as me" — but for a renamed mailbox that reconnect
+   lands on the SAME retired record and tells the person to "pick your own account", which they did.
+   New `_supaAccountState(sess, identity, google)` → `ok` / `other` / `renamed` (renamed = Google says
+   the identity IS the signed-in person while the record carries another address). Renamed → disconnect
+   (the app works from the Sheet, which still works for them), banner `data-kind="renamed"` naming both
+   addresses with **Try again** (no "Connect as me"), per-browser flag `mc_supa_renamed_<email>` so
+   auto-connect never reopens the popup, one urgent message a day to active Admins/Directors with the exact
+   fix, log line. Clears itself when a check sees the person's own email (manual Try again, or the next
+   token refresh via `onAuthStateChange`). Two smoke checks.
+
+**Worth keeping.**
+- Diagnose a "my X is not showing" report by impersonating the person's REAL token: set the JWT claims
+  to what `auth.users` holds for their identity, not to the email you expect. Here the two differed.
+- A fast-database write refused by RLS is silent (console.warn) while the Sheet write and the relays
+  succeed — so a message or request can reach a person by email/Chat and be absent from the app.
+- `dolor@worldclasslaminate.com.ph` is a DIFFERENT person (row named Sonny Quinton; Google profile
+  "Dolor Basera"). Not Karen. Do not conflate the two Dolor accounts.
+- Karen's signature image (`SIG_karen.dolor@…`) was always correct — the SIG key is written by the
+  Google email, which was never wrong. No re-upload needed after an auth-record fix.
+- The egress proxy in the cloud session refused `rotaligatos.github.io` after the deploy; the Pages
+  "deploy" job status via api.github.com is the fallback proof, and the app's own old-version banner
+  on Rommel's screen confirmed it.
+
+# OPEN — updated 2026-11-03
+- Karen: sign out/in once, then sign QT-W00000382 and QT-M00000217; resend her message to Rommel (its
+  text is in the Google Sheet `Messages` tab, from `karen.dolor@`, refused by the database).
+- 4 approved-but-never-applied signature requests on QT-M00000153 (Sept, `applied:false`) make every
+  browser log "could not be carried onto this quotation after 3 tries". Harmless noise; mark applied or
+  cancel to silence.
+- Everything in the 2026-10-30 list still stands.
