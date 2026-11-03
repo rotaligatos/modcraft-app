@@ -6666,6 +6666,25 @@ const PROFILES = {
         return { days: est.days, missing: est.missing, late: s.plan.risk, moved: /before production can finish/.test(s.plan.dhow),
                  procLate: s.plan.procs[0].late > 0, noTarget: w._e2eStages({ serial: 'x', final_locked_at: d(-1) }, []).plan.risk };
       }, { days: 6, missing: ['Sliding Door Grooving'], late: 'late', moved: true, procLate: true, noTarget: 'notarget' });
+      if (typeof window._supaCheckAccountMatch === 'function') {
+        const acct = await (async () => {
+          const w = window, keepS = w.supaSession, keepSupa = w.supa, keepU = w.gUser;
+          let out = 0;
+          w.supa = { auth: { signOut: () => { out++; return Promise.resolve({}); } } };
+          w.gUser = { email: 'karen.dolor@x' };
+          w.supaSession = { user: { email: 'allan.lagsao@x' } };
+          const switched = await w._supaCheckAccountMatch();
+          const cleared = w.supaSession === null;
+          w.supaSession = { user: { email: ' Karen.Dolor@x ' } };
+          const same = await w._supaCheckAccountMatch();
+          const banner = !!document.getElementById('supa-connect-banner') && /allan\.lagsao@x/.test(document.getElementById('supa-connect-banner').innerHTML);
+          const b = document.getElementById('supa-connect-banner'); if (b) b.remove();
+          w.supaSession = keepS; w.supa = keepSupa; w.gUser = keepU;
+          return { switched, cleared, signedOut: out, same, banner };
+        })().catch(e => ({ err: String(e) }));
+        check('A device connected as the previous person is disconnected when someone else signs in',
+          () => acct, { switched: true, cleared: true, signedOut: 1, same: false, banner: true });
+      }
       return out;
     }
   },

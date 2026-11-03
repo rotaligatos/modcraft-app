@@ -29092,12 +29092,38 @@ function initSupabase(){
   if(!SUPA_URL||!SUPA_ANON_KEY){ return; }
   try{
     supa=window.supabase.createClient(SUPA_URL,SUPA_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'pkce'}});
-    supa.auth.getSession().then(function(r){ supaSession=(r&&r.data&&r.data.session)||null; if(supaSession){console.log('[supa] restored session:',supaSession.user&&supaSession.user.email);_supaSessionArrived();} });
+    supa.auth.getSession().then(function(r){ supaSession=(r&&r.data&&r.data.session)||null; if(supaSession){console.log('[supa] restored session:',supaSession.user&&supaSession.user.email);_supaCheckAccountMatch().then(function(sw){ if(!sw) _supaSessionArrived(); });} });
     supa.auth.onAuthStateChange(function(_evt,sess){ var was=!!supaSession; supaSession=sess||null; if(supaSession&&!was)_supaSessionArrived(); });
     console.log('[supa] client initialized');
   }catch(e){ console.warn('[supa] init failed',e); }
 }
 function supaReady(){ return !!(supa&&supaSession); }
+// Wrong account on this device (2026-11-03). The database connection is saved per browser and
+// survives a Google sign-in as someone else, so a laptop handed from Allan to Karen kept reading and
+// writing as Allan: her approval requests never showed and her work was logged under his name.
+// When the person signed in to Modcraft is not the person the connection belongs to, the
+// connection is dropped and the reconnect is offered (or done, when sign-in opened a popup).
+function _supaSessEmail(){ return String((supaSession&&supaSession.user&&supaSession.user.email)||'').trim().toLowerCase(); }
+function _supaCheckAccountMatch(){
+  if(!supa||!supaSession||!gUser||!gUser.email||gUser.email==='local') return Promise.resolve(false);
+  var s=_supaSessEmail(), g=String(gUser.email).trim().toLowerCase();
+  if(!s||s===g) return Promise.resolve(false);
+  console.warn('[supa] this device is connected as '+s+' but '+g+' is signed in — reconnecting');
+  supaSession=null;
+  try{ localStorage.removeItem('mc_supa_autotried_'+g); }catch(e){}
+  return supa.auth.signOut({scope:'local'}).catch(function(){}).then(function(){
+    try{ if(typeof logActivity==='function') logActivity('Fast database was connected as '+s+' on this device — disconnected so '+g+' can connect as themselves.',''); }catch(e){}
+    showSupaConnectBanner('account',s);
+    try{ if(typeof renderSupaStatus==='function') renderSupaStatus(); }catch(e){}
+    return true;
+  });
+}
+// gSignIn() must decide whether to pre-open the connect popup before it knows who will sign in.
+// Pre-open when the saved connection belongs to someone other than the last person who signed in.
+function _supaLastSignInDiffers(){
+  if(!supaSession) return false;
+  try{ var last=String(localStorage.getItem('mc_last_google_email')||'').trim().toLowerCase(); return !!last&&last!==_supaSessEmail(); }catch(e){ return false; }
+}
 // 2026-10-04: the client list loads at login, often a moment BEFORE the Supabase session is
 // restored — so it fell back to the Google Sheet and stayed there all session, even though the
 // app showed Connected. A client deleted from the Sheet but still in the database was then
@@ -29323,7 +29349,16 @@ function _maybeShowSupaConnectBanner(){
   }catch(e){}
   showSupaConnectBanner();
 }
-function showSupaConnectBanner(urgent){
+function showSupaConnectBanner(urgent,wasEmail){
+  if(urgent==='account'){
+    var a=el('supa-connect-banner');
+    if(!a){ a=document.createElement('div'); a.id='supa-connect-banner'; document.body.appendChild(a); }
+    a.style.cssText='position:fixed;bottom:16px;left:16px;z-index:9998;color:var(--on-accent);padding:12px 16px;font-size:13px;display:flex;align-items:center;gap:12px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.25);max-width:400px;background:#8a2c1f';
+    a.innerHTML='<i class="ti ti-user-exclamation" style="font-size:18px;flex-shrink:0"></i>'
+      +'<span style="flex:1">This computer was connected to the database as <b>'+escHtml(wasEmail||'another person')+'</b>. Connect as yourself so your approvals and work show under your name.</span>'
+      +'<button onclick="_supaManualConnect();_dismissSupaConnectBanner(false);" style="background:var(--card);color:#8a2c1f;border:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0">Connect as me</button>';
+    return;
+  }
   var b=el('supa-connect-banner');
   if(!b){
     b=document.createElement('div'); b.id='supa-connect-banner';
@@ -31426,7 +31461,7 @@ function gSignIn(){
   // unconditionally on every single login, closing itself a moment later once
   // _supaAutoConnect saw the "already tried" guard — functionally harmless, but
   // visibly flashed a window on every login, which is what this fixes.)
-  if(supa&&!supaSession){
+  if(supa&&(!supaSession||_supaLastSignInDiffers())){
     try{
       _supaPreOpenedPopup=window.open('about:blank','supaAuthPopup',_supaPopupFeatures());
       _supaWritePopupPlaceholder(_supaPreOpenedPopup); // never leave it a stark blank window, even for the instant before we decide whether to use it
@@ -31613,7 +31648,11 @@ function gShowApp(){
   // gSignIn() pre-opened on click (see _supaAutoConnect for the loop-safety
   // guard) so everyone actually gets the fast Supabase read path instead of
   // only whoever manually ran supaConnect() in the console.
-  (function(){ var p=_supaPreOpenedPopup; _supaPreOpenedPopup=null; setTimeout(function(){ _supaAutoConnect(p); },400); })();
+  (function(){
+    var p=_supaPreOpenedPopup; _supaPreOpenedPopup=null;
+    try{ if(gUser&&gUser.email&&gUser.email!=='local') localStorage.setItem('mc_last_google_email',String(gUser.email).trim().toLowerCase()); }catch(e){}
+    _supaCheckAccountMatch().then(function(){ setTimeout(function(){ _supaAutoConnect(p); },400); });
+  })();
   // If still not connected a while after login, the automatic attempt either
   // never ran (e.g. a stale "already tried" guard from before the postMessage
   // fix — see feedback from testing the Google Sites embed) or genuinely
@@ -47976,7 +48015,9 @@ if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
   if(!_hasCode){
     // First load of the popup — kick off the Google OAuth redirect FROM HERE.
     if(supa){
-      supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:window.location.href.split('#')[0]}})
+      // Clear any connection this popup's storage still holds (a previous person's, on a shared
+      // computer) and let Google show the account picker, so the right person is connected.
+      supa.auth.signOut({scope:'local'}).catch(function(){}).then(function(){ return supa.auth.signInWithOAuth({provider:'google',options:{redirectTo:window.location.href.split('#')[0],queryParams:{prompt:'select_account'}}}); })
         .then(function(r){ if(r&&r.error){ try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false,diag:'signInWithOAuth error: '+(r.error.message||r.error)},'https://rotaligatos.github.io'); }catch(e){} try{window.close();}catch(e){} } })
         .catch(function(e){ try{ if(window.opener) window.opener.postMessage({type:'modcraft-supa-auth',ok:false,diag:'signInWithOAuth threw'},'https://rotaligatos.github.io'); }catch(_){} try{window.close();}catch(_){} });
     } else {
@@ -48022,8 +48063,11 @@ if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
         if(r.error){ console.warn('[supa] setSession from popup handoff failed:',r.error.message||r.error); return; }
         supaSession=(r.data&&r.data.session)||null;
         console.log('[supa] session established via popup handoff:',supaSession&&supaSession.user&&supaSession.user.email);
-        if(typeof renderSupaStatus==='function') renderSupaStatus();
-        if(typeof showToast==='function') showToast('Connected to the faster database ✓');
+        _supaCheckAccountMatch().then(function(wrong){
+          if(wrong){ if(typeof showToast==='function') showToast('That was a different Google account — pick your own account and connect again.'); return; }
+          if(typeof renderSupaStatus==='function') renderSupaStatus();
+          if(typeof showToast==='function') showToast('Connected to the faster database ✓');
+        });
       }).catch(function(e){ console.warn('[supa] setSession threw',e); });
     } else if(!d.ok){
       console.warn('[supa] popup reported the connection did not complete'+(d.diag?(' — '+d.diag):''));
