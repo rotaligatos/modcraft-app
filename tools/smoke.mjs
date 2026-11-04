@@ -6756,6 +6756,73 @@ const PROFILES = {
             return { off, on, shown };
           }, { off: true, on: false, shown: ['request'] });
       }
+      // 2026-11-04, QT-W00000387: saved by someone not connected, so only the Sheet had it. Connected
+      // users opened the older database copy (₱0) and the status checker "corrected" it to Draft.
+      {
+        const newer = await (async () => {
+          const w = window, keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, log: w.logActivity, us: w.USE_SUPABASE, ups: w.supaUpsertState };
+          const dbState = { serial: 'QT-W1', savedAt: '2026-11-04T08:10:00.000Z', pCalc: { grand: 0 } };
+          const shState = { serial: 'QT-W1', savedAt: '2026-11-04T09:42:46.000Z', pCalc: { grand: 2868.41 }, locked: true };
+          let z = '2026-11-04T09:42:46.117Z', sheetCalls = 0, healed = [], rowUpd = [], logged = 0;
+          w.USE_SUPABASE = true; w.gToken = 'tok'; w.supaSession = { user: { email: 'a@x' } };
+          w.supa = { from: (t) => ({
+            select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { state: dbState, updated_at: '2026-11-04T08:10:07Z' }, error: null }) }) }),
+            update: (u) => ({ eq: () => { rowUpd.push(u); return Promise.resolve({ error: null }); } }) }) };
+          w.gApiFetch = () => Promise.resolve({ valueRanges: [ { values: [['Serial'], ['QT-W1']] }, { values: [['Biz'], ['SHELVS']] }, { values: [['Total'], ['2868.41']] }, { values: [['Z'], [z]] } ] });
+          w._loadQuotationJsonFromSheets = (ser, cb) => { sheetCalls++; cb(shState); };
+          w.supaUpsertState = (ser, st) => { healed.push(st.pCalc.grand); return Promise.resolve(); };
+          w.logActivity = () => { logged++; };
+          const open = () => new Promise(res => w.loadQuotationJson('QT-W1', res, { quiet: true }));
+          const a = await open();
+          await new Promise(r => setTimeout(r, 20));
+          const rowStatus = rowUpd[0] && rowUpd[0].status, rowTotal = rowUpd[0] && rowUpd[0].total;
+          const out = { opened: a.pCalc.grand, sheetCalls, healed: healed.slice(), rowStatus, rowTotal, logged };
+          Object.assign(w, { supaSession: keep.sess, supa: keep.sb, gToken: keep.tok, gApiFetch: keep.fq, _loadQuotationJsonFromSheets: keep.sheets, logActivity: keep.log, USE_SUPABASE: keep.us, supaUpsertState: keep.ups });
+          return out;
+        })().catch(e => ({ err: String(e) }));
+        check('A quotation saved only to the Sheet opens as the newer Sheet copy, and the database catches up',
+          () => newer, { opened: 2868.41, sheetCalls: 1, healed: [2868.41], rowStatus: 'IQ Locked', rowTotal: 2868.41, logged: 1 });
+        const usual = await (async () => {
+          const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
+          const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };
+          const db = { serial: 'QT-W2', savedAt: '2026-11-04T08:10:00.000Z', pCalc: { grand: 5 } };
+          let sheetCalls = 0, mode = 'same';
+          w.USE_SUPABASE = true; w.gToken = 'tok'; w.supaSession = { user: { email: 'a@x' } };
+          w.supa = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { state: db, updated_at: '2026-11-04T08:10:01Z' }, error: null }) }) }) }) };
+          w._loadQuotationJsonFromSheets = (ser, cb) => { sheetCalls++; cb(null); };
+          w._quotRowInfoCols = null;
+          w.gApiFetch = () => mode === 'fail' ? Promise.reject(new Error('quota')) : Promise.resolve({ valueRanges: [ { values: [['S'], ['QT-W2']] }, { values: [['B'], ['x']] }, { values: [['T'], ['5']] }, { values: [['Z'], [mode === 'same' ? '2026-11-04T08:10:01.000Z' : '2026-11-04T09:00:00.000Z']] } ] });
+          const open = () => new Promise(res => w.loadQuotationJson('QT-W2', res, { quiet: true }));
+          const same = (await open()).pCalc.grand, sameCalls = sheetCalls;
+          w._quotRowInfoCols = null; mode = 'fail';
+          const failed = (await open()).pCalc.grand, failCalls = sheetCalls;
+          w._quotRowInfoCols = null; mode = 'newer';      // Sheet newer but unreadable
+          const unread = (await open()).pCalc.grand, unreadCalls = sheetCalls;
+          Object.assign(w, { supaSession: keep.sess, supa: keep.sb, gToken: keep.tok, gApiFetch: keep.fq, _loadQuotationJsonFromSheets: keep.sheets, USE_SUPABASE: keep.us });
+          return { same, sameCalls, failed, failCalls, unread, unreadCalls,
+            noDb: w._sheetIsNewer('2026-11-04T09:00:00Z'), blank: w._sheetIsNewer('', '2026-11-04T09:00:00Z'), grace: w._sheetIsNewer('2026-11-04T09:00:30Z', '2026-11-04T09:00:00Z') };
+        })().catch(e => ({ err: String(e) }));
+        check('A normal quotation still opens from the database; a failed Sheet check never blocks opening',
+          () => usual, { same: 5, sameCalls: 0, failed: 5, failCalls: 0, unread: 5, unreadCalls: 1, noDb: false, blank: false, grace: false });
+        const list = (() => {
+          const w = window, keep = w._stageFlags;
+          w._stageFlags = { 'QT-W3': { locked: false, savedAt: '2026-11-04T08:10:00Z' }, 'QT-W4': { locked: false, savedAt: '2026-11-04T09:42:00Z' } };
+          const out = { rowNewer: w._displayStatus({ id: 'QT-W3', status: 'IQ Locked', updatedAt: '2026-11-04T09:42:46Z' }),
+                        rowSame: w._displayStatus({ id: 'QT-W4', status: 'IQ Locked', updatedAt: '2026-11-04T09:42:10Z' }) };
+          w._stageFlags = keep; return out;
+        })();
+        check('The Project List believes a row newer than the saved state', () => list, { rowNewer: 'IQ Locked', rowSame: 'Draft' });
+        const stale = await new Promise((res) => {
+          const w = window, keep = { sg: w.sheetsGet, all: w._allQuotationStates, tok: w.gToken };
+          w.gToken = 'tok';
+          w.sheetsGet = () => Promise.resolve({ values: [['h'],
+            ['QT-W5','', 'c','','','IQ Locked','1','','','','','','','','','','','','','','','','','','','2026-11-04T09:42:46Z'],
+            ['QT-W6','', 'c','','','IQ Locked','1','','','','','','','','','','','','','','','','','','','2026-11-04T08:10:05Z'] ] });
+          w._allQuotationStates = (cb) => cb({ 'QT-W5': { serial: 'QT-W5', savedAt: '2026-11-04T08:10:00Z' }, 'QT-W6': { serial: 'QT-W6', savedAt: '2026-11-04T08:10:00Z' } }, 'Supabase');
+          w._findStaleStatuses((findings) => { Object.assign(w, { sheetsGet: keep.sg, _allQuotationStates: keep.all, gToken: keep.tok }); res((findings || []).map(x => x.serial)); });
+        });
+        check('The status check leaves alone a row newer than the state it would correct from', () => stale, ['QT-W6']);
+      }
       if (typeof window._supaAccountState === 'function') {
         check('Renamed mailbox: Google says it is you but the database record is still the previous name',
           () => {

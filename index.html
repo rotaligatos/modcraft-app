@@ -26566,7 +26566,7 @@ function supaGetStageFlags(){
         m[x.serial]={voided:x.voided, qCancelled:x.q_cancelled, fqClientApproved:x.fq_client_approved,
           clientApproved:x.client_approved, approved:x.approved, locked:x.locked,
           fqLocked:x.fq_locked, fqStarted:x.fq_started, sentStatus:x.sent_status,
-          fqSentStatus:x.fq_sent_status, initLockedAt:x.init_locked_at, finalLockedAt:x.final_locked_at};
+          fqSentStatus:x.fq_sent_status, initLockedAt:x.init_locked_at, finalLockedAt:x.final_locked_at, savedAt:x.saved_at||''};
       });
       return m;
     });
@@ -26596,7 +26596,8 @@ function _stageFlagsNoteLocalSave(serial){
 function _displayStatus(e){
   var serial=e&&(e.id||e.serial);
   var f=_stageFlags&&serial?_stageFlags[serial]:null;
-  var st=f?_statusFromState(f,serial):_normalizeStatusLabel(e&&e.status);
+  // A row newer than the saved state was written by someone not connected: believe the row.
+  var st=(f&&!_sheetIsNewer(e&&e.updatedAt,f.savedAt))?_statusFromState(f,serial):_normalizeStatusLabel(e&&e.status);
   if(st==='Declined'||st==='FQ Approved'||st==='Voided') return st;
   var ctx=_pendingRevisionCtx(serial);
   if(ctx) return ctx==='fq'?'FQ Revision Requested':'IQ Revision Requested';
@@ -29937,6 +29938,15 @@ function supaUpsertState(serial,state){
   }catch(e){ console.warn('[supa] state upsert threw',e); return Promise.resolve(); }
 }
 // — quotation state read (used when USE_SUPABASE is true — ON since 2026-07-02) —
+function supaGetStateMeta(serial){
+  if(!supaReady()||!serial) return Promise.resolve(null);
+  try{
+    return supa.from('quotation_states').select('state,updated_at').eq('serial',serial).maybeSingle().then(function(r){
+      if(r.error){ console.warn('[supa] state read error:',r.error.message||r.error); return null; }
+      return (r.data&&r.data.state)?{state:r.data.state,updatedAt:r.data.updated_at}:null;
+    }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 function supaGetState(serial){
   if(!supaReady()||!serial) return Promise.resolve(null);
   try{
@@ -32822,6 +32832,8 @@ function _findStaleStatuses(cb){
         var sheetN=(r[13]||'').trim(), stateN=(st.initLockedAt||'').trim();
         if(!sheetN&&stateN) lockFromState.push({row:i+1, serial:serial, client:r[2]||'', lockedAt:stateN});
 
+        // The row is newer than this copy of the state, so the state cannot speak for it.
+        if(_sheetIsNewer(r[25],st.savedAt)) continue;
         var should=_statusFromState(st,serial);
         if(_normalizeStatusLabel(stored)===should) continue;
         findings.push({row:i+1, serial:serial, client:r[2]||'', stored:stored||'(blank)',
@@ -38569,13 +38581,74 @@ function loadQuotationJson(serial,callback,opts){
   // Read path: when USE_SUPABASE is on, try Supabase first (indexed single-row read,
   // no chunking) and fall back to the Sheets path below on miss/error/flag-off.
   if(USE_SUPABASE&&supaReady()){
-    supaGetState(serial).then(function(state){
-      if(state){ if(callback)callback(state); return; }
-      _loadQuotationJsonFromSheets(serial,callback,false,opts.quiet);
+    supaGetStateMeta(serial).then(function(meta){
+      if(!meta){ _loadQuotationJsonFromSheets(serial,callback,false,opts.quiet); return; }
+      _quotSheetRowInfo(serial).then(function(info){
+        if(!info||!_sheetIsNewer(info.updatedAt,meta.state.savedAt,meta.updatedAt)){ if(callback)callback(meta.state); return; }
+        // Someone not connected saved after this database copy was written. Their save reached
+        // only the Sheet, so the Sheet's copy is the real one (QT-W00000387, 2026-11-04: priced and
+        // locked at ₱2,868.41 by Christine, opened by everyone else as Nikki's blank ₱0 draft).
+        _loadQuotationJsonFromSheets(serial,function(sheetState){
+          if(!sheetState){ console.warn('[load] Sheet copy of '+serial+' is newer but could not be read; using the database copy'); if(callback)callback(meta.state); return; }
+          _healStaleDbCopy(serial,sheetState,info);
+          if(callback)callback(sheetState);
+        },false,true);
+      });
     });
     return;
   }
   _loadQuotationJsonFromSheets(serial,callback,false,opts.quiet);
+}
+// True when the Quotations row (column Z, Last Updated) is later than everything the database copy
+// knows about. A minute's grace: one save writes both within seconds, and a false positive is
+// harmless because it only reads the Sheet's copy, which every save also writes.
+var QUOT_NEWER_GRACE_MS=60000;
+function _sheetIsNewer(sheetAt){
+  var t=Date.parse(sheetAt||''); if(!t) return false;
+  var latest=0;
+  for(var i=1;i<arguments.length;i++){ var d=Date.parse(arguments[i]||''); if(d&&d>latest) latest=d; }
+  if(!latest) return false;   // nothing to compare against: keep today's behaviour
+  return t-latest>QUOT_NEWER_GRACE_MS;
+}
+// One small Sheet read (four columns) shared by anything opened within 20 seconds.
+var _quotRowInfoAt=0, _quotRowInfoCols=null, _quotRowInfoP=null;
+function _quotSheetRowInfo(serial){
+  if(window._TRN||!gToken) return Promise.resolve(null);
+  var pick=function(){
+    var c=_quotRowInfoCols; if(!c) return null;
+    for(var i=1;i<c[0].length;i++){
+      if(c[0][i]&&c[0][i][0]===serial){
+        return {client:(c[1][i]&&c[1][i][0])||'', total:(c[2][i]&&c[2][i][0])||'', updatedAt:(c[3][i]&&c[3][i][0])||''};
+      }
+    }
+    return null;
+  };
+  if(_quotRowInfoCols&&Date.now()-_quotRowInfoAt<20000) return Promise.resolve(pick());
+  if(!_quotRowInfoP){
+    var qs=['Quotations!A:A','Quotations!C:C','Quotations!G:G','Quotations!Z:Z'].map(function(r){ return 'ranges='+encodeURIComponent(r); }).join('&');
+    _quotRowInfoP=gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values:batchGet?'+qs,{}).then(function(j){
+      if(j&&j.valueRanges&&j.valueRanges.length===4){
+        _quotRowInfoCols=j.valueRanges.map(function(v){ return v.values||[]; }); _quotRowInfoAt=Date.now();
+      } else _quotRowInfoCols=null;
+    }).catch(function(e){ console.warn('[load] Sheet row check failed; using the database copy',e); _quotRowInfoCols=null; })
+      .then(function(){ _quotRowInfoP=null; });
+  }
+  return _quotRowInfoP.then(pick);
+}
+// Brings the database up to the Sheet, so the phone and everyone else get it too. Only when the
+// Sheet's copy really is that quotation, and at most once per session per quotation.
+var _quotHealed={};
+function _healStaleDbCopy(serial,state,info){
+  if(_quotHealed[serial]||!state||_serialRoot(String(state.serial||''))!==_serialRoot(serial)) return;
+  _quotHealed[serial]=true;
+  try{
+    supaUpsertState(serial,state);
+    var status=_statusFromState(state,serial), total=parseFloat(String(info.total||'').replace(/,/g,''));
+    var upd={status:status}; if(!isNaN(total)) upd.total=total; if(info.client) upd.client_name=info.client;
+    supa.from('quotations').update(upd).eq('serial',serial).then(function(r){ if(r&&r.error) console.warn('[load] row refresh refused ('+serial+'):',r.error.message||r.error); });
+    if(_stageFlags) delete _stageFlags[serial];
+    logActivity('The database copy of '+serial+' was older than the Google Sheet (saved by someone not connected). Opened the Sheet\'s copy and updated the database.',serial);
+  }catch(e){ console.warn('[load] could not update the database copy of '+serial,e); }
 }
 function _loadQuotationJsonFromSheets(serial,callback,forceRescan,quiet){
   function say(m){ if(!quiet) alert(m); }

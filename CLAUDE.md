@@ -13538,3 +13538,22 @@ and skip the status correction when the Sheet row is newer than the state.
 - Christine: reconnect, reopen W387, request the signature again. Ask Karen if she saw ₱0 when she declined.
 - The stale-copy fix above: proposed, not built.
 - Everything in the earlier 2026-11-04 lists still stands.
+
+## What was changed on 2026-11-04 (session 4 — the newer copy opens)
+
+Closes the cause recorded in session 3. `loadQuotationJson` now compares the Quotations row's Last Updated
+(column Z, via `_quotSheetRowInfo`, one `batchGet` of A, C, G, Z shared for 20 s) with the database state's `savedAt`
+and `updated_at` (`supaGetStateMeta`). Sheet later by more than 60 s (`_sheetIsNewer`): opens the Sheet's copy and
+`_healStaleDbCopy` updates the database state and row, once per session, logged. A failed or unreadable check
+falls back to the database copy, so opening is never blocked. Adds about one Sheet read per open.
+
+`_findStaleStatuses` skips a row newer than its state. `_displayStatus` believes the row in that case, using
+new view column `quotation_stage_flags.saved_at` (migration `quotation_stage_flags_saved_at`).
+
+Limits: clocks are the users' PCs, so a slow clock could hide a difference. A tab already open keeps what it
+loaded; the existing save-conflict check now sees the newer copy when it re-reads. Not yet seen on a real case.
+
+# OPEN — updated 2026-11-04 (session 4)
+- Stale-copy fix: done. Watch the log for "was older than the Google Sheet".
+- Christine reconnect + re-request W387; Karen on why she declined. The 12 other differing rows are not investigated.
+- Everything in the earlier 2026-11-04 lists still stands.
