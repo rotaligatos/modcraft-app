@@ -13484,3 +13484,25 @@ still miss every connected reader — hence the recovery above.
 - Never-connected staff (Kathleen, Michael, Roniel, Noel, Rhodalyn, Angelica): any request they raise
   reaches approvers only via the Admin recovery until they connect once.
 - Everything in the 2026-11-03 and 2026-10-30 lists still stands.
+
+## What was changed on 2026-11-04 (session 2 — the recovery ran: 29 rows, 1 real)
+
+Rommel ran the recovery (merged as PR #15, deploy `0198e49`). It pulled **29** Sheet-only requests.
+**One was live** — Christine's Checked-by on QT-W00000386 → Karen. 19 were already finished
+(approved/rejected/countered — history only). **9 were pending but already satisfied**: eight
+Checked-by signatures (QT-M00000142, W00000268 ×3, W00000224, W00000249, C00000024, W00000340) and
+one CF override (QT-C00000016) where the quotation already carried that signature or an approved
+override from a LATER request that did reach the database. Closed as `cancelled` with a note on each;
+status only, no quotation touched; logged.
+
+**⚠ Rommel's rule, stated 2026-11-04 — do not change this:** a request stays pending and visible for
+as long as nobody has acted on it, however old it is (someone on leave for a week still finds it).
+Only a transaction on it (signed, approved, rejected, countered, cancelled) moves it. **Age is never a
+criterion** — not in the recovery (it compares every `APPREQ_` row, any date) and not in what shows.
+The nine above were closed because the document already had what they asked for, not because they
+were old. Before closing any pending request by hand, check the quotation's own `state.signatures`
+/ approval flags and the later request that satisfied it — never the date.
+
+PR #15 was still OPEN when Rommel said "merged it" (twice, with #14 and #15) — check the PR state on
+GitHub before assuming a merge happened; a "merged" that never landed looks exactly like a fix that
+does not work.
