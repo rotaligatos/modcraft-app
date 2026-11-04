@@ -6685,6 +6685,34 @@ const PROFILES = {
         check('A device connected as the previous person is disconnected when someone else signs in',
           () => acct, { switched: true, cleared: true, signedOut: 1, same: false, banner: true });
       }
+      if (typeof window.recoverSheetOnlyApprovalRequests === 'function') {
+        const rec = await (async () => {
+          const w = window, keep = { sg: w.sheetsGet, supa: w.supa, sess: w.supaSession, tok: w.gToken, role: w.currentRole, up: w.supaUpsertApprovalRequest, log: w.logActivity, notifs: w.NOTIFS.slice() };
+          const sheetReqs = [
+            { id: 'req_recA', type: 'discount', serial: 'QT-W1', from: 'Christine Aluad', fromEmail: 'designer-ce4@x', approverEmail: 'rommel@x', status: 'pending', reqDisc: 5 },
+            { id: 'req_recB', type: 'unlock', serial: 'QT-W2', from: 'Nikki', fromEmail: 'ce1@x', approverEmail: 'rommel@x', status: 'approved' } ];
+          w.sheetsGet = () => Promise.resolve({ values: [['Key','Value'], ['CONFIG','{}'], ['APPREQ_req_recA', JSON.stringify(sheetReqs[0])], ['APPREQ_req_recB', JSON.stringify(sheetReqs[1])], ['FOLLOWED_x','[]']] });
+          w.supa = { from: () => ({ select: () => ({ in: (col, ids) => Promise.resolve({ data: [{ id: 'req_recB' }], error: null }) }) }) };
+          w.supaSession = { user: { email: 'rommel@x' } }; w.gToken = 'tok';
+          let upserted = [], logged = [];
+          w.supaUpsertApprovalRequest = (r) => { upserted.push(r.id); return Promise.resolve(); };
+          w.logActivity = (a) => { logged.push(a); };
+          w.NOTIFS.length = 0;
+          // Staff may not run it at all
+          w.currentRole = 'Staff'; w.recoverSheetOnlyApprovalRequests(true);
+          await new Promise(r => setTimeout(r, 30));
+          const staffBlocked = upserted.length === 0;
+          w.currentRole = 'Admin'; w.recoverSheetOnlyApprovalRequests(true);
+          await new Promise(r => setTimeout(r, 150));
+          const out = { staffBlocked, upserted: upserted.slice(), inNotifs: w.NOTIFS.some(n => n.reqId === 'req_recA'), notB: !w.NOTIFS.some(n => n.reqId === 'req_recB'),
+                        logged: logged.length === 1 && /Recovered 1 approval request/.test(logged[0]) && /discount on QT-W1 from Christine Aluad/.test(logged[0]) };
+          w.sheetsGet = keep.sg; w.supa = keep.supa; w.supaSession = keep.sess; w.gToken = keep.tok; w.currentRole = keep.role; w.supaUpsertApprovalRequest = keep.up; w.logActivity = keep.log;
+          w.NOTIFS.length = 0; keep.notifs.forEach(n => w.NOTIFS.push(n));
+          return out;
+        })().catch(e => ({ err: String(e) }));
+        check('Approval requests that only reached the Sheet are recovered into the database by an Admin, named in the log',
+          () => rec, { staffBlocked: true, upserted: ['req_recA'], inNotifs: true, notB: true, logged: true });
+      }
       if (typeof window._supaAccountState === 'function') {
         check('Renamed mailbox: Google says it is you but the database record is still the previous name',
           () => {

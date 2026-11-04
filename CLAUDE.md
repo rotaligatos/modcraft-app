@@ -13436,3 +13436,51 @@ lines carry `[karen.dolor@… on this device]` under Allan's email — the signa
   browser log "could not be carried onto this quotation after 3 tries". Harmless noise; mark applied or
   cancel to silence.
 - Everything in the 2026-10-30 list still stands.
+
+## What was changed on 2026-11-04 (session — second renamed mailbox, requests that only reached the Sheet)
+
+Follow-on from the Karen session. Everything here was found by querying live data (auth records, RLS by
+impersonation, the auth logs) — none by reading code alone.
+
+1. **Christine Aluad (`designer-ce4@`) — same fault as Karen.** Her Google account is Stephanie
+   Oliveros's renamed mailbox; the auth record (`c352e30d-…`) still said `stephanie.oliveros@`. The new
+   guard refused her three times on 2026-11-04 morning (the "cannot log in to Supabase" report). Auth
+   record email set to `designer-ce4@`, verified by impersonation (Staff, own row). She signs out/in once.
+   **Stephanie's `users` row deleted** — gone from the Sheet already (removed 2026-09-28); the Command
+   Center sync never deletes a copy, so it lingered and the Command Center kept showing her.
+2. **Rafael Colot — nothing wrong server-side.** Auth record = Google account; session refreshed and the
+   shadow sign-in check passed from his own browser the same afternoon; 20+ price-list writes under his
+   name. If he reports "cannot connect" it is another device/browser (an older office machine last seen
+   16 Sep): auto-connect runs once per browser, so there it is the manual Connect now button.
+3. **⚠ A request that reaches only the Sheet is invisible to approvers — pre-existing since 2026-07-05.**
+   `gSaveApprovalRequest` writes the Sheet, then the database (no-op when disconnected; refused by RLS
+   when the session is somebody else's). `gLoadApprovalRequests` reads the database first and falls
+   back to the Sheet ONLY on a read failure. Christine's request this week never reached the database.
+   Same holds for anyone never connected (Kathleen, Michael, Roniel, Noel, Rhodalyn, Angelica).
+   **Recovery (this commit):** `recoverSheetOnlyApprovalRequests(auto)` — Admin/Director only (their
+   RLS allows inserting on anyone's behalf; a Manager's insert would be refused for another company and
+   silently skip exactly the rows wanted). Reads `Settings!A:B` once, finds `APPREQ_` rows the database
+   lacks, upserts them, merges into NOTIFS, logs them by name. Runs once per Admin session 20 s after
+   login; button **Recover Sheet-only requests** in Settings → Company & DB. Smoke check added.
+   Messages have the same shape (`send messages as self` RLS) but cannot be recovered by an Admin —
+   the email/Chat relay still reaches the person, and the row stays in the `Messages` sheet.
+4. **QT-M00000153's four September signature requests closed out** (`payload.applied=true`) — they made
+   every browser log "could not be carried onto this quotation after 3 tries" on each poll.
+5. **Karen's follow-up:** her `approve.html` sign-ins today carry her own email; the two "OAuth state
+   not found" callbacks from her IP (03:39/03:49) had no preceding /authorize and the main-app referer —
+   a reloaded tab carrying a stale callback URL, not a live failure.
+
+**Worth keeping.** `auth.identities.identity_data.email` is what Google says NOW; `auth.users.email` is
+what Supabase first saw. Compare the two for every active user when anyone reports "cannot connect":
+`select u.email, au.email, i.identity_data->>'email' from users u left join auth.identities i … left
+join auth.users au …`. A `[x@ on this device]` prefix in the activity log under another person's email
+is the same fault seen from the app side. "Stand down to Sheets" protects READS; the person's WRITES
+still miss every connected reader — hence the recovery above.
+
+# OPEN — updated 2026-11-04
+- Christine: sign out/in once, then re-raise or let the Admin recovery pick up her Sheet-only request
+  (it runs by itself on Rommel's next login; button in Settings → Company & DB).
+- Karen: sign QT-W00000382 and QT-M00000217; resend her message to Rommel.
+- Never-connected staff (Kathleen, Michael, Roniel, Noel, Rhodalyn, Angelica): any request they raise
+  reaches approvers only via the Admin recovery until they connect once.
+- Everything in the 2026-11-03 and 2026-10-30 lists still stands.

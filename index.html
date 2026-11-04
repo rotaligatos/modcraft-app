@@ -1815,6 +1815,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
         <button class="btn" onclick="openModcraftDriveFolder()" style="font-size:12px"><i class="ti ti-brand-google-drive"></i>Open Drive folder</button>
         <button class="btn" onclick="checkProjectListData()" style="font-size:12px;border-color:var(--navy);color:var(--navy)"><i class="ti ti-list-search"></i>Check Project List</button>
         <button class="btn" onclick="showDeletedRows()" style="font-size:12px"><i class="ti ti-archive"></i>Deleted rows</button>
+        <button class="btn" onclick="recoverSheetOnlyApprovalRequests(false)" title="Approval requests that reached the Google Sheet but not the database are invisible to approvers until recovered" style="font-size:12px"><i class="ti ti-file-search"></i>Recover Sheet-only requests</button>
       </div>
       <div id="db-status"></div>
       <div id="dbcheck-result"></div>
@@ -17962,6 +17963,77 @@ function _gLoadApprovalRequestsFromSheets(cb){
   }).catch(function(){if(cb)cb();});
 }
 
+// Requests that only reached the Google Sheet.
+// gSaveApprovalRequest writes the Sheet first and the database second, and gLoadApprovalRequests
+// reads the database first and consults the Sheet ONLY when that read fails. So a request raised by
+// someone whose database write did not land — disconnected, standing down to Sheets (renamed
+// mailbox), or identified as somebody else so the row-level rule refused the insert (Christine Aluad,
+// 2026-11-03/04) — sits in the Sheet and no connected approver ever sees it. Nothing errors.
+// An Admin/Director session reads the Sheet's request rows once, puts any the database lacks into
+// it (their visibility rule allows inserting a request on anyone's behalf), and says what it found.
+// Admin tier only: a Manager's insert would be refused for another company's request and the
+// recovery would quietly skip exactly the rows it was meant to find.
+var _apprSheetRecoveryRan=false;
+function _apprSheetOnlyRequests(cb){
+  if(!gToken||typeof supaReady!=='function'||!supaReady()||!supa){ cb(null,'not connected'); return; }
+  sheetsGet('Settings!A:B').then(function(d){
+    if(!d||d.error||!d.values){ cb(null,'could not read the Settings sheet'); return; }
+    var reqs=[];
+    for(var i=1;i<d.values.length;i++){
+      var k=d.values[i][0], v=d.values[i][1];
+      if(k&&k.indexOf('APPREQ_')===0&&v){ try{ var r=JSON.parse(v); if(r&&r.id) reqs.push(r); }catch(e){} }
+    }
+    if(!reqs.length){ cb([],''); return; }
+    var ids=reqs.map(function(r){ return r.id; }), known={}, chunks=[];
+    for(var c=0;c<ids.length;c+=200) chunks.push(ids.slice(c,c+200));
+    var p=Promise.resolve();
+    chunks.forEach(function(ch){
+      p=p.then(function(){
+        return supa.from('approval_requests').select('id').in('id',ch).then(function(r){
+          if(r.error) throw new Error(r.error.message||'read failed');
+          (r.data||[]).forEach(function(x){ known[x.id]=true; });
+        });
+      });
+    });
+    p.then(function(){ cb(reqs.filter(function(r){ return !known[r.id]; }),''); })
+     .catch(function(e){ cb(null,String(e&&e.message||e)); });
+  }).catch(function(e){ cb(null,String(e&&e.message||e)); });
+}
+function recoverSheetOnlyApprovalRequests(auto){
+  var host=el('dbcheck-result');
+  var say=function(html){ if(host&&!auto) host.innerHTML='<div style="padding:12px 16px">'+html+'</div>'; };
+  if(currentRole!=='Admin'&&currentRole!=='Director'){ if(!auto) showToast('Only an Admin or Director can recover requests for other people.'); return; }
+  say('Reading the Sheet\u2019s approval requests\u2026');
+  _apprSheetOnlyRequests(function(missing,why){
+    if(missing===null){ say('Could not check \u2014 '+escHtml(why)+'.'); return; }
+    if(!missing.length){ say('Every approval request in the Sheet is also in the database. Nothing to recover.'); if(!auto) showToast('No Sheet-only requests.'); return; }
+    var done=0, failed=[];
+    var p=Promise.resolve();
+    missing.forEach(function(req){
+      p=p.then(function(){
+        return Promise.resolve(supaUpsertApprovalRequest(req)).then(function(){ done++; _mergeApprovalReqsIntoNotifs([req]); })
+          .catch(function(){ failed.push(req.id); });
+      });
+    });
+    p.then(function(){
+      var names=missing.map(function(r){ return (r.type||'request')+' on '+(r.serial||'\u2014')+' from '+(r.from||r.fromEmail||'?')+' ('+(r.status||'pending')+')'; });
+      logActivity('Recovered '+done+' approval request'+(done===1?'':'s')+' that had only reached the Google Sheet: '+names.join(' \u00b7 ')
+        +(failed.length?' \u2014 '+failed.length+' could not be written.':''),'');
+      _updateNotifBadge();
+      if(el('page-approvals')&&el('page-approvals').classList.contains('active')) renderApprovals();
+      say('Recovered <b>'+done+'</b> request'+(done===1?'':'s')+' into the database:<ul style="margin:6px 0 0 18px">'+names.map(function(n){ return '<li>'+escHtml(n)+'</li>'; }).join('')+'</ul>'
+        +(failed.length?'<div style="color:var(--coral);margin-top:6px">'+failed.length+' could not be written \u2014 see the console.</div>':''));
+      showToast('Recovered '+done+' approval request'+(done===1?'':'s')+' from the Sheet.');
+    });
+  });
+}
+// Once per session, a little after login, for Admin/Director only (one Sheet read).
+function _apprSheetRecoveryOnce(){
+  if(_apprSheetRecoveryRan) return; _apprSheetRecoveryRan=true;
+  if(currentRole!=='Admin'&&currentRole!=='Director') return;
+  try{ recoverSheetOnlyApprovalRequests(true); }catch(e){ console.warn('[approval] sheet recovery failed',e); }
+}
+
 // ── Notification panel (bell dropdown) ────────────────────────────────────
 function _loadSeenNotifs(){
   if(!gUser||!gUser.email) return;
@@ -31820,6 +31892,7 @@ function gShowApp(){
     NOTIFS.forEach(function(n){if(n.status==='pending'&&n.reqId)_lastSeenReqIds[n.reqId]=true;});
     _updateNotifBadge();
     renderApprovals();
+    setTimeout(_apprSheetRecoveryOnce,20000);   // Sheet-only requests (see recoverSheetOnlyApprovalRequests)
   }); // load persisted requests, update badge
   // Auto-refresh every 60 s: ring bell for approvers when new requests arrive;
   // notify requesters when their own requests are approved or rejected.
