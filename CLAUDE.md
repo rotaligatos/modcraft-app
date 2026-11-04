@@ -13516,3 +13516,25 @@ row and email/Chat only). Not yet exercised on a real Sheet-only request in prod
 - Watch the activity log for "had only reached the Google Sheet": first real use proves the path.
 - Everything in the earlier 2026-11-04 list still stands, except that requests from never-connected staff no
   longer depend on an Admin login.
+
+## What was changed on 2026-11-04 (session 3 — QT-W00000387 opened as ₱0: a disconnected save)
+
+Nikki created W387 at 4:10pm (₱0). Christine, not connected, opened it, priced it and locked it at 5:42pm
+(₱2,868.41), which reached only the Sheet. `loadQuotationJson` reads the database first, so connected users
+opened Nikki's blank copy. The automatic Project List correction, going by that stale copy, set the status to
+Draft in both stores. Karen's "not signed" at 5:51pm may have been against the blank copy (to ask her).
+
+**Data repair (no code):** W387's Sheet state copied to `quotation_states`; `quotations` row and Sheet column F
+set to IQ Locked; W386's blank `quotations` row filled from the Sheet. Verified in both stores and logged.
+All 456 Sheet rows compared with the database: W387 was the only state where the Sheet was newer. 12 others
+differ in total or status and were not investigated (QT-C00000022 and QT-C00000029 stand out).
+
+⚠ **Still open, the cause:** a connected user opens a stale copy of anything a disconnected user just saved,
+and a save from that screen overwrites the Sheet. `_dbCheck` status correction trusts the same stale copy.
+Proposed: open whichever copy is newer (compare the Sheet's Last Updated with the state's `updated_at`),
+and skip the status correction when the Sheet row is newer than the state.
+
+# OPEN — updated 2026-11-04 (session 3)
+- Christine: reconnect, reopen W387, request the signature again. Ask Karen if she saw ₱0 when she declined.
+- The stale-copy fix above: proposed, not built.
+- Everything in the earlier 2026-11-04 lists still stands.
