@@ -13569,3 +13569,9 @@ loaded; the existing save-conflict check now sees the newer copy when it re-read
   `job_settings_editor()`), PUBLIC bucket `tv-slides`, RPC `pk_tv_slides_for(site)` for the TV (anon).
   Installed 2026-11-04 (`supabase_pk_tv_slides.sql`). Pictures are public — promo/product only.
   The thumbnail covers the bottom of the Ready column (matters only with 5+ ready numbers).
+- TV video from a USB stick (same session): footer button "🎬 Video from USB" on the TV screen opens a file
+  picker; the file is kept in THAT TV's browser (IndexedDB `hatid_tv`, store `v`, key = site) — nothing
+  uploaded, no Supabase, no internet. Plays muted, on loop, in the corner; pictures pause while it is there.
+  "✕" removes it. No room to keep it → plays until refresh and says so; unplayable → asks for MP4 (H.264).
+  Rommel chose this over Supabase-hosted video (data allowance). Works on Chrome/Android TV boxes; many
+  built-in TV browsers cannot open a file picker — not yet tried on the real TVs (brand unknown).
