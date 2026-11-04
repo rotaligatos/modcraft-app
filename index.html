@@ -14376,7 +14376,7 @@ function submitOrderPauseRequest(){
   });
 
   gSaveApprovalRequest(req,function(ok){
-    if(ok) showToast('Request sent to '+apprObj.name+'. They will see it in their Approvals page.');
+    if(ok){ showToast('Request sent to '+apprObj.name+'. They will see it in their Approvals page.'); _apprWarnIfNotConnected(); }
     else   showToast('⚠ Request could not be saved — check your Sheets access. Contact Admin.');
   });
 }
@@ -17222,6 +17222,7 @@ function submitApprovalRequest(){
   gSaveApprovalRequest(req, function(ok){
     if(ok){
       showToast('Request sent to '+appr.name+'. They will see it in their Approvals page.');
+      _apprWarnIfNotConnected();
       // Only after the row exists: the Edge Function reads the request back by id, so pushing
       // before the save could land on nothing.
       _pushApprovalRequest(reqId);
@@ -18032,6 +18033,100 @@ function _apprSheetRecoveryOnce(){
   if(_apprSheetRecoveryRan) return; _apprSheetRecoveryRan=true;
   if(currentRole!=='Admin'&&currentRole!=='Director') return;
   try{ recoverSheetOnlyApprovalRequests(true); }catch(e){ console.warn('[approval] sheet recovery failed',e); }
+}
+// The approver's own session does this for the requests routed to THEM, so nobody has to wait for
+// an Admin to log in (Rommel, 2026-11-04: "why do I need to be log in in order for them to see the
+// request?"). A request routed to me passes the row-level rule (to_email = me), which is why this
+// works from a Manager or a Staff signatory when the Admin-wide recovery above could not.
+// Saved into the database rather than only shown here, so the phone sees it too and acting on it
+// follows the ordinary path. Costs one small Sheet read (column A) per person per 5 minutes; a row
+// is only read in full if it is recent and not visible to this person, and only once.
+var APPR_PULL_EVERY_MS=5*60*1000, APPR_PULL_FORCED_MS=60*1000;
+var APPR_PULL_MIN_AGE_MS=2*60*1000;      // a connected requester's own database write lands in seconds
+var APPR_PULL_MAX_AGE_MS=14*86400000;    // older than this is the Admin recovery's job
+var _apprPullAt=0, _apprPullBusy=false, _apprPullNotMine={};
+function _apprReqIdTime(id){ var m=/^req_(\d+)_/.exec(String(id||'')); return m?Number(m[1]):0; }
+// Which Settings-sheet rows are worth reading in full. Pure, so it can be tested on its own.
+function _apprPullCandidates(keyRows,knownIds,notMine,now){
+  var out=[];
+  for(var i=1;i<(keyRows||[]).length;i++){
+    var k=keyRows[i]&&keyRows[i][0];
+    if(!k||String(k).indexOf('APPREQ_')!==0) continue;
+    var id=String(k).slice(7);
+    if(knownIds[id]||notMine[id]) continue;
+    var t=_apprReqIdTime(id), age=now-t;
+    if(!t||age<APPR_PULL_MIN_AGE_MS||age>APPR_PULL_MAX_AGE_MS) continue;
+    out.push({row:i+1,id:id});
+  }
+  return out.slice(-40);
+}
+// Still waiting, and given to me or to someone I am the active delegate for.
+function _apprPullIsMine(req,me){
+  if(!req||!req.id||req.status!=='pending') return false;
+  var routed=String(req.approverEmail||'').trim().toLowerCase();
+  me=String(me||'').trim().toLowerCase();
+  if(!routed||!me) return false;
+  if(routed===me) return true;
+  try{
+    var ru=(sheetUsers||[]).find(function(u){return String(u.email||'').trim().toLowerCase()===routed;});
+    return !!(ru&&ru.delegateActive&&String(ru.delegateTo||'').trim().toLowerCase()===me);
+  }catch(e){ return false; }
+}
+function pullSheetOnlyRequestsForMe(force){
+  if(window._TRN||_apprPullBusy) return Promise.resolve(0);
+  if(!gToken||!gUser||!gUser.email||typeof supaReady!=='function'||!supaReady()) return Promise.resolve(0);
+  var now=Date.now();
+  if(now-_apprPullAt<(force?APPR_PULL_FORCED_MS:APPR_PULL_EVERY_MS)) return Promise.resolve(0);
+  _apprPullAt=now; _apprPullBusy=true;
+  var me=gUser.email, keyRows=null;
+  var done=function(n){ _apprPullBusy=false; return n; };
+  return sheetsGet('Settings!A:A').then(function(d){
+    if(!d||d.error||!d.values) return null;
+    keyRows=d.values;
+    return supaGetApprovalRequests();
+  }).then(function(rows){
+    if(!rows) return [];                    // could not read one side: decide nothing this round
+    var known={}; rows.forEach(function(r){ if(r&&r.id) known[r.id]=true; });
+    var cands=_apprPullCandidates(keyRows,known,_apprPullNotMine,now);
+    if(!cands.length) return [];
+    var qs=cands.map(function(c){ return 'ranges='+encodeURIComponent('Settings!B'+c.row); }).join('&');
+    return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'/values:batchGet?'+qs,{}).then(function(j){
+      if(!j||j.error||!j.valueRanges) return [];
+      var mine=[];
+      cands.forEach(function(c,i){
+        var vr=j.valueRanges[i], v=vr&&vr.values&&vr.values[0]&&vr.values[0][0], req=null;
+        try{ req=v?JSON.parse(v):null; }catch(e){}
+        if(req&&req.id===c.id&&_apprPullIsMine(req,me)) mine.push(req);
+        else _apprPullNotMine[c.id]=true;
+      });
+      return mine;
+    });
+  }).then(function(mine){
+    if(!mine.length) return done(0);
+    var p=Promise.resolve();
+    mine.forEach(function(req){
+      p=p.then(function(){ return supaUpsertApprovalRequest(req); }).then(function(ok){
+        logActivity('Approval request from '+(req.from||req.fromEmail||'?')+' had only reached the Google Sheet (their browser is not connected to the database) — picked up by '+(gUser.name||me)+'.',req.serial||'');
+        if(ok===true){ _pushApprovalRequest(req.id); return; }
+        // Refused (a delegate outside the request's company): still show it here.
+        _mergeApprovalReqsIntoNotifs([req]);
+        showToast('🔔 New '+(APPR_TYPE_LABELS[req.type]||req.type)+' request from '+escHtml(req.from||req.fromEmail||'?')+' — '+escHtml(req.serial||''));
+      });
+    });
+    return p.then(function(){
+      done(mine.length);
+      // The ordinary poll now finds them, with its usual bell, toast and voice.
+      if(typeof _pollApprovalsNow==='function') _pollApprovalsNow(true);
+      return mine.length;
+    });
+  }).catch(function(e){ console.warn('[approval] sheet pull failed',e); return done(0); });
+}
+// Sent, but only as far as the Sheet. Say so at the moment it matters and offer the real cure.
+function _apprWarnIfNotConnected(){
+  if(window._TRN||typeof supaReady!=='function'||supaReady()) return false;
+  if(gUser&&typeof _supaRenamedFlag==='function'&&_supaRenamedFlag(gUser.email)) return false; // its own banner, and reconnecting cannot fix it
+  if(typeof showSupaConnectBanner==='function') showSupaConnectBanner('request');
+  return true;
 }
 
 // ── Notification panel (bell dropdown) ────────────────────────────────────
@@ -21803,7 +21898,7 @@ function _sendSignatureRequest(slot,auto,serialOverride,clientOverride,checkedSi
   // Push only once the row is actually stored — the Edge Function reads the request back by id,
   // so firing alongside an async save would race it and land on nothing.
   if(typeof gSaveApprovalRequest==='function')
-    gSaveApprovalRequest(req, function(){ _pushApprovalRequest(id); });
+    gSaveApprovalRequest(req, function(){ _pushApprovalRequest(id); _apprWarnIfNotConnected(); });
   gSendMessage(apprObj.email,apprObj.name,
     who+' is requesting your signature — '+_sigLabel(slot)+' on '+serial+' for '+client
       +'. '+_apprLink(id),'normal',
@@ -29517,7 +29612,9 @@ function showSupaConnectBanner(urgent,wasEmail){
   // it gets its own color/wording/urgency and is NOT gated by the dismiss cooldown that the soft
   // case uses — see _supaHandleConfirmedBroken, which calls this directly on every failed check.
   b.style.background=urgent?'#8a2c1f':'#1a3a5c';
-  var msg=urgent
+  var msg=urgent==='request'
+    ?'Your request was saved, but this browser is not connected to the database, so your approver may take a few minutes to see it. Connect now so your next one reaches them right away.'
+    :urgent
     ?'Your fast database connection has stopped working — background sync has paused. Nothing is lost (Sheets stays live), but reconnect when you can.'
     :'Speed tip: connect to our faster database for quicker loading.';
   b.innerHTML='<i class="ti '+(urgent?'ti-alert-triangle':'ti-bolt')+'" style="font-size:18px;flex-shrink:0"></i>'
@@ -31314,9 +31411,10 @@ function supaUpsertApprovalRequest(req){
   };
   try{
     return supa.from('approval_requests').upsert(row,{onConflict:'id'}).then(function(r){
-      if(r.error) console.warn('[supa] approval_request upsert error:',r.error.message||r.error);
+      if(r.error){ console.warn('[supa] approval_request upsert error:',r.error.message||r.error); return false; }
+      return true;
     });
-  }catch(e){ console.warn('[supa] approval_request upsert threw',e); return Promise.resolve(); }
+  }catch(e){ console.warn('[supa] approval_request upsert threw',e); return Promise.resolve(false); }
 }
 // — activity_log insert (dual-write; append-only, no upsert needed) —
 function supaInsertActivity(action,serial){
@@ -31904,6 +32002,7 @@ function gShowApp(){
   window._pollApprovalsNow=function(force){
     if(!gToken||gSessionExpired) return;
     if(document.hidden&&!force) return;   // skip background polling, but never an on-demand call
+    try{ pullSheetOnlyRequestsForMe(!!force); }catch(ePull){ console.warn('[approval] sheet pull failed',ePull); }
     var me=(gUser&&gUser.email||'').toLowerCase();
     // Snapshot current statuses of own requests before reloading
     var ownBefore={};

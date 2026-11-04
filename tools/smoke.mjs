@@ -6713,6 +6713,49 @@ const PROFILES = {
         check('Approval requests that only reached the Sheet are recovered into the database by an Admin, named in the log',
           () => rec, { staffBlocked: true, upserted: ['req_recA'], inNotifs: true, notB: true, logged: true });
       }
+      // 2026-11-04: Christine's requests reached only the Sheet, and Karen saw them only after an
+      // Admin logged in. The approver's own session must pick up what is routed to them.
+      {
+        const pull = await (async () => {
+          const w = window;
+          if (typeof w.pullSheetOnlyRequestsForMe !== 'function') return { missing: true };
+          const keep = { sg: w.sheetsGet, af: w.gApiFetch, sess: w.supaSession, sb: w.supa, tok: w.gToken, user: w.gUser, gr: w.supaGetApprovalRequests, up: w.supaUpsertApprovalRequest, log: w.logActivity, poll: w._pollApprovalsNow, push: w._pushApprovalRequest };
+          const now = Date.now(), id = (ageMin, x) => 'req_' + (now - ageMin * 60000) + '_' + x;
+          const mine = { id: id(30, 'mine'), type: 'unlock', serial: 'QT-W1', from: 'Christine', approverEmail: ' Karen@x ', status: 'pending' };
+          const other = { id: id(30, 'other'), type: 'unlock', serial: 'QT-W2', from: 'Nikki', approverEmail: 'allan@x', status: 'pending' };
+          const done = { id: id(30, 'done'), type: 'unlock', serial: 'QT-W3', from: 'Nikki', approverEmail: 'karen@x', status: 'approved' };
+          const inDb = id(30, 'indb'), fresh = id(0.5, 'fresh'), old = id(60 * 24 * 20, 'old');
+          const rows = [mine, other, done];
+          const keys = [['Key'], ['CONFIG']].concat([mine.id, other.id, done.id, inDb, fresh, old].map(x => ['APPREQ_' + x]));
+          let upserted = [], asked = [], pushed = [], logged = [], polled = 0, aRead = 0;
+          w.sheetsGet = (r) => { aRead++; return Promise.resolve({ values: keys }); };
+          w.gApiFetch = (u) => { asked = decodeURIComponent(u).match(/Settings!B\d+/g) || []; return Promise.resolve({ valueRanges: rows.map(r => ({ values: [[JSON.stringify(r)]] })) }); };
+          w.supaSession = { user: { email: 'karen@x' } }; w.supa = {}; w.gToken = 'tok'; w.gUser = { email: 'karen@x', name: 'Karen' };
+          w.supaGetApprovalRequests = () => Promise.resolve([{ id: inDb }]);
+          w.supaUpsertApprovalRequest = (r) => { upserted.push(r.id); return Promise.resolve(true); };
+          w.logActivity = (a, ser) => logged.push(ser);
+          w._pollApprovalsNow = () => { polled++; };
+          w._pushApprovalRequest = (x) => pushed.push(x);
+          const n = await w.pullSheetOnlyRequestsForMe(true);
+          const second = await w.pullSheetOnlyRequestsForMe(true);   // within the throttle: no read
+          const reads = aRead;
+          const out = { n, second, reads, upserted: upserted.map(x => x.split('_')[2]), rowsRead: asked.length, pushed: pushed.length, logged, polled };
+          Object.assign(w, { sheetsGet: keep.sg, gApiFetch: keep.af, supaSession: keep.sess, supa: keep.sb, gToken: keep.tok, gUser: keep.user, supaGetApprovalRequests: keep.gr, supaUpsertApprovalRequest: keep.up, logActivity: keep.log, _pollApprovalsNow: keep.poll, _pushApprovalRequest: keep.push });
+          return out;
+        })().catch(e => ({ err: String(e) }));
+        check('An approver picks up a Sheet-only request routed to them, without any Admin logging in',
+          () => pull, { n: 1, second: 0, reads: 1, upserted: ['mine'], rowsRead: 3, pushed: 1, logged: ['QT-W1'], polled: 1 });
+        check('A request sent while not connected tells the sender and offers to connect; a connected sender is not told',
+          () => {
+            const w = window; if (typeof w._apprWarnIfNotConnected !== 'function') return { missing: true };
+            const keep = w.supaSession, keepS = w.supa, keepB = w.showSupaConnectBanner; let shown = []; w.supa = {};
+            w.showSupaConnectBanner = (k) => shown.push(k);
+            w.supaSession = null; const off = w._apprWarnIfNotConnected();
+            w.supaSession = { user: { email: 'x' } }; const on = w._apprWarnIfNotConnected();
+            w.supaSession = keep; w.supa = keepS; w.showSupaConnectBanner = keepB;
+            return { off, on, shown };
+          }, { off: true, on: false, shown: ['request'] });
+      }
       if (typeof window._supaAccountState === 'function') {
         check('Renamed mailbox: Google says it is you but the database record is still the previous name',
           () => {

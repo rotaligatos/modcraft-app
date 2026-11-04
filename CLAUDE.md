@@ -13484,3 +13484,35 @@ still miss every connected reader — hence the recovery above.
 - Never-connected staff (Kathleen, Michael, Roniel, Noel, Rhodalyn, Angelica): any request they raise
   reaches approvers only via the Admin recovery until they connect once.
 - Everything in the 2026-11-03 and 2026-10-30 lists still stands.
+
+## What was changed on 2026-11-04 (session 2 — approvers pick up Sheet-only requests themselves)
+
+Christine's auth record was corrected at 3:49pm PHT but she had not signed in again, so her 4:36pm unlock
+and 5:44pm signature reached only the Sheet. Karen saw them at 5:51pm, the moment Rommel logged in and the
+Admin recovery ran. Rommel: *"why do I need to be log in in order for them to see the request?"*
+
+- **`pullSheetOnlyRequestsForMe(force)`**, run from `_pollApprovalsNow`. Every connected session, every 5 min
+  (60 s when forced by the bell or returning to the tab): reads `Settings!A:A`, takes `APPREQ_` rows not visible
+  in the database, aged 2 min to 14 days, reads at most 40 in full via `values:batchGet`, and upserts those
+  that are pending and routed to this person or their active delegator. The ordinary poll then announces
+  them. Allowed by RLS because `to_email` = the session's own email (verified by impersonation, rolled back,
+  on a different company's request). Rows read and found not mine are remembered for the session.
+- **`_apprWarnIfNotConnected()`** at the 3 places a request is raised: banner kind `'request'` with Connect.
+  Skipped for a renamed mailbox, which has its own banner.
+- `supaUpsertApprovalRequest` now resolves true/false. Existing callers ignore it.
+- The Admin recovery stays, for rows older than 14 days and rows that are no longer pending.
+
+**Limits.** Needs the approver's Modcraft open in a visible tab; an approver only on the phone is not
+covered until someone's laptop picks it up. A disconnected requester's later CANCEL writes the Sheet only, so a
+picked-up request can stay pending in the database until they connect. Messages still have this gap (Sheet
+row and email/Chat only). Not yet exercised on a real Sheet-only request in production.
+
+# OPEN — updated 2026-11-04 (session 2)
+- Christine: sign out and in, or Settings -> Company & DB -> Connect now.
+- **QT-W00000387:** Christine's request said SHELVS FURNITURE ₱2,868.41; the database copy says Miguel Dorotan
+  ₱0, last saved from `designer-ce1` (Nikki) 4:10pm, prepared_by Nikki. The app opens the database copy first, so
+  Karen may have declined against the wrong version. Sheet not readable from a session. Christine to open,
+  check, save and re-request.
+- Watch the activity log for "had only reached the Google Sheet": first real use proves the path.
+- Everything in the earlier 2026-11-04 list still stands, except that requests from never-connected staff no
+  longer depend on an Admin login.
