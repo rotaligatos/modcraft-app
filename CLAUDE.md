@@ -13557,3 +13557,15 @@ loaded; the existing save-conflict check now sees the newer copy when it re-read
 - Stale-copy fix: done. Watch the log for "was older than the Google Sheet".
 - Christine reconnect + re-request W387; Karen on why she declined. The 12 other differing rows are not investigated.
 - Everything in the earlier 2026-11-04 lists still stands.
+
+## What was changed on 2026-11-04 (session 5 — HATID pick-up TV: screen on, music, slideshow)
+- Logistics tab heading: "Coming up — for logistics confirmation" (was "warehouse preparing", which was
+  wrong for prepared orders whose SI is with the warehouse). Released-today table no longer prints raw HTML.
+- TV queue screen (`hatid.html?tv=plant1|annex`, `startTv`): Screen Wake Lock (re-asked on return + every
+  minute); soft page-generated music after the first tap (public-domain carols 1 Sep–6 Jan, a quiet tune
+  otherwise), ducked for every Now calling (`tvHooks.duck`), `&music=0` off.
+- Slideshow thumbnail bottom right, every 9 s. Managed in Settings › Pick-up › TV slideshow
+  (`renderTvSlides`). HATID project: table `pk_tv_slides` (RLS: staff read, admin/manager write via
+  `job_settings_editor()`), PUBLIC bucket `tv-slides`, RPC `pk_tv_slides_for(site)` for the TV (anon).
+  Installed 2026-11-04 (`supabase_pk_tv_slides.sql`). Pictures are public — promo/product only.
+  The thumbnail covers the bottom of the Ready column (matters only with 5+ ready numbers).
