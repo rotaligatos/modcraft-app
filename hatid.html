@@ -819,6 +819,7 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
 .pr-team th{font-size:12px;max-width:110px;white-space:normal;vertical-align:bottom}.pr-team td.c{text-align:center}
 @media print{#pr-card,#pr-ring,body.practice::after{display:none!important}}
 .i.bw.est{border-color:var(--warn);background:var(--warn-soft)}
+#set-body [data-dirty]{outline:2px solid var(--info);outline-offset:1px}
 </style>
 </head>
 <body>
@@ -6748,7 +6749,45 @@ async function reloadWeights(){
   if (!g.error) state.ref.gauges = g.data || [];
   if (!bw.error) state.ref.boardWeights = bw.data || [];
 }
+/* Each Save on this page (one material row, the board grid, the HPL grid) redraws the page from the database. Before that
+   redraw, every figure typed but not saved yet elsewhere on the page is kept and put back, outlined, so saving one row
+   never undoes another (Rommel 2026-11-05: edits "kept reverting"). Inputs a save just stored are left out (data-done). */
+const MW_TBODIES = '#mw-rows,#bw-rows,#hpl-rows';
+function mwMarkDirty(){
+  const body = $('set-body'); if (body._mwDirty) return; body._mwDirty = true;
+  const mark = e => { const t = e.target; if (t.matches?.('input,select') && t.closest(MW_TBODIES) && !t.closest('[data-done]')) t.dataset.dirty = 1; };
+  body.addEventListener('input', mark); body.addEventListener('change', mark);
+}
+function mwSnapshot(){
+  if (!$('mw-rows')) return null;
+  const val = i => i.type === 'checkbox' ? i.checked : i.value, live = r => !r.closest('[data-done]');
+  const fields = tr => Object.fromEntries([...tr.querySelectorAll('[data-f]')].map(i => [i.dataset.f, val(i)]));
+  const cells = tr => Object.fromEntries([...tr.querySelectorAll('[data-sub]')].map(i => [i.dataset.sub, i.value]));
+  const s = { edits: [], newMw: [], newGrid: [] };
+  document.querySelectorAll('#set-body [data-dirty]').forEach(i => { if (!live(i)) return; const tr = i.closest('tr');
+    if (tr.dataset.mw) s.edits.push({ sel: `#mw-rows tr[data-mw="${CSS.escape(tr.dataset.mw)}"] [data-f="${i.dataset.f}"]`, v: val(i) });
+    else if (tr.dataset.mm && i.dataset.sub != null) s.edits.push({ sel: `#${tr.closest('tbody').id} tr[data-mm="${CSS.escape(tr.dataset.mm)}"] [data-sub="${CSS.escape(i.dataset.sub)}"]`, v: val(i) }); });
+  document.querySelectorAll('#mw-rows tr[data-mw=""]').forEach(tr => { if (!live(tr)) return; const f = fields(tr);
+    if (f.name || f.words || f.kg || f.notes) s.newMw.push(f); });
+  document.querySelectorAll('#bw-rows tr:not([data-mm]), #hpl-rows tr:not([data-mm])').forEach(tr => { if (!live(tr)) return;
+    const mm = tr.querySelector('[data-mm-in]')?.value || '', c = cells(tr); if (mm || Object.values(c).some(v => v !== '')) s.newGrid.push({ body: tr.closest('tbody').id, mm, c }); });
+  return s.edits.length || s.newMw.length || s.newGrid.length ? s : null;
+}
+function mwRestore(s, mRow, tRow, hRow, bindRows){
+  if (!s) return;
+  const dirty = i => { i.dataset.dirty = 1; };
+  s.edits.forEach(({ sel, v }) => { const i = document.querySelector(sel); if (!i) return; if (i.type === 'checkbox') i.checked = v; else i.value = v; dirty(i); });
+  s.newMw.forEach(f => { $('mw-rows').insertAdjacentHTML('beforeend', mRow({ name: f.name, words: f.words, basis: f.basis, kg: f.kg, active: f.active, notes: f.notes }));
+    $('mw-rows').lastElementChild.querySelectorAll('[data-f]').forEach(dirty); });
+  if (s.newMw.length) bindRows();
+  s.newGrid.forEach(g => { const b = $(g.body); b.insertAdjacentHTML('beforeend', g.body === 'hpl-rows' ? hRow(null) : tRow(null));
+    const tr = b.lastElementChild, mi = tr.querySelector('[data-mm-in]'); mi.value = g.mm; dirty(mi);
+    tr.querySelectorAll('[data-sub]').forEach(i => { const v = g.c[i.dataset.sub]; if (v != null && v !== ''){ i.value = v; dirty(i); } }); });
+  const n = s.edits.length + s.newMw.length + s.newGrid.length;
+  toast(`Saved. Your other change${n === 1 ? ' is' : 's are'} still on the page (outlined) — not saved yet`, 'ok');
+}
 async function renderWeightSettings(){
+  const keep = mwSnapshot();
   setSetHead('How HATID weighs each delivery: boards by thickness, everything else by the rules below. Truck loads are the sum of their deliveries.',
     '<button class="btn" id="mw-reweigh">⟳ Re-weigh open deliveries</button>');
   try { await reloadWeights(); } catch {}
@@ -6857,7 +6896,7 @@ async function renderWeightSettings(){
       for (const d of dels) await withRetry('Saving', () => sb.from('board_weights').delete().eq('substrate', d.sub).eq('gauge_mm', d.mm));
       for (const g of gUps) await withRetry('Saving', () => sb.from('board_gauges').update(g.p).eq('gauge_mm', g.gauge_mm));
       if (gIns.length) await withRetry('Saving', () => sb.from('board_gauges').insert(gIns));
-      toast('Saved — applies to deliveries uploaded from now on. Use Re-weigh for the ones already waiting.', 'ok'); renderWeightSettings();
+      body.dataset.done = 1; toast('Saved — applies to deliveries uploaded from now on. Use Re-weigh for the ones already waiting.', 'ok'); renderWeightSettings();
     } catch { btn.disabled = false; }
   };
   $('bw-save').addEventListener('click', e => saveGrid($('bw-rows'), e.currentTarget));
@@ -6871,9 +6910,10 @@ async function renderWeightSettings(){
       b.disabled = true;
       try { const id = tr.dataset.mw;
         await withRetry('Saving', () => id ? sb.from('material_weights').update(p).eq('id', id) : sb.from('material_weights').insert(p));
-        toast('Saved — applies to deliveries uploaded from now on', 'ok'); renderWeightSettings(); } catch { b.disabled = false; } }); });
+        tr.dataset.done = 1; toast('Saved — applies to deliveries uploaded from now on', 'ok'); renderWeightSettings(); } catch { b.disabled = false; } }); });
   };
   bindRows();
+  mwMarkDirty(); mwRestore(keep, mRow, tRow, hRow, bindRows);
   $('mw-reweigh').addEventListener('click', async e => {
     const b = e.currentTarget; b.disabled = true;
     try {

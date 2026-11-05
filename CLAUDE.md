@@ -13597,3 +13597,15 @@ same option, same ₱204,394.86), and the card's link opened Option 1 though the
 - Data: Raven's twin `req_1793838295908_lh4btw` cancelled in Supabase (reason: superseded);
   Karen's `req_1793837954155_hktn3c` is the one to sign. Checks in `tools/smoke.mjs`; the link check
   fails on the old code, the others are gated on the new function.
+
+## What was changed on 2026-11-05 (session 2 — HATID Material weights: saving one row wiped the others)
+Report: "changing the weight of the materials keeps reverting". Saves reached the DB (checked rows,
+RLS as Rommel, edge logs). Cause: every Save on Settings › Material weights (one per material row,
+board grid, HPL grid) ran `renderWeightSettings()`, which rebuilt the page from the DB and discarded
+anything typed but not yet saved elsewhere. Logs showed two slab rows saved alternately 3× each.
+Fix (hatid.html): `mwMarkDirty` marks edited inputs, `mwSnapshot` keeps unsaved edits + new rows
+before the redraw, `mwRestore` puts them back outlined (`#set-body [data-dirty]`) with a toast; the
+section just saved is marked `data-done` and skipped. Tested headless with a fake DB: old code lost
+row B / a grid cell / a new row; new code keeps all three and each saves on its own button.
+Also seen in that day's grid save (cleared cells, may be unintended): HDF 3, PLY 6, PLY 22 removed,
+30mm "Any board" switched off.
