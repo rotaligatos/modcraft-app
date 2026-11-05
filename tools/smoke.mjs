@@ -6863,6 +6863,78 @@ const PROFILES = {
         })().catch(e => ({ err: String(e) }));
         check('A quotation saved only to the Sheet opens as the newer Sheet copy, and the database catches up',
           () => newer, { opened: 2868.41, sheetCalls: 1, healed: [2868.41], rowStatus: 'IQ Locked', rowTotal: 2868.41, logged: 1 });
+        const w389 = (() => {
+          const w = window; if (typeof w._slimStateForSave !== 'function') return { missing: true };
+          const heavy = () => ({ fileName: 'x', componentCount: 2, bom: [{ material: 'MDF', boardsNeeded: 3, utilizationPct: 80, layout: [[{ x: 1 }]], plans: [{ dir: 'L' }], shelves: [{ width: 5 }] }] });
+          const keep = { bl: w.qBoardLayout, opts: w.qOptionsList };
+          const mem = heavy(); w.qBoardLayout = mem; w.qOptionsList = [{ id: 1, snapshot: { boardLayout: heavy() } }];
+          const st = w.getFullQuotationState();
+          const row = st.boardLayout.bom[0], snap = st.optionsList[0].snapshot.boardLayout.bom[0];
+          const out = { stateDetail: !!(row.layout || row.plans || row.shelves), snapDetail: !!(snap.layout || snap.plans || snap.shelves),
+            boards: row.boardsNeeded, memoryKept: !!mem.bom[0].layout, memorySnapKept: !!w.qOptionsList[0].snapshot.boardLayout.bom[0].layout,
+            noLayout: w._slimBoardLayout(null) === null };
+          w.qBoardLayout = keep.bl; w.qOptionsList = keep.opts;
+          return out;
+        })();
+        check('The saved state carries board totals, not the cut layout, and the open quotation keeps its copy',
+          () => w389, { stateDetail: false, snapDetail: false, boards: 3, memoryKept: true, memorySnapKept: true, noLayout: true });
+        const tooBig = await (async () => {
+          const w = window; if (typeof w._slimStateForSave !== 'function') return { missing: true };
+          const keep = { tok: w.gToken, up: w.supaUpsertState, g: w.getFullQuotationState, toast: w.showSheetsToast, log: w.logActivity, sg: w.sheetsGet };
+          const run = async (result) => {
+            let toasts = 0, logs = 0, sheet = 0;
+            w.gToken = 't'; w.supaUpsertState = () => Promise.resolve(result);
+            w.getFullQuotationState = () => ({ serial: 'QT-W9', pad: 'x'.repeat(500000) });
+            w.showSheetsToast = () => { toasts++; }; w.logActivity = () => { logs++; };
+            w.sheetsGet = () => { sheet++; return Promise.resolve({ values: [] }); };
+            await new Promise(res => w.saveQuotationJson(res));
+            return { toasts, logs, sheet };
+          };
+          const out = { refused: await run(false), notConnected: await run(null), saved: await run(true) };
+          Object.assign(w, { gToken: keep.tok, supaUpsertState: keep.up, getFullQuotationState: keep.g, showSheetsToast: keep.toast, logActivity: keep.log, sheetsGet: keep.sg });
+          return out;
+        })();
+        check('A quotation too big for the Sheet: silent if the database took it, loud if nothing saved it',
+          () => tooBig, { refused: { toasts: 1, logs: 1, sheet: 0 }, notConnected: { toasts: 1, logs: 1, sheet: 0 }, saved: { toasts: 0, logs: 0, sheet: 0 } });
+        const oldSheet = await (async () => {
+          const w = window; if (typeof w._slimStateForSave !== 'function') return { missing: true };
+          const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, info: w._quotSheetRowInfo, sheets: w._loadQuotationJsonFromSheets, heal: w._healStaleDbCopy, us: w.USE_SUPABASE };
+          const db = { serial: 'QT-W7', savedAt: '2026-11-05T02:30:00Z', pCalc: { grand: 2 } };
+          let healed = 0, sheetCopy = { serial: 'QT-W7', savedAt: '2026-11-05T01:00:00Z', pCalc: { grand: 1 } };
+          w.USE_SUPABASE = true; w.gToken = 't'; w.supaSession = { user: { email: 'a@x' } };
+          w.supa = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { state: db, updated_at: '2026-11-05T02:30:01Z' }, error: null }) }) }) }) };
+          w._quotSheetRowInfo = () => Promise.resolve({ updatedAt: '2026-11-05T02:50:00Z' });
+          w._loadQuotationJsonFromSheets = (s, cb) => cb(sheetCopy);
+          w._healStaleDbCopy = () => { healed++; };
+          const open = () => new Promise(res => w.loadQuotationJson('QT-W7', res, { quiet: true }));
+          const older = (await open()).pCalc.grand, healedOlder = healed;
+          sheetCopy = { serial: 'QT-W7', savedAt: '2026-11-05T02:50:00Z', pCalc: { grand: 3 } };
+          const newer = (await open()).pCalc.grand, healedNewer = healed;
+          Object.assign(w, { supaSession: keep.sess, supa: keep.sb, gToken: keep.tok, _quotSheetRowInfo: keep.info, _loadQuotationJsonFromSheets: keep.sheets, _healStaleDbCopy: keep.heal, USE_SUPABASE: keep.us });
+          return { older, healedOlder, newer, healedNewer };
+        })();
+        check('A newer row with an older Sheet state does not replace the database copy',
+          () => oldSheet, { older: 2, healedOlder: 0, newer: 3, healedNewer: 1 });
+        const daRetry = await (async () => {
+          const w = window; if (typeof w._persistDrawingAnalysisForJo !== 'function') return { missing: true };
+          const keep = { da: w.qDrawingAnalysis, ser: w.qSerial, up: w.supaUploadQuotationFile, rep: w.supaReplaceDrawingAnalysis, ready: w.supaReady, draft: w.qDraftKey, retry: w.DA_UPLOAD_RETRY_MS, log: w.logActivity, toast: w.showToast };
+          const run = async (results) => {
+            let ups = 0, rows = 0, logs = 0, i = 0;
+            w.qDrawingAnalysis = { fileName: 'f' + results.length + Math.random(), analyzedAt: String(Math.random()), result: { components: [{}] } };
+            w.qSerial = 'QT-W5'; w.qDraftKey = ''; w.supaReady = () => true; w.DA_UPLOAD_RETRY_MS = 1;
+            w.supaUploadQuotationFile = () => { ups++; return Promise.resolve(results[Math.min(i++, results.length - 1)]); };
+            w.supaReplaceDrawingAnalysis = () => { rows++; return Promise.resolve(); };
+            w.logActivity = () => { logs++; }; w.showToast = () => {};
+            w._persistDrawingAnalysisForJo();
+            await new Promise(r => setTimeout(r, 60));
+            return { ups, rows, logs };
+          };
+          const out = { thenOk: await run([false, true]), neverOk: await run([false, false, false]) };
+          Object.assign(w, { qDrawingAnalysis: keep.da, qSerial: keep.ser, supaUploadQuotationFile: keep.up, supaReplaceDrawingAnalysis: keep.rep, supaReady: keep.ready, qDraftKey: keep.draft, DA_UPLOAD_RETRY_MS: keep.retry, logActivity: keep.log, showToast: keep.toast });
+          return out;
+        })();
+        check('A cutting list that fails to upload is retried, and no row points at a missing file',
+          () => daRetry, { thenOk: { ups: 2, rows: 1, logs: 0 }, neverOk: { ups: 3, rows: 0, logs: 1 } });
         const usual = await (async () => {
           const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
           const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };

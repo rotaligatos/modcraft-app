@@ -14427,6 +14427,7 @@ function _lockQuotationForPause(serial,entry,orderId,byName){
   loadQuotationJson(serial,function(state){
     if(!state) return;
     state.orderPaused={active:true,orderId:orderId,reason:entry.reason||'',approvedBy:entry.approvedBy||byName,approvedAt:entry.approvedAt};
+    _slimStateForSave(state);
     var json=JSON.stringify(state);
     if(json.length>QSTATE_CHUNK*QSTATE_COLS){ console.warn('[order-pause] patched state too large to save for '+serial); return; }
     var row=_qstateRow(serial,json);
@@ -14470,6 +14471,7 @@ function _clearOrderPauseOnQuotation(serial,who,orderId){
   loadQuotationJson(serial,function(state){
     if(!state||!state.orderPaused||!state.orderPaused.active) return; // nothing to clear
     state.orderPaused={active:false};
+    _slimStateForSave(state);
     var json=JSON.stringify(state);
     if(json.length>QSTATE_CHUNK*QSTATE_COLS){ console.warn('[order-pause] patched state too large to save for '+serial); return; }
     var row=_qstateRow(serial,json);
@@ -17492,6 +17494,7 @@ function _persistApprovedFieldToQuotation(notif,callback,source){
     // (confirmUnlock, _applyApprovedRequest) already do.
     if(type==='unlock'&&typeof _cancelPendingSignaturesFor==='function')
       _cancelPendingSignaturesFor(serial,'Quotation unlocked (approved by '+((notif&&notif.by)||'Manager/Supervisor')+')');
+    _slimStateForSave(state);
     var json=JSON.stringify(state);
     if(json.length>QSTATE_CHUNK*QSTATE_COLS){
       console.warn('[approval] patched state too large to save for '+serial);
@@ -30002,8 +30005,9 @@ function supaUpsertQuotation(entry){
 }
 // — quotation state upsert (dual-write). Ensures parent quotation row exists
 //   first (FK), without clobbering its columns (DO NOTHING stub). —
+// Resolves true when saved, false when refused, null when not connected.
 function supaUpsertState(serial,state){
-  if(!SUPA_DUAL_WRITE||!supaReady()||!serial) return Promise.resolve();
+  if(!SUPA_DUAL_WRITE||!supaReady()||!serial) return Promise.resolve(null);
   try{
     // The stub's own error used to be discarded, so if the parent insert was refused the code
     // carried on and reported only the child's failure — naming the symptom, never the cause.
@@ -30011,10 +30015,10 @@ function supaUpsertState(serial,state){
       if(r0&&r0.error) console.warn('[supa] state upsert — parent row refused ('+serial+'):',r0.error.message||r0.error);
       return supa.from('quotation_states').upsert({serial:serial,state:state,cost_report:(state&&state.costReport)||null},{onConflict:'serial'});
     }).then(function(r){
-      if(r&&r.error) console.warn('[supa] state upsert error ('+serial+'):',r.error.message||r.error);
-      else console.log('[supa] state upserted:',serial);
-    }).catch(function(e){ console.warn('[supa] state upsert threw ('+serial+')',e); });
-  }catch(e){ console.warn('[supa] state upsert threw',e); return Promise.resolve(); }
+      if(r&&r.error){ console.warn('[supa] state upsert error ('+serial+'):',r.error.message||r.error); return false; }
+      console.log('[supa] state upserted:',serial); return true;
+    }).catch(function(e){ console.warn('[supa] state upsert threw ('+serial+')',e); return false; });
+  }catch(e){ console.warn('[supa] state upsert threw',e); return Promise.resolve(false); }
 }
 // — quotation state read (used when USE_SUPABASE is true — ON since 2026-07-02) —
 function supaGetStateMeta(serial){
@@ -30053,17 +30057,18 @@ function supaGetState(serial){
 function _supaSafeStorageKey(s){
   return String(s||'').replace(/[^A-Za-z0-9 ._\-\/]/g,'-');
 }
+// Resolves true when stored, false when refused, null when not connected.
 function supaUploadQuotationFile(baseSerial,fileName,mimeType,content){
-  if(!SUPA_DUAL_WRITE||!supaReady()||!baseSerial||!fileName) return Promise.resolve();
+  if(!SUPA_DUAL_WRITE||!supaReady()||!baseSerial||!fileName) return Promise.resolve(null);
   try{
     var blob=new Blob([content],{type:mimeType});
     var storageKey=_supaSafeStorageKey(baseSerial)+'/'+_supaSafeStorageKey(fileName);
     return supa.storage.from('quotations').upload(storageKey,blob,{contentType:mimeType,upsert:true})
       .then(function(r){
-        if(r&&r.error) console.warn('[supa] quotations storage upload error:',r.error.message||r.error);
-        else console.log('[supa] quotations storage uploaded:',storageKey);
-      }).catch(function(e){ console.warn('[supa] quotations storage upload threw',e); });
-  }catch(e){ console.warn('[supa] quotations storage upload threw',e); return Promise.resolve(); }
+        if(r&&r.error){ console.warn('[supa] quotations storage upload error:',r.error.message||r.error); return false; }
+        console.log('[supa] quotations storage uploaded:',storageKey); return true;
+      }).catch(function(e){ console.warn('[supa] quotations storage upload threw',e); return false; });
+  }catch(e){ console.warn('[supa] quotations storage upload threw',e); return Promise.resolve(false); }
 }
 // Binary-safe variant — supaUploadQuotationFile's new Blob([content]) would wrap a base64 STRING
 // as literal text, not the decoded bytes, corrupting a real file (e.g. a PDF) on download. Decodes
@@ -38491,7 +38496,7 @@ function getFullQuotationState(){
     segment:(el('cl-segment')?el('cl-segment').value:''),
     segmentOther:(el('cl-segment-other')?el('cl-segment-other').value:'')
   };
-  return {
+  return _slimStateForSave({
     serial:qSerial, baseSerial:qBaseSerial||qSerial,
     activeOptionId:qActiveOptionId, optionsList:JSON.parse(JSON.stringify(qOptionsList)),
     locked:qLocked, approved:qApproved, saved:qSaved, sentStatus:qSentStatus, sentAt:qSentAt, fqSentAt:fqSentAt,
@@ -38564,7 +38569,32 @@ function getFullQuotationState(){
     jobSource:qJobSource||'', jobStartedAt:qJobStartedAt||'',
     savedAt:(function(){ var t=new Date().toISOString(); qLoadedSavedAt=t; qLoadedSavedBy=gUser?(gUser.email||''):''; return t; })(),
     savedBy:gUser?(gUser.email||''):''
-  };
+  });
+}
+// The piece-by-piece cut layout of every board does not belong in the quotation's saved state.
+// Nothing reads it back from there: the Job Order builds from the saved cutting list, and the layout
+// has its own file in the quotation's folder. A job with many small pieces made it huge. QT-W00000389
+// (material swatches, 2026-11-05) reached 4 MB: the Sheet refused it (450 KB limit) and the database
+// timed out, so each lock changed the Project List row but not the saved state, and reopening found
+// the quotation unlocked. Totals and board counts stay; they fill the board_layouts table.
+var BOARD_LAYOUT_DETAIL_KEYS={layout:1,plans:1,shelves:1};
+function _slimBoardLayout(bl){
+  if(!bl||!Array.isArray(bl.bom)) return bl;
+  var out={}; Object.keys(bl).forEach(function(k){ out[k]=bl[k]; });
+  out.bom=bl.bom.map(function(r){
+    var c={}; Object.keys(r||{}).forEach(function(k){ if(!BOARD_LAYOUT_DETAIL_KEYS[k]) c[k]=r[k]; });
+    return c;
+  });
+  return out;
+}
+// Applied to a state about to be written. Covers each option's snapshot and states saved before this.
+function _slimStateForSave(state){
+  if(!state) return state;
+  if(state.boardLayout) state.boardLayout=_slimBoardLayout(state.boardLayout);
+  (state.optionsList||[]).forEach(function(o){
+    if(o&&o.snapshot&&o.snapshot.boardLayout) o.snapshot.boardLayout=_slimBoardLayout(o.snapshot.boardLayout);
+  });
+  return state;
 }
 // State stored in the "Quotation State" tab of the main Sheet (no server / no Drive needed).
 // JSON is chunked across columns B..K (45k chars each) to stay under the 50k/cell limit.
@@ -38579,13 +38609,22 @@ function saveQuotationJson(callback){
   if(!gToken){if(callback)callback();return;}
   var state=getFullQuotationState();
   var serial=state.baseSerial||state.serial;
-  try{ supaUpsertState(serial,state); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
+  var supaWrite=null;
+  try{ supaWrite=supaUpsertState(serial,state); }catch(e){} // Phase 1 dual-write (non-blocking, guarded)
   var json=JSON.stringify(state);
   var row=_qstateRow(serial,json);
   var header=[['Serial','State JSON (chunked across columns B–K — do not edit manually)']];
   if(json.length>QSTATE_CHUNK*QSTATE_COLS){
-    showSheetsToast(false,'Quotation '+serial+' is too large to save state. Contact support.');
-    if(callback)callback();return;
+    // Too big for the Sheet, so the database is the only copy. If that failed too, nothing was saved,
+    // including a lock, and the person has to be told.
+    Promise.resolve(supaWrite).then(function(ok){
+      if(ok!==true){
+        showSheetsToast(false,'Quotation '+serial+' was NOT saved: it is too large for the Sheet and the database did not take it. Your latest changes, including a lock, are not kept. Contact support.');
+        try{ logActivity('⚠ Quotation not saved: too large for the Sheet ('+Math.round(json.length/1024)+' KB) and the database did not take it. Latest changes, including any lock, are not kept.',serial); }catch(e){}
+      } else console.warn('[save] '+serial+' is over the Sheet limit ('+Math.round(json.length/1024)+' KB); saved to the database only');
+      if(callback)callback();
+    });
+    return;
   }
   sheetsGet('Quotation State!A:A').then(function(d){
     if(d.error){
@@ -38669,6 +38708,10 @@ function loadQuotationJson(serial,callback,opts){
         // locked at ₱2,868.41 by Christine, opened by everyone else as Nikki's blank ₱0 draft).
         _loadQuotationJsonFromSheets(serial,function(sheetState){
           if(!sheetState){ console.warn('[load] Sheet copy of '+serial+' is newer but could not be read; using the database copy'); if(callback)callback(meta.state); return; }
+          // The row can be newer while the state in the Sheet is old: a state too big for the Sheet
+          // updates the row and leaves the old chunks. Compare the states themselves.
+          var _shAt=Date.parse(sheetState.savedAt||''), _dbAt=Date.parse(meta.state.savedAt||'');
+          if(_shAt&&_dbAt&&_shAt<=_dbAt){ if(callback)callback(meta.state); return; }
           _healStaleDbCopy(serial,sheetState,info);
           if(callback)callback(sheetState);
         },false,true);
@@ -44370,9 +44413,16 @@ function _saveBoardLayoutToDrive(){
     boardLayout:qBoardLayout
   };
   var fileName=qSerial+' — '+driveClientName()+' — board layout.json';
+  // Reopened from its saved state, this quotation has totals but no layout detail. Keep the file
+  // already in its folder and refresh only the table.
+  if(!qBoardLayout.bom.some(function(r){ return r&&(r.layout||r.plans); })){
+    supaReplaceBoardLayouts(baseSerial,qBoardLayout.bom,qBoardLayout.analyzedAt);
+    return;
+  }
+  var _blBody=JSON.stringify(payload);
   ensureDriveFolder()
     .then(function(rootId){return ensureQuotationFolder(baseSerial,rootId);})
-    .then(function(fid){supaUploadQuotationFile(baseSerial,fileName,'application/json',JSON.stringify(payload,null,2)); return _driveUpsertFile(fid,fileName,'application/json',JSON.stringify(payload,null,2));})
+    .then(function(fid){supaUploadQuotationFile(baseSerial,fileName,'application/json',_blBody); return _driveUpsertFile(fid,fileName,'application/json',_blBody);})
     .then(function(r){
       if(r&&r.id) logActivity('Board layout saved to Drive folder ('+fileName+')');
       else console.warn('Board layout Drive save failed:',r&&r.error&&r.error.message);
@@ -44431,6 +44481,7 @@ function _trnDaPut(k,v){
     localStorage.setItem(TRN_DA_KEY,JSON.stringify(m)); }catch(e){ console.warn('[training] cutting list not kept in this browser',e); }
 }
 var _daPersistedSig='';
+var DA_UPLOAD_RETRY_MS=4000;
 function _persistDrawingAnalysisForJo(){
   var da=qDrawingAnalysis, base=qBaseSerial||qSerial;
   if(!da||!da.result||!base||qDraftKey) return;
@@ -44442,7 +44493,21 @@ function _persistDrawingAnalysisForJo(){
   var body=JSON.stringify({fileName:da.fileName||'',fileType:da.fileType||'',analyzedAt:da.analyzedAt||'',
     result:da.result,elevationResult:da.elevationResult||null},null,2);
   _daPersistedSig=sig;
-  supaUploadQuotationFile(base,outputFileName,'application/json',body).then(function(){
+  // A failed upload used to be ignored, and a row was written pointing at a file that did not exist
+  // (QT-W00000389: storage timed out, so every later lock found no list and reserved no Job Order).
+  var _daUpload=function(triesLeft){
+    return supaUploadQuotationFile(base,outputFileName,'application/json',body).then(function(ok){
+      if(ok===true||triesLeft<=0) return ok;
+      return new Promise(function(res){ setTimeout(res,DA_UPLOAD_RETRY_MS); }).then(function(){ return _daUpload(triesLeft-1); });
+    });
+  };
+  _daUpload(2).then(function(ok){
+    if(ok!==true){
+      _daPersistedSig='';   // the next save tries again, while this tab still holds the list
+      try{ logActivity('⚠ The cutting list could not be saved with this quotation, so its Job Order cannot be reserved yet. Save again before closing this tab.',base); }catch(e){}
+      try{ showToast('⚠ The cutting list did not save. Save again before closing this tab, or the Job Order cannot be reserved.'); }catch(e){}
+      return;
+    }
     return supaReplaceDrawingAnalysis(base,{fileName:da.fileName||'',fileType:da.fileType||'',
       componentCount:(da.result.components||[]).length,analyzedAt:da.analyzedAt||new Date().toISOString(),
       savedBy:gUser?gUser.email:'',outputFilePath:_supaSafeStorageKey(base)+'/'+_supaSafeStorageKey(outputFileName),rawFilePath:''});
