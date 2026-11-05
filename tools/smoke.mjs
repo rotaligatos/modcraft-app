@@ -7023,6 +7023,25 @@ const PROFILES = {
                    credit: document.querySelector('.topbar').textContent.indexOf('Developed by RTmo Digital Solutions') >= 0,
                    title: document.title }),
           { name: true, credit: true, title: 'Modcraft Quotation System' });
+        check('Reports and the Dashboard give the same team figures, and the tracker shows the Project List status',
+          () => {
+            const w = window, keep = { d: w.dirData, u: w.sheetUsers, o: w.pendingOrders, f: w._stageFlags, s: w.sessionQuotations };
+            const out = {};
+            try {
+              w.dirData = [{ id: 'QT-W00000901', baseSerial: 'QT-W00000901', user: 'Test Person', status: 'Draft', value: 100, created: '2026-11-01', company: 'World Class Laminate, Inc.', updatedAt: '2026-11-01T00:00:00Z' }];
+              w.sessionQuotations = {};
+              w.sheetUsers = [{ name: 'Test Person', pos: 'Staff', includeKpi: true, active: true, company: 'World Class Laminate, Inc.' }];
+              w.pendingOrders = [{ id: '1', status: 'Pending', receivedAt: '2026-11-02T01:00:00Z', orderKind: 'Wufoo', sourceCompany: 'World Class Laminate, Inc.' }];
+              w._stageFlags = { 'QT-W00000901': { locked: true, savedAt: '2026-11-01T00:00:00Z' } };
+              const r = w._reportTeamStats()[0];
+              out.reportCountsUnclaimedWait = r.answered === 1 && r.avgHrs > 0;
+              out.issuedFromFlags = r.quotes;
+              out.trackerStatus = w._reportProjectRows()[0].status;
+            } catch (e) { out.threw = String(e); }
+            Object.assign(w, { dirData: keep.d, sheetUsers: keep.u, pendingOrders: keep.o, _stageFlags: keep.f, sessionQuotations: keep.s });
+            return out;
+          },
+          { reportCountsUnclaimedWait: true, issuedFromFlags: 1, trackerStatus: 'IQ Locked' });
         const usual = await (async () => {
           const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
           const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };

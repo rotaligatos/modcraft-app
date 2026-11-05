@@ -13878,6 +13878,183 @@ function _rollupJobs(entries){
   });
   return order.map(function(k){ return jobs[k]; });
 }
+// ── Team performance, one definition (2026-11-05) ─────────────────────────────────────
+// The Dashboard card and Reports > User KPI used to count this separately, and it drifted: when the
+// shared wait of unclaimed orders went into everyone's average (2026-08-13) only the Dashboard got it,
+// so the two pages showed different response times for the same person (Nikki 31h vs 10.4h).
+// opt: entries (quotations being measured), lookup (all quotations, to find an order's quotation),
+// teamCo (company of the work), teamUserCo (company of the person), orderInScope(order).
+function _teamStats(opt){
+  var teamCo=opt.teamCo||'', teamUserCo=opt.teamUserCo||'';
+  var kpiPeople=(sheetUsers||[]).filter(function(u){
+    if(!(u.includeKpi&&u.active)) return false;
+    if(teamUserCo&&_quotCompanyKey({company:u.company})!==teamUserCo) return false;
+    return true;
+  });
+  var byUser={};
+  kpiPeople.forEach(function(u){
+    byUser[u.name.trim().toLowerCase()]={name:u.name,pos:u.pos||'',quotes:0,drafts:0,won:0,revenue:0,respMins:[],answered:0};
+  });
+  var quotBySerial={};
+  (opt.lookup||[]).forEach(function(e){ if(e&&e.id) quotBySerial[String(e.id)]=e; });
+  var unmatched={};
+  var teamAll=opt.entries||[];
+  // One row per JOB, not per quotation — an additional order counts toward the job it came from
+  // (see _rollupJobs), so it neither adds a second win nor a second chance to the rate.
+  var teamJobs=_rollupJobs(teamAll);
+  var teamExtras=0;
+  teamJobs.forEach(function(j){
+    var e=j.root;
+    teamExtras+=j.extras;
+    // No company filter here — `all` arrived already scoped by _dashScopedEntries().
+    var key=String(e.user||'').trim().toLowerCase();
+    if(!key) return;
+    if(!byUser[key]){
+      // Naming an unticked preparer is how a person who SHOULD be measured is noticed. But an
+      // Admin or Director is deliberately not in a staff matrix, so naming them is pure noise —
+      // Rommel's own 93 quotations sat in this footer saying nothing useful. Silent for those
+      // roles; still named for everyone else, and ALWAYS named for a preparer who is not in the
+      // Roles sheet at all, since that is a real data problem (usually a name that stopped
+      // matching after the Google-vs-Settings change).
+      if(e.user){
+        var known=(sheetUsers||[]).filter(function(su){return String(su.name||'').trim().toLowerCase()===key;})[0];
+        var exempt=known&&(known.pos==='Admin'||known.pos==='Director');
+        if(!exempt) unmatched[e.user]=(unmatched[e.user]||0)+1;
+      }
+      return;
+    }
+    var u=byUser[key];
+    // A draft was never issued, so it is not something the client could have said yes to — and
+    // counting it made the win rate meaningless: measured on real data, 46-57% of everyone's
+    // "quotes" had never left the building. Drafts get their own column instead of vanishing, so
+    // work in progress is still visible without dragging the rate down.
+    // Declined DOES count: it was issued and lost, which is exactly what a win rate is about.
+    if(_displayStatus(e)==='Draft'){ u.drafts++; return; }
+    u.quotes++;
+    // Won is now the recorded client-approval fact at EITHER stage, not the "Client Approved"
+    // status label — that label is only reachable from Stage 2, so a job the client approved at
+    // Stage 1 and never took further counted as unwon. Revenue is the whole job, additional
+    // orders included.
+    if(_isClientApprovedEntry(e)){ u.won++; u.revenue+=j.revenue; }
+  });
+  // The response clock lives on the ORDER, not the quotation: received -> sent.
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
+    if(!o||!o.receivedAt||!o.sentAt||!o.quotSerial) return;
+    if(opt.orderInScope&&!opt.orderInScope(o)) return;
+    var q=quotBySerial[o.quotSerial]||quotBySerial[_serialRoot(o.quotSerial)];
+    if(!q) return;
+    var pre=_quotCompanyKey(q);
+    if(teamCo && pre!==teamCo) return;
+    var key=String(q.user||'').trim().toLowerCase();
+    if(!byUser[key]) return;
+    var mins=(typeof _orderElapsedWorkingMinutes==='function')
+      ? _orderElapsedWorkingMinutes(o,o.sentAt)
+      : (new Date(o.sentAt)-new Date(o.receivedAt))/60000;
+    if(mins>=0){ byUser[key].respMins.push(mins); byUser[key].answered++; }
+  });
+  // Jobs that arrived without an order — a walk-in, or an emailed order (CWLI does
+  // not use Wufoo at all). The encoder starts that clock on the quotation form; it
+  // stops at the Initial Quotation lock. Same working-hours calendar, same column:
+  // once the start is deliberate, "how long the client waited" is the same quantity
+  // whichever way the job came in.
+  var noClockStart=0;
+  teamAll.forEach(function(e){
+    if(!e||e.sourceOrder) return;
+    var key=String(e.user||'').trim().toLowerCase();
+    if(!byUser[key]) return;
+    if(teamCo==='none'){ if(_quotCompanyKey(e)!=='') return; }
+    else if(teamCo){ if(_quotCompanyKey(e)!==teamCo) return; }
+    // Where the client's wait actually ENDS depends on how the job arrived (Rommel, 2026-08-08):
+    // a walk-in client is standing in front of you, so there is nothing to send — handing the
+    // locked quotation over IS the answer. An emailed job is a real send, and the wait runs until
+    // it goes out. Older rows have no recorded send time; those fall back to the lock rather than
+    // dropping out of the average altogether.
+    var endAt=(e.jobSource==='email'&&e.sentAt)?e.sentAt:e.initLockedAt;
+    if(!endAt) return;                       // still being worked — no end yet
+    if(!e.jobStartedAt){ noClockStart++; return; }
+    var m=(typeof calcWorkingMinutes==='function')
+      ? calcWorkingMinutes(e.jobStartedAt,endAt,e.company||'')
+      : (new Date(endAt)-new Date(e.jobStartedAt))/60000;
+    if(m!==null&&m>=0){ byUser[key].respMins.push(m); byUser[key].answered++; }
+  });
+  // Orders sitting unclaimed — received, but nobody has opened/exported them to a quotation yet
+  // (status still 'Pending'). Rommel, 2026-08-13: "It should be included to everyone's
+  // performance average. It will only be removed to everyone['s] performance once someone
+  // claim[s] it for quotation." So the elapsed wait is a SHARED liability until one specific
+  // person picks the order up — it counts toward every ticked team member's average, not
+  // nobody's. The moment it is claimed, exportOrderToQuotation() flips its status away from
+  // 'Pending', so it drops out of this pool automatically on the very next render — no separate
+  // bookkeeping needed. From there it follows the existing per-person tracking above (attributed
+  // to whoever exported it, once that quotation is actually sent).
+  var unclaimedCount=0, unclaimedMinsTotal=0;
+  var nowIsoUnclaimed=new Date().toISOString();
+  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
+    if(!o||o.status!=='Pending'||!o.receivedAt) return;
+    if(!(ORDER_KINDS[orderKind(o)]||{}).sla) return;     // site visits etc. are SLA-exempt everywhere else too
+    if(opt.orderInScope&&!opt.orderInScope(o)) return;
+    var age=(typeof _orderElapsedWorkingMinutes==='function')
+      ? _orderElapsedWorkingMinutes(o,nowIsoUnclaimed)
+      : (new Date(nowIsoUnclaimed)-new Date(o.receivedAt))/60000;
+    if(age==null||age<0) return;
+    unclaimedCount++; unclaimedMinsTotal+=age;
+    Object.keys(byUser).forEach(function(k){ byUser[k].respMins.push(age); byUser[k].answered++; });
+  });
+  var users=Object.values(byUser).sort(function(a,b){return b.quotes-a.quotes;});
+  return {users:users,unmatched:unmatched,teamExtras:teamExtras,noClockStart:noClockStart,
+    unclaimedCount:unclaimedCount,unclaimedMinsTotal:unclaimedMinsTotal};
+}
+// The notes under a team table. Anyone or anything left out of the figures is named, on both pages.
+function _teamNotesHtml(ts,cols,noPrefixHidden){
+  var out='', teamExtras=ts.teamExtras, noClockStart=ts.noClockStart, unclaimedCount=ts.unclaimedCount,
+      unclaimedMinsTotal=ts.unclaimedMinsTotal, unmatched=ts.unmatched;
+  // The roll-up is stated. Otherwise a preparer's Quotes count silently reads lower than the
+  // number of quotations with their name on it, and the person who prepared an additional order
+  // sees no credit for it anywhere with nothing to explain why.
+  if(teamExtras){
+    out+='<tfoot><tr><td colspan="'+cols+'" style="font-size:11px;color:var(--text2);background:var(--card2);padding:7px 10px">'
+      +'<i class="ti ti-git-merge"></i> '+teamExtras+' additional order'+(teamExtras===1?'':'s')
+      +' counted under the job '+(teamExtras===1?'it':'they')+' came from — revenue included, not counted as '+(teamExtras===1?'a separate win':'separate wins')+'.'
+      +'</td></tr></tfoot>';
+  }
+  // Anyone preparing quotations who is NOT in the matrix is named, not silently dropped — that is
+  // how you notice a new hire nobody ticked, or a name that no longer matches the Roles sheet.
+  if(noPrefixHidden){
+    out+='<tfoot><tr><td colspan="'+cols+'" style="font-size:11px;color:var(--text2);background:var(--card2);padding:7px 10px">'
+      +'<i class="ti ti-info-circle"></i> '+noPrefixHidden+' quotation'+(noPrefixHidden===1?'':'s')+' not shown — created before serials carried a company letter. See <b>Unassigned (older serials)</b>.'
+      +'</td></tr></tfoot>';
+  }
+  // Locked quotations that nobody could time, because no arrival source was picked.
+  // Named rather than quietly averaged out — an empty response column looks the same
+  // as a fast one, and this is also the only thing that tells people to use the tick.
+  if(noClockStart){
+    out+='<tfoot><tr><td colspan="'+cols+'" style="font-size:11px;color:var(--text2);background:var(--card2);padding:7px 10px">'
+      +'<i class="ti ti-info-circle"></i> '+noClockStart+' locked quotation'+(noClockStart===1?'':'s')
+      +' not timed — no arrival source was picked on the form. Tick <b>Walk-in</b> or <b>Email order</b> at the top of Client information to start the clock.'
+      +'</td></tr></tfoot>';
+  }
+  // Unclaimed orders — their wait is baked into every ticked person's average above, not shown
+  // as anyone's own row, so it must be named or the jump in "Jobs timed" and the average looks
+  // unexplained.
+  if(unclaimedCount){
+    var unclaimedAvg=Math.round(unclaimedMinsTotal/unclaimedCount);
+    out+='<tfoot><tr><td colspan="'+cols+'" style="font-size:11px;color:var(--ink3);background:var(--wash-amber);padding:7px 10px">'
+      +'<i class="ti ti-clock-exclamation"></i> '+unclaimedCount+' order'+(unclaimedCount===1?' is':'s are')
+      +' still unclaimed — nobody has opened '+(unclaimedCount===1?'it':'them')+' yet, averaging '
+      +(typeof fmtWorkMins==='function'?fmtWorkMins(unclaimedAvg):unclaimedAvg+'m')
+      +' waiting. That wait counts toward <b>every</b> person\'s average above until someone claims it in Orders — '
+      +'it drops out on its own the moment it is exported to a quotation.'
+      +'</td></tr></tfoot>';
+  }
+  var un=Object.keys(unmatched);
+  if(un.length){
+    out+='<tfoot><tr><td colspan="'+cols+'" style="font-size:11px;color:var(--ink3);background:var(--wash-amber);padding:7px 10px">'
+      +'<i class="ti ti-alert-triangle"></i> Not measured: '
+      +un.map(function(n){return escHtml(n)+' ('+unmatched[n]+')';}).join(' · ')
+      +' — tick them in Settings &rarr; Users. A name that is not in the Roles sheet at all usually means it no longer matches.</td></tr></tfoot>';
+  }
+  return out;
+}
+
 // Compute and render real KPIs + pipeline + chart from live data
 function _dashUpdateKPIs(){
   var all=_dashScopedEntries();
@@ -14056,125 +14233,13 @@ function _dashUpdateKPIs(){
   var teamUserCo=(el('dash-team-usrco')||{}).value||'';
   var _tScope=el('dash-team-scope');
   if(_tScope) _tScope.textContent=teamCo?('Catered for: '+_dashCoLabel()):'';
-  var kpiPeople=(sheetUsers||[]).filter(function(u){
-    if(!(u.includeKpi&&u.active)) return false;
-    if(teamUserCo&&_quotCompanyKey({company:u.company})!==teamUserCo) return false;
-    return true;
-  });
-  var byUser={};
-  kpiPeople.forEach(function(u){
-    byUser[u.name.trim().toLowerCase()]={name:u.name,quotes:0,drafts:0,won:0,revenue:0,respMins:[],answered:0};
-  });
   // Counted by _dashScopedEntries when it applied the company filter — the rows it dropped for
   // having no company letter at all. Read from there rather than re-filtered here: `all` is
   // already scoped, so a second pass would find nothing and the note would silently vanish.
   var noPrefixHidden=_dashCoHidden;
-  var quotBySerial={};
-  all.forEach(function(e){ if(e.id) quotBySerial[String(e.id)]=e; });
-  var unmatched={};
-  // Team performance follows the date range as well as the company — it used every date.
-  var teamAll=filtered;
-  // One row per JOB, not per quotation — an additional order counts toward the job it came from
-  // (see _rollupJobs), so it neither adds a second win nor a second chance to the rate.
-  var teamJobs=_rollupJobs(teamAll);
-  var teamExtras=0;
-  teamJobs.forEach(function(j){
-    var e=j.root;
-    teamExtras+=j.extras;
-    // No company filter here — `all` arrived already scoped by _dashScopedEntries().
-    var key=String(e.user||'').trim().toLowerCase();
-    if(!key) return;
-    if(!byUser[key]){
-      // Naming an unticked preparer is how a person who SHOULD be measured is noticed. But an
-      // Admin or Director is deliberately not in a staff matrix, so naming them is pure noise —
-      // Rommel's own 93 quotations sat in this footer saying nothing useful. Silent for those
-      // roles; still named for everyone else, and ALWAYS named for a preparer who is not in the
-      // Roles sheet at all, since that is a real data problem (usually a name that stopped
-      // matching after the Google-vs-Settings change).
-      if(e.user){
-        var known=(sheetUsers||[]).filter(function(su){return String(su.name||'').trim().toLowerCase()===key;})[0];
-        var exempt=known&&(known.pos==='Admin'||known.pos==='Director');
-        if(!exempt) unmatched[e.user]=(unmatched[e.user]||0)+1;
-      }
-      return;
-    }
-    var u=byUser[key];
-    // A draft was never issued, so it is not something the client could have said yes to — and
-    // counting it made the win rate meaningless: measured on real data, 46-57% of everyone's
-    // "quotes" had never left the building. Drafts get their own column instead of vanishing, so
-    // work in progress is still visible without dragging the rate down.
-    // Declined DOES count: it was issued and lost, which is exactly what a win rate is about.
-    if(_displayStatus(e)==='Draft'){ u.drafts++; return; }
-    u.quotes++;
-    // Won is now the recorded client-approval fact at EITHER stage, not the "Client Approved"
-    // status label — that label is only reachable from Stage 2, so a job the client approved at
-    // Stage 1 and never took further counted as unwon. Revenue is the whole job, additional
-    // orders included.
-    if(_isClientApprovedEntry(e)){ u.won++; u.revenue+=j.revenue; }
-  });
-  // The response clock lives on the ORDER, not the quotation: received -> sent.
-  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
-    if(!o||!o.receivedAt||!o.sentAt||!o.quotSerial) return;
-    if(!_dashOrderInScope(o)) return;
-    var q=quotBySerial[o.quotSerial]||quotBySerial[_serialRoot(o.quotSerial)];
-    if(!q) return;
-    var pre=_quotCompanyKey(q);
-    if(teamCo && pre!==teamCo) return;
-    var key=String(q.user||'').trim().toLowerCase();
-    if(!byUser[key]) return;
-    var mins=(typeof _orderElapsedWorkingMinutes==='function')
-      ? _orderElapsedWorkingMinutes(o,o.sentAt)
-      : (new Date(o.sentAt)-new Date(o.receivedAt))/60000;
-    if(mins>=0){ byUser[key].respMins.push(mins); byUser[key].answered++; }
-  });
-  // Jobs that arrived without an order — a walk-in, or an emailed order (CWLI does
-  // not use Wufoo at all). The encoder starts that clock on the quotation form; it
-  // stops at the Initial Quotation lock. Same working-hours calendar, same column:
-  // once the start is deliberate, "how long the client waited" is the same quantity
-  // whichever way the job came in.
-  var noClockStart=0;
-  teamAll.forEach(function(e){
-    if(!e||e.sourceOrder) return;
-    var key=String(e.user||'').trim().toLowerCase();
-    if(!byUser[key]) return;
-    if(teamCo==='none'){ if(_quotCompanyKey(e)!=='') return; }
-    else if(teamCo){ if(_quotCompanyKey(e)!==teamCo) return; }
-    // Where the client's wait actually ENDS depends on how the job arrived (Rommel, 2026-08-08):
-    // a walk-in client is standing in front of you, so there is nothing to send — handing the
-    // locked quotation over IS the answer. An emailed job is a real send, and the wait runs until
-    // it goes out. Older rows have no recorded send time; those fall back to the lock rather than
-    // dropping out of the average altogether.
-    var endAt=(e.jobSource==='email'&&e.sentAt)?e.sentAt:e.initLockedAt;
-    if(!endAt) return;                       // still being worked — no end yet
-    if(!e.jobStartedAt){ noClockStart++; return; }
-    var m=(typeof calcWorkingMinutes==='function')
-      ? calcWorkingMinutes(e.jobStartedAt,endAt,e.company||'')
-      : (new Date(endAt)-new Date(e.jobStartedAt))/60000;
-    if(m!==null&&m>=0){ byUser[key].respMins.push(m); byUser[key].answered++; }
-  });
-  // Orders sitting unclaimed — received, but nobody has opened/exported them to a quotation yet
-  // (status still 'Pending'). Rommel, 2026-08-13: "It should be included to everyone's
-  // performance average. It will only be removed to everyone['s] performance once someone
-  // claim[s] it for quotation." So the elapsed wait is a SHARED liability until one specific
-  // person picks the order up — it counts toward every ticked team member's average, not
-  // nobody's. The moment it is claimed, exportOrderToQuotation() flips its status away from
-  // 'Pending', so it drops out of this pool automatically on the very next render — no separate
-  // bookkeeping needed. From there it follows the existing per-person tracking above (attributed
-  // to whoever exported it, once that quotation is actually sent).
-  var unclaimedCount=0, unclaimedMinsTotal=0;
-  var nowIsoUnclaimed=new Date().toISOString();
-  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
-    if(!o||o.status!=='Pending'||!o.receivedAt) return;
-    if(!(ORDER_KINDS[orderKind(o)]||{}).sla) return;     // site visits etc. are SLA-exempt everywhere else too
-    if(!_dashOrderInScope(o)) return;
-    var age=(typeof _orderElapsedWorkingMinutes==='function')
-      ? _orderElapsedWorkingMinutes(o,nowIsoUnclaimed)
-      : (new Date(nowIsoUnclaimed)-new Date(o.receivedAt))/60000;
-    if(age==null||age<0) return;
-    unclaimedCount++; unclaimedMinsTotal+=age;
-    Object.keys(byUser).forEach(function(k){ byUser[k].respMins.push(age); byUser[k].answered++; });
-  });
-  var users=Object.values(byUser).sort(function(a,b){return b.quotes-a.quotes;});
+  // Team performance follows the date range as well as the company.
+  var _ts=_teamStats({entries:filtered,lookup:all,teamCo:teamCo,teamUserCo:teamUserCo,orderInScope:_dashOrderInScope});
+  var users=_ts.users;
   var teamHtml='<thead><tr><th>User</th><th title="Quotations actually issued to a client. Drafts are counted separately — a draft was never sent, so it cannot be won or lost.">Issued</th><th title="Started but never issued. Not counted in the rate.">Drafts</th><th>Won</th><th>Rate</th><th title="How many jobs had a measurable response time — the sample size behind the average beside it. Not every quotation has one.">Jobs timed</th><th>Avg. response</th><th>Revenue</th></tr></thead><tbody>';
   if(!users.length){
     // Blaming the tick box when it is actually a filter sends people to change a setting that
@@ -14201,51 +14266,7 @@ function _dashUpdateKPIs(){
       +'<td style="font-weight:500">'+fmtK(u.revenue)+'</td></tr>';
   });
   teamHtml+='</tbody>';
-  // The roll-up is stated. Otherwise a preparer's Quotes count silently reads lower than the
-  // number of quotations with their name on it, and the person who prepared an additional order
-  // sees no credit for it anywhere with nothing to explain why.
-  if(teamExtras){
-    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--text2);background:var(--card2);padding:7px 10px">'
-      +'<i class="ti ti-git-merge"></i> '+teamExtras+' additional order'+(teamExtras===1?'':'s')
-      +' counted under the job '+(teamExtras===1?'it':'they')+' came from — revenue included, not counted as '+(teamExtras===1?'a separate win':'separate wins')+'.'
-      +'</td></tr></tfoot>';
-  }
-  // Anyone preparing quotations who is NOT in the matrix is named, not silently dropped — that is
-  // how you notice a new hire nobody ticked, or a name that no longer matches the Roles sheet.
-  if(noPrefixHidden){
-    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--text2);background:var(--card2);padding:7px 10px">'
-      +'<i class="ti ti-info-circle"></i> '+noPrefixHidden+' quotation'+(noPrefixHidden===1?'':'s')+' not shown — created before serials carried a company letter. See <b>Unassigned (older serials)</b>.'
-      +'</td></tr></tfoot>';
-  }
-  // Locked quotations that nobody could time, because no arrival source was picked.
-  // Named rather than quietly averaged out — an empty response column looks the same
-  // as a fast one, and this is also the only thing that tells people to use the tick.
-  if(noClockStart){
-    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--text2);background:var(--card2);padding:7px 10px">'
-      +'<i class="ti ti-info-circle"></i> '+noClockStart+' locked quotation'+(noClockStart===1?'':'s')
-      +' not timed — no arrival source was picked on the form. Tick <b>Walk-in</b> or <b>Email order</b> at the top of Client information to start the clock.'
-      +'</td></tr></tfoot>';
-  }
-  // Unclaimed orders — their wait is baked into every ticked person's average above, not shown
-  // as anyone's own row, so it must be named or the jump in "Jobs timed" and the average looks
-  // unexplained.
-  if(unclaimedCount){
-    var unclaimedAvg=Math.round(unclaimedMinsTotal/unclaimedCount);
-    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--ink3);background:var(--wash-amber);padding:7px 10px">'
-      +'<i class="ti ti-clock-exclamation"></i> '+unclaimedCount+' order'+(unclaimedCount===1?' is':'s are')
-      +' still unclaimed — nobody has opened '+(unclaimedCount===1?'it':'them')+' yet, averaging '
-      +(typeof fmtWorkMins==='function'?fmtWorkMins(unclaimedAvg):unclaimedAvg+'m')
-      +' waiting. That wait counts toward <b>every</b> person\'s average above until someone claims it in Orders — '
-      +'it drops out on its own the moment it is exported to a quotation.'
-      +'</td></tr></tfoot>';
-  }
-  var un=Object.keys(unmatched);
-  if(un.length){
-    teamHtml+='<tfoot><tr><td colspan="7" style="font-size:11px;color:var(--ink3);background:var(--wash-amber);padding:7px 10px">'
-      +'<i class="ti ti-alert-triangle"></i> Not measured: '
-      +un.map(function(n){return escHtml(n)+' ('+unmatched[n]+')';}).join(' · ')
-      +' — tick them in Settings &rarr; Users. A name that is not in the Roles sheet at all usually means it no longer matches.</td></tr></tfoot>';
-  }
+  teamHtml+=_teamNotesHtml(_ts,8,noPrefixHidden);
   html('dash-team',teamHtml);
 
   // Revenue chart — monthly totals for current year
@@ -15904,7 +15925,8 @@ function setRepTab(t) {
   // 30 s, so a report is never a stale snapshot of the list.
   var _dirTab={user:renderUserKpi,projects:renderProjTracker,archive:renderArchive,overview:renderRepOverview}[t];
   if(_dirTab){
-    if(t==='user') _repLoading('user-kpi-tbl',8); else if(t==='projects') _repLoading('proj-tbl',9); else if(t==='archive') _repLoading('arch-tbl',8);
+    try{ _ensureStageFlags(); }catch(e){}
+    if(t==='user') _repLoading('user-kpi-tbl',9); else if(t==='projects') _repLoading('proj-tbl',9); else if(t==='archive') _repLoading('arch-tbl',8);
     gLoadDirData(function(){ if(repTab===t) _dirTab(); });
     return;
   }
@@ -16507,7 +16529,8 @@ function renderRepOverview(){
   drawChart('rep-chart',tr.map(function(m){return m.actual;}),tgt);
 }
 function renderUserKpi(){
-  var sel=el('kpi-filter'), stats=_reportTeamStats();
+  var sel=el('kpi-filter'), _rts=_reportTeamNumbers(), stats=_reportTeamStats(_rts);
+  var fmtAvg=function(m){ return m==null?'—':(typeof fmtWorkMins==='function'?fmtWorkMins(Math.round(m)):Math.round(m)+'m'); };
   if(sel){
     var cur=sel.value;
     sel.innerHTML='<option value="">All users</option>'+stats.map(function(u){return '<option>'+escHtml(u.name)+'</option>';}).join('');
@@ -16522,12 +16545,12 @@ function renderUserKpi(){
     var u=list[0];
     kHtml='<div class="kpi"><div class="lbl">Quotations issued</div><div class="val" style="color:var(--navy)">'+u.quotes+'</div><div class="sub">'+u.drafts+' still draft</div></div>'
       +'<div class="kpi"><div class="lbl">Win rate</div><div class="val" style="color:'+rateCol(u.rate)+'">'+u.rate+'%</div><div class="sub">'+u.won+' won</div></div>'
-      +'<div class="kpi"><div class="lbl">Avg response</div><div class="val" style="color:var(--navy)">'+(u.avgHrs!=null?u.avgHrs+'h':'—')+'</div><div class="sub">working hours</div></div>'
+      +'<div class="kpi"><div class="lbl">Avg response</div><div class="val" style="color:var(--navy)">'+fmtAvg(u.avgMins)+'</div><div class="sub">working hours · '+(u.answered||0)+' jobs timed</div></div>'
       +'<div class="kpi"><div class="lbl">Won revenue</div><div class="val" style="color:var(--amber)">'+fmtK(u.revenue)+'</div></div>';
   }
   html('user-kpis',kHtml);
-  var th='<thead><tr><th>User</th><th>Position</th><th>Issued</th><th>Drafts</th><th>Won</th><th>Win rate</th><th>Avg response</th><th>Won revenue</th></tr></thead><tbody>';
-  if(!list.length) th+=_repEmptyRow(8,'Nobody is ticked "Include in Team performance" yet — Settings → Users.');
+  var th='<thead><tr><th>User</th><th>Position</th><th>Issued</th><th>Drafts</th><th>Won</th><th>Win rate</th><th>Jobs timed</th><th>Avg response</th><th>Won revenue</th></tr></thead><tbody>';
+  if(!list.length) th+=_repEmptyRow(9,'Nobody is ticked "Include in Team performance" yet — Settings → Users.');
   list.forEach(function(u){
     var init=String(u.name||'').split(' ').map(function(n){return n[0]||'';}).join('').slice(0,3);
     th+='<tr><td><div style="display:flex;align-items:center;gap:8px"><div style="width:26px;height:26px;border-radius:50%;background:var(--wash-navy);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:var(--navy)">'+escHtml(init)+'</div>'+escHtml(u.name)+'</div></td>'
@@ -16535,10 +16558,11 @@ function renderUserKpi(){
       +'<td style="text-align:center">'+u.quotes+'</td><td style="text-align:center;color:var(--text2)">'+u.drafts+'</td>'
       +'<td style="text-align:center">'+u.won+'</td>'
       +'<td><div style="display:flex;align-items:center;gap:6px"><div class="range-bar" style="flex:1"><div class="range-fill" style="background:'+rateCol(u.rate)+';width:'+u.rate+'%"></div></div><span style="font-size:12px;font-weight:500;min-width:28px">'+u.rate+'%</span></div></td>'
-      +'<td style="text-align:center">'+(u.avgHrs!=null?u.avgHrs+'h':'—')+'</td>'
+      +'<td style="text-align:center">'+(u.answered||'—')+'</td>'
+      +'<td style="text-align:center">'+fmtAvg(u.avgMins)+'</td>'
       +'<td style="font-weight:500">'+fmtK(u.revenue)+'</td></tr>';
   });
-  html('user-kpi-tbl',th+'</tbody>');
+  html('user-kpi-tbl',th+'</tbody>'+(filter?'':_teamNotesHtml(_rts,9,0)));
 }
 function renderProjTracker(){
   var rows=_reportProjectRows();
@@ -16765,47 +16789,17 @@ function _reportAvgResponseHours(){
 // gate the Dashboard's Team performance card uses, so an export can't rank someone who was
 // deliberately excluded from that measurement. One row per JOB (additional orders roll up
 // under the job they came from, via _rollupJobs), same as everywhere else in the app.
-function _reportTeamStats(){
+function _reportTeamNumbers(){
   var all=_dashAllEntries();
-  var people=(typeof sheetUsers!=='undefined'?sheetUsers:[]).filter(function(u){return u&&u.includeKpi&&u.active;});
-  var byUser={};
-  people.forEach(function(u){
-    byUser[String(u.name||'').trim().toLowerCase()]={name:u.name,pos:u.pos||'',quotes:0,drafts:0,won:0,revenue:0,respMins:[]};
-  });
-  var jobs=_rollupJobs(all);
-  jobs.forEach(function(j){
-    var e=j.root;
-    var key=String(e.user||'').trim().toLowerCase();
-    if(!byUser[key]) return;
-    if(_displayStatus(e)==='Draft'){ byUser[key].drafts++; return; }
-    byUser[key].quotes++;
-    if(_isClientApprovedEntry(e)){ byUser[key].won++; byUser[key].revenue+=j.revenue; }
-  });
-  var quotBySerial={};
-  all.forEach(function(e){ if(e.id) quotBySerial[String(e.id)]=e; });
-  (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
-    if(!o||!o.receivedAt||!o.sentAt||!o.quotSerial) return;
-    var q=quotBySerial[o.quotSerial]||quotBySerial[_serialRoot(o.quotSerial)];
-    if(!q) return;
-    var key=String(q.user||'').trim().toLowerCase();
-    if(!byUser[key]) return;
-    var mins=(typeof _orderElapsedWorkingMinutes==='function')?_orderElapsedWorkingMinutes(o,o.sentAt):(new Date(o.sentAt)-new Date(o.receivedAt))/60000;
-    if(mins>=0) byUser[key].respMins.push(mins);
-  });
-  all.forEach(function(e){
-    if(!e||e.sourceOrder) return;
-    var key=String(e.user||'').trim().toLowerCase();
-    if(!byUser[key]) return;
-    var endAt=(e.jobSource==='email'&&e.sentAt)?e.sentAt:e.initLockedAt;
-    if(!endAt||!e.jobStartedAt) return;
-    var m=(typeof calcWorkingMinutes==='function')?calcWorkingMinutes(e.jobStartedAt,endAt,e.company||''):(new Date(endAt)-new Date(e.jobStartedAt))/60000;
-    if(m!==null&&m>=0) byUser[key].respMins.push(m);
-  });
-  return Object.values(byUser).map(function(u){
+  return _teamStats({entries:all,lookup:all});
+}
+function _reportTeamStats(ts){
+  return (ts||_reportTeamNumbers()).users.map(function(u){
     var rate=u.quotes?Math.round(u.won/u.quotes*100):0;
     var avgMins=u.respMins.length?u.respMins.reduce(function(s,v){return s+v;},0)/u.respMins.length:null;
-    return {name:u.name,pos:u.pos,quotes:u.quotes,drafts:u.drafts,won:u.won,rate:rate,avgHrs:avgMins!=null?Math.round(avgMins/60*10)/10:null,revenue:u.revenue};
-  }).sort(function(a,b){return b.quotes-a.quotes;});
+    return {name:u.name,pos:u.pos,quotes:u.quotes,drafts:u.drafts,won:u.won,rate:rate,answered:u.answered,
+      avgMins:avgMins,avgHrs:avgMins!=null?Math.round(avgMins/60*10)/10:null,revenue:u.revenue};
+  });
 }
 
 // One row per real quotation (post-revision/option merge, same as the Project List) — the
@@ -16817,7 +16811,7 @@ function _reportProjectRows(){
       id:e.id, client:e.client||'', type:e.type||'', value:e.value||0,
       user:e.user||'', created:(e.created||'').substring(0,10),
       sent:(e.sentAt||'').substring(0,10),
-      status:_normalizeStatusLabel(e.status||''),
+      status:_displayStatus(e),   // the same status the Project List shows, not the row's stored copy
       approved:_isClientApprovedEntry(e)
     };
   }).sort(function(a,b){ return (b.created||'').localeCompare(a.created||''); });
@@ -26734,6 +26728,7 @@ function _ensureStageFlags(){
     if(!m) return;
     _stageFlags=m;
     if(typeof renderDirectory==='function') try{ renderDirectory(); }catch(e){}
+    if(repTab==='projects'&&typeof renderProjTracker==='function'&&el('page-reports')&&el('page-reports').classList.contains('active')) try{ renderProjTracker(); }catch(e){}
   });
 }
 // Keeps the derived view honest the moment something changes in this session, without refetching.
