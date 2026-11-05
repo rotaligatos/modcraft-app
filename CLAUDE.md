@@ -13630,7 +13630,7 @@ Commit `0ce078b`, with 4 smoke checks (all fail on the old code).
   remains, the app warns instead of guessing. W389's project size 9942 is a typed entry and the user confirms it is real: one list holds about 9942 pieces.
 - **Replace-or-Add never asked in the same session:** `_prodReflectDo` tested `known.componentCount`, which a just-reflected list does not have (only a saved summary does),
   so a corrected list was silently added. This is what tripled W389. Fixed with `_daPartCount`. The layout was ~2.4 MB at about 70-80 chars a piece = ~30,000 pieces, three times 9942.
-- Noted, not changed: cutting-list project size detection counts rows (65), not pieces (9942), which is why he typed it.
+- **Project size now means pieces in every mode** (Rommel, 2026-11-05): cutting-list detection sums row quantities (`_daPieceCount`), saved as `pieceCount`. A summary saved before this answers with its row count, so issued quotations print as before.
 
 # OPEN — W389 (2026-11-05)
 Sonny: Designers Support → the list → Reflect → **Replace it** → check project size → Lock → Request signature. Karen re-signs.

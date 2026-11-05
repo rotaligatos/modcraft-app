@@ -7002,6 +7002,22 @@ const PROFILES = {
         })();
         check('Reflecting a corrected list in the same session asks Replace or Add, and Replace leaves one list',
           () => askAgain, { firstAsked: 0, secondAsked: 1, knownParts: 65, beforeChoice: 65, afterReplace: 70, lists: 1 });
+        const sizePieces = (() => {
+          const w = window, keep = { da: w.qDrawingAnalysis, fm: w.qFabMode, ps: w.qProjectSize }, out = {};
+          w.qFabMode = 'services'; w.qProjectSize = 0;
+          const da = { fileName: 'x', result: { components: [{ qty: 300 }, { qty: 2 }, {}] } };
+          w.qDrawingAnalysis = da;
+          out.live = w.projectSizeValue();
+          const lite = w._daLightweightSummary(da);
+          out.rows = lite.componentCount; out.savedPieces = lite.pieceCount;
+          w.qDrawingAnalysis = lite; out.afterReopen = w.projectSizeValue();
+          w.qDrawingAnalysis = { componentCount: 65 }; out.olderSave = w.projectSizeValue();
+          w.qProjectSize = 9942; out.typedWins = w.projectSizeValue();
+          Object.assign(w, { qDrawingAnalysis: keep.da, qFabMode: keep.fm, qProjectSize: keep.ps });
+          return out;
+        })();
+        check('Project size counts pieces in cutting-list mode, after reopening too, and a typed figure still wins',
+          () => sizePieces, { live: 303, rows: 3, savedPieces: 303, afterReopen: 303, olderSave: 65, typedWins: 9942 });
         const usual = await (async () => {
           const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
           const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };
