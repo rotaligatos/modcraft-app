@@ -7018,6 +7018,11 @@ const PROFILES = {
         })();
         check('Project size counts pieces in cutting-list mode, after reopening too, and a typed figure still wins',
           () => sizePieces, { live: 303, rows: 3, savedPieces: 303, afterReopen: 303, olderSave: 65, typedWins: 9942 });
+        check('The top bar names the app, and credits the developer without taking its place',
+          () => ({ name: document.querySelector('.topbar').textContent.indexOf('Modcraft Quotation System') >= 0,
+                   credit: document.querySelector('.topbar').textContent.indexOf('Developed by RTmo Digital Solutions') >= 0,
+                   title: document.title }),
+          { name: true, credit: true, title: 'Modcraft Quotation System' });
         const usual = await (async () => {
           const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
           const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };

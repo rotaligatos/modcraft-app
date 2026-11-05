@@ -13635,3 +13635,6 @@ Commit `0ce078b`, with 4 smoke checks (all fail on the old code).
 # OPEN — W389 (2026-11-05)
 Sonny: Designers Support → the list → Reflect → **Replace it** → check project size → Lock → Request signature. Karen re-signs.
 Rommel's Noted-by request (`req_1793846115333_3g1qdr`) is still pending: sign only after Karen.
+
+## What was changed on 2026-11-05 (session 4 — the app is named Modcraft Quotation System)
+Users took "RTmo" in the top bar for the app's name. Top bar and sign-in card now show the Modcraft icon + **Modcraft Quotation System**, with "Developed by RTmo Digital Solutions" under the name (top bar) or at the foot of the card (sign-in). Also the browser title, the installed app name (`short_name` stays Modcraft, it has to fit under an icon) and the connect popup. An uploaded App logo (Settings) replaces the icon only; the name and credit always stay. The brand is hidden below 900px as before, so phones show neither.
