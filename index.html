@@ -19231,12 +19231,15 @@ function openQuotationFromOrder(serial){
 // An approver should be one click from the thing they are being asked to judge. Routed through
 // openQuotationFromDir, which goes via confirmUnsavedThen — an approver may have a quotation
 // part-written, and navigating away without that guard discards it silently.
-function openQuotationFromApproval(serial){
+function openQuotationFromApproval(serial,optId){
   var s=String(serial||'').trim();
   if(!s||s==='—'){ showToast('This request has no quotation number on it.'); return; }
   if(typeof openQuotationFromDir!=='function') return;
   closeNotifPanel&&closeNotifPanel();
-  openQuotationFromDir(s);
+  // The request remembers which option was active when it was raised; open THAT one, not whichever
+  // option the quotation was last saved on (Rommel, 2026-11-05: the card said Option 3, the link
+  // opened Option 1).
+  openQuotationFromDir(s,(+optId||0));
 }
 // The client + serial line, clickable when there is a real quotation behind it. A request raised
 // before the first save carries '—' or a DRAFT key, and neither can be opened from the directory.
@@ -19253,7 +19256,7 @@ function _apprQuotLink(n,size){
   var openable=se&&se!=='—'&&!/^DRAFT-/.test(se);
   if(!openable) return cl+' · '+escHtml(se||'—')
     +(/^DRAFT-/.test(se)?' <span style="font-weight:400;color:var(--text2)">(not yet numbered)</span>':'')+optBadge;
-  var oc='onclick="openQuotationFromApproval(\''+se.replace(/'/g,"\\'")+'\');return false;"';
+  var oc='onclick="openQuotationFromApproval(\''+se.replace(/'/g,"\\'")+'\','+(+n.optionId||0)+');return false;"';
   return '<a href="#" '+oc+' style="color:inherit;text-decoration:none;cursor:pointer" '
     +'title="Open this quotation">'+cl+' · <span style="color:var(--pill-navy);'
     +'text-decoration:underline;font-family:ui-monospace,monospace;font-size:'+(size||12)+'px">'
@@ -21726,7 +21729,41 @@ function _sigPendingFor(slot){
     var n=NOTIFS[i];
     if(n.type==='signature'&&n.sigSlot===slot&&n.serial===serial&&n.status==='pending') return n;
   }
+  // NOTIFS only holds what this person is allowed to read. approval_requests lets Staff see requests
+  // FROM or TO themselves — and the Noted-by request raised automatically when Checked by is signed
+  // is from the CHECKER to the Noted-by signatory, so the preparer never sees it here. That is how
+  // QT-M00000217 got two identical Noted-by requests (2026-11-05; same on 2026-10-20): the bar said
+  // nothing was pending and offered the button again. The server's own list fills that gap.
+  var rp=_sigRemotePending;
+  if(rp&&rp.serial===serial&&rp.rows){
+    for(var j=0;j<rp.rows.length;j++){
+      var r=rp.rows[j];
+      if(r.sig_slot===slot) return {type:'signature',sigSlot:slot,serial:serial,status:'pending',reqId:r.id,
+        approverEmail:r.to_email||'',approver:r.to_email||'',from:r.from_name||'',optionLabel:r.option_label||'',_remote:true};
+    }
+  }
   return null;
+}
+// {serial, at, rows} from sig_pending_on(serial) — every pending signature request on that quotation,
+// whoever raised it. Refreshed by the bar (throttled) and forced before a request goes out.
+var _sigRemotePending=null;
+function _sigRefreshRemotePending(serial,force,cb){
+  function done(){ if(cb) cb(); }
+  if(!serial||serial==='—'||/^DRAFT-/.test(serial)){ done(); return; }
+  var ready=(typeof USE_SUPABASE!=='undefined'&&USE_SUPABASE&&typeof supaReady==='function'&&supaReady()&&typeof supa!=='undefined'&&supa&&supa.rpc);
+  if(!ready){ done(); return; }
+  var rp=_sigRemotePending;
+  if(!force&&rp&&rp.serial===serial&&Date.now()-rp.at<30000){ done(); return; }
+  var p;
+  try{ p=supa.rpc('sig_pending_on',{p_serial:serial}); }catch(e){ done(); return; }
+  Promise.resolve(p).then(function(r){
+    if(r&&!r.error&&Array.isArray(r.data)){
+      var before=JSON.stringify((rp&&rp.serial===serial&&rp.rows)||[]);
+      _sigRemotePending={serial:serial,at:Date.now(),rows:r.data};
+      if(JSON.stringify(r.data)!==before&&(qBaseSerial||qSerial)===serial) try{ renderSignatureBar(); }catch(e2){}
+    }
+    done();
+  }).catch(function(){ done(); });
 }
 // One place that decides where the quotation stands, so the button, the badge and the send
 // warning can never describe it differently.
@@ -21748,7 +21785,18 @@ function requestSignatures(){
   // Locking a never-saved quotation claims its number a moment later. A request raised in that gap
   // carried no number, so the approval had nothing to apply to (QT-W00000360, 2026-10-27). Wait for
   // the number first, the same way the Job Order does.
-  _whenNumbered(function(){ _sendSignatureRequest(slot,false); },'Signature request');
+  _whenNumbered(function(){
+    // Ask the server too, right before sending: a pending request this person cannot read (the
+    // auto-forwarded Noted-by — see _sigPendingFor) must stop a second one just the same.
+    _sigRefreshRemotePending(qBaseSerial||qSerial,true,function(){
+      var pend=_sigPendingFor(slot);
+      if(pend){
+        showToast(_sigLabel(slot)+' has already been requested'+(pend.approverEmail?' — awaiting '+pend.approverEmail:'')+'.');
+        renderSignatureBar(); return;
+      }
+      _sendSignatureRequest(slot,false);
+    });
+  },'Signature request');
 }
 // Runs fn once the open quotation has its real number. Waits up to 20 s while a number is being
 // claimed; if none arrives it says so and sends nothing.
@@ -22012,11 +22060,16 @@ function confirmSignature(){
     var sig={name:(gUser.name||gUser.email||''),email:(gUser.email||''),role:currentRole||'',
              img:mySignature(),at:new Date().toISOString()};
     NOTIFS[idx].status='approved'; NOTIFS[idx].by=sig.name;
+    // applied:true — this browser writes the signature into the quotation itself just below, so no
+    // other browser's _apprApplyRemoteDecisions pass needs to (each one was re-applying it and
+    // logging "approved … (from a phone)" for a signature given on a laptop).
+    NOTIFS[idx].applied=true;
     _localActions[n.reqId]={time:Date.now()};
     if(typeof gSaveApprovalRequest==='function')
       gSaveApprovalRequest({id:n.reqId,type:'signature',sigSlot:n.sigSlot,status:'approved',serial:n.serial,
         client:n.client,from:n.from,fromEmail:n.fromEmail||'',company:n.company,msg:n.msg,
-        date:n.date,by:sig.name,actionDate:new Date().toISOString()});
+        date:n.date,by:sig.name,applied:true,actionDate:new Date().toISOString()});
+    _sigSupersedeDuplicates(n,sig.name);
     // Apply to the open quotation when it is the right one, and always to the stored record.
     if((qBaseSerial||qSerial)===n.serial){
       qSignatures=qSignatures||{}; qSignatures[n.sigSlot]=sig;
@@ -22048,6 +22101,31 @@ function confirmSignature(){
     _updateNotifBadge();
     if(el('page-approvals')&&el('page-approvals').classList.contains('active')) renderApprovals();
   });
+}
+// The same signature asked for twice (the automatic Noted-by plus the preparer pressing the button
+// before they could see it — QT-M00000217, 2026-11-05): once one is signed, the other has nothing
+// left to do. Closed as "superseded", never "rejected" — the requester did nothing wrong and the
+// decline message would tell them to correct the quotation.
+function _sigSupersedeDuplicates(n,signerName){
+  if(!n||!n.serial||!n.sigSlot) return 0;
+  var closed=0;
+  for(var i=0;i<NOTIFS.length;i++){
+    var d=NOTIFS[i];
+    if(!d||d===n||d.reqId===n.reqId) continue;
+    if(d.type!=='signature'||d.status!=='pending'||d.serial!==n.serial||d.sigSlot!==n.sigSlot) continue;
+    d.status='cancelled'; d.by=signerName||'';
+    _localActions[d.reqId]={time:Date.now()};
+    if(typeof gSaveApprovalRequest==='function')
+      gSaveApprovalRequest({id:d.reqId,status:'cancelled',by:d.by,actionDate:new Date().toISOString(),
+        actionReason:'Superseded — the same '+_sigLabel(n.sigSlot)+' signature was already given on another request.'});
+    if(d.fromEmail&&typeof gSendMessage==='function')
+      gSendMessage(d.fromEmail,d.from||'',_sigLabel(n.sigSlot)+' on '+n.serial+' was signed by '+(signerName||'the signatory')
+        +'. Your other request for the same signature was closed — nothing more to do.','normal',
+        'signature_superseded:'+n.sigSlot+':'+n.serial,function(){});
+    closed++;
+  }
+  if(closed) logActivity('Closed '+closed+' duplicate '+_sigLabel(n.sigSlot)+' request'+(closed===1?'':'s')+' on '+n.serial+' — the signature was already given.',n.serial);
+  return closed;
 }
 function declineSignature(idx){
   var n=NOTIFS[idx]; if(!n) return;
@@ -22155,6 +22233,7 @@ function renderSignatureBar(){
   // the moment the quotation is locked — in the row people already read for the serial and status.
   if(!locked){ w.style.display='none'; w.innerHTML=''; return; }
   var st=_sigState();
+  if(!st.complete&&!st.pending) _sigRefreshRemotePending(qBaseSerial||qSerial,false);
   function pill(slot,on,req){
     var pend=_sigPendingFor(slot);
     var sg=_sigOf(slot);

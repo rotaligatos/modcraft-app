@@ -6596,6 +6596,87 @@ const PROFILES = {
         check('A signature request waits for the quotation number, and never goes out without one',
           () => ({ before, after, guarded }), { before: 0, after: ['checked:QT-W00000777'], guarded: true });
       }
+      /* QT-M00000217, 2026-11-05: Rommel found two identical pending "Noted by" requests on Option 3
+         — Karen's (raised automatically the moment she signed Checked by) and Raven's (pressed five
+         minutes later). Cause: approval_requests RLS lets Staff read only requests FROM or TO
+         themselves, and the automatic one is from the checker to the signatory, so the preparer's
+         _sigPendingFor() saw nothing and the bar offered the button again. Proven live as Raven:
+         1 row through RLS, 2 through the new sig_pending_on() RPC. The same pattern sits in the data
+         three times from 2026-10-20. Four guards, checked against the real functions. */
+      if (typeof window._sigRefreshRemotePending === 'function') {
+        const w = window;
+        check('_sigPendingFor: falls back to the server\'s list when this person cannot read the pending request', () => {
+          const keepN = w.NOTIFS, keepS = w.qSerial, keepR = w._sigRemotePending;
+          try {
+            w.NOTIFS = []; w.qSerial = 'QT-TEST-SIG9';
+            w._sigRemotePending = { serial: 'QT-TEST-SIG9', at: Date.now(), rows: [{ id: 'req_x', sig_slot: 'noted', to_email: 'rommel@x', from_name: 'Karen Dolor', option_label: 'Option 3' }] };
+            const noted = w._sigPendingFor('noted'), checked = w._sigPendingFor('checked');
+            w.qSerial = 'QT-TEST-OTHER';
+            const other = w._sigPendingFor('noted');
+            return { noted: !!noted && noted.approverEmail === 'rommel@x' && noted.optionLabel === 'Option 3' && noted.status === 'pending',
+              checked: checked === null, other: other === null };
+          } finally { w.NOTIFS = keepN; w.qSerial = keepS; w._sigRemotePending = keepR; }
+        }, { noted: true, checked: true, other: true });
+        check('requestSignatures: asks the server first, and refuses a Noted-by the preparer could not see', () => {
+          const keep = { refresh: w._sigRefreshRemotePending, st: w._sigState, send: w._sendSignatureRequest, toast: w.showToast,
+            bar: w.renderSignatureBar, N: w.NOTIFS, S: w.qSerial, D: w.qDraftKey, L: w.qLocked, R: w._sigRemotePending };
+          const sent = [], toasts = [];
+          try {
+            w.NOTIFS = []; w.qSerial = 'QT-TEST-SIG9'; w.qDraftKey = ''; w.qLocked = true; w._sigRemotePending = null;
+            w._sigState = () => ({ complete: false, checked: true, needNoted: true, pending: null });
+            w._sendSignatureRequest = slot => { sent.push(slot); };
+            w.showToast = m => toasts.push(m); w.renderSignatureBar = () => {};
+            let rows = [{ id: 'req_x', sig_slot: 'noted', to_email: 'rommel@x', from_name: 'Karen', option_label: '' }];
+            w._sigRefreshRemotePending = (s, force, cb) => { w._sigRemotePending = { serial: s, at: Date.now(), rows }; cb(); };
+            w.requestSignatures();
+            const refused = sent.length === 0 && toasts.some(t => /already been requested/.test(t) && /rommel@x/.test(t));
+            rows = []; toasts.length = 0; w._sigRemotePending = null;   // the cached answer lasts 30 s by design
+            w.requestSignatures();
+            return { refused, sentWhenClear: sent.slice() };
+          } finally {
+            w._sigRefreshRemotePending = keep.refresh; w._sigState = keep.st; w._sendSignatureRequest = keep.send; w.showToast = keep.toast;
+            w.renderSignatureBar = keep.bar; w.NOTIFS = keep.N; w.qSerial = keep.S; w.qDraftKey = keep.D; w.qLocked = keep.L; w._sigRemotePending = keep.R;
+          }
+        }, { refused: true, sentWhenClear: ['noted'] });
+        check('_sigSupersedeDuplicates: signing one Noted-by closes its twin as superseded, touches nothing else', () => {
+          const keep = { N: w.NOTIFS, save: w.gSaveApprovalRequest, msg: w.gSendMessage, log: w.logActivity, la: w._localActions };
+          const saves = [], msgs = [], logs = [];
+          try {
+            w._localActions = {};
+            w.gSaveApprovalRequest = r => saves.push(r); w.gSendMessage = (to, nm, text) => msgs.push(to + '|' + text); w.logActivity = a => logs.push(a);
+            const signed = { reqId: 'a', type: 'signature', sigSlot: 'noted', serial: 'QT-TEST-SIG9', status: 'approved', fromEmail: 'karen@x' };
+            const twin = { reqId: 'b', type: 'signature', sigSlot: 'noted', serial: 'QT-TEST-SIG9', status: 'pending', fromEmail: 'raven@x', from: 'Raven' };
+            const otherSlot = { reqId: 'c', type: 'signature', sigSlot: 'checked', serial: 'QT-TEST-SIG9', status: 'pending', fromEmail: 'raven@x' };
+            const otherSerial = { reqId: 'd', type: 'signature', sigSlot: 'noted', serial: 'QT-TEST-SIG8', status: 'pending', fromEmail: 'raven@x' };
+            const done = { reqId: 'e', type: 'signature', sigSlot: 'noted', serial: 'QT-TEST-SIG9', status: 'approved', fromEmail: 'raven@x' };
+            w.NOTIFS = [signed, twin, otherSlot, otherSerial, done];
+            const n = w._sigSupersedeDuplicates(signed, 'Rommel Taligatos');
+            return { closed: n, twin: twin.status, others: [otherSlot.status, otherSerial.status, done.status].join(','),
+              save: saves.length === 1 && saves[0].id === 'b' && saves[0].status === 'cancelled' && /Superseded/.test(saves[0].actionReason),
+              msg: msgs.length === 1 && /^raven@x\|Noted by on QT-TEST-SIG9 was signed by Rommel Taligatos/.test(msgs[0]),
+              notRejected: !saves.some(s => s.status === 'rejected'), logged: logs.some(l => /duplicate Noted by request/.test(l)) };
+          } finally { w.NOTIFS = keep.N; w.gSaveApprovalRequest = keep.save; w.gSendMessage = keep.msg; w.logActivity = keep.log; w._localActions = keep.la; }
+        }, { closed: 1, twin: 'cancelled', others: 'pending,pending,approved', save: true, msg: true, notRejected: true, logged: true });
+        check('confirmSignature: marks the signed request applied and closes its duplicates (source wiring)', () => {
+          const src = String(w.confirmSignature);
+          return { applied: /applied:true,actionDate/.test(src), supersede: /_sigSupersedeDuplicates\(n,sig\.name\)/.test(src) };
+        }, { applied: true, supersede: true });
+      }
+      if (typeof window._apprQuotLink === 'function') {
+        const w = window;
+        check('Approvals card link opens the option the request was raised against, not the last-saved one', () => {
+          const keepO = w.openQuotationFromDir, keepC = w.closeNotifPanel;
+          const got = [];
+          try {
+            w.openQuotationFromDir = (s, o) => got.push([s, o]); w.closeNotifPanel = () => {};
+            const html = w._apprQuotLink({ client: 'DOT MATTERS', serial: 'QT-M00000217', optionId: 3, optionLabel: 'Option 3' }, 13);
+            w.openQuotationFromApproval('QT-M00000217', 3);
+            w.openQuotationFromApproval('QT-M00000217');
+            w.openQuotationFromApproval('QT-M00000217', '2');
+            return { link: /openQuotationFromApproval\('QT-M00000217',3\)/.test(html), got };
+          } finally { w.openQuotationFromDir = keepO; w.closeNotifPanel = keepC; }
+        }, { link: true, got: [['QT-M00000217', 3], ['QT-M00000217', 0], ['QT-M00000217', 2]] });
+      }
       if (typeof window._ebtLS === 'function')
         check('Edge code prints by the piece\'s real long/short sides, even when Width > Length (QT-W00000362)', () => {
           const w = window, t = [['2s', 100, 564], ['1l', 200, 500], ['1s', 480, 564], ['1l', 2064, 500], ['1s/1l', 114, 480], ['4s', 150, 600], ['', 100, 100]];

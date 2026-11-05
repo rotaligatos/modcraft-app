@@ -13575,3 +13575,25 @@ loaded; the existing save-conflict check now sees the newer copy when it re-read
   "✕" removes it. No room to keep it → plays until refresh and says so; unplayable → asks for MP4 (H.264).
   Rommel chose this over Supabase-hosted video (data allowance). Works on Chrome/Android TV boxes; many
   built-in TV browsers cannot open a file picker — not yet tried on the real TVs (brand unknown).
+
+## What was changed on 2026-11-05 (session — duplicate Noted-by requests; Approvals link opens the wrong option)
+Rommel, before signing QT-M00000217: two identical pending "Noted by" requests (Karen's and Raven's,
+same option, same ₱204,394.86), and the card's link opened Option 1 though the card said Option 3.
+- **Why the duplicate.** `approval_requests` RLS lets Staff read only requests FROM or TO themselves.
+  The Noted-by request the app raises automatically when Checked by is signed is from the CHECKER
+  (Karen) to the signatory (Rommel), so Raven's browser never had it in NOTIFS, `_sigPendingFor`
+  found nothing, the bar offered "Request signature (Noted by)" and he pressed it 5 min later.
+  Proven as Raven by impersonation: 1 row through RLS, 2 through the new RPC. Same pattern three
+  times on 2026-10-20 (Stephanie), all signed twice.
+- **Fix.** RPC `sig_pending_on(serial)` (security definer, staff only, read-only, migration
+  `sig_pending_on_rpc`) lists every pending signature request on a quotation. `_sigPendingFor` falls
+  back to that list (`_sigRemotePending`, refreshed by the bar every 30 s and forced in
+  `requestSignatures` right before sending). `confirmSignature` now closes any twin of the request
+  just signed as "superseded" (`_sigSupersedeDuplicates`, message to its requester, never "rejected")
+  and saves `applied:true` so other browsers stop re-applying a laptop signature and logging it as
+  "from a phone".
+- **Link.** `_apprQuotLink` → `openQuotationFromApproval(serial, optionId)` → `openQuotationFromDir`
+  with the option the request was raised against.
+- Data: Raven's twin `req_1793838295908_lh4btw` cancelled in Supabase (reason: superseded);
+  Karen's `req_1793837954155_hktn3c` is the one to sign. Checks in `tools/smoke.mjs`; the link check
+  fails on the old code, the others are gated on the new function.
