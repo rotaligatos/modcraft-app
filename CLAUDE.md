@@ -13609,3 +13609,25 @@ section just saved is marked `data-done` and skipped. Tested headless with a fak
 row B / a grid cell / a new row; new code keeps all three and each saves on its own button.
 Also seen in that day's grid save (cleared cells, may be unintended): HDF 3, PLY 6, PLY 22 removed,
 30mm "Any board" switched off.
+
+## What was changed on 2026-11-05 (session 3 — QT-W00000389: locked, but reopened unlocked)
+Commit `0ce078b`, with 4 smoke checks (all fail on the old code).
+- **Cause:** the saved state was **4 MB**, 99% `boardLayout.bom[].layout/plans/shelves` (a swatch job, ~3,300 pieces, list added 3 times).
+  The Sheet refuses a state over 450 KB and the database write hit the statement timeout (500s in the logs). The Quotations row
+  still updated, so the list read IQ Locked while `state.locked` stayed false. Karen's Checked-by never landed either
+  (`_persistApprovedFieldToQuotation` refuses oversized states). The analysis output upload also got a 544, and the
+  `drawing_analyses` row was written anyway, pointing at a missing file, so every lock logged "No Job Order reserved".
+- **Fix:** `_slimStateForSave` / `_slimBoardLayout`: saved states keep board totals, not the layout (W389: 4 MB → 61 KB). Memory keeps
+  the detail; `_saveBoardLayoutToDrive` skips the file when it has none, so a reopened quotation never overwrites the full file.
+  `supaUpsertState` and `supaUploadQuotationFile` now resolve true/false/null. Too big for the Sheet + database failed = toast + log.
+  A newer row with an older Sheet state no longer replaces the database copy (the hazard in the 2026-11-04 newer-copy fix).
+  Cutting list upload retries twice; no row without the file.
+- **Data:** W389's layout detail removed from its database state (full copy stays in `… board layout.json`). Its lock was NOT restored:
+  the Job Order needs the list reflected again, which needs it unlocked.
+- **Only W389 had a lock lost** (checked: `initial_locked_at` later than the state's `updated_at`).
+- Found, not changed: removing an area does not remove its cutting list, so reflect → remove → reflect + "Add as another list" multiplies
+  the Job Order and board layout (W389: 195 parts, 186 boards on the layout for about 62 billed; project size 9942).
+
+# OPEN — W389 (2026-11-05)
+Sonny: Designers Support → the list → Reflect → **Replace it** → check project size → Lock → Request signature. Karen re-signs.
+Rommel's Noted-by request (`req_1793846115333_3g1qdr`) is still pending: sign only after Karen.
