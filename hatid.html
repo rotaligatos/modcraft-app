@@ -2567,11 +2567,17 @@ function simPickupRpc(fn, a){
           Object.assign(o, { status: leftAny ? 'balance' : 'done', closed_at: leftAny ? null : now, updated_at: now }); vo.taken = tk;
           if (leftAny) log(o.id, v.id, 'balance', 'Items left for a later pick-up'); }
         const min = Math.round((Date.now() - new Date(v.arrived_at)) / 6000) / 10, tgt = Number(set(v.company).target_min ?? 15);
+        const ov = (a.p_taken || {})._over || {}, ovr = PK_OVER[ov.reason] ? ov.reason : null, ovn = String(ov.note || '').trim() || null, overT = v.counted && !v.is_balance && min / Math.max(1, v.so_count) > tgt;
+        if (overT && !ovr) return fail(`Pick the reason it went over the ${tgt} min target.`); if (overT && ovr === 'or_other' && !ovn) return fail('Say what the other reason is.');
         Object.assign(v, { status: 'done', loaded_at: now, loaded_name: who, photo_urls: a.p_photos, minutes: min, per_so: Math.round(min / Math.max(1, v.so_count) * 10) / 10, target_min: tgt,
-          within: min / Math.max(1, v.so_count) <= tgt });
+          within: min / Math.max(1, v.so_count) <= tgt, over_reason: ovr, over_note: ovr ? ovn : null, over_reason_name: ovr ? who : null, over_reason_at: ovr ? now : null });
       } else return fail('unknown step ' + s);
       log(null, v.id, s, null); return ok({ ...v });
     }
+    case 'pk_over_reason': { const v = V(a.p_visit); if (!v) return fail('Queue number not found.'); if (!can('logistics')) return fail('Only Logistics can give the reason.');
+      if (v.status !== 'done' || v.within !== false) return fail(`${v.label} did not go over the target.`); if (!PK_OVER[a.p_reason]) return fail('Pick a reason from the list.');
+      if (a.p_reason === 'or_other' && !String(a.p_note || '').trim()) return fail('Say what the other reason is.');
+      Object.assign(v, { over_reason: a.p_reason, over_note: String(a.p_note || '').trim() || null, over_reason_name: who, over_reason_at: now }); log(null, v.id, 'over_reason', a.p_reason); return ok({ ...v }); }
     case 'pk_cancel_visit': { const v = V(a.p_visit); if (!v) return fail('Queue number not found.'); v.status = 'cancelled';
       SIM.pk_visit_orders.filter(x => x.visit_id === v.id).forEach(x => { const o = O(x.order_id); if (o && o.status === 'in_queue') o.status = o.lines.some(l => l.taken > 0) ? 'balance' : 'open'; });
       log(null, v.id, 'cancelled', a.p_reason); return ok(null); }
@@ -5508,6 +5514,12 @@ async function renderCouriers(){
 const PK_KIND = { scheduled:'Scheduled', same_day:'Same-day', walkin:'Walk-in' };
 const PK_SITE = { plant1:'Plant 1', annex:'Annex' };
 const PK_ROLE = { sales_support:'Sales Support', warehouse:'Warehouse', logistics:'Logistics', wh_manager:'Warehouse Manager' };
+/* Why a pick-up went over the target (Logistics picks one; summed in Promptness) */
+const PK_OVER = { or_si:'SI entered late', or_prep:'Items not yet prepared', or_stock:'Item not found / short stock', or_quality:'Quality issue / replacement',
+  or_queue:'Many clients in the queue', or_equipment:'Forklift / loading area busy', or_client:'Client delay (payment, papers, vehicle)', or_load:'Big or difficult load',
+  or_system:'System / Odoo down', or_other:'Other' };
+const pkOverSel = (id, cur = '') => `<select class="i" id="${id}" aria-label="Reason it went over target"><option value="">Pick the reason…</option>${Object.entries(PK_OVER).map(([k, t]) => `<option value="${k}"${k === cur ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+const pkOverTxt = v => v.over_reason ? esc(PK_OVER[v.over_reason] || v.over_reason) + (v.over_note ? ' — ' + esc(v.over_note) : '') : '';
 const PK_ST = { waiting:'Waiting for SI', notified:'SI sent — warehouse to accept', accepted:'Being prepared', ready:'Ready for loading', done:'Released', cancelled:'Cancelled' };
 const PK_OST = { open:'Expected', in_queue:'In the queue', balance:'Balance to pick up', done:'Released', no_show:'No-show', cancelled:'Cancelled' };
 const PK_LANES = [['waiting', 'Waiting for SI', 'Sales Support'], ['notified', 'SI sent', 'Warehouse to accept'], ['accepted', 'Being prepared', 'Warehouse'], ['ready', 'Ready for loading', 'Logistics']];
@@ -5965,7 +5977,7 @@ async function loadPkRole(view){
       <span class="pkm-tags">${pkPartialTag(o)}
       ${p.n ? (p.prep === p.n ? '<span class="tag ok">✓ Prepared</span>' : `<span class="tag warn">${p.prep} of ${p.n} prepared</span>`) : ''}${o.on_time && o.kind !== 'walkin' ? '' : pkCutTag(o)}</span>${btn ? `<span class="pkm-btns">${btn}</span>` : ''}</div>`; };
   let todo = 0;
-  const sec = (title, hint, rows, opts = {}) => { if (opts.todo) todo += rows.length;
+  const sec = (title, hint, rows, opts = {}) => { if (opts.todo) todo += opts.todoN ?? rows.length;
     return `<div class="card pad pkm-sec${opts.todo ? '' : ' pkm-info'}"><div class="chart-h" style="margin:0 0 6px"><h3 style="margin:0">${title} <span class="pk-n">${rows.length}</span></h3>${opts.right || ''}</div>
       ${hint ? `<div class="ft" style="margin-bottom:6px">${hint}</div>` : ''}${rows.join('') || `<div class="ft pkm-none">${opts.empty || 'None'}</div>`}${opts.foot || ''}</div>`; };
   const STAGE = { notified: 'SI sent — warehouse to accept', accepted: 'warehouse getting it out', ready: 'ready — Logistics loading' };
@@ -6006,7 +6018,8 @@ async function loadPkRole(view){
     const rel = V('done').reverse();
     html = sec('Ready to load', 'Record what was loaded and take 3–5 photos — this stops the clock.', V('ready').map(v => vRow(v, B('primary', 'load', v.id, 'Load &amp; photos'))), { todo: 1, empty: 'Nothing ready 👍' })
       + sec('Coming up — for logistics confirmation', 'SI is with the warehouse; these come to you next. Get the truck / area ready.', V('accepted', 'notified').map(v => vRow(v, '', stageOf(v))), { empty: 'Nothing coming up' })
-      + sec('Released today', '', rel.map(v => vRow(v, '', [v.loaded_at ? 'released ' + new Date(v.loaded_at).toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' }) : '', v.loaded_name ? 'by ' + esc(v.loaded_name) : ''].filter(Boolean).join(' '))), { empty: 'Nothing released yet' });
+      + sec('Released today', rel.some(pkOverMissing) ? '<b style="color:var(--bad)">Over target with no reason yet — add it.</b>' : '', rel.map(v => vRow(v, pkOverMissing(v) ? B('primary', 'overwhy', v.id, 'Why over target?') : v.over_reason && can ? B('', 'overwhy', v.id, 'Change reason') : '',
+          [v.loaded_at ? 'released ' + new Date(v.loaded_at).toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' }) : '', v.loaded_name ? 'by ' + esc(v.loaded_name) : '', v.over_reason ? '· over target: ' + pkOverTxt(v) : ''].filter(Boolean).join(' '))), { todo: rel.some(pkOverMissing) ? 1 : 0, todoN: rel.filter(pkOverMissing).length, empty: 'Nothing released yet' });
     sub = 'Load, take photos, release.';
   }
   const live = state.pkVisits.filter(v => !['done','cancelled'].includes(v.status));
@@ -6032,6 +6045,7 @@ async function loadPkRole(view){
     if (a === 'si') return openPkVisit(id);
     if (a === 'arrive1') return pkArriveSelected([id]);
     if (a === 'load') return openPkLoad(id);
+    if (a === 'overwhy') return openPkOverReason(state.pkVisits.find(x => x.id === id));
     if (a === 'prep') return openPkOrder(id, { prep: true });
     if (a === 'allprep'){ const o = state.pkOrders.find(x => x.id === id); const vals = {};
       (o?.lines || []).filter(l => l.want && Number(l.qty) > Number(l.taken)).forEach(l => { vals[l.i] = true; });
@@ -6076,7 +6090,7 @@ async function loadPkQueue(){
   const done = state.pkVisits.filter(v => v.status === 'done').reverse();
   const cnt = done.filter(v => v.counted), ok = cnt.filter(v => v.within);
   $('pk-done').innerHTML = `<div class="chart-h"><h3 style="margin:0">Released today</h3><div class="ft">${cnt.length ? `${ok.length} of ${cnt.length} within target (${Math.round(ok.length / cnt.length * 100)}%)` : 'None timed yet'}</div></div>` +
-    (done.length ? simpleTable(['No.', 'Client', 'SOs', 'Time', 'Released by'], done.map(v => [`<b>${esc(v.label)}</b>`, esc(v.client_name || '—'), v.so_count, pkTimer(v) + (v.counted ? '' : ' <span class="ft">not timed</span>'), esc(v.loaded_name || '')]), { html: true }) : '<div class="muted">Nothing released yet.</div>');
+    (done.length ? simpleTable(['No.', 'Client', 'SOs', 'Time', 'Released by', 'Why over target'], done.map(v => [`<b>${esc(v.label)}</b>`, esc(v.client_name || '—'), v.so_count, pkTimer(v) + (v.counted ? '' : ' <span class="ft">not timed</span>'), esc(v.loaded_name || ''), pkOverMissing(v) ? '<span style="color:var(--bad)">not given yet</span>' : pkOverTxt(v)]), { html: true }) : '<div class="muted">Nothing released yet.</div>');
 }
 function pkCard(v, oBy){   // Queue board is view-only (Rommel 2026-10-01): actions live on the job tabs
   const sos = (v.pk_visit_orders || []).map(x => oBy[x.order_id]?.so_no || '').filter(Boolean);
@@ -6231,6 +6245,22 @@ function pkConcern(v, orders){
       toast('Concern sent', 'ok'); closeOverlay(); } catch { e.target.disabled = false; } });
 }
 
+/* Over target: released, counted, and no reason given yet */
+const pkOverMissing = v => v && v.status === 'done' && v.counted && !v.is_balance && v.within === false && !v.over_reason;
+function openPkOverReason(v){
+  if (!v) return;
+  openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><h2 style="margin-top:0">Why over target — ${esc(v.label)}</h2>
+    <div class="ft">${esc(v.client_name || '')} · ${fmtN1(v.per_so)} min${v.so_count > 1 ? ' per SO' : ''} · target ${esc(v.target_min ?? pkTarget(v.company))} min</div>
+    <label class="f" style="margin-top:8px">Reason${pkOverSel('pko-r', v.over_reason || '')}</label>
+    <label class="f">Details <span class="ft">(required for Other)</span><input class="i" id="pko-n" value="${esc(v.over_note || '')}"></label>
+    <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pko-go">Save</button></div></div>`);
+  bindClose();
+  $('pko-go').addEventListener('click', async e => { const r = $('pko-r').value, n = $('pko-n').value.trim();
+    if (!r) return toast('Pick the reason', 'error'); if (r === 'or_other' && !n) return toast('Say what the other reason is', 'error');
+    e.target.disabled = true;
+    try { await pkRpc('Saving the reason', 'pk_over_reason', { p_visit: v.id, p_reason: r, p_note: n || null }); toast('Reason saved', 'ok'); closeOverlay(); loadPk(state.view); } catch { e.target.disabled = false; } });
+}
+
 /* Logistics: what left, 3–5 photos */
 async function openPkLoad(id){
   openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true"><span class="spin"></span></div>`); bindClose();
@@ -6247,11 +6277,19 @@ async function openPkLoad(id){
         return `<tr><td>${esc(l.desc)}${l.want ? '' : ' <span class="ft">(not planned today)</span>'}</td><td class="num">${esc(fmtQty(left))} ${esc(l.unit || '')}</td>
           <td class="num"><input class="i pk-q" type="number" min="0" max="${left}" step="any" data-o="${esc(o.id)}" data-i="${l.i}" value="${pkPlan(l)}" style="width:90px" aria-label="Loaded ${esc(l.desc)}"></td></tr>`; }).join('') || '<tr><td colspan="3" class="ft">No item lines.</td></tr>'}
       </tbody></table></div></div>`).join('')}
+    <div class="card pad hidden" id="pkl-over" style="margin:8px 0;border-color:var(--bad)"><b style="color:var(--bad)">Over the target</b> <span class="ft" id="pkl-over-t"></span>
+      <div class="ft" style="margin:4px 0">Pick the main reason. It goes in the Promptness report.</div>
+      <label class="f">Reason${pkOverSel('pkl-or')}</label><label class="f">Details <span class="ft" id="pkl-on-h">(optional)</span><input class="i" id="pkl-on" placeholder="e.g. waited 10 min for the forklift"></label></div>
     <div class="sub" style="margin-top:8px"><b>Photos of the loaded items</b> <span class="ft">3 to 5</span></div>
     <div class="thumbs" id="pkl-th"></div>
     <label class="btn" style="margin-top:6px">📷 Take photo<input type="file" accept="image/*" capture="environment" multiple id="pkl-ph" hidden></label>${state.preview?.practice ? ' <button type="button" class="btn" id="pkl-sample" style="margin-top:6px">🖼 Use 3 sample photos (practice)</button>' : ''}
     <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pkl-go">Released — stop the clock</button></div>`;
   bindClose();
+  const tgt = pkTarget(v.company), overNow = () => v.counted && !v.is_balance && pkMins(v.arrived_at) / Math.max(1, v.so_count) > tgt;
+  const showOver = force => { const on = force || overNow(); $('pkl-over')?.classList.toggle('hidden', !on);
+    if (on && $('pkl-over-t')) $('pkl-over-t').textContent = `${fmtN1(pkMins(v.arrived_at) / Math.max(1, v.so_count))} min${v.so_count > 1 ? ' per SO' : ''} · target ${tgt} min`; return on; };
+  showOver(); const overTick = setInterval(() => { if (!$('pkl-over')) return clearInterval(overTick); showOver(!$('pkl-over').classList.contains('hidden')); }, 20000);
+  $('pkl-or').addEventListener('change', () => { $('pkl-on-h').textContent = $('pkl-or').value === 'or_other' ? '(required)' : '(optional)'; });
   const draw = () => { $('pkl-th').innerHTML = photos.map((p, i) => `<span class="th"><img src="${p.url}" alt="Photo ${i + 1}"><button class="lnk" data-rm="${i}" aria-label="Remove photo ${i + 1}">✕</button></span>`).join('');
     document.querySelectorAll('#pkl-th [data-rm]').forEach(b => b.addEventListener('click', () => { photos.splice(Number(b.dataset.rm), 1); draw(); })); };
   $('pkl-sample')?.addEventListener('click', async () => { for (const b of await prSamplePhotos()){ if (photos.length >= 5) break; photos.push({ blob: b, url: URL.createObjectURL(b) }); } draw(); });
@@ -6263,14 +6301,19 @@ async function openPkLoad(id){
     for (const i of document.querySelectorAll('.pk-q')){ const q = Number(i.value || 0); if (q < 0 || q > Number(i.max)) { i.focus(); return toast('A loaded quantity is more than what’s left', 'error'); }
       (taken[i.dataset.o] ??= {})[i.dataset.i] = q; if (q > 0) any = true; }
     if (!any && document.querySelectorAll('.pk-q').length && !confirm('Nothing is marked as loaded. Release anyway?')) return;
+    if (showOver()){ const r = $('pkl-or').value, n = $('pkl-on').value.trim();
+      if (!r){ $('pkl-or').focus(); return toast('It went over the target — pick the reason first', 'error'); }
+      if (r === 'or_other' && !n){ $('pkl-on').focus(); return toast('Say what the other reason is', 'error'); }
+      taken._over = { reason: r, note: n }; }
     e.target.disabled = true; e.target.textContent = 'Uploading photos…';
     try {
       const paths = [];
       for (let i = 0; i < photos.length; i++) paths.push(await uploadMedia('pickups/' + v.id, photos[i].blob, `loaded-${i + 1}.jpg`, 'image/jpeg'));
       const r = await pkRpc('Releasing', 'pk_step', { p_visit: v.id, p_step: 'loaded', p_photos: paths, p_taken: taken });
       toast(r.counted ? `${r.label} released — ${fmtN1(r.per_so)} min${r.so_count > 1 ? ' per SO' : ''} ${r.within ? '✓ within target' : '✗ over target'}` : `${r.label} released`, r.within || !r.counted ? 'ok' : 'error');
-      closeOverlay(); loadPk(state.view);
-    } catch { e.target.disabled = false; e.target.textContent = 'Released — stop the clock'; }
+      clearInterval(overTick); closeOverlay(); loadPk(state.view);
+    } catch (err) { if (/reason it went over/i.test(err?.message || '')) { showOver(true); $('pkl-or').focus(); }
+      e.target.disabled = false; e.target.textContent = 'Released — stop the clock'; }
   });
 }
 
@@ -6617,6 +6660,17 @@ async function openPkWalkin(){
   });
 }
 
+/* Over-target reasons, added up (one row per SO, like the rest of the report) */
+function pkOverReport(rows){
+  const over = rows.filter(r => !r.ok); if (!over.length) return '<div class="muted">None went over the target 👍</div>';
+  const g = new Map(); over.forEach(r => { const k = r.v.over_reason || '_none'; if (!g.has(k)) g.set(k, []); g.get(k).push(r); });
+  const av = xs => fmtN1(xs.reduce((a, x) => a + x, 0) / xs.length);
+  const t = simpleTable(['Reason', 'SOs', '% of over', 'Avg min'], [...g.entries()].sort((a, b) => b[1].length - a[1].length)
+    .map(([k, rs]) => [k === '_none' ? '<span style="color:var(--bad)">No reason given</span>' : esc(PK_OVER[k] || k), rs.length, Math.round(rs.length / over.length * 100) + '%', av(rs.map(r => r.min))]), { html: true });
+  const notes = over.filter(r => r.v.over_note).slice(-12).reverse().map(r => `<div class="ft">${esc(fmtDay(r.v.queue_day))} · ${esc(r.v.label)} · ${esc(PK_OVER[r.v.over_reason] || '')} — ${esc(r.v.over_note)}${r.v.over_reason_name ? ' (' + esc(r.v.over_reason_name) + ')' : ''}</div>`).join('');
+  return t + (notes ? '<div class="sub" style="margin-top:8px"><b>Latest details</b></div>' + notes : '');
+}
+
 /* ---------- Promptness report ---------- */
 async function loadPkReport(){
   if (!$('pkr-from').value){ $('pkr-from').value = localDate().slice(0, 8) + '01'; $('pkr-to').value = localDate(); }
@@ -6672,6 +6726,7 @@ async function loadPkReport(){
         <h3>By person</h3>${n ? `<div class="ft">Sales Support (arrival → SI)</div>${simpleTable(['Name', 'SOs', 'Avg min'], people('arrived_name', 'si'))}
           <div class="ft" style="margin-top:6px">Warehouse (accepted → ready)</div>${simpleTable(['Name', 'SOs', 'Avg min'], people('ready_name', 'prep'))}
           <div class="ft" style="margin-top:6px">Logistics (ready → loaded)</div>${simpleTable(['Name', 'SOs', 'Avg min'], people('loaded_name', 'load'))}` : '—'}</div>
+      <div class="card pad"><h3 style="margin-top:0">Why over target</h3>${pkOverReport(rows)}</div>
       <div class="card pad"><h3 style="margin-top:0">By day</h3>${days.length ? simpleTable(['Day', 'SOs', 'Within', '%', 'Avg min'], days.map(([k, rs]) => line(fmtDay(k), rs))) : '—'}</div>
       <div class="card pad"><h3 style="margin-top:0">Balances waiting for pick-up</h3>${balances.length ? simpleTable(['SO', 'Client', 'Site', 'Since'], balances.map(b => [b.so_no, b.client_name || '', PK_SITE[b.site] || b.site, b.updated_at ? fmtDay(b.updated_at.slice(0, 10)) : '—'])) : '<div class="muted">None.</div>'}
         ${tc ? `<h3>TC %, two ways</h3><div class="ft">Delivery cost ${peso(tc.delivery_cost)} ÷ delivered sales ${peso(tc.delivery_sales)} = <b>${tc.tc_delivery != null ? (tc.tc_delivery * 100).toFixed(2) + '%' : '—'}</b>.<br>
