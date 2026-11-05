@@ -36,7 +36,6 @@ begin
   return new;
 end $$;
 
-drop trigger if exists job_outbox_hold_trg on job_outbox;
 create trigger job_outbox_hold_trg before insert or update of status on job_outbox for each row execute function job_outbox_hold();
 
 -- Switch from the app (admin / manager). Turning a hold on also stops what is already waiting to go.
