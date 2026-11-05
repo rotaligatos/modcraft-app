@@ -1305,11 +1305,12 @@ const OUTCOME_LABEL = { full:'Delivered — all received', partial:'Partial — 
 const DELAY_REASON = { site_not_ready:'Site not ready', client_absent:'Receiver not available', access:'No access / gate pass / permit', unloading:'Waiting to unload',
   traffic:'Traffic / road closure', truck:'Truck problem', weather:'Weather', other:'Other' };
 const EVENT_LABEL = { proposed:'Ticket received', scheduled:'Scheduled', rejected:'Rejected', dispatched:'Departed', arrived:'Arrived on site', completed:'Delivery result', issue:'Problem reported', delay:'Delay',
-  note:'Note', load_confirmed:'Pre-departure confirmed (locked)', load_unlocked:'Pre-departure unlocked', load_concern:'Load concern' };
+  note:'Note', load_confirmed:'Pre-departure confirmed (locked)', load_unlocked:'Pre-departure unlocked', load_concern:'Load concern',
+  address_changed:'Address changed', address_request:'Address change asked', address_declined:'Address change declined' };
 const ACTOR_ROLE = { field:'driver/crew', dispatcher:'dispatcher', manager:'manager', admin:'admin', viewer:'office' };
 const CH_LABEL = { chat:'Google Chat', email:'Email', sms:'SMS' };
 const OB_STATUS = { pending:'Sending…', sending:'Sending…', sent:'Sent', failed:'Failed', skipped:'Not sent' };
-const OB_KIND = { pkready_client:'Pick-up ready → client', pkready_agent:'Pick-up ready → agent', pkdone_client:'Pick-up released → client', pkdone_agent:'Pick-up released → agent', pkmissed_client:'Pick-up missed → client', pkmissed_agent:'Pick-up missed → agent', delivered:'Delivered', partial:'Partial', returned:'Refused', issue:'Problem', delay:'Delay', daily:'Daily summary', daily_auto:'Daily summary', sched_client:'Schedule confirmed → client', sched_agent:'Schedule confirmed → agent' };
+const OB_KIND = { address_client:'Address updated → client', address_agent:'Address changed → agent', pkready_client:'Pick-up ready → client', pkready_agent:'Pick-up ready → agent', pkdone_client:'Pick-up released → client', pkdone_agent:'Pick-up released → agent', pkmissed_client:'Pick-up missed → client', pkmissed_agent:'Pick-up missed → agent', delivered:'Delivered', partial:'Partial', returned:'Refused', issue:'Problem', delay:'Delay', daily:'Daily summary', daily_auto:'Daily summary', sched_client:'Schedule confirmed → client', sched_agent:'Schedule confirmed → agent' };
 const CHAT_WEBHOOK_RE = /^https:\/\/chat\.googleapis\.com\/v1\/spaces\/\S+$/;
 function actorText(ev){ return ev.actor_name ? `${ev.actor_name}${ACTOR_ROLE[ev.actor_role] ? ' (' + ACTOR_ROLE[ev.actor_role] + ')' : ''}` : ''; }
 
@@ -3816,6 +3817,7 @@ async function openJob(id){
     ]);
     if (isDispatcher()) job._outbox = (await withRetry('Loading updates sent', () => sb.from('job_outbox')
       .select('id, kind, channel, recipient_label, status, last_error, attempts, created_at, sent_at').eq('job_id', id).order('created_at', { ascending: false }))).data || [];
+    job._addrReq = await addrPending(id);
     if (['partial','returned'].includes(job.delivery_outcome))
       job._redeliveries = (await withRetry('Loading redeliveries', () => sb.from('jobs').select('id, status, scheduled_date').eq('redelivery_of', id))).data || [];
     if (job.truck_id && job.scheduled_date)   // the other SOs on this truck trip — to show which share this drop (stop)
@@ -4431,7 +4433,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
         ${job.order_value != null && canSeeCosts() ? `<dt>Order value</dt><dd>${peso(job.order_value)}${br ? `<div class="ft">Customer delivery charge (proposal): ${peso(br.charge)} · ${esc(br.label)}</div>` : ''}</dd>` : ''}
         ${job.override_reason ? `<dt>Override</dt><dd><div style="color:var(--warn)">${esc((job.rule_warnings || []).join(' '))}</div><div class="ft">Reason: ${esc(job.override_reason)}</div></dd>` : ''}
         ${job.assigned_team ? `<dt>Crew / helpers</dt><dd>${esc(job.assigned_team)}</dd>` : ''}
-        <dt>Address</dt><dd>${job.address ? `${esc(job.address)}<br><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.address)}">Open in Maps</a>` : '—'}</dd>
+        <dt>Address</dt><dd>${job.address ? `${esc(job.address)}<br><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.address)}">Open in Maps</a>` : '—'}${addrCanChange(job) ? ` · <button class="lnk" id="dr-addr">📍 Change address</button>` : ''}${addrReqBox(job)}</dd>
         ${job.site_lat != null ? `<dt>Delivery spot</dt><dd>${esc(SITE_LABEL[job.site_source] || '')}${job.site_accuracy_m ? ` (±${Math.round(job.site_accuracy_m)} m)` : ''} · ${siteLink(job.site_lat, job.site_lon, 'Open in Maps')}${dispatcher ? ` · <a href="#" id="dr-onmap">Show on HATID map</a>` : ''}</dd>` : ''}
         <dt>Notes</dt><dd style="white-space:pre-wrap">${esc(job.notes || '—')}</dd>
       </dl>
@@ -4511,6 +4513,8 @@ function renderDrawer(job, events, costs = [], rep = {}){
   if ($('eco-out')){ fillEconomy(job); ['cf-date','cf-dest'].forEach(id => $(id)?.addEventListener('change', () => fillEconomy(job))); }
   if ($('dr-msgs')) $('dr-msgs').addEventListener('click', () => { closeOverlay(); state.msgOpen = job.id; switchView('msgs'); });
   if ($('dr-contact')) $('dr-contact').addEventListener('click', () => openClientContact(job, () => openJob(job.id)));
+  $('dr-addr')?.addEventListener('click', () => openAddressChange(job, () => refreshAfterChange(job.id)));
+  bindAddrReq(job, () => refreshAfterChange(job.id));
   bindOutboxRetry(() => openJob(job.id));
   if ($('dr-refs')) $('dr-refs').addEventListener('click', () => openDocRefs(job, () => openJob(job.id)));
   { const again = () => { closeOverlay(); openJob(job.id); };
@@ -4959,6 +4963,7 @@ const tripOf = job => state.field?.date === job.scheduled_date ? fieldTrips(stat
 function tripCardHtml(t){
   const s = tripState(t), lbl = `${esc(t.truck.label || 'Truck')} · Trip ${t.trip_no}`, sn = stopNumbers(t.jobs);
   const re = t.notices.find(n => n.kind === 'reorder' && n.status === 'pending');
+  const adr = t.notices.filter(n => n.kind === 'address' && n.status === 'pending');
   const req = t.notices.find(n => n.kind === 'order_request' && (n.status === 'pending' || Date.now() - new Date(n.resolved_at || 0) < 2 * 3600e3));
   let pre = '';
   if (!s.departed && s.open.length){
@@ -4970,7 +4975,10 @@ function tripCardHtml(t){
         : `<button class="btn primary big" data-predep="${esc(t.key)}" ${state.field?.needTruck ? 'disabled title="Choose your truck first"' : ''}>${s.ticked || t.check ? 'Continue' : 'Start'} pre-departure check</button>`}</div>
       ${!s.locked && state.field?.needTruck ? '<div class="ft" style="margin-top:6px">☝️ Choose your truck in “My truck today” first — then the pre-departure check opens.</div>' : ''}`;
   } else if (s.locked) pre = `<div class="ft" style="margin-top:4px">🔒 Pre-departure confirmed ${hm12(t.row.load_locked_at)} · <button class="lnk" data-predep="${esc(t.key)}">view</button></div>`;
-  const banners = (re ? `<div class="warnbox nt-re"><b>🔀 Base changed the order of your drops.</b> Check the new order below.
+  const banners = adr.map(n => `<div class="warnbox nt-re"><b>📍 New delivery address — ${esc(t.jobs.find(j => j.id === n.job_id)?.client_name || 'one of your drops')}</b>
+      <div style="margin-top:4px">${esc(n.note || '')}</div>${n.reason ? `<div class="ft">Reason: ${esc(n.reason)}</div>` : ''}${n.note ? `<div class="ft">${mapsLink(n.note)}</div>` : ''}
+      <div class="row-btns" style="margin-top:8px"><button class="btn ok" data-ack-ok="${esc(n.id)}" data-ack-kind="address">👍 OK, got it</button><button class="btn" data-ack-cn="${esc(n.id)}" data-ack-kind="address">⚠️ With concern</button></div></div>`).join('')
+    + (re ? `<div class="warnbox nt-re"><b>🔀 Base changed the order of your drops.</b> Check the new order below.
       <div class="row-btns" style="margin-top:8px"><button class="btn ok" data-ack-ok="${esc(re.id)}">👍 OK, got it</button><button class="btn" data-ack-cn="${esc(re.id)}">⚠️ With concern</button></div></div>` : '')
     + (req ? `<div class="${req.status === 'declined' ? 'warnbox' : 'infobox'}">${req.status === 'pending' ? `⏳ Waiting for base to approve going to <b>${esc(t.jobs.find(j => j.id === req.job_id)?.client_name || 'that drop')}</b> first (${esc(ORDER_REASON[req.reason] || req.reason)})`
         : req.status === 'approved' ? `✅ Base approved — <b>${esc(t.jobs.find(j => j.id === req.job_id)?.client_name || 'that drop')}</b> is now next${req.response_note ? ': ' + esc(req.response_note) : ''}`
@@ -4998,18 +5006,18 @@ function bindTripCards(){
     try { await withRetry('Saving', () => sb.rpc('job_trip_update', { p_date: t.date, p_truck: t.truck_id, p_trip: t.trip_no, p_patch: { back: true } }), 1); toast('Back at base — thanks!', 'ok'); loadField(); }
     catch { e.currentTarget.disabled = false; }
   }));
-  document.querySelectorAll('[data-ack-ok]').forEach(b => b.addEventListener('click', () => ackReorder(b.dataset.ackOk, 'ok', null)));
+  document.querySelectorAll('[data-ack-ok]').forEach(b => b.addEventListener('click', () => ackReorder(b.dataset.ackOk, 'ok', null, b.dataset.ackKind)));
   document.querySelectorAll('[data-ack-cn]').forEach(b => b.addEventListener('click', () => {
     if (b.parentElement.nextElementSibling?.classList.contains('cn-ask')) return;
-    b.parentElement.insertAdjacentHTML('afterend', `<div class="cn-ask" style="margin-top:8px"><textarea class="i" rows="2" placeholder="Your concern about the new order (e.g. that client closes at 3 PM)"></textarea>
+    b.parentElement.insertAdjacentHTML('afterend', `<div class="cn-ask" style="margin-top:8px"><textarea class="i" rows="2" placeholder="${b.dataset.ackKind === 'address' ? 'Your concern about the new address (e.g. too far for the remaining time)' : 'Your concern about the new order (e.g. that client closes at 3 PM)'}"></textarea>
       <div class="row-btns" style="margin-top:6px"><button class="btn primary">Send to base</button></div></div>`);
     const box = b.parentElement.nextElementSibling;
-    box.querySelector('button').addEventListener('click', () => { const v = box.querySelector('textarea').value.trim(); if (!v) return toast('Write your concern', 'error'); ackReorder(b.dataset.ackCn, 'concern', v); });
+    box.querySelector('button').addEventListener('click', () => { const v = box.querySelector('textarea').value.trim(); if (!v) return toast('Write your concern', 'error'); ackReorder(b.dataset.ackCn, 'concern', v, b.dataset.ackKind); });
   }));
 }
-async function ackReorder(id, status, note){
+async function ackReorder(id, status, note, kind){
   try { await withRetry('Sending', () => sb.rpc('job_trip_notice_resolve', { p_id: id, p_status: status, p_note: note }), 1);
-    toast(status === 'ok' ? 'Base sees you got the new order' : 'Your concern was sent to base', 'ok'); loadField(); } catch {}
+    toast(status === 'ok' ? (kind === 'address' ? 'Base sees you got the new address' : 'Base sees you got the new order') : 'Your concern was sent to base', 'ok'); loadField(); } catch {}
 }
 
 async function departTrip(t, btn){
@@ -5759,6 +5767,103 @@ async function loadPkDtix(){
   document.querySelectorAll('[data-pkd-date]').forEach(b => b.addEventListener('click', () => ssChangeDate(state.pkDtix.find(j => j.id === b.dataset.pkdDate))));
   document.querySelectorAll('[data-pkd-cancel]').forEach(b => b.addEventListener('click', () => ssCancel(state.pkDtix.find(j => j.id === b.dataset.pkdCancel))));
 }
+/* ----- Change of delivery address (Rommel 2026-11-05) -----
+   Dispatch changes it directly; Sales Support changes it directly while the ticket waits for dispatch, otherwise asks and dispatch approves.
+   Database (job_address_change / job_address_decide): a schedule in signing or approved goes back for signing, the signers are told,
+   a truck already loaded / on the road gets a driver notice to acknowledge, and the client (if already told) and agent get the new address. */
+function addrCanChange(j){
+  if (!j || state.preview || ['completed','rejected'].includes(j.status)) return false;
+  return isDispatcher() || state.me?.pickup_role === 'sales_support';
+}
+async function addrPending(jobId){
+  try { const { data } = await sb.from('job_address_requests').select('*').eq('job_id', jobId).eq('status', 'pending').order('created_at', { ascending: false }).limit(1);
+    return data?.[0] || null; } catch { return null; }
+}
+function addrReqBox(j){
+  const r = j._addrReq; if (!r) return '';
+  return `<div class="warnbox" style="margin-top:6px"><b>📍 Address change asked</b> by ${esc(r.requested_name || 'Sales Support')} · ${esc(fmtTime(r.created_at))}
+    <div style="margin-top:4px">New: <b>${esc(r.new_address)}</b>${r.new_destination_id && r.new_destination_id !== j.destination_id ? ` <span class="ft">(destination ${esc(destLabel(j.destination_id))} → ${esc(destLabel(r.new_destination_id))})</span>` : ''}</div>
+    <div class="ft">Reason: ${esc(r.reason)}</div>
+    ${isDispatcher() ? `<div class="row-btns" style="margin-top:8px"><button class="btn ok" data-addr-ok="${esc(r.id)}">Approve the change</button><button class="btn" data-addr-no="${esc(r.id)}">Decline</button></div>`
+      : '<div class="ft">Waiting for dispatch.</div>'}</div>`;
+}
+function bindAddrReq(j, after){
+  const r = j._addrReq; if (!r) return;
+  document.querySelector(`#overlay [data-addr-ok="${r.id}"]`)?.addEventListener('click', () => addrDecide(j, r, true, after));
+  document.querySelector(`#overlay [data-addr-no="${r.id}"]`)?.addEventListener('click', () => addrDecide(j, r, false, after));
+}
+async function addrScheduleState(j){
+  if (!j.scheduled_date || j.status === 'proposed') return null;
+  try { const { data, error } = await sb.from('delivery_schedules').select('status, snapshot').eq('delivery_date', j.scheduled_date);
+    if (error) return undefined;
+    const s = (data || []).find(x => (x.snapshot || []).some(t => (t.drops || []).some(d => d.job_id === j.id)));
+    return s ? s.status : null; } catch { return undefined; }
+}
+const SCHED_SIGNING = { for_review: 'waiting for review', for_confirmation: 'waiting for confirmation', for_approval: 'waiting for approval', approved: 'approved' };
+function addrResultText(res){
+  const bits = ['Address changed'];
+  if (res?.schedule_returned) bits.push(`the ${fmtDate(res.schedule_date)} schedule went back for signing`);
+  if (res?.driver_notice) bits.push('the driver was asked to confirm');
+  bits.push(res?.client_told ? 'client and agent told' : 'agent told');
+  return bits.join(' — ');
+}
+async function addrDecide(j, r, approve, after){
+  let note = null;
+  if (!approve){ note = prompt('Why is the address change declined? (Sales Support sees this)'); if (note === null) return; if (!note.trim()) return toast('Say why', 'error'); }
+  else {
+    const sch = await addrScheduleState(j);
+    if (!confirm(`Change the address of ${j.quotation_serial} to:\n${r.new_address}\n\n${sch && SCHED_SIGNING[sch] ? `The ${fmtDate(j.scheduled_date)} schedule is ${SCHED_SIGNING[sch]} — it goes back for signing.\n` : ''}Continue?`)) return;
+  }
+  try { const { data } = await withRetry(approve ? 'Changing the address' : 'Declining', () => sb.rpc('job_address_decide', { p_req: r.id, p_approve: approve, p_note: note }), 1);
+    toast(approve ? addrResultText(data) : 'Declined — Sales Support was told', 'ok'); after && after(); } catch {}
+}
+async function openAddressChange(j, after){
+  const office = isDispatcher(), direct = office || j.status === 'proposed';
+  const di = destInfo(j.destination_id), truck = j.truck_id ? state.ref.truckById?.[j.truck_id] : null;
+  const onRoad = ['dispatched','in_progress','issue'].includes(j.status);
+  openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><h2 style="margin-top:0">📍 Change the delivery address</h2>
+    <div class="ft">${esc(j.quotation_serial)} · ${esc(j.client_name || '')}${j.scheduled_date ? ' · ' + esc(fmtDate(j.scheduled_date)) : ''}</div>
+    <div class="infobox" style="margin-top:8px"><div class="ft">Now</div><b>${esc(j.address || 'No address on file')}</b><div class="ft">${esc(destLabel(j.destination_id))}${di ? ' · ' + esc(di.zone.name) : ''}</div></div>
+    <label class="f" style="margin-top:8px">New address *<textarea class="i" id="ad-a" rows="2" placeholder="Street, barangay, town / city, province">${esc(j.address || '')}</textarea></label>
+    <label class="f">Destination * <span class="ft">— guessed from the address; check it</span><select class="i" id="ad-d">${destOptions(j.company, j.destination_id)}</select></label>
+    <label class="f">Why? *<input class="i" id="ad-r" placeholder="e.g. client asked to deliver to their other site"></label>
+    <div id="ad-fx" style="margin-top:6px"></div>
+    <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Back</button><button class="btn primary" id="ad-go">${direct ? 'Change the address' : 'Ask dispatch to change it'}</button></div></div>`);
+  bindClose();
+  let destTouched = false, sch = null;
+  const fx = () => {
+    const d = $('ad-d').value, nd = destInfo(d), changed = d && d !== j.destination_id, out = [];
+    if (changed) out.push(`Destination changes: <b>${esc(destLabel(j.destination_id))}</b> → <b>${esc(destLabel(d))}</b>${nd ? ` (${esc(nd.zone.name)})` : ''}.`);
+    if (changed && nd && j.scheduled_date && !(nd.group.schedule_days || []).includes(isoDow(j.scheduled_date)))
+      out.push(`⚠ ${esc(nd.group.name)} is normally delivered ${esc((nd.group.schedule_days || []).map(x => DAY_SHORT[x]).join(', ') || '—')}, not ${esc(DAY_SHORT[isoDow(j.scheduled_date)])}.`);
+    if (changed && truck?.uses_trip_rates && canSeeCosts()){
+      const a = rateFor(j.destination_id, truck.truck_class, j.scheduled_date), b = rateFor(d, truck.truck_class, j.scheduled_date);
+      out.push(`Trip rate on ${esc(truck.label)}: ${a ? peso(a.rate) : '—'} → ${b ? peso(b.rate) : '<b>no rate for this destination</b>'}.`);
+    } else if (changed && j.truck_id) out.push('The trip cost may change.');
+    if (changed && j.courier_vehicle_id) out.push('⚠ Grab / Lalamove: the fare was for the old address — check the booking.');
+    if (j.truck_id && changed) out.push('It stays on the same truck and trip — move it in the Day planner if it no longer fits the route.');
+    if (sch && SCHED_SIGNING[sch]) out.push(`🖊 The ${esc(fmtDate(j.scheduled_date))} delivery schedule is <b>${SCHED_SIGNING[sch]}</b> — it goes <b>back for signing</b> and the signers are told.`);
+    else if (sch === undefined && j.status !== 'proposed') out.push('🖊 If the delivery schedule is in signing or approved, it goes back for signing and the signers are told.');
+    if (onRoad) out.push('🚚 The truck is already on the road — the driver gets the new address and must tap “OK, got it”.');
+    out.push('The sales agent is told; the client too if they were already told about this delivery. The map pin moves to the new destination (fix it on the Map if needed).');
+    if (!direct) out.push('Dispatch approves the change first.');
+    $('ad-fx').innerHTML = `<ul class="ft" style="margin:0;padding-left:18px">${out.map(x => `<li>${x}</li>`).join('')}</ul>`;
+  };
+  $('ad-a').addEventListener('input', () => { if (destTouched) return; const g = guessDest(j.company, $('ad-a').value); if (g){ $('ad-d').value = g.id; fx(); } });
+  $('ad-d').addEventListener('change', () => { destTouched = true; fx(); });
+  fx(); addrScheduleState(j).then(v => { sch = v; if ($('ad-fx')) fx(); });
+  $('ad-go').addEventListener('click', async e => {
+    const a = $('ad-a').value.trim(), d = $('ad-d').value || null, r = $('ad-r').value.trim();
+    if (!a) return toast('Type the new address', 'error');
+    if (!d) return toast('Pick the destination', 'error');
+    if (!r){ $('ad-r').focus(); return toast('Say why the address is changing', 'error'); }
+    if (a === (j.address || '').trim() && d === j.destination_id) return toast('That is the same address', 'error');
+    e.target.disabled = true;
+    try { const { data } = await withRetry(direct ? 'Changing the address' : 'Sending to dispatch', () => sb.rpc('job_address_change', { p_job: j.id, p_address: a, p_destination: d, p_reason: r }), 1);
+      toast(data?.applied ? addrResultText(data) : 'Sent — dispatch approves the change', 'ok'); closeOverlay(); after && after(); }
+    catch { e.target.disabled = false; }
+  });
+}
 function ssChangeDate(j, after){
   openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><h2 style="margin-top:0">Change the requested date</h2>
     <div class="ft">${esc(j.quotation_serial)} · ${esc(j.client_name || '')}. Dispatch is told.</div>
@@ -5781,6 +5886,7 @@ function ssCancel(j, after){
 async function openPkDtix(id){
   const j = state.pkDtix.find(x => x.id === id); if (!j) return;
   let ev = []; try { ev = (await sb.from('job_events').select('event_type, notes, created_at, actor_name').eq('job_id', id).order('created_at', { ascending: false })).data || []; } catch {}
+  j._addrReq = await addrPending(id);
   const st = ssStage(j);
   openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true">
     <div class="chart-h" style="margin:0"><h2 style="margin:0" class="mono">${esc(j.quotation_serial)}</h2><span><span class="tag ${st.c}">${esc(st.t)}</span>${prepMark(j)}</span></div>
@@ -5789,7 +5895,7 @@ async function openPkDtix(id){
       <dt>Requested date</dt><dd>${j.scheduled_date ? fmtDate(j.scheduled_date) : '—'}</dd>
       <dt>Truck / trip</dt><dd>${j.trucks?.label ? esc(j.trucks.label) + (j.trip_no ? ' · trip ' + j.trip_no : '') : j.courier_vehicle_id ? 'Grab / Lalamove' : 'Not assigned yet'}</dd>
       <dt>Contact</dt><dd>${esc([j.client_contact_name, j.client_phone].filter(Boolean).join(' · ') || '—')}</dd>
-      <dt>Address</dt><dd>${esc(j.address || '—')}</dd>
+      <dt>Address</dt><dd>${esc(j.address || '—')}${addrCanChange(j) ? ` · <button class="lnk" id="pkdd-addr">📍 Change address</button>` : ''}${addrReqBox(j)}</dd>
       <dt>Odoo ticket</dt><dd>${esc(j.odoo_ticket || '—')}</dd>
       <dt>Uploaded by</dt><dd>${esc(j.created_name || '—')} · ${fmtTime(j.created_at)}</dd>
       ${j.prepared_at ? `<dt>Prepared</dt><dd>${esc(j.prepared_name || '')} · ${fmtTime(j.prepared_at)}</dd>` : ''}
@@ -5801,6 +5907,7 @@ async function openPkDtix(id){
   bindClose();
   $('pkdd-items')?.addEventListener('click', () => ssItemsModal(j)); $('pkdd-bal')?.addEventListener('click', () => ssBalanceModal(j));
   $('pkdd-date')?.addEventListener('click', () => ssChangeDate(j)); $('pkdd-cancel')?.addEventListener('click', () => ssCancel(j));
+  $('pkdd-addr')?.addEventListener('click', () => openAddressChange(j, () => { closeOverlay(); loadPkDtix(); }));
 }
 ['pkd-from','pkd-to','pkd-show','pkd-mine'].forEach(id => $(id).addEventListener('change', loadPkDtix));
 $('pkd-q').addEventListener('input', () => { clearTimeout(state.pkdQ); state.pkdQ = setTimeout(loadPkDtix, 300); });
