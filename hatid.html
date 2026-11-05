@@ -2510,12 +2510,14 @@ function simPickupRpc(fn, a){
       SIM.pk_orders.push(o); log(o.id, null, 'uploaded', on ? null : 'Past the cut-off — needs the Warehouse Manager’s OK to queue'); return ok(o.id);
     }
     case 'pk_set_lines': {
-      if (!['want','prep','plan'].includes(a.p_field)) return fail('bad field');
-      if (!can(...(a.p_field === 'prep' ? ['warehouse'] : ['sales_support']))) return fail(a.p_field === 'prep' ? 'Only the warehouse can tick lines as prepared.' : 'Only Sales Support can change what the client will pick up.');
+      if (!['want','prep','plan','prep_qty'].includes(a.p_field)) return fail('bad field');
+      if (!can(...(['prep','prep_qty'].includes(a.p_field) ? ['warehouse'] : ['sales_support']))) return fail(a.p_field === 'prep' ? 'Only the warehouse can tick lines as prepared.' : 'Only Sales Support can change what the client will pick up.');
       const o = O(a.p_order); if (!o) return fail('Ticket not found.'); if (['done','no_show','cancelled'].includes(o.status)) return fail('This ticket is closed.');
       o.lines.forEach(l => { if (!(String(l.i) in (a.p_vals || {}))) return; const v = a.p_vals[l.i];
         if (a.p_field === 'plan'){ const left = l.qty - l.taken; if (v === '' || v == null || Number(v) >= left) delete l.plan; else if (Number(v) <= 0){ delete l.plan; l.want = false; } else { l.plan = Number(v); l.want = true; } }
-        else l[a.p_field] = v === true || v === 'true'; });
+        else if (a.p_field === 'prep_qty'){ const pl = l.plan != null && l.plan !== '' ? Number(l.plan) : l.qty - l.taken;
+          if (v === '' || v == null || Number(v) >= pl){ delete l.prep_qty; l.prep = true; } else if (Number(v) <= 0){ delete l.prep_qty; l.prep = false; } else { l.prep_qty = Number(v); l.prep = true; } }
+        else { l[a.p_field] = v === true || v === 'true'; if (a.p_field === 'prep' && !l.prep) delete l.prep_qty; } });
       o.updated_at = now; prepCheck(o); return ok({ ...o });
     }
     case 'pk_set_contact': {
@@ -5985,7 +5987,7 @@ async function loadPkRole(view){
   const oRow = (o, btn = '', lead = '') => { const p = pkLinesDone(o);
     return `<div class="pkm-row" data-pko="${esc(o.id)}" data-find="${esc([o.so_no, o.client_name, o.salesperson].filter(Boolean).join(' ').toLowerCase())}">${lead}<span class="pkm-d"><b>${esc(o.so_no)}</b> ${esc(o.client_name || '')}
       <span class="ft">${o.pickup_date < day ? `<b style="color:var(--bad)">${esc(fmtDay(o.pickup_date))}</b>` : o.pickup_date === day ? 'today' : 'tomorrow'} · ${esc(PK_KIND[o.kind])}${o.status === 'balance' ? ' · balance' : ''}${o.status === 'in_queue' ? ' · in the queue' : ''}${o.salesperson ? ' · ' + esc(o.salesperson) : ''}${o.missed_last ? ` · <b style="color:var(--bad)">missed ${esc(fmtDay(o.missed_last))}${o.missed_count > 1 ? ' (' + o.missed_count + '×)' : ''}</b>` : ''}</span>${pkInstr(o, 90)}</span>
-      <span class="pkm-tags">${pkPartialTag(o)}
+      <span class="pkm-tags">${(o.lines||[]).some(pkShort) ? `<span class="tag warn" title="The warehouse prepared less than the client takes this time">Short</span> ` : ''}${pkPartialTag(o)}
       ${p.n ? (p.prep === p.n ? '<span class="tag ok">✓ Prepared</span>' : `<span class="tag warn">${p.prep} of ${p.n} prepared</span>`) : ''}${o.on_time && o.kind !== 'walkin' ? '' : pkCutTag(o)}</span>${btn ? `<span class="pkm-btns">${btn}</span>` : ''}</div>`; };
   let todo = 0;
   const sec = (title, hint, rows, opts = {}) => { if (opts.todo) todo += opts.todoN ?? rows.length;
@@ -6221,6 +6223,9 @@ async function openPkVisit(id){
    A line can be partial by quantity too: plan = how many the client takes THIS time (e.g. small car); empty = all that's left. */
 const pkLeft = l => Number(l.qty) - Number(l.taken || 0);
 const pkPlan = l => !l.want ? 0 : l.plan != null && l.plan !== '' && Number(l.plan) < pkLeft(l) ? Number(l.plan) : pkLeft(l);
+// what the warehouse actually prepared (prep_qty only when short of what the client takes this time)
+const pkPrepQty = l => l.prep && l.prep_qty != null && l.prep_qty !== '' && Number(l.prep_qty) < pkPlan(l) ? Number(l.prep_qty) : (l.prep ? pkPlan(l) : 0);
+const pkShort = l => l.want && l.prep && pkPrepQty(l) < pkPlan(l);
 function pkTakeTag(o){ const w = (o.lines || []).filter(l => pkLeft(l) > 0), t = w.filter(l => l.want), q = t.filter(l => pkPlan(l) < pkLeft(l));
   if (!w.length) return '';
   return t.length === w.length && !q.length ? `<span class="tag ok">Full</span> <span class="ft">${w.length} item${w.length === 1 ? '' : 's'}</span>`
@@ -6239,7 +6244,8 @@ function pkLinesTable(o, edit, prepEdit = false){   // prepared ticks only from 
       return `<tr class="${left <= 0 ? 'off' : ''}"><td>${esc(l.desc)}</td><td class="num">${esc(fmtQty(l.qty))} ${esc(l.unit || '')}</td><td class="num">${Number(l.taken) ? esc(fmtQty(l.taken)) : '—'}</td>
         <td>${left > 0 ? (canW ? `<input type="checkbox" class="pk-w" data-i="${l.i}"${l.want ? ' checked' : ''} aria-label="Client takes ${esc(l.desc)}">` : l.want ? '✓' : '<span class="ft">not today</span>') : '<span class="ft">done</span>'}</td>
         <td class="num">${left > 0 ? (canW ? `<input class="i pk-plan" type="number" min="0" max="${left}" step="any" data-i="${l.i}" value="${pkPlan(l)}" style="width:80px" aria-label="Qty this time — ${esc(l.desc)}">` : l.want ? `<b${pkPlan(l) < left ? ' style="color:var(--warn)"' : ''}>${esc(fmtQty(pkPlan(l)))}</b>${pkPlan(l) < left ? ` <span class="ft">of ${esc(fmtQty(left))}</span>` : ''}` : '—') : ''}</td>
-        <td>${left > 0 ? (canP ? `<input type="checkbox" class="pk-p" data-i="${l.i}"${l.prep ? ' checked' : ''} aria-label="Prepared ${esc(l.desc)}">` : l.prep ? '✓' : '—') : ''}</td></tr>`; }).join('')}
+        <td>${left > 0 ? (canP && l.want ? `<label style="display:flex;gap:6px;align-items:center;white-space:nowrap"><input type="checkbox" class="pk-p" data-i="${l.i}"${l.prep ? ' checked' : ''} aria-label="Prepared ${esc(l.desc)}"><input class="i pk-pq" oninput="const c=this.parentNode.querySelector('.pk-p');if(c&&this.value!=='')c.checked=Number(this.value)>0" type="number" min="0" max="${pkPlan(l)}" step="any" data-i="${l.i}" value="${l.prep ? pkPrepQty(l) : pkPlan(l)}" style="width:72px${pkShort(l) ? ';border-color:var(--warn)' : ''}" aria-label="Qty prepared — ${esc(l.desc)}"> <span class="ft">of ${esc(fmtQty(pkPlan(l)))}</span></label>`
+          : canP ? '<span class="ft">not today</span>' : pkShort(l) ? `<b style="color:var(--warn)">${esc(fmtQty(pkPrepQty(l)))} of ${esc(fmtQty(pkPlan(l)))}</b>` : l.prep ? '✓' : '—') : ''}</td></tr>`; }).join('')}
     </tbody></table></div>`;
 }
 const fmtQty = x => { const n = Number(x); return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, '').replace(/\.$/, ''); };
@@ -6286,7 +6292,7 @@ async function openPkLoad(id){
       <div class="tbl-wrap"><table class="rt ut"><thead><tr><th>Item</th><th class="num">Still to pick up</th><th class="num">Loaded now</th></tr></thead><tbody>
       ${(o.lines || []).filter(l => Number(l.qty) > Number(l.taken)).map(l => { const left = Number(l.qty) - Number(l.taken);
         return `<tr><td>${esc(l.desc)}${l.want ? '' : ' <span class="ft">(not planned today)</span>'}</td><td class="num">${esc(fmtQty(left))} ${esc(l.unit || '')}</td>
-          <td class="num"><input class="i pk-q" type="number" min="0" max="${left}" step="any" data-o="${esc(o.id)}" data-i="${l.i}" value="${pkPlan(l)}" style="width:90px" aria-label="Loaded ${esc(l.desc)}"></td></tr>`; }).join('') || '<tr><td colspan="3" class="ft">No item lines.</td></tr>'}
+          <td class="num"><input class="i pk-q" type="number" min="0" max="${left}" step="any" data-o="${esc(o.id)}" data-i="${l.i}" value="${l.prep ? pkPrepQty(l) : pkPlan(l)}" style="width:90px" aria-label="Loaded ${esc(l.desc)}"></td></tr>`; }).join('') || '<tr><td colspan="3" class="ft">No item lines.</td></tr>'}
       </tbody></table></div></div>`).join('')}
     <div class="card pad hidden" id="pkl-over" style="margin:8px 0;border-color:var(--bad)"><b style="color:var(--bad)">Over the target</b> <span class="ft" id="pkl-over-t"></span>
       <div class="ft" style="margin:4px 0">Pick the main reason. It goes in the Promptness report.</div>
@@ -6398,10 +6404,13 @@ async function openPkOrder(id, opt = {}){
   $('pko-save')?.addEventListener('click', async e => { e.target.disabled = true;
     try {
       const w = {}, p = {}, pl = {}; document.querySelectorAll('.pk-w').forEach(c => { w[c.dataset.i] = c.checked; }); document.querySelectorAll('.pk-p').forEach(c => { p[c.dataset.i] = c.checked; });
+      const pq = {}; for (const i of document.querySelectorAll('.pk-pq')){ if (!p[i.dataset.i]) continue; const q = i.value === '' ? '' : Number(i.value);
+        if (q !== '' && (!(q >= 0) || q > Number(i.max))) { i.focus(); throw toast(`The prepared quantity can be 0 to ${i.max}`, 'error'); } pq[i.dataset.i] = q === '' ? '' : String(q); }
       for (const i of document.querySelectorAll('.pk-plan')){ const q = Number(i.value); if (!(q >= 0) || q > Number(i.max)) { i.focus(); throw toast(`The quantity can be 0 to ${i.max}`, 'error'); } if (w[i.dataset.i] !== false) pl[i.dataset.i] = String(q); }
       if (Object.keys(w).length) await pkRpc('Saving', 'pk_set_lines', { p_order: o.id, p_field: 'want', p_vals: w });
       if (Object.keys(pl).length) await pkRpc('Saving', 'pk_set_lines', { p_order: o.id, p_field: 'plan', p_vals: pl });
       if (Object.keys(p).length) await pkRpc('Saving', 'pk_set_lines', { p_order: o.id, p_field: 'prep', p_vals: p });
+      if (Object.keys(pq).length) await pkRpc('Saving', 'pk_set_lines', { p_order: o.id, p_field: 'prep_qty', p_vals: pq });
       toast('Saved', 'ok'); closeOverlay(); loadPk(state.view);
     } catch { e.target.disabled = false; } });
   $('pko-allow')?.addEventListener('click', async () => { if (!confirm('Allow this late ticket? It will be served and recorded, but not counted in promptness.')) return;
