@@ -7042,6 +7042,29 @@ const PROFILES = {
             return out;
           },
           { reportCountsUnclaimedWait: true, issuedFromFlags: 1, trackerStatus: 'IQ Locked' });
+        check('Reports filters narrow every figure, and match the Dashboard with the same choices',
+          () => {
+            const w = window, keep = { d: w.dirData, u: w.sheetUsers, o: w.pendingOrders, f: w._stageFlags, s: w.sessionQuotations };
+            const out = {};
+            const set = (id, v) => { const x = document.getElementById(id); if (x) x.value = v; return !!x; };
+            try {
+              const mk = (id, user, created) => ({ id, baseSerial: id, user, created, status: 'IQ Locked', value: 1000, updatedAt: '2026-11-01T00:00:00Z' });
+              w.dirData = [mk('QT-W00000901', 'Test Person', '2026-03-10'), mk('QT-W00000902', 'Test Person', '2026-10-10'), mk('QT-M00000903', 'Test Person', '2026-10-11')];
+              w.sessionQuotations = {}; w._stageFlags = null; w.pendingOrders = [];
+              w.sheetUsers = [{ name: 'Test Person', pos: 'Staff', includeKpi: true, active: true, company: 'World Class Laminate, Inc.' }];
+              out.barExists = set('rep-co', '') && set('rep-from', '') && set('rep-to', '');
+              out.none = w._reportProjectRows().length;
+              set('rep-co', 'W'); out.company = w._reportProjectRows().length;
+              set('rep-from', '2026-10-01'); set('rep-to', '2026-10-31'); out.both = w._reportProjectRows().length;
+              out.issued = w._reportTeamStats()[0].quotes;
+              out.total = w.KPI_DEFS.totalQuotes.calc();
+              out.pipeline = w.KPI_DEFS.openPipeline.calc();
+              ['rep-co', 'rep-from', 'rep-to'].forEach(i => set(i, ''));
+            } catch (e) { out.threw = String(e); }
+            Object.assign(w, { dirData: keep.d, sheetUsers: keep.u, pendingOrders: keep.o, _stageFlags: keep.f, sessionQuotations: keep.s });
+            return out;
+          },
+          { barExists: true, none: 3, company: 2, both: 1, issued: 1, total: 1, pipeline: 1000 });
         const usual = await (async () => {
           const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
           const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };
