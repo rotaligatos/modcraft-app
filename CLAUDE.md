@@ -13627,7 +13627,10 @@ Commit `0ce078b`, with 4 smoke checks (all fail on the old code).
 - **Only W389 had a lock lost** (checked: `initial_locked_at` later than the state's `updated_at`).
 - **Then fixed:** removing a reflected area now takes its cutting list off (`_daDetachAreaList`; lists tagged `_listId`, parts `id`, areas `cutListId`).
   W389 had 195 parts and 186 boards on the layout for about 62 billed. Lists reflected before this have no tag: if another cutting-list area
-  remains, the app warns instead of guessing. W389's project size 9942 is a typed entry (`state.projectSize`), not caused by this; Sonny to confirm it.
+  remains, the app warns instead of guessing. W389's project size 9942 is a typed entry and the user confirms it is real: one list holds about 9942 pieces.
+- **Replace-or-Add never asked in the same session:** `_prodReflectDo` tested `known.componentCount`, which a just-reflected list does not have (only a saved summary does),
+  so a corrected list was silently added. This is what tripled W389. Fixed with `_daPartCount`. The layout was ~2.4 MB at about 70-80 chars a piece = ~30,000 pieces, three times 9942.
+- Noted, not changed: cutting-list project size detection counts rows (65), not pieces (9942), which is why he typed it.
 
 # OPEN — W389 (2026-11-05)
 Sonny: Designers Support → the list → Reflect → **Replace it** → check project size → Lock → Request signature. Karen re-signs.

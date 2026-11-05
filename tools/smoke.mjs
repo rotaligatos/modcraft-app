@@ -6972,6 +6972,36 @@ const PROFILES = {
         })();
         check('Removing a reflected area takes its cutting list off, so reflecting again does not count it twice',
           () => areaList, { afterRemove: 0, boardLayout: false, afterReflectAgain: 3, parts: 1, both: 5, afterRemovingB: 3, partsLeft: 1, layoutFollows: 3, afterHandArea: 3 });
+        const askAgain = await (async () => {
+          const w = window, out = {};
+          const keep = { ask: w._prodAskReplaceOrAdd, toast: w.showToast, log: w.logActivity };
+          try {
+            w.showToast = () => {}; w.logActivity = () => {};
+            w.initQuotation();
+            const list = (n) => ({ result: { components: Array.from({ length: n }, (_, i) => ({ name: 'P' + i, length: 500, width: 300, qty: 1, material: 'MDF', thickness: 18, area: 'A' })), holeSchedule: [], extraServices: [], hardware: [] },
+              summary: { materials: [{ include: true, name: 'Board', qty: 1, unit: 'pc', price: 100 }], hardware: [], services: [] }, fileName: 'Cutting list' });
+            let asked = 0, knownParts = 0, doReplace = null;
+            w._prodAskReplaceOrAdd = (known, onReplace) => { asked++; knownParts = w._daPartCount ? w._daPartCount(known) : known.componentCount; doReplace = onReplace; };
+            Object.assign(w.prodState, list(65));
+            w._prodReflectDo(false, 's1');
+            await new Promise(r => setTimeout(r, 30));
+            out.firstAsked = asked;
+            Object.assign(w.prodState, list(70));            // the corrected list, same session
+            w._prodReflectDo(false, 's1');
+            await new Promise(r => setTimeout(r, 30));
+            out.secondAsked = asked; out.knownParts = knownParts;
+            out.beforeChoice = w.qDrawingAnalysis.result.components.length;
+            if (doReplace) doReplace();
+            await new Promise(r => setTimeout(r, 30));
+            out.afterReplace = w.qDrawingAnalysis.result.components.length;
+            out.lists = w.qDrawingAnalysis.parts.length;
+            w.initQuotation();
+          } catch (e) { out.threw = String(e); }
+          Object.assign(w, { _prodAskReplaceOrAdd: keep.ask, showToast: keep.toast, logActivity: keep.log });
+          return out;
+        })();
+        check('Reflecting a corrected list in the same session asks Replace or Add, and Replace leaves one list',
+          () => askAgain, { firstAsked: 0, secondAsked: 1, knownParts: 65, beforeChoice: 65, afterReplace: 70, lists: 1 });
         const usual = await (async () => {
           const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
           const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };
