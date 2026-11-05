@@ -13625,8 +13625,9 @@ Commit `0ce078b`, with 4 smoke checks (all fail on the old code).
 - **Data:** W389's layout detail removed from its database state (full copy stays in `… board layout.json`). Its lock was NOT restored:
   the Job Order needs the list reflected again, which needs it unlocked.
 - **Only W389 had a lock lost** (checked: `initial_locked_at` later than the state's `updated_at`).
-- Found, not changed: removing an area does not remove its cutting list, so reflect → remove → reflect + "Add as another list" multiplies
-  the Job Order and board layout (W389: 195 parts, 186 boards on the layout for about 62 billed; project size 9942).
+- **Then fixed:** removing a reflected area now takes its cutting list off (`_daDetachAreaList`; lists tagged `_listId`, parts `id`, areas `cutListId`).
+  W389 had 195 parts and 186 boards on the layout for about 62 billed. Lists reflected before this have no tag: if another cutting-list area
+  remains, the app warns instead of guessing. W389's project size 9942 is a typed entry (`state.projectSize`), not caused by this; Sonny to confirm it.
 
 # OPEN — W389 (2026-11-05)
 Sonny: Designers Support → the list → Reflect → **Replace it** → check project size → Lock → Request signature. Karen re-signs.

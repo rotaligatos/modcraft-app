@@ -6935,6 +6935,43 @@ const PROFILES = {
         })();
         check('A cutting list that fails to upload is retried, and no row points at a missing file',
           () => daRetry, { thenOk: { ups: 2, rows: 1, logs: 0 }, neverOk: { ups: 3, rows: 0, logs: 1 } });
+        const areaList = await (async () => {
+          const w = window;
+          const keep = { ps: w.prodState, st: w.setTimeout, toast: w.showToast, log: w.logActivity };
+          const out = {};
+          try {
+            w.showToast = () => {}; w.logActivity = () => {};
+            w.initQuotation();
+            const list = (name, n) => ({ result: { components: Array.from({ length: n }, (_, i) => ({ name: name + i, length: 500, width: 300, qty: 1, material: 'MDF', thickness: 18, area: name })), holeSchedule: [], extraServices: [], hardware: [] },
+              summary: { materials: [{ include: true, name: 'Board ' + name, qty: 1, unit: 'pc', price: 100 }], hardware: [], services: [] }, fileName: name + '.xlsx' });
+            const reflect = (l, prior, replaceOf) => { Object.assign(w.prodState, l); w._prodReflectCommit(false, 's1', prior || null, replaceOf); };
+            const tick = () => new Promise(r => setTimeout(r, 30));
+            const cnt = () => w.qDrawingAnalysis ? (w.qDrawingAnalysis.result.components || []).length : 0;
+            // the W389 path: reflect, remove the area, reflect the same list again
+            reflect(list('A', 3)); w.addArea(); w.removeArea(0); await tick();
+            out.afterRemove = cnt(); out.boardLayout = !!w.qBoardLayout;
+            reflect(list('A', 3), await w._daLoadFull('s1')); await tick();
+            out.afterReflectAgain = cnt();
+            out.parts = w.qDrawingAnalysis.parts.length;
+            // two separate lists: removing one keeps the other
+            w.initQuotation();
+            reflect(list('A', 3));
+            reflect(list('B', 2), w.qDrawingAnalysis);
+            out.both = cnt();
+            const idxB = w.qAreas.findIndex(a => a.cutListId && a.cutListId === w.qDrawingAnalysis.parts[1].id);
+            w.removeArea(idxB); await tick();
+            out.afterRemovingB = cnt(); out.partsLeft = w.qDrawingAnalysis.parts.length;
+            out.layoutFollows = (w.qBoardLayout.componentCount);
+            // an area typed by hand never touches the list
+            w.addArea(); w.removeArea(w.qAreas.length - 1); await tick();
+            out.afterHandArea = cnt();
+            w.initQuotation();
+          } catch (e) { out.threw = String(e); }
+          Object.assign(w, { showToast: keep.toast, logActivity: keep.log });
+          return out;
+        })();
+        check('Removing a reflected area takes its cutting list off, so reflecting again does not count it twice',
+          () => areaList, { afterRemove: 0, boardLayout: false, afterReflectAgain: 3, parts: 1, both: 5, afterRemovingB: 3, partsLeft: 1, layoutFollows: 3, afterHandArea: 3 });
         const usual = await (async () => {
           const w = window; if (typeof w._sheetIsNewer !== 'function') return { missing: true };
           const keep = { sess: w.supaSession, sb: w.supa, tok: w.gToken, fq: w.gApiFetch, sheets: w._loadQuotationJsonFromSheets, us: w.USE_SUPABASE };

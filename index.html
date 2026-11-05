@@ -7886,10 +7886,86 @@ function addArea() {
 }
 function removeArea(a) {
   if(qAreas.length<=1){alert("At least one area is required.");return;}
-  var nm=qAreas[a].name;
+  var nm=qAreas[a].name, _gone=qAreas[a];
   qAreas.splice(a,1);
   renderItems();
   logActivity("Removed area: "+nm);
+  if(_gone&&_gone.fromCutList) _daDetachAreaList(_gone,_scopeCtx==='fq'?'fq':'s1',nm);
+}
+// Removing an area used to leave its cutting list attached. Reflecting again then added the list on
+// top, so the Job Order and board layout counted it twice or more while the price counted it once
+// (QT-W00000389: 3 lists, 195 parts, 186 boards on the layout for about 62 billed).
+// Each list is tagged when reflected. Lists reflected before this have no tag: with no other
+// cutting-list area left they go too; otherwise the app cannot tell which pieces were whose, and says so.
+var DA_TAGGED_LISTS=['components','holeSchedule','extraServices','hardware','drawings'];
+function _daTagList(res,id){
+  if(!res) return res;
+  DA_TAGGED_LISTS.forEach(function(k){ (res[k]||[]).forEach(function(x){ if(x&&typeof x==='object') x._listId=id; }); });
+  return res;
+}
+function _daWithoutList(res,id){
+  var out=JSON.parse(JSON.stringify(res));
+  DA_TAGGED_LISTS.forEach(function(k){ if(out[k]) out[k]=out[k].filter(function(x){ return !(x&&x._listId===id); }); });
+  try{ out._bom=prodComputeBom(out.components||[]); }catch(e){ delete out._bom; }
+  try{ out._services=prodComputeServices(out.components||[],out.holeSchedule||[],out.extraServices||[]); }catch(e){ delete out._services; }
+  return out;
+}
+function _daDetachAreaList(area,stage,areaName){
+  var da=stage==='fq'?fqDrawingAnalysis:qDrawingAnalysis;
+  if(!da) return;    // Stage 2 with no list of its own: the Job Order still comes from Stage 1's
+  var id=area.cutListId||'', others=qAreas.some(function(x){ return x&&x.fromCutList; });
+  if(others&&!id){
+    showToast('Area removed, but its cutting list could not be separated from the others on this quotation. Use Replace when you reflect again, or the Job Order will count it twice.');
+    logActivity('⚠ Area "'+areaName+'" removed, but its cutting list is still on the quotation: it was reflected before lists were tracked separately.');
+    return;
+  }
+  var key=qSerial||qDraftKey;
+  _daLoadFull(stage).catch(function(){ return null; }).then(function(full){
+    if((qSerial||qDraftKey)!==key) return;
+    var res=full&&full.result, next=null;
+    if(others){
+      if(!res){
+        showToast('Area removed, but its cutting list could not be loaded to take it off. Use Replace when you reflect again.');
+        logActivity('⚠ Area "'+areaName+'" removed, but its cutting list could not be loaded to take it off the quotation.');
+        return;
+      }
+      next=_daWithoutList(res,id);
+      if(!(next.components||[]).length) next=null;
+    }
+    _daApplyDetached(stage,da,next,id,areaName);
+  });
+}
+function _daApplyDetached(stage,da,nextResult,id,areaName){
+  var base=qBaseSerial||qSerial, numbered=base&&!qDraftKey, nd=null;
+  if(nextResult){
+    nd=JSON.parse(JSON.stringify(Object.assign({},da,{result:null})));
+    nd.result=nextResult;
+    nd.parts=(da.parts||[]).filter(function(p){ return p.id!==id; });
+    nd.fileName=nd.parts.map(function(p){ return p.fileName||'list'; }).join(' + ');
+    nd.analyzedAt=new Date().toISOString();
+    nd.componentCount=(nextResult.components||[]).length;
+    nd.rawFileBase64=''; nd.rawFileMime='';
+  }
+  if(stage==='fq') fqDrawingAnalysis=nd; else qDrawingAnalysis=nd;
+  var layoutFrom=(stage==='fq'&&!nd)?qDrawingAnalysis:nd;
+  var bom=layoutFrom&&layoutFrom.result&&layoutFrom.result._bom;
+  qBoardLayout=(bom&&bom.length)?{fileName:layoutFrom.fileName,analyzedAt:layoutFrom.analyzedAt,
+    componentCount:layoutFrom.componentCount,bom:JSON.parse(JSON.stringify(bom))}:null;
+  _daPersistedSig='';
+  // The stored copy has to follow, because the Job Order reads it when this tab no longer holds the list.
+  if(window._TRN){
+    try{ if(numbered) _trnDaPut(stage==='fq'?base+'|fq':base,nd?{result:nd.result,fileName:nd.fileName,elevation:false}:{result:null}); }catch(e){}
+  } else if(numbered&&typeof supaReady==='function'&&supaReady()){
+    if(stage==='fq'){
+      if(nd) _saveFQDrawingAnalysis();
+      else supa.storage.from('quotations').remove([_fqDrawingAnalysisPath(base).path]).catch(function(e){ console.warn('[da] Stage 2 list file not removed',e); });
+    } else if(nd) _persistDrawingAnalysisForJo();
+    else supa.from('drawing_analyses').delete().eq('serial',base).then(function(r){ if(r&&r.error) console.warn('[da] list row not removed',r.error.message||r.error); });
+  }
+  if(typeof renderProjectSizeNote==='function') renderProjectSizeNote();
+  var left=nd?(nd.componentCount+' parts remain'):'none remain';
+  logActivity('Cutting list taken off with area "'+areaName+'": the Job Order will not include it ('+left+').',numbered?base:undefined);
+  showToast('The cutting list from that area was also taken off ('+left+').');
 }
 function addItemToArea(a) {
   qAreas[a].items.push({type:"Kitchen Base Cabinet",qty:1});
@@ -48245,7 +48321,9 @@ function _prodAskReplaceOrAdd(known,onReplace,onAdd){
   el('ov-reflect-ra-add').onclick=function(){ closeModal('ov-reflect-ra'); onAdd(); };
   openModal('ov-reflect-ra');
 }
+var _reflectListId='';
 function _prodReflectCommit(startNew,stage,prior,replaceOf){
+  _reflectListId='';
   var sum=prodState.summary;
   var _rep=replaceOf?{known:replaceOf,removed:0,found:false}:null;
   // Init first (resets qAreas, qFabMode, etc. — including qBoardLayout), then populate — NOT before
@@ -48255,10 +48333,12 @@ function _prodReflectCommit(startNew,stage,prior,replaceOf){
   var da=null;
   if(prodState.result){
     var add=JSON.parse(JSON.stringify(prodState.result));
+    _reflectListId='L'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+    _daTagList(add,_reflectListId);
     var merged=(prior&&prior.result)?_daMergeResults(prior.result,add,prodState.fileName):add;
     var parts=prior?(prior.parts?JSON.parse(JSON.stringify(prior.parts))
       :[{fileName:prior.fileName||'',analyzedAt:prior.analyzedAt||'',componentCount:((prior.result&&prior.result.components)||[]).length}]):[];
-    parts.push(_daPart());
+    parts.push(Object.assign(_daPart(),{id:_reflectListId}));
     // Full analysis (raw upload + complete output, not just the board-layout BOM subset), so it
     // can be re-opened for review/edit and printed later — see _saveDrawingAnalysisToDrive(),
     // which persists Stage 1's at lock/approve time (before locking, a draft has no serial).
@@ -48397,6 +48477,7 @@ function _prodReflectFill(sum,startNew,stageLabel,rep){
     logActivity('Drawing analysis reflected into '+qSerial+(stageLabel?' ('+stageLabel+')':'')+' as a new area: '+_nm);
   }
   area.fromCutList=true;
+  if(_reflectListId) area.cutListId=_reflectListId; else delete area.cutListId;
   if(!area.svcItems) area.svcItems=[];
   if(!area.matItems) area.matItems=[];
   if(!area.hwItems)  area.hwItems=[];
