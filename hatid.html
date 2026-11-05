@@ -2577,6 +2577,20 @@ function simPickupRpc(fn, a){
         o.rider_cancelled = { at: now, by: who, reason: r, label: v.label, service: v.rider_service, other: v.rider_service_other, rider: pkRiderText(v) }; });
       log(null, v.id, 'courier_cancelled', [pkRiderText(v), r].filter(Boolean).join(' — ') + '. Number cancelled; the clock restarts when the new rider arrives.'); return ok(null);
     }
+    case 'pk_set_site': {
+      if (!can('sales_support')) return fail('Only Sales Support can change the pick-up location.');
+      const o = O(a.p_order); if (!o) return fail('Ticket not found.'); if (!PK_SITE[a.p_site]) return fail('Pick Plant 1 or Annex.');
+      if (!['open','balance','no_show','in_queue'].includes(o.status)) return fail(`SO ${o.so_no} is ${o.status.replace('_', ' ')} — the location can no longer be changed.`);
+      if (o.site === a.p_site) return fail(`SO ${o.so_no} is already for ${PK_SITE[a.p_site]}.`);
+      const r = String(a.p_reason || '').trim(); if (!r) return fail(`Say why the location changed (e.g. no stock at ${PK_SITE[o.site]}).`);
+      const from = o.site, v = o.status === 'in_queue' ? SIM.pk_visits.find(x => !['done','cancelled'].includes(x.status) && SIM.pk_visit_orders.some(y => y.visit_id === x.id && y.order_id === o.id)) : null;
+      const os = v ? SIM.pk_visit_orders.filter(y => y.visit_id === v.id).map(y => O(y.order_id)).filter(Boolean) : [o];
+      os.forEach(x => { x.site = a.p_site; x.prepared_at = null; x.prepared_name = null; x.lines.forEach(l => { l.prep = false; delete l.prep_qty; }); log(x.id, null, 'site_changed', `Pick-up location ${PK_SITE[from]} → ${PK_SITE[a.p_site]}. Reason: ${r}`); });
+      if (v){ const n = Math.max(0, ...SIM.pk_visits.filter(x => x.site === a.p_site && x.queue_day === v.queue_day && x.series === v.series).map(x => x.queue_no)) + 1;
+        Object.assign(v, { site: a.p_site, queue_no: n, label: (a.p_site === 'annex' ? 'AX' : 'P1') + '-' + (v.series === 'C' ? '' : v.series) + String(n).padStart(3, '0'), status: 'waiting', notified_at: null, accepted_at: null, ready_at: null });
+        log(null, v.id, 'site_changed', `Moved ${PK_SITE[from]} → ${PK_SITE[a.p_site]}, new number ${v.label}. Reason: ${r}`); }
+      return ok(os.map(x => x.so_no).join(', ') + ' moved to ' + PK_SITE[a.p_site] + (v ? ' — new number ' + v.label : ''));
+    }
     case 'pk_set_si': { const v = V(a.p_visit); if (!v || !['waiting','notified'].includes(v.status)) return fail('The SI can only be changed before the warehouse accepts it.');
       const vo = SIM.pk_visit_orders.find(x => x.visit_id === v.id && x.order_id === a.p_order); if (vo) vo.si_no = String(a.p_si || '').trim().toUpperCase() || null; return ok(null); }
     case 'pk_step': {
@@ -6230,6 +6244,27 @@ function openPkRiderCancelled(v){
     try { await pkRpc('Cancelling the number', 'pk_rider_cancelled', { p_visit: v.id, p_reason: r });
       toast(`${v.label} cancelled. When the new rider arrives, tap Client arrived — the clock starts again.`, 'ok'); closeOverlay(); loadPk(state.view); } catch { e.target.disabled = false; } });
 }
+/* Move a pick-up between Plant 1 and the Annex (e.g. no stock where it was booked). The new site's Sales Support
+   endorses it to its warehouse and logistics as usual; prepared ticks are cleared; a client already waiting keeps
+   their clock and gets a new number at the new site. Both sites are notified, the client gets a text/email. */
+function openPkSite(o, v){
+  const to = o.site === 'annex' ? 'plant1' : 'annex', sos = v ? (v._sos || o.so_no) : o.so_no;
+  openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><h2 style="margin-top:0">Change pick-up location</h2>
+    <div class="ft">${esc(sos)} · ${esc(o.client_name || '')}</div>
+    <div class="toolbar" style="gap:10px;margin:10px 0;border:0;padding:0"><span class="pill">${esc(PK_SITE[o.site])}</span> → <select class="i" id="pks-to" style="width:auto">${Object.entries(PK_SITE).filter(([k]) => k !== o.site).map(([k, n]) => `<option value="${k}"${k === to ? ' selected' : ''}>${n}</option>`).join('')}</select></div>
+    <ul class="ft" style="margin:0 0 8px 18px;padding:0">
+      <li>The ticket moves to the new site for its Sales Support to endorse to the warehouse and logistics, like any ticket.</li>
+      <li>Prepared ticks are cleared — the new site’s warehouse prepares the items. The old site is told to put back anything it prepared.</li>
+      ${v ? `<li><b>The client is already waiting (${esc(v.label)})</b>: they get a new number at the new site and the clock keeps running from their arrival.${(v.so_count || 1) > 1 ? ' All SOs on this number move together.' : ''}</li>` : ''}
+      <li>The client and the sales agent get a text/email about the new location.</li></ul>
+    <label class="f">Why? (required)<input class="i" id="pks-why" placeholder="e.g. no stock at ${esc(PK_SITE[o.site])}"></label>
+    <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pks-go">Move pick-up</button></div></div>`);
+  bindClose();
+  $('pks-go').addEventListener('click', async e => { const r = $('pks-why').value.trim(); if (!r) { $('pks-why').focus(); return toast('Say why the location changed', 'error'); }
+    e.target.disabled = true;
+    try { const msg = await pkRpc('Moving the pick-up', 'pk_set_site', { p_order: o.id, p_site: $('pks-to').value, p_reason: r });
+      toast(msg || 'Pick-up moved', 'ok'); closeOverlay(); loadPk(state.view); } catch { e.target.disabled = false; } });
+}
 async function pkArriveWithRider(orderIds, rider, client){
   const v = await pkRpc('Logging the arrival', 'pk_arrive', { p_orders: orderIds, p_courier: !!rider, p_client: client });
   if (rider) { try { return await pkRpc('Saving the rider', 'pk_set_rider', { p_visit: v.id, p_rider: rider, p_reason: null }); } catch { toast('Queue number given — the rider details did not save. Open the number and use Change rider.', 'error'); } }
@@ -6284,6 +6319,7 @@ async function openPkVisit(id){
     <div class="row-btns" style="justify-content:flex-end;flex-wrap:wrap">
       ${pkCan('warehouse','logistics') && v.status !== 'cancelled' ? '<button class="btn" id="pkv-concern">⚠ Report a concern</button>' : ''}
       ${pkCan('sales_support') && !['done','cancelled'].includes(v.status) ? '<button class="btn" id="pkv-cancel">Cancel number</button>' : ''}
+      ${pkCan('sales_support') && !['done','cancelled'].includes(v.status) ? '<button class="btn" id="pkv-site">📍 Change location</button>' : ''}
       <button class="btn" data-close>Close</button>
       ${siEdit ? `<button class="btn primary" id="pkv-notify">${v.status === 'notified' ? 'Save SI' : 'Save SI &amp; notify warehouse'}</button>` : ''}
       ${v.status === 'notified' && pkCan('warehouse') ? (orders.every(o => { const p = pkLinesDone(o); return p.n > 0 && p.prep === p.n; }) ? '<button class="btn primary" id="pkv-acceptready">✓ Accept &amp; ready</button>' : '<button class="btn primary" id="pkv-accept">Accept SI</button>') : ''}
@@ -6304,6 +6340,7 @@ async function openPkVisit(id){
   stepBtn('pkv-accept', 'accept', 'SI accepted');
   $('pkv-rider')?.addEventListener('click', () => openPkRider(v, () => openPkVisit(v.id)));
   $('pkv-ridercx')?.addEventListener('click', () => openPkRiderCancelled(v));
+  $('pkv-site')?.addEventListener('click', () => openPkSite(orders[0], { ...v, _sos: orders.map(x => x.so_no).join(', ') }));
   $('pkv-acceptready')?.addEventListener('click', e => { e.target.disabled = true; closeOverlay(); pkAcceptReady(v.id); }); stepBtn('pkv-ready', 'ready', 'Logistics has been told it’s ready');
   $('pkv-load')?.addEventListener('click', () => openPkLoad(v.id));
   $('pkv-concern')?.addEventListener('click', () => pkConcern(v, orders));
@@ -6466,9 +6503,14 @@ async function openPkOrder(id, opt = {}){
       ${pkLate(o) && !o.late_allowed_at && o.status === 'open' && pkCan('wh_manager') ? '<button class="btn" id="pko-allow">Allow late ticket</button>' : ''}
       ${pkCan('warehouse','logistics') && o.status !== 'cancelled' ? '<button class="btn" id="pko-concern">⚠ Report a concern</button>' : ''}
       ${pkCan('sales_support') && ['open','no_show'].includes(o.status) ? '<button class="btn" id="pko-date">📅 Change date</button>' : ''}
+      ${pkCan('sales_support') && ['open','balance','no_show','in_queue'].includes(o.status) ? '<button class="btn" id="pko-site">📍 Change location</button>' : ''}
       ${pkCan('sales_support') && ['open','balance','no_show'].includes(o.status) ? '<button class="btn" id="pko-cancel">Cancel ticket</button>' : ''}
       <button class="btn" data-close>Close</button>${edit && (o.lines || []).length ? '<button class="btn primary" id="pko-save">Save ticks</button>' : ''}</div>`;
   bindClose();
+  $('pko-site')?.addEventListener('click', async () => { let v = null;
+    if (o.status === 'in_queue') try { const { data } = await sb.from('pk_visit_orders').select('pk_visits(id, label, status, so_count)').eq('order_id', o.id);
+      v = (data || []).map(x => x.pk_visits).find(x => x && !['done','cancelled'].includes(x.status)) || null; } catch {}
+    openPkSite(o, v); });
   $('pko-date')?.addEventListener('click', () => {
     const box = document.createElement('div'); box.className = 'card pad'; box.style.marginTop = '8px';
     box.innerHTML = `<div class="grid2"><label class="f">New pick-up date<input class="i" type="date" id="pkd-d" min="${localDate()}" value="${esc(o.pickup_date >= localDate() ? o.pickup_date : localDate())}"></label>
