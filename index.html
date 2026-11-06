@@ -29553,7 +29553,7 @@ function initSupabase(){
   if(!SUPA_URL||!SUPA_ANON_KEY){ return; }
   try{
     supa=window.supabase.createClient(SUPA_URL,SUPA_ANON_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'pkce'}});
-    supa.auth.getSession().then(function(r){ supaSession=(r&&r.data&&r.data.session)||null; if(supaSession){console.log('[supa] restored session:',supaSession.user&&supaSession.user.email);_supaCheckAccountMatch().then(function(sw){ if(!sw) _supaSessionArrived(); });} });
+    _supaInitPromise=supa.auth.getSession().then(function(r){ supaSession=(r&&r.data&&r.data.session)||null; if(supaSession){console.log('[supa] restored session:',supaSession.user&&supaSession.user.email);_supaCheckAccountMatch().then(function(sw){ if(!sw) _supaSessionArrived(); });} });
     supa.auth.onAuthStateChange(function(_evt,sess){ var was=!!supaSession; supaSession=sess||null; if(supaSession&&!was)_supaSessionArrived();
       // A refreshed token carries the auth record's CURRENT email — after an Admin corrects a renamed
       // mailbox this is where the session becomes the person's own, so re-check and let the flag clear.
@@ -31828,6 +31828,55 @@ function supaMarkMessageRead(id,readAt){
   }catch(e){ return Promise.resolve(); }
 }
 
+// Stay signed in across a reload (Rommel, 2026-11-06). The Google pass used to live in page memory
+// only, so every reload, new tab and "old version" banner meant signing in again. It is now kept in
+// this browser until it expires, and only after the role check has passed.
+// Only the pass and its expiry are stored, never the email: Google is asked who the pass belongs to
+// each time, and the role comes from the User Roles sheet each time. A stored email could be edited
+// in the browser to open the app as someone else.
+var MC_GPASS_KEY='mc_gpass';
+var _gPassRestored=false;     // this page opened from a saved pass: a reload, not a login
+var _supaInitPromise=null;    // set by initSupabase
+function _gPassSave(){
+  if(!gToken||!_roleResolved) return;
+  try{ localStorage.setItem(MC_GPASS_KEY,JSON.stringify({t:gToken,x:gTokenExpiry})); }catch(e){}
+}
+function _gPassClear(){ try{ localStorage.removeItem(MC_GPASS_KEY); }catch(e){} }
+function _gPassRead(now){
+  var p=null;
+  try{ p=JSON.parse(localStorage.getItem(MC_GPASS_KEY)||'null'); }catch(e){}
+  if(!p) return null;
+  if(!p.t||!(p.x>now)){ _gPassClear(); return null; }
+  return p;
+}
+function _gPassGiveUp(msg){
+  gToken=null; gTokenExpiry=0; gUser=null; _gPassRestored=false;
+  var ls=el('login-status'); if(ls){ls.textContent=msg;ls.style.color='var(--text2)';}
+  var btn=el('signin-btn'); if(btn){btn.disabled=false;btn.innerHTML=gSignInBtnHtml();}
+}
+function _gPassRestore(){
+  var p=_gPassRead(Date.now());
+  if(!p) return false;
+  var btn=el('signin-btn'); if(btn){btn.disabled=true;btn.innerHTML='<span style="color:var(--muted)">Signing in...</span>';}
+  var ls=el('login-status'); if(ls){ls.textContent='Welcome back. Opening Modcraft...';ls.style.color='var(--text2)';}
+  gToken=p.t; gTokenExpiry=p.x; _gPassRestored=true;
+  // Wait for the database session first, or the first screens would load from the slower Sheets path.
+  var waitSupa=Promise.race([_supaInitPromise||Promise.resolve(),new Promise(function(res){setTimeout(res,4000);})]).catch(function(){});
+  waitSupa.then(function(){
+    return fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+p.t}});
+  }).then(function(r){
+    if(r.status===401||r.status===403){ _gPassClear(); _gPassGiveUp('Use your @worldclasslaminate.com.ph account'); return; }
+    if(!r.ok){ _gPassGiveUp('Could not reach Google. Check your connection and sign in.'); return; }
+    return r.json().then(function(info){
+      if(!info||!info.email){ _gPassClear(); _gPassGiveUp('Use your @worldclasslaminate.com.ph account'); return; }
+      gUser={email:info.email,name:info.name,picture:info.picture};
+      gCheckRole();
+    });
+  }).catch(function(){
+    _gPassGiveUp('Could not reach Google. Check your connection and sign in.');
+  });
+  return true;
+}
 function initGoogleAuth(){
   if(typeof google==='undefined'||!google.accounts||!google.accounts.oauth2){
     setTimeout(initGoogleAuth,200); return;
@@ -31850,7 +31899,7 @@ function initGoogleAuth(){
       gTokenExpiry=Date.now()+(((parseInt(resp.expires_in,10)||3600)-120)*1000);
       gSessionExpired=false; hideSessionBanner();
       // If this was a silent refresh (user already known), just resolve it — don't re-run role lookup
-      if(gRefreshResolve){var r=gRefreshResolve;gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null;r(gToken);if(gUser)return;}
+      if(gRefreshResolve){var r=gRefreshResolve;gRefreshPromise=null;gRefreshResolve=null;gRefreshReject=null;r(gToken);if(gUser){_gPassSave();return;}}
       var ls=el('login-status'); if(ls){ls.textContent='Verifying your account...';ls.style.color='var(--text2)';}
       fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+gToken}})
         .then(function(r){return r.json();})
@@ -32108,6 +32157,7 @@ function gCheckRole(){
         if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
         var ls2=el('login-status');
         var btn0=el('signin-btn');if(btn0){btn0.disabled=false;btn0.innerHTML=gSignInBtnHtml();}
+        if(!_isSheetsRateLimit(data.error)) _gPassClear();
         if(_isSheetsRateLimit(data.error)){
           // Transient — still rate-limited after all retries. Tell the user to
           // wait and try again; do NOT imply a permissions problem.
@@ -32147,6 +32197,7 @@ function gCheckRole(){
         }
       }
       if(!role){
+        _gPassClear();
         if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
         var ls2=el('login-status');
         if(ls2){ls2.innerHTML='<span style="color:var(--ink5)">&#9888; <b>'+gUser.email+'</b> is not registered. Contact your Admin to be added to the User Roles sheet.</span>';}
@@ -32164,6 +32215,7 @@ function gCheckRole(){
       if(deviceBindingEnabled&&!exempt&&isNewFmt&&userDeviceId){
         var devId=getDeviceId();
         if(devId.toLowerCase()!==userDeviceId.toLowerCase()){
+          _gPassClear();
           if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
           var ls3=el('login-status');
           if(ls3) ls3.innerHTML='<span style="color:var(--ink5)">&#9888; <b>This device is not authorized</b> for your account. Contact your Admin to register this device.</span>';
@@ -32173,6 +32225,7 @@ function gCheckRole(){
       }
       currentRole=role;
       _roleResolved=true;
+      _gPassSave();
       gShowApp();
       setTimeout(_loadMySkuAccess,2500);
       setTimeout(_shadowUserCheck,3000); // phase 3: compare the Sheet with the database copy, record only
@@ -32188,6 +32241,7 @@ function gCheckRole(){
         return;
       }
       currentRole=''; currentUserAcc={};
+      if(err&&err.message==='SESSION_EXPIRED') _gPassClear();
       if(_supaPreOpenedPopup){ try{_supaPreOpenedPopup.close();}catch(e){} _supaPreOpenedPopup=null; }
       var ov=el('login-overlay'); if(ov) ov.style.display='flex';
       var lsE=el('login-status');
@@ -32205,7 +32259,7 @@ function gShowApp(){
   (function(){
     var p=_supaPreOpenedPopup; _supaPreOpenedPopup=null;
     try{ if(gUser&&gUser.email&&gUser.email!=='local') localStorage.setItem('mc_last_google_email',String(gUser.email).trim().toLowerCase()); }catch(e){}
-    _supaCheckAccountMatch().then(function(){ setTimeout(function(){ _supaAutoConnect(p); },400); });
+    _supaCheckAccountMatch().then(function(){ if(!_gPassRestored) setTimeout(function(){ _supaAutoConnect(p); },400); });
   })();
   // If still not connected a while after login, the automatic attempt either
   // never ran (e.g. a stale "already tried" guard from before the postMessage
@@ -32267,7 +32321,7 @@ function gShowApp(){
   if(chipB) chipB.style.display=lamiEnabled?'block':'none';
   var chipP=el('chip-panel');
   if(chipP&&!lamiEnabled) chipP.style.display='none';
-  if(lamiEnabled) setTimeout(_chipLoginGreet, 1800);
+  if(lamiEnabled&&!_gPassRestored) setTimeout(_chipLoginGreet, 1800);
   if(lamiEnabled&&lamiWakeWordEnabled) setTimeout(_lamiStartWakeWord, 2500);
   // "What's new" — after Lami's greeting has had its moment, so the two don't talk over each other.
   setTimeout(function(){ try{ _wnInit(); }catch(e){ console.warn('[whatsnew]',e); } }, 5000);
@@ -32438,7 +32492,7 @@ function gShowApp(){
     });
   }, 45000); // every 45 seconds
 
-  _showFullscreenPrompt();
+  if(!_gPassRestored) _showFullscreenPrompt();
   // After the fullscreen prompt so the two never stack. sheetUsers is populated by gCheckRole
   // before this point, so the roster is available.
   setTimeout(_maybePromptPinSetup, 1200);
@@ -32621,6 +32675,7 @@ function resetUserPin(i) {
 }
 
 function gSignOut(){
+  _gPassClear(); _gPassRestored=false;
   if(gToken&&typeof google!=='undefined') google.accounts.oauth2.revoke(gToken,function(){});
   gToken=null; gUser=null; currentRole=''; currentUserAcc={}; _roleResolved=false; currentUserCompany='World Class Laminate, Inc.';
   var ov=el('login-overlay'); if(ov) ov.style.display='flex';
@@ -48830,6 +48885,7 @@ if(new URLSearchParams(window.location.search).get('supaAuthPopup')==='1'){
   });
   initGoogleAuth();
   initSupabase();
+  _gPassRestore();
   // Show local-access button if running from file:// protocol
   if(window.location.protocol==='file:'){
     var _law=el('local-access-wrap');
@@ -51335,6 +51391,10 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-11-06-stay-signed-in', date:'6 Nov 2026', items:[
+    {id:'stay-signed-in', icon:'ti-login', title:'Fewer sign-ins',
+     text:'Reloading the page or opening another tab no longer asks you to sign in while your Google sign-in is still valid (up to about an hour). On a shared PC, press Sign out when you finish, so the next person does not open Modcraft as you.'}
+  ]},
   {id:'2026-11-05-report-filters', date:'5 Nov 2026', items:[
     {id:'report-filters', icon:'ti-filter', title:'Filter Reports by company and date',
      text:'Reports now has the same company and date controls as the Dashboard. They apply to Overview, User KPI, Project tracker, Archive and Custom export, and an exported file states what it covers.',

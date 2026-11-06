@@ -731,6 +731,40 @@ const PROFILES = {
           const back=window._settingsFromSheetRows(rows);
           return [writes.every(w=>String(w[2][1]).length<=50000),last[2][0],last[1],left&&left[2][1],Object.keys(back.serviceCapacity).length];
         })(); out.push({ label, got, want, ok: JSON.stringify(got) === JSON.stringify(want) }); } catch (e) { out.push({ label, err: String(e).slice(0,120), ok: false }); } }
+        check('saved Google pass: kept only after the role check, holds no email, dropped when expired', () => {
+          const sv={t:window.gToken,x:window.gTokenExpiry,r:window._roleResolved};
+          localStorage.removeItem('mc_gpass');
+          window.gToken='TOK'; window.gTokenExpiry=Date.now()+60000; window._roleResolved=false;
+          window._gPassSave(); const beforeRole=localStorage.getItem('mc_gpass');
+          window._roleResolved=true; window._gPassSave();
+          const stored=JSON.parse(localStorage.getItem('mc_gpass')); const live=!!window._gPassRead(Date.now());
+          const expired=window._gPassRead(Date.now()+120000); const goneAfter=localStorage.getItem('mc_gpass');
+          window.gToken=sv.t; window.gTokenExpiry=sv.x; window._roleResolved=sv.r;
+          return [beforeRole,Object.keys(stored).sort(),live,expired,goneAfter];
+        }, [null,['t','x'],true,null,null]);
+        { const label='reopening with a saved pass: Google decides who it is; a rejected pass is erased; no connection keeps it'; const want=[['real@x.ph',1],[null,0,'gone'],[null,0,'kept'],'gone'];
+          const sv={f:window.fetch,c:window.gCheckRole,t:window.gToken,x:window.gTokenExpiry,u:window.gUser,r:window._gPassRestored,so:window.gSignOut};
+          let calls=0; window.gCheckRole=()=>{calls++;};
+          const put=()=>localStorage.setItem('mc_gpass',JSON.stringify({t:'TOK',x:Date.now()+60000,email:'admin@x.ph'}));
+          const run=async(fn)=>{ calls=0; window.gUser=null; put(); window.fetch=fn; const started=window._gPassRestore(); await new Promise(r=>setTimeout(r,60)); return started; };
+          try {
+            await run(()=>Promise.resolve({status:200,ok:true,json:()=>Promise.resolve({email:'real@x.ph',name:'R'})}));
+            const a=[window.gUser&&window.gUser.email,calls];
+            await run(()=>Promise.resolve({status:401,ok:false}));
+            const b=[window.gUser,calls,localStorage.getItem('mc_gpass')?'kept':'gone'];
+            await run(()=>Promise.reject(new Error('offline')));
+            const c=[window.gUser,calls,localStorage.getItem('mc_gpass')?'kept':'gone'];
+            window.google=window.google||undefined; window.gToken=null; window.gSignOut();
+            const d=localStorage.getItem('mc_gpass')?'kept':'gone';
+            const got=[a,b,c,d]; out.push({ label, got, want, ok: JSON.stringify(got)===JSON.stringify(want) });
+          } catch(e){ out.push({ label, err:String(e).slice(0,120), ok:false }); }
+          Object.assign(window,{fetch:sv.f,gCheckRole:sv.c,gToken:sv.t,gTokenExpiry:sv.x,gUser:sv.u,_gPassRestored:sv.r}); localStorage.removeItem('mc_gpass');
+        }
+        check('a reload is not a login: no connect popup, greeting or fullscreen question; a refused role erases the pass', () => {
+          const show=[...document.scripts].map(x=>x.textContent).join(' '), role=String(window.gCheckRole);
+          return [/if\(!_gPassRestored\) setTimeout\(function\(\)\{ _supaAutoConnect/.test(show),/lamiEnabled&&!_gPassRestored/.test(show),/if\(!_gPassRestored\) _showFullscreenPrompt/.test(show),
+                  /if\(!role\)\{\s*_gPassClear\(\)/.test(role),role.indexOf('_gPassSave')>role.indexOf('_roleResolved=true')];
+        }, [true,true,true,true,true]);
         check('_shadowSnap carries pin_set only, never the hash', () => {
           const snap=window._shadowSnap({name:'A',pos:'Staff',acc:{},pinHash:'HASH123',pinSalt:'S',rowIdx:4});
           return [snap.pin_set, JSON.stringify(snap).indexOf('HASH123')<0];
