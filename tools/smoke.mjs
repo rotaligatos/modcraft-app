@@ -765,6 +765,20 @@ const PROFILES = {
           return [/if\(!_gPassRestored\) setTimeout\(function\(\)\{ _supaAutoConnect/.test(show),/lamiEnabled&&!_gPassRestored/.test(show),/if\(!_gPassRestored\) _showFullscreenPrompt/.test(show),
                   /if\(!role\)\{\s*_gPassClear\(\)/.test(role),role.indexOf('_gPassSave')>role.indexOf('_roleResolved=true')];
         }, [true,true,true,true,true]);
+        check('Saved Analyses search: typing keeps the same box and cursor, and filters the list', () => {
+          const sv={l:window._prodSavedAnalyses,f:window._prodSavedFilter,r:window.supaReady,s:window.supa};
+          const host=document.createElement('div'); document.body.appendChild(host);
+          window._prodSavedAnalyses=[{id:1,serial:'QT-W00000001',file_name:'a.pdf',quotations:{client_name:'Alpha'}},{id:2,serial:'QT-W00000002',file_name:'b.pdf',quotations:{client_name:'Beta'}}];
+          window._prodSavedFilter=''; window.supaReady=()=>true; try {
+          host.innerHTML=window._buildSavedAnalysesTab();
+          const box=host.querySelector('input[placeholder^="Search by serial"]'); box.focus();
+          box.value='al'; box.dispatchEvent(new Event('input',{bubbles:true}));
+          const same=host.querySelector('input[placeholder^="Search by serial"]')===box;
+          const focused=document.activeElement===box;
+          const rows=host.querySelectorAll('#prod-saved-list tbody tr').length;
+          const txt=host.querySelector('#prod-saved-list').textContent.indexOf('Alpha')>=0;
+                    return [same,focused,rows,txt]; } finally { host.remove(); window._prodSavedAnalyses=sv.l; window._prodSavedFilter=sv.f; window.supaReady=sv.r; }
+        }, [true,true,1,true]);
         check('_shadowSnap carries pin_set only, never the hash', () => {
           const snap=window._shadowSnap({name:'A',pos:'Staff',acc:{},pinHash:'HASH123',pinSalt:'S',rowIdx:4});
           return [snap.pin_set, JSON.stringify(snap).indexOf('HASH123')<0];
