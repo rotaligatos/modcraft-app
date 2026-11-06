@@ -13651,3 +13651,12 @@ Rommel could not see the client-supplied check on PMES Materials: the block was 
 
 ## What was changed on 2026-11-06 (session — Project List delete really voids)
 Report: delete said the quotation "is voided" but nothing was. `deleteQuotation` only showed a toast for a series number ("voided, not deleted. Open it and use Void draft"), changed nothing, and an issued quotation has no Void button. Only 2 quotations were ever voided (W361, M237). Now the Admin trash button and Delete selected open the void window for W/M/C numbers (reason required, warns if already issued) and void any stage, open or not: `_voidFromList`, `_voidSerials`, `type:'void'` in `_persistApprovedFieldToQuotation` (state + Status in both stores). Pending signature requests are cancelled and open orders go back to New. Kept under Status: Voided and in Series register; Admin restores from inside the quotation. Old-format serials still delete outright. Limit: a tab already holding that quotation open elsewhere could re-save it un-voided. Reproduced on the old code; smoke check added.
+
+## What was changed on 2026-11-06 (session — HATID practice TV)
+Report: staff practising pick-up saw no queue number on the TV, while Rommel's own numbers showed. Not a bug: practice runs on
+sample data in that browser tab only, and the TV (`hatid.html?tv=…`) reads the real queue on another screen, so practice can never
+reach it (and must not — clients would be called). Rommel's had shown because his were real check-ins. Added (`553e071`): a
+**Practice TV** panel inside the practice tab (`pkPracticeTv`, `ptvTick`, `ptvClose`; bottom-left, clear of the guide card). It opens
+when a queue number is given in practice, or from the Queue tab's TV button while practising. It reads the simulated `pk_tv`, and it
+calls a number with a chime and voice when the number turns ready. It closes when practice ends. The real TV is unchanged. Tested headless:
+Waiting → Ready, call shown, closes on exit.
