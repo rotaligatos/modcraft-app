@@ -6553,7 +6553,7 @@ const PROFILES = {
         w.pendingOrders = [{ id: '9997', status: 'In Progress', quotSerial: 'DRAFT-abc123', handledBy: 'Nikki' }];
         w.discardQuotation();
         const draftOrder = w.pendingOrders[0].status + ':' + (w.pendingOrders[0].quotSerial || '-');
-        const delRefused = (() => { let t = ''; const k = w.showToast; w.showToast = m => { t = m; }; w.deleteQuotation('QT-M00000001'); w.showToast = k; return /voided, not deleted/.test(t); })();
+        const delRefused = (() => { w.deleteQuotation('QT-M00000001'); const open = document.getElementById('ov-void-quotation').classList.contains('show'); w.closeModal('ov-void-quotation'); return open && deleted === 0; })();
         Object.assign(w, { pendingOrders: keep.o, gSaveQuotation: keep.save, supaDeleteQuotation: keep.del, sheetsDeleteRowByKey: keep.sd,
           sheetsUpdate: keep.su, gToken: keep.tok, gUser: keep.user, currentRole: keep.role, dirData: keep.dir, sessionQuotations: keep.sess,
           _stageFlags: keep.flags, _confirm: keep.conf });
@@ -6562,6 +6562,55 @@ const PROFILES = {
           doneUntouched: o2.status + ':' + o2.quotSerial, voidSaved: !!state.voided && state.voidReason, counted, draftOrder, delRefused };
       }, { modal: true, refused: true, st: 'Voided', ro: true, saved: 1, deleted: 0, order: 'Pending:-:-',
            doneUntouched: 'Done:QT-W00000999-2', voidSaved: 'Made twice by mistake', counted: ['QT-W00000998'], draftOrder: 'Pending:-', delRefused: true });
+      { const _vLabel = 'Deleting a series number from the Project List really voids it and keeps it on record';
+        const _vRun = () => {
+        const w = window;
+        const keep = { load: w.loadQuotationJson, sg: w.sheetsGet, su: w.sheetsUpdate, sa: w.sheetsAppend, ups: w.supaUpsertState, del: w.supaDeleteQuotation,
+          sd: w.sheetsDeleteRowByKey, tok: w.gToken, user: w.gUser, role: w.currentRole, dir: w.dirData, sess: w.sessionQuotations, flags: w._stageFlags,
+          o: w.pendingOrders, log: w.logActivity, toast: w.showToast, sync: w._syncRowFromState };
+        const stored = { serial: 'QT-W00000901', locked: true, sentStatus: 'Shared' };
+        let deleted = 0, upserted = null; const logs = [], toasts = [];
+        w.loadQuotationJson = (x, cb) => cb(x === 'QT-W00000901' ? stored : null, x === 'QT-W00000901' ? '' : 'missing');
+        w.sheetsGet = () => Promise.resolve({ values: [['Serial'], ['QT-W00000901']] }); w.sheetsUpdate = () => Promise.resolve({}); w.sheetsAppend = () => Promise.resolve({});
+        w.supaUpsertState = (x, st) => { upserted = st; }; w.supaDeleteQuotation = () => { deleted++; }; w.sheetsDeleteRowByKey = () => { deleted++; };
+        w.logActivity = (t, x) => logs.push(x + '|' + t); w.showToast = m => toasts.push(m);
+        w.gToken = 't'; w.gUser = { name: 'Tester', email: 't@x' }; w.currentRole = 'Admin'; w._stageFlags = {};
+        w.initQuotation();
+        w.dirData = [{ id: 'QT-W00000901', client: 'Acme', value: 100, status: 'IQ Locked' }, { id: 'QT-W00000902', client: 'Beta', value: 50, status: 'Voided' }];
+        w.sessionQuotations = {};
+        w.pendingOrders = [{ id: '7001', status: 'In Progress', quotSerial: 'QT-W00000901', handledBy: 'Nikki' }];
+        w.deleteQuotation('QT-W00000901');
+        const modal = document.getElementById('ov-void-quotation').classList.contains('show');
+        const warned = /already issued/i.test(document.getElementById('void-summary').textContent);
+        document.getElementById('void-reason').value = '';
+        w.confirmVoidQuotation();
+        const needsReason = !stored.voided;
+        document.getElementById('void-reason').value = 'Duplicate';
+        w.confirmVoidQuotation();
+        return new Promise(res => setTimeout(res, 50)).then(() => {
+          const row = w.dirData[0];
+          const out = { modal, warned, needsReason, deleted, voided: stored.voided === true, reason: stored.voidReason, by: stored.voidedBy,
+            saved: !!(upserted && upserted.voided), rowStatus: row.status, shown: w._displayStatus(row),
+            logged: logs.some(l => l.indexOf('QT-W00000901|Quotation VOIDED: QT-W00000901 — Acme') === 0 && /Reason: Duplicate/.test(l)),
+            order: w.pendingOrders[0].status + ':' + (w.pendingOrders[0].quotSerial || '-'),
+            counted: w._dashAllEntries().filter(e => e.id === 'QT-W00000901').length };
+          toasts.length = 0;
+          w.deleteQuotation('QT-W00000902');           // already voided: says so, opens nothing
+          out.alreadySaid = /already voided/.test(toasts[0] || '') && !document.getElementById('ov-void-quotation').classList.contains('show');
+          w.openVoidQuotation();                       // a cancelled list choice must not leak
+          out.listCleared = w._voidListSerials === null; w.closeModal('ov-void-quotation');
+          Object.assign(w, { loadQuotationJson: keep.load, sheetsGet: keep.sg, sheetsUpdate: keep.su, sheetsAppend: keep.sa, supaUpsertState: keep.ups,
+            supaDeleteQuotation: keep.del, sheetsDeleteRowByKey: keep.sd, gToken: keep.tok, gUser: keep.user, currentRole: keep.role, dirData: keep.dir,
+            sessionQuotations: keep.sess, _stageFlags: keep.flags, pendingOrders: keep.o, logActivity: keep.log, showToast: keep.toast, _syncRowFromState: keep.sync });
+          w.initQuotation();
+          return out;
+        });
+        };
+        const _vWant = { modal: true, warned: true, needsReason: true, deleted: 0, voided: true, reason: 'Duplicate', by: 'Tester', saved: true, rowStatus: 'Voided', shown: 'Voided',
+           logged: true, order: 'Pending:-', counted: 0, alreadySaid: true, listCleared: true };
+        try { const got = await _vRun(); out.push({ label: _vLabel, got, want: _vWant, ok: JSON.stringify(got) === JSON.stringify(_vWant) }); }
+        catch (e) { out.push({ label: _vLabel, err: String(e).slice(0,120), ok: false }); }
+      }
       check('Series register lists every number and explains each gap from the activity log', () => {
         const w = window;
         const rows = w._srBuild({ logStart: '2026-07-02T00:00:00Z',
