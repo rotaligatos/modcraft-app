@@ -698,6 +698,39 @@ const PROFILES = {
           const d={name:'Ana',role:'Staff',company:'W',active:true,device_id:'',feature_access:{Dashboard:true,KPI:false},delegate_to:'',access_companies:[],include_in_kpi:false,require_pin:true};
           return window._shadowUserDiffs(u,d).map(x=>x.field).sort();
         }, ['active','also sees','feature access','role']);
+        check('settings too long for one Sheet cell are split into rows and join back identically', () => {
+          const longCap={}; for(let i=0;i<900;i++) longCap['Service '+i]={teams:1,consumables:[{label:'=x"y\'é',cost:i}]};
+          const cfg={CF:{a:1},tnc:'short',serviceCapacity:longCap,serviceCostData:{A:{operatorCost:5}},hugeLater:'z'.repeat(60000)};
+          const sp=window._settingsSheetSplit(cfg);
+          const rows=[['CONFIG',sp.main]].concat(sp.parts.map((p,i)=>['CONFIG_PART_'+(i+1),p]));
+          const back=window._settingsFromSheetRows(rows);
+          const allFit=[sp.main].concat(sp.parts).every(c=>c.length<=50000);
+          const noFormula=sp.parts.every(p=>/^part\|/.test(p));
+          return [allFit,noFormula,sp.parts.length>1,JSON.stringify(back)===JSON.stringify(Object.assign(JSON.parse(sp.main),{serviceCapacity:longCap,serviceCostData:cfg.serviceCostData,hugeLater:cfg.hugeLater}))];
+        }, [true,true,true,true]);
+        check('a CONFIG row with no part rows still loads; pieces that do not join up leave CONFIG usable', () => {
+          const plain=window._settingsFromSheetRows([['CONFIG','{"tnc":"x","serviceCapacity":{"A":1}}'],['LOGO_APP','y']]);
+          const broken=window._settingsFromSheetRows([['CONFIG','{"tnc":"x"}'],['CONFIG_PART_1','part|{"serviceCap']]);
+          return [plain.serviceCapacity.A,broken.tnc,window._settingsFromSheetRows([['LOGO_APP','y']])];
+        }, [1,'x',null]);
+        { const label='Save settings writes each cell within the limit, parts before CONFIG, and blanks leftover parts'; const want=[true,'CONFIG','Settings!A2:C2','',900]; try { const got = await (async () => {
+          const longCap={}; for(let i=0;i<900;i++) longCap['Service '+i]={teams:1,consumables:[{label:'x',cost:i}]};
+          const saved={g:window.gToken,sg:window.sheetsGet,su:window.sheetsUpdate,sa:window.sheetsAppend,c:window._collectAppSettings,up:window.supaUpsertSettings,a:window._saveServicesToPriceDb,b:window._saveHardwareToPriceDb,d:window._saveSvcCapToDrive};
+          const writes=[];
+          window.gToken='t'; window._collectAppSettings=()=>({tnc:'x',serviceCapacity:longCap});
+          window.supaUpsertSettings=()=>{}; window._saveServicesToPriceDb=()=>Promise.resolve(); window._saveHardwareToPriceDb=()=>Promise.resolve(); window._saveSvcCapToDrive=()=>{};
+          window.sheetsGet=()=>Promise.resolve({values:[['Key'],['CONFIG'],['CONFIG_PART_1'],['CONFIG_PART_9']]});
+          window.sheetsUpdate=(r,v)=>{writes.push(['u',r,v[0]]);return Promise.resolve({});};
+          window.sheetsAppend=(r,v)=>{v.forEach(x=>writes.push(['a',r,x]));return Promise.resolve({});};
+          window.gSaveAppSettings();
+          await new Promise(r=>setTimeout(r,60));
+          Object.assign(window,{gToken:saved.g,sheetsGet:saved.sg,sheetsUpdate:saved.su,sheetsAppend:saved.sa,_collectAppSettings:saved.c,supaUpsertSettings:saved.up,_saveServicesToPriceDb:saved.a,_saveHardwareToPriceDb:saved.b,_saveSvcCapToDrive:saved.d});
+          const last=writes[writes.length-1];
+          const left=writes.find(w=>w[2][0]==='CONFIG_PART_9');
+          const rows=writes.map(w=>[w[2][0],w[2][1]]).filter(r=>r[1]);
+          const back=window._settingsFromSheetRows(rows);
+          return [writes.every(w=>String(w[2][1]).length<=50000),last[2][0],last[1],left&&left[2][1],Object.keys(back.serviceCapacity).length];
+        })(); out.push({ label, got, want, ok: JSON.stringify(got) === JSON.stringify(want) }); } catch (e) { out.push({ label, err: String(e).slice(0,120), ok: false }); } }
         check('_shadowSnap carries pin_set only, never the hash', () => {
           const snap=window._shadowSnap({name:'A',pos:'Staff',acc:{},pinHash:'HASH123',pinSalt:'S',rowIdx:4});
           return [snap.pin_set, JSON.stringify(snap).indexOf('HASH123')<0];

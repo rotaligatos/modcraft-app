@@ -37612,24 +37612,86 @@ function _applyAppSettings(s){
   // finishes last would otherwise leave dbMaterials tagged against the wrong (stale/empty) list.
   if(Array.isArray(s.mtoMaterials)){ mtoMaterialNames=s.mtoMaterials.slice(); _applyMtoTags(); }
 }
+// A Google Sheets cell holds at most 50,000 characters and the settings outgrew that
+// (54,873 on 2026-11-06, mostly the per-service capacity and cost figures). So the CONFIG row
+// keeps the short settings, and the long ones go in CONFIG_PART_1, _2, ... rows. Supabase holds
+// the whole object in one row and is not affected.
+var SETTINGS_CELL_MAX=45000;
+var SETTINGS_PART_PREFIX='CONFIG_PART_';
+var SETTINGS_PART_MARK='part|';   // cells are written USER_ENTERED: a piece starting with = + - or ' would be read as a formula or lose its first character
+function _settingsSheetSplit(cfg){
+  var main={}, extra={};
+  Object.keys(cfg).forEach(function(k){
+    if(k==='serviceCapacity'||k==='serviceCostData') extra[k]=cfg[k]; else main[k]=cfg[k];
+  });
+  // Whatever else grows later moves across too, largest first, so the save cannot fail this way again.
+  while(JSON.stringify(main).length>SETTINGS_CELL_MAX){
+    var big=null, bigN=-1;
+    Object.keys(main).forEach(function(k){ var n=JSON.stringify(main[k]===undefined?null:main[k]).length; if(n>bigN){bigN=n;big=k;} });
+    extra[big]=main[big]; delete main[big];
+  }
+  var json=JSON.stringify(extra), parts=[];
+  for(var i=0;i<json.length;i+=SETTINGS_CELL_MAX) parts.push(SETTINGS_PART_MARK+json.slice(i,i+SETTINGS_CELL_MAX));
+  return {main:JSON.stringify(main), parts:parts};
+}
+// values = the rows of Settings!A:B. Returns the whole settings object, or null if there is no CONFIG.
+// Pieces that do not join up (a save interrupted halfway) are ignored and the CONFIG row still applies.
+function _settingsFromSheetRows(values){
+  var cfg=null, pieces={};
+  (values||[]).forEach(function(r){
+    var k=(r&&r[0])||'', v=r&&r[1];
+    if(k==='CONFIG'&&v){ try{cfg=JSON.parse(v);}catch(e){console.warn('Bad settings JSON',e);} }
+    else if(k.indexOf(SETTINGS_PART_PREFIX)===0&&v&&String(v).indexOf(SETTINGS_PART_MARK)===0){
+      pieces[parseInt(k.substring(SETTINGS_PART_PREFIX.length),10)]=String(v).substring(SETTINGS_PART_MARK.length);
+    }
+  });
+  if(!cfg) return null;
+  var joined='';
+  for(var i=1;pieces[i]!==undefined;i++) joined+=pieces[i];
+  if(joined){
+    try{ var extra=JSON.parse(joined); Object.keys(extra).forEach(function(k){cfg[k]=extra[k];}); }
+    catch(e){ console.warn('[settings] the long settings rows in the Sheet do not join up; using the CONFIG row only',e); }
+  }
+  return cfg;
+}
 function gSaveAppSettings(){
   if(!gToken){showSheetsToast(false,'Sign in to save settings.');return;}
   var btn=el('save-settings-btn'); if(btn){btn.disabled=true;btn.innerHTML='<i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Saving…';}
   var _cfgObj=_collectAppSettings();
   supaUpsertSettings(_cfgObj);
-  var row=['CONFIG',JSON.stringify(_cfgObj),new Date().toISOString()];
+  var _split=_settingsSheetSplit(_cfgObj), _savedAt=new Date().toISOString();
+  var row=['CONFIG',_split.main,_savedAt];
   var header=[['Key','Value (JSON)','Saved At']];
+  // Parts first, CONFIG last. Parts left over from a longer save are blanked, not deleted, so no row moves.
+  function _writeSettingsRows(vals){
+    var rowOf={}, chain=Promise.resolve(), toAdd=[];
+    for(var i=1;i<vals.length;i++){ var key=vals[i]&&vals[i][0]; if(key&&!rowOf[key]) rowOf[key]=i+1; }
+    _split.parts.forEach(function(p,ix){
+      var pr=[SETTINGS_PART_PREFIX+(ix+1),p,_savedAt], at=rowOf[pr[0]];
+      if(at) chain=chain.then(function(){return sheetsUpdate('Settings!A'+at+':C'+at,[pr]);});
+      else toAdd.push(pr);
+    });
+    Object.keys(rowOf).forEach(function(key){
+      if(key.indexOf(SETTINGS_PART_PREFIX)!==0) return;
+      if(parseInt(key.substring(SETTINGS_PART_PREFIX.length),10)<=_split.parts.length) return;
+      var at=rowOf[key];
+      chain=chain.then(function(){return sheetsUpdate('Settings!A'+at+':C'+at,[[key,'',_savedAt]]);});
+    });
+    if(toAdd.length) chain=chain.then(function(){return sheetsAppend('Settings!A:C',toAdd);});
+    return chain.then(function(){
+      if(rowOf.CONFIG) return sheetsUpdate('Settings!A'+rowOf.CONFIG+':C'+rowOf.CONFIG,[row]);
+      return sheetsAppend('Settings!A:C',[row]);
+    });
+  }
   sheetsGet('Settings!A:A').then(function(d){
     if(d.error){
       return sheetsCreateTab('Settings').then(function(){
-        return sheetsAppend('Settings!A:C',header).then(function(){return sheetsAppend('Settings!A:C',[row]);});
+        return sheetsAppend('Settings!A:C',header).then(function(){return _writeSettingsRows([]);});
       });
     }
     var vals=d.values||[];
-    if(!vals.length){ return sheetsAppend('Settings!A:C',header).then(function(){return sheetsAppend('Settings!A:C',[row]);}); }
-    var idx=-1; for(var i=1;i<vals.length;i++){ if(vals[i][0]==='CONFIG'){idx=i+1;break;} }
-    if(idx>0) return sheetsUpdate('Settings!A'+idx+':C'+idx,[row]);
-    return sheetsAppend('Settings!A:C',[row]);
+    if(!vals.length){ return sheetsAppend('Settings!A:C',header).then(function(){return _writeSettingsRows([]);}); }
+    return _writeSettingsRows(vals);
   }).then(function(){
     showSheetsToast(true,'Settings saved to database');
     return _saveServicesToPriceDb();
@@ -37867,11 +37929,11 @@ function gLoadAppSettings(callback){
   function fromSheets(){
     sheetsGet('Settings!A:B').then(function(d){
       if(d.error||!d.values){if(callback)callback();return;}
+      var _sheetCfg=_settingsFromSheetRows(d.values.slice(1));
+      if(_sheetCfg){ try{_applyAppSettings(_sheetCfg);}catch(e){console.warn('Bad settings JSON',e);} }
       for(var i=1;i<d.values.length;i++){
         var k=d.values[i][0]||'', v=d.values[i][1];
-        if(k==='CONFIG'&&v){
-          try{_applyAppSettings(JSON.parse(v));}catch(e){console.warn('Bad settings JSON',e);}
-        } else if(k==='LOGO_APP'){
+        if(k==='LOGO_APP'){
           appLogoData=v||null;
         } else if(k.indexOf('LOGO_CO_')===0){
           if(v){companyLogos[k.substring(8)]=v;_cacheLogoDims(v);} else delete companyLogos[k.substring(8)];
