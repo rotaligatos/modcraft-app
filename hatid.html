@@ -2913,7 +2913,7 @@ async function boot(user){
     state.mode = (pkOnly() && !(savedMode === 'delivery' && dlvAccess())) || (savedMode === 'pickup' && hasPickup()) ? 'pickup' : 'delivery'; setHeader();
     switchView(state.mode === 'pickup' ? pkHome() : pkOnly() ? (canSsTickets() ? 'dtix' : 'prep') : isDispatcher() ? 'dash' : isViewer() ? 'sched' : 'field');
     openDeepLink();
-    renderModemChip(); modemAutoStart();
+    renderModemChip(); modemAutoStart(); if (modemCanUse()) modemFetchStatus().then(renderModemChip);
   } catch { show('screen-login'); }
 }
 
@@ -10812,14 +10812,85 @@ async function modemAutoStart(){
 if (modemSupported()) navigator.serial.addEventListener?.('connect', () => { if (modemPref() && !modem.at) setTimeout(modemAutoStart, 1500); });
 // keep trying while this PC is the modem PC but it isn't connected (tab still closing elsewhere, dongle plugged in later, laptop woke up)
 setInterval(() => { if (modemPref() && !modem.at && state.me) modemAutoStart(); }, 60000);
+/* The signal chip shows on every office computer that can drive a modem (Chrome/Edge, dispatcher and up), not only on the
+   computer first set up — so whoever has the dongle plugged in can click it, pick the COM port and take over (Rommel 2026-11-22). */
+function modemCanUse(){ return modemSupported() && ['admin','manager','dispatcher'].includes(state.me?.role); }
+let modemStatus = null, modemStatusAt = 0, modemOffSince = null, modemLastWarn = 0;
+async function modemFetchStatus(){
+  try { const { data } = await sb.rpc('job_modem_status'); modemStatus = data || null; modemStatusAt = Date.now(); } catch {}
+  return modemStatus;
+}
+function modemLiveElsewhere(){ const st = modemStatus; return !!(st?.last_seen_at && Date.now() - new Date(st.last_seen_at) < 150000); }
 function renderModemChip(){
   const el = $('modem-chip'); if (!el) return;
-  const pref = modemPref();
-  el.classList.toggle('hidden', !pref);
-  if (!pref) return;
-  el.textContent = modem.at && modem.active ? `📶 SMS modem${modem.info.signal != null ? ' ' + modem.info.signal + '%' : ''}` : '📵 SMS modem off';
-  el.title = modem.at && modem.active ? `Sending HATID’s texts through the USB modem${modem.info.operator ? ' · ' + modem.info.operator : ''}` : (modem.error || 'Not connected — open Settings › Messaging');
-  el.classList.toggle('bad', !(modem.at && modem.active));
+  const pref = modemPref(), show = !!state.me && (!!pref || modemCanUse());
+  el.classList.toggle('hidden', !show);
+  if (!show) return;
+  const here = modem.at && modem.active, live = here || modemLiveElsewhere(), q = modemStatus?.queued || 0;
+  el.textContent = here ? `📶 SMS on${modem.info.signal != null ? ' ' + modem.info.signal + '%' : ''}`
+    : live ? `📶 SMS on${modemStatus?.host ? ' (' + modemStatus.host + ')' : ''}`
+    : `📵 SMS off${q ? ' · ' + q + ' waiting' : ''}`;
+  el.title = here ? `Sending HATID’s texts through the USB modem on this computer${modem.info.operator ? ' · ' + modem.info.operator : ''}`
+    : live ? `Texts go out through the modem on ${modemStatus?.host || 'another computer'}${modemStatus?.holder ? ' (' + modemStatus.holder + ')' : ''}`
+    : (modem.error || 'No computer is sending texts — click to connect the modem on this one');
+  el.classList.toggle('bad', !live);
+}
+/* Status every minute; warn dispatch when texts are waiting and no computer has sent for 5 minutes in office hours */
+setInterval(async () => {
+  if (!state.me || !modemCanUse()) return;
+  await modemFetchStatus(); renderModemChip();
+  const live = (modem.at && modem.active) || modemLiveElsewhere(), q = modemStatus?.queued || 0;
+  if (live || !q || modemStatus?.mode !== 'modem' || !modemStatus?.enabled){ modemOffSince = null; return; }
+  modemOffSince = modemOffSince || Date.now();
+  const t = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' })), office = t.getDay() !== 0 && t.getHours() >= 8 && t.getHours() < 18;
+  if (office && Date.now() - modemOffSince > 300000 && Date.now() - modemLastWarn > 1800000){
+    modemLastWarn = Date.now();
+    toast(`SMS is off — ${q} text${q > 1 ? 's' : ''} waiting. Click 📵 SMS off at the top to connect the modem on the computer it is plugged into.`, 'error');
+  }
+}, 60000);
+async function modemConnectHere(btn){
+  if (btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Connecting…'; }
+  try {
+    let port;
+    try { port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x1E0E }] }); }
+    catch (err) { if (err?.name === 'NotFoundError'){ port = await navigator.serial.requestPort().catch(() => null); if (!port) throw new Error('No port chosen'); } else throw err; }
+    const host = ($('mq-host')?.value || '').trim() || modemPref()?.host || state.modemHost || '';
+    setModemPref({ ...(modemPref() || {}), host });
+    await modemConnect(port, { take: true });
+    await modemFetchStatus(); renderModemChip();
+    toast(`SMS modem connected on this computer${modem.info.operator ? ' · ' + modem.info.operator : ''}`, 'ok');
+    return true;
+  } catch (err) {
+    toast(err?.message || 'Could not connect to the modem', 'error');
+    if (btn){ btn.disabled = false; btn.textContent = 'Connect the modem on this computer'; }
+    return false;
+  }
+}
+async function openModemQuick(){
+  const draw = () => {
+    const here = modem.at && modem.active, st = modemStatus, live = modemLiveElsewhere(), q = st?.queued || 0;
+    const line = here ? `<span class="tag ok">Connected on this computer</span> ${esc([modem.info.operator, modem.info.signal != null ? 'signal ' + modem.info.signal + '%' : ''].filter(Boolean).join(' · '))}`
+      : live ? `<span class="tag ok">Connected on ${esc(st.host || 'another computer')}</span>${st.holder ? ' by ' + esc(st.holder) : ''}`
+      : `<span class="tag bad">No computer is sending texts</span>${st?.last_seen_at ? ' — last seen ' + esc(fmtTime(st.last_seen_at)) + (st.host ? ' on ' + esc(st.host) : '') : ''}`;
+    const setupNote = st && st.mode !== 'modem' ? '<div class="warnbox" style="margin-top:8px">Texts are set to go through the Android phone, not the USB modem. Change it in Settings › Messaging.</div>'
+      : st && !st.enabled ? '<div class="warnbox" style="margin-top:8px">Send SMS is switched off in Settings › Messaging, so nothing will be sent.</div>' : '';
+    openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true" aria-label="SMS modem">
+      <h2 style="margin:0 0 6px">SMS modem</h2>
+      <div class="ft" style="margin-bottom:8px">${line}${q ? ` · <b>${q} text${q > 1 ? 's' : ''} waiting</b>` : ' · nothing waiting'}</div>
+      ${setupNote}
+      ${here ? '' : `<div class="ft" style="margin:10px 0 6px">Plug the USB modem into <b>this</b> computer, then connect. Chrome lists the ports — pick the one named <b>AT Port</b> (e.g. “SimTech HS-USB AT Port (COM5)”). The other computer stops sending as soon as this one takes over.</div>
+        <label class="f" style="max-width:320px">Name of this computer <span class="ft">— shown to others</span><input class="i" id="mq-host" value="${esc(modemPref()?.host || state.modemHost || '')}" placeholder="Dispatch desk PC"></label>`}
+      <div class="row-btns" style="justify-content:space-between;margin-top:12px">
+        <span>${here ? '<button class="btn bad" id="mq-stop">Disconnect this computer</button>' : '<button class="btn primary" id="mq-connect">Connect the modem on this computer</button>'}</span>
+        <span>${canSettings() ? '<button class="btn" id="mq-settings">Messaging settings</button> ' : ''}<button class="btn" data-close>Close</button></span>
+      </div>
+      <div class="ft" style="margin-top:10px">A computer that is switched off can’t be woken from here — move the dongle to the computer you are on and connect it.</div></div>`);
+    bindClose();
+    $('mq-connect')?.addEventListener('click', async e => { if (await modemConnectHere(e.currentTarget)) draw(); });
+    $('mq-stop')?.addEventListener('click', async () => { if (!confirm('Stop sending HATID’s texts from this computer?')) return; await modemStop(false); await modemFetchStatus(); renderModemChip(); toast('This computer no longer sends texts', 'ok'); draw(); });
+    $('mq-settings')?.addEventListener('click', () => { closeOverlay(); state.setSub = 'messaging'; switchView('settings'); });
+  };
+  draw(); await modemFetchStatus(); renderModemChip(); if ($('mq-connect') || $('mq-stop')) draw();
 }
 
 /* ----- Settings › Messaging › SMS: choose the Android phone or the USB modem ----- */
@@ -10888,7 +10959,7 @@ function bindSmsMode(cfg){
     b.disabled = false;
   });
 }
-$('modem-chip').addEventListener('click', () => { if (canSettings()){ state.setSub = 'messaging'; switchView('settings'); } else toast(modem.error || 'SMS modem', ''); });
+$('modem-chip').addEventListener('click', () => { if (modemCanUse()) openModemQuick(); else if (canSettings()){ state.setSub = 'messaging'; switchView('settings'); } else toast(modem.error || 'SMS modem', ''); });
 
 /* ===== Settings: one-time setup (admin / manager) ===== */
 document.querySelectorAll('#set-tabs .subtab').forEach(b => b.addEventListener('click', () => { state.setSub = b.dataset.set; renderSettings(); }));
