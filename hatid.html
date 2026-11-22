@@ -1724,6 +1724,7 @@ function simQuery(t){
   }
   return api;
 }
+const SIM_SUPS = [{ id: 'sim-sup-1', name: 'Logistics Supervisor (sample)' }, { id: 'sim-sup-2', name: 'FG Scheduler (sample)' }];
 function simRpc(fn, a){
   { const d = simDeliveryRpc(fn, a) || (state.preview?.practice ? simPickupRpc(fn, a) : null); if (d) return d; }
   if (fn === 'job_trip_update'){
@@ -1961,6 +1962,14 @@ function simDeliveryRpc(fn, a){
   const J = id => SIM.jobs.find(j => j.id === id);
   const ev = (job_id, event_type, notes) => SIM.job_events.push({ id: newId(), job_id, event_type, notes, created_at: new Date().toISOString(), actor_name: who, actor_role: state.me?.role });
   const sched = (pool, date) => (SIM.delivery_schedules || (SIM.delivery_schedules = [])).find(s => s.pool_id === pool && s.delivery_date === date);
+  const simChg = () => SIM.delivery_schedule_change_requests || (SIM.delivery_schedule_change_requests = []);
+  const simIsApprover = () => (state.me.schedule_steps || []).includes('approve');
+  /* Same rule as job_sched_change_can: '' = as themselves, text = for that approver, null = may not. Requester can't decide (Admin can). */
+  const simChgCan = r => { if (r && r.requested_by === state.me.id && !isAdmin()) return null;
+    if (simIsApprover() || isAdmin()) return '';
+    if (r && r.assigned_to === state.me.id) return r.forwarded_name || 'the approver';
+    if (SIM.schedDelegate && SIM.schedDelegate.to === state.me.id) return 'Supply Chain Manager (sample)';
+    return null; };
   switch (fn){
     case 'job_truck_load': {
       const D = a.p_date;
@@ -2038,22 +2047,81 @@ function simDeliveryRpc(fn, a){
         notes: `Balance of ${j.quotation_serial} (items not on the ${j.scheduled_date ? fmtDay(j.scheduled_date) + ' ' : ''}delivery).` + (j.notes ? '\n' + j.notes : '') };
       SIM.jobs.push(n); j.balance_job = n.id; ev(n.id, 'proposed', `Balance of ${j.quotation_serial} sent to dispatch by ${who}`); return ok(n.id);
     }
+    case 'job_sched_change_info': {
+      const s = sched(a.p_pool, a.p_date), r = s ? simChg().filter(x => x.schedule_id === s.id).slice(-1)[0] || null : null, c = simChgCan(r);
+      return ok({ request: r ? { ...r } : null, can_request: isDispatcher() || (state.me.schedule_steps || []).some(x => ['review','confirm'].includes(x)),
+        can_decide: c !== null, on_behalf: c || null, can_forward: simIsApprover() || isAdmin(), is_approver: simIsApprover(),
+        delegate_to: SIM.schedDelegate && SIM.schedDelegate.from === state.me.id ? { id: SIM.schedDelegate.to, name: SIM_SUPS.find(p => p.id === SIM.schedDelegate.to)?.name } : null,
+        delegate_from: SIM.schedDelegate && SIM.schedDelegate.to === state.me.id ? { id: SIM.schedDelegate.from, name: 'Supply Chain Manager (sample)' } : null,
+        people: SIM_SUPS.filter(p => p.id !== state.me.id) });
+    }
+    case 'job_sched_change_request': {
+      const s = sched(a.p_pool, a.p_date); if (!s || s.status !== 'approved') return fail('Only an approved plan needs a change request.');
+      if (!(a.p_reason || '').trim()) return fail('Say what needs to change and why.');
+      if (simChg().some(x => x.schedule_id === s.id && ['pending','approved'].includes(x.status))) return fail('A change request for this plan is already open.');
+      const r = { id: newId(), schedule_id: s.id, revision: s.revision, reason: a.p_reason.trim(), requested_by: state.me.id, requested_name: who, requested_at: now, status: 'pending' };
+      simChg().push(r); SIM.delivery_schedule_events.push({ schedule_id: s.id, action: 'change_requested', revision: s.revision, by_name: who, at: now, note: r.reason }); return ok({ ...r });
+    }
+    case 'job_sched_change_forward': {
+      const r = simChg().find(x => x.id === a.p_req); if (!r || r.status !== 'pending') return fail('This request is no longer waiting.');
+      if (!simIsApprover() && !isAdmin()) return fail('Only the approver can pass this request on.');
+      const t = SIM_SUPS.find(p => p.id === a.p_to); if (!t) return fail('Pick someone else to decide.');
+      Object.assign(r, { assigned_to: t.id, assigned_name: t.name, forwarded_by: state.me.id, forwarded_name: who, forwarded_at: now, forward_note: a.p_note || null });
+      SIM.delivery_schedule_events.push({ schedule_id: r.schedule_id, action: 'change_forwarded', revision: r.revision, by_name: who, at: now, note: 'To ' + t.name + (a.p_note ? ': ' + a.p_note : '') }); return ok({ ...r });
+    }
+    case 'job_sched_change_decide': {
+      const r = simChg().find(x => x.id === a.p_req); if (!r || r.status !== 'pending') return fail('This request is no longer waiting.');
+      const s = SIM.delivery_schedules.find(x => x.id === r.schedule_id); if (!s || s.status !== 'approved') return fail('The plan is no longer approved — this request is out of date.');
+      const c = simChgCan(r); if (c === null) return fail(r.requested_by === state.me.id ? 'You can’t decide your own request.' : 'Only the approver (or the person they chose) can decide this.');
+      if (!a.p_approve && !(a.p_note || '').trim()) return fail('Give the reason for declining.');
+      Object.assign(r, { status: a.p_approve ? 'approved' : 'declined', decided_by: state.me.id, decided_name: who, decided_on_behalf_of: c || null, decided_at: now, decision_note: a.p_note || null });
+      if (a.p_approve) Object.assign(s, { status: 'returned', returned_from: 'approved', approved_at: null, returned_at: now, return_reason: 'Change approved: ' + r.reason, change_mode: true, change_request_id: r.id, updated_at: now });
+      SIM.delivery_schedule_events.push({ schedule_id: s.id, action: a.p_approve ? 'change_approved' : 'change_declined', revision: s.revision, by_name: who + (c ? ' (for ' + c + ')' : ''), at: now, note: a.p_note || (a.p_approve ? r.reason : null) });
+      return ok({ ...r });
+    }
+    case 'job_sched_change_withdraw': {
+      const r = simChg().find(x => x.id === a.p_req); if (!r || r.status !== 'pending') return fail('This request is no longer waiting.');
+      if (r.requested_by !== state.me.id && !isAdmin()) return fail('Only the person who asked can withdraw it.');
+      Object.assign(r, { status: 'withdrawn', decided_name: who, decided_at: now });
+      SIM.delivery_schedule_events.push({ schedule_id: r.schedule_id, action: 'change_withdrawn', revision: r.revision, by_name: who, at: now }); return ok({ ...r });
+    }
+    case 'job_sched_delegate_set': {
+      if (!simIsApprover()) return fail('Only the schedule approver can delegate.');
+      SIM.schedDelegate = a.p_to ? { from: state.me.id, to: a.p_to } : null; return ok({ to: a.p_to });
+    }
+    case 'job_sched_change_mine': {
+      const out = [];
+      (SIM.delivery_schedules || []).forEach(s => { const pl = state.ref.poolById?.[s.pool_id];
+        simChg().filter(r => r.schedule_id === s.id && r.status === 'pending' && r.requested_by !== state.me.id && simChgCan(r) !== null)
+          .forEach(r => out.push({ pool_id: s.pool_id, date: s.delivery_date, pool: pl?.name, kind: 'request', reason: r.reason, by: r.requested_name }));
+        const r = s.status === 'for_change_approval' && simChg().find(x => x.id === s.change_request_id);
+        if (r && simChgCan(r) !== null && !(SIM.delivery_schedule_signoffs || []).some(x => x.schedule_id === s.id && x.revision === s.revision && x.signed_by === state.me.id))
+          out.push({ pool_id: s.pool_id, date: s.delivery_date, pool: pl?.name, kind: 'sign', reason: r.reason, by: r.requested_name }); });
+      return ok(out);
+    }
     case 'job_schedule_view': {
       const s = sched(a.p_pool, a.p_date);
       return ok({ schedule: s ? { ...s, snapshot: undefined } : null, snapshot: s?.snapshot || null, live: simSnapshot(a.p_pool, a.p_date), full_view: true, can_prepare: isDispatcher() });
     }
     case 'job_schedule_action': {
-      const act = a.p_action, signing = ['submit','review','confirm','approve'].includes(act);
+      const act = a.p_action, signing = ['submit','review','confirm','approve','change_approve'].includes(act);
       if (signing && !/^\d{4,6}$/.test(a.p_passcode || '')) return fail('Enter a 4–6 digit passcode (in practice any digits work)');
       let s = sched(a.p_pool, a.p_date);
       if (!s){ s = { id: newId(), pool_id: a.p_pool, delivery_date: a.p_date, revision: 0, status: 'draft', created_at: now }; SIM.delivery_schedules.push(s); }
       if (act === 'submit'){ if (!['draft','returned'].includes(s.status)) return fail('This schedule was already submitted.'); s.revision++; s.snapshot = simSnapshot(a.p_pool, a.p_date); s.submitted_at = now; s.submitted_by = state.me.id; }
       else if (['review','confirm','approve'].includes(act) && STEP_FOR_STATUS[s.status] !== act) return fail('This schedule isn’t waiting for that step.');
-      const next = { submit: 'for_review', review: 'for_confirmation', confirm: 'for_approval', approve: 'approved', reject: 'returned', withdraw: 'returned', reopen: 'returned' }[act];
+      if (act === 'change_approve'){
+        if (s.status !== 'for_change_approval') return fail('This plan isn’t waiting for a change approval.');
+        if (simChgCan(simChg().find(x => x.id === s.change_request_id)) === null) return fail('Only the approver (or the person they chose) can approve this change.');
+        if ((SIM.delivery_schedule_signoffs || []).some(x => x.schedule_id === s.id && x.revision === s.revision && x.signed_by === state.me.id)) return fail('You prepared this plan — the change needs a different person to approve.');
+      }
+      const next = { submit: s.change_mode ? 'for_change_approval' : 'for_review', review: 'for_confirmation', confirm: 'for_approval', approve: 'approved', change_approve: 'approved', reject: 'returned', withdraw: 'returned', reopen: 'returned' }[act];
       if (!next) return fail('Unknown action');
-      if (a.p_signature) SIM.delivery_schedule_signoffs.push({ schedule_id: s.id, revision: s.revision, step: act === 'submit' ? 'prepare' : act, signed_by: state.me.id, signer_name: who, signer_title: null, signature_url: a.p_signature, signed_at: now });
+      if (a.p_signature) SIM.delivery_schedule_signoffs.push({ schedule_id: s.id, revision: s.revision, step: act === 'submit' ? 'prepare' : act === 'change_approve' ? 'change' : act, signed_by: state.me.id, signer_name: who, signer_title: null, signature_url: a.p_signature, signed_at: now });
       if (['reject','withdraw','reopen'].includes(act)){ s.return_reason = a.p_note; s.returned_at = now; }
-      if (act === 'approve') s.approved_at = now;
+      if (act === 'approve' || act === 'change_approve') s.approved_at = now;
+      if (act === 'change_approve'){ const r = simChg().find(x => x.id === s.change_request_id); if (r) Object.assign(r, { status: 'done', done_at: now }); s.change_mode = false; s.change_request_id = null; }
+      if (act === 'reopen'){ simChg().filter(x => x.schedule_id === s.id && ['pending','approved'].includes(x.status)).forEach(x => Object.assign(x, { status: 'withdrawn', decision_note: 'Plan reopened for full re-approval' })); s.change_mode = false; s.change_request_id = null; }
       s.status = next; s.updated_at = now;
       SIM.delivery_schedule_events.push({ schedule_id: s.id, action: act, revision: s.revision, by_name: who, at: now, note: a.p_note || null });
       return ok({ ...s });
@@ -2295,6 +2363,34 @@ const PR_SC = [
         say: T('Sign, type any 4 digits, then **Sign**.', 'Pumirma, mag-type ng kahit anong 4 na numero, tapos **Sign**.'),
         why: T('Approval sends the schedule to the clients and agents, and saves the final signed copy (📄) for printing.', 'Kapag approved, ipapadala ang schedule sa mga client at agent, at mase-save ang final signed copy (📄) para ma-print.') },
       { id: 'sg-done', next: true, el: () => $('sf-final') || $('sf-mkfinal'), say: T('Approved. Open **📄 Final signed copy** any time to print it.', 'Approved na. Buksan ang **📄 Final signed copy** kahit kailan para i-print.') }] },
+  { id: 'd-change', mode: 'delivery', who: ['disp','mgr'], mins: 4,
+    title: T('Change an approved schedule', 'Baguhin ang approved na schedule'), desc: T('Dispatch asks, the manager approves, one signature.', 'Hihingi ang dispatch, aaprubahan ng manager, isang pirma.'),
+    seed: () => { const c = PR.ctx; SIM.jobs.push(prPrepAll(prOnTruck(prJob({ so: 'S90081', client: 'Sample: Acme Builders' }), c.tA, 1)), prPrepAll(prOnTruck(prJob({ so: 'S90082', client: 'Sample: Cruz Cabinetry', dest: c.dest2 }), c.tA, 2)));
+      const at = new Date().toISOString(), s = { id: newId(), pool_id: c.pool.id, delivery_date: c.today, revision: 1, status: 'approved', submitted_at: at, approved_at: at, updated_at: at };
+      s.snapshot = simSnapshot(c.pool.id, c.today); SIM.delivery_schedules.push(s);
+      [['prepare','Dispatch (sample)'], ['review','Logistics Supervisor (sample)'], ['confirm','Admin Office (sample)'], ['approve','Manager (sample)']].forEach(([step, nm]) =>
+        SIM.delivery_schedule_signoffs.push({ schedule_id: s.id, revision: 1, step, signed_by: 'practice-' + step, signer_name: nm, signature_url: null, signed_at: at }));
+      SIM.delivery_schedule_events.push({ schedule_id: s.id, action: 'approve', revision: 1, by_name: 'Manager (sample)', at }); },
+    steps: () => [
+      { id: 'ch-ask', as: 'disp', go: () => openSchedule(PR.ctx.pool.id, PR.ctx.today), el: '#overlay [data-chg=request]', done: () => !!$('rs-note'),
+        say: T('You are **Dispatch**. Today’s schedule is already approved, but a client asked to move their drop. Tap **Request a change**.', 'Ikaw ang **Dispatch**. Approved na ang schedule ngayon, pero humiling ang client na ilipat ang drop nila. I-tap ang **Request a change**.'),
+        why: T('An approved plan can’t be edited directly — the manager (or their delegate) must agree first.', 'Hindi puwedeng direktang baguhin ang approved na plan — kailangan munang pumayag ang manager (o ang delegate niya).') },
+      { id: 'ch-ask2', el: '#overlay .modal', free: true, done: () => (SIM.delivery_schedule_change_requests || []).some(r => r.status === 'pending'),
+        say: T('Type what needs to change and why (e.g. “Move Cruz Cabinetry to trip 1”), then **Send**.', 'I-type kung ano ang babaguhin at bakit (hal. “Ilipat ang Cruz Cabinetry sa trip 1”), tapos **Send**.') },
+      { id: 'ch-mgr', as: 'mgr', view: 'sched', el: () => document.querySelector('#sc-mine [data-sched]'), done: () => !!document.querySelector('#overlay [data-chg=approve]'),
+        say: T('Now you are the **Manager**. The request is under **Needs you**. Tap it.', 'Ngayon ikaw ang **Manager**. Nasa **Needs you** ang request. I-tap ito.') },
+      { id: 'ch-mgr2', el: '#overlay [data-chg=approve]', done: () => prSched()?.status === 'returned',
+        say: T('Read the reason, then tap **Approve request**.', 'Basahin ang dahilan, tapos i-tap ang **Approve request**.'),
+        why: T('You can also **Decline** (with a reason), or **Pass to a supervisor** to decide this one. Away often? Name a standing delegate on the Schedules screen.', 'Puwede ring **Decline** (may dahilan), o **Pass to a supervisor** para sila ang magpasya. Madalas wala? Pumili ng delegate sa Schedules screen.') },
+      { id: 'ch-edit', as: 'disp', go: () => openSchedule(PR.ctx.pool.id, PR.ctx.today), el: '#overlay [data-act=submit]', done: () => !!$('sg-ok'),
+        say: T('Back to **Dispatch**. The plan is open — make the change (practice: skip it), then tap **Sign & submit for change approval**.', 'Balik sa **Dispatch**. Bukas na ang plan — gawin ang pagbabago (practice: laktawan), tapos i-tap ang **Sign & submit for change approval**.') },
+      { id: 'ch-edit2', el: '#overlay .modal', free: true, done: () => prSched()?.status === 'for_change_approval',
+        say: T('Sign, type any 4 digits as the passcode (practice), then **Sign**.', 'Pumirma, mag-type ng kahit anong 4 na numero bilang passcode (practice), tapos **Sign**.') },
+      { id: 'ch-sign', as: 'mgr', go: () => openSchedule(PR.ctx.pool.id, PR.ctx.today), el: '#overlay [data-act=change_approve]', done: () => !!$('sg-ok'),
+        say: T('**Manager** again. No review or confirm needed for a change — tap **Sign & approve change**.', '**Manager** ulit. Hindi na kailangan ng review o confirm para sa pagbabago — i-tap ang **Sign & approve change**.') },
+      { id: 'ch-sign2', el: '#overlay .modal', free: true, done: () => prSched()?.status === 'approved',
+        say: T('Sign, type any 4 digits, then **Sign**.', 'Pumirma, mag-type ng kahit anong 4 na numero, tapos **Sign**.') },
+      { id: 'ch-done', next: true, say: T('Approved again. The new signature is in the **Approved by** box; if a delegate signs, it says “for” the manager.', 'Approved na ulit. Nasa **Approved by** box ang bagong pirma; kung delegate ang pumirma, nakasulat na “for” ang manager.') }] },
 ];
 
 /* ----- the guide card + highlight ----- */
@@ -12500,7 +12596,7 @@ async function loadSched(){
   try { ({ data: rows } = await withRetry('Loading schedules', () => sb.from('delivery_schedules').select(SCHED_COLS).gte('delivery_date', addDays(localDate(), -45)).order('delivery_date', { ascending: false }).limit(200))); }
   catch { $('sc-body').innerHTML = '<tr><td colspan="5" class="muted">Could not load schedules.</td></tr>'; return; }
   let mine = []; try { mine = await schedulesNeedingMe(rows); } catch {}
-  let chg = []; if (!PR.on) try { const { data } = await sb.rpc('job_sched_change_mine'); chg = data || []; } catch {}
+  let chg = []; try { const { data } = await sb.rpc('job_sched_change_mine'); chg = data || []; } catch {}
   const returned = isDispatcher() ? rows.filter(s => s.status === 'returned') : [];
   const pn = id => state.ref.poolById?.[id]?.name || '—';
   $('sc-mine').innerHTML = (mine.length || returned.length || chg.length ? `<div class="card pad rp-sec"><h3>Needs you</h3><ul class="alerts">
@@ -12529,7 +12625,7 @@ async function loadSched(){
    approves the request, passes it to a supervisor, or names a standing delegate; Admin is the fallback.
    The re-submitted plan then needs one signature (step 'change'), shown in the "Approved by" box. */
 async function schedDelegateCard(pools){
-  if (PR.on || !(state.me.schedule_steps || []).includes('approve') || !pools.length) return '';
+  if (!(state.me.schedule_steps || []).includes('approve') || !pools.length) return '';
   let ci; try { ({ data: ci } = await sb.rpc('job_sched_change_info', { p_pool: pools[0].id, p_date: localDate() })); } catch { return ''; }
   if (!ci) return '';
   state.schedDeleg = ci;
@@ -12588,7 +12684,7 @@ async function openSchedule(poolId, date){
       signs = (c.data || []).map(x => x.step === 'change' ? { ...x, step: 'approve', change: true } : x); events = d.data || [];
     }
   } catch { closeOverlay(); return; }
-  let ci = null; if (!PR.on) try { ({ data: ci } = await sb.rpc('job_sched_change_info', { p_pool: poolId, p_date: date })); } catch {}
+  let ci = null; try { ({ data: ci } = await sb.rpc('job_sched_change_info', { p_pool: poolId, p_date: date })); } catch {}
   const status = s?.status || 'draft', isChg = status === 'for_change_approval', inFlow = !!STEP_FOR_STATUS[status] || status === 'approved' || isChg;
   const content = inFlow ? (s.snapshot || []) : live;
   const changed = inFlow && JSON.stringify(s.snapshot) !== JSON.stringify(live);
