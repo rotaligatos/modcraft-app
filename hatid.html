@@ -1727,12 +1727,17 @@ function simQuery(t){
 const SIM_SUPS = [{ id: 'sim-sup-1', name: 'Logistics Supervisor (sample)' }, { id: 'sim-sup-2', name: 'FG Scheduler (sample)' }];
 
 /* Practice: undo a step processed by mistake — same rules as ticket_undo_* */
+/* the practice people an undo can be passed or delegated to: the practice personas */
+function simUndoPeople(){ return Object.entries(PR_AS).filter(([k, p]) => p.role !== 'field').map(([k, p]) => ({ id: 'practice-' + k, name: `${p.en} (practice)` })); }
 function simUndoRpc(fn, a){
   if (!SIM || !/^ticket_undo_/.test(fn)) return null;
   const ok = d => Promise.resolve({ data: d, error: null }), fail = m => Promise.resolve({ data: null, error: { code: 'P0001', message: m } });
   const now = new Date().toISOString(), who = state.me?.name || 'Practice', me = state.me || {};
   const R = SIM.ticket_undo_requests || (SIM.ticket_undo_requests = []);
-  const canDecide = () => isAdmin() || me.pickup_role === 'wh_manager';
+  const isAppr = () => isAdmin() || !!me.can_approve_undo;
+  const dgFrom = () => SIM.undoDelegate && SIM.undoDelegate.to === me.id ? SIM.undoDelegate.from_name : null;
+  const canFor = r => isAppr() ? '' : (r && r.assigned_to === me.id) ? (r.forwarded_by_name || 'the warehouse manager') : dgFrom();
+  const canDecide = r => canFor(r) != null;
   const plan = (kind, id) => {
     if (kind === 'delivery'){ const j = SIM.jobs.find(x => x.id === id); if (!j) return { blocked: 'Delivery not found.' };
       const evs = (SIM.job_events || []).filter(e => e.job_id === id), last = t => evs.filter(e => e.event_type === t).map(e => e.created_at).sort().pop();
@@ -1754,7 +1759,8 @@ function simUndoRpc(fn, a){
   const lbl = (k, st) => undoLbl(k, st);
   switch (fn){
     case 'ticket_undo_for': { const pl = plan(a.p_kind, a.p_id), r = open(a.p_id);
-      return ok({ request: r || null, can_decide: !!r && canDecide() && (r.requested_by !== me.id || isAdmin()), can_withdraw: !!r && (r.requested_by === me.id || isAdmin()),
+      return ok({ request: r || null, can_decide: !!r && canDecide(r) && (r.requested_by !== me.id || isAdmin()), decide_for: r ? (canFor(r) || null) : null, can_forward: !!r && isAppr(),
+        can_withdraw: !!r && (r.requested_by === me.id || isAdmin()),
         can_ask: !r && !pl.blocked && (a.p_kind === 'delivery' ? ['admin','manager','dispatcher','field'].includes(me.role) : (['admin','manager'].includes(me.role) || !!me.pickup_role)),
         from_status: pl.from_status, back_to: pl.back_to, from_label: lbl(a.p_kind, pl.from_status), back_label: lbl(a.p_kind, pl.back_to), blocked: pl.blocked || null }); }
     case 'ticket_undo_request': {
@@ -1773,10 +1779,11 @@ function simUndoRpc(fn, a){
       Object.assign(r, { status: 'withdrawn', decided_name: who, decided_at: now }); return ok({ ...r }); }
     case 'ticket_undo_decide': { const r = R.find(x => x.id === a.p_req);
       if (!r || r.status !== 'pending') return fail('This request was already decided.');
-      if (!canDecide()) return fail('Only the warehouse manager or an admin can approve an undo.');
-      if (r.requested_by === me.id && !isAdmin()) return fail('You can’t approve your own request — another warehouse manager or an admin has to.');
+      if (!canDecide(r)) return fail('Only the warehouse manager (or someone they delegated) or an admin can approve an undo.');
+      if (r.requested_by === me.id && !isAdmin()) return fail('You can’t approve your own request — the warehouse manager or an admin has to.');
+      const by = canFor(r) ? `${who} for ${canFor(r)}` : who;
       if (!a.p_approve){ if (!(a.p_note || '').trim()) return fail('Say why the undo is declined.');
-        Object.assign(r, { status: 'declined', decided_name: who, decided_at: now, decide_note: a.p_note.trim() }); return ok({ ...r }); }
+        Object.assign(r, { status: 'declined', decided_name: by, decided_at: now, decide_note: a.p_note.trim() }); return ok({ ...r }); }
       const pl = plan(r.kind, r.job_id || r.visit_id); if (pl.blocked) return fail(pl.blocked);
       if (pl.from_status !== r.from_status) return fail(`The ticket has moved on since the request (now ${lbl(r.kind, pl.from_status)}) — ask again.`);
       let fx = {};
@@ -1797,11 +1804,25 @@ function simUndoRpc(fn, a){
         }
         SIM.pk_events.push({ id: newId(), visit_id: v.id, kind: 'undo', notes: `${lbl('pickup', r.from_status)} undone — back to ${lbl('pickup', r.back_to)}. Asked by ${r.requested_name}: ${r.reason}`, actor_name: who, created_at: now });
       }
-      Object.assign(r, { status: 'approved', decided_name: who, decided_at: now, effects: fx }); return ok({ ...r }); }
+      Object.assign(r, { status: 'approved', decided_name: by, decided_at: now, effects: fx }); return ok({ ...r }); }
+    case 'ticket_undo_forward': { const r = R.find(x => x.id === a.p_req);
+      if (!r || r.status !== 'pending') return fail('This request is no longer waiting.');
+      if (!isAppr()) return fail('Only the warehouse manager or an admin can pass a request on.');
+      if (a.p_to === r.requested_by) return fail('That person asked for it — they can’t approve it.');
+      const p = simUndoPeople().find(x => x.id === a.p_to); if (!p) return fail('Pick another active user.');
+      Object.assign(r, { assigned_to: p.id, assigned_name: p.name, forwarded_by_name: who }); return ok({ ...r }); }
+    case 'ticket_undo_delegate_set': {
+      if (!isAppr()) return fail('Only the warehouse manager can delegate undo approvals.');
+      if (!a.p_to){ SIM.undoDelegate = null; return ok({ to: null }); }
+      const p = simUndoPeople().find(x => x.id === a.p_to); if (!p) return fail('Pick another active user.');
+      SIM.undoDelegate = { from: me.id, from_name: who, to: p.id, to_name: p.name, since: now }; return ok({ to: p.id, to_name: p.name }); }
+    case 'ticket_undo_delegate_info':
+      return ok({ approver: isAppr(), delegate: SIM.undoDelegate && SIM.undoDelegate.from === me.id ? { to: SIM.undoDelegate.to, to_name: SIM.undoDelegate.to_name, since: SIM.undoDelegate.since } : null,
+        covering_for: dgFrom() ? [dgFrom()] : [], people: simUndoPeople().filter(p => p.id !== me.id) });
     case 'ticket_undo_mine':
-      return ok(R.filter(r => (r.status === 'pending' && (r.requested_by === me.id || canDecide())) || r.requested_by === me.id || r.decided_name === who)
+      return ok(R.filter(r => (r.status === 'pending' && (r.requested_by === me.id || canDecide(r))) || r.requested_by === me.id || (r.decided_name || '').startsWith(who))
         .map(r => ({ ...r, from_label: lbl(r.kind, r.from_status), back_label: lbl(r.kind, r.back_to), mine: r.requested_by === me.id,
-          can_decide: r.status === 'pending' && canDecide() && (r.requested_by !== me.id || isAdmin()) }))
+          can_decide: r.status === 'pending' && canDecide(r) && (r.requested_by !== me.id || isAdmin()), decide_for: canFor(r) || null, can_forward: r.status === 'pending' && isAppr() }))
         .sort((x, y) => (y.status === 'pending') - (x.status === 'pending') || (y.created_at > x.created_at ? 1 : -1)));
   }
   return null;
@@ -1929,7 +1950,7 @@ const PR_AS = {
 function prAs(k, view){
   const p = PR_AS[k]; PR.persona = k;
   state.me = { ...state.realMe, id: 'practice-' + k, name: `${p.en} (practice)`, email: 'practice@hatid', role: p.role, pickup_role: p.pickup_role || null, pickup_site: 'plant1',
-    schedule_steps: p.steps || [], companies: null, company: null, can_see_costs: p.role === 'manager', signature_url: null, pk_home: null };
+    schedule_steps: p.steps || [], companies: null, company: null, can_see_costs: p.role === 'manager', signature_url: null, pk_home: null, can_approve_undo: p.pickup_role === 'wh_manager' };
   state.mode = p.mode || 'delivery'; state.field = null; if (p.mode === 'pickup') state.pkSite = 'plant1';
   closeOverlay(); setHeader(); switchView(view || p.home);
 }
@@ -2986,7 +3007,7 @@ PR_SC.push(
       { id: 'pu-ok', as: 'pwm', go: () => openUndoList(), el: '#overlay [data-undo-ok]', done: () => (SIM.pk_visits || []).find(v => v.id === PR.undoV)?.status === 'ready',
         say: T('Now you are the **Warehouse Manager**. The request shows under **Undo requests** (also in the 🔔). Read the reason, tap **Approve undo**, then **OK**.',
                'Ngayon ikaw ang **Warehouse Manager**. Nasa **Undo requests** ang request (nasa 🔔 din). Basahin ang dahilan, i-tap ang **Approve undo**, tapos **OK**.'),
-        why: T('You can also **Decline** with a reason. You can’t approve your own request.', 'Puwede ring **Decline** na may dahilan. Hindi mo maaaprubahan ang sarili mong request.') },
+        why: T('You can also **Decline** with a reason, or **Pass to** someone. Away? Under **While you’re away**, let the warehouse supervisor approve for you.', 'Puwede ring **Decline** na may dahilan, o **Pass to** sa iba. Wala ka? Sa **While you’re away**, hayaan ang warehouse supervisor na mag-approve para sa iyo.') },
       { id: 'pu-end', next: true, say: T('Undone: P1-004 is back to **Ready for loading** and the items are back on the order. When it is released again, promptness still counts from the first release. A client already told gets a correction message.',
                'Na-undo na: balik sa **Ready for loading** ang P1-004 at bumalik sa order ang mga item. Kapag na-release ulit, sa unang release pa rin bibilangin ang promptness. Ang client na nasabihan na ay makakatanggap ng correction.') }] },
 );
@@ -13100,7 +13121,8 @@ function openReasonModal(title, message, onSubmit, back){
 
 
 /* ----- Undo a step processed by mistake (Rommel 2026-11-22, concern #5) -----
-   Anyone on the ticket asks with a reason; the warehouse manager (covering the company) or an admin approves.
+   Anyone on the ticket asks with a reason; the warehouse manager (job_staff.can_approve_undo, covering the company) or an admin approves.
+   The manager can delegate: a standing delegate while away (e.g. the warehouse supervisor), or pass one request on.
    Nobody approves their own request unless admin; a warehouse manager can undo steps up to 7 days old, an admin any time.
    Database: ticket_undo_request / ticket_undo_decide / ticket_undo_withdraw / ticket_undo_for / ticket_undo_mine.
    An undone release keeps its first loaded time for promptness, and a message already sent gets a correction. */
@@ -13114,13 +13136,14 @@ async function undoFor(kind, id){
 function undoBoxHtml(kind, id, u){
   if (!u) return '';
   const r = u.request;
-  if (r) return `<div class="warnbox" style="margin:8px 0"><b>↩ Undo asked</b> by ${esc(r.requested_name || '—')} · ${esc(fmtTime(r.created_at))}
+  if (r) return `<div class="warnbox" style="margin:8px 0"><b>↩ Undo asked</b> by ${esc(r.requested_name || '—')} · ${esc(fmtTime(r.created_at))}${r.assigned_name ? ` · <span class="ft">passed to ${esc(r.assigned_name)} by ${esc(r.forwarded_by_name || '—')}</span>` : ''}
     <div style="margin-top:4px"><b>${esc(undoLbl(kind, r.from_status))}</b> → back to <b>${esc(undoLbl(kind, r.back_to))}</b></div>
     <div class="ft">Reason: ${esc(r.reason)}</div>
     <div class="row-btns" style="margin-top:8px">
-      ${u.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${kind}" data-from="${esc(r.from_status)}">Approve undo</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
+      ${u.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${kind}" data-from="${esc(r.from_status)}">Approve undo${u.decide_for ? ' (for ' + esc(u.decide_for) + ')' : ''}</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
+      ${u.can_forward ? '<button class="btn" data-undo-list>Pass to someone…</button>' : ''}
       ${u.can_withdraw ? `<button class="btn" data-undo-wd="${esc(r.id)}">Withdraw</button>` : ''}
-      ${!u.can_decide ? '<span class="ft">Waiting for the warehouse manager or an admin.</span>' : ''}</div></div>`;
+      ${!u.can_decide ? `<span class="ft">Waiting for ${r.assigned_name ? esc(r.assigned_name) : 'the warehouse manager or an admin'}.</span>` : ''}</div></div>`;
   if (u.can_ask) return `<div style="margin:6px 0"><button class="lnk" data-undo-ask="${kind}" data-id="${esc(id)}" data-from="${esc(u.from_status)}" data-back="${esc(u.back_to)}">↩ Processed by mistake? Ask to undo “${esc(undoLbl(kind, u.from_status))}”</button></div>`;
   if (u.blocked && !/^Only /.test(u.blocked) && u.from_status && !['proposed','scheduled','rejected','waiting','cancelled'].includes(u.from_status))
     return `<div class="ft" style="margin:6px 0">↩ Can’t undo yet: ${esc(u.blocked)}</div>`;
@@ -13135,7 +13158,8 @@ function undoConfirmText(kind, from, back){
 }
 async function undoAfterDone(){ try { undoAfter && undoAfter(); } catch {} refreshBell && refreshBell(); }
 document.addEventListener('click', async e => {
-  const b = e.target.closest && e.target.closest('[data-undo-ask],[data-undo-ok],[data-undo-no],[data-undo-wd]'); if (!b) return;
+  if (e.target.closest && e.target.closest('[data-undo-list]')){ e.preventDefault(); openUndoList(); return; }
+  const b = e.target.closest && e.target.closest('[data-undo-ask],[data-undo-ok],[data-undo-no],[data-undo-wd],[data-undo-fw],[data-undo-dg]'); if (!b) return;
   e.preventDefault();
   try {
     if (b.dataset.undoAsk){
@@ -13157,6 +13181,18 @@ document.addEventListener('click', async e => {
       b.disabled = true;
       await withRetry('Declining', () => sb.rpc('ticket_undo_decide', { p_req: b.dataset.undoNo, p_approve: false, p_note: note.trim() }), 1);
       toast('Undo declined', 'ok');
+    } else if (b.dataset.undoFw){
+      const to = document.querySelector(`[data-undo-fwsel="${b.dataset.undoFw}"]`)?.value;
+      if (!to) return toast('Pick who decides it', 'error');
+      b.disabled = true;
+      await withRetry('Passing it on', () => sb.rpc('ticket_undo_forward', { p_req: b.dataset.undoFw, p_to: to }), 1);
+      toast('Passed on — they were notified', 'ok');
+    } else if (b.dataset.undoDg){
+      const to = b.dataset.undoDg === 'off' ? null : $('ul-dg-to')?.value;
+      if (b.dataset.undoDg !== 'off' && !to) return toast('Pick who approves while you’re away', 'error');
+      b.disabled = true;
+      await withRetry('Saving', () => sb.rpc('ticket_undo_delegate_set', { p_to: to }), 1);
+      toast(to ? 'Delegated — they can approve undos for you' : 'Delegation switched off', 'ok');
     } else if (b.dataset.undoWd){
       if (!confirm('Withdraw this undo request?')) return;
       b.disabled = true;
@@ -13170,19 +13206,31 @@ const UNDO_BACK = { delivery: st => ({ dispatched: 'scheduled', in_progress: 'di
   pickup: st => ({ notified: 'waiting', accepted: 'notified', ready: 'accepted', done: 'ready' })[st] };
 async function openUndoList(){
   openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true"><span class="spin"></span></div>`); bindClose();
-  let rows; try { ({ data: rows } = await withRetry('Loading undo requests', () => sb.rpc('ticket_undo_mine'))); } catch { closeOverlay(); return; }
-  rows = rows || [];
+  let rows, dg; try { [{ data: rows }, { data: dg }] = await Promise.all([withRetry('Loading undo requests', () => sb.rpc('ticket_undo_mine')),
+      withRetry('Loading', () => sb.rpc('ticket_undo_delegate_info'))]); } catch { closeOverlay(); return; }
+  rows = rows || []; dg = dg || {};
+  const people = dg.people || [];
+  const pplOpts = (sel, skip) => '<option value="">— pick someone —</option>' + people.filter(p => p.id !== skip).map(p => `<option value="${esc(p.id)}"${p.id === sel ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  const dgCard = dg.approver ? `<div class="card pad" style="margin:0 0 8px"><b>While you’re away</b>
+      <div class="ft">Let someone approve undo requests for you (e.g. the warehouse supervisor). They approve “for” you, and you can switch it off any time.</div>
+      ${dg.delegate ? `<div style="margin-top:6px">Now: <b>${esc(dg.delegate.to_name)}</b> approves for you <span class="ft">since ${esc(fmtTime(dg.delegate.since))}</span></div>` : ''}
+      <div class="row-btns" style="margin-top:6px"><select class="i" id="ul-dg-to" style="max-width:260px">${pplOpts(dg.delegate?.to)}</select>
+        <button class="btn" data-undo-dg="set">${dg.delegate ? 'Change' : 'Delegate'}</button>${dg.delegate ? '<button class="btn" data-undo-dg="off">Switch off</button>' : ''}</div></div>`
+    : (dg.covering_for || []).length ? `<div class="card pad" style="margin:0 0 8px">You approve undo requests for <b>${esc(dg.covering_for.join(', '))}</b> while they’re away.</div>` : '';
   const ST = { pending: ['warn', 'Waiting'], approved: ['ok', 'Undone'], declined: ['bad', 'Declined'], withdrawn: ['', 'Withdrawn'] };
   document.querySelector('#overlay .modal').innerHTML = `<div class="chart-h" style="margin:0 0 6px"><h2 style="margin:0">↩ Undo requests</h2></div>
     <div class="ft" style="margin-bottom:8px">A step processed by mistake is undone once the warehouse manager or an admin approves. Ask from the ticket itself.</div>
+    ${dgCard}
     <div id="ul-list">${rows.length ? rows.map(r => { const st = ST[r.status] || ['', r.status];
       return `<div class="card pad" style="margin:8px 0"><div class="chart-h" style="margin:0"><b>${r.kind === 'pickup' ? '📦' : '🚚'} ${esc(r.label || '')}</b> <span class="tag ${st[0]}">${esc(st[1])}</span></div>
         <div style="margin-top:4px"><b>${esc(r.from_label)}</b> → back to <b>${esc(r.back_label)}</b> · <span class="ft">asked by ${esc(r.requested_name || '—')} · ${esc(fmtTime(r.created_at))}</span></div>
         <div class="ft">Reason: ${esc(r.reason)}</div>
+        ${r.assigned_name && r.status === 'pending' ? `<div class="ft">Passed to ${esc(r.assigned_name)} by ${esc(r.forwarded_by_name || '—')}</div>` : ''}
         ${r.decided_name ? `<div class="ft">${esc(st[1])} by ${esc(r.decided_name)} · ${esc(fmtTime(r.decided_at))}${r.decide_note ? ' — ' + esc(r.decide_note) : ''}</div>` : ''}
         <div class="row-btns" style="margin-top:6px">
           <button class="btn" data-ul-open="${esc(r.kind)}" data-id="${esc(r.job_id || r.visit_id)}">Open the ticket</button>
-          ${r.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${esc(r.kind)}" data-from="${esc(r.from_status)}">Approve undo</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
+          ${r.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${esc(r.kind)}" data-from="${esc(r.from_status)}">Approve undo${r.decide_for ? ' (for ' + esc(r.decide_for) + ')' : ''}</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
+          ${r.can_forward ? `<select class="i" data-undo-fwsel="${esc(r.id)}" style="max-width:200px">${pplOpts(r.assigned_to, r.requested_by)}</select><button class="btn" data-undo-fw="${esc(r.id)}">Pass to</button>` : ''}
           ${r.status === 'pending' && r.mine ? `<button class="btn" data-undo-wd="${esc(r.id)}">Withdraw</button>` : ''}</div></div>`; }).join('')
       : '<div class="muted" style="padding:14px 0">Nothing waiting. To undo a step, open the ticket and tap “Processed by mistake? Ask to undo”.</div>'}</div>
     <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Close</button></div>`;
