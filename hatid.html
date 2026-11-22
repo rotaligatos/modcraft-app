@@ -680,7 +680,7 @@ table.ut tr.off td{color:var(--muted)}
 .stepper .st b{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.3px;color:var(--muted)}
 @media (max-width:600px){.stepper{grid-template-columns:repeat(2,1fr)}}
 .sc-st{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
-.sc-draft{background:var(--surface-2);color:var(--muted)} .sc-for_review,.sc-for_confirmation,.sc-for_approval{background:var(--warn-soft);color:var(--warn)}
+.sc-draft{background:var(--surface-2);color:var(--muted)} .sc-for_review,.sc-for_confirmation,.sc-for_approval,.sc-for_change_approval{background:var(--warn-soft);color:var(--warn)}
 .sc-approved{background:var(--ok-soft);color:var(--ok)} .sc-returned{background:var(--bad-soft);color:var(--bad)}
 .bell{position:relative}
 .bell .n{position:absolute;top:-6px;right:-6px;background:#e5484d;color:#fff;border-radius:999px;font-size:11px;font-weight:700;min-width:18px;height:18px;line-height:18px;text-align:center;padding:0 4px}
@@ -12471,7 +12471,7 @@ function renderRateSettings(){
    manager approves & signs. Any signer can return it for revision; dispatch can withdraw it to edit; the approver can reopen
    an approved schedule. Every step runs in the database (job_schedule_action), which checks who may do it and notifies people.
    Signers sign the version that was submitted (a frozen copy); if jobs change afterwards the schedule says so. */
-const SCHED_STATUS = { draft:'Draft', for_review:'For review', for_confirmation:'For confirmation', for_approval:'For approval', approved:'Approved', returned:'Returned for revision' };
+const SCHED_STATUS = { draft:'Draft', for_review:'For review', for_confirmation:'For confirmation', for_approval:'For approval', for_change_approval:'Change — for approval', approved:'Approved', returned:'Returned for revision' };
 const SCHED_STEPS = [['prepare','Prepared by','Dispatcher / FG Scheduler'], ['review','Reviewed by','Logistics Supervisor'], ['confirm','Confirmed by','Admin Office Supervisor'], ['approve','Approved by','SCM / Logistics Manager']];
 const STEP_FOR_STATUS = { for_review:'review', for_confirmation:'confirm', for_approval:'approve' };
 const STEP_VERB = { review:'Review', confirm:'Confirm', approve:'Approve' };
@@ -12500,12 +12500,14 @@ async function loadSched(){
   try { ({ data: rows } = await withRetry('Loading schedules', () => sb.from('delivery_schedules').select(SCHED_COLS).gte('delivery_date', addDays(localDate(), -45)).order('delivery_date', { ascending: false }).limit(200))); }
   catch { $('sc-body').innerHTML = '<tr><td colspan="5" class="muted">Could not load schedules.</td></tr>'; return; }
   let mine = []; try { mine = await schedulesNeedingMe(rows); } catch {}
+  let chg = []; if (!PR.on) try { const { data } = await sb.rpc('job_sched_change_mine'); chg = data || []; } catch {}
   const returned = isDispatcher() ? rows.filter(s => s.status === 'returned') : [];
   const pn = id => state.ref.poolById?.[id]?.name || '—';
-  $('sc-mine').innerHTML = mine.length || returned.length ? `<div class="card pad rp-sec"><h3>Needs you</h3><ul class="alerts">
+  $('sc-mine').innerHTML = (mine.length || returned.length || chg.length ? `<div class="card pad rp-sec"><h3>Needs you</h3><ul class="alerts">
+      ${chg.map(c => `<li data-sched="${esc(c.pool_id)}|${esc(c.date)}"><span class="ic warn">✎</span><div><div>${fmtDate(c.date)} · ${esc(c.pool || pn(c.pool_id))}</div><div class="ft">${c.kind === 'sign' ? 'Changed plan waiting for your approval and signature' : 'Change requested by ' + esc(c.by || '') + ': ' + esc(c.reason || '')}</div></div></li>`).join('')}
       ${mine.map(s => `<li data-sched="${esc(s.pool_id)}|${esc(s.delivery_date)}"><span class="ic warn">✍</span><div><div>${fmtDate(s.delivery_date)} · ${esc(pn(s.pool_id))}</div><div class="ft">Waiting for your ${esc(STEP_VERB[STEP_FOR_STATUS[s.status]].toLowerCase())} and signature</div></div></li>`).join('')}
       ${returned.map(s => `<li data-sched="${esc(s.pool_id)}|${esc(s.delivery_date)}"><span class="ic bad">↩</span><div><div>${fmtDate(s.delivery_date)} · ${esc(pn(s.pool_id))}</div><div class="ft">Returned for revision: ${esc(s.return_reason || '')}</div></div></li>`).join('')}
-    </ul></div>` : '';
+    </ul></div>` : '') + await schedDelegateCard(pools);
   // dates that already have confirmed deliveries but no schedule prepared yet
   let todo = [];
   try {
@@ -12521,6 +12523,49 @@ async function loadSched(){
       <td>${fmtDate(s.delivery_date)}</td><td>${esc(pn(s.pool_id))}</td><td>${schedPill(s.status)}</td><td>${s.revision || '—'}</td><td>${fmtTime(s.updated_at)}</td></tr>`).join('')
     || '<tr><td colspan="5" class="muted">No schedules yet. Pick a pool and date above to prepare one.</td></tr>';
   document.querySelectorAll('#screen-sched [data-sched]').forEach(el => el.addEventListener('click', () => { const [p, d] = el.dataset.sched.split('|'); openSchedule(p, d); }));
+}
+
+/* Plan changes (2026-11-22): an approved plan is changed by request. The schedule approver (Supply Chain Manager)
+   approves the request, passes it to a supervisor, or names a standing delegate; Admin is the fallback.
+   The re-submitted plan then needs one signature (step 'change'), shown in the "Approved by" box. */
+async function schedDelegateCard(pools){
+  if (PR.on || !(state.me.schedule_steps || []).includes('approve') || !pools.length) return '';
+  let ci; try { ({ data: ci } = await sb.rpc('job_sched_change_info', { p_pool: pools[0].id, p_date: localDate() })); } catch { return ''; }
+  if (!ci) return '';
+  state.schedDeleg = ci;
+  return `<div class="card pad rp-sec"><h3>Plan changes while you’re away</h3><div class="ft" style="margin-bottom:8px">${ci.delegate_to
+      ? `<b>${esc(ci.delegate_to.name)}</b> can approve changes to approved plans for you. Their approvals are recorded as “for ${esc(state.me.name || '')}”.`
+      : 'Nobody is set to approve changes for you. Change requests wait for you (or an Admin).'}</div>
+    <div class="row-btns" style="margin:0"><button class="btn" id="sc-deleg">${ci.delegate_to ? 'Change who' : 'Choose someone'}</button>${ci.delegate_to ? '<button class="btn bad" id="sc-deleg-off">Switch off</button>' : ''}</div></div>`;
+}
+document.addEventListener('click', async e => {
+  const t = e.target.closest?.('#sc-deleg, #sc-deleg-off'); if (!t) return;
+  if (t.id === 'sc-deleg-off'){ t.disabled = true; try { await withRetry('Saving', () => sb.rpc('job_sched_delegate_set', { p_to: null }), 1); toast('Switched off — change requests come to you again', 'ok'); } catch { t.disabled = false; } return loadSched(); }
+  const ci = state.schedDeleg || {};
+  openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true"><h2>Who approves plan changes for you?</h2>
+    <p class="muted" style="margin-top:0">They can approve or decline change requests and sign the changed plan, until you switch it off.</p>
+    <label class="f">Person<select class="i" id="dg-to">${(ci.people || []).map(p => `<option value="${esc(p.id)}" ${ci.delegate_to?.id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+    <div class="row-btns" style="justify-content:flex-end"><button class="btn" id="dg-cancel">Cancel</button><button class="btn primary" id="dg-ok">Save</button></div></div>`);
+  $('dg-cancel').addEventListener('click', closeOverlay);
+  $('dg-ok').addEventListener('click', async ev => { ev.currentTarget.disabled = true;
+    try { await withRetry('Saving', () => sb.rpc('job_sched_delegate_set', { p_to: $('dg-to').value }), 1); toast('Saved — they have been told', 'ok'); closeOverlay(); loadSched(); } catch { ev.currentTarget.disabled = false; } });
+});
+function schedChangeBlock(ci, status, s){
+  if (!ci) return '';
+  const r = ci.request, me = state.me.id, out = [];
+  if (ci.delegate_from && (status === 'approved' || status === 'for_change_approval' || r?.status === 'pending'))
+    out.push(`<div class="ft">You can approve plan changes for ${esc(ci.delegate_from.name)}.</div>`);
+  if (r && r.status === 'pending'){
+    const mine = r.requested_by === me, canDecide = ci.can_decide && (!mine || isAdmin());
+    out.push(`<div class="note" style="background:var(--warn-soft)"><b>Change requested</b> by ${esc(r.requested_name || '')} · ${fmtTime(r.requested_at)}<br>${esc(r.reason)}${r.assigned_name ? `<div class="ft">Passed to <b>${esc(r.assigned_name)}</b> by ${esc(r.forwarded_name || '')}${r.forward_note ? ': ' + esc(r.forward_note) : ''}</div>` : ''}
+      <div class="row-btns" style="margin:8px 0 0">${canDecide ? `<button class="btn ok" data-chg="approve">Approve request${ci.on_behalf ? ' (for ' + esc(ci.on_behalf) + ')' : ''}</button><button class="btn bad" data-chg="decline">Decline</button>` : ''}${ci.can_forward ? '<button class="btn" data-chg="forward">Pass to a supervisor</button>' : ''}${mine ? '<button class="btn" data-chg="withdraw">Withdraw request</button>' : ''}</div>
+      ${!canDecide && !mine ? '<div class="ft">Waiting for the approver to decide.</div>' : ''}</div>`);
+  } else if (r && r.status === 'declined' && r.revision === s?.revision && status === 'approved'){
+    out.push(`<div class="ft">Last change request was declined by ${esc(r.decided_name || '')}${r.decided_on_behalf_of ? ' (for ' + esc(r.decided_on_behalf_of) + ')' : ''}: ${esc(r.decision_note || '')}</div>`);
+  }
+  if (status === 'approved' && ci.can_request && !(r && ['pending','approved'].includes(r.status)))
+    out.push('<div class="row-btns" style="margin:0"><button class="btn" data-chg="request">Request a change</button></div>');
+  return out.length ? '<div class="no-print" style="display:grid;gap:8px">' + out.join('') + '</div>' : '';
 }
 
 async function signedUrl(path){ try { const { data } = await sb.storage.from(MEDIA_BUCKET).createSignedUrl(path, 900); return data?.signedUrl || ''; } catch { return ''; } }
@@ -12540,10 +12585,11 @@ async function openSchedule(poolId, date){
       const [c, d] = await Promise.all([
         withRetry('Loading signatures', () => sb.from('delivery_schedule_signoffs').select('*').eq('schedule_id', s.id).eq('revision', s.revision)),
         withRetry('Loading history', () => sb.from('delivery_schedule_events').select('*').eq('schedule_id', s.id).order('at', { ascending: false }))]);
-      signs = c.data || []; events = d.data || [];
+      signs = (c.data || []).map(x => x.step === 'change' ? { ...x, step: 'approve', change: true } : x); events = d.data || [];
     }
   } catch { closeOverlay(); return; }
-  const status = s?.status || 'draft', inFlow = !!STEP_FOR_STATUS[status] || status === 'approved';
+  let ci = null; if (!PR.on) try { ({ data: ci } = await sb.rpc('job_sched_change_info', { p_pool: poolId, p_date: date })); } catch {}
+  const status = s?.status || 'draft', isChg = status === 'for_change_approval', inFlow = !!STEP_FOR_STATUS[status] || status === 'approved' || isChg;
   const content = inFlow ? (s.snapshot || []) : live;
   const changed = inFlow && JSON.stringify(s.snapshot) !== JSON.stringify(live);
   const editable = !inFlow && isDispatcher() && view.can_prepare;
@@ -12557,7 +12603,10 @@ async function openSchedule(poolId, date){
   const doneSteps = new Set(shownSigns.map(x => x.step));
 
   const btns = [];
-  if (editable) btns.push(`<button class="btn primary" data-act="submit" ${content.length ? '' : 'disabled'}>Sign &amp; submit for review</button>`);
+  if (editable) btns.push(`<button class="btn primary" data-act="submit" ${content.length ? '' : 'disabled'}>Sign &amp; submit for ${s?.change_mode ? 'change approval' : 'review'}</button>`);
+  if (isChg && ci?.can_decide && !signedThis) btns.push(`<button class="btn ok" data-act="change_approve">Sign &amp; approve change${ci.on_behalf ? ' (for ' + esc(ci.on_behalf) + ')' : ''}</button>`);
+  if (isChg && (ci?.can_decide || my.length || ['admin','manager'].includes(state.me.role))) btns.push('<button class="btn bad" data-act="reject">Return for revision</button>');
+  if (isChg && isDispatcher()) btns.push('<button class="btn" data-act="withdraw">Withdraw to edit</button>');
   if (stepNow && my.includes(stepNow) && !signedThis) btns.push(`<button class="btn ok" data-act="${stepNow}">Sign &amp; ${STEP_VERB[stepNow].toLowerCase()}</button>`);
   if (stepNow && (my.length || ['admin','manager'].includes(state.me.role))) btns.push('<button class="btn bad" data-act="reject">Return for revision</button>');
   if (stepNow && isDispatcher()) btns.push('<button class="btn" data-act="withdraw">Withdraw to edit</button>');
@@ -12565,6 +12614,8 @@ async function openSchedule(poolId, date){
   if (status === 'approved') btns.push(s.final_copy_path ? '<button class="btn primary" id="sf-final">📄 Final signed copy</button>' : '<button class="btn" id="sf-mkfinal">📄 Save the final signed copy</button>');
   const notes = [];
   if (stepNow && my.includes(stepNow) && signedThis) notes.push('You already signed this revision — this step needs a different person.');
+  if (isChg && ci?.can_decide && signedThis) notes.push('You prepared this changed plan — someone else must approve it.');
+  if (isChg && !ci?.can_decide) notes.push('Changed plan — waiting for the approver (or their delegate) to approve and sign.');
   if (stepNow && !my.includes(stepNow)) notes.push(`Waiting for the ${SCHED_STEPS.find(x => x[0] === stepNow)[2].toLowerCase()} to ${STEP_VERB[stepNow].toLowerCase()} and sign.`);
   if (editable && !content.length) notes.push('No deliveries confirmed on this date yet. Confirm jobs on the Dispatch board first (a truck, or a Grab / Lalamove booking).');
   if (!inFlow && isDispatcher() && !view.can_prepare) notes.push(`This pool serves ${(pool?.companies || []).join(' and ')}, so its schedule is prepared by staff covering all those companies.`);
@@ -12574,9 +12625,10 @@ async function openSchedule(poolId, date){
     <div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>Delivery schedule · ${fmtDate(date)}</h2>${schedPill(status)}<button class="btn no-print" id="sf-print">Print</button></div>
     <div class="sheet-b" style="max-width:1000px">
       <div class="stepper no-print">${SCHED_STEPS.map(([k, lab]) => { const x = shownSigns.find(y => y.step === k);
-        const now = (k === 'prepare' && !inFlow) || k === stepNow;
-        return `<div class="st ${x ? 'done' : now ? 'now' : ''}"><b>${esc(lab.replace(' by', ''))}</b>${x ? `${esc(x.signer_name)}<div class="ft">${fmtTime(x.signed_at)}</div>` : now ? 'Waiting' : '—'}</div>`; }).join('')}</div>
-      ${status === 'returned' ? `<div class="note no-print" style="background:var(--bad-soft)"><b>Returned for revision</b> by ${esc(events.find(e => ['reject','withdraw','reopen'].includes(e.action))?.by_name || '')}: ${esc(s.return_reason || '')}<br>Make the changes, then sign and submit again. Signatures start over.</div>` : ''}
+        const now = (k === 'prepare' && !inFlow) || k === stepNow || (isChg && k === 'approve');
+        return `<div class="st ${x ? 'done' : now ? 'now' : ''}"><b>${esc(lab.replace(' by', ''))}</b>${x ? `${esc(x.signer_name)}${x.change ? ' (change)' : ''}<div class="ft">${fmtTime(x.signed_at)}</div>` : now ? 'Waiting' : (isChg || (status === 'approved' && shownSigns.some(y => y.change))) && ['review','confirm'].includes(k) ? '<span class="ft">not needed for a change</span>' : '—'}</div>`; }).join('')}</div>
+      ${schedChangeBlock(ci, status, s)}
+      ${status === 'returned' ? `<div class="note no-print" style="background:var(--bad-soft)"><b>${s.change_mode ? 'Open for an approved change' : 'Returned for revision'}</b> by ${esc(events.find(e => ['reject','withdraw','reopen','change_approved'].includes(e.action))?.by_name || '')}: ${esc(s.return_reason || '')}<br>${s.change_mode ? 'Make the change, then sign and submit — it goes straight to the approver for one signature.' : 'Make the changes, then sign and submit again. Signatures start over.'}</div>` : ''}
       ${changed ? `<div class="note no-print"><b>Jobs changed after this schedule was submitted.</b> Signers see the submitted version below.${isDispatcher() && stepNow ? ' Withdraw it to include the changes.' : ''}</div>` : ''}
       ${notes.map(n => `<div class="ft no-print">${esc(n)}</div>`).join('')}
       ${prepList.length ? `<div class="ft no-print">Warehouse preparation: <b style="color:${prepDone === prepList.length ? 'var(--ok)' : 'var(--warn)'}">${prepDone} of ${prepList.length} drops prepared</b> — the schedule can still be reviewed and approved meanwhile; a drop can’t be loaded until it’s prepared.</div>` : ''}
@@ -12585,24 +12637,42 @@ async function openSchedule(poolId, date){
       ${editable ? '<div class="ft no-print">Yellow boxes save as you type. Use ↑ ↓ to set the drop order, “Refs” for document references (SO/DR numbers), remarks and weights, and pick each drop’s sales agent.</div>' : ''}
       ${status === 'approved' && isDispatcher() ? '<div id="cf-panel" class="no-print"><div class="muted" style="padding:10px"><span class="spin"></span> Loading confirmations…</div></div>' : ''}
       ${events.length ? `<details class="no-print"><summary style="cursor:pointer">History</summary><ul class="timeline" style="margin-top:10px">${events.map(e =>
-        `<li><div class="t">${esc({ submit:'Submitted', review:'Reviewed', confirm:'Confirmed', approve:'Approved', reject:'Returned for revision', withdraw:'Withdrawn', reopen:'Reopened' }[e.action] || e.action)} · rev ${e.revision}</div><div class="d">${esc(e.by_name || '')} · ${fmtTime(e.at)}</div>${e.note ? `<div style="font-size:14px">${esc(e.note)}</div>` : ''}</li>`).join('')}</ul></details>` : ''}
+        `<li><div class="t">${esc({ submit:'Submitted', review:'Reviewed', confirm:'Confirmed', approve:'Approved', reject:'Returned for revision', withdraw:'Withdrawn', reopen:'Reopened', change_requested:'Change requested', change_forwarded:'Change request passed on', change_approved:'Change request approved', change_declined:'Change request declined', change_withdrawn:'Change request withdrawn', change_approve:'Changed plan approved' }[e.action] || e.action)} · rev ${e.revision}</div><div class="d">${esc(e.by_name || '')} · ${fmtTime(e.at)}</div>${e.note ? `<div style="font-size:14px">${esc(e.note)}</div>` : ''}</li>`).join('')}</ul></details>` : ''}
     </div>`;
   bindClose();
   $('sf-print').addEventListener('click', () => window.print());
   const reload = () => openSchedule(poolId, date);
   $('sf-final')?.addEventListener('click', () => openFinalCopy(s.final_copy_path));
   $('sf-mkfinal')?.addEventListener('click', async e => { e.currentTarget.disabled = true; try { await saveFinalCopy(poolId, date); toast('Final signed copy saved', 'ok'); } catch { toast('Could not save the final copy', 'error'); } reload(); });
+  document.querySelectorAll('#overlay [data-chg]').forEach(b => b.addEventListener('click', async () => {
+    const k = b.dataset.chg, r = ci?.request;
+    if (k === 'request') return openReasonModal('Request a change', 'Say what needs to change and why. The approver (or their delegate) decides; once approved you edit the plan and it goes back for one signature.',
+      async note => { await withRetry('Sending', () => sb.rpc('job_sched_change_request', { p_pool: poolId, p_date: date, p_reason: note }), 1); toast('Change request sent', 'ok'); }, reload);
+    if (k === 'decline') return openReasonModal('Decline change request', 'The person who asked will be told why. The approved plan stays as it is.',
+      async note => { await withRetry('Saving', () => sb.rpc('job_sched_change_decide', { p_req: r.id, p_approve: false, p_note: note }), 1); toast('Declined', 'ok'); }, reload);
+    if (k === 'approve'){ b.disabled = true; try { await withRetry('Saving', () => sb.rpc('job_sched_change_decide', { p_req: r.id, p_approve: true, p_note: null }), 1); toast('Approved — the plan is open for the change', 'ok'); } catch { b.disabled = false; return; } return reload(); }
+    if (k === 'withdraw'){ b.disabled = true; try { await withRetry('Saving', () => sb.rpc('job_sched_change_withdraw', { p_req: r.id }), 1); toast('Request withdrawn', 'ok'); } catch { b.disabled = false; return; } return reload(); }
+    if (k === 'forward'){
+      openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true"><h2>Pass to a supervisor</h2><p class="muted" style="margin-top:0">They decide this one request, and sign the changed plan for you.</p>
+        <label class="f">Person<select class="i" id="fw-to">${(ci.people || []).filter(p => p.id !== r.requested_by).map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></label>
+        <label class="f">Note (optional)<textarea class="i" id="fw-note" rows="2"></textarea></label>
+        <div class="row-btns" style="justify-content:flex-end"><button class="btn" id="fw-cancel">Cancel</button><button class="btn primary" id="fw-ok">Pass on</button></div></div>`);
+      $('fw-cancel').addEventListener('click', reload);
+      $('fw-ok').addEventListener('click', async e => { e.currentTarget.disabled = true;
+        try { await withRetry('Saving', () => sb.rpc('job_sched_change_forward', { p_req: r.id, p_to: $('fw-to').value, p_note: $('fw-note').value.trim() || null }), 1); toast('Passed on — they have been told', 'ok'); reload(); } catch { e.currentTarget.disabled = false; } });
+    }
+  }));
   document.querySelectorAll('#overlay [data-act]').forEach(b => b.addEventListener('click', () => {
     const act = b.dataset.act, dl = fmtDate(date).replace(/<[^>]+>/g, '');
     if (['reject','withdraw','reopen'].includes(act))
       return openReasonModal({ reject: 'Return for revision', withdraw: 'Withdraw to edit', reopen: 'Reopen approved schedule' }[act],
         { reject: 'Say what needs to change. Dispatch and the supervisor will be notified, and everyone is told it was returned.', withdraw: 'The signers will be told it was withdrawn.', reopen: 'Everyone will be told it was reopened. It must go through approval again.' }[act],
         async note => { await schedAction(poolId, date, act, { note }); toast({ reject: 'Returned for revision', withdraw: 'Withdrawn — you can edit it now', reopen: 'Schedule reopened' }[act], 'ok'); }, reload);
-    const what = act === 'submit' ? 'submit this schedule for review' : `${STEP_VERB[act].toLowerCase()} this schedule`;
-    openSignModal(act === 'submit' ? 'Sign & submit' : `Sign & ${STEP_VERB[act].toLowerCase()}`, `By signing you ${what} for ${dl} (${pool?.name || ''}).`,
+    const what = act === 'submit' ? `submit this schedule for ${s?.change_mode ? 'change approval' : 'review'}` : act === 'change_approve' ? `approve this changed plan${ci?.on_behalf ? ' for ' + ci.on_behalf : ''}` : `${STEP_VERB[act].toLowerCase()} this schedule`;
+    openSignModal(act === 'submit' ? 'Sign & submit' : act === 'change_approve' ? 'Sign & approve change' : `Sign & ${STEP_VERB[act].toLowerCase()}`, `By signing you ${what} for ${dl} (${pool?.name || ''}).`,
       async (sig, code) => { const r = await schedAction(poolId, date, act, { signature: sig, passcode: code });
-        toast(act === 'approve' ? 'Schedule approved — everyone has been notified' : 'Signed', 'ok');
-        if (act === 'approve') { try { await saveFinalCopy(poolId, date); } catch {} } }, reload);
+        toast(act === 'approve' || act === 'change_approve' ? 'Schedule approved — everyone has been notified' : 'Signed', 'ok');
+        if (act === 'approve' || act === 'change_approve') { try { await saveFinalCopy(poolId, date); } catch {} } }, reload);
   }));
   if (editable) bindScheduleEditing(content, date, reload);
   if ($('cf-panel')) renderConfirmPanel(s, pool, date, reload);
@@ -12620,7 +12690,8 @@ async function saveFinalCopy(poolId, date){
   const pool = state.ref.poolById?.[poolId];
   const [{ data: v }, f] = await Promise.all([sb.rpc('job_schedule_view', { p_pool: poolId, p_date: date }), sb.from('job_settings').select('value').eq('key', 'schedule_form').maybeSingle()]);
   const s = v?.schedule; if (!s || s.status !== 'approved') throw new Error('not approved');
-  const { data: signs } = await sb.from('delivery_schedule_signoffs').select('*').eq('schedule_id', s.id).eq('revision', s.revision);
+  const { data: signs0 } = await sb.from('delivery_schedule_signoffs').select('*').eq('schedule_id', s.id).eq('revision', s.revision);
+  const signs = (signs0 || []).map(x => x.step === 'change' ? { ...x, step: 'approve', change: true } : x);
   const toData = async path => { try { const u = await signedUrl(path); const bl = await (await fetch(u)).blob(); return await new Promise(ok => { const r = new FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(bl); }); } catch { return ''; } };
   const urls = {}; await Promise.all((signs || []).filter(x => x.signature_url).map(async x => { urls[x.step] = await toData(x.signature_url); }));
   const css = [...document.querySelectorAll('style')].map(x => x.textContent).join('\n');
