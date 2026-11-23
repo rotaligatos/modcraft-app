@@ -6692,6 +6692,11 @@ const PROFILES = {
         try { const got = await _vRun(); out.push({ label: _vLabel, got, want: _vWant, ok: JSON.stringify(got) === JSON.stringify(_vWant) }); }
         catch (e) { out.push({ label: _vLabel, err: String(e).slice(0,120), ok: false }); }
       }
+      check('Board diagram: narrow strips get a turned label; a piece too small for any label gets a pointer line to a label outside the board', () => {
+        const w = window;
+        const svg = w._prodBoardSvg([{x:0,y:0,w:700,h:2030,ref:23},{x:1150,y:0,w:70,h:600,ref:40},{x:1100,y:2400,w:30,h:30,ref:45}],1220,2440);
+        return { wide: svg.indexOf('>P24 · 700×2030<') >= 0, strip: /rotate\(-90[^>]*>P41</.test(svg), small: /<polyline[^>]*><\/polyline><text[^>]*>P46 · 30×30</.test(svg) };
+      }, { wide:true, strip:true, small:true });
       check('Project tracker: search (any word order, project/agent), status/type/user filters and sort', () => {
         const w = window;
         if (typeof w._ptFilterSort !== 'function') return 'missing';
