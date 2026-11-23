@@ -46572,17 +46572,45 @@ function _warmCatalogIndexes(){
   if(!arr.length||_catWarmFor===arr) return;
   _catWarmFor=arr;
   var i=0;
-  function slice(){
+  // Runs only in the browser's spare moments, a few milliseconds at a time, so the app can be used
+  // straight after login. It used to run fixed 1,500-item batches from 1.5 s after login with a
+  // 15 ms gap — on an office PC each batch held the screen for a long stretch, back to back, which
+  // read as "the app freezes for about 30 seconds after I log in" (Rommel, 2026-11-24).
+  var idle=(typeof requestIdleCallback==='function')
+    ? function(fn){ requestIdleCallback(fn,{timeout:4000}); }
+    : function(fn){ setTimeout(function(){ fn(null); },50); };
+  function budget(dl){ var t0=performance.now(); return function(){
+    if(performance.now()-t0>=8) return false;   // never more than ~8 ms at a time
+    return dl&&typeof dl.timeRemaining==='function'&&!dl.didTimeout ? dl.timeRemaining()>1 : true; }; }
+  function slice(dl){
     if(_catWarmFor!==arr) return;            // catalogue reloaded — the new run takes over
-    var end=Math.min(arr.length,i+1500);
-    for(;i<end;i++){ var it=arr[i]; if(!it||!it.name) continue;
+    var more=budget(dl);
+    for(;i<arr.length&&more();i++){ var it=arr[i]; if(!it||!it.name) continue;
       if(!it.__tok) it.__tok=_prodTokenize(it.name);
       if(!it.__matDesc) it.__matDesc=_prodParseMaterialDescriptor(it.name); }
-    if(i<arr.length){ setTimeout(slice,15); return; }
-    try{ lookupInSource(arr,'_'); if(typeof getMatSource==='function') lookupInSource(getMatSource(),'_'); lookupInSource(_prodEdgeTapeCatalog(),'_'); }catch(e){}
+    if(i<arr.length){ idle(slice); return; }
+    // The three lookup indexes are built one per spare moment, not all at once.
+    var jobs=[function(){ lookupInSource(arr,'_'); },
+              function(){ if(typeof getMatSource==='function') lookupInSource(getMatSource(),'_'); },
+              function(){ lookupInSource(_prodEdgeTapeCatalog(),'_'); }];
+    (function next(){ if(!jobs.length||_catWarmFor!==arr) return; var j=jobs.shift(); idle(function(){ try{ j(); }catch(e){} next(); }); })();
   }
-  setTimeout(slice,1500);
+  setTimeout(function(){ idle(slice); },8000);   // after login has settled
 }
+// Startup timing, written to the console about a minute after login: how long the screen was
+// held and the longest single hold. If "the app freezes after login" comes back, this line says
+// whether it is still happening and how badly, instead of guessing.
+(function(){
+  try{
+    if(typeof PerformanceObserver!=='function') return;
+    var t0=performance.now(), total=0, longest=0, n=0;
+    var ob=new PerformanceObserver(function(list){ list.getEntries().forEach(function(e){ total+=e.duration; n++; if(e.duration>longest) longest=e.duration; }); });
+    ob.observe({type:'longtask',buffered:true});
+    setTimeout(function(){ try{ ob.disconnect(); }catch(e){}
+      console.log('[startup] first '+Math.round((performance.now()-t0)/1000)+' s: screen held '+(total/1000).toFixed(1)
+        +' s in '+n+' stretches, longest '+Math.round(longest)+' ms'); },60000);
+  }catch(e){}
+})();
 function _prodFindCatalogMatches(query,catalogArr,maxResults){
   var qTokens=_prodTokenize(query);
   if(!qTokens.length||!catalogArr||!catalogArr.length) return [];
