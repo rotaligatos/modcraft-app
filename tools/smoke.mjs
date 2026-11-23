@@ -6692,6 +6692,31 @@ const PROFILES = {
         try { const got = await _vRun(); out.push({ label: _vLabel, got, want: _vWant, ok: JSON.stringify(got) === JSON.stringify(_vWant) }); }
         catch (e) { out.push({ label: _vLabel, err: String(e).slice(0,120), ok: false }); }
       }
+      check('Project tracker: search (any word order, project/agent), status/type/user filters and sort', () => {
+        const w = window;
+        if (typeof w._ptFilterSort !== 'function') return 'missing';
+        const real = w._reportProjectRows;
+        w._reportProjectRows = () => [
+          { id:'QT-W00000001', client:'Shelv Furniture', project:'Kitchen run', agent:'Juan', type:'Fabrication only', value:500, user:'Nikki', created:'2026-11-01', sent:'', status:'IQ Locked' },
+          { id:'QT-W00000002', client:'Angela Isla', project:'', agent:'', type:'Fabrication with Installation', value:9000, user:'Raven', created:'2026-11-05', sent:'2026-11-06', status:'FQ Approved' },
+          { id:'QT-W00000003', client:'Shelv Furniture', project:'Office', agent:'', type:'Fabrication only', value:100, user:'Raven', created:'2026-11-03', sent:'', status:'Draft' }];
+        try {
+          const ids = () => [...document.querySelectorAll('#proj-tbl tbody tr')].map(t => (t.querySelector('td')||{}).textContent);
+          w._ptClear(); const all = ids();
+          w._ptSet('q','run kitchen'); const q1 = ids();
+          w._ptSet('q','juan'); const q2 = ids();
+          w._ptClear(); w._ptSet('user','Raven'); const u = ids();
+          w._ptSet('status','Draft'); const s = ids();
+          w._ptClear(); w._ptSet('sort','value:desc'); const v = ids();
+          w._ptSet('type','Fabrication only'); const t = ids();
+          w._ptClear(); w._ptSet('q','zzz'); const none = document.querySelector('#proj-tbl tbody').textContent.indexOf('No quotation matches') >= 0;
+          const cnt = (document.getElementById('pt-count')||{}).textContent;
+          w._ptClear();
+          return { all, q1, q2, u, s, v, t, none, cnt };
+        } finally { w._reportProjectRows = real; }
+      }, { all:['QT-W00000002','QT-W00000003','QT-W00000001'], q1:['QT-W00000001'], q2:['QT-W00000001'],
+           u:['QT-W00000002','QT-W00000003'], s:['QT-W00000003'], v:['QT-W00000002','QT-W00000001','QT-W00000003'],
+           t:['QT-W00000001','QT-W00000003'], none:true, cnt:'0 of 3 quotations' });
       check('Series register lists every number and explains each gap from the activity log', () => {
         const w = window;
         const rows = w._srBuild({ logStart: '2026-07-02T00:00:00Z',
