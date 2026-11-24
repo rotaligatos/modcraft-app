@@ -7260,8 +7260,9 @@ function pkOverReport(rows){
   const over = rows.filter(r => !r.ok); if (!over.length) return '<div class="muted">None went over the target 👍</div>';
   const g = new Map(); over.forEach(r => { const k = r.v.over_reason || '_none'; if (!g.has(k)) g.set(k, []); g.get(k).push(r); });
   const av = xs => fmtN1(xs.reduce((a, x) => a + x, 0) / xs.length);
-  const t = simpleTable(['Reason', 'SOs', '% of over', 'Avg min'], [...g.entries()].sort((a, b) => b[1].length - a[1].length)
-    .map(([k, rs]) => [k === '_none' ? '<span style="color:var(--bad)">No reason given</span>' : esc(PK_OVER[k] || k), rs.length, Math.round(rs.length / over.length * 100) + '%', av(rs.map(r => r.min))]), { html: true });
+  const t = hbarsHtml([...g.entries()].sort((a, b) => b[1].length - a[1].length)
+    .map(([k, rs]) => ({ name: k === '_none' ? 'No reason given' : (PK_OVER[k] || k), v: rs.length, c: k === '_none' ? 'var(--bad)' : 'var(--series-2)',
+      note: `${Math.round(rs.length / over.length * 100)}% · avg ${av(rs.map(r => r.min))} min` })), { fmt: v => v + ' SO' + (v === 1 ? '' : 's') });
   const notes = over.filter(r => r.v.over_note).slice(-12).reverse().map(r => `<div class="ft">${esc(fmtDay(r.v.queue_day))} · ${esc(r.v.label)} · ${esc(PK_OVER[r.v.over_reason] || '')} — ${esc(r.v.over_note)}${r.v.over_reason_name ? ' (' + esc(r.v.over_reason_name) + ')' : ''}</div>`).join('');
   return t + (notes ? '<div class="sub" style="margin-top:8px"><b>Latest details</b></div>' + notes : '');
 }
@@ -7298,7 +7299,11 @@ async function loadPkReport(){
   const grp = (key) => { const g = new Map(); rows.forEach(r => { const k = key(r); if (!g.has(k)) g.set(k, []); g.get(k).push(r); }); return [...g.entries()]; };
   const line = (label, rs) => [label, rs.length, rs.filter(r => r.ok).length, pct(rs.filter(r => r.ok).length, rs.length), av(rs.map(r => r.min))];
   const KL = { scheduled:'Scheduled', same_day:'Same-day', walkin:'Walk-in', courier:'Courier rider' };
-  const people = (field, step) => grp(r => r.v[field] || '—').map(([k, rs]) => [esc(k), rs.length, av(rs.map(r => r[step]))]).sort((a, b) => b[1] - a[1]);
+  const avN = (xs) => { const a = xs.filter(x => x != null && !isNaN(x)); return a.length ? a.reduce((s, x) => s + x, 0) / a.length : null; };
+  const STEPS = [{ k: 'si', name: 'Arrival → SI sent', who: 'Sales Support', c: 'var(--series-1)', f: 'arrived_name' }, { k: 'acc', name: 'SI sent → accepted', who: 'Warehouse', c: 'var(--series-4)' },
+    { k: 'prep', name: 'Accepted → ready', who: 'Warehouse', c: 'var(--series-3)', f: 'ready_name' }, { k: 'load', name: 'Ready → loaded', who: 'Logistics', c: 'var(--series-2)', f: 'loaded_name' }];
+  const peopleN = (field, step) => grp(r => r.v[field] || '—').map(([k, rs]) => ({ name: k, v: avN(rs.map(r => r[step])) || 0, n: rs.length, note: rs.length + ' SO' + (rs.length === 1 ? '' : 's') })).sort((a, b) => b.n - a.n);
+  const okBar = (name, rs) => { const w = rs.filter(r => r.ok).length; return { name, v: Math.round(w / rs.length * 100), c: 'var(--series-3)', note: `${w} of ${rs.length} · avg ${av(rs.map(r => r.min))} min` }; };
   const days = grp(r => r.v.queue_day).sort((a, b) => a[0] < b[0] ? -1 : 1);
   const notCounted = done.filter(v => !v.counted || v.is_balance).length;
   rows.forEach(r => { r.kindLabel = KL[r.kind] || r.kind; r.why = r.v.over_reason ? (PK_OVER[r.v.over_reason] || r.v.over_reason) + (r.v.over_note ? ' — ' + r.v.over_note : '') : ''; });
@@ -7319,22 +7324,32 @@ async function loadPkReport(){
       ${tc ? kpi('TC % — delivery only', tc.tc_delivery != null ? (tc.tc_delivery * 100).toFixed(2) + '%' : '—', 'delivery cost ÷ delivered sales') : ''}
       ${tc ? kpi('TC % — delivery + pick-up', tc.tc_combined != null ? (tc.tc_combined * 100).toFixed(2) + '%' : '—', `pick-up sales ${peso(tc.pickup_sales)} · no delivery cost`) : ''}
     </div>
-    ${canSeeCosts() ? '<div class="card pad" id="pkdb-sales" style="margin-bottom:14px"><span class="spin"></span></div>' : ''}
+    <div class="card pad viz" style="margin-bottom:14px">
+      <div class="chart-h"><div><h3>Served within target, by day</h3><div class="ft">SOs timed each day</div></div>${legendHtml([['Within target', 's3'], ['Over target', 's2']])}</div>
+      ${days.length ? '<div class="chart" id="pkr-c-day"></div>' : '<div class="muted">No timed pick-ups in this period.</div>'}
+      ${days.length ? `<div class="chart-h" style="margin-top:14px"><div><h3 style="font-size:14px">Average minutes per SO</h3><div class="ft">arrival → loaded, each day</div></div>${legendHtml([['Average', 's1 ln'], ['Target', 'dash']])}</div>
+      <div class="chart" id="pkr-c-min"></div>
+      <details class="tblview"><summary>Show as table</summary>${simpleTable(['Day', 'SOs', 'Within', '%', 'Avg min'], days.map(([k, rs]) => line(fmtDay(k), rs)))}</details>` : ''}
+    </div>
+    ${canSeeCosts() ? '<div class="card pad viz" id="pkdb-sales" style="margin-bottom:14px"><span class="spin"></span></div>' : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:14px;align-items:start">
-      <div class="card pad"><h3 style="margin-top:0">By type</h3>${n ? simpleTable(['Type', 'SOs', 'Within', '%', 'Avg min'], ['scheduled','same_day','walkin','courier'].map(k => rows.filter(r => r.kind === k)).map((rs, i) => line(KL[['scheduled','same_day','walkin','courier'][i]], rs)).filter(r => r[1])) : '<div class="muted">No timed pick-ups in this period.</div>'}
-        <h3>By site</h3>${n ? simpleTable(['Site', 'SOs', 'Within', '%', 'Avg min'], grp(r => r.v.site).map(([k, rs]) => line(PK_SITE[k] || k, rs))) : '—'}</div>
-      <div class="card pad"><h3 style="margin-top:0">Where the time goes</h3>${n ? simpleTable(['Step', 'Who', 'Avg min per SO'], [
-          ['Arrival → SI sent', 'Sales Support', av(rows.map(r => r.si))], ['SI sent → accepted', 'Warehouse', av(rows.map(r => r.acc))],
-          ['Accepted → ready', 'Warehouse', av(rows.map(r => r.prep))], ['Ready → loaded', 'Logistics', av(rows.map(r => r.load))]]) : '—'}
-        <h3>By person</h3>${n ? `<div class="ft">Sales Support (arrival → SI)</div>${simpleTable(['Name', 'SOs', 'Avg min'], people('arrived_name', 'si'))}
-          <div class="ft" style="margin-top:6px">Warehouse (accepted → ready)</div>${simpleTable(['Name', 'SOs', 'Avg min'], people('ready_name', 'prep'))}
-          <div class="ft" style="margin-top:6px">Logistics (ready → loaded)</div>${simpleTable(['Name', 'SOs', 'Avg min'], people('loaded_name', 'load'))}` : '—'}</div>
-      <div class="card pad"><h3 style="margin-top:0">Why over target</h3>${pkOverReport(rows)}</div>
-      <div class="card pad"><h3 style="margin-top:0">By day</h3>${days.length ? simpleTable(['Day', 'SOs', 'Within', '%', 'Avg min'], days.map(([k, rs]) => line(fmtDay(k), rs))) : '—'}</div>
+      <div class="card pad viz"><h3 style="margin-top:0">Where the time goes</h3><div class="ft" style="margin-bottom:8px">Average minutes per SO at each step</div>
+        ${n ? hbarsHtml(STEPS.map(st => ({ name: st.name, v: avN(rows.map(r => r[st.k])) || 0, c: st.c, note: st.who })), { fmt: v => fmtN1(v) + ' min' }) : '<div class="muted">No timed pick-ups in this period.</div>'}
+        ${n ? STEPS.filter(st => st.f).map(st => `<h3 style="font-size:14px;margin:16px 0 6px">${esc(st.who)} — ${esc(st.name)}</h3>${hbarsHtml(peopleN(st.f, st.k), { fmt: v => fmtN1(v) + ' min', color: st.c })}`).join('') : ''}</div>
+      <div class="card pad viz"><h3 style="margin-top:0">Within target, by type</h3>
+        ${n ? hbarsHtml(['scheduled','same_day','walkin','courier'].map(k => rows.filter(r => r.kind === k)).map((rs, i) => ({ name: KL[['scheduled','same_day','walkin','courier'][i]], rs })).filter(x => x.rs.length).map(x => okBar(x.name, x.rs)), { fmt: v => v + '%', max: 100 }) : '<div class="muted">No timed pick-ups in this period.</div>'}
+        <h3 style="font-size:14px;margin:16px 0 6px">By site</h3>${n ? hbarsHtml(grp(r => r.v.site).map(([k, rs]) => okBar(PK_SITE[k] || k, rs)), { fmt: v => v + '%', max: 100 }) : '—'}
+        <div class="ft" style="margin-top:8px">Green bar = share served within ${co ? pkTarget(co) : pkTarget('WCLI')} min.</div></div>
+      <div class="card pad viz"><h3 style="margin-top:0">Why over target</h3>${pkOverReport(rows)}</div>
       <div class="card pad"><h3 style="margin-top:0">Balances waiting for pick-up</h3>${balances.length ? simpleTable(['SO', 'Client', 'Site', 'Since'], balances.map(b => [b.so_no, b.client_name || '', PK_SITE[b.site] || b.site, b.updated_at ? fmtDay(b.updated_at.slice(0, 10)) : '—'])) : '<div class="muted">None.</div>'}
         ${tc ? `<h3>TC %, two ways</h3><div class="ft">Delivery cost ${peso(tc.delivery_cost)} ÷ delivered sales ${peso(tc.delivery_sales)} = <b>${tc.tc_delivery != null ? (tc.tc_delivery * 100).toFixed(2) + '%' : '—'}</b>.<br>
           Adding pick-up sales ${peso(tc.pickup_sales)} (no delivery cost) = <b>${tc.tc_combined != null ? (tc.tc_combined * 100).toFixed(2) + '%' : '—'}</b>. HATID deliveries only.</div>` : ''}</div>
     </div>`;
+  if (days.length){
+    const dl = days.map(([k]) => new Date(k + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric' }));
+    stackChart($('pkr-c-day'), dl, [{ name: 'Within target', slot: 3, values: days.map(([, rs]) => rs.filter(r => r.ok).length) }, { name: 'Over target', slot: 2, values: days.map(([, rs]) => rs.filter(r => !r.ok).length) }], v => fmtN(v));
+    lineChart($('pkr-c-min'), dl, [{ name: 'Average', values: days.map(([, rs]) => avN(rs.map(r => r.min))) }, { name: 'Target', dash: true, values: days.map(() => co ? pkTarget(co) : pkTarget('WCLI')) }], v => fmtN1(v) + ' min');
+  }
   if (canSeeCosts()) pkdbSalesLoad(localDate(), site, co);
 }
 
@@ -7387,6 +7402,13 @@ async function loadPkDash(){
     ...lateWait.map(o => ({ c: 'warn', ic: '⏱', t: `<b>${esc(o.so_no)}</b> · ${esc(o.client_name || '—')} — late ticket, waiting for the Warehouse Manager’s OK`, a: `data-pkdb-o="${esc(o.id)}"` })),
     ...missed.map(o => ({ c: 'info', ic: '✕', t: `<b>${esc(o.so_no)}</b> · ${esc(o.client_name || '—')} — missed ${esc(fmtDay(o.missed_last))}${o.missed_count > 1 ? ` (${o.missed_count}×)` : ''}, not picked up yet${o.salesperson ? ' · ' + esc(o.salesperson) : ''}`, a: `data-pkdb-o="${esc(o.id)}"` })),
   ];
+  // clients by hour today: arrived vs released (loaded)
+  const hrOf = t => t ? new Date(t).getHours() : null, hArr = {}, hRel = {};
+  visits.forEach(v => { const a = hrOf(v.arrived_at); if (a != null) hArr[a] = (hArr[a] || 0) + 1; if (v.status === 'done'){ const r = hrOf(v.loaded_at || v.updated_at); if (r != null) hRel[r] = (hRel[r] || 0) + 1; } });
+  const hKeys = [...Object.keys(hArr), ...Object.keys(hRel)].map(Number), nowH = new Date().getHours();
+  const h0 = Math.min(8, ...hKeys), h1 = Math.max(Math.min(nowH, 20), h0 + 3, ...hKeys), hrs = Array.from({ length: h1 - h0 + 1 }, (_, i) => h0 + i);
+  const hl = h => `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`;
+  const stageColor = { waiting: 'var(--series-1)', notified: 'var(--series-4)', accepted: 'var(--series-3)', ready: 'var(--series-2)' };
   $('pkdb-sub').textContent = `${fmtDay(day)} · live — updates as clients arrive and are released`;
   $('pkdb-body').innerHTML = `
     <div class="card pad" style="margin-bottom:14px">
@@ -7404,15 +7426,20 @@ async function loadPkDash(){
       ${tile('Balances open', balances.length, 'partly picked up', '', 'pk-tickets')}
       ${canSeeCosts() ? tile('Pick-up sales today', peso(sales), 'released today', '', 'pk-report') : ''}
     </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:14px;align-items:start;margin-bottom:14px">
+      <div class="card pad viz"><div class="chart-h"><div><h3>Arrivals and releases by hour</h3><div class="ft">clients today</div></div>${legendHtml([['Arrived', 's1'], ['Released', 's2']])}</div>
+        <div class="chart" id="pkdb-c-hour"></div></div>
+      <div class="card pad viz"><div class="chart-h"><div><h3>Queue now, by stage</h3><div class="ft">clients in each step right now · ${done.length} released today</div></div></div>
+        ${live.length ? hbarsHtml(PK_LANES.map(([k, t, w]) => ({ name: { waiting: 'Waiting for SI', notified: 'SI sent', accepted: 'Being prepared', ready: 'Ready for loading' }[k] || t, v: live.filter(v => v.status === k).length, c: stageColor[k], note: w })), { fmt: v => String(v) }) : '<div class="muted">Nobody in the queue right now.</div>'}
+        <details class="tblview"><summary>By site</summary><div class="tbl-wrap"><table class="rt ut"><thead><tr><th>Site</th>${PK_LANES.map(([k, t, w]) => `<th style="text-align:center" title="${esc(t + ' — ' + w)}">${esc({ waiting: 'Waiting SI', notified: 'SI sent', accepted: 'Preparing', ready: 'Ready' }[k] || t)}</th>`).join('')}<th style="text-align:center">Released</th></tr></thead><tbody>${strip}</tbody></table></div></details></div>
+    </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:14px;align-items:start">
       <div class="card pad"><h3 style="margin-top:0">Needs attention <span class="ft">${att.length}</span></h3>
         <ul class="alerts">${att.length ? att.map(x => `<li ${x.a}><span class="ic ${x.c}">${x.ic}</span><span>${x.t}</span></li>`).join('') : '<li class="none">Nothing needs attention right now.</li>'}</ul></div>
-      <div class="card pad"><h3 style="margin-top:0">Queue now, by stage</h3>
-        <div class="tbl-wrap"><table class="rt ut"><thead><tr><th>Site</th>${PK_LANES.map(([k, t, w]) => `<th style="text-align:center" title="${esc(t + ' — ' + w)}">${esc({ waiting: 'Waiting SI', notified: 'SI sent', accepted: 'Preparing', ready: 'Ready' }[k] || t)}</th>`).join('')}<th style="text-align:center">Released</th></tr></thead><tbody>${strip}</tbody></table></div>
-</div>
       <div class="card pad"><h3 style="margin-top:0">Released today <span class="ft">${done.length}</span></h3>
         ${done.length ? simpleTable(['No.', 'Client', 'SOs', 'Time'], done.slice().reverse().map(v => [`<b>${esc(v.label)}</b>`, esc(v.client_name || '—'), esc(sos(v) || String(v.so_count || '')), pkTimer(v) + (v.counted ? '' : ' <span class="ft">not timed</span>')]), { html: true }) : '<div class="muted">Nothing released yet today.</div>'}</div>
     </div>`;
+  columnChart($('pkdb-c-hour'), hrs.map(hl), [{ name: 'Arrived', values: hrs.map(h => hArr[h] || 0) }, { name: 'Released', values: hrs.map(h => hRel[h] || 0) }], v => fmtN(v));
   document.querySelectorAll('[data-pkdb-go]').forEach(el => el.addEventListener('click', () => switchView(el.dataset.pkdbGo)));
   document.querySelectorAll('[data-pkdb-v]').forEach(el => el.addEventListener('click', () => openPkVisit(el.dataset.pkdbV)));
   document.querySelectorAll('[data-pkdb-o]').forEach(el => el.addEventListener('click', () => openPkOrder(el.dataset.pkdbO)));
@@ -7461,10 +7488,21 @@ function pkdbSalesDraw(){
       <label class="f" style="flex-direction:row;align-items:center;gap:6px">Show<select class="i" id="pks-by">${opt('day', 'By day', PKSALES.by)}${opt('month', 'By month', PKSALES.by)}</select></label>
       <label class="f" style="flex-direction:row;align-items:center;gap:6px">Sort<select class="i" id="pks-sort">${opt('new', 'Newest date first', PKSALES.sort)}${opt('old', 'Oldest date first', PKSALES.sort)}${opt('high', 'Highest sales first', PKSALES.sort)}</select></label>
     </div>
+    ${rows.length ? `<div class="chart" id="pks-chart"></div><details class="tblview"${PKSALES.open ? ' open' : ''}><summary>Show as table</summary>` : ''}
     ${rows.length ? `<div class="tbl-wrap"><table class="rt ut"><thead><tr><th>${PKSALES.by === 'month' ? 'Month' : 'Date'}</th><th class="num">SOs</th><th class="num">Sales</th><th style="width:30%"></th></tr></thead><tbody>
       ${rows.map(r => `<tr><td>${esc(lbl(r.d))}</td><td class="num">${r.sos}</td><td class="num">${peso(r.sales, 2)}</td><td><span class="pkdb-dbar" style="display:block"><i style="width:${Math.round(r.sales / max * 100)}%"></i></span></td></tr>`).join('')}
-      </tbody><tfoot><tr><td>Total</td><td class="num">${rows.reduce((t, r) => t + r.sos, 0)}</td><td class="num">${peso(total, 2)}</td><td></td></tr></tfoot></table></div>`
+      </tbody><tfoot><tr><td>Total</td><td class="num">${rows.reduce((t, r) => t + r.sos, 0)}</td><td class="num">${peso(total, 2)}</td><td></td></tr></tfoot></table></div></details>`
       : '<div class="muted">No pick-up sales released in this period.</div>'}`;
+  if (rows.length){   // chart: always oldest → newest; a year is shown by month
+    let cr = PKSALES.rows.filter(r => r.d >= from), byM = PKSALES.per === 'year' || PKSALES.by === 'month';
+    if (byM){ const g = new Map(); cr.forEach(r => { const k = r.d.slice(0, 7); const x = g.get(k) || { d: k, sales: 0, sos: 0 }; x.sales += r.sales; x.sos += r.sos; g.set(k, x); }); cr = [...g.values()]; }
+    const cm = new Map(cr.map(r => [r.d, r])); cr = [];   // every day / month in the period, empty ones as 0
+    if (byM){ for (let m = +from.slice(5, 7); m <= +day.slice(5, 7); m++){ const k = day.slice(0, 5) + String(m).padStart(2, '0'); cr.push(cm.get(k) || { d: k, sales: 0, sos: 0 }); } }
+    else { for (let d = from; d <= day; d = addDays(d, 1)) cr.push(cm.get(d) || { d, sales: 0, sos: 0 }); }
+    const cl = d => d.length === 7 ? new Date(d + '-01T00:00:00').toLocaleDateString('en-PH', { month: 'short' }) : new Date(d + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric' });
+    stackChart($('pks-chart'), cr.map(r => cl(r.d)), [{ name: 'Pick-up sales', values: cr.map(r => r.sales) }], v => pesoShort(v));
+    box.querySelector('details.tblview').addEventListener('toggle', e => { PKSALES.open = e.target.open; });
+  }
   box.querySelectorAll('[data-pks-per]').forEach(el => el.addEventListener('click', () => { PKSALES.per = el.dataset.pksPer; pkdbSalesDraw(); }));
   $('pks-per').addEventListener('change', e => { PKSALES.per = e.target.value; pkdbSalesDraw(); });
   $('pks-by').addEventListener('change', e => { PKSALES.by = e.target.value; pkdbSalesDraw(); });
@@ -9485,7 +9523,7 @@ function legendHtml(items){ return `<div class="legend">${items.map(([name, cls]
 function hbarsHtml(items, { fmt = v => fmtN(v), max, color } = {}){
   if (!items.length) return '<div class="muted">No data in this period.</div>';
   const mx = max || Math.max(...items.map(x => x.v), 1);
-  return `<div class="hbars">${items.map(x => `<div class="hbar" title="${esc(x.name)}"><span class="nm">${esc(x.name)}</span><span class="tr"><i style="width:${Math.max(0.5, x.v / mx * 100)}%${color ? ';background:' + color : ''}"></i></span><span class="v">${esc(fmt(x.v))}${x.note ? `<small>${esc(x.note)}</small>` : ''}</span></div>`).join('')}</div>`;
+  return `<div class="hbars">${items.map(x => `<div class="hbar" title="${esc(x.name)}"><span class="nm">${esc(x.name)}</span><span class="tr"><i style="width:${Math.max(0.5, x.v / mx * 100)}%${(x.c || color) ? ';background:' + (x.c || color) : ''}"></i></span><span class="v">${esc(fmt(x.v))}${x.note ? `<small>${esc(x.note)}</small>` : ''}</span></div>`).join('')}</div>`;
 }
 
 /* ----- Line chart (one y-axis; dashed series = target/budget) with crosshair tooltip ----- */
@@ -9534,14 +9572,14 @@ function stackChart(el, cats, series, fmt = v => fmtN(v)){
     ${[0, max / 2, max].map(t => `<line class="gl" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="axt" x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${esc(fmt(t))}</text>`).join('')}
     ${cats.map((c, i) => { let acc = 0; const gx = L + band * i + (band - bw) / 2;
       const segs = series.map((s, j) => { const v = s.values[i] || 0; if (!v) return ''; const y0 = y(acc), y1 = y(acc + v); acc += v; const h = Math.max(0, y0 - y1 - 2);
-        return h > 0 ? `<rect class="m" x="${gx}" y="${y1}" width="${bw}" height="${h}" rx="${j === series.length - 1 || !series.slice(j + 1).some(z => z.values[i]) ? 3 : 0}" fill="var(--series-${j + 1})"/>` : ''; }).join('');
+        return h > 0 ? `<rect class="m" x="${gx}" y="${y1}" width="${bw}" height="${h}" rx="${j === series.length - 1 || !series.slice(j + 1).some(z => z.values[i]) ? 3 : 0}" fill="var(--series-${s.slot || j + 1})"/>` : ''; }).join('');
       return segs + (i % every === 0 ? `<text class="axt" x="${gx + bw / 2}" y="${H - 8}" text-anchor="middle">${esc(c)}</text>` : '') + `<rect class="hit" x="${L + band * i}" y="${T}" width="${band}" height="${H - T - B}" data-i="${i}" tabindex="0"/>`; }).join('')}
   </svg>`;
   const tip = $('viz-tip');
   el.querySelectorAll('rect.hit').forEach(h => {
     const show = (cx, cy) => { const i = +h.dataset.i; tip.textContent = ''; const t = document.createElement('div'); t.className = 'tt'; t.textContent = `${cats[i]} · ${fmt(totals[i])} total`; tip.appendChild(t);
       series.forEach((s, j) => { if (!s.values[i]) return; const row = document.createElement('div'); row.className = 'row'; const name = document.createElement('span'); const key = document.createElement('i'); key.className = 'key';
-        key.style.background = getComputedStyle(el).getPropertyValue(`--series-${j + 1}`); name.appendChild(key); name.appendChild(document.createTextNode(s.name)); const val = document.createElement('b'); val.textContent = fmt(s.values[i]); row.appendChild(val); row.appendChild(name); tip.appendChild(row); });
+        key.style.background = getComputedStyle(el).getPropertyValue(`--series-${s.slot || j + 1}`); name.appendChild(key); name.appendChild(document.createTextNode(s.name)); const val = document.createElement('b'); val.textContent = fmt(s.values[i]); row.appendChild(val); row.appendChild(name); tip.appendChild(row); });
       tip.classList.remove('hidden'); const w = tip.offsetWidth; tip.style.left = Math.min(innerWidth - w - 8, Math.max(8, cx + 12)) + 'px'; tip.style.top = Math.max(8, cy - tip.offsetHeight - 10) + 'px'; };
     h.addEventListener('pointermove', e => show(e.clientX, e.clientY));
     h.addEventListener('focus', () => { const b = h.getBoundingClientRect(); show(b.left + b.width / 2, b.top + 20); });
