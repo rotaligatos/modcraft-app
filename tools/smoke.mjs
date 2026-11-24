@@ -3327,6 +3327,7 @@ const PROFILES = {
         const w = window;
         const saved = { dirData: w.dirData, search: document.getElementById('dir-search').value, dsa: w.dirShowArchived };
         w.dirShowArchived = true;
+        document.getElementById('page-directory').classList.add('active');   // the list is drawn only while on screen
         try {
           w.dirData = [{ id:'QT-W00000999', baseSerial:'QT-W00000999', created:'2026-01-01T00:00:00Z', client:'Renumbered Co',
             type:'Fabrication only', value:1, user:'T', status:'Draft', stage:'Initial', options:1, updatedAt:'2026-01-01T00:00:00Z',
@@ -3367,6 +3368,7 @@ const PROFILES = {
             updatedAt: '2026-01-01T00:00:00Z', sentAt: '', agent
           });
           try {
+            document.getElementById('page-directory').classList.add('active');   // the list is drawn only while on screen
             w.dirData = [mkEntry('QT-TEST-A001', 'Jane Reyes'), mkEntry('QT-TEST-A002', 'Mark Cruz')];
             const search = document.getElementById('dir-search');
             search.value = 'jane';
@@ -5382,6 +5384,7 @@ const PROFILES = {
         const w = window;
         const saved = { d: w.dirData, ol: w._dirOptLines, op: w.dirOptOpen, dsa: w.dirShowArchived, s: document.getElementById('dir-search').value };
         try {
+          document.getElementById('page-directory').classList.add('active');   // the list is drawn only while on screen
           w.dirShowArchived = true; document.getElementById('dir-search').value = 'QT-M00000943';
           w.dirData = [{ id:'QT-M00000943', baseSerial:'QT-M00000943', created:'2026-10-01T00:00:00Z', client:'Opt Co', type:'Fabrication only',
             value:177496.26, user:'T', status:'FQ Awaiting Client Approval', stage:'Final', options:2, updatedAt:'2026-10-29T00:00:00Z' }];
@@ -6711,6 +6714,36 @@ const PROFILES = {
         const svg = w._prodBoardSvg([{x:0,y:0,w:700,h:2030,ref:23},{x:1150,y:0,w:70,h:600,ref:40},{x:1100,y:2400,w:30,h:30,ref:45}],1220,2440);
         return { wide: svg.indexOf('>P24 · 700×2030<') >= 0, strip: /rotate\(-90[^>]*>P41</.test(svg), small: /<polyline[^>]*><\/polyline><text[^>]*>P46 · 30×30</.test(svg) };
       }, { wide:true, strip:true, small:true });
+      /* 2026-11-24: start-up. Every login built the hidden Settings > Price Database page, whose
+         bulk-add duplicate index reads every name in the ~153k catalogue, and tagged Made-to-Order
+         items with a 37-name walk per material: one 27-second hold in the start-up test. */
+      check('Start-up: hidden pages are not built, the price list is not indexed until something is pasted', () => {
+        const w = window, P = document.getElementById('page-directory');
+        const saved = { m: w.dbMaterials, st: w.stTab, tok: w.gToken, d: w.dirData, act: P.classList.contains('active'), mto: w.mtoMaterialNames, idx: w._skuIndexAdd };
+        let adds = 0; w._skuIndexAdd = function (ix, it) { adds++; return saved.idx(ix, it); };
+        try {
+          w.gToken = 'x'; w.stTab = 'company';
+          w.dbMaterials = [{ name: 'White PB 4x8 2F (18mm, Matte)', unit: 'pc', price: 1 }, { name: ' made TO order Board ', unit: 'pc', price: 2 }];
+          w.renderPriceDbSettings();
+          const hiddenAdds = adds;
+          const blank = w._matBulkParse('  \n ', 'pc', 0, 'Materials').length, blankAdds = adds;
+          const dup = w._matBulkParse('White PB 4 x 8 2 Face (18 mm, Matte)', 'pc', 10, 'Materials')[0].status;
+          const loose = w._matBulkParse('White 2F PB 4x8 (Matte, 18mm)', 'pc', 10, 'Materials')[0].status;
+          w.mtoMaterialNames = ['Made to Order Board']; w._applyMtoTags();
+          const tags = w.dbMaterials.map(m => m.mto).join();
+          w.mtoMaterialNames = []; w._applyMtoTags(); const cleared = w.dbMaterials.map(m => m.mto).join();
+          P.classList.remove('active'); document.getElementById('dir-table').innerHTML = 'KEEP'; w.renderDirectoryTable();
+          const hiddenList = document.getElementById('dir-table').innerHTML;
+          return { hiddenAdds, blank, blankAdds, dup, loose, tags, cleared, hiddenList, money: w.fmtMoney(-1234567.891) + w.fmtMoney('12') + w.fmtMoney(NaN),
+            pack: w._rowsPack([{ a: 'x', b: 1.5 }, { a: null, b: '2' }], 'a,b') === 'x\u00011.5\u0002\u00012', refuse: w._rowsPack([{ a: 'p\u0001q' }], 'a') };
+        } finally { w._skuIndexAdd = saved.idx; w.dbMaterials = saved.m; w.stTab = saved.st; w.gToken = saved.tok; w.dirData = saved.d; w.mtoMaterialNames = saved.mto; P.classList.toggle('active', saved.act); }
+      }, { hiddenAdds: 0, blank: 0, blankAdds: 0, dup: 'same', loose: 'similar', tags: 'false,true', cleared: 'false,false', hiddenList: 'KEEP',
+           money: '₱-1,234,567.89₱12.00₱NaN', pack: true, refuse: null });
+      check('Start-up: roles asked early are used only for the same Google pass, once, and never when bad', () => {
+        const w = window, src = w._readRoles.toString(), gc = w.gCheckRole.toString(), rs = w._gPassRestore.toString();
+        return { sameToken: /pre\.t!==gToken/.test(src), usedOnce: /_rolesPrefetch=null/.test(src), fresh: /20000/.test(src),
+          badFallsBack: /!d\.error/.test(src) && /:normal\(\)/.test(src), roleStillByGoogleEmail: /gUser\.email\.toLowerCase\(\)/.test(gc), emailFromGoogle: /userinfo/.test(rs) };
+      }, { sameToken: true, usedOnce: true, fresh: true, badFallsBack: true, roleStillByGoogleEmail: true, emailFromGoogle: true });
       check('Project tracker: search (any word order, project/agent), status/type/user filters and sort', () => {
         const w = window;
         if (typeof w._ptFilterSort !== 'function') return 'missing';
