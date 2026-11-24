@@ -1789,6 +1789,28 @@ function simUndoRpc(fn, a){
       if (a.p_kind === 'delivery') SIM.job_events.push({ id: newId(), job_id: a.p_id, event_type: 'note', notes: `↩ Undo asked: ${lbl('delivery', r.from_status)} → ${lbl('delivery', r.back_to)}. Reason: ${r.reason}`, created_at: now, actor_name: who, actor_role: me.role });
       else SIM.pk_events.push({ id: newId(), visit_id: a.p_id, kind: 'undo_request', notes: `${lbl('pickup', r.from_status)} → ${lbl('pickup', r.back_to)} — ${r.reason}`, actor_name: who, created_at: now });
       return ok({ ...r }); }
+    case 'ticket_undo_release_lines': {
+      const v = (SIM.pk_visits || []).find(x => x.id === a.p_visit); if (!v || v.status !== 'done') return ok([]);
+      return ok((SIM.pk_visit_orders || []).filter(x => x.visit_id === v.id).map(x => { const o = (SIM.pk_orders || []).find(oo => oo.id === x.order_id); if (!o) return null;
+        const ls = (x.taken || []).filter(t => +t.qty > 0).map(t => { const l = o.lines.find(ll => ll.i === t.i) || {}; return { i: t.i, qty: +t.qty, unit: l.unit, desc: l.desc }; });
+        return ls.length ? { o: o.id, so_no: o.so_no, lines: ls } : null; }).filter(Boolean)); }
+    case 'ticket_undo_request_part': {
+      if (!(a.p_reason || '').trim()) return fail('Say what was processed by mistake.');
+      const pl = plan('pickup', a.p_id); if (pl.blocked) return fail(pl.blocked);
+      if (pl.from_status !== 'done') return fail('Only a released queue number can be partly undone.');
+      if (open(a.p_id)) return fail('An undo is already waiting for approval on this ticket.');
+      const rel = []; (SIM.pk_visit_orders || []).filter(x => x.visit_id === a.p_id).forEach(x => { const o = (SIM.pk_orders || []).find(oo => oo.id === x.order_id);
+        (x.taken || []).filter(t => +t.qty > 0).forEach(t => { const l = o?.lines.find(ll => ll.i === t.i) || {}; rel.push({ o: x.order_id, so: o?.so_no, i: t.i, got: +t.qty, unit: l.unit, desc: l.desc }); }); });
+      const ask = (a.p_lines || []).filter(x => +x.q > 0), bad = ask.filter(x => { const r0 = rel.find(r1 => r1.o === x.o && r1.i === x.i); return !r0 || +x.q > r0.got; });
+      if (bad.length) return fail('More than was released, or not on this queue number.');
+      if (!ask.length) return fail('Pick at least one item to put back.');
+      if (rel.every(r0 => ask.some(x => x.o === r0.o && x.i === r0.i && +x.q === r0.got))) return simUndoRpc('ticket_undo_request', { p_kind: 'pickup', p_id: a.p_id, p_reason: a.p_reason });
+      const bySo = {}; ask.forEach(x => { const r0 = rel.find(r1 => r1.o === x.o && r1.i === x.i); (bySo[r0.so] = bySo[r0.so] || []).push(`${fmtQty(+x.q)} ${r0.unit || ''} ${r0.desc || ''}`.replace(/\s+/g, ' ').trim()); });
+      const txt = Object.keys(bySo).sort().map(k => `SO ${k}: ${bySo[k].join(', ')}`).join('; ');
+      const r = { id: newId(), kind: 'pickup', job_id: null, visit_id: a.p_id, company: pl.company, label: pl.label, from_status: 'done', back_to: 'done', reason: a.p_reason.trim(),
+        requested_by: me.id, requested_name: who, created_at: now, status: 'pending', lines: ask.map(x => ({ o: x.o, i: x.i, q: +x.q })), lines_text: txt };
+      R.push(r); SIM.pk_events.push({ id: newId(), visit_id: a.p_id, kind: 'undo_request', notes: `Part of the release — put back: ${txt} — ${r.reason}`, actor_name: who, created_at: now });
+      return ok({ ...r }); }
     case 'ticket_undo_withdraw': { const r = R.find(x => x.id === a.p_req);
       if (!r || r.status !== 'pending') return fail('This request was already decided.');
       if (r.requested_by !== me.id && !isAdmin()) return fail('Only the person who asked (or an admin) can withdraw it.');
@@ -1811,14 +1833,22 @@ function simUndoRpc(fn, a){
         if (r.from_status === 'notified') Object.assign(v, { status: 'waiting', notified_at: null, notified_name: null });
         if (r.from_status === 'accepted') Object.assign(v, { status: 'notified', accepted_at: null, accepted_name: null });
         if (r.from_status === 'ready') Object.assign(v, { status: 'accepted', ready_at: null, ready_name: null });
-        if (r.from_status === 'done'){
+        if (r.from_status === 'done' && r.lines){
+          SIM.pk_visit_orders.filter(x => x.visit_id === v.id).forEach(x => { const o = SIM.pk_orders.find(oo => oo.id === x.order_id); if (!o) return;
+            const back = r.lines.filter(y => y.o === x.order_id); if (!back.length) return;
+            back.forEach(y => { const t = (x.taken || []).find(tt => tt.i === y.i), l = o.lines.find(ll => ll.i === y.i); const q = Math.min(+y.q, +(t?.qty || 0));
+              if (t) t.qty = +t.qty - q; if (l) l.taken = Math.max(0, (+l.taken || 0) - q); });
+            x.taken = (x.taken || []).filter(t => +t.qty > 0); o.status = 'balance'; o.closed_at = null;
+            SIM.pk_events.push({ id: newId(), order_id: o.id, visit_id: v.id, kind: 'balance', notes: 'Items put back by an undo — left for a later pick-up', actor_name: who, created_at: now }); });
+          fx = { partial: true, put_back: r.lines_text, corrections: 0 };
+        } else if (r.from_status === 'done'){
           SIM.pk_visit_orders.filter(x => x.visit_id === v.id).forEach(x => { const o = SIM.pk_orders.find(oo => oo.id === x.order_id); if (!o) return;
             (x.taken || []).forEach(t => { const l = o.lines.find(ll => ll.i === t.i); if (l) l.taken = Math.max(0, (+l.taken || 0) - (+t.qty || 0)); });
             o.status = 'in_queue'; o.closed_at = null; x.taken = []; x.sales = null; });
           fx = { first_loaded_at: v.loaded_at, photos: (v.photo_urls || []).length, corrections: 0 };
           Object.assign(v, { status: 'ready', first_loaded_at: v.first_loaded_at || v.loaded_at, loaded_at: null, loaded_name: null, photo_urls: [], minutes: null, per_so: null, within: null, over_reason: null, over_note: null });
         }
-        SIM.pk_events.push({ id: newId(), visit_id: v.id, kind: 'undo', notes: `${lbl('pickup', r.from_status)} undone — back to ${lbl('pickup', r.back_to)}. Asked by ${r.requested_name}: ${r.reason}`, actor_name: who, created_at: now });
+        SIM.pk_events.push({ id: newId(), visit_id: v.id, kind: 'undo', notes: `${r.lines ? `Part of the release undone — put back: ${r.lines_text}. Still released` : `${lbl('pickup', r.from_status)} undone — back to ${lbl('pickup', r.back_to)}`}. Asked by ${r.requested_name}: ${r.reason}`, actor_name: who, created_at: now });
       }
       Object.assign(r, { status: 'approved', decided_name: by, decided_at: now, effects: fx }); return ok({ ...r }); }
     case 'ticket_undo_forward': { const r = R.find(x => x.id === a.p_req);
@@ -3041,8 +3071,8 @@ PR_SC.push(
       SIM.pk_visit_orders = [{ visit_id: v.id, order_id: b.id, si_no: 'SI 2004', taken: b.lines.map(l => ({ i: l.i, qty: l.qty })), sales: 0, counted: true }]; PR.undoV = v.id; },
     steps: () => [
       { id: 'pu-ask', as: 'plg', go: () => openPkVisit(PR.undoV), el: '#overlay [data-undo-ask]', done: () => (SIM.ticket_undo_requests || []).some(r => r.status === 'pending'),
-        say: T('You are **Logistics**. You released **P1-004**, but the client hasn’t loaded yet — it was tapped by mistake. Tap **Processed by mistake? Ask to undo**, say what happened, then **OK**.',
-               'Ikaw ang **Logistics**. Na-release mo ang **P1-004**, pero hindi pa nakakapagkarga ang client — napindot lang nang mali. I-tap ang **Processed by mistake? Ask to undo**, sabihin ang nangyari, tapos **OK**.'),
+        say: T('You are **Logistics**. You released **P1-004**, but the client hasn’t loaded yet — it was tapped by mistake. Tap **Processed by mistake? Ask to undo**, leave every item ticked, say what happened, then **Ask to undo**.',
+               'Ikaw ang **Logistics**. Na-release mo ang **P1-004**, pero hindi pa nakakapagkarga ang client — napindot lang nang mali. I-tap ang **Processed by mistake? Ask to undo**, hayaang naka-tick lahat ng item, sabihin ang nangyari, tapos **Ask to undo**.'),
         why: T('You can’t undo it yourself — the Warehouse Manager (or an admin) approves, so a mistake is fixed and on record.', 'Hindi mo ito ma-u-undo nang mag-isa — aaprubahan ng Warehouse Manager (o admin), para naayos ang mali at naka-record.') },
       { id: 'pu-ok', as: 'pwm', go: () => openUndoList(), el: '#overlay [data-undo-ok]', done: () => (SIM.pk_visits || []).find(v => v.id === PR.undoV)?.status === 'ready',
         say: T('Now you are the **Warehouse Manager**. The request shows under **Undo requests** (also in the 🔔). Read the reason, tap **Approve undo**, then **OK**.',
@@ -3050,6 +3080,28 @@ PR_SC.push(
         why: T('You can also **Decline** with a reason, or **Pass to** someone. Away? Under **While you’re away**, let the warehouse supervisor approve for you.', 'Puwede ring **Decline** na may dahilan, o **Pass to** sa iba. Wala ka? Sa **While you’re away**, hayaan ang warehouse supervisor na mag-approve para sa iyo.') },
       { id: 'pu-end', next: true, say: T('Undone: P1-004 is back to **Ready for loading** and the items are back on the order. When it is released again, promptness still counts from the first release. A client already told gets a correction message.',
                'Na-undo na: balik sa **Ready for loading** ang P1-004 at bumalik sa order ang mga item. Kapag na-release ulit, sa unang release pa rin bibilangin ang promptness. Ang client na nasabihan na ay makakatanggap ng correction.') }] },
+  { id: 'p-undo-part', mode: 'pickup', who: ['plg','pwm'], mins: 3,
+    title: T('Released too much — undo only part of it', 'Sobra ang na-release — i-undo ang bahagi lang'), desc: T('Put back only what didn’t go out; it stays on the order for another day.', 'Ibalik lang ang hindi lumabas; mananatili sa order para sa ibang araw.'),
+    seed: () => { const b = prPkOrder({ so: 'S80012', client: 'Sample: Santos Cabinets', items: prItems(['board','edge']) });
+      b.lines.forEach(l => { l.prep = true; l.taken = l.qty; }); b.status = 'done'; b.closed_at = new Date().toISOString();
+      const v = { id: newId(), site: 'plant1', company: PR.ctx.co, series: 'C', queue_day: PR.ctx.today, queue_no: 5, label: 'P1-005', client_name: b.client_name, courier: false, is_balance: false, counted: true, walkin: false,
+        status: 'done', arrived_at: new Date(Date.now() - 20 * 60000).toISOString(), notified_at: new Date(Date.now() - 18 * 60000).toISOString(), accepted_at: new Date(Date.now() - 15 * 60000).toISOString(),
+        ready_at: new Date(Date.now() - 9 * 60000).toISOString(), loaded_at: new Date(Date.now() - 2 * 60000).toISOString(), loaded_name: 'Logistics (practice)', minutes: 12, per_so: 12, within: true, target_min: 15, so_count: 1, photo_urls: [] };
+      SIM.pk_orders = [b]; SIM.pk_visits = [v]; SIM.ticket_undo_requests = [];
+      SIM.pk_visit_orders = [{ visit_id: v.id, order_id: b.id, si_no: 'SI 2005', taken: b.lines.map(l => ({ i: l.i, qty: l.qty })), sales: 0, counted: true }]; PR.undoV = v.id; },
+    steps: () => [
+      { id: 'pp-open', as: 'plg', go: () => openPkVisit(PR.undoV), el: '#overlay [data-undo-ask]', done: () => !!$('ur-go'),
+        say: T('You are **Logistics**. You released **P1-005** with every line ticked, but the client only took the boards — the edge band stays for another day. Tap **Processed by mistake? Ask to undo**.',
+               'Ikaw ang **Logistics**. Na-release mo ang **P1-005** na naka-tick lahat, pero boards lang ang kinuha ng client — sa ibang araw ang edge band. I-tap ang **Processed by mistake? Ask to undo**.') },
+      { id: 'pp-ask', el: '#overlay .modal', free: true, done: () => (SIM.ticket_undo_requests || []).some(r => r.status === 'pending' && r.lines),
+        say: T('Keep ticked only what did **not** go out (the edge band); untick the boards. You can also lower a number, e.g. 4 of 10. Say what happened, then **Ask to undo**.',
+               'Iwanang naka-tick lang ang **hindi** lumabas (edge band); i-untick ang boards. Puwede ring bawasan ang bilang, hal. 4 sa 10. Sabihin ang nangyari, tapos **Ask to undo**.'),
+        why: T('Items stay on their own SO — an undo never moves them to another order.', 'Nasa sarili nilang SO pa rin ang mga item — hindi inililipat ng undo sa ibang order.') },
+      { id: 'pp-ok', as: 'pwm', go: () => openUndoList(), el: '#overlay [data-undo-ok]', done: () => prPk('S80012')?.status === 'balance',
+        say: T('Now you are the **Warehouse Manager**. The request says **Part of the release** and lists what goes back. Tap **Approve undo**, then **OK**.',
+               'Ngayon ikaw ang **Warehouse Manager**. Nakasulat sa request ang **Part of the release** at ang ibabalik. I-tap ang **Approve undo**, tapos **OK**.') },
+      { id: 'pp-end', next: true, say: T('Done: P1-005 stays **Released** with its photos and time, and S80012 is now **partly picked up** — the edge band is its balance, to be picked up another day.',
+               'Tapos: nananatiling **Released** ang P1-005 kasama ang photos at oras, at **partly picked up** na ang S80012 — balance ang edge band, kukunin sa ibang araw.') }] },
 );
 
 $('btn-practice').addEventListener('click', openPracticeHub);
@@ -13170,6 +13222,10 @@ function openReasonModal(title, message, onSubmit, back){
 const UNDO_LBL = { delivery: { scheduled: 'Scheduled', dispatched: 'Departed', in_progress: 'On site', issue: 'Problem reported', completed: 'Delivered' },
   pickup: { waiting: 'Waiting', notified: 'SI sent', accepted: 'SI accepted', ready: 'Ready for loading', done: 'Released' } };
 const undoLbl = (k, st) => UNDO_LBL[k]?.[st] || st || '—';
+/* "Released → back to Ready" for a whole undo; for part of a release, what goes back and that it stays Released */
+const undoWhatHtml = (kind, r) => r.lines_text
+  ? `<b>Part of the release</b> — put back: ${esc(r.lines_text)} <span class="ft">· the rest stays released; the put-back items stay on the order as balance for another day</span>`
+  : `<b>${esc(undoLbl(kind, r.from_status))}</b> → back to <b>${esc(undoLbl(kind, r.back_to))}</b>`;
 let undoAfter = null;
 async function undoFor(kind, id){
   try { const { data, error } = await sb.rpc('ticket_undo_for', { p_kind: kind, p_id: id }); return error ? null : (data || null); } catch { return null; }
@@ -13178,10 +13234,10 @@ function undoBoxHtml(kind, id, u){
   if (!u) return '';
   const r = u.request;
   if (r) return `<div class="warnbox" style="margin:8px 0"><b>↩ Undo asked</b> by ${esc(r.requested_name || '—')} · ${esc(fmtTime(r.created_at))}${r.assigned_name ? ` · <span class="ft">passed to ${esc(r.assigned_name)} by ${esc(r.forwarded_by_name || '—')}</span>` : ''}
-    <div style="margin-top:4px"><b>${esc(undoLbl(kind, r.from_status))}</b> → back to <b>${esc(undoLbl(kind, r.back_to))}</b></div>
+    <div style="margin-top:4px">${undoWhatHtml(kind, r)}</div>
     <div class="ft">Reason: ${esc(r.reason)}</div>
     <div class="row-btns" style="margin-top:8px">
-      ${u.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${kind}" data-from="${esc(r.from_status)}">Approve undo${u.decide_for ? ' (for ' + esc(u.decide_for) + ')' : ''}</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
+      ${u.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${kind}" data-from="${esc(r.from_status)}" data-part="${esc(r.lines_text || '')}">Approve undo${u.decide_for ? ' (for ' + esc(u.decide_for) + ')' : ''}</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
       ${u.can_forward ? '<button class="btn" data-undo-list>Pass to someone…</button>' : ''}
       ${u.can_withdraw ? `<button class="btn" data-undo-wd="${esc(r.id)}">Withdraw</button>` : ''}
       ${!u.can_decide ? `<span class="ft">Waiting for ${r.assigned_name ? esc(r.assigned_name) : 'the warehouse manager or an admin'}.</span>` : ''}</div></div>`;
@@ -13190,7 +13246,8 @@ function undoBoxHtml(kind, id, u){
     return `<div class="ft" style="margin:6px 0">↩ Can’t undo yet: ${esc(u.blocked)}</div>`;
   return '';
 }
-function undoConfirmText(kind, from, back){
+function undoConfirmText(kind, from, back, part){
+  if (part) return `Put back part of the release: ${part}.\n\nThose items go back to the order as balance, to be picked up another day. Everything else stays released, with its photos and time. Anyone already told gets a correction, then the corrected release message.`;
   const bits = [`Undo “${undoLbl(kind, from)}” — the ticket goes back to “${undoLbl(kind, back)}”.`];
   if (kind === 'pickup' && from === 'done') bits.push('The items go back to the order, the release photos are cleared (they stay in Drive), and promptness keeps the first release time.');
   if (kind === 'delivery' && from === 'completed') bits.push('The delivery result and “received by” are cleared and the trip is reopened.');
@@ -13205,13 +13262,14 @@ document.addEventListener('click', async e => {
   try {
     if (b.dataset.undoAsk){
       const kind = b.dataset.undoAsk;
+      if (kind === 'pickup' && b.dataset.from === 'done'){ openUndoReleaseAsk(b.dataset.id); return; }
       const why = prompt(`Ask to undo “${undoLbl(kind, b.dataset.from)}” → back to “${undoLbl(kind, b.dataset.back)}”.\n\nWhat was processed by mistake? (the warehouse manager or an admin approves)`, '');
       if (why === null) return; if (!why.trim()) return toast('Say what was processed by mistake', 'error');
       b.disabled = true;
       await withRetry('Asking to undo', () => sb.rpc('ticket_undo_request', { p_kind: kind, p_id: b.dataset.id, p_reason: why.trim() }), 1);
       toast('Undo asked — the warehouse manager or an admin will approve it', 'ok');
     } else if (b.dataset.undoOk){
-      if (!confirm(undoConfirmText(b.dataset.kind, b.dataset.from, UNDO_BACK[b.dataset.kind]?.(b.dataset.from) || '') + '\n\nContinue?')) return;
+      if (!confirm(undoConfirmText(b.dataset.kind, b.dataset.from, UNDO_BACK[b.dataset.kind]?.(b.dataset.from) || '', b.dataset.part) + '\n\nContinue?')) return;
       b.disabled = true;
       const { data } = await withRetry('Undoing', () => sb.rpc('ticket_undo_decide', { p_req: b.dataset.undoOk, p_approve: true, p_note: null }), 1);
       const n = data?.effects?.corrections || 0;
@@ -13243,6 +13301,45 @@ document.addEventListener('click', async e => {
     if ($('ul-list')) openUndoList(); else undoAfterDone();
   } catch { b.disabled = false; }
 });
+/* Undo a release: tick which items (and how many) were released by mistake. All ticked = the whole release goes back (queue number back to Ready);
+   some = only those go back as the order's balance and the queue number stays Released. Items never move to another order. */
+async function openUndoReleaseAsk(visitId){
+  openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true"><span class="spin"></span></div>`); bindClose();
+  let sos; try { ({ data: sos } = await withRetry('Loading what was released', () => sb.rpc('ticket_undo_release_lines', { p_visit: visitId }))); } catch { closeOverlay(); return; }
+  sos = sos || [];
+  if (!sos.length){ closeOverlay(); return toast('Nothing released on this queue number to undo', 'error'); }
+  const m = document.querySelector('#overlay .modal');
+  m.innerHTML = `<div class="chart-h" style="margin:0 0 6px"><h2 style="margin:0">↩ Undo the release</h2></div>
+    <div class="ft" style="margin-bottom:8px">Tick what was released by mistake, and how many. Untick what really went out. The warehouse manager or an admin approves.</div>
+    ${sos.map(so => `<div class="card pad" style="margin:8px 0"><b>SO ${esc(so.so_no)}</b>
+      ${so.lines.map(l => `<label class="row-btns" style="margin-top:6px;align-items:center;gap:8px">
+        <input type="checkbox" data-ur-on data-o="${esc(so.o)}" data-i="${esc(l.i)}" checked>
+        <input class="i" type="number" min="0" max="${esc(l.qty)}" step="any" data-ur-q data-o="${esc(so.o)}" data-i="${esc(l.i)}" value="${esc(l.qty)}" style="width:80px">
+        <span>of ${esc(fmtQty(l.qty))} ${esc(l.unit || '')} · ${esc(l.desc || '')}</span></label>`).join('')}</div>`).join('')}
+    <div id="ur-sum" class="ft" style="margin:8px 0"></div>
+    <label class="f">What was released by mistake?<textarea class="i" id="ur-why" rows="2" placeholder="e.g. Only 6 of the 10 plywood were loaded"></textarea></label>
+    <div class="row-btns" style="justify-content:flex-end;margin-top:8px"><button class="btn" data-close>Cancel</button><button class="btn ok" id="ur-go">Ask to undo</button></div>`;
+  bindClose();
+  m.parentNode.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => undoAfterDone()));
+  const all = () => [...m.querySelectorAll('[data-ur-q]')].map(q => { const on = m.querySelector(`[data-ur-on][data-o="${q.dataset.o}"][data-i="${q.dataset.i}"]`);
+    const max = +q.max, v = Math.max(0, Math.min(max, +q.value || 0)); return { o: q.dataset.o, i: +q.dataset.i, q: on.checked ? v : 0, max }; });
+  const sum = () => { const a = all(), back = a.filter(x => x.q > 0);
+    $('ur-sum').innerHTML = !back.length ? '<b>Nothing ticked.</b>'
+      : a.every(x => x.q === x.max) ? '<b>Everything goes back.</b> The queue number returns to “Ready for loading” so Logistics can release again.'
+      : `<b>Part goes back</b> (${back.length} item${back.length === 1 ? '' : 's'}). The queue number stays “Released”; the put-back items stay on the order as balance for another day.`; };
+  m.querySelectorAll('[data-ur-on],[data-ur-q]').forEach(el => el.addEventListener('input', sum)); sum();
+  $('ur-go').addEventListener('click', async () => {
+    const a = all(), back = a.filter(x => x.q > 0), why = $('ur-why').value.trim();
+    if (a.some(x => { const q = m.querySelector(`[data-ur-q][data-o="${x.o}"][data-i="${x.i}"]`); return +q.value > x.max || +q.value < 0; })) return toast('A quantity is more than was released', 'error');
+    if (!back.length) return toast('Tick at least one item to put back', 'error');
+    if (!why) return toast('Say what was released by mistake', 'error');
+    $('ur-go').disabled = true;
+    try {
+      await withRetry('Asking to undo', () => sb.rpc('ticket_undo_request_part', { p_id: visitId, p_reason: why, p_lines: back.map(x => ({ o: x.o, i: x.i, q: x.q })) }), 1);
+      toast('Undo asked — the warehouse manager or an admin will approve it', 'ok'); closeOverlay(); undoAfterDone();
+    } catch { $('ur-go').disabled = false; }
+  });
+}
 const UNDO_BACK = { delivery: st => ({ dispatched: 'scheduled', in_progress: 'dispatched' })[st] || 'in_progress',
   pickup: st => ({ notified: 'waiting', accepted: 'notified', ready: 'accepted', done: 'ready' })[st] };
 async function openUndoList(){
@@ -13264,13 +13361,13 @@ async function openUndoList(){
     ${dgCard}
     <div id="ul-list">${rows.length ? rows.map(r => { const st = ST[r.status] || ['', r.status];
       return `<div class="card pad" style="margin:8px 0"><div class="chart-h" style="margin:0"><b>${r.kind === 'pickup' ? '📦' : '🚚'} ${esc(r.label || '')}</b> <span class="tag ${st[0]}">${esc(st[1])}</span></div>
-        <div style="margin-top:4px"><b>${esc(r.from_label)}</b> → back to <b>${esc(r.back_label)}</b> · <span class="ft">asked by ${esc(r.requested_name || '—')} · ${esc(fmtTime(r.created_at))}</span></div>
+        <div style="margin-top:4px">${undoWhatHtml(r.kind, r)} · <span class="ft">asked by ${esc(r.requested_name || '—')} · ${esc(fmtTime(r.created_at))}</span></div>
         <div class="ft">Reason: ${esc(r.reason)}</div>
         ${r.assigned_name && r.status === 'pending' ? `<div class="ft">Passed to ${esc(r.assigned_name)} by ${esc(r.forwarded_by_name || '—')}</div>` : ''}
         ${r.decided_name ? `<div class="ft">${esc(st[1])} by ${esc(r.decided_name)} · ${esc(fmtTime(r.decided_at))}${r.decide_note ? ' — ' + esc(r.decide_note) : ''}</div>` : ''}
         <div class="row-btns" style="margin-top:6px">
           <button class="btn" data-ul-open="${esc(r.kind)}" data-id="${esc(r.job_id || r.visit_id)}">Open the ticket</button>
-          ${r.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${esc(r.kind)}" data-from="${esc(r.from_status)}">Approve undo${r.decide_for ? ' (for ' + esc(r.decide_for) + ')' : ''}</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
+          ${r.can_decide ? `<button class="btn ok" data-undo-ok="${esc(r.id)}" data-kind="${esc(r.kind)}" data-from="${esc(r.from_status)}" data-part="${esc(r.lines_text || '')}">Approve undo${r.decide_for ? ' (for ' + esc(r.decide_for) + ')' : ''}</button><button class="btn" data-undo-no="${esc(r.id)}">Decline</button>` : ''}
           ${r.can_forward ? `<select class="i" data-undo-fwsel="${esc(r.id)}" style="max-width:200px">${pplOpts(r.assigned_to, r.requested_by)}</select><button class="btn" data-undo-fw="${esc(r.id)}">Pass to</button>` : ''}
           ${r.status === 'pending' && r.mine ? `<button class="btn" data-undo-wd="${esc(r.id)}">Withdraw</button>` : ''}</div></div>`; }).join('')
       : '<div class="muted" style="padding:14px 0">Nothing waiting. To undo a step, open the ticket and tap “Processed by mistake? Ask to undo”.</div>'}</div>
