@@ -13668,3 +13668,13 @@ The Google pass lived in page memory, so every reload/new tab/"old version" bann
 
 ## What was changed on 2026-11-06 (session 4 — Saved Analyses search)
 Typing in Designers Support › Saved Analyses dropped the cursor after each letter: `_prodSetSavedFilter` redrew the whole page, replacing the search box. Results now live in `#prod-saved-list` (`_savedAnalysesListHtml`, `_prodRefreshSavedList`) and only that redraws.
+
+## What was changed on 2026-11-24 (session — HATID announcements: must-read banner + email blast)
+- **Why:** partial pick-ups were being uploaded/released in full (S80680 GAMATECH, S80446 RCQ — every line ticked by Sales Support, every line "taken" at release), and Rommel wanted a reminder that reaches everyone and is confirmed read.
+- **📢 in the header (everyone):** list of your announcements (last 60 days, read/unread). Admins and managers also get **+ New announcement** and a **Sent** list with "x/y read" → **Who read it** (not read / read with time), **Email a reminder** (only to those who haven't read it), **End announcement** (two taps).
+- **Must-read screen:** an unread announcement covers the whole app (`#ann-gate`, z-index 90 — separate from `#overlay`, so Esc and the scrim don't close it). The button stays disabled for 3 s ("Please read first…"), then **✓ I have read and understood** records the read. Oldest unread first; "1 of N".
+- **Checks:** no realtime (tables are closed to direct reads) — `annCheck()` runs on sign-in (`startNotifications` → `annStart`), every 3 min, on `visibilitychange`, and on practice/driver-view enter/exit and persona switch.
+- **Email:** `job_outbox` rows with `kind = 'announce'`, `to_role = 'other'` (so the practice-period message hold doesn't stop staff announcements), sent by `job-notify-send` through the same mail script. Subject "HATID announcement: …" with a link back to HATID. Poster excluded. `job_outbox_kind_check` now includes `announce`; `OB_KIND.announce` = 'Announcement → staff'.
+- **Audience:** companies (null = all; a manager covering some companies can only post to those) and groups `office` (admin/manager/dispatcher/viewer), `drivers` (field), `pickup` (role pickup or any pickup_role); null = everyone. Same rule in `hatid_ann_for()` and `simAnnRpc`.
+- **Database** (`supabase_hatid_announcements.sql`, applied 2026-11-24): `hatid_announcements`, `hatid_announcement_reads` (RLS on, no grants); functions `hatid_ann_post / _mine / _ack / _list / _reads / _remind / _end / _can_post` (security definer, authenticated only).
+- **Practice:** `simAnnRpc` plays all `hatid_ann_*` on `SIM.ann` (no email). New scenario **d-announce** (Manager posts → Sales Support must read → Manager checks who read it).
