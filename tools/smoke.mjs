@@ -6692,6 +6692,20 @@ const PROFILES = {
         try { const got = await _vRun(); out.push({ label: _vLabel, got, want: _vWant, ok: JSON.stringify(got) === JSON.stringify(_vWant) }); }
         catch (e) { out.push({ label: _vLabel, err: String(e).slice(0,120), ok: false }); }
       }
+      check('Final Quotation board/tape changes are offered as swaps and rebuild the Job Order with the new materials', () => {
+        const w = window;
+        if (typeof w._fqMaterialSwaps !== 'function') return 'missing';
+        const s1 = w.qAreas, s2 = w.fqAreas;
+        try {
+          const L = (n) => ({ name: n, qty: 1, price: 1, unit: 'pc' });
+          w.qAreas = [{ name: 'A', matItems: [L('Light Gray MDF 4x8 2F (25mm, Stipple)'), L('Light Gray 2mmx29mm Embossed PVC Premium Edgeband'), L('Real White PB 4x8 2F (18mm, Matte)')] }];
+          w.fqAreas = [{ name: 'A', matItems: [L('Light Gray PB MR 4x8 2F 25mm, Stipple'), L('Light Gray 2mmx34mm Embossed PVC Premium Edgeband'), L('Warm White PB 4x8 2F (18mm, Matte)')] }];
+          const comps = [{ name: 'Top', material: 'MDF', color: 'light gray 4x8', texture: 'stipple', thickness: 25, faces: 2, length: 1400, width: 700, qty: 8, ebt: '4s', edgeTape: 'Light Gray 2mmx29mm Embossed PVC Premium Edgeband' }];
+          const sw = w._fqMaterialSwaps({ components: comps });
+          const jo = w._joBuild(w._fqApplySwaps({ components: comps }, sw), { joNumber: 'JO-T', serial: 'QT-T' });
+          return { swaps: sw.map(s => s.kind + ':' + s.pieces), mat: jo.parts[0].material, sku: jo.parts[0].sku, tape: jo.parts[0].tape, board: jo.boards[0].material };
+        } finally { w.qAreas = s1; w.fqAreas = s2; }
+      }, { swaps: ['board:8', 'tape:8'], mat: 'PB-MR', sku: 'Light Gray PB MR 4x8 2F 25mm, Stipple', tape: 'Light Gray 2mmx34mm Embossed PVC Premium Edgeband', board: 'PB-MR' });
       check('Board diagram: narrow strips get a turned label; a piece too small for any label gets a pointer line to a label outside the board', () => {
         const w = window;
         const svg = w._prodBoardSvg([{x:0,y:0,w:700,h:2030,ref:23},{x:1150,y:0,w:70,h:600,ref:40},{x:1100,y:2400,w:30,h:30,ref:45}],1220,2440);

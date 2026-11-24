@@ -26063,7 +26063,7 @@ function confirmSend(via) {
     _saveDrawingAnalysisToDrive();
     _copyOrderAttachmentsToQuotationFolder();
     // A cutting list reflected into the Final Quotation reserves the Job Order at the Final lock.
-    if(fqDrawingAnalysis){ _saveFQDrawingAnalysis(); _reserveJobOrder('fq'); }
+    if(fqDrawingAnalysis){ _saveFQDrawingAnalysis(); _reserveJobOrder('fq'); } else setTimeout(function(){ _fqMaterialCheck(true); },600);
     gSaveQuotation();
   } else {
     qLocked=true; qInitLockedAt=qInitLockedAt||new Date().toISOString(); _markSent('s1',sentTxt);
@@ -26120,7 +26120,7 @@ function skipSend() {
     _saveBoardLayoutToDrive();
     _saveDrawingAnalysisToDrive();
     _copyOrderAttachmentsToQuotationFolder();
-    if(fqDrawingAnalysis){ _saveFQDrawingAnalysis(); _reserveJobOrder('fq'); }
+    if(fqDrawingAnalysis){ _saveFQDrawingAnalysis(); _reserveJobOrder('fq'); } else setTimeout(function(){ _fqMaterialCheck(true); },600);
     gSaveQuotation();
   } else {
     qLocked=true; qSentStatus="Not sent"; qInitLockedAt=qInitLockedAt||new Date().toISOString();
@@ -43381,6 +43381,96 @@ function _markJobOrderReady(){
     }).catch(function(e){ console.warn('[jo] ready failed',e); });
 }
 
+// ── Final Quotation materials → Job Order (Rommel, 2026-11-24, QT-W00000378.R2) ─────────────────
+// The Job Order is built from the cutting list. When staff change a board or edge tape on the Final
+// Quotation's lines without reflecting a new cutting list, the Job Order and its labels kept the
+// Initial materials. Now: the Initial and Final lines are compared row by row; each line whose
+// material changed AND is used by the cutting list is offered as a swap ("25mm MDF → PB MR 25mm").
+// Nothing changes without a confirm. On confirm the cutting list gets the new materials (boards
+// re-packed), it becomes the Final Quotation's own list, and a new Job Order version is reserved.
+function _fqLinePairs(){
+  var out=[], s1=qAreas||[], s2=fqAreas||[];
+  for(var a=0;a<Math.min(s1.length,s2.length);a++){
+    var m1=(s1[a]&&s1[a].matItems)||[], m2=(s2[a]&&s2[a].matItems)||[];
+    for(var i=0;i<Math.min(m1.length,m2.length);i++){
+      var f=String(m1[i]&&m1[i].name||'').trim(), t=String(m2[i]&&m2[i].name||'').trim();
+      if(f&&t&&f!==t&&!out.some(function(p){return p.from===f&&p.to===t;})) out.push({from:f,to:t});
+    }
+  }
+  return out;
+}
+function _fqCompBoardMatches(c,from){
+  if(c.catalogName) return String(c.catalogName).trim()===from;
+  var d=_prodParseMaterialDescriptor(from);
+  if(!d.substrate) return false;
+  var cd=_prodParseMaterialDescriptor([c.material,c.color,c.texture].filter(Boolean).join(' '));
+  if(cd.substrate!==d.substrate) return false;
+  if(d.thickness&&+c.thickness!==d.thickness) return false;
+  if(d.faces&&+c.faces&&+c.faces!==d.faces) return false;
+  var words=String(c.color||'').toLowerCase().split(/[^a-z0-9]+/).filter(function(w){return w.length>1;});
+  var fl=from.toLowerCase();
+  return words.every(function(w){ return fl.indexOf(w)>=0; });
+}
+// Which line changes touch the cutting list, and how many pieces each moves.
+function _fqMaterialSwaps(result){
+  var comps=(result&&result.components)||[];
+  return _fqLinePairs().map(function(p){
+    var tape=0, board=0;
+    comps.forEach(function(c){
+      var q=Math.max(1,+c.qty||1);
+      if(c.edgeTape&&String(c.edgeTape).trim()===p.from) tape+=q;
+      else if(_fqCompBoardMatches(c,p.from)) board+=q;
+    });
+    return {from:p.from,to:p.to,kind:tape?'tape':'board',pieces:tape||board};
+  }).filter(function(s){ return s.pieces>0; });
+}
+function _fqApplySwaps(result,swaps){
+  var r=JSON.parse(JSON.stringify(result));
+  (r.components||[]).forEach(function(c){
+    swaps.forEach(function(s){
+      if(s.kind==='tape'){ if(c.edgeTape&&String(c.edgeTape).trim()===s.from) c.edgeTape=s.to; return; }
+      if(!_fqCompBoardMatches(c,s.from)) return;
+      var d=_prodParseMaterialDescriptor(s.to);
+      if(d.substrate) c.material=d.substrate;
+      if(d.thickness) c.thickness=d.thickness;
+      if(d.faces) c.faces=d.faces;
+      if(d.texture) c.texture=d.texture;
+      c.catalogName=s.to;
+    });
+  });
+  delete r._bom; delete r._services;
+  r._bom=prodComputeBom(r.components||[]);
+  r._services=prodComputeServices(r.components||[],r.holeSchedule||[],r.extraServices||[]);
+  return r;
+}
+// Run at the Final lock, and from the Job Order window. silentIfNone: no message when nothing changed.
+function _fqMaterialCheck(silentIfNone){
+  var base=qBaseSerial||qSerial;
+  if(fqDrawingAnalysis||!base||qDraftKey) return Promise.resolve(false);   // the Final has its own list already
+  return _joAnalysisForQuotation(base,'s1').then(function(an){
+    if(!an||!an.result||!(an.result.components||[]).length){ if(!silentIfNone) showToast('This quotation has no cutting list, so there is no Job Order to update.'); return false; }
+    var swaps=_fqMaterialSwaps(an.result);
+    if(!swaps.length){ if(!silentIfNone) showToast('The Job Order already uses the Final Quotation\'s materials.'); return false; }
+    return new Promise(function(res){
+      _confirm('The Final Quotation uses different materials from the cutting list the Job Order was built from:\n\n'
+        +swaps.map(function(s){ return '• '+s.from+'\n   → '+s.to+'  ('+s.pieces+' piece'+(s.pieces===1?'':'s')+', '+(s.kind==='tape'?'edge tape':'board')+')'; }).join('\n')
+        +'\n\nUpdate the Job Order and labels to the Final Quotation\'s materials? Boards are re-packed and a new Job Order version replaces the current one.',
+        function(){
+          var nr=_fqApplySwaps(an.result,swaps);
+          fqDrawingAnalysis={result:nr,fileName:(an.fileName||'Cutting list')+' — Final Quotation materials',analyzedAt:new Date().toISOString(),componentCount:(nr.components||[]).length};
+          logActivity('Job Order materials updated to the Final Quotation: '+swaps.map(function(s){return s.from+' → '+s.to;}).join('; ')+'.',base);
+          _saveFQDrawingAnalysis();
+          _reserveJobOrder('fq').then(function(jo){ if(el('ov-jo')&&el('ov-jo').classList.contains('show')) openJobOrders(); res(!!jo); });
+          gSaveQuotation();
+        },
+        function(){
+          logActivity('⚠ Final Quotation materials differ from the Job Order and were NOT carried over ('+swaps.map(function(s){return s.from+' → '+s.to;}).join('; ')+'). Job Order → Check Final Quotation materials to update it.',base);
+          res(false);
+        });
+    });
+  }).catch(function(e){ console.warn('[jo] material check failed',e); return false; });
+}
+
 // ── KEYSTONE payment gate switch ─────────────────────────────────────────────
 // Rommel, 2026-10-21: Job Orders are in use but KEYSTONE is not deployed yet. ON (default) = a Job
 // Order is "not for production" until KEYSTONE releases it after payment. OFF = good for production
@@ -43675,7 +43765,7 @@ function _joPrintLabels(jo,draft){
     used[p.ref]=(used[p.ref]||0)+1; var k=used[p.ref]-1, code=p.barcodes[k]||p.barcodes[0];
     var sc=(p.scan&&(p.scan[k]||p.scan[0]))||code;
     labels.push({scan:sc,p:p.p,name:p.name,area:p.area,L:p.L,W:p.W,cutL:p.cutL,cutW:p.cutW,th:p.thickness||0,
-      material:[p.material,p.color].filter(Boolean).join(' '),ebt:p.ebt||'',sc:p.sc||0,lc:p.lc||0,grain:p.grain||'',tape:p.tape||'',where:where,
+      material:p.sku||[p.material,p.color].filter(Boolean).join(' '),ebt:p.ebt||'',sc:p.sc||0,lc:p.lc||0,grain:p.grain||'',tape:p.tape||'',where:where,
       work:_joWorkSvcs(p).map(function(x){ return _joSvcLabel(x); }).concat(p.remark?[p.remark]:[]).filter(Boolean).join(' · '),
       grain:(p.grained!=null?p.grained:_isGrainedMaterial([p.material,p.color,p.texture].join(' ')))?(p.grain||'length'):'',
       client:jo.client||'',project:jo.project||'',order:jo.orderRef||''});
@@ -43771,7 +43861,7 @@ function openJobOrders(){
       // A lock whose reservation failed (or a quotation locked before Job Orders existed) can be
       // reserved by hand — only while the Initial Quotation is locked, the same moment it would
       // have happened automatically.
-      if(qLocked) el('ov-jo-foot').innerHTML='<button class="btn" onclick="_joReserveNow()" title="Normally automatic at lock. Use this if the lock did not reserve one, or the cutting list changed."><i class="ti ti-plus"></i>'+(rows.length?'Reserve a new version':'Reserve the Job Order')+'</button>'
+      if(qLocked) el('ov-jo-foot').innerHTML=(fqLocked&&!fqDrawingAnalysis?'<button class="btn" onclick="_fqMaterialCheck(false)" title="Use this when a board or edge tape was changed on the Final Quotation"><i class="ti ti-replace"></i>Check Final Quotation materials</button>':'')+'<button class="btn" onclick="_joReserveNow()" title="Normally automatic at lock. Use this if the lock did not reserve one, or the cutting list changed."><i class="ti ti-plus"></i>'+(rows.length?'Reserve a new version':'Reserve the Job Order')+'</button>'
         +'<button class="btn" onclick="closeModal(\'ov-jo\')">Close</button>';
     });
 }
@@ -51532,6 +51622,14 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-11-24-tracker-jo-materials', date:'24 Nov 2026', items:[
+    {id:'jo-fq-materials', icon:'ti-replace', title:'Job Order follows Final Quotation materials',
+     text:'If you change a board or edge tape on the Final Quotation, the app now asks at the Final lock whether to carry the change into the Job Order and labels. It lists each change; press OK to update. Already locked? Open Job Order and press Check Final Quotation materials.',
+     show:'quotations'},
+    {id:'tracker-search', icon:'ti-search', title:'Search and filter the Project tracker',
+     text:'Reports › Project tracker now has a search box, status / type / prepared-by filters and sorting.',
+     show:'reports'}
+  ]},
   {id:'2026-11-06-stay-signed-in', date:'6 Nov 2026', items:[
     {id:'stay-signed-in', icon:'ti-login', title:'Fewer sign-ins',
      text:'Reloading the page or opening another tab no longer asks you to sign in while your Google sign-in is still valid (up to about an hour). On a shared PC, press Sign out when you finish, so the next person does not open Modcraft as you.'}
