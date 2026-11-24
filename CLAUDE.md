@@ -13678,3 +13678,21 @@ Typing in Designers Support › Saved Analyses dropped the cursor after each let
 - **Audience:** companies (null = all; a manager covering some companies can only post to those) and groups `office` (admin/manager/dispatcher/viewer), `drivers` (field), `pickup` (role pickup or any pickup_role); null = everyone. Same rule in `hatid_ann_for()` and `simAnnRpc`.
 - **Database** (`supabase_hatid_announcements.sql`, applied 2026-11-24): `hatid_announcements`, `hatid_announcement_reads` (RLS on, no grants); functions `hatid_ann_post / _mine / _ack / _list / _reads / _remind / _end / _can_post` (security definer, authenticated only).
 - **Practice:** `simAnnRpc` plays all `hatid_ann_*` on `SIM.ann` (no email). New scenario **d-announce** (Manager posts → Sales Support must read → Manager checks who read it).
+
+## What was changed on 2026-11-24 (session — Project tracker filters, board diagram labels, login freeze, Final Quotation materials into the Job Order)
+Commits `c1edace`..`1b91792`, all live (PMES `aab0582`..`faa9a9c`).
+- **Project tracker** (Reports): search (words in any order), status / type / prepared-by filters, sort, Clear, count (`_ptF`, `_ptFilterSort`). The page's company + date filters still apply first.
+- **Board diagram: every piece is named** (Modcraft `_prodBoardSvg`, PMES `_pjoBoardSvg`; change both together). `_prodPieceLabel` tries across, then turned 90°, at 3 sizes; what still doesn't fit goes to `_prodCallouts`: a thin red line from the piece to "P# · W×H" in the right margin. **No dot on the piece** (Rommel: two neighbouring pieces read as one); line = half the piece stroke.
+- **~30 s freeze after login:** the catalogue index warm-up (`_warmCatalogIndexes`) held the screen. It now starts 8 s after load in idle slices of at most 8 ms. At heavy CPU throttle the screen was held 60 s of 70 before, 0.8 s after. A `[startup]` console line reports how long the screen was held.
+- **Final Quotation board/tape changes now reach the Job Order and labels** (QT-W00000378). A Job Order is built ONLY from the cutting list, so changing a Final Quotation line changed nothing in production. `_fqLinePairs` compares Stage 1 and Stage 2 material lines, `_fqMaterialSwaps` keeps those the cutting list uses, and `_fqMaterialCheck` asks (Rommel chose "ask, then swap") at both Final lock paths, or from Job Order → **Check Final Quotation materials**. OK = the swapped list becomes `fqDrawingAnalysis`, boards re-packed, new JO version. Cancel = logged, nothing changed. Skipped when a list was reflected into Stage 2. Labels print the exact SKU.
+  - **First real use worked:** Jhover ran it on QT-W00000378 at 16:32 PHT; V4 ready, 25mm parts = Light Gray PB MR, 2x34mm tape, 18mm parts unchanged.
+- **Lami guide + training:** Job Orders and tracker lines in Lami's guide; training scenario **14** (change a board on the Final → Job Order), English/Taglish. `tools/sim_trn14.mjs` runs it headless (Sheets emulated, network blocked; `CANCEL=1` = Cancel path): 6 of 6 steps tick both ways. It calls several functions directly rather than clicking (load, reflect, client name, confirms, skip send), and uses a 3-item catalogue with the cutting-rate line unticked, so it is not a substitute for a person doing it in the live training mode.
+- `_joLoadProduction` guards a missing Supabase client (it threw before the window's footer buttons were drawn; seen only offline).
+- **Rule:** shipping a feature = What's new **and** Lami's guide **and** a training scenario where staff do it. Rommel had to ask for the last two.
+- GitHub Pages deploys kept failing ("No artifacts named github-pages") and passed on `gh run rerun <id>`. Check `gh run list` before waiting on the live page.
+- Shell heredocs / `node -e` / `sed` mangled backslashes and `&` again, several times. Write the script with the Write tool, or use Edit.
+
+# OPEN — updated 2026-11-24
+- A person to run training scenario 14 once in the live app.
+- Not checked: the login speed on slower staff PCs (Rommel: "better than before"); read their `[startup]` line if anyone still reports it.
+- Everything in the earlier lists still stands.
