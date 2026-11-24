@@ -736,6 +736,7 @@ table.ut tr.off td{color:var(--muted)}
 .pkdb-day{display:grid;grid-template-columns:64px 1fr 64px 84px;gap:8px;align-items:center;padding:3px 0;font-size:14px}
 .pkdb-dbar{height:10px;border-radius:5px;background:var(--line);overflow:hidden} .pkdb-dbar i{display:block;height:100%;background:var(--accent)}
 #pkdb-body [data-pkdb-go]:hover .kpi{border-color:var(--accent)}
+#pkdb-sales [data-pks-per]:hover .kpi,#pkdb-sales .pks-on .kpi{border-color:var(--accent)}
 .pk-lanes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:start}
 @media (max-width:900px){.pk-lanes{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:520px){.pk-lanes{grid-template-columns:1fr}}
@@ -2937,6 +2938,9 @@ function simPickupRpc(fn, a){
     case 'pk_tv': return ok({ site: a.p_site, visits: SIM.pk_visits.filter(v => v.site === a.p_site && v.queue_day === day && !['done','cancelled'].includes(v.status)).map(v => ({ label: v.label, series: v.series, status: v.status, client: v.client_name || '',
       so: (SIM.pk_visit_orders || []).filter(x => x.visit_id === v.id).map(x => ((SIM.pk_orders || []).find(o => o.id === x.order_id) || {}).so_no).filter(Boolean) })) });
     case 'pk_tc': return ok(null);
+    case 'pk_sales_daily': { const g = new Map(); SIM.pk_visits.filter(v => v.status === 'done' && v.loaded_at && (!a.p_site || v.site === a.p_site) && (!a.p_company || v.company === a.p_company)).forEach(v => { const d = localDate(new Date(v.loaded_at)); if (d < a.p_from || d > a.p_to) return;
+      (SIM.pk_visit_orders || []).filter(x => x.visit_id === v.id).forEach(x => { const r = g.get(d) || { d, sales: 0, sos: 0, visits: 0 }; r.sales += Number(x.sales || 0); r.sos++; g.set(d, r); }); });
+      return ok([...g.values()].sort((p, q) => p.d < q.d ? -1 : 1)); }
     case 'pk_set_home': return ok(null);
   }
   return fail('Not available in practice');
@@ -7398,6 +7402,7 @@ async function loadPkDash(){
       ${tile('Balances open', balances.length, 'partly picked up', '', 'pk-tickets')}
       ${canSeeCosts() ? tile('Pick-up sales today', peso(sales), 'released today', '', 'pk-report') : ''}
     </div>
+    ${canSeeCosts() ? '<div class="card pad" id="pkdb-sales" style="margin-bottom:14px"><span class="spin"></span></div>' : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:14px;align-items:start">
       <div class="card pad"><h3 style="margin-top:0">Needs attention <span class="ft">${att.length}</span></h3>
         <ul class="alerts">${att.length ? att.map(x => `<li ${x.a}><span class="ic ${x.c}">${x.ic}</span><span>${x.t}</span></li>`).join('') : '<li class="none">Nothing needs attention right now.</li>'}</ul></div>
@@ -7413,8 +7418,61 @@ async function loadPkDash(){
   document.querySelectorAll('[data-pkdb-go]').forEach(el => el.addEventListener('click', () => switchView(el.dataset.pkdbGo)));
   document.querySelectorAll('[data-pkdb-v]').forEach(el => el.addEventListener('click', () => openPkVisit(el.dataset.pkdbV)));
   document.querySelectorAll('[data-pkdb-o]').forEach(el => el.addEventListener('click', () => openPkOrder(el.dataset.pkdbO)));
+  if (canSeeCosts()) pkdbSalesLoad(day, site, co);
 }
 ['pkdb-site','pkdb-co'].forEach(id => $(id).addEventListener('change', loadPkDash));
+
+/* Pick-up sales: this week (from Monday), this month and this year, by the day the order was released
+   (same rule as TC % — pk_tc). One call for the whole year; the week and month come from it. */
+const PKSALES = { per: 'month', by: 'day', sort: 'new', rows: [], day: '' };
+async function pkdbSalesLoad(day, site, co){
+  const y0 = day.slice(0, 4) + '-01-01';
+  let rows = [];
+  try { const { data, error } = await sb.rpc('pk_sales_daily', { p_from: y0, p_to: day, p_site: site || null, p_company: co || null }); if (error) throw error; rows = data || []; }
+  catch { if ($('pkdb-sales')) $('pkdb-sales').innerHTML = '<div class="muted">Could not load pick-up sales.</div>'; return; }
+  PKSALES.rows = rows.map(r => ({ d: r.d, sales: Number(r.sales || 0), sos: Number(r.sos || 0) })); PKSALES.day = day;
+  pkdbSalesDraw();
+}
+function pkdbSalesFrom(per, day){
+  if (per === 'year') return day.slice(0, 4) + '-01-01';
+  if (per === 'month') return day.slice(0, 8) + '01';
+  const wd = (new Date(day + 'T00:00:00').getDay() + 6) % 7; return addDays(day, -wd);   // Monday
+}
+function pkdbSalesDraw(){
+  const box = $('pkdb-sales'); if (!box) return;
+  const day = PKSALES.day, sumOf = per => { const f = pkdbSalesFrom(per, day); const rs = PKSALES.rows.filter(r => r.d >= f); return { s: rs.reduce((t, r) => t + r.sales, 0), n: rs.reduce((t, r) => t + r.sos, 0), f }; };
+  const W = sumOf('week'), M = sumOf('month'), Y = sumOf('year');
+  const from = pkdbSalesFrom(PKSALES.per, day);
+  let rows = PKSALES.rows.filter(r => r.d >= from);
+  if (PKSALES.by === 'month'){
+    const g = new Map(); rows.forEach(r => { const k = r.d.slice(0, 7); const x = g.get(k) || { d: k, sales: 0, sos: 0 }; x.sales += r.sales; x.sos += r.sos; g.set(k, x); }); rows = [...g.values()];
+  }
+  rows.sort((a, b) => PKSALES.sort === 'old' ? (a.d < b.d ? -1 : 1) : PKSALES.sort === 'high' ? b.sales - a.sales : (a.d < b.d ? 1 : -1));
+  const total = rows.reduce((t, r) => t + r.sales, 0), max = Math.max(1, ...rows.map(r => r.sales));
+  const lbl = d => d.length === 7 ? new Date(d + '-01T00:00:00').toLocaleDateString('en-PH', { month: 'long', year: 'numeric' })
+    : new Date(d + 'T00:00:00').toLocaleDateString('en-PH', { weekday: 'short', month: 'short', day: 'numeric' });
+  const card = (t, x, sub, per) => `<div data-pks-per="${per}" style="cursor:pointer"${PKSALES.per === per ? ' class="pks-on"' : ''}>${kpi(t, peso(x.s), `${x.n} SO${x.n === 1 ? '' : 's'} · ${esc(sub)}`)}</div>`;
+  const opt = (v, t, cur) => `<option value="${v}"${cur === v ? ' selected' : ''}>${t}</option>`;
+  box.innerHTML = `<div class="chart-h" style="margin:0 0 10px"><h3 style="margin:0">Pick-up sales</h3><div class="ft">by the day the order was released</div></div>
+    <div class="kpis" style="margin-bottom:12px">
+      ${card('This week', W, 'since Mon ' + new Date(W.f + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric' }), 'week')}
+      ${card('This month', M, new Date(day + 'T00:00:00').toLocaleDateString('en-PH', { month: 'long' }), 'month')}
+      ${card('This year', Y, day.slice(0, 4) + ' to date', 'year')}
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <label class="f" style="flex-direction:row;align-items:center;gap:6px">Period<select class="i" id="pks-per">${opt('week', 'This week', PKSALES.per)}${opt('month', 'This month', PKSALES.per)}${opt('year', 'This year', PKSALES.per)}</select></label>
+      <label class="f" style="flex-direction:row;align-items:center;gap:6px">Show<select class="i" id="pks-by">${opt('day', 'By day', PKSALES.by)}${opt('month', 'By month', PKSALES.by)}</select></label>
+      <label class="f" style="flex-direction:row;align-items:center;gap:6px">Sort<select class="i" id="pks-sort">${opt('new', 'Newest date first', PKSALES.sort)}${opt('old', 'Oldest date first', PKSALES.sort)}${opt('high', 'Highest sales first', PKSALES.sort)}</select></label>
+    </div>
+    ${rows.length ? `<div class="tbl-wrap"><table class="rt ut"><thead><tr><th>${PKSALES.by === 'month' ? 'Month' : 'Date'}</th><th class="num">SOs</th><th class="num">Sales</th><th style="width:30%"></th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td>${esc(lbl(r.d))}</td><td class="num">${r.sos}</td><td class="num">${peso(r.sales, 2)}</td><td><span class="pkdb-dbar" style="display:block"><i style="width:${Math.round(r.sales / max * 100)}%"></i></span></td></tr>`).join('')}
+      </tbody><tfoot><tr><td>Total</td><td class="num">${rows.reduce((t, r) => t + r.sos, 0)}</td><td class="num">${peso(total, 2)}</td><td></td></tr></tfoot></table></div>`
+      : '<div class="muted">No pick-up sales released in this period.</div>'}`;
+  box.querySelectorAll('[data-pks-per]').forEach(el => el.addEventListener('click', () => { PKSALES.per = el.dataset.pksPer; pkdbSalesDraw(); }));
+  $('pks-per').addEventListener('change', e => { PKSALES.per = e.target.value; pkdbSalesDraw(); });
+  $('pks-by').addEventListener('change', e => { PKSALES.by = e.target.value; pkdbSalesDraw(); });
+  $('pks-sort').addEventListener('change', e => { PKSALES.sort = e.target.value; pkdbSalesDraw(); });
+}
 
 /* Promptness → Excel: the period's figures, one row per timed SO, by day, and open balances */
 async function exportPkReport(){
