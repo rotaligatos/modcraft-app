@@ -47,6 +47,7 @@ async function handle(route) {
     return J({ values: v, sheets: [{ properties: { title: 'Messages', sheetId: 1 } }] }); }
   if (u.includes('googleapis.com')) { await wait(LAT.drive); return J({ modifiedTime: '2020-01-01T00:00:00Z', files: [] }); }
   if (u.includes('supabase.co')) { await wait(LAT.supa); const url = new URL(u); const tb = (u.match(/rest\/v1\/([a-z_]+)/) || [])[1];
+    if (u.includes('/rpc/price_materials_stamp')) return J({ n: MAT.length, max_id: MAT.length, updated_at: now, expected: MAT.length });
     if (m !== 'GET' && m !== 'HEAD') return J([]);
     const all = T[tb] || []; let rows = all; const sel = url.searchParams.get('select') || '*';
     const ord = url.searchParams.get('order') || '', lim = url.searchParams.get('limit');

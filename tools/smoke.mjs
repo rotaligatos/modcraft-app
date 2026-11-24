@@ -6739,6 +6739,11 @@ const PROFILES = {
         } finally { w._skuIndexAdd = saved.idx; w.dbMaterials = saved.m; w.stTab = saved.st; w.gToken = saved.tok; w.dirData = saved.d; w.mtoMaterialNames = saved.mto; P.classList.toggle('active', saved.act); }
       }, { hiddenAdds: 0, blank: 0, blankAdds: 0, dup: 'same', loose: 'similar', tags: 'false,true', cleared: 'false,false', hiddenList: 'KEEP',
            money: '₱-1,234,567.89₱12.00₱NaN', pack: true, refuse: null });
+      check('Start-up: the price list stamp is one read, with the old reads behind it when it fails', () => {
+        const w = window, f = w._checkPriceDbFreshness.toString(), fp = w._supaCatalogueFingerprint.toString(), st = w._priceMaterialsStamp.toString();
+        return { shared: /_priceMaterialsStamp()/.test(f) && /_priceMaterialsStamp()/.test(fp), fallback: /_supaFingerprintSlow/.test(fp) && /count:'exact',head:true/.test(f),
+          emptyIsNotTrusted: /d.n>0/.test(st), manualReloadAsksAgain: [...document.scripts].some(x => x.textContent.includes('if(showFeedback) _matStamp=null')) };
+      }, { shared: true, fallback: true, emptyIsNotTrusted: true, manualReloadAsksAgain: true });
       check('Start-up: roles asked early are used only for the same Google pass, once, and never when bad', () => {
         const w = window, src = w._readRoles.toString(), gc = w.gCheckRole.toString(), rs = w._gPassRestore.toString();
         return { sameToken: /pre\.t!==gToken/.test(src), usedOnce: /_rolesPrefetch=null/.test(src), fresh: /20000/.test(src),

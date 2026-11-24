@@ -57,7 +57,7 @@
   var DATA_TABLES={quotations:1,quotation_states:1,quotation_state_lite:1,quotation_stage_flags:1,clients:1,
     pending_orders:1,order_cutting_lists:1,approval_requests:1,messages:1,activity_log:1,job_orders:1,
     board_layouts:1,drawing_analyses:1,user_shadow_log:1,mapping_audit:1,push_subscriptions:1,device_capabilities:1};
-  var RPC_READ={modcraft_service_capacity:1,cutlist_learned:1,catalogue_search:1,catalogue_resolve:1,catalogue_list:1};
+  var RPC_READ={modcraft_service_capacity:1,cutlist_learned:1,catalogue_search:1,catalogue_resolve:1,catalogue_list:1,price_materials_stamp:1};
   var realFetch=window.fetch.bind(window);
   function fake(obj,status,headers){
     var h={'Content-Type':'application/json'}; if(headers) for(var k in headers) h[k]=headers[k];
@@ -34488,6 +34488,10 @@ function _checkPriceDbFreshness(){
   return Promise.all([
     gApiFetch('https://www.googleapis.com/drive/v3/files/'+PRICE_DB_ID
       +'?fields=modifiedTime&supportsAllDrives=true',{}).catch(function(){return null;}),
+    _priceMaterialsStamp()
+  ]).then(function(a){
+    if(a[1]) return [a[0],a[1].updated_at||null,typeof a[1].expected==='number'?a[1].expected:null,a[1].n];
+    return Promise.all([a[0],
     supa.from('price_materials').select('updated_at').order('updated_at',{ascending:false}).limit(1)
       .then(function(r){return (r&&r.data&&r.data[0])?r.data[0].updated_at:null;},function(){return null;}),
     // How many rows the last SUCCESSFUL sync said it wrote, and how many are actually there.
@@ -34496,7 +34500,8 @@ function _checkPriceDbFreshness(){
                         return (v&&typeof v.count==='number')?v.count:null;},function(){return null;}),
     supa.from('price_materials').select('id',{count:'exact',head:true})
       .then(function(r){return (r&&typeof r.count==='number')?r.count:null;},function(){return null;})
-  ]).then(function(res){
+    ]);
+  }).then(function(res){
     // COMPLETENESS first. A sync that died partway leaves a truncated table whose rows carry a NEW
     // timestamp, so it passes any freshness test while missing most of the catalogue — that is how
     // 5,000 of ~145,000 materials came to look current on 2026-08-12. Checked before freshness
@@ -36320,7 +36325,26 @@ function _idbPut(key,val){
     catch(e){ res(false); }
   }); }).catch(function(){ return false; });
 }
+// Row count, newest id and newest change of the price list's fast copy, plus how many rows the last
+// good sync wrote — one read, shared by the freshness check and the browser-copy check for half a
+// minute (login asked the same five questions separately, two of them counting all ~153k rows).
+// null when it cannot be read: callers ask the old way.
+var _matStamp=null;
+function _priceMaterialsStamp(){
+  if(_matStamp&&Date.now()-_matStamp.at<30000) return _matStamp.p;
+  var p=supa.rpc('price_materials_stamp').then(function(r){
+    var d=r&&!r.error&&r.data; return (d&&typeof d.n==='number'&&d.n>0)?d:null;
+  },function(){ return null; });
+  _matStamp={at:Date.now(),p:p};
+  return p;
+}
 function _supaCatalogueFingerprint(table){
+  if(table==='price_materials') return _priceMaterialsStamp().then(function(d){
+    return d?(d.n+'|'+(d.max_id||'')+'|'+(d.updated_at||'')):_supaFingerprintSlow(table);
+  });
+  return _supaFingerprintSlow(table);
+}
+function _supaFingerprintSlow(table){
   return Promise.all([
     supa.from(table).select('id',{count:'exact'}).order('id',{ascending:false}).limit(1),
     supa.from(table).select('updated_at').order('updated_at',{ascending:false,nullsFirst:false}).limit(1)
@@ -36479,6 +36503,7 @@ function supaGetPriceDb(){
 // mirror is used exactly as before. An unrelated failure must not make the catalogue slow.
 function loadPriceDatabase(showFeedback) {
   if(!gToken) return;
+  if(showFeedback) _matStamp=null;   // asked for by hand (or right after a sync): never a stamp from before it
   if(showFeedback){var s=el('db-status-row');if(s)s.innerHTML='<div class="alert alert-info"><i class="ti ti-loader"></i> Loading price database…</div>';}
   _loadOutsourceList();
   if(USE_SUPABASE&&supaReady()){
