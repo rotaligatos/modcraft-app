@@ -1133,7 +1133,7 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
   <main>
     <div class="fleet-head">
       <div><h2 style="margin:0">Reports</h2><div class="muted" style="font-size:14px">Logistics report — trips, transport cost, dispatch, capacity and OTIF, with analysis</div></div>
-      <div class="row-btns" style="margin:0"><button class="btn" id="rp-daily">📋 Daily summary</button><button class="btn" id="rp-csv">Export CSV</button><button class="btn" id="rp-print">🖨 Print</button></div>
+      <div class="row-btns" style="margin:0"><button class="btn" id="rp-daily">📋 Daily summary</button><button class="btn" id="rp-csv">Export CSV</button><button class="btn" id="rp-xlsx">⬇ Excel</button><button class="btn" id="rp-ppt">📊 PowerPoint</button><button class="btn" id="rp-print">🖨 Print</button></div>
     </div>
     <div class="card toolbar rp-filters" style="border:1px solid var(--line);margin-bottom:14px">
       <label class="f">Period
@@ -1285,7 +1285,7 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
 <!-- PICK-UP: promptness -->
 <section id="screen-pk-report" class="hidden">
   <main>
-    <div class="fleet-head"><div><h2 style="margin:0">Dashboard</h2><div class="muted" style="font-size:14px">Report for the dates you choose — served within target, where the time goes, pick-up sales and TC %</div></div><div class="row-btns" style="margin:0"><button class="btn" id="pkr-xls">⬇ Export to Excel</button><button class="btn" id="pkr-print">🖨 Print</button><span class="pk-home-slot"></span></div></div>
+    <div class="fleet-head"><div><h2 style="margin:0">Dashboard</h2><div class="muted" style="font-size:14px">Report for the dates you choose — served within target, where the time goes, pick-up sales and TC %</div></div><div class="row-btns" style="margin:0"><button class="btn" id="pkr-xls">⬇ Export to Excel</button><button class="btn" id="pkr-ppt">📊 PowerPoint</button><button class="btn" id="pkr-print">🖨 Print</button><span class="pk-home-slot"></span></div></div>
     <div class="subtabs" role="tablist" style="margin-top:4px"><button class="subtab" data-pkdbv="pk-dash" role="tab">Today</button><button class="subtab active" data-pkdbv="pk-report" role="tab">Report</button></div>
     <div class="card toolbar" style="border:1px solid var(--line);margin-bottom:14px;flex-wrap:wrap">
       <label class="f">From<input class="i" type="date" id="pkr-from"></label><label class="f">To<input class="i" type="date" id="pkr-to"></label>
@@ -2985,10 +2985,11 @@ function simPickupRpc(fn, a){
           Object.assign(o, { status: leftAny ? 'balance' : 'done', closed_at: leftAny ? null : now, updated_at: now }); vo.taken = tk;
           if (leftAny) log(o.id, v.id, 'balance', 'Items left for a later pick-up'); }
         const min = Math.round(((v.first_loaded_at ? new Date(v.first_loaded_at) : Date.now()) - new Date(v.arrived_at)) / 6000) / 10, tgt = Number(set(v.company).target_min ?? 15);
-        const ov = (a.p_taken || {})._over || {}, ovr = PK_OVER[ov.reason] ? ov.reason : null, ovn = String(ov.note || '').trim() || null, overT = v.counted && !v.is_balance && min / Math.max(1, v.so_count) > tgt;
+        const ov = (a.p_taken || {})._over || {}, ovr = PK_OVER[ov.reason] ? ov.reason : null, ovn = String(ov.note || '').trim() || null, overT = v.counted && !v.is_balance && pkPerSoIfReleased(v, SIM.pk_visits) > tgt;
         if (overT && !ovr) return fail(`Pick the reason it went over the ${tgt} min target.`); if (overT && ovr === 'or_other' && !ovn) return fail('Say what the other reason is.');
         Object.assign(v, { status: 'done', loaded_at: now, loaded_name: who, photo_urls: a.p_photos, minutes: min, per_so: Math.round(min / Math.max(1, v.so_count) * 10) / 10, target_min: tgt,
           within: min / Math.max(1, v.so_count) <= tgt, over_reason: ovr, over_note: ovr ? ovn : null, over_reason_name: ovr ? who : null, over_reason_at: ovr ? now : null });
+        pkRegroupLocal(SIM.pk_visits, v);
       } else return fail('unknown step ' + s);
       log(null, v.id, s, null); return ok({ ...v });
     }
@@ -6191,8 +6192,55 @@ async function pkSettings(force){
 }
 const pkTarget = co => Number(state.pkSet?.[co]?.target_min ?? 15), pkWarn = co => Number(state.pkSet?.[co]?.warn_min ?? 10);
 const pkMins = (a, b = Date.now()) => (new Date(b) - new Date(a)) / 60000;
+/* One client's queue numbers that are in the queue at the same time are timed together (Rommel 2026-11-25):
+   same day, site, company and client; a number joins the group when it arrives before the group so far is released.
+   Promptness = first arrival → last release ÷ all their SOs. Same rule as pk_groups() in the database. */
+const pkGrpKey = v => String(v.client_name || '').trim().replace(/\s+/g, ' ').toLowerCase() || 'id:' + v.id;
+function pkGroupsOf(list, pretendId, pretendEnd){
+  const out = {}, buckets = {};
+  (list || []).filter(v => v.status !== 'cancelled' && v.counted && !v.is_balance).forEach(v => {
+    const k = [v.queue_day, v.site, v.company, pkGrpKey(v)].join('|'); (buckets[k] = buckets[k] || []).push(v); });
+  for (const vs of Object.values(buckets)){
+    vs.sort((a, b) => new Date(a.arrived_at) - new Date(b.arrived_at) || String(a.id).localeCompare(String(b.id)));
+    let g = null;
+    for (const v of vs){
+      const e = v.id === pretendId ? new Date(pretendEnd).getTime() : v.status === 'done' ? new Date(v.first_loaded_at || v.loaded_at).getTime() : null;
+      const a = new Date(v.arrived_at).getTime();
+      if (!g || (!g.open && a > g.end)) g = { id: v.id, start: a, end: e, open: e == null, so: 0, members: [] };
+      else if (e == null) g.open = true; else if (g.end == null || e > g.end) g.end = e;
+      g.so += Math.max(1, v.so_count || 1); g.members.push(v); out[v.id] = g;
+    }
+  }
+  return out;
+}
+/* Practice: write group figures onto the client's numbers, like pk_regroup() */
+function pkRegroupLocal(list, v){
+  const gs = pkGroupsOf(list);
+  (list || []).filter(x => x.queue_day === v.queue_day && x.site === v.site && x.company === v.company && pkGrpKey(x) === pkGrpKey(v)).forEach(x => {
+    const g = gs[x.id];
+    if (g && g.members.length > 1){ if (x.own_per_so == null) x.own_per_so = x.per_so; x.grp_id = g.id; x.grp_so = g.so;
+      if (x.status === 'done' && g.end != null){ x.per_so = Math.round((g.end - g.start) / 6000 / g.so) / 10; x.within = x.per_so <= Number(x.target_min ?? 15); } }
+    else if (x.grp_id){ x.per_so = x.own_per_so ?? x.per_so; x.within = x.per_so <= Number(x.target_min ?? 15); x.grp_id = null; x.grp_so = null; x.own_per_so = null; }
+  });
+}
+/* Per-SO minutes right now for a live number (its group's figure when the client has several numbers in) */
+function pkLivePerSo(v){
+  const g = pkGroupsOf(state.pkVisits || [])[v.id];
+  if (!g || g.members.length < 2) return pkMins(v.arrived_at) / Math.max(1, v.so_count);
+  return (Date.now() - g.start) / 60000 / g.so;
+}
+/* Per-SO minutes if this number were released now (what the release form and the database use) */
+function pkPerSoIfReleased(v, list){
+  const end = v.first_loaded_at ? new Date(v.first_loaded_at).getTime() : Date.now(), g = pkGroupsOf(list || state.pkVisits || [], v.id, end)[v.id];
+  if (!g || g.members.length < 2) return Math.round((end - new Date(v.arrived_at)) / 6000) / 10 / Math.max(1, v.so_count);
+  return ((g.end ?? end) - g.start) / 60000 / g.so;
+}
+const pkGrpNote = v => v.grp_so > 1 ? `timed together with the client’s other queue numbers — ${v.grp_so} SOs` : '';
 function pkTimer(v){
-  if (v.status === 'done') return `<span class="pk-t ${v.within ? 'ok' : 'bad'}" title="From arrival to release${v.so_count > 1 ? ', divided by the number of SOs' : ''}">${fmtN1(v.per_so)} min${v.so_count > 1 ? ' per SO' : ' from arrival'}</span>`;
+  if (v.status === 'done') return `<span class="pk-t ${v.within ? 'ok' : 'bad'}" title="From arrival to release${v.grp_so > 1 ? ' of all the client’s queue numbers, divided by their ' + v.grp_so + ' SOs' : v.so_count > 1 ? ', divided by the number of SOs' : ''}">${fmtN1(v.per_so)} min${v.grp_so > 1 ? ' per SO · 👥 ' + v.grp_so + ' SOs' : v.so_count > 1 ? ' per SO' : ' from arrival'}</span>`;
+  const gl = pkGroupsOf(state.pkVisits || [])[v.id], grouped = gl && gl.members.length > 1;
+  if (grouped && v.counted){ const el = pkLivePerSo(v), cls = el >= pkTarget(v.company) ? 'bad' : el >= pkWarn(v.company) ? 'warn' : 'ok';
+    return `<span class="pk-t ${cls}" title="Timed with the client’s ${gl.members.length} queue numbers (${gl.so} SOs)">${Math.floor(el)} min / SO · 👥 ${gl.so}</span>`; }
   const el = pkMins(v.arrived_at) / Math.max(1, v.so_count);
   if (!v.counted) return `<span class="pk-t mute" title="${v.is_balance ? 'Balance pick-up' : 'Late ticket'} — not counted in promptness">${Math.floor(el * Math.max(1, v.so_count))} min · not timed</span>`;
   const cls = el >= pkTarget(v.company) ? 'bad' : el >= pkWarn(v.company) ? 'warn' : 'ok';
@@ -6208,7 +6256,7 @@ function pkCutTag(o){
 function pkAlarmHtml(over, oBy){   // one line per client over the target: who, how long, where it is
   if (!over.length) return '';
   const at = { waiting: 'waiting for the SI (Sales Support)', notified: 'SI sent — warehouse to accept', accepted: 'warehouse getting it out', ready: 'ready — Logistics loading' };
-  return `<div class="pk-alarm">🚨 Over the target${over.map(v => { const m = Math.floor(pkMins(v.arrived_at) / Math.max(1, v.so_count));
+  return `<div class="pk-alarm">🚨 Over the target${over.map(v => { const m = Math.floor(pkLivePerSo(v));
     const sos = (v.pk_visit_orders || []).map(x => oBy?.[x.order_id]?.so_no).filter(Boolean).join(', ');
     return `<div style="margin-top:4px"><b>${esc(v.label)}</b> · ${esc(v.client_name || '—')}${sos ? ' · ' + esc(sos) : ''} — <b>${m} min${v.so_count > 1 ? ' per SO' : ''}</b> (target ${pkTarget(v.company)}) · ${at[v.status] || esc(v.status)}</div>`; }).join('')}</div>`;
 }
@@ -6650,7 +6698,7 @@ async function loadPkRole(view){
     sub = 'Load, take photos, release.';
   }
   const live = state.pkVisits.filter(v => !['done','cancelled'].includes(v.status));
-  const over = live.filter(v => v.counted && pkMins(v.arrived_at) / Math.max(1, v.so_count) >= pkTarget(v.company));
+  const over = live.filter(v => v.counted && pkLivePerSo(v) >= pkTarget(v.company));
   $('pkm-alarm').innerHTML = pkAlarmHtml(over, oBy);
   $('pkm-sub').textContent = `${sub} ${todo ? `· ${todo} waiting for you` : '· all clear'}`;
   // Live refreshes redraw the list: keep what Sales Support was doing (ticks, search text, cursor)
@@ -6696,7 +6744,7 @@ async function loadPkQueue(){
   } catch { $('pk-lanes').innerHTML = '<div class="card empty">Could not load the queue.</div>'; return; }
   state.pkVisits = visits || []; state.pkOrders = orders || [];
   const live = state.pkVisits.filter(v => !['done','cancelled'].includes(v.status));
-  const over = live.filter(v => v.counted && pkMins(v.arrived_at) / Math.max(1, v.so_count) >= pkTarget(v.company));
+  const over = live.filter(v => v.counted && pkLivePerSo(v) >= pkTarget(v.company));
   const oBy = Object.fromEntries(state.pkOrders.map(o => [o.id, o]));
   $('pk-alarm').innerHTML = pkAlarmHtml(over, oBy);
   $('pk-lanes').innerHTML = PK_LANES.map(([st, title, who]) => {
@@ -6927,6 +6975,7 @@ async function openPkVisit(id){
     const ids = v.pk_visit_orders.map(x => x.order_id);
     [{ data: orders }, { data: evs }] = await Promise.all([sb.from('pk_orders').select('*').in('id', ids), sb.from('pk_events').select('*').eq('visit_id', id).order('created_at')]);
     v._undo = await undoFor('pickup', id);
+    if (v.grp_id) try { const { data } = await sb.from('pk_visits').select('id, label, so_count, arrived_at, loaded_at, first_loaded_at, own_per_so, per_so, status').eq('grp_id', v.grp_id).order('arrived_at'); v._grp = data || []; } catch {}
   } catch { closeOverlay(); return; }
   await pkSettings();
   const steps = [['Arrived', v.arrived_at, v.arrived_name], ['SI sent to warehouse', v.notified_at, v.notified_name], ['Warehouse accepted', v.accepted_at, v.accepted_name],
@@ -6941,6 +6990,7 @@ async function openPkVisit(id){
     ${v.courier ? `<div class="card pad" style="margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>🛵 <b>${esc(pkRiderText(v) || 'Rider details not entered yet')}</b></span>
       ${(v.rider_history || []).length ? `<details><summary class="ft">${v.rider_history.length} earlier rider${v.rider_history.length > 1 ? 's' : ''}</summary>${v.rider_history.map(h => `<div class="ft">${esc(pkRiderText({ rider_service: h.service, rider_service_other: h.other, rider_name: h.name, rider_vehicle: h.vehicle, rider_plate: h.plate }))} — replaced ${esc(fmtTime(h.replaced_at))} by ${esc(h.replaced_by || '')}: ${esc(h.reason || '')}</div>`).join('')}</details>` : ''}
       ${pkCan('sales_support', 'logistics') && !['done','cancelled'].includes(v.status) ? '<span style="margin-left:auto;display:flex;gap:6px"><button class="btn" id="pkv-rider">✎ Change rider</button><button class="btn" id="pkv-ridercx" style="color:var(--bad)">🚫 Courier cancelled</button></span>' : ''}</div>` : ''}
+    ${(v._grp || []).length > 1 ? `<div class="card pad" style="margin:8px 0">👥 <b>Timed together</b> — ${esc(v.client_name || 'this client')} had ${v._grp.length} queue numbers in at the same time (${v.grp_so} SOs). Promptness is their whole stay ÷ all SOs${v.status === 'done' ? ` = <b>${fmtN1(v.per_so)} min per SO</b>` : ''}.${simpleTable(['No.', 'SOs', 'Arrived', 'Released', 'Own time per SO'], v._grp.map(x => [`${x.id === v.id ? '<b>' : ''}${esc(x.label)}${x.id === v.id ? '</b>' : ''}`, x.so_count, hm12(x.arrived_at), x.first_loaded_at || x.loaded_at ? hm12(x.first_loaded_at || x.loaded_at) : '—', x.own_per_so != null ? fmtN1(x.own_per_so) + ' min' : '—']), { html: true })}</div>` : ''}
     ${v.status === 'done' && v.counted && v.within === false ? `<div class="pk-alarm" style="margin:8px 0">⏱ <b>Over target.</b> Why: ${v.over_reason ? pkOverTxt(v) : '<span style="color:var(--bad)">not given yet</span>'}</div>` : ''}
     <ol class="pk-tl">${tl}</ol>
     ${orders.map(o => { const vo = v.pk_visit_orders.find(x => x.order_id === o.id);
@@ -7065,9 +7115,9 @@ async function openPkLoad(id){
     <label class="btn" style="margin-top:6px">📷 Take photo<input type="file" accept="image/*" capture="environment" multiple id="pkl-ph" hidden></label>${state.preview?.practice ? ' <button type="button" class="btn" id="pkl-sample" style="margin-top:6px">🖼 Use 3 sample photos (practice)</button>' : ''}
     <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pkl-go">Released — stop the clock</button></div>`;
   bindClose();
-  const tgt = pkTarget(v.company), overNow = () => v.counted && !v.is_balance && pkMins(v.arrived_at) / Math.max(1, v.so_count) > tgt;
+  const tgt = pkTarget(v.company), overNow = () => v.counted && !v.is_balance && pkPerSoIfReleased(v) > tgt;
   const showOver = force => { const on = force || overNow(); $('pkl-over')?.classList.toggle('hidden', !on);
-    if (on && $('pkl-over-t')) $('pkl-over-t').textContent = `${fmtN1(pkMins(v.arrived_at) / Math.max(1, v.so_count))} min${v.so_count > 1 ? ' per SO' : ''} · target ${tgt} min`; return on; };
+    if (on && $('pkl-over-t')) $('pkl-over-t').textContent = `${fmtN1(pkPerSoIfReleased(v))} min${v.so_count > 1 || (pkGroupsOf(state.pkVisits || [])[v.id]?.members.length > 1) ? ' per SO' : ''} · target ${tgt} min`; return on; };
   showOver(); const overTick = setInterval(() => { if (!$('pkl-over')) return clearInterval(overTick); showOver(!$('pkl-over').classList.contains('hidden')); }, 20000);
   $('pkl-or').addEventListener('change', () => { $('pkl-on-h').textContent = $('pkl-or').value === 'or_other' ? '(required)' : '(optional)'; });
   const draw = () => { $('pkl-th').innerHTML = photos.map((p, i) => `<span class="th"><img src="${p.url}" alt="Photo ${i + 1}"><button class="lnk" data-rm="${i}" aria-label="Remove photo ${i + 1}">✕</button></span>`).join('');
@@ -7490,7 +7540,7 @@ async function loadPkReport(){
     visits = await fetchAll('Loading pick-ups', qv);
     const ids = [...new Set(visits.flatMap(v => v.pk_visit_orders.map(x => x.order_id)))];
     orders = [];
-    for (let i = 0; i < ids.length; i += 200){ const { data } = await withRetry('Loading tickets', () => sb.from('pk_orders').select('id, kind, so_no, company').in('id', ids.slice(i, i + 200))); orders.push(...(data || [])); }
+    for (let i = 0; i < ids.length; i += 200){ const { data } = await withRetry('Loading tickets', () => sb.from('pk_orders').select('id, kind, so_no, company, ticket_no').in('id', ids.slice(i, i + 200))); orders.push(...(data || [])); }
     let qn = sb.from('pk_orders').select('id', { count: 'exact', head: true }).eq('status', 'no_show').gte('pickup_date', from).lte('pickup_date', to); if (co) qn = qn.eq('company', co); if (site) qn = qn.eq('site', site);
     let qb = sb.from('pk_orders').select('so_no, client_name, updated_at, site, company').eq('status', 'balance').order('updated_at'); if (co) qb = qb.eq('company', co); if (site) qb = qb.eq('site', site);
     const [{ count }, { data: bal }] = await Promise.all([qn, qb]); noshow = count || 0; balances = bal || [];
@@ -7522,6 +7572,23 @@ async function loadPkReport(){
       ['Not timed (late / balance)', notCounted], ['No-shows', noshow], ['Balances open', balances.length],
       ...(tc ? [['TC % — delivery only', tc.tc_delivery != null ? (tc.tc_delivery * 100).toFixed(2) + '%' : '—'], ['TC % — delivery + pick-up', tc.tc_combined != null ? (tc.tc_combined * 100).toFixed(2) + '%' : '—'],
         ['Pick-up sales', Number(tc.pickup_sales || 0)]] : [])] };
+  // One row per client visit — queue numbers timed together are one row (Rommel 2026-11-25)
+  const vg = new Map(); done.forEach(v => { const k = v.grp_id || v.id; if (!vg.has(k)) vg.set(k, []); vg.get(k).push(v); });
+  const tsMax = xs => xs.filter(Boolean).sort().pop() || null, tsMin = xs => xs.filter(Boolean).sort()[0] || null;
+  state.pkRep.visitRows = [...vg.values()].map(ms => { ms.sort((a, b) => a.arrived_at < b.arrived_at ? -1 : 1); const v = ms[0];
+    const os = ms.flatMap(m => (m.pk_visit_orders || []).map(x => oBy[x.order_id]).filter(Boolean));
+    const timed = v.counted && !v.is_balance, end = tsMax(ms.map(m => m.first_loaded_at || m.loaded_at));
+    const why = [...new Set(ms.filter(m => m.over_reason).map(m => (PK_OVER[m.over_reason] || m.over_reason) + (m.over_note ? ' — ' + m.over_note : '')))].join('; ');
+    return { id: v.id, day: v.queue_day, client: v.client_name || '', site: v.site, company: v.company, nums: ms.map(m => m.label).join(', '), n: ms.length,
+      os, sos: os.map(o => o.so_no).join(', '), tickets: os.map(o => o.ticket_no).filter(Boolean).join(', '), soCount: ms.reduce((a, m) => a + Math.max(1, m.so_count || 1), 0),
+      arrived: tsMin(ms.map(m => m.arrived_at)), si: tsMin(ms.map(m => m.notified_at)), ready: tsMax(ms.map(m => m.ready_at)), released: end,
+      stay: end ? Math.round(pkMins(tsMin(ms.map(m => m.arrived_at)), end) * 10) / 10 : null, perSo: timed ? Number(v.per_so) : null,
+      result: !timed ? 'Not timed' : ms.every(m => m.within) ? 'Within' : 'Over', by: [...new Set(ms.map(m => m.loaded_name).filter(Boolean))].join(', '),
+      why: ms.some(m => m.within === false) ? why : '', reason: [...new Set(ms.filter(m => m.within === false).map(m => m.over_reason || '_none'))] };
+  });
+  state.pkRep.steps = STEPS.map(st => ({ name: st.name, who: st.who, v: avN(rows.map(r => r[st.k])) || 0 }));
+  state.pkRep.reasons = (() => { const g = {}; rows.filter(r => !r.ok).forEach(r => { const k = r.v.over_reason ? (PK_OVER[r.v.over_reason] || r.v.over_reason) : 'No reason given'; g[k] = (g[k] || 0) + 1; }); return Object.entries(g).sort((a, b) => b[1] - a[1]); })();
+  state.pkRep.target = co ? pkTarget(co) : pkTarget('WCLI');
   if (state.view !== 'pk-report') return;
   $('pkr-body').innerHTML = `
     <div class="kpis" style="margin-bottom:14px">
@@ -7554,7 +7621,9 @@ async function loadPkReport(){
       <div class="card pad"><h3 style="margin-top:0">Balances waiting for pick-up</h3>${balances.length ? simpleTable(['SO', 'Client', 'Site', 'Since'], balances.map(b => [b.so_no, b.client_name || '', PK_SITE[b.site] || b.site, b.updated_at ? fmtDay(b.updated_at.slice(0, 10)) : '—'])) : '<div class="muted">None.</div>'}
         ${tc ? `<h3>TC %, two ways</h3><div class="ft">Delivery cost ${peso(tc.delivery_cost)} ÷ delivered sales ${peso(tc.delivery_sales)} = <b>${tc.tc_delivery != null ? (tc.tc_delivery * 100).toFixed(2) + '%' : '—'}</b>.<br>
           Adding pick-up sales ${peso(tc.pickup_sales)} (no delivery cost) = <b>${tc.tc_combined != null ? (tc.tc_combined * 100).toFixed(2) + '%' : '—'}</b>. HATID deliveries only.</div>` : ''}</div>
-    </div>`;
+    </div>
+    <div class="card pad" id="pkr-detail" style="margin-top:14px"></div>`;
+  pkrDetailInit();
   if (days.length){
     const dl = days.map(([k]) => new Date(k + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric' }));
     stackChart($('pkr-c-day'), dl, [{ name: 'Within target', slot: 3, values: days.map(([, rs]) => rs.filter(r => r.ok).length) }, { name: 'Over target', slot: 2, values: days.map(([, rs]) => rs.filter(r => !r.ok).length) }], v => fmtN(v));
@@ -7587,7 +7656,7 @@ async function loadPkDash(){
   const live = visits.filter(v => v.status !== 'done'), done = visits.filter(v => v.status === 'done');
   const sos = v => (v.pk_visit_orders || []).map(x => oBy[x.order_id]?.so_no).filter(Boolean).join(', ');
   const nSo = vs => vs.reduce((n, v) => n + Math.max(1, (v.pk_visit_orders || []).length || v.so_count || 1), 0);
-  const over = live.filter(v => v.counted && pkMins(v.arrived_at) / Math.max(1, v.so_count) >= pkTarget(v.company));
+  const over = live.filter(v => v.counted && pkLivePerSo(v) >= pkTarget(v.company));
   const timed = done.filter(v => v.counted && !v.is_balance), within = timed.filter(v => v.within);
   const expected = orders.filter(o => o.status === 'open' && o.pickup_date === day);
   const prepared = expected.filter(o => { const p = pkLinesDone(o); return p.n > 0 && p.prep === p.n; });
@@ -7720,6 +7789,58 @@ function pkdbSalesDraw(){
 }
 
 /* Promptness → Excel: the period's figures, one row per timed SO, by day, and open balances */
+/* ---------- Pick-ups in detail: one row per client visit, filter + sort (Rommel 2026-11-25) ---------- */
+const PKR_COLS = [['day', 'Date'], ['client', 'Client'], ['nums', 'Queue no.'], ['sos', 'SO / ticket'], ['arrived', 'Arrived'], ['si', 'SI sent'], ['ready', 'Ready'],
+  ['released', 'Released'], ['stay', 'Stay (min)'], ['perSo', 'Min per SO'], ['result', 'Result'], ['by', 'Released by'], ['why', 'Why over target']];
+function pkrDetailRows(){
+  const R = state.pkRep; if (!R) return [];
+  const f = state.pkrF || {}, q = String(f.q || '').trim().toLowerCase();
+  let rs = (R.visitRows || []).filter(r => (!f.res || r.result === f.res) && (!f.reason || r.reason.includes(f.reason))
+    && (!q || [r.client, r.nums, r.sos, r.tickets, r.by, r.why].join(' ').toLowerCase().includes(q)));
+  const k = f.sort || 'arrived', dir = f.dir === 'asc' ? 1 : -1;
+  return rs.slice().sort((a, b) => { const x = a[k], y = b[k]; if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1;
+    return (typeof x === 'number' ? x - y : String(x).localeCompare(String(y))) * dir; });
+}
+function pkrDetailInit(){
+  const R = state.pkRep, box = $('pkr-detail'); if (!R || !box) return;
+  state.pkrF = state.pkrF || { sort: 'arrived', dir: 'desc' };
+  const reasons = [...new Set((R.visitRows || []).flatMap(r => r.reason))];
+  box.innerHTML = `<div class="chart-h"><div><h3 style="margin:0">Pick-ups in detail</h3><div class="ft">One row per client visit — a client’s queue numbers that were in at the same time are one row, timed together. Click a row for what happened; click an SO for its ticket.</div></div><span class="ft" id="pkr-d-n"></span></div>
+    <div class="toolbar" style="gap:8px;margin:8px 0;flex-wrap:wrap">
+      <input class="i" id="pkr-d-q" placeholder="Search client, SO, ticket, queue no., person…" value="${esc(state.pkrF.q || '')}" style="flex:1;min-width:220px" aria-label="Search pick-ups">
+      <select class="i" id="pkr-d-res" aria-label="Result"><option value="">All results</option>${['Within', 'Over', 'Not timed'].map(x => `<option${state.pkrF.res === x ? ' selected' : ''}>${x}</option>`).join('')}</select>
+      <select class="i" id="pkr-d-reason" aria-label="Reason"><option value="">All reasons</option>${reasons.map(k => `<option value="${esc(k)}"${state.pkrF.reason === k ? ' selected' : ''}>${esc(k === '_none' ? 'No reason given' : (PK_OVER[k] || k))}</option>`).join('')}</select>
+    </div><div id="pkr-d-tbl"></div>`;
+  $('pkr-d-q').addEventListener('input', e => { state.pkrF.q = e.target.value; pkrDetailDraw(); });
+  $('pkr-d-res').addEventListener('change', e => { state.pkrF.res = e.target.value; pkrDetailDraw(); });
+  $('pkr-d-reason').addEventListener('change', e => { state.pkrF.reason = e.target.value; pkrDetailDraw(); });
+  pkrDetailDraw();
+}
+function pkrDetailDraw(){
+  const box = $('pkr-d-tbl'); if (!box) return;
+  const rs = pkrDetailRows(), f = state.pkrF, all = (state.pkRep.visitRows || []).length;
+  $('pkr-d-n').textContent = rs.length === all ? `${all} visit${all === 1 ? '' : 's'}` : `${rs.length} of ${all} visits`;
+  const tm = t => t ? hm12(t) : '—', cls = { Within: 'ok', Over: 'bad', 'Not timed': 'mute' };
+  const shown = rs.slice(0, 500);
+  box.innerHTML = rs.length ? `<div class="tbl-wrap"><table class="rt pkr-d"><thead><tr>${PKR_COLS.map(([k, h]) => `<th data-sort="${k}" style="cursor:pointer;white-space:nowrap" aria-sort="${f.sort === k ? (f.dir === 'asc' ? 'ascending' : 'descending') : 'none'}">${esc(h)}${f.sort === k ? (f.dir === 'asc' ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr></thead><tbody>
+    ${shown.map(r => `<tr data-pkv="${esc(r.id)}" style="cursor:pointer" title="What happened">
+      <td style="white-space:nowrap">${esc(fmtDay(r.day))}</td><td>${esc(r.client || '—')}</td><td><b>${esc(r.nums)}</b>${r.n > 1 ? ` <span class="tag info">👥 ${r.n}</span>` : ''}</td>
+      <td>${r.os.map(o => `<a href="#" data-pko="${esc(o.id)}">${esc(o.so_no)}</a>${o.ticket_no ? ` <span class="ft">#${esc(o.ticket_no)}</span>` : ''}`).join(', ') || '—'}</td>
+      <td>${tm(r.arrived)}</td><td>${tm(r.si)}</td><td>${tm(r.ready)}</td><td>${tm(r.released)}</td>
+      <td>${r.stay == null ? '—' : fmtN1(r.stay)}</td><td>${r.perSo == null ? '—' : fmtN1(r.perSo)}${r.soCount > 1 && r.perSo != null ? ` <span class="ft">× ${r.soCount} SOs</span>` : ''}</td>
+      <td><span class="pk-t ${cls[r.result]}">${r.result}</span></td><td>${esc(r.by)}</td><td>${r.result === 'Over' ? (r.why ? esc(r.why) : '<span style="color:var(--bad)">not given</span>') : ''}</td></tr>`).join('')}
+    </tbody></table></div>${rs.length > shown.length ? `<div class="ft">Showing the first ${shown.length} — narrow the search, or export to Excel for all ${rs.length}.</div>` : ''}`
+    : '<div class="muted">No pick-ups match.</div>';
+  box.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => { const k = th.dataset.sort;
+    f.dir = f.sort === k && f.dir === 'desc' ? 'asc' : 'desc'; f.sort = k; pkrDetailDraw(); }));
+  box.querySelectorAll('tr[data-pkv]').forEach(tr => tr.addEventListener('click', e => { const a = e.target.closest('a[data-pko]');
+    e.preventDefault(); if (a) openPkOrder(a.dataset.pko); else openPkVisit(tr.dataset.pkv); }));
+}
+const pkrDetailSheet = rows => [['Date', 'Client', 'Site', 'Company', 'Queue no.', 'Timed together (numbers)', 'SOs', 'Odoo tickets', 'SO count', 'Arrived', 'SI sent', 'Ready', 'Released',
+  'Stay (min)', 'Minutes per SO', 'Result', 'Released by', 'Why over target'],
+  ...rows.map(r => [r.day, r.client, PK_SITE[r.site] || r.site, r.company, r.nums, r.n, r.sos, r.tickets, r.soCount, r.arrived ? hm12(r.arrived) : '', r.si ? hm12(r.si) : '',
+    r.ready ? hm12(r.ready) : '', r.released ? hm12(r.released) : '', r.stay ?? '', r.perSo ?? '', r.result, r.by, r.result === 'Over' ? (r.why || 'not given') : ''])];
+
 async function exportPkReport(){
   const R = state.pkRep; if (!R) return toast('Load the report first', 'error');
   let X; try { X = await loadXlsx(); } catch (e) { return toast(e.message, 'error'); }
@@ -7729,11 +7850,16 @@ async function exportPkReport(){
   sheet('SOs', [['Day', 'Queue no.', 'Client', 'SO', 'Type', 'Site', 'Minutes per SO', 'Within target', 'Arrival→SI', 'SI→accepted', 'Accepted→ready', 'Ready→loaded', 'Sales Support', 'Warehouse', 'Logistics', 'Why over target'],
     ...R.rows.map(r => [r.v.queue_day, r.v.label, r.v.client_name || '', r.o.so_no || '', r.kindLabel, PK_SITE[r.v.site] || r.v.site, r.min, r.ok ? 'Yes' : 'No',
       ...[r.si, r.acc, r.prep, r.load].map(x => x == null || isNaN(x) ? '' : Math.round(x * 10) / 10), r.v.arrived_name || '', r.v.ready_name || '', r.v.loaded_name || '', r.ok ? '' : (r.why || '')])]);
+  const det = pkrDetailRows(), f = state.pkrF || {};
+  sheet('Pick-ups in detail', [[`One row per client visit${f.q || f.res || f.reason ? ' — filtered as on screen' : ''}`], ...pkrDetailSheet(det)]);
   sheet('By day', [['Day', 'SOs', 'Within', '% within', 'Avg min'], ...R.days]);
   sheet('Balances', [['SO', 'Client', 'Site', 'Since'], ...R.balances.map(b => [b.so_no, b.client_name || '', PK_SITE[b.site] || b.site, b.updated_at ? b.updated_at.slice(0, 10) : ''])]);
   X.writeFile(wb, `HATID-pickup-promptness_${R.from}_${R.to}.xlsx`);
 }
 $('pkr-xls').addEventListener('click', exportPkReport);
+$('pkr-ppt').addEventListener('click', () => { if (!state.pkRep) return toast('Load the report first', 'error'); openPptDialog('pk'); });
+$('rp-xlsx').addEventListener('click', exportDlExcel);
+$('rp-ppt').addEventListener('click', () => { if (!state.lr) return toast('Load the report first', 'error'); openPptDialog('dl'); });
 $('pkr-print').addEventListener('click', () => window.print());
 
 /* ---------- TV queue screen: hatid.html?tv=plant1 (no sign-in; numbers only) ---------- */
@@ -10866,18 +10992,174 @@ function csvDownload(cols, rows, name){
   a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type:'text/csv' }));
   a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
+/* ===== Excel + PowerPoint for the reports (Rommel 2026-11-25): delivery, pick-up, or both, for the dates picked ===== */
+function lrCurrentV(){
+  const L0 = state.lr; if (!L0) return null;
+  const f = lrFilterVals(), recs = lrApply(L0.recs, f), dimOnly = Object.keys(f).filter(k => k !== 'src').length === 0;
+  const ctx = { from: L0.from, to: L0.to, monthly: L0.monthly, companies: L0.co ? [L0.co] : null, companyWide: dimOnly };
+  return { L: L0, f, recs, prev: null, A: lrAgg(recs, ctx), B: null, ctx, cmpLabel: '' };
+}
+function dlScoreRows(A, cost){
+  return [['Trips', A.trips], ['Orders delivered', A.orders], ['Delivery days', A.days], ['Customers served', A.customers], ['Weight delivered (kg)', Math.round(A.kg || 0)],
+    ...(cost ? [['Transport cost (TC)', A.tc], ['TC per trip', A.tcPerTrip], ['TC % of sales', A.tcPctSales ?? A.tcPctDelivered]] : []),
+    ['Capacity rate', A.capRate], ['Load rate', A.loadRate], ['On-time dispatch (OTS)', A.onTimeDisp], ['OTIF', A.otif], ['Orders with an error', A.errOrders]];
+}
+async function exportDlExcel(){
+  const V = lrCurrentV(); if (!V || !V.recs.length) return toast('Nothing to export for this period', 'error');
+  let X; try { X = await loadXlsx(); } catch (e) { return toast(e.message, 'error'); }
+  const cost = canSeeCosts(), cols = dlExportCols(cost);
+  const wb = X.utils.book_new(), sheet = (name, rows) => X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(rows), name);
+  sheet('Scorecard', [['Delivery report'], ['From', V.L.from], ['To', V.L.to], ['Company', V.L.co || 'All'], [], ['Measure', 'Value'], ...dlScoreRows(V.A, cost).map(([k, v]) => [k, v ?? ''])]);
+  sheet('Deliveries', [cols.map(c => c[1]), ...V.recs.map(r => cols.map(([k, , fn]) => { const x = fn ? fn(r) : r[k]; return x == null ? '' : x; }))]);
+  X.writeFile(wb, `HATID-delivery-report_${V.L.from}_${V.L.to}.xlsx`);
+}
+const PPT_URLS = ['vendor/pptxgen-3.12.0.bundle.js', 'https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js'];
+function loadPptx(){
+  if (window.PptxGenJS) return Promise.resolve(window.PptxGenJS);
+  const tryUrl = i => new Promise((ok, no) => {
+    if (i >= PPT_URLS.length) return no(new Error('Could not load the PowerPoint maker — check the connection'));
+    const s = document.createElement('script'); s.src = PPT_URLS[i];
+    s.onload = () => window.PptxGenJS ? ok(window.PptxGenJS) : (s.remove(), tryUrl(i + 1).then(ok, no));
+    s.onerror = () => { s.remove(); tryUrl(i + 1).then(ok, no); };
+    document.head.appendChild(s); });
+  return state.pptP ??= tryUrl(0).catch(e => { state.pptP = null; throw e; });
+}
+function openPptDialog(src){
+  const from = src === 'pk' ? $('pkr-from').value : $('rp-from').value, to = src === 'pk' ? $('pkr-to').value : $('rp-to').value;
+  openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><h2 style="margin-top:0">📊 PowerPoint</h2>
+    <div class="ft" style="margin-bottom:10px">For ${esc(fmtRange(from, to))} — the dates picked in this report.</div>
+    ${[['delivery', 'Delivery', 'scorecard, trips, OTIF and the analysis'], ['pickup', 'Pick-up', 'promptness, where the time goes, why over target, slowest visits'], ['both', 'Delivery and pick-up combined', 'one deck: a summary slide, then both']]
+      .map(([v, t, d], i) => `<label class="f" style="flex-direction:row;gap:8px;align-items:flex-start;margin:6px 0"><input type="radio" name="ppt-k" value="${v}"${(src === 'pk' ? v === 'pickup' : v === 'delivery') ? ' checked' : ''}><span><b>${t}</b><br><span class="ft">${d}</span></span></label>`).join('')}
+    <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="ppt-go">⬇ Download</button></div></div>`);
+  bindClose();
+  $('ppt-go').addEventListener('click', async e => { const k = document.querySelector('[name="ppt-k"]:checked')?.value || 'delivery';
+    e.target.disabled = true; e.target.innerHTML = '<span class="spin"></span> Making the slides…';
+    try { await makeReportDeck(k, src, from, to); closeOverlay(); } catch (err) { console.error(err); toast(err.message || 'Could not make the PowerPoint', 'error'); e.target.disabled = false; e.target.textContent = '⬇ Download'; } });
+}
+/* Make sure the other report has the same dates loaded (combined decks, or a delivery deck from the pick-up report and back) */
+async function pptEnsure(kind, from, to){
+  if (kind === 'delivery' && !(state.lr && state.lr.from === from && state.lr.to === to)){
+    $('rp-preset').value = 'custom'; $('rp-from').value = from; $('rp-to').value = to; await loadReports();
+  }
+  if (kind === 'pickup' && !(state.pkRep && state.pkRep.from === from && state.pkRep.to === to)){
+    $('pkr-from').value = from; $('pkr-to').value = to; await loadPkReport();
+  }
+}
+const PPT_C = { navy: '1F3A5F', ink: '1E293B', mute: '64748B', ok: '2E8B57', bad: 'C0392B', blue: '2F6FB2', amber: 'D98E04', line: 'D6DEE8', bg: 'F4F7FB' };
+function pptKit(pptx, period){
+  const slide = (title, sub) => { const s = pptx.addSlide(); s.background = { color: 'FFFFFF' };
+    s.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 13.33, h: 0.9, fill: { color: PPT_C.navy } });
+    s.addText(title, { x: 0.4, y: 0.12, w: 9.5, h: 0.66, fontSize: 24, bold: true, color: 'FFFFFF', fontFace: 'Calibri' });
+    s.addText(period, { x: 9.2, y: 0.12, w: 3.8, h: 0.66, fontSize: 12, color: 'DCE6F2', align: 'right', fontFace: 'Calibri' });
+    if (sub) s.addText(sub, { x: 0.4, y: 1.0, w: 12.5, h: 0.4, fontSize: 13, color: PPT_C.mute, fontFace: 'Calibri' });
+    s.addText('HATID — Haul and Trip Information & Dispatch', { x: 0.4, y: 7.05, w: 8, h: 0.3, fontSize: 9, color: PPT_C.mute });
+    return s; };
+  const tiles = (s, items, y = 1.55) => { const per = 4, w = 2.95, h = 1.35, gap = 0.2;
+    items.forEach(([label, value, sub, tone], i) => { const x = 0.4 + (i % per) * (w + gap), yy = y + Math.floor(i / per) * (h + gap);
+      s.addShape(pptx.ShapeType.roundRect, { x, y: yy, w, h, fill: { color: PPT_C.bg }, line: { color: PPT_C.line }, rectRadius: 0.08 });
+      s.addText(String(value ?? '—'), { x: x + 0.15, y: yy + 0.12, w: w - 0.3, h: 0.6, fontSize: 26, bold: true, color: tone === 'bad' ? PPT_C.bad : tone === 'ok' ? PPT_C.ok : PPT_C.ink });
+      s.addText(label, { x: x + 0.15, y: yy + 0.72, w: w - 0.3, h: 0.3, fontSize: 12, bold: true, color: PPT_C.ink });
+      if (sub) s.addText(sub, { x: x + 0.15, y: yy + 0.99, w: w - 0.3, h: 0.28, fontSize: 9, color: PPT_C.mute }); }); };
+  const table = (s, head, rows, opt = {}) => s.addTable([head.map(h => ({ text: h, options: { bold: true, color: 'FFFFFF', fill: { color: PPT_C.navy } } })), ...rows.map(r => r.map(c => ({ text: String(c ?? '') })))],
+    { x: 0.4, y: opt.y ?? 1.5, w: 12.5, fontSize: opt.fs ?? 10, color: PPT_C.ink, border: { type: 'solid', color: PPT_C.line, pt: 0.5 }, autoPage: true, autoPageRepeatHeader: true, colW: opt.colW });
+  return { slide, tiles, table };
+}
+const pptPct = n => n == null || isNaN(n) ? '—' : Math.round(n * 100) + '%';
+const pptPlain = h => String(h || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+function pptDelivery(pptx, K){
+  const V = lrCurrentV(); if (!V) return;
+  const A = V.A, cost = canSeeCosts();
+  const s1 = K.slide('Delivery — scorecard', `${V.L.co || 'All companies'} · ${fmtN(A.trips)} trips · ${fmtN(A.orders)} orders`);
+  K.tiles(s1, [['Trips', fmtN(A.trips), `${fmtN(A.days)} delivery days`], ['Customers served', fmtN(A.customers)], ['Weight delivered', fmtT(A.kg), `${fmtT(A.avgDailyKg)} per day`],
+    ...(cost ? [['Transport cost', pesoShort(A.tc), `${peso(A.tcPerTrip)} per trip`], ['TC % of sales', pct2(A.tcPctSales ?? A.tcPctDelivered)]] : []),
+    ['Capacity rate', pptPct(A.capRate), A.capTarget != null ? `target ${pptPct(A.capTarget)}` : '', A.capTarget != null && A.capRate != null ? (A.capRate >= A.capTarget ? 'ok' : 'bad') : ''],
+    ['Load rate', pptPct(A.loadRate)], ['On-time dispatch', pptPct(A.onTimeDisp), `${fmtN(A.dispTrips)} trips timed`], ['OTIF', pct1(A.otif), `${fmtN(A.errOrders)} orders with an error`]]);
+  try {
+    const pb = periodBuckets(V.L.from, V.L.to), S = seriesFor(V.recs, pb, V.ctx), labels = pb.list.map(b => b.label);
+    if (labels.length > 1){
+      const s2 = K.slide('Delivery — trend', `Per ${pb.gran}`);
+      s2.addChart(pptx.ChartType.bar, [{ name: 'Trips', labels, values: S.map(x => x.trips || 0) }], { x: 0.4, y: 1.5, w: 6.2, h: 5.2, chartColors: [PPT_C.blue], showTitle: true, title: 'Trips', titleFontSize: 14, showValue: labels.length <= 14, valAxisLabelFontSize: 10, catAxisLabelFontSize: 10 });
+      const ix = S.map((x, i) => x.trips ? i : -1).filter(i => i >= 0), L2 = ix.map(i => labels[i]);   // only periods that had trips — an empty day is not 0%
+      s2.addChart(pptx.ChartType.line, [{ name: 'OTIF', labels: L2, values: ix.map(i => S[i].otif == null ? 0 : Math.round(S[i].otif * 1000) / 10) }, { name: 'On-time dispatch', labels: L2, values: ix.map(i => S[i].onTimeDisp == null ? 0 : Math.round(S[i].onTimeDisp * 1000) / 10) }],
+        { x: 6.8, y: 1.5, w: 6.1, h: 5.2, chartColors: [PPT_C.ok, PPT_C.amber], showTitle: true, title: 'OTIF and on-time dispatch (%)', titleFontSize: 14, showLegend: true, legendPos: 'b', valAxisMaxVal: 100, valAxisMinVal: 0, lineSize: 2 });
+    }
+  } catch (e) { console.warn('delivery trend slide', e); }
+  try {
+    const ins = lrInsights(V) || [];
+    if (ins.length){ const s3 = K.slide('Delivery — what the numbers say');
+      s3.addText(ins.slice(0, 9).map(x => ({ text: pptPlain(x.t) + (x.s ? '  — ' + pptPlain(x.s) : ''), options: { bullet: true, breakLine: true } })), { x: 0.5, y: 1.4, w: 12.3, h: 5.5, fontSize: 14, color: PPT_C.ink, valign: 'top', paraSpaceAfter: 8 }); }
+  } catch (e) { console.warn('delivery insights slide', e); }
+}
+function pptPickup(pptx, K){
+  const R = state.pkRep; if (!R) return;
+  const vr = R.visitRows || [], kp = Object.fromEntries(R.kpis.map(k => [k[0], k]));
+  const s1 = K.slide('Pick-up — promptness', `${R.co || 'All companies'} · ${R.site ? PK_SITE[R.site] || R.site : 'Both sites'} · target ${R.target} min per SO · a client’s queue numbers in at the same time are timed together`);
+  const w = kp['Served within target'];
+  K.tiles(s1, [['Served within target', w?.[1], w?.[2], parseInt(w?.[1]) >= 90 ? 'ok' : 'bad'], ['Over target', kp['Over target']?.[1], 'SOs that took longer', kp['Over target']?.[1] ? 'bad' : 'ok'],
+    ['Average time', (kp['Average minutes per SO']?.[1] ?? '—') + ' min', 'per SO, arrival → released'], ['Client visits', vr.length, `${vr.filter(r => r.n > 1).length} timed as a group`],
+    ['Not timed', kp['Not timed (late / balance)']?.[1], 'late tickets and balances'], ['No-shows', kp['No-shows']?.[1]], ['Balances open', kp['Balances open']?.[1]]]);
+  if (R.days.length){
+    const s2 = K.slide('Pick-up — by day', 'SOs served each day, and the average minutes per SO'), labels = R.days.map(d => new Date(d[0] + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric' }));
+    s2.addChart(pptx.ChartType.bar, [{ name: 'Within target', labels, values: R.days.map(d => d[2]) }, { name: 'Over target', labels, values: R.days.map(d => d[1] - d[2]) }],
+      { x: 0.4, y: 1.5, w: 6.2, h: 5.2, barGrouping: 'stacked', chartColors: [PPT_C.ok, PPT_C.bad], showLegend: true, legendPos: 'b', showTitle: true, title: 'SOs within / over target', titleFontSize: 14 });
+    s2.addChart(pptx.ChartType.line, [{ name: 'Average min per SO', labels, values: R.days.map(d => Number(d[4]) || 0) }, { name: 'Target', labels, values: R.days.map(() => R.target) }],
+      { x: 6.8, y: 1.5, w: 6.1, h: 5.2, chartColors: [PPT_C.blue, PPT_C.bad], showLegend: true, legendPos: 'b', showTitle: true, title: 'Average minutes per SO', titleFontSize: 14, lineSize: 2 });
+  }
+  const s3 = K.slide('Pick-up — where the time goes', 'Average minutes per SO at each step, and why pick-ups went over');
+  if ((R.steps || []).some(x => x.v)) s3.addChart(pptx.ChartType.bar, [{ name: 'Minutes', labels: R.steps.map(x => `${x.name} (${x.who})`), values: R.steps.map(x => Math.round(x.v * 10) / 10) }],
+    { x: 0.4, y: 1.5, w: 6.2, h: 5.2, barDir: 'bar', chartColors: [PPT_C.blue], showValue: true, showTitle: true, title: 'Minutes per SO by step', titleFontSize: 14 });
+  if ((R.reasons || []).length) s3.addChart(pptx.ChartType.bar, [{ name: 'SOs', labels: R.reasons.map(r => r[0]), values: R.reasons.map(r => r[1]) }],
+    { x: 6.8, y: 1.5, w: 6.1, h: 5.2, barDir: 'bar', chartColors: [PPT_C.bad], showValue: true, showTitle: true, title: 'Why over target (SOs)', titleFontSize: 14 });
+  else s3.addText('None went over the target.', { x: 6.8, y: 3.5, w: 6, h: 0.5, fontSize: 16, color: PPT_C.ok });
+  const slow = vr.filter(r => r.result === 'Over').sort((a, b) => b.perSo - a.perSo).slice(0, 12);
+  if (slow.length){ const s4 = K.slide('Pick-up — slowest visits', 'Over target, slowest first');
+    K.table(s4, ['Date', 'Client', 'Queue no.', 'SOs', 'Min per SO', 'Released by', 'Why'], slow.map(r => [fmtDay(r.day), r.client, r.nums, r.sos, fmtN1(r.perSo), r.by, r.why || 'not given']),
+      { colW: [1.2, 2.8, 1.5, 2.2, 1.0, 1.6, 2.2] }); }
+}
+async function makeReportDeck(kind, src, from, to){
+  const P = await loadPptx();
+  if (kind !== 'pickup') await pptEnsure('delivery', from, to);
+  if (kind !== 'delivery') await pptEnsure('pickup', from, to);
+  const pptx = new P(); pptx.layout = 'LAYOUT_WIDE'; pptx.title = 'HATID report';
+  const period = fmtRange(from, to), K = pptKit(pptx, period);
+  const t = pptx.addSlide(); t.background = { color: PPT_C.navy };
+  t.addText(kind === 'both' ? 'Logistics report' : kind === 'pickup' ? 'Pick-up report' : 'Delivery report', { x: 0.7, y: 2.4, w: 12, h: 1, fontSize: 40, bold: true, color: 'FFFFFF' });
+  t.addText(kind === 'both' ? 'Delivery and pick-up' : '', { x: 0.7, y: 3.35, w: 12, h: 0.5, fontSize: 20, color: 'DCE6F2' });
+  t.addText(period, { x: 0.7, y: 3.95, w: 12, h: 0.5, fontSize: 18, color: 'DCE6F2' });
+  t.addText(`HATID · prepared by ${state.me?.name || state.me?.email || ''} · ${new Date().toLocaleString('en-PH')}`, { x: 0.7, y: 6.6, w: 12, h: 0.4, fontSize: 11, color: 'B8C7DA' });
+  if (kind === 'both'){
+    const V = lrCurrentV(), R = state.pkRep, s = K.slide('At a glance', 'Delivery and pick-up for the same dates');
+    const w = R?.kpis?.find(k => k[0] === 'Served within target');
+    s.addText('Delivery', { x: 0.4, y: 1.5, w: 6, h: 0.4, fontSize: 18, bold: true, color: PPT_C.navy });
+    s.addText('Pick-up', { x: 6.9, y: 1.5, w: 6, h: 0.4, fontSize: 18, bold: true, color: PPT_C.navy });
+    const col = (x, items) => items.forEach(([l, v, sub], i) => { const y = 2.05 + i * 1.15;
+      s.addShape(pptx.ShapeType.roundRect, { x, y, w: 6, h: 1.0, fill: { color: PPT_C.bg }, line: { color: PPT_C.line }, rectRadius: 0.08 });
+      s.addText(String(v ?? '—'), { x: x + 0.2, y: y + 0.1, w: 2.3, h: 0.8, fontSize: 26, bold: true, color: PPT_C.ink });
+      s.addText([{ text: l, options: { bold: true, breakLine: true } }, { text: sub || '', options: { fontSize: 10, color: PPT_C.mute } }], { x: x + 2.5, y: y + 0.1, w: 3.4, h: 0.8, fontSize: 13, color: PPT_C.ink }); });
+    if (V) col(0.4, [['Trips', fmtN(V.A.trips), `${fmtN(V.A.orders)} orders`], ['OTIF', pct1(V.A.otif), 'in full, no errors'], ['On-time dispatch', pptPct(V.A.onTimeDisp)], ['Capacity rate', pptPct(V.A.capRate)]]);
+    if (R) col(6.9, [['Within target', w?.[1], w?.[2]], ['Average time', (R.kpis.find(k => k[0] === 'Average minutes per SO')?.[1] ?? '—') + ' min', 'per SO'], ['Client visits', (R.visitRows || []).length], ['Balances open', R.kpis.find(k => k[0] === 'Balances open')?.[1]]]);
+  }
+  if (kind !== 'pickup') pptDelivery(pptx, K);
+  if (kind !== 'delivery') pptPickup(pptx, K);
+  await pptx.writeFile({ fileName: `HATID-${kind === 'both' ? 'logistics' : kind}-report_${from}_${to}.pptx` });
+  toast('PowerPoint downloaded');
+}
+
 function exportCsv(){
   if ((state.rpTab || 'overview') === 'jobs') return exportJobsCsv();
   const recs = state.lr ? lrApply(state.lr.recs, lrFilterVals()) : [];
   if (!recs.length) return toast('Nothing to export for this period', 'error');
   const cost = canSeeCosts();
-  const cols = [['date','Delivery date'],['src','Source',r => r.src === 'hatid' ? 'HATID' : 'Excel'],['company','Company'],['so','SO / reference'],['customer','Customer'],['ctype','Customer category',r => CUST_CAT[r.ctype] || ''],
+  const cols = dlExportCols(cost);
+  csvDownload(cols, recs, `hatid-logistics_${$('rp-from').value}_to_${$('rp-to').value}.csv`);
+}
+function dlExportCols(cost){
+  return [['date','Delivery date'],['src','Source',r => r.src === 'hatid' ? 'HATID' : 'Excel'],['company','Company'],['so','SO / reference'],['customer','Customer'],['ctype','Customer category',r => CUST_CAT[r.ctype] || ''],
     ['sp','Salesperson'],['truckName','Truck'],['cat','Truck type',r => TRUCK_CAT[r.cat] || ''],['province','Province'],['muni','City / municipality'],['region','Region'],
     ['trip','Trip count'],['kg','Weight kg'],['cap','Truck capacity kg'],...(cost ? [['tc','Transport cost'],['sales','Order value']] : []),
     ['ticket','Trip ticket'],['target','Target departure'],['outAt','Departed',r => r.outAt ? hmManila(r.outAt) : ''],['outSrc','Departure source',r => r.outSrc === 'gps' ? 'GPS (verified)' : r.outSrc === 'manual' ? 'Button (manual)' : ''],['earlyTap','Tapped early (min)',r => r.earlyTap > DISPATCH_GRACE ? r.earlyTap : ''],['docs','DR / SI no.'],['cbm','CBM',r => r.cbm ? r.cbm.toFixed(3) : ''],
     ['lapse','Dispatch minutes vs target'],['bkt','Dispatch',r => r.bkt == null ? '' : DISPATCH_BUCKETS[r.bkt]],['reason','Late reason',r => LATE_DISPATCH[r.reason] || r.reason || ''],
     ['err','Errors',r => Object.keys(ERR_TYPES).filter(k => r.err[k]).map(k => ERR_TYPES[k]).join('; ')]];
-  csvDownload(cols, recs, `hatid-logistics_${$('rp-from').value}_to_${$('rp-to').value}.csv`);
 }
 function exportJobsCsv(){
   const rows = state.reportRows || [];
@@ -13992,6 +14274,13 @@ function annGate(){
    show: who sees an item — 'office' (admin, manager, dispatcher, schedule signers), 'signers' (schedule signers, managers),
    'pickup' (anyone using Pick-up), 'drivers' (field). No show = everyone. */
 const WHATS_NEW = [
+  { id: '2026-11-25-group-report', date: '25 Nov 2026', items: [
+    { icon: '👥', title: 'A client’s tickets are timed together',
+      text: 'When one client has several queue numbers in at the same time, promptness is their whole stay ÷ all their SOs — 4 SOs released in 50 minutes is 12.5 min per SO, not four separate 45-minute waits. The queue shows 👥 and the number’s window lists the numbers timed together. Past records were re-timed the same way.' },
+    { icon: '📋', title: 'Pick-ups in detail',
+      text: 'Pick-up › Dashboard has a table of every client visit — queue numbers, SOs and tickets, each step’s time, minutes per SO, released by and why over target. Search, filter by result or reason, and click a column to sort. Click a row for what happened.' },
+    { icon: '📊', title: 'PowerPoint and Excel',
+      text: 'Reports and the Pick-up dashboard can make a PowerPoint for the dates picked — delivery, pick-up, or both combined in one deck. The delivery report can also download to Excel, and the pick-up Excel includes the detail table as filtered.' } ] },
   { id: '2026-11-25-queue-so', date: '25 Nov 2026', items: [
     { icon: '🔎', title: 'SO numbers in Released today',
       text: 'Queue › Released today now shows each queue number’s SO and Odoo ticket number. Click the row or queue number to see what happened — when each step was done, by whom, how many minutes each took, and why it was over target. Click the SO to open that ticket’s items.' } ] },
