@@ -2112,7 +2112,10 @@ function prFastApprove(){
 /* ----- the sandbox: delivery RPCs, played on the sample data (mirrors the database functions) ----- */
 function simPoolOf(j){ return j.truck_id ? state.ref.truckById?.[j.truck_id]?.pool_id : [...(state.ref.pools || [])].sort((a, b) => a.name.localeCompare(b.name)).find(p => (p.companies || []).includes(j.company))?.id; }
 function simSnapshot(poolId, date){
-  const pool = state.ref.poolById?.[poolId] || {}, js = SIM.jobs.filter(j => j.scheduled_date === date && LIVE_ON_TRUCK.includes(j.status));
+  const plan = (SIM.delivery_schedules || []).find(x => x.pool_id === poolId && x.delivery_date === date && x.plan)?.plan;
+  const pool = state.ref.poolById?.[poolId] || {}, js = SIM.jobs.filter(j => j.scheduled_date === date && (LIVE_ON_TRUCK.includes(j.status) || plan?.[j.id]))
+    .map(j => { const pe = plan?.[j.id]; return pe && ['proposed','scheduled'].includes(j.status) ? { ...j, truck_id: pe.t || null, trip_no: pe.n || 1, drop_seq: pe.s ?? null, status: pe.t ? 'scheduled' : 'proposed' } : j; })
+    .filter(j => LIVE_ON_TRUCK.includes(j.status));
   const drop = j => ({ job_id: j.id, serial: j.quotation_serial, company: j.company, customer: j.client_name, address: j.address || destLabel(j.destination_id), job_type: j.job_type,
     doc_refs: j.doc_refs, weight: j.estimated_weight_kg, agent_id: j.agent_id, agent: state.ref.agentById?.[j.agent_id]?.name || null, drop_key: dropKey(j) });
   const secs = new Map();
@@ -2127,6 +2130,16 @@ function simSnapshot(poolId, date){
     out.push({ truck_id: null, courier: true, trip_no: 1, label: (v.service === 'grab' ? 'Grab ' : 'Lalamove ') + (v.name || ''), service: v.service, plate_no: j.courier_ref, booking: j.courier_ref,
       paid_by: j.courier_paid_by, capacity: v.max_kg, total_weight: Number(j.estimated_weight_kg || 0), coded: false, drops: [drop(j)] }); });
   return out;
+}
+function simPlanApply(s){
+  let applied = 0; const skipped = [];
+  Object.entries(s.plan || {}).forEach(([id, pe]) => { const j = SIM.jobs.find(x => x.id === id);
+    if (!j || !['proposed','scheduled'].includes(j.status)){ skipped.push({ job_id: id, serial: j?.quotation_serial, reason: j ? 'already ' + j.status : 'not found' }); return; }
+    if (pe.t) Object.assign(j, { truck_id: pe.t, trip_no: pe.n || 1, drop_seq: pe.s ?? null, status: 'scheduled', scheduled_date: s.delivery_date });
+    else Object.assign(j, { truck_id: null, trip_no: null, drop_seq: null, status: 'proposed' });
+    applied++; });
+  Object.assign(s, { plan: null, in_force: null, plan_applied_at: new Date().toISOString() });
+  return { applied, skipped };
 }
 function simDeliveryRpc(fn, a){
   if (!SIM) return null;
@@ -2292,25 +2305,37 @@ function simDeliveryRpc(fn, a){
       if (!next) return fail('Unknown action');
       if (a.p_signature) SIM.delivery_schedule_signoffs.push({ schedule_id: s.id, revision: s.revision, step: act === 'submit' ? 'prepare' : act === 'change_approve' ? 'change' : act, signed_by: state.me.id, signer_name: who, signer_title: null, signature_url: a.p_signature, signed_at: now });
       if (act === 'revise'){ if (s.status !== 'approved') return fail('Only an approved schedule can be revised.'); if (!isDispatcher()) return fail('Only dispatchers, managers and admins can revise a schedule.'); if (!(a.p_note || '').trim()) return fail('Give the reason');
-        s.in_force = { revision: s.revision, snapshot: s.snapshot, approved_at: s.approved_at, submitted_at: s.submitted_at, submitted_by: s.submitted_by, final_copy_path: s.final_copy_path || null }; }
+        if (s.plan) return fail('The approved revision hasn’t been applied to the trucks yet — apply it first, then revise again');
+        s.in_force = { revision: s.revision, snapshot: s.snapshot, approved_at: s.approved_at, submitted_at: s.submitted_at, submitted_by: s.submitted_by, final_copy_path: s.final_copy_path || null }; s.plan = {}; s.plan_apply = null; }
       if (act === 'reject_revision' || act === 'cancel_revision'){
         if (!s.in_force) return fail('There is no revision in progress on this schedule');
         if (act === 'reject_revision' && !STEP_FOR_STATUS[s.status]) return fail('This revision isn’t waiting for a signature');
         if (act === 'reject_revision' && !(state.me.schedule_steps || []).length && !['admin','manager'].includes(state.me.role)) return fail('Only signers can reject a revision');
         if (act === 'cancel_revision' && !isDispatcher()) return fail('Only dispatchers, managers and admins can cancel a revision');
+        if (s.status === 'approved') return fail('This revision is already approved — apply it to the trucks');
         if (!(a.p_note || '').trim()) return fail('Give the reason');
         SIM.delivery_schedule_events.push({ schedule_id: s.id, action: act, revision: s.revision, by_name: who, at: now, note: a.p_note });
         const f0 = s.in_force; Object.assign(s, { status: 'approved', revision: f0.revision, snapshot: f0.snapshot, approved_at: f0.approved_at, submitted_at: f0.submitted_at, submitted_by: f0.submitted_by,
-          final_copy_path: f0.final_copy_path, return_reason: null, returned_at: null, returned_from: null, in_force: null, updated_at: now });
+          final_copy_path: f0.final_copy_path, return_reason: null, returned_at: null, returned_from: null, in_force: null, plan: null, plan_apply: null, updated_at: now });
         return ok({ ...s }); }
       if (['reject','withdraw','reopen','revise'].includes(act)){ s.return_reason = a.p_note; s.returned_at = now; s.returned_from = s.status; }
-      if (act === 'approve' || act === 'change_approve'){ s.approved_at = now; s.in_force = null; }
+      let held = false;
+      if (act === 'approve' && s.plan){ if (!['now','scheduler'].includes(a.p_apply)) return fail('Choose whether the revision goes to the trucks now or the scheduler applies it'); held = a.p_apply === 'scheduler'; s.plan_apply = a.p_apply; }
+      if (act === 'approve' || act === 'change_approve'){ s.approved_at = now; if (!held) s.in_force = null; }
+      if (act === 'approve' && s.plan && !held) simPlanApply(s);
       if (act === 'change_approve'){ const r = simChg().find(x => x.id === s.change_request_id); if (r) Object.assign(r, { status: 'done', done_at: now }); s.change_mode = false; s.change_request_id = null; }
       if (act === 'reopen' || act === 'revise'){ simChg().filter(x => x.schedule_id === s.id && ['pending','approved'].includes(x.status)).forEach(x => Object.assign(x, { status: 'withdrawn', decision_note: 'Plan reopened for full re-approval' })); s.change_mode = false; s.change_request_id = null; }
       s.status = next; s.updated_at = now;
       SIM.delivery_schedule_events.push({ schedule_id: s.id, action: act, revision: s.revision, by_name: who, at: now, note: a.p_note || null });
       return ok({ ...s });
     }
+    case 'job_schedule_plan_save': { const s = sched(a.p_pool, a.p_date);
+      if (!s || s.status !== 'returned' || !s.in_force || !s.plan) return fail('This schedule has no revision being edited — press Revise schedule first');
+      s.plan = { ...(a.p_plan || {}) }; return ok({ changes: Object.keys(s.plan).length }); }
+    case 'job_schedule_apply': { const s = sched(a.p_pool, a.p_date);
+      if (!s || s.status !== 'approved' || !s.plan) return fail('There is no approved revision waiting to be applied');
+      const r = simPlanApply(s); SIM.delivery_schedule_events.push({ schedule_id: s.id, action: 'apply', revision: s.revision, by_name: who, at: now, note: r.applied + ' change(s) applied to the trucks' });
+      return ok(r); }
     case 'job_schedule_set_final': { const s = SIM.delivery_schedules.find(x => x.id === a.p_schedule); if (s) s.final_copy_path = a.p_path; return ok(null); }
     case 'job_passcode_status': return ok({ set: true });
     case 'job_passcode_set': case 'job_dest_set_pin': return ok(null);
@@ -2563,7 +2588,8 @@ const PR_SC = [
       { id: 'ch-rev2', el: '#overlay .modal', free: true, done: () => prSched()?.status === 'returned',
         say: T('Type what is changing and why (e.g. “Move Cruz Cabinetry to trip 1”), then **Send**.', 'I-type kung ano ang babaguhin at bakit (hal. “Ilipat ang Cruz Cabinetry sa trip 1”), tapos **Send**.') },
       { id: 'ch-edit', go: () => openSchedule(PR.ctx.pool.id, PR.ctx.today), el: '#overlay [data-act=submit]', done: () => !!$('sg-ok'),
-        say: T('The plan is open — make the change (practice: skip it), then tap **Sign & submit for review**.', 'Bukas na ang plan — gawin ang pagbabago (practice: laktawan), tapos i-tap ang **Sign & submit for review**.') },
+        say: T('The plan is open. Move drops between trucks and trips with **📋 Edit trucks in the Day planner** (practice: skip it), then tap **Sign & submit for review**.', 'Bukas na ang plan. Ilipat ang mga drop sa ibang truck o trip gamit ang **📋 Edit trucks in the Day planner** (practice: laktawan), tapos i-tap ang **Sign & submit for review**.'),
+        why: T('What you change goes into the revision only. Dispatch and the drivers keep the approved plan — the trucker doesn’t see the change until it is approved.', 'Sa revision lang napupunta ang binago mo. Ang approved na plan pa rin ang nakikita ng dispatch at ng mga driver — hindi malalaman ng trucker ang pagbabago hangga’t hindi ito naaaprubahan.') },
       { id: 'ch-edit2', el: '#overlay .modal', free: true, done: () => prSched()?.status === 'for_review',
         say: T('Sign, type any 4 digits as the passcode (practice), then **Sign**.', 'Pumirma, mag-type ng kahit anong 4 na numero bilang passcode (practice), tapos **Sign**.'),
         why: T('Each signer gets an email and an in-app alert that it waits for them.', 'May email at alert sa app ang bawat pipirma na naghihintay ito sa kanila.') },
@@ -2576,10 +2602,15 @@ const PR_SC = [
           SIM.delivery_schedule_signoffs.push({ schedule_id: s.id, revision: s.revision, step: 'confirm', signed_by: 'practice-confirm', signer_name: 'Admin Office (sample)', signature_url: null, signed_at: at });
           SIM.delivery_schedule_events.push({ schedule_id: s.id, action: 'confirm', revision: s.revision, by_name: 'Admin Office (sample)', at }); s.status = 'for_approval'; s.updated_at = at; closeOverlay(); } },
         done: () => prSched()?.status === 'for_approval', say: T('Next the admin office confirms. Tap the button to have them sign.', 'Susunod ang admin office. I-tap ang button para pumirma sila.') },
-      { id: 'ch-mgr', as: 'mgr', go: () => openSchedule(PR.ctx.pool.id, PR.ctx.today), el: '#overlay [data-act=approve]', done: () => !!$('sg-ok'),
+      { id: 'ch-mgr', as: 'mgr', go: () => openSchedule(PR.ctx.pool.id, PR.ctx.today), el: '#overlay [data-act=approve]', done: () => !!$('ac-now') || !!$('sg-ok'),
         say: T('Now you are the **Manager**. Tap **Sign & approve**.', 'Ngayon ikaw ang **Manager**. I-tap ang **Sign & approve**.') },
+      { id: 'ch-mgr-how', el: '#overlay .modal', free: true, done: () => !!$('sg-ok'),
+        say: T('Choose when the revision reaches the trucks: **as soon as you approve**, or **the scheduler applies it** (e.g. once the truck is back at the plant).', 'Piliin kung kailan aabot sa mga truck ang revision: **pagka-approve mo**, o **ang scheduler ang mag-a-apply** (hal. pagbalik ng truck sa planta).'),
+        why: T('If the scheduler applies it, they get a reminder by email and in HATID until they do.', 'Kung ang scheduler ang mag-a-apply, may paalala sila sa email at sa HATID hangga’t hindi pa nila nagagawa.') },
       { id: 'ch-mgr2', el: '#overlay .modal', free: true, done: () => prSched()?.status === 'approved',
         say: T('Sign, type any 4 digits, then **Sign**.', 'Pumirma, mag-type ng kahit anong 4 na numero, tapos **Sign**.') },
+      { id: 'ch-apply', as: 'disp', when: () => !!prSched()?.plan, go: () => openSchedule(PR.ctx.pool.id, PR.ctx.today), el: '#sf-apply', done: () => prSched() && !prSched().plan,
+        say: T('You are **Dispatch** again. The revision is approved but not yet on the trucks. When ready, tap **🚚 Apply to trucks** and confirm.', 'Ikaw ulit ang **Dispatch**. Approved na ang revision pero wala pa sa mga truck. Kapag handa na, i-tap ang **🚚 Apply to trucks** at i-confirm.') },
       { id: 'ch-done', next: true, say: T('Approved again — revision 2. Everyone is notified, and **History** shows who revised it and why.', 'Approved na ulit — revision 2. Nasabihan ang lahat, at makikita sa **History** kung sino ang nag-revise at bakit.') }] },
   { id: 'd-announce', mode: 'delivery', who: ['mgr','ss'], mins: 2,
     title: T('Announcement everyone must read', 'Announcement na dapat basahin ng lahat'), desc: T('The manager posts it; each person confirms they read it.', 'Ipo-post ng manager; kukumpirmahin ng bawat isa na nabasa nila.'),
@@ -4555,7 +4586,7 @@ async function openPlanTrucks(date, poolId){
       <select class="i" id="dp-pool" style="width:auto" aria-label="Pool"></select>
       <span class="dp-tools"><button class="btn" id="dp-view">🗺 Map</button><button class="btn" id="dp-auto" title="Re-plan only the drops for scheduling — drops already on trucks stay">✨ Re-plan new</button><button class="btn" id="dp-all" title="Re-plan everything that hasn't left yet, including drops already on trucks">↻ Re-plan all</button>
       <button class="btn ok" id="dp-go" disabled>Confirm</button><button class="btn" id="dp-sched">Prepare schedule →</button></span></div>
-    <div class="sheet-b dp-b" id="dp-body"><div class="muted" style="padding:14px"><span class="spin"></span> Planning…</div></div></div>`);
+    <div id="dp-rev" class="no-print"></div><div class="sheet-b dp-b" id="dp-body"><div class="muted" style="padding:14px"><span class="spin"></span> Planning…</div></div></div>`);
   bindClose();
   // dates that have drops for scheduling, plus today and the next working days
   let props = [];
@@ -4590,6 +4621,25 @@ async function dpLoad(DP){
   ctx.load = ctx.load.filter(t => t.pool_id === DP.poolId);
   const { data } = await withRetry('Loading tickets', () => sb.from('jobs').select('*').eq('status', 'proposed').eq('scheduled_date', DP.date));
   const all = (data || []).filter(j => (pool?.companies || []).includes(j.company) && j.job_type !== 'pickup');
+  /* A revision of an approved schedule (Rommel 2026-11-25): the planner shows and edits the revision; the jobs (what dispatch and drivers see) stay until it is approved and applied */
+  DP.rev = null; const revOff = [];
+  try { const { data: sr } = await sb.from('delivery_schedules').select('status, plan, revision').eq('pool_id', DP.poolId).eq('delivery_date', DP.date).maybeSingle();
+    if (sr?.plan) DP.rev = { plan: sr.plan, edit: sr.status === 'returned', status: sr.status, revision: sr.revision }; } catch {}
+  if (DP.rev){
+    const plan = DP.rev.plan, onTrucks = Object.values(ctx.fixed).flat(); ctx.fixed = {}; ctx.recount = true;
+    for (const j of [...onTrucks, ...all.splice(0)]){
+      j._live = { t: j.truck_id || null, n: j.trip_no || null, s: j.drop_seq ?? null }; j._st = j.status;
+      const pe = plan[j.id];
+      if (pe && ['proposed','scheduled'].includes(j.status)){
+        if (pe.t) Object.assign(j, { truck_id: pe.t, trip_no: pe.n || 1, drop_seq: pe.s ?? null, status: 'scheduled' });
+        else { Object.assign(j, { truck_id: null, trip_no: null, drop_seq: null, status: 'proposed' }); revOff.push(j); continue; }
+      }
+      if (j.truck_id) (ctx.fixed[`${j.truck_id}|${j.trip_no || 1}`] ??= []).push(j); else all.push(j);
+    }
+  }
+  const rv = $('dp-rev');
+  if (rv) rv.innerHTML = DP.rev ? `<div class="note" style="margin:8px 14px 0;background:var(--warn-soft)"><b>${DP.rev.edit ? '✏️ Editing the revision of the approved schedule' : DP.rev.status === 'approved' ? '✅ Approved revision — not yet on the trucks' : '🔒 Revision in approval'}</b> —
+    ${DP.rev.edit ? 'what you save here goes into the revision only. Dispatch and the drivers keep the approved plan until the revision is approved up to the manager.' : DP.rev.status === 'approved' ? 'apply it from the schedule (🚚 Apply to trucks). Trucks can’t be changed here until then.' : 'trucks can’t be changed while it is being signed. Withdraw it from the schedule to edit.'}</div>` : '';
   // "Re-plan all": drops already on trucks that haven't left (trip not locked) are planned again; where they end up elsewhere they show as "moved"
   if (DP.all){
     const locked = new Set((await sb.from('job_trips').select('truck_id, trip_no, load_locked_at, departed_at').eq('trip_date', DP.date)).data?.filter(r => r.load_locked_at || r.departed_at).map(r => `${r.truck_id}|${r.trip_no}`) || []);
@@ -4611,6 +4661,7 @@ async function dpLoad(DP){
   DP.unplaced = DP.unplaced.filter(u => { const j = u.job, home = j._was && DP.bins.find(b => b.key === j._was); if (!home) return true;   // couldn't re-plan it: it stays where it was
     home.fixed.push(j); home.kg += Number(j.estimated_weight_kg || 0); home.pcs += boardsPcs(j.board_pcs); home.dests.push(j.destination_id); delete j._was; return false; });
   DP.unplaced.push(...DP.blocked);
+  revOff.forEach(job => DP.unplaced.push({ job, reason: 'Taken off its trip in this revision' }));
   DP.bins.forEach(b => dpOrder(DP, b));
 }
 /* Delivery order for a trip: kept as set by hand; otherwise departed/fixed drops keep their order and the rest follow the route */
@@ -4706,9 +4757,12 @@ function dpRender(DP){
   const nNew = sum(used, b => b.planned.filter(j => !j._was).length), nMv = sum(used, b => b.planned.filter(j => j._was).length) + DP.unplaced.filter(u => u.job._was).length;
   const n = nNew + nMv + Object.keys(DP.seq).length;
   $('dp-go').disabled = !n; $('dp-go').textContent = nNew || nMv ? `Confirm ${[nNew ? `${nNew} new` : '', nMv ? `${nMv} moved` : ''].filter(Boolean).join(' + ')}` : n ? 'Save order' : 'Confirm';
+  if (DP.rev){ if (DP.rev.edit) $('dp-go').textContent = n ? 'Save to revision' : 'Revision saved';
+    else { $('dp-go').disabled = true; $('dp-go').textContent = 'Locked'; }
+    ['dp-auto','dp-all'].forEach(id => { if ($(id)) $(id).disabled = !DP.rev.edit; }); }
   // actions
   document.querySelectorAll('[data-dp-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openJob(a.dataset.dpOpen); }));
-  document.querySelectorAll('#dp-body .dp-h:not(.off)').forEach(h => h.addEventListener('pointerdown', e => dpDrag(DP, e, h.closest('li'))));
+  if (!DP.rev || DP.rev.edit) document.querySelectorAll('#dp-body .dp-h:not(.off)').forEach(h => h.addEventListener('pointerdown', e => dpDrag(DP, e, h.closest('li'))));
   $('dp-allow')?.addEventListener('click', async () => { const v = prompt('How many km may a drop add to a trip, compared with going straight to its last drop? (e.g. 3)', routeAllow(DP.poolId)); if (v === null) return;
     try { await pkRpc('Saving', 'job_pool_set_detour', { p_pool: DP.poolId, p_km: Number(v) }); state.ref.poolById[DP.poolId].route_detour_km = Number(v); DP.moved.clear(); DP.seq = {}; await dpLoad(DP); dpRender(DP); toast(`On-route allowance: ${v} km — re-planned`, 'ok'); } catch {} });
   if (DP.view === 'map') dpMap(DP, used);
@@ -4744,6 +4798,7 @@ function dpMove(DP, id, key, at){
 }
 /* Divert a drop to Grab / Lalamove: opens the booking form; back in the planner afterwards */
 async function dpCourier(DP, j){
+  if (DP.rev) return toast('A revision is open on this day — sending a drop by Grab / Lalamove waits until it is approved or cancelled', 'error');
   if (!$('dp-go').disabled && !confirm('You have changes in the planner that are not confirmed yet. They will be re-planned after this. Continue?')) return;
   let job = j;
   try { job = (await withRetry('Loading the ticket', () => sb.from('jobs').select('*').eq('id', j.id).single())).data || j; } catch { return; }
@@ -4785,6 +4840,7 @@ function dpDrag(DP, e, li){
   place(e.clientX, e.clientY); raf = requestAnimationFrame(auto);
 }
 async function dpConfirm(DP, btn){
+  if (DP.rev) return dpSaveRevision(DP, btn);
   const used = DP.bins.filter(b => b.order.length), list = [];
   for (const b of used){
     const touched = b.planned.length || DP.seq[b.key];
@@ -4817,6 +4873,23 @@ async function dpConfirm(DP, btn){
   toast(done === list.length ? `Saved — ${list.filter(x => x.isNew).length} drop(s) on trucks. Next: Prepare schedule →` : `Saved ${done} of ${list.length} — try again`, done === list.length ? 'ok' : 'error');
   if (state.view === 'board') loadBoard();
   DP.moved.clear(); DP.seq = {}; await dpLoad(DP); dpRender(DP); btn.disabled = false;
+}
+/* Revision mode: the planner's result becomes the revision's plan { job_id: {t, n, s} } — only what differs from the jobs as they are now */
+async function dpSaveRevision(DP, btn){
+  if (!DP.rev?.edit) return;
+  const plan = { ...DP.rev.plan }, movable = j => ['proposed','scheduled'].includes(j._st || j.status);
+  const touched = new Set(DP.bins.filter(b => b.planned.length || DP.seq[b.key]).map(b => b.key));
+  for (const b of DP.bins) b.order.forEach((j, i) => {
+    if (!movable(j) || (!touched.has(b.key) && !b.planned.includes(j))) return;
+    const L = j._live || {}, want = { t: b.t.truck_id, n: b.trip_no, s: i + 1 };
+    if (L.t === want.t && (L.n || 1) === want.n && (L.s ?? null) === want.s) delete plan[j.id]; else plan[j.id] = want;
+  });
+  DP.unplaced.forEach(u => { const j = u.job; if (!j?.id || !movable(j)) return; if (j._live?.t) plan[j.id] = { t: null }; else delete plan[j.id]; });
+  btn.disabled = true;
+  try { await withRetry('Saving the revision', () => sb.rpc('job_schedule_plan_save', { p_pool: DP.poolId, p_date: DP.date, p_plan: plan }), 1);
+    toast(`Saved to the revision — ${Object.keys(plan).length} change${Object.keys(plan).length === 1 ? '' : 's'} from the approved plan. Next: open the schedule and sign &amp; submit`.replace('&amp;', '&'), 'ok');
+  } catch { btn.disabled = false; return; }
+  DP.moved.clear(); DP.seq = {}; await dpLoad(DP); dpRender(DP);
 }
 /* Missing destination pins: look them up once (OpenStreetMap, 1 per second) and keep them for next time */
 async function dpPins(DP){
@@ -9106,6 +9179,7 @@ async function loadDash(){
       if (!rows.some(r => r.truck_pool_id === p.id && r.scheduled_date === d && CAPACITY_STATUSES.includes(r.status))) continue;
       const sc = (sch || []).find(x => x.pool_id === p.id && x.delivery_date === d);
       const mineToSign = sc && needMe.has(sc.id);
+      if (schedHeld(sc) && isDispatcher()){ items.push({ c:'bad', i:'🚚', t:`Approved revision · ${d === today ? 'today' : 'tomorrow'} · ${p.name}`, s:'Not yet on the trucks — open it and press “Apply to trucks”', sched: [p.id, d] }); continue; }
       if (sc?.status === 'approved' || (schedInForce(sc) && !mineToSign)) continue;
       items.push({ c: d === today || sc?.status === 'returned' || mineToSign ? 'bad' : 'warn', i:'📋', t:`Delivery schedule ${d === today ? 'today' : 'tomorrow'} · ${p.name}`,
         s: mineToSign ? 'Waiting for your signature' : sc ? SCHED_STATUS[sc.status] + (sc.status === 'returned' ? ' — ' + (sc.return_reason || '') : '') : 'Not prepared yet', sched: [p.id, d] });
@@ -13055,10 +13129,12 @@ const STEP_VERB = { review:'Review', confirm:'Confirm', approve:'Approve' };
 const DOC_REMARKS = ['Full Released','Partial Released','Slab','Delivery Charge','Adhesive Only','Ebt Only'];
 const ordinal = n => n + ((n % 100 >= 11 && n % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th');
 const schedPill = st => `<span class="sc-st sc-${esc(st)}">${esc(SCHED_STATUS[st] || st)}</span>`;
-const SCHED_COLS = 'id, pool_id, delivery_date, revision, status, submitted_by, submitted_at, approved_at, return_reason, returned_at, updated_at, in_force';
+const SCHED_COLS = 'id, pool_id, delivery_date, revision, status, submitted_by, submitted_at, approved_at, return_reason, returned_at, updated_at, in_force, plan, plan_apply, plan_approved_at';
 /* While an approved schedule is being revised, the approved version stays in force: in_force = { revision, snapshot, approved_at, final_copy_path } */
 const schedInForce = s => s?.in_force && s.status !== 'approved' ? s.in_force : null;
-const schedPillFull = s => schedInForce(s) ? schedPill('approved') + ` <span class="tag warn" title="The approved plan (rev ${esc(s.in_force.revision)}) stays in force until the revision is approved">revision ${s.status === 'returned' ? 'being edited' : 'in approval'}</span>` : schedPill(s.status);
+/* An approved revision the manager left for the scheduler to put on the trucks: jobs still show the old plan until "Apply to trucks" */
+const schedHeld = s => s?.status === 'approved' && s.plan ? s : null;
+const schedPillFull = s => schedHeld(s) ? schedPill('approved') + ' <span class="tag warn" title="Approved, but dispatch and the drivers still see the previous plan until the scheduler applies it">not yet on the trucks</span>' : schedInForce(s) ? schedPill('approved') + ` <span class="tag warn" title="The approved plan (rev ${esc(s.in_force.revision)}) stays in force until the revision is approved">revision ${s.status === 'returned' ? 'being edited' : 'in approval'}</span>` : schedPill(s.status);
 /* Schedules waiting for a step I hold, minus those I already signed in this revision (one person, one signature) */
 async function schedulesNeedingMe(list){
   const my = state.me.schedule_steps || [];
@@ -13168,6 +13244,8 @@ async function openSchedule(poolId, date){
   } catch { closeOverlay(); return; }
   let ci = null; try { ({ data: ci } = await sb.rpc('job_sched_change_info', { p_pool: poolId, p_date: date })); } catch {}
   const inForce = schedInForce(s), status = s?.status || 'draft', isChg = status === 'for_change_approval', inFlow = !!STEP_FOR_STATUS[status] || status === 'approved' || isChg;
+  const held = schedHeld(s);
+  state.schedRev = inForce && status === 'returned' ? { poolId, date, plan: s.plan || {} } : null;
   const content = inFlow ? (s.snapshot || []) : live;
   const changed = inFlow && JSON.stringify(s.snapshot) !== JSON.stringify(live);
   const editable = !inFlow && isDispatcher() && view.can_prepare;
@@ -13188,12 +13266,14 @@ async function openSchedule(poolId, date){
   if (stepNow && my.includes(stepNow) && !signedThis) btns.push(`<button class="btn ok" data-act="${stepNow}">Sign &amp; ${STEP_VERB[stepNow].toLowerCase()}</button>`);
   if (stepNow && !inForce && (my.length || ['admin','manager'].includes(state.me.role))) btns.push('<button class="btn bad" data-act="reject">Return for revision</button>');
   if (stepNow && isDispatcher()) btns.push('<button class="btn" data-act="withdraw">Withdraw to edit</button>');
-  const canRevise = status === 'approved' && isDispatcher() && view.can_prepare && date >= dayManila(Date.now());
+  const canRevise = status === 'approved' && !held && isDispatcher() && view.can_prepare && date >= dayManila(Date.now());
+  if (held && isDispatcher() && view.can_prepare) btns.push('<button class="btn ok" id="sf-apply">🚚 Apply to trucks</button>');
   if (inForce && stepNow && (my.length || ['admin','manager'].includes(state.me.role))) btns.push('<button class="btn bad" data-act="reject_revision">Reject revision</button>');
   if (inForce && isDispatcher() && view.can_prepare) btns.push('<button class="btn" data-act="cancel_revision">Cancel revision</button>');
+  if (state.schedRev && isDispatcher() && view.can_prepare) btns.push(`<button class="btn" id="sf-dp">📋 Edit trucks in the Day planner</button>`);
   if (inForce?.final_copy_path) btns.push('<button class="btn" id="sf-inforce">📄 Approved plan in force (rev ' + esc(inForce.revision) + ')</button>');
   if (canRevise) btns.push('<button class="btn primary" data-act="revise">✏️ Revise schedule</button>');
-  if (status === 'approved' && !canRevise && (my.includes('approve') || isAdmin())) btns.push('<button class="btn" data-act="reopen">Reopen</button>');
+  if (status === 'approved' && !held && !canRevise && (my.includes('approve') || isAdmin())) btns.push('<button class="btn" data-act="reopen">Reopen</button>');
   if (status === 'approved') btns.push(s.final_copy_path ? '<button class="btn primary" id="sf-final">📄 Final signed copy</button>' : '<button class="btn" id="sf-mkfinal">📄 Save the final signed copy</button>');
   const notes = [];
   if (stepNow && my.includes(stepNow) && signedThis) notes.push('You already signed this revision — this step needs a different person.');
@@ -13212,7 +13292,8 @@ async function openSchedule(poolId, date){
         return `<div class="st ${x ? 'done' : now ? 'now' : ''}"><b>${esc(lab.replace(' by', ''))}</b>${x ? `${esc(x.signer_name)}${x.change ? ' (change)' : ''}<div class="ft">${fmtTime(x.signed_at)}</div>` : now ? 'Waiting' : (isChg || (status === 'approved' && shownSigns.some(y => y.change))) && ['review','confirm'].includes(k) ? '<span class="ft">not needed for a change</span>' : '—'}</div>`; }).join('')}</div>
       ${schedChangeBlock(ci, status, s)}
       ${inForce ? `<div class="note no-print" style="background:var(--warn-soft)"><b>Revision in progress — the approved plan (rev ${esc(inForce.revision)}, approved ${fmtTime(inForce.approved_at)}) is still the one in force.</b><br>
-        This revision takes effect only when it is approved. If a signer rejects it, or dispatch cancels it, the approved plan stays.${status !== 'returned' ? ' Signers below are signing the revision.' : ''}</div>` : ''}
+        Dispatch and the drivers keep seeing the approved plan — nothing changes on the trucks until this revision is approved. If a signer rejects it, or dispatch cancels it, the approved plan stays.${status !== 'returned' ? ' Signers below are signing the revision.' : ' Move drops between trucks and trips in the Day planner; the list below shows the plan as revised.'}</div>` : ''}
+      ${held ? `<div class="note no-print" style="background:var(--warn-soft)"><b>Revision ${esc(s.revision)} is approved but not yet on the trucks.</b><br>The manager left it to the scheduler. Dispatch and the drivers still see the previous plan until ${isDispatcher() ? 'you press <b>🚚 Apply to trucks</b>' : 'the scheduler applies it'}.</div>` : ''}
       ${status === 'returned' ? `<div class="note no-print" style="background:var(--bad-soft)"><b>${s.change_mode ? 'Open for an approved change' : inForce ? 'Opened for revision' : 'Returned for revision'}</b> by ${esc(events.find(e => ['reject','withdraw','reopen','revise','change_approved'].includes(e.action))?.by_name || '')}: ${esc(s.return_reason || '')}<br>${s.change_mode ? 'Make the change, then sign and submit — it goes straight to the approver for one signature.' : (inForce ? 'Make the changes, then sign and submit — it goes through review, confirmation and approval again, up to the manager.' : 'Make the changes, then sign and submit again. Signatures start over.')}</div>` : ''}
       ${changed ? `<div class="note no-print"><b>Jobs changed after this schedule was submitted.</b> Signers see the submitted version below.${isDispatcher() && stepNow ? ' Withdraw it to include the changes.' : ''}</div>` : ''}
       ${notes.map(n => `<div class="ft no-print">${esc(n)}</div>`).join('')}
@@ -13222,13 +13303,24 @@ async function openSchedule(poolId, date){
       ${editable ? '<div class="ft no-print">Yellow boxes save as you type. Use ↑ ↓ to set the drop order, “Refs” for document references (SO/DR numbers), remarks and weights, and pick each drop’s sales agent.</div>' : ''}
       ${status === 'approved' && isDispatcher() ? '<div id="cf-panel" class="no-print"><div class="muted" style="padding:10px"><span class="spin"></span> Loading confirmations…</div></div>' : ''}
       ${events.length ? `<details class="no-print"><summary style="cursor:pointer">History</summary><ul class="timeline" style="margin-top:10px">${events.map(e =>
-        `<li><div class="t">${esc({ submit:'Submitted', review:'Reviewed', confirm:'Confirmed', approve:'Approved', reject:'Returned for revision', withdraw:'Withdrawn', reopen:'Reopened', revise:'Opened for revision', reject_revision:'Revision rejected — approved plan kept', cancel_revision:'Revision cancelled — approved plan kept', change_requested:'Change requested', change_forwarded:'Change request passed on', change_approved:'Change request approved', change_declined:'Change request declined', change_withdrawn:'Change request withdrawn', change_approve:'Changed plan approved' }[e.action] || e.action)} · rev ${e.revision}</div><div class="d">${esc(e.by_name || '')} · ${fmtTime(e.at)}</div>${e.note ? `<div style="font-size:14px">${esc(e.note)}</div>` : ''}</li>`).join('')}</ul></details>` : ''}
+        `<li><div class="t">${esc({ submit:'Submitted', review:'Reviewed', confirm:'Confirmed', approve:'Approved', reject:'Returned for revision', withdraw:'Withdrawn', reopen:'Reopened', revise:'Opened for revision', reject_revision:'Revision rejected — approved plan kept', cancel_revision:'Revision cancelled — approved plan kept', apply:'Applied to the trucks', change_requested:'Change requested', change_forwarded:'Change request passed on', change_approved:'Change request approved', change_declined:'Change request declined', change_withdrawn:'Change request withdrawn', change_approve:'Changed plan approved' }[e.action] || e.action)} · rev ${e.revision}</div><div class="d">${esc(e.by_name || '')} · ${fmtTime(e.at)}</div>${e.note ? `<div style="font-size:14px">${esc(e.note)}</div>` : ''}</li>`).join('')}</ul></details>` : ''}
     </div>`;
   bindClose();
   $('sf-print').addEventListener('click', () => window.print());
   const reload = () => openSchedule(poolId, date);
   $('sf-final')?.addEventListener('click', () => openFinalCopy(s.final_copy_path));
   $('sf-inforce')?.addEventListener('click', () => openFinalCopy(s.in_force.final_copy_path));
+  $('sf-dp')?.addEventListener('click', () => { closeOverlay(); openPlanTrucks(date, poolId); });
+  $('sf-apply')?.addEventListener('click', async e => {
+    if (!confirm('Put the approved revision on the trucks now? Dispatch and the drivers will see the new trucks, trips and drop order.')) return;
+    e.currentTarget.disabled = true;
+    try { const { data } = await withRetry('Applying', () => sb.rpc('job_schedule_apply', { p_pool: poolId, p_date: date }), 1);
+      const sk = data?.skipped || [];
+      toast(`Applied — ${data?.applied || 0} change${data?.applied === 1 ? '' : 's'} now on the trucks${sk.length ? ` · ${sk.length} skipped (${sk.map(x => (x.serial || '') + ' ' + x.reason).join(', ')})` : ''}`, sk.length ? 'error' : 'ok');
+      if (state.view === 'board') loadBoard();
+    } catch { e.currentTarget.disabled = false; return; }
+    reload();
+  });
   $('sf-mkfinal')?.addEventListener('click', async e => { e.currentTarget.disabled = true; try { await saveFinalCopy(poolId, date); toast('Final signed copy saved', 'ok'); } catch { toast('Could not save the final copy', 'error'); } reload(); });
   document.querySelectorAll('#overlay [data-chg]').forEach(b => b.addEventListener('click', async () => {
     const k = b.dataset.chg, r = ci?.request;
@@ -13258,14 +13350,29 @@ async function openSchedule(poolId, date){
           cancel_revision: 'Say why. The revision is dropped and the approved plan stays in force. Everyone is told.' }[act],
         async note => { await schedAction(poolId, date, act, { note }); toast({ reject: 'Returned for revision', withdraw: 'Withdrawn — you can edit it now', reopen: 'Schedule reopened', revise: 'Open for revision — edit, then sign & submit',
           reject_revision: 'Revision rejected — the approved plan stays', cancel_revision: 'Revision cancelled — the approved plan stays' }[act], 'ok'); }, reload);
+    if (act === 'approve' && s?.plan && b.dataset.apply === undefined) return schedApplyChoice(dl, choice => { b.dataset.apply = choice; b.click(); });
+    const apply = act === 'approve' && s?.plan ? b.dataset.apply : null; delete b.dataset.apply;
     const what = act === 'submit' ? `submit this schedule for ${s?.change_mode ? 'change approval' : 'review'}` : act === 'change_approve' ? `approve this changed plan${ci?.on_behalf ? ' for ' + ci.on_behalf : ''}` : `${STEP_VERB[act].toLowerCase()} this schedule`;
     openSignModal(act === 'submit' ? 'Sign & submit' : act === 'change_approve' ? 'Sign & approve change' : `Sign & ${STEP_VERB[act].toLowerCase()}`, `By signing you ${what} for ${dl} (${pool?.name || ''}).`,
-      async (sig, code) => { const r = await schedAction(poolId, date, act, { signature: sig, passcode: code });
-        toast(act === 'approve' || act === 'change_approve' ? 'Schedule approved — everyone has been notified' : 'Signed', 'ok');
+      async (sig, code) => { const r = await schedAction(poolId, date, act, { signature: sig, passcode: code, apply });
+        toast(apply === 'scheduler' ? 'Approved — the scheduler has been told to apply it to the trucks' : apply === 'now' ? 'Approved — the revision is now on the trucks' : act === 'approve' || act === 'change_approve' ? 'Schedule approved — everyone has been notified' : 'Signed', 'ok');
         if (act === 'approve' || act === 'change_approve') { try { await saveFinalCopy(poolId, date); } catch {} } }, reload);
   }));
   if (editable) bindScheduleEditing(content, date, reload);
   if ($('cf-panel')) renderConfirmPanel(s, pool, date, reload);
+}
+
+/* The manager decides how an approved revision reaches the trucks (Rommel 2026-11-25) */
+function schedApplyChoice(dl, done){
+  openOverlay(`<div class="scrim"></div><div class="modal" role="dialog" aria-modal="true"><h2>When should this revision reach the trucks?</h2>
+    <p class="muted" style="margin-top:0">This is a revision of the approved schedule for ${esc(dl)}. Until it is applied, dispatch and the drivers keep seeing the previous plan.</p>
+    <div class="row-btns" style="flex-direction:column;align-items:stretch">
+      <button class="btn ok" id="ac-now">🚚 Apply to dispatch and the trucks as soon as I approve</button>
+      <button class="btn" id="ac-sch">⏸ The scheduler applies it (e.g. once the truck is back at the plant) — they get a reminder</button>
+      <button class="btn" id="ac-x">Cancel</button></div></div>`);
+  $('ac-x').addEventListener('click', closeOverlay);
+  $('ac-now').addEventListener('click', () => { closeOverlay(); done('now'); });
+  $('ac-sch').addEventListener('click', () => { closeOverlay(); done('scheduler'); });
 }
 
 /* Final signed copy: the approved FO-LGTS-02 as one self-contained page (signatures embedded), stored once. */
@@ -13348,6 +13455,10 @@ function bindScheduleEditing(content, date, reload){
     const [si, di, dir] = b.dataset.mv.split('|').map(Number), drops = content[si].drops.slice();
     [drops[di], drops[di + dir]] = [drops[di + dir], drops[di]];
     b.disabled = true;
+    if (state.schedRev){ const R = state.schedRev, plan = { ...R.plan }, sec = content[si];
+      drops.forEach((d, k) => { plan[d.job_id] = { t: sec.truck_id, n: sec.trip_no || 1, s: k + 1 }; });
+      try { await withRetry('Saving the revision', () => sb.rpc('job_schedule_plan_save', { p_pool: R.poolId, p_date: R.date, p_plan: plan }), 1); reload(); } catch { b.disabled = false; }
+      return; }
     try { for (let k = 0; k < drops.length; k++) await withRetry('Saving drop order', () => sb.from('jobs').update({ drop_seq: k + 1 }).eq('id', drops[k].job_id)); reload(); } catch { b.disabled = false; }
   }));
   document.querySelectorAll('#overlay [data-agent-job]').forEach(sel => sel.addEventListener('change', async () => {
@@ -13387,8 +13498,8 @@ function openDocRefs(job, onDone){
   });
 }
 
-async function schedAction(poolId, date, action, { note = null, signature = null, passcode = null } = {}){
-  const { data } = await withRetry('Saving', () => sb.rpc('job_schedule_action', { p_pool: poolId, p_date: date, p_action: action, p_note: note, p_signature: signature, p_passcode: passcode }), 1);
+async function schedAction(poolId, date, action, { note = null, signature = null, passcode = null, apply = null } = {}){
+  const { data } = await withRetry('Saving', () => sb.rpc('job_schedule_action', { p_pool: poolId, p_date: date, p_action: action, p_note: note, p_signature: signature, p_passcode: passcode, ...(apply ? { p_apply: apply } : {}) }), 1);
   if (signature) state.me.signature_url = signature;
   return data;
 }
