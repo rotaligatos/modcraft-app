@@ -795,6 +795,11 @@ const PROFILES = {
           const old=/setTimeout\(function\(\)\{ try\{ _persistDrawingAnalysisForJo\(\); \}catch\(e\)\{\} \},1500\)/.test(s);
           return [waits, old, /prodState&&prodState\.result/.test(String(window._reserveJobOrder))];
         }, [true,false,true]);
+        check('QT-M00000241: a quotation reopened on Stage 2 draws its cost cards (summary, Lock & Send, Client Approve)', () => {
+          const r=String(window.restoreFullQuotationState), g=String(window.goStage);
+          const blk=r.slice(r.indexOf('if(qStage===2&&fqAreas)'), r.indexOf('_qTotalBar', r.indexOf('if(qStage===2&&fqAreas)')));
+          return [/renderFQCards\(\)/.test(blk), /fq-cards-wrap/.test(g)&&/renderFQCards\(\)/.test(g)];
+        }, [true,true]);
         check('Stage 2 BOM: typing keeps the same field (no redraw per letter) and a half-typed decimal', () => {
           const wrap = document.getElementById('fq-items-wrap'); if (!wrap) return 'no fq wrap';
           const sv = { mode: window.qFabMode, fq: window.fqAreas, q: window.qAreas };
