@@ -3102,6 +3102,14 @@ function simPickupRpc(fn, a){
       if (v.status !== 'done' || v.within !== false) return fail(`${v.label} did not go over the target.`); if (!PK_OVER[a.p_reason]) return fail('Pick a reason from the list.');
       if (a.p_reason === 'or_other' && !String(a.p_note || '').trim()) return fail('Say what the other reason is.');
       Object.assign(v, { over_reason: a.p_reason, over_note: String(a.p_note || '').trim() || null, over_reason_name: who, over_reason_at: now }); log(null, v.id, 'over_reason', a.p_reason); return ok({ ...v }); }
+    case 'pk_photos_set': { const v = V(a.p_visit); if (!v) return fail('Queue number not found.'); if (!can('logistics')) return fail('Only Logistics can change the loading photos.');
+      if (v.status !== 'done') return fail(`Photos can be changed once ${v.label} is released.`); const r = String(a.p_reason || '').trim(); if (!r) return fail('Say why the photos are being changed.');
+      const np = a.p_photos || [], old = v.photo_urls || []; if (np.length < 3 || np.length > 5) return fail('Keep 3 to 5 photos of the loaded items.');
+      if (np.some(x => !old.includes(x) && !String(x).startsWith('pickups/' + v.id + '/'))) return fail('A photo is not from this queue number.');
+      const rm = old.filter(x => !np.includes(x)), add = np.filter(x => !old.includes(x)).length; if (!rm.length && !add) return fail('Nothing was changed.');
+      v.photo_urls = np.slice();
+      SIM.pk_events.push({ id: newId(), visit_id: v.id, kind: 'photos_changed', notes: [rm.length ? rm.length + ' removed' : '', add ? add + ' added' : ''].filter(Boolean).join(' · ') + '. Reason: ' + r,
+        photos_removed: rm.length ? rm : null, actor_name: who, created_at: now }); return ok({ ...v }); }
     case 'pk_cancel_visit': { const v = V(a.p_visit); if (!v) return fail('Queue number not found.'); v.status = 'cancelled';
       SIM.pk_visit_orders.filter(x => x.visit_id === v.id).forEach(x => { const o = O(x.order_id); if (o && o.status === 'in_queue') o.status = o.lines.some(l => l.taken > 0) ? 'balance' : 'open'; });
       log(null, v.id, 'cancelled', a.p_reason); return ok(null); }
@@ -7348,11 +7356,12 @@ async function openPkVisit(id){
       return `<div class="card pad" style="margin:8px 0"><div class="chart-h" style="margin:0"><b>${esc(o.so_no)}</b> ${pkCutTag(o)}
         <label class="f" style="flex-direction:row;align-items:center;gap:6px">SI no. ${siEdit ? `<input class="i pk-si" data-o="${esc(o.id)}" value="${esc(vo?.si_no || '')}" style="width:130px" placeholder="SI number">` : `<b>${esc(vo?.si_no || '—')}</b>`}</label></div>
         ${pkLinesTable(o, false)}</div>`; }).join('')}
-    ${evs.length ? `<details style="margin-top:6px"><summary class="ft">History (${evs.length})</summary>${evs.map(e => `<div class="ft">${fmtTime(e.created_at)} · ${esc(e.kind.replace(/_/g, ' '))}${e.notes ? ' — ' + esc(e.notes) : ''} · ${esc(e.actor_name || '')}</div>`).join('')}</details>` : ''}
+    ${evs.length ? `<details style="margin-top:6px"><summary class="ft">History (${evs.length})</summary>${evs.map(e => `<div class="ft">${fmtTime(e.created_at)} · ${esc(e.kind.replace(/_/g, ' '))}${e.notes ? ' — ' + esc(e.notes) : ''} · ${esc(e.actor_name || '')}${(e.photos_removed || []).length ? ' · removed: ' + e.photos_removed.map((u, i) => `<a href="#" data-media="${esc(u)}">photo ${i + 1}</a>`).join(' ') : ''}</div>`).join('')}</details>` : ''}
     ${(v.photo_urls || []).length ? `<div class="thumbs" id="pkv-ph" style="margin-top:8px"></div>` : ''}
     ${undoBoxHtml('pickup', v.id, v._undo)}
     <div class="row-btns" style="justify-content:flex-end;flex-wrap:wrap">
       ${pkCan('warehouse','logistics') && v.status !== 'cancelled' ? '<button class="btn" id="pkv-concern">⚠ Report a concern</button>' : ''}
+      ${pkCan('logistics') && v.status === 'done' ? '<button class="btn" id="pkv-photos">🖼 Change photos</button>' : ''}
       ${pkCan('sales_support') && !['done','cancelled'].includes(v.status) ? '<button class="btn" id="pkv-cancel">Cancel number</button>' : ''}
       ${pkCan('sales_support') && !['done','cancelled'].includes(v.status) ? '<button class="btn" id="pkv-site">📍 Change location</button>' : ''}
       <button class="btn" data-close>Close</button>
@@ -7378,6 +7387,8 @@ async function openPkVisit(id){
   $('pkv-site')?.addEventListener('click', () => openPkSite(orders[0], { ...v, _sos: orders.map(x => x.so_no).join(', ') }));
   $('pkv-acceptready')?.addEventListener('click', e => { e.target.disabled = true; closeOverlay(); pkAcceptReady(v.id); }); stepBtn('pkv-ready', 'ready', 'Logistics has been told it’s ready');
   $('pkv-load')?.addEventListener('click', () => openPkLoad(v.id));
+  $('pkv-photos')?.addEventListener('click', () => openPkPhotos(v));
+  m.querySelectorAll('details [data-media]').forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); openMedia(a.dataset.media); }));
   undoAfter = () => { openPkVisit(v.id); if (/^pk-/.test(state.view)) loadPk(state.view); };
   $('pkv-concern')?.addEventListener('click', () => pkConcern(v, orders));
   $('pkv-cancel')?.addEventListener('click', async () => { const r = prompt('Why cancel this queue number? (e.g. client left, wrong SO)'); if (!r) return;
@@ -7440,6 +7451,48 @@ function openPkOverReason(v){
     if (!r) return toast('Pick the reason', 'error'); if (r === 'or_other' && !n) return toast('Say what the other reason is', 'error');
     e.target.disabled = true;
     try { await pkRpc('Saving the reason', 'pk_over_reason', { p_visit: v.id, p_reason: r, p_note: n || null }); toast('Reason saved', 'ok'); closeOverlay(); loadPk(state.view); } catch { e.target.disabled = false; } });
+}
+
+/* Logistics: fix a wrong loading photo after release — remove, replace or add (still 3 to 5).
+   A reason is required; the removed photos stay in storage and are listed on the history line. */
+async function openPkPhotos(v){
+  const cur = (v.photo_urls || []).map(path => ({ path, url: '' }));
+  openOverlay(`<div class="scrim" data-close></div><div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="pkp-h">
+    <h2 id="pkp-h" style="margin-top:0">Change photos — ${esc(v.label)} · ${esc(v.client_name || '')}</h2>
+    <div class="ft">Remove the wrong photo, or tap <b>Replace</b> to take its place with the right one. Keep 3 to 5 photos. The removed photo is kept in the history.</div>
+    <div class="thumbs" id="pkp-th" style="margin-top:8px"></div>
+    <label class="btn" style="margin-top:6px" id="pkp-add-l">📷 Add photo<input type="file" accept="image/*" capture="environment" multiple id="pkp-add" hidden></label>
+    <input type="file" accept="image/*" capture="environment" id="pkp-rep" hidden>${state.preview?.practice ? ' <button type="button" class="btn" id="pkp-sample" style="margin-top:6px">🖼 Use a sample photo (practice)</button>' : ''}
+    <label class="f" style="margin-top:8px">Why are the photos being changed? <span class="ft">(required)</span><input class="i" id="pkp-why" placeholder="e.g. wrong picture — it was another client's order"></label>
+    <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pkp-go">Save photos</button></div></div>`);
+  bindClose();
+  let repAt = -1;
+  const draw = () => { const n = cur.length;
+    $('pkp-th').innerHTML = cur.map((p, i) => `<span class="th" style="display:inline-flex;flex-direction:column;align-items:center;gap:4px">${p.url ? `<img src="${esc(p.url)}" alt="Photo ${i + 1}">` : '<span class="spin"></span>'}
+      ${p.blob ? '<span class="ft" style="color:var(--ok)">new</span>' : ''}<span style="display:flex;gap:6px"><button class="lnk" data-rp="${i}">Replace</button><button class="lnk" data-rm="${i}" style="color:var(--bad)" aria-label="Remove photo ${i + 1}">Remove</button></span></span>`).join('') || '<span class="ft">No photos left.</span>';
+    $('pkp-add-l').classList.toggle('hidden', n >= 5);
+    document.querySelectorAll('#pkp-th [data-rm]').forEach(b => b.addEventListener('click', () => { cur.splice(Number(b.dataset.rm), 1); draw(); }));
+    document.querySelectorAll('#pkp-th [data-rp]').forEach(b => b.addEventListener('click', () => { repAt = Number(b.dataset.rp); $('pkp-rep').click(); })); };
+  draw();
+  Promise.all(cur.map(p => signedUrl(p.path))).then(us => { us.forEach((u, i) => { if (cur[i] && !cur[i].blob) cur[i].url = u; }); if ($('pkp-th')) draw(); });
+  const take = async f => { const blob = await shrinkImage(f); return { blob, url: URL.createObjectURL(blob) }; };
+  $('pkp-rep').addEventListener('change', async e => { const f = e.target.files[0]; e.target.value = ''; if (!f || repAt < 0) return; cur[repAt] = await take(f); repAt = -1; draw(); });
+  $('pkp-add').addEventListener('change', async e => { for (const f of e.target.files){ if (cur.length >= 5){ toast('5 photos at most', 'error'); break; } cur.push(await take(f)); } e.target.value = ''; draw(); });
+  $('pkp-sample')?.addEventListener('click', async () => { const [b] = await prSamplePhotos(); if (!b) return;
+    const ph = { blob: b, url: URL.createObjectURL(b) }; if (repAt >= 0) { cur[repAt] = ph; repAt = -1; } else if (cur.length < 5) cur.push(ph); else cur[cur.length - 1] = ph; draw(); });
+  $('pkp-go').addEventListener('click', async e => {
+    if (cur.length < 3) return toast('Keep at least 3 photos of the loaded items', 'error');
+    const why = $('pkp-why').value.trim(); if (!why){ $('pkp-why').focus(); return toast('Say why the photos are being changed', 'error'); }
+    const before = (v.photo_urls || []).join('|');
+    if (cur.every(p => !p.blob) && cur.map(p => p.path).join('|') === before) return toast('Nothing was changed', 'error');
+    e.target.disabled = true; e.target.textContent = 'Uploading…';
+    try {
+      const paths = [];
+      for (let i = 0; i < cur.length; i++) paths.push(cur[i].blob ? await uploadMedia('pickups/' + v.id, cur[i].blob, `loaded-fix-${i + 1}.jpg`, 'image/jpeg') : cur[i].path);
+      await pkRpc('Saving the photos', 'pk_photos_set', { p_visit: v.id, p_photos: paths, p_reason: why });
+      toast('Photos updated', 'ok'); closeOverlay(); openPkVisit(v.id);
+    } catch { e.target.disabled = false; e.target.textContent = 'Save photos'; }
+  });
 }
 
 /* Logistics: what left, 3–5 photos */
@@ -14638,6 +14691,9 @@ function annGate(){
    show: who sees an item — 'office' (admin, manager, dispatcher, schedule signers), 'signers' (schedule signers, managers),
    'pickup' (anyone using Pick-up), 'drivers' (field). No show = everyone. */
 const WHATS_NEW = [
+  { id: '2026-11-27-pk-photos', date: '27 Nov 2026', items: [
+    { icon: '🖼', title: 'Fix a wrong loading photo on a released pick-up',
+      text: 'Uploaded the wrong picture? Open the released queue number › 🖼 Change photos. Tap Remove on the wrong photo or Replace to take the right one; you can also add one. Keep 3 to 5 photos and say why. The removed photo isn’t deleted — it stays in the number’s History. For Logistics.' }] },
   { id: '2026-11-27-method-change', date: '27 Nov 2026', items: [
     { icon: '🔁', title: 'Change a pick-up to delivery — or a delivery to pick-up',
       text: 'Client didn’t come and wants it delivered? Open the pick-up ticket › 🚚 Change to delivery: the delivery form is filled from the ticket, and the pick-up ticket is closed when the delivery is created. Client will pick up instead? Open the delivery › 📦 Change to pick-up: pick the date and site, and the pick-up ticket is made (counted as on time). A delivery that is already loaded or on the road can’t change; a delivery schedule being signed goes back for signing.' },
