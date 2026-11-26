@@ -1054,7 +1054,7 @@ body.practice::after{content:'';position:fixed;inset:0;border:4px solid #f59e0b;
   <main>
     <div class="fleet-head">
       <div><h2 style="margin:0">Delivery schedules</h2><div class="muted" style="font-size:14px">Prepared by dispatch → reviewed by the logistics supervisor → confirmed by the admin office → approved by the manager</div></div>
-      <div class="row-btns" style="margin:0"><button class="btn" id="sc-trips">🚚 Trips &amp; pre-departure checks</button><button class="btn" id="sc-daily">📋 Daily summary</button></div>
+      <div class="row-btns" style="margin:0"><button class="btn" id="sc-trips">🚚 Trips &amp; load checks</button><button class="btn" id="sc-daily">📋 Daily summary</button></div>
     </div>
     <div class="card toolbar" style="border:1px solid var(--line);margin-bottom:14px">
       <label class="f">Pool<select class="i" id="sc-pool"></select></label>
@@ -1747,7 +1747,7 @@ function simQuery(t){
     if (q.op === 'insert' || q.op === 'upsert'){
       out = q.rows.map(r => { const x = { id: r.id || newId(), created_at: now, created_by: state.me?.id, ...r };
         if (t === 'job_events'){ x.actor_name ??= state.me?.name || 'Driver'; x.actor_role ??= 'field'; }
-        const i = q.op === 'upsert' ? rows.findIndex(y => y.id === x.id || (t === 'job_truck_drivers' && y.day === x.day && y.staff_id === x.staff_id)) : -1;
+        const i = q.op === 'upsert' ? rows.findIndex(y => y.id === x.id || (t === 'job_truck_drivers' && y.day === x.day && y.staff_id === x.staff_id) || (t === 'truck_crews' && y.truck_id === x.truck_id && y.work_date === x.work_date)) : -1;
         if (i >= 0) rows[i] = { ...rows[i], ...x }; else rows.push(x); return x; });
     } else if (q.op === 'update'){ out = rows.filter(match); out.forEach(r => Object.assign(r, q.patch, t === 'jobs' ? { updated_at: now } : {})); }
     else if (q.op === 'delete'){ out = rows.filter(match); SIM[t] = rows.filter(r => !match(r)); }
@@ -1913,23 +1913,57 @@ function simRpc(fn, a){
     const p = a.p_patch || {}, now = new Date().toISOString();
     const tripJobs = SIM.jobs.filter(j => j.truck_id === a.p_truck && j.scheduled_date === a.p_date && (j.trip_no || 1) === a.p_trip);
     const fail = m => Promise.resolve({ data: null, error: { code: 'P0001', message: m } });
+    const company = state.ref.truckById?.[a.p_truck]?.fleet_type === 'company_owned';
     if (p.lock && !r.load_locked_at){
-      if (state.ref.truckById?.[a.p_truck]?.fleet_type === 'company_owned' && !(SIM.job_truck_checks || []).some(c => c.truck_id === a.p_truck && c.day === a.p_date))
-        return fail('Do the truck checklist first — it is needed before this truck’s first trip of the day');
-      const n = tripJobs.filter(j => OPEN_ST.includes(j.status) && !j.load_check?.all).length;
-      if (n) return fail(`Tick every item on every drop of this trip first (${n} drop(s) not fully ticked)`);
-      r.load_locked_at = now; tripJobs.filter(j => OPEN_ST.includes(j.status)).forEach(j => SIM.job_events.push({ id: 'sim-e-' + Math.random(), job_id: j.id, event_type: 'load_confirmed', notes: 'Pre-departure check confirmed — load locked', created_at: now, actor_name: state.me.name, actor_role: 'field' }));
+      if (!['admin','manager','dispatcher'].includes(state.me?.role)) return fail('Only the dispatcher (or a manager) checks and locks the load.');
+      const hasDrv = (SIM.job_truck_drivers || []).some(d => d.day === a.p_date && d.truck_id === a.p_truck)
+        || (!company && !!(SIM.truck_crews || []).find(c => c.truck_id === a.p_truck && c.work_date === a.p_date)?.driver);
+      if (!hasDrv) return fail('Assign the driver first.');
+      const sch = tripJobs.filter(j => j.status === 'scheduled');
+      if (sch.some(j => j.load_issue)) return fail('A drop is back with the warehouse for a loading problem — lock it once it is fixed and checked again.');
+      if (sch.some(j => !j.prepared_at)) return fail('A drop is not prepared yet by the warehouse.');
+      const n = sch.filter(j => !j.load_check?.all).length;
+      if (n) return fail(`Check every item on every drop first (${n} drop(s) not fully checked)`);
+      Object.assign(r, { load_locked_at: now, load_locked_by: state.me.id, load_locked_name: state.me.name });
+      sch.forEach(j => SIM.job_events.push({ id: 'sim-e-' + Math.random(), job_id: j.id, event_type: 'load_confirmed', notes: `Load checked and locked by ${state.me.name} (items, quantity and quality)`, created_at: now, actor_name: state.me.name, actor_role: state.me.role }));
+    }
+    if (p.received && !r.load_received_at){
+      if (!r.load_locked_at) return fail('The dispatcher has not checked and locked the load yet.');
+      if (company && !(SIM.job_truck_checks || []).some(c => c.truck_id === a.p_truck && c.day === a.p_date)) return fail('Do the truck checklist first — it is needed before this truck’s first trip of the day');
+      Object.assign(r, { load_received_at: now, load_received_by: state.me.id, load_received_name: state.me.name });
+      tripJobs.filter(j => j.status === 'scheduled').forEach(j => SIM.job_events.push({ id: 'sim-e-' + Math.random(), job_id: j.id, event_type: 'load_received', notes: `Load received by ${state.me.name}`, created_at: now, actor_name: state.me.name, actor_role: 'field' }));
     }
     if (p.back) r.back_at = r.back_at || now;
     if (p.departed) r.departed_at = r.departed_at || new Date().toISOString();
     if ('target' in p) r.target_time = p.target; if ('late_reason' in p) r.late_reason = p.late_reason;
     return Promise.resolve({ data: r, error: null });
   }
-  if (fn === 'job_truck_driver_set'){ state.preview.truck = a.p_truck || null; return Promise.resolve({ data: null, error: null }); }
+  if (fn === 'job_truck_driver_set'){
+    const L = SIM.job_truck_drivers || (SIM.job_truck_drivers = []);
+    SIM.job_truck_drivers = L.filter(d => !(d.day === a.p_day && d.staff_id === a.p_staff));
+    if (a.p_truck) SIM.job_truck_drivers.push({ id: newId(), day: a.p_day, staff_id: a.p_staff, truck_id: a.p_truck });
+    if (a.p_truck) state.preview.truck = a.p_truck; else if (a.p_staff === state.me?.id) state.preview.truck = null;
+    return Promise.resolve({ data: null, error: null });
+  }
+  if (fn === 'job_field_staff') return Promise.resolve({ data: [{ id: 'sim-drv-1', name: 'Ramon Cruz (practice driver)', email: 'driver1@practice' }, { id: 'sim-drv-2', name: 'Jun Reyes (practice driver)', email: 'driver2@practice' }], error: null });
+  if (fn === 'job_load_problem'){
+    const j = SIM.jobs.find(x => x.id === a.p_job), fl = m => Promise.resolve({ data: null, error: { code: 'P0001', message: m } });
+    if (!j || j.status !== 'scheduled') return fl('This delivery has already left.');
+    if (!(a.p_note || '').trim()) return fl('Say what is wrong.');
+    const r = (SIM.job_trips || []).find(x => x.trip_date === j.scheduled_date && x.truck_id === j.truck_id && x.trip_no === (j.trip_no || 1));
+    if (r?.load_locked_at) return fl('The load is locked — unlock it first.');
+    const PL = { short: 'Short quantity', damaged: 'Damaged / quality issue', wrong: 'Wrong item / color / size' };
+    const lines = a.p_lines || [], prep = { ...(j.prep || {}) }, lc = { ...(j.load_check || {}), lines: { ...(j.load_check?.lines || {}) }, all: false };
+    (lines.length ? lines : ['all']).forEach(k => { delete prep[k]; delete lc.lines[k]; }); delete prep.all;
+    Object.assign(j, { prep, load_check: lc, prepared_at: null, prepared_name: null, loaded_at: null,
+      load_issue: { kind: a.p_kind, label: PL[a.p_kind] || 'Problem at loading', note: a.p_note.trim(), lines, photo: a.p_photo || null, by: state.me.id, by_name: state.me.name, at: new Date().toISOString() } });
+    SIM.job_events.push({ id: 'sim-e-' + Math.random(), job_id: j.id, event_type: 'load_problem', notes: `Problem at loading — ${PL[a.p_kind] || ''}: ${a.p_note.trim()} (back to the warehouse)`, created_at: new Date().toISOString(), actor_name: state.me.name, actor_role: state.me.role });
+    return Promise.resolve({ data: { ok: true }, error: null });
+  }
   if (fn === 'job_trip_unlock'){
     const r = (SIM.job_trips || []).find(x => x.trip_date === a.p_date && x.truck_id === a.p_truck && x.trip_no === a.p_trip);
-    if (r){ r.load_locked_at = null; SIM.jobs.filter(j => j.truck_id === a.p_truck && j.scheduled_date === a.p_date && (j.trip_no || 1) === a.p_trip && OPEN_ST.includes(j.status)).forEach(j => {
-      j.load_check = null; j.loaded_at = null; SIM.job_events.push({ id: 'sim-e-' + Math.random(), job_id: j.id, event_type: 'load_unlocked', notes: `Pre-departure check unlocked (practice): ${a.p_reason} — the driver must tick and confirm again`, created_at: new Date().toISOString(), actor_name: 'Supervisor (practice)' }); }); }
+    if (r){ Object.assign(r, { load_locked_at: null, load_locked_name: null, load_received_at: null, load_received_name: null }); SIM.jobs.filter(j => j.truck_id === a.p_truck && j.scheduled_date === a.p_date && (j.trip_no || 1) === a.p_trip && OPEN_ST.includes(j.status)).forEach(j => {
+      j.load_check = null; j.loaded_at = null; SIM.job_events.push({ id: 'sim-e-' + Math.random(), job_id: j.id, event_type: 'load_unlocked', notes: `Load check unlocked (practice): ${a.p_reason} — the dispatcher must check and lock it again`, created_at: new Date().toISOString(), actor_name: 'Supervisor (practice)' }); }); }
     return Promise.resolve({ data: r || null, error: null });
   }
   if (fn === 'job_trip_notice_resolve'){
@@ -2180,7 +2214,7 @@ function simDeliveryRpc(fn, a){
         .map(j => ({ id: j.id, serial: j.quotation_serial, company: j.company, client: j.client_name, date: j.scheduled_date, status: j.status,
           truck: state.ref.truckById?.[j.truck_id]?.label || (j.courier_vehicle_id ? 'Grab / Lalamove' : null), truck_id: j.truck_id, trip_no: j.trip_no, drop_seq: j.drop_seq,
           board_pcs: j.board_pcs, items: j.items, doc_refs: j.doc_refs, notes: j.notes, prep: j.prep, prepared_at: j.prepared_at, prepared_name: j.prepared_name,
-          req_at: j.prep_req_at, req_name: j.prep_req_name, req_note: j.prep_req_note, req_lines: j.prep_req_lines, waived_at: j.prep_waived_at,
+          req_at: j.prep_req_at, req_name: j.prep_req_name, req_note: j.prep_req_note, req_lines: j.prep_req_lines, waived_at: j.prep_waived_at, load_issue: j.load_issue || null,
           sched: sched(simPoolOf(j), j.scheduled_date)?.status || null })));
     case 'job_prep_set': {
       const j = J(a.p_job); if (!j) return fail('Delivery not found.');
@@ -2189,7 +2223,9 @@ function simDeliveryRpc(fn, a){
       const v = a.p_all ? { ...Object.fromEntries(keys.map(k => [k, true])), all: true } : { ...(j.prep || {}), ...(a.p_vals || {}) };
       const done = keys.length ? keys.every(k => v[k]) : !!v.all;
       j.prep = v;
-      if (done && !j.prepared_at){ j.prepared_at = now; j.prepared_name = who; ev(j.id, 'prepared', 'Warehouse: all items prepared'); }
+      if (done && !j.prepared_at){ j.prepared_at = now; j.prepared_name = who;
+        if (j.load_issue){ j.load_issue = null; ev(j.id, 'load_fixed', 'Warehouse: loading problem fixed — prepared again; the dispatcher checks it again'); }
+        else ev(j.id, 'prepared', 'Warehouse: all items prepared'); }
       return ok({ prepared: done, prep: v });
     }
     case 'job_prep_request': {
@@ -2372,8 +2408,8 @@ const PS = {   // shared step sets
     { id: 'ss-check', el: '#nj', next: true, free: true,
       say: T('HATID filled in the form: client, contact, address, **Destination**, **Items** and the requested date. Check them, then tap **Next**.',
              'Na-fill-up na ng HATID ang form: client, contact, address, **Destination**, **Items** at requested date. I-check, tapos i-tap ang **Next**.'),
-      why: T('The destination decides the delivery area, the truck and the trip rate. The items are what the warehouse prepares and the driver checks at loading.',
-             'Ang destination ang nagsasabi ng area, truck at trip rate. Ang items ang ihahanda ng warehouse at iche-check ng driver bago umalis.') },
+      why: T('The destination decides the delivery area, the truck and the trip rate. The items are what the warehouse prepares and the dispatcher checks at loading.',
+             'Ang destination ang nagsasabi ng area, truck at trip rate. Ang items ang ihahanda ng warehouse at iche-check ng dispatcher bago umalis.') },
     { id: 'ss-send', el: '#nj [type=submit]', done: () => !!prJ(tk.so),
       say: T('Tap **Send to dispatch**.', 'I-tap ang **Send to dispatch**.') },
     { id: 'ss-list', el: () => [...document.querySelectorAll('#pkd-body tr[data-pkd]')].find(r => r.textContent.includes(tk.so)), next: true,
@@ -2413,30 +2449,46 @@ const PS = {   // shared step sets
     { id: 'wh-tick', el: () => document.querySelector(`[data-pp-row="${prJ(so)?.id}"]`), free: true, done: () => !!prJ(so)?.prepared_at,
       say: T('Get each item ready and tick it — or tap **✓ All prepared** when everything is ready.',
              'Ihanda ang bawat item at i-tick — o i-tap ang **✓ All prepared** kapag handa na lahat.'),
-      why: T('A drop that isn’t prepared can’t be loaded: the driver can’t confirm the pre-departure check until you finish. The client is told when the order is prepared.',
-             'Hindi maisasakay ang drop na hindi pa prepared: hindi makaka-confirm ang driver ng pre-departure check hangga’t hindi ka tapos. Sinasabihan ang client kapag prepared na ang order.') },
+      why: T('A drop that isn’t prepared can’t be loaded: the dispatcher can’t check and lock the load until you finish. The client is told when the order is prepared.',
+             'Hindi maisasakay ang drop na hindi pa prepared: hindi ma-check at ma-lock ng dispatcher ang load hangga’t hindi ka tapos. Sinasabihan ang client kapag prepared na ang order.') },
+  ],
+  dispLoad: so => [
+    { id: 'ld-open', as: 'disp', go: () => openTripsPanel(prJ(so)?.scheduled_date), el: () => document.querySelector(`[data-ldk="${prJ(so)?.truck_id}|${prJ(so)?.trip_no || 1}"]`),
+      done: () => !!$('ld-lock') || !!prTrip(prJ(so))?.load_locked_at,
+      say: T('You are the **Dispatcher** again. The truck is being loaded. In **Trips**, tap **📦 Check & lock load** for this trip.',
+             'Ikaw ulit ang **Dispatcher**. Nilo-load na ang truck. Sa **Trips**, i-tap ang **📦 Check & lock load** ng trip na ito.'),
+      why: T('You carry out the approved plan: who drives, what goes on the truck, and that nothing is short or damaged.',
+             'Ikaw ang nagsasagawa ng approved na plano: sino ang driver, ano ang isasakay, at walang kulang o sira.') },
+    { id: 'ld-drv', el: () => $('ld-drv')?.closest('.card'), free: true,
+      done: () => (SIM.job_truck_drivers || []).some(d => d.truck_id === prJ(so)?.truck_id && d.day === prJ(so)?.scheduled_date),
+      say: T('**A · Crew** — choose the **Driver**. Type the helper’s name too (optional).', '**A · Crew** — piliin ang **Driver**. I-type din ang pangalan ng helper (optional).'),
+      why: T('The driver gets this trip on their phone. The crew is set for the truck’s whole day.', 'Makikita ng driver ang trip na ito sa phone niya. Para sa buong araw ng truck ang crew.') },
+    { id: 'ld-chk', el: () => $('ld-allall') || document.querySelector(`[data-ld-drop="${prJ(so)?.id}"]`), free: true, done: () => !!prJ(so)?.load_check?.all,
+      say: T('**B · Check the load** — count each item on the truck: right item, right quantity, no damage. Tick each one — or **✓ Everything on this trip is correct**.',
+             '**B · Check the load** — bilangin ang bawat item sa truck: tamang item, tamang dami, walang sira. I-tick ang bawat isa — o **✓ Everything on this trip is correct**.'),
+      why: T('Found a problem? **⚠️ Problem** sends it back to the warehouse with the reason — the trip can’t lock until it is fixed.',
+             'May problema? Ibinabalik ng **⚠️ Problem** sa warehouse kasama ang dahilan — hindi mala-lock ang trip hangga’t hindi naaayos.') },
+    { id: 'ld-lock', el: '#ld-lock', done: () => !!prTrip(prJ(so))?.load_locked_at,
+      say: T('**C** — tap **🔒 Lock the load**.', '**C** — i-tap ang **🔒 Lock the load**.'),
+      why: T('Locking records what leaves the plant. Only the logistics supervisor can unlock it. The driver is told to receive the load.',
+             'Nire-record ng lock kung ano ang aalis sa planta. Logistics supervisor lang ang makaka-unlock. Sasabihan ang driver na tanggapin ang load.') },
   ],
   driver: so => [
-    { id: 'dr-truck', as: 'drv', el: '#mt-sel', done: () => !!prJ(so)?.truck_id && state.preview?.truck === prJ(so).truck_id && state.field?.mine === prJ(so).truck_id,
-      go: () => { state.preview.truck = null; },
-      say: () => T(`You are the **Driver**. First pick your truck for today: **${prTruckOf(prJ(so))?.label || ''}**.`, `Ikaw ang **Driver**. Piliin muna ang truck mo ngayon: **${prTruckOf(prJ(so))?.label || ''}**.`),
-      why: T('Picking the truck links your phone’s GPS to it, so the departure and arrival times are recorded by themselves.',
-             'Kapag pinili ang truck, nakakabit ang GPS ng phone mo dito, kaya kusang nare-record ang oras ng alis at dating.') },
-    { id: 'dr-pre', el: () => document.querySelector('[data-predep]:not([disabled])'), done: () => !!($('pd-tickall') || $('ck-save') || $('pd-confirm')),
-      say: T('Tap **Start pre-departure check**.', 'I-tap ang **Start pre-departure check**.') },
+    { id: 'dr-truck', as: 'drv', when: () => state.preview?.truck !== prJ(so)?.truck_id, el: '#mt-sel', done: () => !!prJ(so)?.truck_id && state.preview?.truck === prJ(so).truck_id && state.field?.mine === prJ(so).truck_id,
+      say: () => T(`You are the **Driver**. Pick your truck for today: **${prTruckOf(prJ(so))?.label || ''}**.`, `Ikaw ang **Driver**. Piliin ang truck mo ngayon: **${prTruckOf(prJ(so))?.label || ''}**.`),
+      why: T('Usually the dispatcher already set it. Picking the truck links your phone’s GPS to it.', 'Kadalasan naka-set na ito ng dispatcher. Kapag pinili ang truck, nakakabit ang GPS ng phone mo dito.') },
+    { id: 'dr-pre', as: 'drv', el: () => document.querySelector('[data-predep]'), done: () => !!($('pd-receive') || $('ck-save')),
+      say: T('You are the **Driver**. The dispatcher locked your load. Tap the button on your trip to open it.', 'Ikaw ang **Driver**. Na-lock na ng dispatcher ang load mo. I-tap ang button sa trip mo para buksan.') },
     { id: 'dr-ck', when: () => prTruckOf(prJ(so))?.fleet_type === 'company_owned' && !(SIM.job_truck_checks || []).length, el: () => $('ck-save')?.closest('.card'), free: true,
       done: () => (SIM.job_truck_checks || []).length > 0,
       say: T('Company truck: do the **truck checklist** (once a day). Mark each item OK / Not OK / NA — or **All OK** — then **Save truck checklist**.',
              'Company truck: gawin ang **truck checklist** (isang beses kada araw). Markahan ang bawat item ng OK / Not OK / NA — o **All OK** — tapos **Save truck checklist**.'),
       why: T('A “Not OK” doesn’t stop the trip — base and Engineering are alerted right away so it gets fixed.',
              'Hindi pipigilan ng “Not OK” ang biyahe — agad na aabisuhan ang base at Engineering para maayos.') },
-    { id: 'dr-tick', el: '#pd-tickall', done: () => !!prJ(so)?.load_check?.all,
-      say: T('Check each item is really on the truck and tick it — or tap **Tick everything on this trip**.',
-             'Siguraduhing nasa truck talaga ang bawat item at i-tick — o i-tap ang **Tick everything on this trip**.') },
-    { id: 'dr-lock', el: '#pd-confirm', done: () => !!prTrip(prJ(so))?.load_locked_at,
-      say: T('Tap **🔒 Confirm pre-departure**. The ticks lock — only the supervisor can unlock them.', 'I-tap ang **🔒 Confirm pre-departure**. Mala-lock ang mga tick — supervisor lang ang makaka-unlock.'),
-      why: T('Locking records what left the plant. The client gets “Loaded and on the way — you are our 1st stop”.',
-             'Nire-record ng lock kung ano ang umalis sa planta. Makakatanggap ang client ng “Loaded and on the way — 1st stop ka namin”.') },
+    { id: 'dr-recv', el: '#pd-receive', done: () => !!prTrip(prJ(so))?.load_received_at,
+      say: T('Count what is on the truck against the list. If it matches, tap **✅ Load received**.', 'Bilangin ang nasa truck ayon sa listahan. Kung tugma, i-tap ang **✅ Load received**.'),
+      why: T('Receiving the load makes you responsible for it from here. The client gets “Loaded and on the way”.',
+             'Sa pagtanggap ng load, ikaw na ang responsable dito. Makakatanggap ang client ng “Loaded and on the way”.') },
     { id: 'dr-depart', el: () => document.querySelector('[data-depart-trip]'), allow: '.ld-ask', done: () => ['dispatched','in_progress','completed'].includes(prJ(so)?.status),
       say: T('Tap **🚚 Depart**. (If HATID asks why the trip is late — practice uses today’s clock — pick a reason and tap Depart.)',
              'I-tap ang **🚚 Depart**. (Kung itanong ng HATID kung bakit late — totoong oras ang gamit ng practice — pumili ng dahilan at i-tap ang Depart.)'),
@@ -2460,7 +2512,7 @@ const PR_SC = [
     title: T('Full delivery, start to finish', 'Buong delivery, simula hanggang dulo'),
     desc: T('Play every job in turn: Sales Support → Dispatch → Warehouse → Driver.', 'Gampanan ang bawat trabaho: Sales Support → Dispatch → Warehouse → Driver.'),
     seed: () => { PR.tk = { so: 'S90001', client: 'Sample: Dela Cruz Cabinets', items: prItems(['board','edge','hinge']) }; },
-    steps: () => [...PS.ssPaste(PR.tk), ...PS.dispPlan('S90001'), PS.fastApprove(), ...PS.whPrep('S90001'), ...PS.driver('S90001'), PS.deliverAll('S90001'),
+    steps: () => [...PS.ssPaste(PR.tk), ...PS.dispPlan('S90001'), PS.fastApprove(), ...PS.whPrep('S90001'), ...PS.dispLoad('S90001'), ...PS.driver('S90001'), PS.deliverAll('S90001'),
       { id: 'ss-done', as: 'ss', go: () => { $('pkd-show').value = 'done'; loadPkDtix(); }, el: () => [...document.querySelectorAll('#pkd-body tr[data-pkd]')].find(r => r.textContent.includes('S90001')), next: true,
         say: T('Back as **Sales Support**: the ticket now shows **Delivered**. That’s the whole delivery! 🎉', 'Balik bilang **Sales Support**: **Delivered** na ang ticket. Iyan ang buong delivery! 🎉') }] },
   { id: 'd-ss-ticket', mode: 'delivery', who: ['ss'], mins: 3,
@@ -2547,15 +2599,20 @@ const PR_SC = [
         say: T('Now the second SO: open it and tick the items one by one this time.', 'Ngayon ang pangalawang SO: buksan at i-tick isa-isa ang mga item.') },
       { id: 'wh-done', next: true, say: T('All prepared. Prepared deliveries show a green **Prepared** tag on Dispatch, the schedule and the driver’s trip.', 'Prepared na lahat. May berdeng **Prepared** tag ang mga ito sa Dispatch, schedule at sa trip ng driver.') }] },
   { id: 'd-drv-day', mode: 'delivery', who: ['drv'], mins: 6,
-    title: T('A driver’s delivery', 'Delivery ng driver'), desc: T('Pre-departure check, depart, arrive, deliver with photos.', 'Pre-departure check, alis, dating, i-deliver na may photos.'),
-    seed: () => { const c = PR.ctx; SIM.jobs.push(prPrepAll(prOnTruck(prJob({ so: 'S90051', client: 'Sample: Acme Builders' }), c.tA, 1)), prPrepAll(prOnTruck(prJob({ so: 'S90052', client: 'Sample: Cruz Cabinetry', dest: c.dest2, items: prItems(['edge','handle']) }), c.tA, 2))); },
+    title: T('A driver’s delivery', 'Delivery ng driver'), desc: T('Receive the load, depart, arrive, deliver with photos.', 'Tanggapin ang load, alis, dating, i-deliver na may photos.'),
+    seed: () => { const c = PR.ctx; SIM.jobs.push(prPrepAll(prOnTruck(prJob({ so: 'S90051', client: 'Sample: Acme Builders' }), c.tA, 1)), prPrepAll(prOnTruck(prJob({ so: 'S90052', client: 'Sample: Cruz Cabinetry', dest: c.dest2, items: prItems(['edge','handle']) }), c.tA, 2)));
+      // the dispatcher already assigned the crew, checked the load and locked it (2026-11-26)
+      SIM.jobs.filter(j => ['S90051','S90052'].includes(j.quotation_serial)).forEach(j => { j.load_check = { all: true, lines: Object.fromEntries(outcomeLines(j).map(x => [x.k, true])), by_name: 'Dispatcher (practice)' }; });
+      SIM.job_truck_drivers.push({ id: newId(), day: c.today, staff_id: 'practice-drv', truck_id: c.tA.id });
+      SIM.job_trips.push({ id: newId(), trip_date: c.today, truck_id: c.tA.id, trip_no: 1, load_locked_at: new Date(Date.now() - 600e3).toISOString(), load_locked_name: 'Dispatcher (practice)', tracked: false });
+      state.preview.truck = c.tA.id; },
     steps: () => [...PS.driver('S90051'), PS.deliverAll('S90051'),
       { id: 'dr-next', next: true, el: () => document.querySelector(`.fjob[data-id="${prJ('S90052')?.id}"]`),
         say: T('Your next drop is marked **Next**. Do the same there. After the last drop, base is told you’re returning.', 'May **Next** na tag ang susunod mong drop. Ganoon din ang gagawin. Pagkatapos ng huling drop, sasabihan ang base na pabalik ka na.') }] },
   { id: 'd-drv-problem', mode: 'delivery', who: ['drv'], mins: 4,
     title: T('Problem at the site — partial delivery', 'Problema sa site — partial delivery'), desc: T('Some boards are damaged; they ride back.', 'May sirang boards; ibabalik sa truck.'),
     seed: () => { const c = PR.ctx, j = prPrepAll(prOnTruck(prJob({ so: 'S90061', client: 'Sample: Lopez Interiors' }), c.tA, 1)); j.status = 'in_progress'; j.load_check = { all: true, lines: {} };
-      SIM.jobs.push(j); SIM.job_trips.push({ id: newId(), trip_date: c.today, truck_id: c.tA.id, trip_no: 1, load_locked_at: new Date(Date.now() - 3600e3).toISOString(), departed_at: new Date(Date.now() - 3000e3).toISOString(), tracked: false });
+      SIM.jobs.push(j); SIM.job_trips.push({ id: newId(), trip_date: c.today, truck_id: c.tA.id, trip_no: 1, load_locked_at: new Date(Date.now() - 3600e3).toISOString(), load_locked_name: 'Dispatcher (practice)', load_received_at: new Date(Date.now() - 3300e3).toISOString(), departed_at: new Date(Date.now() - 3000e3).toISOString(), tracked: false });
       SIM.job_truck_checks.push({ id: newId(), day: c.today, truck_id: c.tA.id, trip_no: 1, results: [], fails: 0, actor_name: 'Driver (practice)', created_at: new Date(Date.now() - 3700e3).toISOString() });
       state.preview.truck = c.tA.id; },
     steps: () => [
@@ -5460,7 +5517,7 @@ async function openFieldJob(id){
       <div class="card" style="padding:14px">
         <div class="f" style="margin-bottom:4px;font-size:15px;color:var(--ink);font-weight:600">What's on the truck for this stop</div>
         <div style="font-size:15px">${contentsHtml(job)}</div>
-        ${trip ? `<div class="ft" style="margin-top:6px">${ts.locked ? '🔒 Checked at pre-departure — locked' : job.load_check?.all ? '✓ Ticked — confirm the pre-departure check' : '☐ Not checked yet — do it in the pre-departure check'}${trip ? ` · Drop ${trip.jobs.findIndex(x => x.id === job.id) + 1} of ${trip.jobs.length} on ${esc(trip.truck.label || 'the truck')}, trip ${trip.trip_no}` : ''}</div>`
+        ${trip ? `<div class="ft" style="margin-top:6px">${ts.received ? '🔒 Load locked by the dispatcher · received' : ts.locked ? '🔒 Load locked by the dispatcher — receive it in Pre-departure' : '⏳ Waiting for the dispatcher to check and lock the load'}${trip ? ` · Drop ${trip.jobs.findIndex(x => x.id === job.id) + 1} of ${trip.jobs.length} on ${esc(trip.truck.label || 'the truck')}, trip ${trip.trip_no}` : ''}</div>`
           : `<label class="loadck"><input type="checkbox" id="fx-loaded" ${job.loaded_at ? 'checked' : ''} ${closed ? 'disabled' : ''}> Loaded on truck</label>`}
       </div>
       <div class="row-btns" style="margin:0">
@@ -5589,8 +5646,9 @@ async function openFieldJob(id){
 }
 
 /* ===== Driver workflow (agreed with Rommel 2026-09-29) =====
-   Before leaving: truck checklist (company-owned trucks, once per truck per day) + content check per drop → confirm → LOCKED
-   (only the logistics supervisor — Review step — or an admin can unlock, with a reason; then the driver re-ticks and confirms).
+   Before leaving (changed 2026-11-26): the DISPATCHER assigns the crew, checks every line (item, quantity, quality) and LOCKS the load
+   (a problem sends the drop back to the warehouse; only the logistics supervisor — Review step — or an admin can unlock, with a reason).
+   The driver does the truck checklist (company-owned trucks, once per truck per day), taps "Load received", then departs.
    On the road: drops in order ("Drop 1 of 3"); base re-orders → driver taps "OK, got it" / "With concern";
    driver wants another drop first → asks base, base approves or declines.
    At each client: delivered quantity per line, a reason for anything not delivered, 3–5 photos (saved to Google Drive by the server).
@@ -5633,7 +5691,7 @@ function tripState(t){
   const departed = !!(t.row?.departed_at || t.row?.gps_left_at) || t.jobs.some(j => ['dispatched','in_progress','issue','completed'].includes(j.status));
   const company = t.truck.fleet_type === 'company_owned';
   return { open, departed, done: t.jobs.length > 0 && !open.length, company, needCheck: company && !t.check,
-    ticked: t.jobs.filter(j => !OPEN_ST.includes(j.status) || j.load_check?.all).length, locked: !!t.row?.load_locked_at, next: open[0] || null,
+    ticked: t.jobs.filter(j => !OPEN_ST.includes(j.status) || j.load_check?.all).length, locked: !!t.row?.load_locked_at, received: !!t.row?.load_received_at, next: open[0] || null,
     tracked: !!(t.row?.tracked || t.row?.gps_left_at) };
 }
 const tripOf = job => state.field?.date === job.scheduled_date ? fieldTrips(state.field).find(t => t.truck_id === job.truck_id && t.trip_no === (job.trip_no || 1)) : null;
@@ -5645,14 +5703,15 @@ function tripCardHtml(t){
   const req = t.notices.find(n => n.kind === 'order_request' && (n.status === 'pending' || Date.now() - new Date(n.resolved_at || 0) < 2 * 3600e3));
   let pre = '';
   if (!s.departed && s.open.length){
+    const ck = !s.company || !!t.check, ready = s.locked && ck;
     pre = `<ol class="pd-steps">
-        ${s.company ? `<li class="${t.check ? 'ok' : ''}"><span>${t.check ? '✓' : '1'}</span> Truck checklist${t.check ? ` — ${t.check.fails ? `<b style="color:var(--bad)">${t.check.fails} not OK</b> (Engineering told)` : 'all OK'}` : ' <span class="ft">(first trip of the day)</span>'}</li>` : ''}
-        <li class="${s.ticked === t.jobs.length ? 'ok' : ''}"><span>${s.ticked === t.jobs.length ? '✓' : s.company ? '2' : '1'}</span> Load checked — ${s.ticked} of ${t.jobs.length} SO${t.jobs.length > 1 ? 's' : ''}</li>
-        <li class="${s.locked ? 'ok' : ''}"><span>${s.locked ? '🔒' : s.company ? '3' : '2'}</span> ${s.locked ? `Confirmed ${hm12(t.row.load_locked_at)} — locked` : 'Confirm — then it locks'}</li></ol>
-      ${s.locked && (s.tracked || (state.gpsLive && state.field?.mine === t.truck_id)) ? '<div class="ft" style="margin-top:6px">📡 GPS starts the trip by itself when the truck leaves the base. No signal? Tap Depart.</div>' : ''}<div class="row-btns" style="margin:8px 0 0">${s.locked ? `<button class="btn ${s.tracked || (state.gpsLive && state.field?.mine === t.truck_id) ? '' : 'primary '}big" data-depart-trip="${esc(t.key)}">🚚 Depart — start trip ${t.trip_no}</button><button class="btn" data-predep="${esc(t.key)}">View check</button>`
-        : `<button class="btn primary big" data-predep="${esc(t.key)}" ${state.field?.needTruck ? 'disabled title="Choose your truck first"' : ''}>${s.ticked || t.check ? 'Continue' : 'Start'} pre-departure check</button>`}</div>
-      ${!s.locked && state.field?.needTruck ? '<div class="ft" style="margin-top:6px">☝️ Choose your truck in “My truck today” first — then the pre-departure check opens.</div>' : ''}`;
-  } else if (s.locked) pre = `<div class="ft" style="margin-top:4px">🔒 Pre-departure confirmed ${hm12(t.row.load_locked_at)} · <button class="lnk" data-predep="${esc(t.key)}">view</button></div>`;
+        <li class="${s.locked ? 'ok' : ''}"><span>${s.locked ? '🔒' : '1'}</span> ${s.locked ? `Load checked &amp; locked by ${esc(t.row.load_locked_name || 'the dispatcher')} ${hm12(t.row.load_locked_at)}` : 'Dispatcher checks and locks the load <span class="ft">(items, quantity, quality)</span>'}</li>
+        ${s.company ? `<li class="${t.check ? 'ok' : ''}"><span>${t.check ? '✓' : '2'}</span> Truck checklist${t.check ? ` — ${t.check.fails ? `<b style="color:var(--bad)">${t.check.fails} not OK</b> (Engineering told)` : 'all OK'}` : ' <span class="ft">(first trip of the day)</span>'}</li>` : ''}
+        <li class="${s.received ? 'ok' : ''}"><span>${s.received ? '✓' : s.company ? '3' : '2'}</span> ${s.received ? `Load received ${hm12(t.row.load_received_at)}` : 'You receive the load'}</li></ol>
+      ${s.received && (s.tracked || (state.gpsLive && state.field?.mine === t.truck_id)) ? '<div class="ft" style="margin-top:6px">📡 GPS starts the trip by itself when the truck leaves the base. No signal? Tap Depart.</div>' : ''}<div class="row-btns" style="margin:8px 0 0">${s.received ? `<button class="btn ${s.tracked || (state.gpsLive && state.field?.mine === t.truck_id) ? '' : 'primary '}big" data-depart-trip="${esc(t.key)}">🚚 Depart — start trip ${t.trip_no}</button><button class="btn" data-predep="${esc(t.key)}">View load</button>`
+        : `<button class="btn ${ready || !ck ? 'primary ' : ''}big" data-predep="${esc(t.key)}">${!ck ? 'Truck checklist' : ready ? '✅ Receive the load' : 'View the load'}</button>`}</div>
+      ${!s.locked ? '<div class="ft" style="margin-top:6px">⏳ Waiting for the dispatcher to check and lock the load. You’ll be notified.</div>' : ''}`;
+  } else if (s.locked) pre = `<div class="ft" style="margin-top:4px">🔒 Load locked ${hm12(t.row.load_locked_at)}${s.received ? ` · received ${hm12(t.row.load_received_at)}` : ''} · <button class="lnk" data-predep="${esc(t.key)}">view</button></div>`;
   const banners = adr.map(n => `<div class="warnbox nt-re"><b>📍 New delivery address — ${esc(t.jobs.find(j => j.id === n.job_id)?.client_name || 'one of your drops')}</b>
       <div style="margin-top:4px">${esc(n.note || '')}</div>${n.reason ? `<div class="ft">Reason: ${esc(n.reason)}</div>` : ''}${n.note ? `<div class="ft">${mapsLink(n.note)}</div>` : ''}
       <div class="row-btns" style="margin-top:8px"><button class="btn ok" data-ack-ok="${esc(n.id)}" data-ack-kind="address">👍 OK, got it</button><button class="btn" data-ack-cn="${esc(n.id)}" data-ack-kind="address">⚠️ With concern</button></div></div>`).join('')
@@ -5661,8 +5720,8 @@ function tripCardHtml(t){
     + (req ? `<div class="${req.status === 'declined' ? 'warnbox' : 'infobox'}">${req.status === 'pending' ? `⏳ Waiting for base to approve going to <b>${esc(t.jobs.find(j => j.id === req.job_id)?.client_name || 'that drop')}</b> first (${esc(ORDER_REASON[req.reason] || req.reason)})`
         : req.status === 'approved' ? `✅ Base approved — <b>${esc(t.jobs.find(j => j.id === req.job_id)?.client_name || 'that drop')}</b> is now next${req.response_note ? ': ' + esc(req.response_note) : ''}`
         : `⛔ Base declined — keep the order${req.response_note ? ': ' + esc(req.response_note) : ''}`}</div>` : '');
-  const gated = !s.departed && !s.locked && s.open.length;   // drops open only after the pre-departure check is confirmed
-  const drops = (gated ? '<div class="ft" style="margin:6px 2px">🔒 The drops open after you finish and confirm the pre-departure check.</div>' : '')
+  const gated = !s.departed && !s.received && s.open.length;   // drops open only after the driver receives the locked load
+  const drops = (gated ? '<div class="ft" style="margin:6px 2px">🔒 The drops open after the dispatcher locks the load and you receive it.</div>' : '')
     + t.jobs.map((j, i) => `<button class="card fjob drop ${s.departed && j === s.next ? 'next' : ''}${gated ? ' gated' : ''}" data-id="${esc(j.id)}"${gated ? ' disabled aria-disabled="true"' : ''}>
       <div class="l1"><span class="dno">${sn.nums[i]}</span><span class="client">${esc(j.client_name || j.quotation_serial)}</span>${s.departed && j === s.next ? '<span class="tag info">Next</span>' : ''}${pill(j.status)}${prepMark(j)}</div>
       <div class="addr">${esc(j.address || 'No address on file')}</div>
@@ -5700,7 +5759,8 @@ async function ackReorder(id, status, note, kind){
 
 async function departTrip(t, btn){
   const s = tripState(t);
-  if (!s.locked) return toast('Finish and confirm the pre-departure check first', 'error');
+  if (!s.locked) return toast('The dispatcher hasn’t checked and locked the load yet', 'error');
+  if (!s.received) return toast('Receive the load first (Pre-departure → Load received)', 'error');
   const stops = t.jobs.filter(j => j.status === 'scheduled');
   if (!stops.length) return;
   const truckTrips = [...new Set(state.field.jobs.filter(j => j.truck_id === t.truck_id).map(j => j.trip_no || 1))].sort((a, b) => a - b);
@@ -5725,21 +5785,24 @@ async function departTrip(t, btn){
   const box = btn.parentElement.nextElementSibling; box.querySelector('[data-ld-go]').addEventListener('click', () => { const r = box.querySelector('[data-ld]').value; box.remove(); go(r); });
 }
 
-/* ----- Pre-departure sheet: truck checklist + content check + confirm (lock) ----- */
+/* ----- Driver: pre-departure — truck checklist, see what the dispatcher checked, receive the load (Rommel 2026-11-26) -----
+   The dispatcher assigns the crew, checks every line (item, quantity, quality) and locks the load (openLoadSheet).
+   The driver does the truck checklist (company trucks), then taps "Load received" — only then can the trip start. */
 const unprepared = j => j.status === 'scheduled' && !j.prepared_at;
-function prepMsg(ok, needCheck, waitPrep){
-  return ok ? 'Everything is checked. Once you confirm, the ticks lock — only the supervisor can unlock them.'
-    : waitPrep ? `${waitPrep === 1 ? 'A drop is' : waitPrep + ' drops are'} not prepared yet by the warehouse — you can’t confirm until the warehouse finishes (or the manager lets it go without the missing items).`
-    : needCheck ? 'Do the truck checklist first, and tick every item.' : 'Tick every item on every drop first.';
+const LOAD_PROBLEM = { short: 'Short quantity', damaged: 'Damaged / quality issue', wrong: 'Wrong item / color / size' };
+function loadIssueBox(j){
+  const x = j.load_issue; if (!x || j.status !== 'scheduled') return '';
+  return `<div class="warnbox" style="margin:6px 0 0">↩️ <b>Back with the warehouse</b> — ${esc(x.label || LOAD_PROBLEM[x.kind] || 'problem at loading')}: ${esc(x.note || '')}
+    <div class="ft">Found by ${esc(x.by_name || 'dispatch')} at ${hm12(x.at)}. The warehouse prepares it again; then check it again.</div></div>`;
 }
 async function openPredepart(key){
   const t = fieldTrips(state.field).find(x => x.key === key); if (!t) return;
-  const s = tripState(t), ro = s.locked || s.departed;
-  if (!ro && state.field?.needTruck) return toast('Choose your truck in “My truck today” first', 'error');
+  const s = tripState(t);
   const ckState = state.ckDraft?.key === key ? state.ckDraft : (state.ckDraft = { key, v: {}, note: {}, notes: '' });
+  const ckDone = !s.company || !!t.check;
   const checkHtml = !s.company ? '' : t.check ? `<div class="card" style="padding:14px"><div class="f" style="font-weight:600;color:var(--ink)">1 · Truck checklist ✓</div>
-      <div class="ft">Done by ${esc(t.check.actor_name || 'driver')} at ${hm12(t.check.created_at)} — ${t.check.fails ? `<b style="color:var(--bad)">${t.check.fails} not OK</b>: ${esc((t.check.results || []).filter(x => x.v === 'bad').map(x => x.label + (x.note ? ' (' + x.note + ')' : '')).join(', '))}. Base and Engineering were told.` : 'all OK.'} Needed once a day per truck.</div></div>`
-    : `<div class="card" style="padding:14px"><div class="f" style="font-weight:600;color:var(--ink)">1 · Truck checklist <span class="ft">— ${esc(t.truck.label || '')}, once a day before its first trip</span></div>
+      <div class="ft">Done by ${esc(t.check.actor_name || 'driver')} at ${hm12(t.check.created_at)} — ${t.check.fails ? `<b style="color:var(--bad)">${t.check.fails} not OK</b>: ${esc((t.check.results || []).filter(x => x.v === 'bad').map(x => x.label + (x.note ? ' (' + x.note + ')' : '')).join(', '))}. Base and Engineering were alerted.` : 'all OK.'}</div></div>`
+    : s.departed ? '' : `<div class="card" style="padding:14px"><div class="f" style="font-weight:600;color:var(--ink)">1 · Truck checklist <span class="ft">— ${esc(t.truck.label || '')}, once a day before its first trip</span></div>
       <div class="ck-list">${TRUCK_CHECK.map(([k, l]) => `<div class="ck-row"><span>${esc(l)}</span><div class="seg" role="group" aria-label="${esc(l)}">${[['ok','OK'],['bad','Not OK'],['na','NA']].map(([v, lb]) =>
         `<button type="button" data-ck="${k}" data-v="${v}" class="${ckState.v[k] === v ? 'on ' + v : ''}">${lb}</button>`).join('')}</div>
         <input class="i ck-note ${ckState.v[k] === 'bad' ? '' : 'hidden'}" data-ckn="${k}" placeholder="What’s wrong?" value="${esc(ckState.note[k] || '')}"></div>`).join('')}</div>
@@ -5747,36 +5810,33 @@ async function openPredepart(key){
       <label class="f" style="margin-top:8px">Notes (optional)<input class="i" id="ck-notes" value="${esc(ckState.notes)}"></label>
       <div class="ft" style="margin-top:6px">A “Not OK” doesn’t stop the trip — base and Engineering are alerted right away. The result goes to the Engineering Chat space.</div>
       <button class="btn primary" id="ck-save" style="margin-top:10px">Save truck checklist</button></div>`;
-  const loadSn = stopNumbers(t.jobs);
+  const sn = stopNumbers(t.jobs), n2 = s.company ? '2' : '1', n3 = s.company ? '3' : '2';
   const loadHtml = t.jobs.map((j, i) => {
-    const lines = outcomeLines(j), got = j.load_check?.lines || {}, closed = !OPEN_ST.includes(j.status), np = !ro && !closed && unprepared(j);
-    return `<div class="card${np ? ' gated' : ''}" style="padding:14px"><div class="l1" style="display:flex;gap:8px;align-items:center;justify-content:space-between">
-        <div><b>Drop ${loadSn.nums[i]} — ${esc(j.client_name || j.quotation_serial)}</b><div class="ft mono">${esc(j.quotation_serial)}</div></div>
-        ${!ro && !closed && !np && lines.length ? `<button class="btn" data-tick-all="${esc(j.id)}">Tick all</button>` : ''}</div>
-      ${np ? `<div class="warnbox" style="margin:6px 0 0">⏳ <b>Not prepared yet by the warehouse</b> — don’t load this drop yet.${j.prep_req_at ? ' Base asked to let it go without the missing items; waiting for the manager’s decision.' : ' Tell the base if you are waiting on it.'}</div>` : ''}
-      ${lines.length ? `<div class="ld-lines">${lines.map(x => `<label class="loadck"><input type="checkbox" data-lk="${esc(j.id)}" data-k="${x.k}" ${got[x.k] || closed ? 'checked' : ''} ${ro || closed || np ? 'disabled' : ''}> <span><b>${x.qty}</b> × ${esc(x.label)}</span></label>`).join('')}</div>`
-        : `<label class="loadck"><input type="checkbox" data-lk="${esc(j.id)}" data-k="all" ${got.all || j.load_check?.all || closed ? 'checked' : ''} ${ro || closed || np ? 'disabled' : ''}> Everything for this drop is on the truck <span class="ft">(no item list — see notes)</span></label>`}
+    const lines = outcomeLines(j), got = j.load_check?.lines || {}, closed = !OPEN_ST.includes(j.status), ok = k => closed || s.locked || got[k] || j.load_check?.all;
+    return `<div class="card" style="padding:14px"><div><b>Drop ${sn.nums[i]} — ${esc(j.client_name || j.quotation_serial)}</b><div class="ft mono">${esc(j.quotation_serial)}</div></div>
+      ${loadIssueBox(j)}
+      ${lines.length ? `<div class="ld-lines">${lines.map(x => `<div class="loadck"><span aria-hidden="true">${ok(x.k) ? '✅' : '⬜'}</span> <span><b>${x.qty}</b> × ${esc(x.label)}</span></div>`).join('')}</div>`
+        : `<div class="loadck"><span aria-hidden="true">${ok('all') ? '✅' : '⬜'}</span> Everything for this drop <span class="ft">(no item list — see notes)</span></div>`}
       ${j.notes ? `<div class="ft" style="margin-top:4px;white-space:pre-wrap">📝 ${esc(j.notes)}</div>` : ''}
-      ${!closed ? `<button class="lnk" data-lc="${esc(j.id)}" style="margin-top:6px">📦 Report a load concern (short, damaged, wrong item)</button>` : ''}</div>`;
+      ${!closed && !s.departed ? `<button class="lnk" data-lc="${esc(j.id)}" style="margin-top:6px">📦 Something wrong with the load? Tell base (short, damaged, wrong item)</button>` : ''}</div>`;
   }).join('');
-  const waitPrep = t.jobs.filter(unprepared).length;
-  const ready = !s.needCheck && s.ticked === t.jobs.length && !waitPrep;
+  const recvHtml = s.departed ? '' : s.received ? `<div class="okbox">✅ You received the load at ${hm12(t.row.load_received_at)}. You can depart.</div>`
+    : `<div class="card" style="padding:14px"><div class="f" style="font-weight:600;color:var(--ink)">${n3} · Receive the load</div>
+      <div class="ft">${!s.locked ? 'Wait for the dispatcher to check and lock the load.' : !ckDone ? 'Do the truck checklist first.' : 'Count what is on the truck against the list above. If it matches, tap Load received. If not, tell base before you leave.'}</div>
+      <button class="btn primary big" id="pd-receive" style="margin-top:10px" ${s.locked && ckDone ? '' : 'disabled'}>✅ Load received</button></div>`;
   openOverlay(`<div class="sheet" role="dialog" aria-modal="true">
     <div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>Pre-departure — ${esc(t.truck.label || 'Truck')} · Trip ${t.trip_no}</h2></div>
     <div class="sheet-b">
-      ${s.locked ? `<div class="okbox">🔒 Confirmed ${hm12(t.row.load_locked_at)} — locked. If something must change, ask the logistics supervisor to unlock it.
-        ${canUnlockLoad() ? `<div style="margin-top:8px"><button class="btn" id="pd-unlock">🔓 Unlock${state.preview ? ' (practice — as supervisor)' : ''}</button></div>` : ''}</div>` : ''}
       ${checkHtml}
-      <div class="f" style="font-weight:600;color:var(--ink);margin:4px 2px">${s.company ? '2' : '1'} · What’s on the truck <span class="ft">— tick each item as you check it on the truck</span></div>
-      ${!ro ? '<div class="row-btns" style="margin:0"><button class="btn" id="pd-tickall">Tick everything on this trip</button></div>' : ''}
+      <div class="f" style="font-weight:600;color:var(--ink);margin:4px 2px">${n2} · The load — checked by the dispatcher</div>
+      ${s.locked ? `<div class="okbox">🔒 Checked and locked by <b>${esc(t.row.load_locked_name || 'the dispatcher')}</b> at ${hm12(t.row.load_locked_at)} — items, quantity and quality.
+        ${canUnlockLoad() && !s.departed ? `<div style="margin-top:8px"><button class="btn" id="pd-unlock">🔓 Unlock${state.preview ? ' (practice — as supervisor)' : ''}</button></div>` : ''}</div>`
+        : s.departed ? '' : '<div class="infobox">⏳ The dispatcher hasn’t locked the load yet. You’ll be notified when it’s ready.</div>'}
       ${loadHtml}
-      ${!ro ? `<div class="card" style="padding:14px"><div class="f" style="font-weight:600;color:var(--ink)">${s.company ? '3' : '2'} · Confirm</div>
-        <div class="ft">${prepMsg(ready, s.needCheck, waitPrep)}</div>
-        <button class="btn primary big" id="pd-confirm" style="margin-top:10px" ${ready ? '' : 'disabled'}>🔒 Confirm pre-departure</button></div>` : ''}
+      ${recvHtml}
     </div></div>`);
   bindClose();
   const rerender = async () => { state.field = await fetchFieldData(state.field.date); openPredepart(key); };
-  // checklist
   document.querySelectorAll('[data-ck]').forEach(b => b.addEventListener('click', () => {
     const k = b.dataset.ck; ckState.v[k] = b.dataset.v;
     b.parentElement.querySelectorAll('button').forEach(x => x.className = x === b ? 'on ' + b.dataset.v : '');
@@ -5799,36 +5859,140 @@ async function openPredepart(key){
       state.ckDraft = null; rerender();
     } catch { e.currentTarget.disabled = false; }
   });
-  // content ticks → jobs.load_check
+  document.querySelectorAll('[data-lc]').forEach(b => b.addEventListener('click', () => openLoadConcern(t.jobs.find(j => j.id === b.dataset.lc), () => openPredepart(key))));
+  $('pd-receive')?.addEventListener('click', async e => {
+    const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spin"></span> Saving…';
+    try { await withRetry('Saving', () => sb.rpc('job_trip_update', { p_date: t.date, p_truck: t.truck_id, p_trip: t.trip_no, p_patch: { received: true } }), 1);
+      toast('Load received — you can depart. The clients are told you are on the way.' + (state.preview?.sim ? ' (practice — nobody was actually told)' : ''), 'ok'); closeOverlay(); loadField(); }
+    catch { b.disabled = false; b.textContent = '✅ Load received'; }
+  });
+  $('pd-unlock')?.addEventListener('click', () => askText('Unlock the load check', 'Why is it being unlocked? The dispatcher must check and lock it again; the driver is told.', 'e.g. recount — 2 boards short at loading', async reason => {
+    await withRetry('Unlocking', () => sb.rpc('job_trip_unlock', { p_date: t.date, p_truck: t.truck_id, p_trip: t.trip_no, p_reason: reason }), 1);
+    toast('Unlocked — the dispatcher must check and lock it again', 'ok'); state.field = await fetchFieldData(state.field.date); loadField(); openPredepart(key);
+  }));
+}
+
+/* ----- Dispatcher: carry out the plan — A. crew, B. check every line (item, quantity, quality), C. lock (Rommel 2026-11-26) ----- */
+async function openLoadSheet(date, key){
+  openOverlay(`<div class="sheet" role="dialog" aria-modal="true"><div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>Loading</h2></div><div class="sheet-b"><span class="spin"></span></div></div>`); bindClose();
+  let F, staff = [], drivers = [], crew = null;
+  try {
+    F = await fetchFieldData(date);
+    const tid = key.split('|')[0];
+    const [fs, dr, cr] = await Promise.all([sb.rpc('job_field_staff'), sb.from('job_truck_drivers').select('*').eq('day', date).eq('truck_id', tid),
+      sb.from('truck_crews').select('*').eq('truck_id', tid).eq('work_date', date).maybeSingle()]);
+    staff = Array.isArray(fs?.data) ? fs.data : []; drivers = Array.isArray(dr?.data) ? dr.data : []; crew = cr?.data || null;
+  } catch { closeOverlay(); return; }
+  const t = fieldTrips(F).find(x => x.key === key); if (!t) { closeOverlay(); return toast('That trip has no deliveries any more', 'error'); }
+  state.ldSheet = { date, key };
+  const s = tripState(t), sn = stopNumbers(t.jobs), ro = s.locked || s.departed || !isDispatcher();
+  const drvIds = drivers.map(x => x.staff_id), company = s.company;
+  const typed = (crew?.driver || '').trim(), hasDriver = drvIds.length > 0 || (!company && !!typed);
+  const drvName = drvIds.map(id => staff.find(f => f.id === id)?.name).filter(Boolean).join(', ') || typed;
+  const crewHtml = `<div class="card" style="padding:14px"><div class="f" style="font-weight:600;color:var(--ink)">A · Crew <span class="ft">— ${esc(t.truck.label || '')}, ${esc(FLEET_LABEL[t.truck.fleet_type] || '')}</span></div>
+    ${ro ? `<div style="margin-top:4px">Driver: <b>${esc(drvName || '—')}</b> · Helper: <b>${esc(crew?.helper || '—')}</b>${crew?.contact_no ? ` · ${esc(crew.contact_no)}` : ''}</div>` : `
+    <div class="grid2" style="margin-top:6px">
+      <label class="f">Driver *<select class="i" id="ld-drv"><option value="">— choose the driver —</option>${staff.map(f => `<option value="${esc(f.id)}" ${drvIds.includes(f.id) ? 'selected' : ''}>${esc(f.name || f.email || 'Driver')}</option>`).join('')}</select></label>
+      ${!company ? `<label class="f">…or driver without a HATID account<input class="i" id="ld-drvt" value="${esc(drvIds.length ? '' : typed)}" placeholder="Outside trucker’s driver"></label>` : ''}
+      <label class="f">Helper(s)<input class="i" id="ld-help" value="${esc(crew?.helper || '')}" placeholder="e.g. Juan Dela Cruz, Pedro Santos"></label>
+      <label class="f">Contact no.<input class="i" id="ld-cno" value="${esc(crew?.contact_no || '')}" placeholder="Driver’s phone"></label>
+    </div><div class="ft" style="margin-top:4px">The driver sees this trip on their phone. The crew is for the truck’s whole day (every trip).</div>`}</div>`;
+  const dropHtml = t.jobs.map((j, i) => {
+    const lines = outcomeLines(j), got = j.load_check?.lines || {}, closed = !OPEN_ST.includes(j.status), np = unprepared(j), issue = !!j.load_issue && j.status === 'scheduled';
+    const dis = ro || closed || np || issue;
+    return `<div class="card${np || issue ? ' gated' : ''}" style="padding:14px" data-ld-drop="${esc(j.id)}"><div class="l1" style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+        <div><b>Drop ${sn.nums[i]} — ${esc(j.client_name || j.quotation_serial)}</b><div class="ft mono">${esc(j.quotation_serial)}${j.load_check?.by_name ? ` · checked by ${esc(j.load_check.by_name)}` : ''}</div></div>
+        ${!dis && lines.length ? `<button class="btn" data-ld-all="${esc(j.id)}">✓ All correct</button>` : ''}</div>
+      ${issue ? loadIssueBox(j) : np ? `<div class="warnbox" style="margin:6px 0 0">⏳ <b>Not prepared yet by the warehouse</b> — it can’t be loaded until it is.${j.prep_req_at ? ' Waiting for the manager’s decision to let it go without the missing items.' : ''}</div>` : ''}
+      ${lines.length ? `<div class="ld-lines">${lines.map(x => `<label class="loadck"><input type="checkbox" data-ldc="${esc(j.id)}" data-k="${x.k}" ${got[x.k] || closed || s.locked ? 'checked' : ''} ${dis ? 'disabled' : ''}> <span><b>${x.qty}</b> × ${esc(x.label)}</span></label>`).join('')}</div>`
+        : `<label class="loadck"><input type="checkbox" data-ldc="${esc(j.id)}" data-k="all" ${got.all || j.load_check?.all || closed || s.locked ? 'checked' : ''} ${dis ? 'disabled' : ''}> Everything for this drop is correct <span class="ft">(no item list — see notes)</span></label>`}
+      ${j.notes ? `<div class="ft" style="margin-top:4px;white-space:pre-wrap">📝 ${esc(j.notes)}</div>` : ''}
+      ${!dis ? `<button class="lnk" data-ld-bad="${esc(j.id)}" style="margin-top:6px;color:var(--bad)">⚠️ Problem — short, damaged or wrong item (back to the warehouse)</button>` : ''}</div>`;
+  }).join('');
+  const why = () => { const tt = state.ldTrip || t, st = tripState(tt);
+    const issue = tt.jobs.filter(j => j.load_issue && j.status === 'scheduled').length, np = tt.jobs.filter(unprepared).length - issue;
+    const left = tt.jobs.filter(j => OPEN_ST.includes(j.status) && !j.load_check?.all).length;
+    return !state.ldHasDriver ? 'Choose the driver first (A).' : issue ? `${issue === 1 ? 'A drop is' : issue + ' drops are'} back with the warehouse — lock when they are fixed and checked.`
+      : np > 0 ? `${np === 1 ? 'A drop is' : np + ' drops are'} not prepared yet by the warehouse.` : left ? `Check every item on every drop (${left} drop${left > 1 ? 's' : ''} left).` : st.locked ? '' : 'Everything is correct. Once you lock it, only the logistics supervisor can unlock it. The driver then receives the load and departs.'; };
+  state.ldTrip = t; state.ldHasDriver = hasDriver;
+  document.querySelector('#overlay .sheet').innerHTML = `<div class="sheet-h"><button class="x" data-close aria-label="Back">‹</button><h2>📦 Loading — ${esc(t.truck.label || 'Truck')} · Trip ${t.trip_no}</h2></div>
+    <div class="sheet-b">
+      <div class="ft">${esc(fmtDate(date).replace(/<[^>]+>/g, ''))} · ${dropsTxt(sn.count, t.jobs.length)}. Carry out the approved plan: crew, check the load, lock it.</div>
+      ${s.locked ? `<div class="okbox">🔒 Locked by <b>${esc(t.row.load_locked_name || 'dispatch')}</b> at ${hm12(t.row.load_locked_at)}. ${s.received ? `Driver received it at ${hm12(t.row.load_received_at)}${t.row.load_received_name ? ' (' + esc(t.row.load_received_name) + ')' : ''}.` : 'Waiting for the driver to receive it.'}
+        ${canUnlockLoad() && !s.departed ? `<div style="margin-top:8px"><button class="btn" id="ld-unlock">🔓 Unlock${state.preview ? ' (practice — as supervisor)' : ''}</button></div>` : ''}</div>` : s.departed ? '<div class="warnbox">This trip already left.</div>' : ''}
+      ${crewHtml}
+      <div class="f" style="font-weight:600;color:var(--ink);margin:4px 2px">B · Check the load <span class="ft">— the right item, the right quantity, no quality issue</span></div>
+      ${!ro ? '<div class="row-btns" style="margin:0"><button class="btn" id="ld-allall">✓ Everything on this trip is correct</button></div>' : ''}
+      ${dropHtml}
+      ${!ro ? `<div class="card" style="padding:14px"><div class="f" style="font-weight:600;color:var(--ink)">C · Lock the load</div><div class="ft" id="ld-why">${why()}</div>
+        <button class="btn primary big" id="ld-lock" style="margin-top:10px">🔒 Lock the load</button></div>` : ''}
+    </div>`;
+  bindClose();
+  const reopen = () => openLoadSheet(date, key);
+  const refresh = () => { const b = $('ld-lock'); if (!b) return; const w = why(); $('ld-why').textContent = w; b.disabled = !/^Everything is correct/.test(w); };
+  refresh();
+  // A. crew
+  $('ld-drv')?.addEventListener('change', async e => {
+    const sel = e.target; sel.disabled = true;
+    try { for (const sid of drvIds) if (sid !== sel.value) await sb.rpc('job_truck_driver_set', { p_day: date, p_truck: null, p_staff: sid });
+      if (sel.value) await withRetry('Assigning driver', () => sb.rpc('job_truck_driver_set', { p_day: date, p_truck: t.truck_id, p_staff: sel.value }), 1);
+      toast(sel.value ? 'Driver assigned — the trip shows on their phone' : 'Driver cleared', 'ok'); reopen(); } catch { sel.disabled = false; }
+  });
+  let ct; const saveCrew = () => { clearTimeout(ct); ct = setTimeout(async () => {
+    const vals = { helper: $('ld-help')?.value.trim() || null, contact_no: $('ld-cno')?.value.trim() || null };
+    if ($('ld-drvt') && !$('ld-drv')?.value) vals.driver = $('ld-drvt').value.trim() || null;
+    try { await withRetry('Saving crew', () => sb.from('truck_crews').upsert({ truck_id: t.truck_id, work_date: date, ...vals }, { onConflict: 'truck_id,work_date' }));
+      if ('driver' in vals){ state.ldHasDriver = !!vals.driver || !!$('ld-drv')?.value; refresh(); } } catch {}
+  }, 600); };
+  ['ld-help', 'ld-cno', 'ld-drvt'].forEach(id => $(id)?.addEventListener('input', saveCrew));
+  // B. check
   const saveJob = async jobId => {
-    const j = t.jobs.find(x => x.id === jobId), boxes = [...document.querySelectorAll(`[data-lk="${jobId}"]`)];
+    const j = t.jobs.find(x => x.id === jobId), boxes = [...document.querySelectorAll(`[data-ldc="${jobId}"]`)];
     const lines = {}; boxes.forEach(b => { if (b.checked) lines[b.dataset.k] = true; });
     const all = boxes.length > 0 && boxes.every(b => b.checked);
-    const lc = { lines, all, at: new Date().toISOString(), by: state.me.id };
+    const lc = { lines, all, at: new Date().toISOString(), by: state.me.id, by_name: state.me.name || state.me.email };
     try { await withRetry('Saving the check', () => sb.from('jobs').update({ load_check: lc, ...(all ? { loaded_at: new Date().toISOString(), loaded_by: state.me.id } : { loaded_at: null, loaded_by: null }) }).eq('id', jobId));
-      j.load_check = lc; } catch { rerender(); throw 0; }
+      j.load_check = lc; } catch { reopen(); throw 0; }
   };
-  document.querySelectorAll('[data-lk]').forEach(c => c.addEventListener('change', async () => { c.disabled = true; try { await saveJob(c.dataset.lk); refreshConfirm(); } catch {} c.disabled = false; }));
-  const tickJob = async id => { document.querySelectorAll(`[data-lk="${id}"]`).forEach(b => { b.checked = true; }); await saveJob(id); };
-  document.querySelectorAll('[data-tick-all]').forEach(b => b.addEventListener('click', async () => { b.disabled = true; try { await tickJob(b.dataset.tickAll); refreshConfirm(); } catch {} b.disabled = false; }));
-  $('pd-tickall')?.addEventListener('click', async e => { e.currentTarget.disabled = true; try { for (const j of t.jobs.filter(x => OPEN_ST.includes(x.status) && !unprepared(x))) await tickJob(j.id); refreshConfirm(); toast('All ticked', 'ok'); } catch {} e.currentTarget.disabled = false; });
-  function refreshConfirm(){
-    const b = $('pd-confirm'); if (!b) return;
-    const wp = t.jobs.filter(unprepared).length;
-    const ok = !tripState(t).needCheck && !wp && t.jobs.every(j => !OPEN_ST.includes(j.status) || j.load_check?.all);
-    b.disabled = !ok; b.previousElementSibling.textContent = prepMsg(ok, tripState(t).needCheck, wp);
-  }
-  document.querySelectorAll('[data-lc]').forEach(b => b.addEventListener('click', () => openLoadConcern(t.jobs.find(j => j.id === b.dataset.lc), () => openPredepart(key))));
-  $('pd-confirm')?.addEventListener('click', async e => {
-    const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spin"></span> Confirming…';
-    try { await withRetry('Confirming', () => sb.rpc('job_trip_update', { p_date: t.date, p_truck: t.truck_id, p_trip: t.trip_no, p_patch: { lock: true } }), 1);
-      toast('Pre-departure confirmed and locked — you can depart', 'ok'); closeOverlay(); loadField(); }
-    catch { b.disabled = false; b.textContent = '🔒 Confirm pre-departure'; }
+  document.querySelectorAll('[data-ldc]').forEach(c => c.addEventListener('change', async () => { c.disabled = true; try { await saveJob(c.dataset.ldc); refresh(); } catch {} c.disabled = false; }));
+  const allJob = async id => { document.querySelectorAll(`[data-ldc="${id}"]:not([disabled])`).forEach(b => { b.checked = true; }); await saveJob(id); };
+  document.querySelectorAll('[data-ld-all]').forEach(b => b.addEventListener('click', async () => { b.disabled = true; try { await allJob(b.dataset.ldAll); refresh(); } catch {} b.disabled = false; }));
+  $('ld-allall')?.addEventListener('click', async e => { e.currentTarget.disabled = true;
+    try { for (const j of t.jobs.filter(x => OPEN_ST.includes(x.status) && !unprepared(x) && !x.load_issue)) await allJob(j.id); refresh(); toast('Marked correct', 'ok'); } catch {} e.currentTarget.disabled = false; });
+  document.querySelectorAll('[data-ld-bad]').forEach(b => b.addEventListener('click', () => openLoadProblem(t.jobs.find(j => j.id === b.dataset.ldBad), reopen)));
+  // C. lock
+  $('ld-lock')?.addEventListener('click', async e => {
+    const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spin"></span> Locking…';
+    try { await withRetry('Locking the load', () => sb.rpc('job_trip_update', { p_date: date, p_truck: t.truck_id, p_trip: t.trip_no, p_patch: { lock: true } }), 1);
+      toast('Load locked — the driver was told to receive it' + (state.preview?.sim ? ' (practice)' : ''), 'ok'); reopen(); }
+    catch { b.disabled = false; b.textContent = '🔒 Lock the load'; }
   });
-  $('pd-unlock')?.addEventListener('click', () => askText('Unlock the pre-departure check', 'Why is it being unlocked? The driver is told, and must tick and confirm again.', 'e.g. recount — 2 boards short at loading', async reason => {
-    await withRetry('Unlocking', () => sb.rpc('job_trip_unlock', { p_date: t.date, p_truck: t.truck_id, p_trip: t.trip_no, p_reason: reason }), 1);
-    toast('Unlocked — the driver must tick and confirm again', 'ok'); state.field = await fetchFieldData(state.field.date); loadField(); openPredepart(key);
-  }));
+  $('ld-unlock')?.addEventListener('click', () => askText('Unlock the load check', `${t.truck.label} · Trip ${t.trip_no}. The dispatcher must check and lock it again; the driver is told.`, 'e.g. recount — 2 boards short at loading', async reason => {
+    await withRetry('Unlocking', () => sb.rpc('job_trip_unlock', { p_date: date, p_truck: t.truck_id, p_trip: t.trip_no, p_reason: reason }), 1);
+    toast('Unlocked — check and lock it again', 'ok'); reopen(); }));
+}
+function openLoadProblem(job, back){
+  const lines = outcomeLines(job);
+  openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><h2 style="margin-top:0">⚠️ Problem at loading — ${esc(job.client_name || job.quotation_serial)}</h2>
+    <div class="ft">It goes back to the warehouse to prepare again. The trip can’t be locked until the warehouse ticks it prepared and you check it again.</div>
+    ${lines.length ? `<div class="f" style="margin-top:8px">Which items?</div>${lines.map(x => `<label class="loadck"><input type="checkbox" class="lp-l" value="${x.k}"> <span><b>${x.qty}</b> × ${esc(x.label)}</span></label>`).join('')}` : ''}
+    <div class="f" style="margin-top:8px">What’s wrong? *</div>
+    ${Object.entries(LOAD_PROBLEM).map(([k, v], i) => `<label class="loadck"><input type="radio" name="lp-k" value="${k}" ${i ? '' : 'checked'}> <span>${esc(v)}</span></label>`).join('')}
+    <label class="f" style="margin-top:8px">Details *<textarea class="i" id="lp-n" rows="2" placeholder="e.g. 34 of 36 pcs; 2 boards with chipped edges"></textarea></label>
+    <label class="f" style="margin-top:8px">Photo (optional)<input class="i" type="file" accept="image/*" capture="environment" id="lp-p"></label>
+    <div class="row-btns" style="justify-content:flex-end;margin-top:10px"><button class="btn" id="lp-x">Back</button><button class="btn bad" id="lp-go">Send back to the warehouse</button></div></div>`);
+  $('lp-x').addEventListener('click', back); document.querySelector('#overlay .scrim').addEventListener('click', back);
+  $('lp-go').addEventListener('click', async e => {
+    const ls = [...document.querySelectorAll('.lp-l:checked')].map(c => c.value), n = $('lp-n').value.trim(), k = document.querySelector('[name="lp-k"]:checked')?.value;
+    if (lines.length && !ls.length) return toast('Tick the items with the problem', 'error');
+    if (!n) return toast('Say what’s wrong', 'error');
+    const b = e.currentTarget; b.disabled = true;
+    try { const f = $('lp-p').files[0]; let photo = null;
+      if (f) photo = await uploadMedia(job.id, await shrinkImage(f), 'load-problem.jpg', 'image/jpeg');
+      await withRetry('Sending', () => sb.rpc('job_load_problem', { p_job: job.id, p_lines: ls, p_kind: k, p_note: n, p_photo: photo }), 1);
+      toast('Sent back to the warehouse — you’ll be notified when it’s fixed' + (state.preview?.sim ? ' (practice)' : ''), 'ok'); back();
+    } catch { b.disabled = false; }
+  });
 }
 
 /* Small "type a reason" modal */
@@ -5961,7 +6125,8 @@ async function openTripsPanel(date = localDate()){
     return `<div class="card" style="padding:12px;margin-bottom:10px"><div class="trip-h"><b>🚚 ${esc(t.truck.label || 'Truck')} · Trip ${t.trip_no}</b>
         <span class="ft">${dropsTxt(stopNumbers(t.jobs).count, t.jobs.length)} · ${s.done ? (back ? 'back at base ' + hm12(back) : t.row?.return_sent_at ? 'returning to base (' + hm12(t.row.return_sent_at) + ')' : 'all drops done') : s.departed ? 'on the road' : 'at the base'}</span></div>
       <div class="ft" style="margin:4px 0">${s.company ? (t.check ? `Truck checklist ✓ ${hm12(t.check.created_at)} by ${esc(t.check.actor_name || '')}${t.check.fails ? ` — <b style="color:var(--bad)">${t.check.fails} not OK</b>: ${esc((t.check.results || []).filter(x => x.v === 'bad').map(x => x.label + (x.note ? ' (' + x.note + ')' : '')).join(', '))}` : ' — all OK'}` : 'Truck checklist: not done yet') + ' · ' : ''}
-        Load checked ${s.ticked}/${t.jobs.length} · ${s.locked ? `<b>🔒 confirmed ${hm12(t.row.load_locked_at)}</b>` : s.departed ? '<b style="color:var(--bad)">left without confirming</b>' : 'not confirmed'}
+        Load ${s.locked ? `<b>🔒 locked by ${esc(t.row.load_locked_name || 'dispatch')} ${hm12(t.row.load_locked_at)}</b> · ${s.received ? `received by the driver ${hm12(t.row.load_received_at)}` : s.departed ? '<b style="color:var(--bad)">left without receiving</b>' : 'waiting for the driver to receive it'}` : s.departed ? '<b style="color:var(--bad)">left without a load check</b>' : `checked ${s.ticked}/${t.jobs.length} — not locked`}${t.jobs.some(j => j.load_issue && j.status === 'scheduled') ? ' · <b style="color:var(--bad)">↩️ back with the warehouse</b>' : ''}
+        ${office && !s.departed && s.open.some(j => j.status === 'scheduled') ? ` <button class="btn ${s.locked ? '' : 'primary'}" data-ldk="${esc(t.key)}">📦 ${s.locked ? 'View load' : 'Check &amp; lock load'}</button>` : ''}
         ${s.locked && canUnlockLoad() && s.open.some(j => j.status === 'scheduled') ? ` <button class="btn" data-unl="${esc(t.key)}">🔓 Unlock</button>` : ''}</div>
       <ol class="ft" style="margin:4px 0 4px 18px;padding:0">${t.jobs.map(j => `<li>${esc(j.client_name || j.quotation_serial)} — ${esc(STATUS_LABEL[j.status] || j.status)}${j.delivery_outcome && j.delivery_outcome !== 'full' ? ' · ' + esc(OUTCOME_LABEL[j.delivery_outcome]) : ''}</li>`).join('')}</ol>
       ${req.map(n => `<div class="warnbox" style="margin-top:6px">↪️ <b>${esc(n.created_by_name || 'Driver')}</b> asks to do <b>${esc(t.jobs.find(j => j.id === n.job_id)?.client_name || 'another drop')}</b> next — ${esc(ORDER_REASON[n.reason] || n.reason)}${n.note ? ': ' + esc(n.note) : ''} <span class="ft">(${hm12(n.created_at)})</span>
@@ -5971,13 +6136,14 @@ async function openTripsPanel(date = localDate()){
   }).join('') : '<div class="muted">No trips on this day.</div>';
   document.querySelector('#overlay .modal').innerHTML = `<div class="chart-h" style="margin:0 0 8px"><h2 style="margin:0">🚚 Trips — ${esc(fmtDate(date).replace(/<[^>]+>/g, ''))}</h2>
       <input class="i" type="date" id="tp-date" value="${esc(date)}" style="width:auto"></div>
-    <div class="ft" style="margin-bottom:8px">Pre-departure checks, drivers’ requests to change the drop order, and returns. Re-ordering drops on a trip that’s on the road tells the driver, who confirms.</div>
+    <div class="ft" style="margin-bottom:8px">📦 Check &amp; lock each trip’s load before it leaves (crew, items, quantity, quality). Also drivers’ requests to change the drop order, and returns. Re-ordering drops on a trip that’s on the road tells the driver, who confirms.</div>
     ${body}<div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Close</button></div>`;
   bindClose();
   $('tp-date').addEventListener('change', e => openTripsPanel(e.target.value));
   const byKey = k => trips.find(t => t.key === k);
+  document.querySelectorAll('[data-ldk]').forEach(b => b.addEventListener('click', () => openLoadSheet(date, b.dataset.ldk)));
   document.querySelectorAll('[data-unl]').forEach(b => b.addEventListener('click', () => { const t = byKey(b.dataset.unl);
-    askText('Unlock the pre-departure check', `${t.truck.label} · Trip ${t.trip_no}. The driver is told, and must tick and confirm again.`, 'e.g. recount — 2 boards short at loading', async reason => {
+    askText('Unlock the load check', `${t.truck.label} · Trip ${t.trip_no}. The dispatcher must check and lock it again; the driver is told.`, 'e.g. recount — 2 boards short at loading', async reason => {
       await withRetry('Unlocking', () => sb.rpc('job_trip_unlock', { p_date: t.date, p_truck: t.truck_id, p_trip: t.trip_no, p_reason: reason }), 1); toast('Unlocked — the driver was told', 'ok'); openTripsPanel(date); }); }));
   const resolve = async (id, st, note) => { await withRetry('Saving', () => sb.rpc('job_trip_notice_resolve', { p_id: id, p_status: st, p_note: note || null }), 1); toast(st === 'approved' ? 'Approved — the drop order was changed and the driver told' : 'Declined — the driver was told', 'ok'); openTripsPanel(date); };
   document.querySelectorAll('[data-apr]').forEach(b => b.addEventListener('click', async () => { b.disabled = true; try { await resolve(b.dataset.apr, 'approved'); } catch { b.disabled = false; } }));
@@ -6388,11 +6554,12 @@ async function loadPkPrep(){
       const st = prepState(r), pc = pct(r), open = state.pkpOpen.has(r.id);
       return `<div class="pp-row${open ? ' open' : ''}" data-pp-row="${esc(r.id)}">
       <button type="button" class="pp-head" data-pp-tog="${esc(r.id)}" aria-expanded="${open}">
-        <span class="pp-so"><b>${esc(r.serial)}</b>${r.client ? ` · ${esc(r.client)}` : ''}<span class="ft">${esc(r.truck || 'No truck yet')}${r.trip_no ? ' · trip ' + r.trip_no : ''}${r.drop_seq ? ' · drop ' + r.drop_seq : ''} · ${esc(r.company)}${r.sched ? ' · ' + esc(SCH[r.sched] || r.sched) : ''}</span></span>
+        <span class="pp-so"><b>${esc(r.serial)}</b>${r.client ? ` · ${esc(r.client)}` : ''}${r.load_issue ? ' <span class="tag bad">↩️ Fix before loading</span>' : ''}<span class="ft">${esc(r.truck || 'No truck yet')}${r.trip_no ? ' · trip ' + r.trip_no : ''}${r.drop_seq ? ' · drop ' + r.drop_seq : ''} · ${esc(r.company)}${r.sched ? ' · ' + esc(SCH[r.sched] || r.sched) : ''}</span></span>
         <span class="pp-prog"><span class="pp-bar"><i class="${pc === 100 ? 'ok' : pc ? 'mid' : ''}" style="width:${pc}%"></i></span><b>${pc}%</b><span class="ft">${st.n ? `${r.prepared_at ? st.n : st.done}/${st.n} lines` : 'no item list'}</span></span>
         <span class="pp-chip">${prepChip(r).replace(/ · \d+\/\d+/, '')}</span><span class="pp-caret">${open ? '▾' : '▸'}</span>
       </button>
       ${open ? `<div class="pp-body">
+        ${r.load_issue ? `<div class="warnbox" style="margin:0 0 6px">↩️ <b>Fix before loading</b> — the dispatcher found: ${esc(r.load_issue.label || '')}: ${esc(r.load_issue.note || '')} <span class="ft">(${esc(r.load_issue.by_name || '')}, ${hm12(r.load_issue.at)})</span><div class="ft">Prepare the unticked items again, then tick them. The dispatcher checks them again before loading.</div></div>` : ''}
         <div class="ld-lines">${prepLinesHtml(r, canPrepTick())}</div>
         ${r.notes ? `<div class="ft" style="white-space:pre-wrap;margin-top:6px">📝 ${esc(r.notes)}</div>` : ''}
         ${prepReqBox(r)}
@@ -11391,7 +11558,7 @@ async function openTripSheet(date, truckId = ''){
         const out = trk ? tr?.gps_left_at : (tr?.gps_left_at || tr?.departed_at), lateBy = out && tg ? minsOf(hmManila(out)) - minsOf(tg) : null;
         const early = tr?.departed_at && tr?.gps_left_at ? Math.round((new Date(tr.gps_left_at) - new Date(tr.departed_at)) / 6e4) : null;
         return `<div class="ts-trip">
-          <div class="ts-trip-h"><div><b>Trip ${n}</b>${tr?.ticket_no ? ` <span class="mono" data-tk="${esc(t.id)}|${n}" data-no="1">#${esc(tr.ticket_no)}</span>` : `<span data-tk="${esc(t.id)}|${n}"></span>`} <span class="ft">· ${stops.length} stop${stops.length > 1 ? 's' : ''} · ${Math.round(w).toLocaleString('en-PH')} / ${Number(t.max_weight_kg).toLocaleString('en-PH')} kg · ${pcs} boards ${gone ? '' : ` · ${tr?.load_locked_at ? `<b>🔒 load confirmed by the driver ${hm12(tr.load_locked_at)}</b>` : `driver checked ${loaded}/${stops.length}`}`}</span>
+          <div class="ts-trip-h"><div><b>Trip ${n}</b>${tr?.ticket_no ? ` <span class="mono" data-tk="${esc(t.id)}|${n}" data-no="1">#${esc(tr.ticket_no)}</span>` : `<span data-tk="${esc(t.id)}|${n}"></span>`} <span class="ft">· ${stops.length} stop${stops.length > 1 ? 's' : ''} · ${Math.round(w).toLocaleString('en-PH')} / ${Number(t.max_weight_kg).toLocaleString('en-PH')} kg · ${pcs} boards ${gone ? '' : ` · ${tr?.load_locked_at ? `<b>🔒 load locked by ${esc(tr.load_locked_name || 'the dispatcher')} ${hm12(tr.load_locked_at)}${tr.load_received_at ? ' · received ' + hm12(tr.load_received_at) : ''}</b>` : `load checked ${loaded}/${stops.length}`}`}</span>
               <div class="ft" style="margin-top:3px">Leave by ${office && !out ? `<input class="i no-print" type="time" style="width:auto;display:inline-block;padding:2px 6px" data-tgt="${esc(t.id)}|${n}" value="${esc(tg || '')}" aria-label="Trip ${n} target departure"><span class="print-only">${tg ? fmtHM(tg) : '—'}</span>` : `<b>${tg ? fmtHM(tg) : '—'}</b>`}
                 ${out ? ` · <b>left ${fmtHM(hmManila(out))}</b>${tr?.gps_left_at ? ' (GPS)' : ''}${lateBy != null ? (lateBy > DISPATCH_GRACE ? ` <span style="color:var(--bad)">${lateBy} min late${tr?.late_reason ? ' — ' + esc(LATE_DISPATCH[tr.late_reason]) : ''}</span>${!tr?.late_reason && office ? ` <select class="i no-print" style="width:auto;display:inline-block;padding:2px 6px" data-lr="${esc(t.id)}|${n}" aria-label="Reason trip ${n} left late"><option value="">Why late? — pick a reason</option>${Object.entries(LATE_DISPATCH).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>` : ''}` : ' <span style="color:var(--ok)">on time</span>') : ''}${tr?.gps_back_at ? ` · back ${fmtHM(hmManila(tr.gps_back_at))} (GPS)` : ''}` : ''}
                 ${trk ? ` · <span class="tag info">📍 GPS-timed</span>` : ` · <span class="tag">Manual time — set the driver (with their phone tracker) or an in-truck phone</span>`}
@@ -11407,7 +11574,7 @@ async function openTripSheet(date, truckId = ''){
               ${contentsHtml(j)}
               ${j.notes ? `<div class="ft" style="white-space:pre-wrap;margin-top:4px">${esc(j.notes)}</div>` : ''}
               ${j.delivery_outcome ? `<div class="ft" style="margin-top:4px">Result: <b>${esc(OUTCOME_LABEL[j.delivery_outcome])}</b></div>` : ''}
-              ${j.status === 'scheduled' ? `<div class="ft" style="margin-top:4px">${tr?.load_locked_at ? '🔒 Load checked by the driver' : j.load_check?.all ? '✓ Ticked by the driver — not confirmed yet' : '☐ Not checked by the driver yet'}</div>` : ''}
+              ${j.status === 'scheduled' ? `<div class="ft" style="margin-top:4px">${tr?.load_locked_at ? '🔒 Load checked and locked' : j.load_issue ? '↩️ Back with the warehouse — ' + esc(j.load_issue.note || '') : j.load_check?.all ? '✓ Checked — not locked yet' : '☐ Not checked by the dispatcher yet'}</div>` : ''}
             </div></div>`).join('')}
         </div>`; }).join('')}
     </div>`; }).join('');
@@ -11438,8 +11605,8 @@ async function openTripSheet(date, truckId = ''){
     // Every trip with a target time is measured (on-time dispatch); trip 1 defaults to the pool's leave-by time
     // Tracked trucks: the GPS decides the departure time, so no late prompt here (the reason is picked once the GPS shows it late)
     const late = !b.dataset.trk && !!tg && date === localDate() && minsOf(now) - minsOf(tg) > DISPATCH_GRACE;
-    if (state.me.role === 'field' && !tripRow(tid, n)?.load_locked_at && !(state.preview?.sim && (SIM.job_trips || []).find(r => r.truck_id === tid && r.trip_no === +n)?.load_locked_at))
-      return toast('Finish and confirm the pre-departure check first (Field › your trip)', 'error');
+    if (state.me.role === 'field' && !tripRow(tid, n)?.load_received_at && !(state.preview?.sim && (SIM.job_trips || []).find(r => r.truck_id === tid && r.trip_no === +n)?.load_received_at))
+      return toast('The dispatcher locks the load, then you receive it (Field › your trip) — then depart', 'error');
     const go = async reason => {
       const notLoaded = stops.filter(j => !j.loaded_at).length;
       if (notLoaded && !confirm(`${notLoaded} stop${notLoaded > 1 ? 's are' : ' is'} not ticked as loaded. Mark the trip departed anyway?`)) return;
@@ -14319,6 +14486,13 @@ function annGate(){
    show: who sees an item — 'office' (admin, manager, dispatcher, schedule signers), 'signers' (schedule signers, managers),
    'pickup' (anyone using Pick-up), 'drivers' (field). No show = everyone. */
 const WHATS_NEW = [
+  { id: '2026-11-26-dispatcher-load', date: '26 Nov 2026', items: [
+    { icon: '📦', title: 'The dispatcher checks and locks the load',
+      text: 'Before a truck leaves, the dispatcher opens Trips › 📦 Check & lock load: chooses the driver (and helper), checks every line — right item, right quantity, no damage — and locks it. Only the logistics supervisor can unlock it.' },
+    { icon: '↩️', title: 'A problem at loading goes back to the warehouse',
+      text: 'Short, damaged or wrong item? Tap ⚠️ Problem, say what’s wrong (photo optional). The warehouse sees “Fix before loading”, prepares it again, and the dispatcher checks it again. The trip can’t lock until every line passes.' },
+    { icon: '🚚', title: 'Drivers receive the load',
+      text: 'Drivers no longer tick the items. They do the truck checklist, see what the dispatcher checked, tap ✅ Load received, then depart. The client is told the truck is on the way when the driver receives the load.' } ] },
   { id: '2026-11-25-group-report', date: '25 Nov 2026', items: [
     { icon: '👥', title: 'A client’s tickets are timed together',
       text: 'When one client has several queue numbers in at the same time, promptness is their whole stay ÷ all their SOs — 4 SOs released in 50 minutes is 12.5 min per SO, not four separate 45-minute waits. The queue shows 👥 and the number’s window lists the numbers timed together. Past records were re-timed the same way.' },
