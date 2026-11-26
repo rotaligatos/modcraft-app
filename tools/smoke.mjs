@@ -318,6 +318,30 @@ const PROFILES = {
             return [run(10), run(0), run(1, 20)];
           } finally { window.SERVICES = keep; }
         }, [[1, 10, 20, 10, false], [1, 1, 2, 1, false], [3, 3, 6, 3, true]]);
+      // 2026-11-26 (Rommel): an HPL build the client brings — the HPL, the board, or both. Not priced, not on
+      // the quotation's material lines, listed under Customer-Supplied Materials; cutting, lamination and the
+      // Job Order unchanged. Ours of the same spec stays a separate, priced line.
+      if (typeof window._cutListToAnalysis === 'function' && typeof window._reflectClientSupplied === 'function')
+        check('HPL build supplied by the client: not priced, listed as customer-supplied, cutting + lamination kept', () => {
+          const keep = { S: window.SERVICES, M: window.dbMaterials, L: window.qClientSupplyMatList, T: window.qClientSupplyMat, A: window.qAreas };
+          try {
+            window.SERVICES = [{ name: 'HPL Lamination (MDF/PB, 2 Face)', unit: 'piece', price: 702 }, { name: "Cutting  MDF/PB/Plywood (4' x 8')", unit: '/lm', price: 16.5 }];
+            const sub = 'Raw Boards 4x8 18mm MDF', fin = 'Green 4x8 0.7mm HPL', lab = fin + ' on ' + sub + ' · 2F';
+            window.dbMaterials = [{ name: sub, unit: 'pc', price: 1200 }, { name: fin, unit: 'pc', price: 900 }];
+            const run = (csHpl, csBoard) => {
+              window.qClientSupplyMatList = []; window.qClientSupplyMat = false;
+              const a = window._cutListToAnalysis({ grain: 'L', hardware: [], hpl: [{ sub, fin, faces: '2F', L: 2440, W: 1220, qty: 2, cut: true, csHpl, csBoard }],
+                panels: [{ group: 'C', part: 'Door', mat: lab, th: 18, qty: 4, L: 700, W: 400, ebt: '', svcs: [] }] });
+              window.prodLoadStructuredList(a, 't'); window.prodBuildSummary(window.prodState.result); const s = window.prodState.summary;
+              window.qAreas = [{ name: 'A', items: [], svcItems: [], matItems: [], hwItems: [], bomItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+              window._prodReflectFill(s, false, '', null);
+              const jo = window._joBuild(window.prodState.result, { joNumber: 'JO-T' });
+              return [window.qAreas[0].matItems.map(x => x.name).join('|'), window.qClientSupplyMatList.map(x => x.type + ':' + x.qty).join('|'), window.qClientSupplyMat,
+                (s.services.find(x => /lamination/i.test(x.name)) || {}).qty || 0, !!s.services.find(x => /cutting/i.test(x.name)), jo.parts.length];
+            };
+            return [run(true, false), run(true, true), run(false, false)];
+          } finally { window.SERVICES = keep.S; window.dbMaterials = keep.M; window.qClientSupplyMatList = keep.L; window.qClientSupplyMat = keep.T; window.qAreas = keep.A; }
+        }, [['Raw Boards 4x8 18mm MDF', 'HPL:4', true, 2, true, 1], ['', 'Raw Board MDF:2|HPL:4', true, 2, true, 1], ['Raw Boards 4x8 18mm MDF|Green 4x8 0.7mm HPL', '', false, 2, true, 1]]);
       // 2026-10-18 end-to-end test (website order -> ModCraft): remarks were dropped (website sends
       // "remarks"), per-piece services ("× 1 pcs") were flagged as per-metre or re-priced as plain
       // grooving, every hole was priced as the first boring service (Glider), a whole board still went

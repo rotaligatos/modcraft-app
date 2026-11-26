@@ -19924,6 +19924,9 @@ function _cutListToAnalysis(cl,order){
     var bOrd=(hr.cut&&+hr.qty>0)?+hr.qty:0;
     if(builds[bKey]) builds[bKey].ordered=(builds[bKey].ordered||0)+bOrd;
     else builds[bKey]={sub:hr.sub,fin:hr.fin,faces:hr.faces==='2F'?2:1,ordered:bOrd};
+    // Client brings the HPL and/or the board (Rommel, 2026-11-26): not priced, listed as customer-supplied.
+    if(hr.csHpl) builds[bKey].csHpl=true;
+    if(hr.csBoard) builds[bKey].csBoard=true;
   }
   // LAMINATION ONLY (2026-10-17): an HPL row that is not "cut to size" is boards we laminate and
   // hand over whole — no panel uses it, so reading HPL only through the panels lost the job
@@ -19976,7 +19979,7 @@ function _cutListToAnalysis(cl,order){
       if(_subX&&!(+_subX.price>0)) _subX=null;
       var _finX=(typeof lookupInSource==='function')?lookupInSource(_src,color):null;
       if(_subX) catalogName=_subX.name;
-      else if(/ply/i.test(subName)&&!pn.outsource) pn.outsource='Marine Plywood '+(+pn.th||18)+'mm (raw)';
+      else if(/ply/i.test(subName)&&!pn.outsource&&!b.csBoard) pn.outsource='Marine Plywood '+(+pn.th||18)+'mm (raw)';
       if(_finX) hplSku=_finX.name;
     } else {
       var cut=label.lastIndexOf(' — ');
@@ -20226,6 +20229,8 @@ function _cutListToAnalysis(cl,order){
       services:extraSvcs.slice(svcStart).map(function(x){ var o={service:x.service,qty:x.qty,unit:x.unit||'lm'}; if(x.side) o.side=x.side; return o; })
     };
     if(pn.drawing&&pn.drawing.source) baseComp.drawing={source:String(pn.drawing.source),page:+pn.drawing.page||0};
+    if(b&&b.csHpl) baseComp.clientHpl=true;
+    if(b&&b.csBoard) baseComp.clientBoard=true;
     // A whole board handed over laminated has no cutting direction: 1220 × 2440 and 2440 × 1220 are the same board.
     if(pn.__lamOnly){ baseComp._lamOnly=true; baseComp.grain='none'; baseComp.grainLock=true; }
     comps.push(baseComp);
@@ -40608,7 +40613,7 @@ var MCL=(function(){
       h+='<div style="font-size:11px;color:var(--text2);font-style:italic">None — add one only if the job has HPL.</div>';
     } else {
       h+='<table style="width:100%;border-collapse:collapse"><tr>'
-        +'<th '+th+'>Substrate</th><th '+th+'>HPL finish</th><th '+th+'>Faces</th><th '+th+'>Width</th><th '+th+'>Length</th><th '+th+'>Qty</th><th '+th+' title="Ticked: the laminated boards are cut into the panels below. Off: lamination only, whole boards.">Cut to size</th><th '+th+'>Selectable as</th><th></th></tr>';
+        +'<th '+th+'>Substrate</th><th '+th+'>HPL finish</th><th '+th+'>Faces</th><th '+th+'>Width</th><th '+th+'>Length</th><th '+th+'>Qty</th><th '+th+' title="Ticked: the laminated boards are cut into the panels below. Off: lamination only, whole boards.">Cut to size</th><th '+th+' title="Ticked: the client brings it. It is not priced and is listed under Customer-Supplied Materials; cutting, lamination and the Job Order are unchanged.">Client supplies</th><th '+th+'>Selectable as</th><th></th></tr>';
       for(var i=0;i<S.hpl.length;i++){
         var hp=S.hpl[i];
         var ii='style="width:100%;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"';
@@ -40623,6 +40628,8 @@ var MCL=(function(){
           +['W','L','qty'].map(function(f){ return '<td><input type="number" min="0" style="width:72px;padding:4px 6px;border:.5px solid var(--border);border-radius:5px;font-size:12px;font-family:inherit"'
             +' value="'+(hp[f]||'')+'" placeholder="'+(f==='qty'?'boards':'mm')+'" onchange="MCL.setHpl('+i+',\''+f+'\',+this.value||0)"></td>'; }).join('')
           +'<td style="text-align:center"><input type="checkbox"'+(hp.cut?' checked':'')+' onchange="MCL.setHpl('+i+',\'cut\',this.checked)"></td>'
+          +'<td style="font-size:11px;white-space:nowrap"><label style="display:block;cursor:pointer"><input type="checkbox"'+(hp.csHpl?' checked':'')+' onchange="MCL.setHpl('+i+',\'csHpl\',this.checked)"> HPL</label>'
+          +'<label style="display:block;cursor:pointer"><input type="checkbox"'+(hp.csBoard?' checked':'')+' onchange="MCL.setHpl('+i+',\'csBoard\',this.checked)"> Board</label></td>'
           +'<td style="font-size:11px;color:var(--text2)">'+esc(hplLabel(hp)||'— fill both SKUs —')+'</td>'
           +'<td style="text-align:center"><button class="btn" style="padding:2px 7px" onclick="MCL.removeHpl('+i+')"><i class="ti ti-trash"></i></button></td></tr>';
       }
@@ -46349,6 +46356,15 @@ function prodLoadStructuredList(payload,fileName){
 }
 // Every field the review UI and the strict tool schema expect, defaulted — a structured
 // source may legitimately not carry all of them, and a missing one must not read as 0.
+// A material the client brings (HPL builds → "Client supplies", 2026-11-26): kept in the summary so
+// it is visible, never priced, and reflected into Customer-Supplied Materials instead of the lines.
+function _prodClientSuppliedRow(row,searchName,kind){
+  if(!row) return;
+  if(!row.name||row.needsReview) row.name=row.name||searchName;
+  row.clientSupplied=kind; row.price=0; row.outsource=false; row.custom=true;
+  row.needsReview=false; row.reviewNote='';
+  row.orderNote='Client supplies this '+(kind==='hpl'?'HPL':'board')+' — not priced; listed under Customer-Supplied Materials.';
+}
 function _prodNormalizeComponent(c){
   c=c||{};
   return {
@@ -46362,7 +46378,8 @@ function _prodNormalizeComponent(c){
     needsReview:!!c.needsReview,reviewNote:String(c.reviewNote||''),notes:String(c.notes||''),
     noCut:!!c.noCut, remark:String(c.remark||''), manualEb:!!c.manualEb, manualEbLm:+c.manualEbLm||0,
     drawing:(c.drawing&&c.drawing.source)?{source:String(c.drawing.source),page:+c.drawing.page||0}:undefined,
-    services:Array.isArray(c.services)?c.services.map(function(x){ var o={service:String(x&&x.service||''),qty:+(x&&x.qty)||0,unit:String(x&&x.unit||'lm')}; if(x&&x.side) o.side=String(x.side); return o; }):undefined
+    services:Array.isArray(c.services)?c.services.map(function(x){ var o={service:String(x&&x.service||''),qty:+(x&&x.qty)||0,unit:String(x&&x.unit||'lm')}; if(x&&x.side) o.side=String(x.side); return o; }):undefined,
+    clientHpl:c.clientHpl?true:undefined, clientBoard:c.clientBoard?true:undefined
   };
 }
 
@@ -47604,7 +47621,8 @@ function prodComputeBom(comps){
     // Colour too: an imported client label ("18MM PLYWOOD RAW BOARD / HPL SILKY OFF-WHITE") lands
     // the HPL words in the colour, and reading only material+notes quoted it with no lamination.
     var isHpl=/\bhpl\b/i.test((c.material||'')+' '+(c.color||'')+' '+(c.notes||''));
-    var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0,c.colorB||'',c.textureB||'',isHpl].join('|');
+    var key=[c.material||'Unknown',c.color||'',c.texture||'',c.thickness||0,c.faces||0,c.colorB||'',c.textureB||'',isHpl].join('|')
+      +(c.clientHpl||c.clientBoard?'|cs'+(c.clientHpl?'H':'')+(c.clientBoard?'B':''):'');
     if(!groups[key]) groups[key]={material:c.material||'Unknown',color:c.color||'',texture:c.texture||'',thickness:c.thickness||0,faces:c.faces||0,colorB:c.colorB||'',textureB:c.textureB||'',hpl:isHpl,totalAreaMm2:0,areas:{},pieces:[],catalogName:undefined};
     // The exact SKU chosen for these pieces. Every piece in the group must name the same one;
     // if they disagree, or some have none, the group falls back to catalogue matching.
@@ -47615,6 +47633,8 @@ function prodComputeBom(comps){
     if(groups[key].outsourceName===undefined) groups[key].outsourceName=on;
     else if(groups[key].outsourceName!==on) groups[key].outsourceName='';
     groups[key].hplOrdered=Math.max(groups[key].hplOrdered||0,+c.hplOrdered||0);
+    if(c.clientHpl) groups[key].clientHpl=true;
+    if(c.clientBoard) groups[key].clientBoard=true;
     var hs=c.hplSku||'';
     if(groups[key].hplSku===undefined) groups[key].hplSku=hs;
     else if(groups[key].hplSku!==hs) groups[key].hplSku='';
@@ -47637,6 +47657,7 @@ function prodComputeBom(comps){
     bom.push({
       material:g.material,color:g.color,texture:g.texture,thickness:g.thickness,faces:g.faces,
       colorB:g.colorB,textureB:g.textureB,hpl:g.hpl,catalogName:g.catalogName||'',outsourceName:g.outsourceName||'',hplSku:g.hplSku||'',hplOrdered:g.hplOrdered||0,
+      clientHpl:g.clientHpl||undefined,clientBoard:g.clientBoard||undefined,
       totalArea:Math.round(g.totalAreaMm2/10000)/100,
       boardSize:boardW+'×'+boardH+'mm',boardsNeeded:sim.boardsNeeded,areas:areaList,
       utilizationPct:Math.round(sim.utilization*1000)/10,
@@ -47740,7 +47761,7 @@ function prodBuildSummary(result) {
     var parts=[bm.material,bm.color,bm.colorB,bm.texture?'('+bm.texture+')':'',bm.textureB&&bm.textureB!==bm.texture?'('+bm.textureB+')':'',bm.thickness?bm.thickness+'mm':'',bm.faces?bm.faces+'F':''];
     var rn=parts.filter(function(s){return s&&s.trim();}).join(' ');
     var picked=bm.catalogName&&typeof lookupInSource==='function'?lookupInSource(dbMaterials,bm.catalogName):null;
-    if(bm.outsourceName){
+    if(bm.outsourceName&&!bm.clientBoard){
       // Chosen as outsourced at import: lands in the quotation's outsource section, where the
       // supplier's price is entered (same as pressing "Outsource" on the line here).
       var orow={aiName:rn,name:bm.outsourceName,qty:bq,unit:'pc',include:true,price:0,custom:true,
@@ -47755,6 +47776,7 @@ function prodBuildSummary(result) {
     } else {
       mats.push(catalogMatchRow(rn,applyJargon(rn,'materials'),dbMaterials,bq,'pc',bm.texture));
     }
+    if(bm.clientBoard) _prodClientSuppliedRow(mats[mats.length-1],rn,'board');
     if(bm.hpl&&bm.hplOrdered>0&&mats.length){
       var srow=mats[mats.length-1];
       if(bm.hplOrdered<(bm.boardsNeeded||0)){ srow.needsReview=true; srow.reviewNote=(srow.reviewNote?srow.reviewNote+' ':'')+'The panels need '+bm.boardsNeeded+' laminated boards but the order says '+bm.hplOrdered+' — confirm the quantity with the client.'; }
@@ -47775,6 +47797,7 @@ function prodBuildSummary(result) {
       var hrow=hpk?pickedRow(hplName,applyJargon(hplName,'materials'),hpk,hplSheets,'pc',bm.texture,'mat')
         :catalogMatchRow(hplName,applyJargon(hplName,'materials'),dbMaterials,hplSheets,'pc',bm.texture);
       mats.push(hrow);
+      if(bm.clientHpl) _prodClientSuppliedRow(hrow,hplName,'hpl');
       // Substrate determines WHICH lamination service — reuse the same field parser built for
       // catalog matching so "Plywood"/"PB"/"MDF"/"PB-MR"/"MDF-MR" are recognized regardless of how
       // the AI phrased the material string.
@@ -49227,6 +49250,17 @@ function _reflectNewClear(){
   try{ if(typeof renderItems==='function') renderItems(); }catch(e){}
   try{ if(fqAreas&&typeof renderFQItems==='function') renderFQItems(); }catch(e){}
 }
+function _reflectClientSupplied(mt){
+  var d=(typeof _prodParseMaterialDescriptor==='function')?_prodParseMaterialDescriptor(mt.name):{};
+  var typ=mt.clientSupplied==='hpl'?'HPL':({MDF:'Raw Board MDF','MDF-MR':'Raw Board MDF-MR',PB:'Melamine Laminate PB','PB-MR':'Melamine Laminate PB-MR',Plywood:'Raw Board Plywood'}[d.substrate]||'');
+  var size=(String(mt.name).match(/\b\d+\s*x\s*\d+\b/i)||[''])[0];
+  var hit=(qClientSupplyMatList||[]).filter(function(x){ return x&&x.color===mt.name&&x.type===typ; })[0];
+  if(hit) hit.qty=(+hit.qty||0)+(+mt.qty||0);
+  else { qClientSupplyMatList=(qClientSupplyMatList||[]).filter(function(x){ return x&&(x.brand||x.type||x.color); });
+    qClientSupplyMatList.push({brand:'',type:typ,color:mt.name,size:size,thickness:d.thickness?d.thickness+'mm':'',texture:mt.texture||'',qty:+mt.qty||0}); }
+  if(!qClientSupplyMat){ qClientSupplyMat=true; var tg=el('client-mat-toggle'); if(tg) tg.checked=true; var tf=el('fq-client-mat-toggle'); if(tf) tf.checked=true; }
+  logActivity('Client-supplied '+(mt.clientSupplied==='hpl'?'HPL':'board')+' from the cutting list: '+mt.name+' × '+mt.qty+' — not priced, listed under Customer-Supplied Materials.');
+}
 function _prodReflectFill(sum,startNew,stageLabel,rep){
   // Adding to an existing quotation must never overwrite what is already there. Land in the
   // first area only while it is still empty (a fresh quotation, or the one initQuotation just
@@ -49280,6 +49314,7 @@ function _prodReflectFill(sum,startNew,stageLabel,rep){
   for(var m=0;m<sum.materials.length;m++){
     var mt=sum.materials[m];
     if(!mt.include||!mt.name||!(mt.qty>0)) continue;
+    if(mt.clientSupplied){ _reflectClientSupplied(mt); continue; }
     if(_mergeInto(mt.outsource?area.outsourceMaterials:area.matItems,mt.outsource?_outStart:_matStart,
       {name:mt.name,unit:mt.unit||'pc',price:mt.price||0,qty:mt.qty,mto:!mt.outsource&&!!mt.mto})) continue;
     if(mt.outsource) area.outsourceMaterials.push({name:mt.name,unit:mt.unit||'pc',qty:mt.qty,price:mt.price||0,saved:false});
@@ -50767,7 +50802,7 @@ var LAMI_APP_MANUAL=
   +'- DESIGNERS SUPPORT (Production AI): upload a shop drawing or cutting list (PDF/image/Excel) — AI extracts each cabinet component (material, color, texture, thickness, dimensions, qty, edge-banding code, grooving spec, faces) and FLAGS anything genuinely ambiguous instead of guessing. Materials/hardware match against the real Price Database catalog; unmatched items can be marked Outsource. Corrections are remembered so the same wording auto-resolves next time (tracked in the Mapping Audit Log, Admin-only). "Reflect to quotation" pushes the result into the open quotation. The Bill-of-Materials report simulates real board-cutting layout (Panel Saw or CNC-nesting, set in Settings → Designers Support) to compute actual sheets needed, not a flat area guess.\n'
   +'- CLIENTS: full directory (B2B: contractors/architects/developers/hotels; B2C: homeowners/condo owners), autocomplete + transaction history on the quotation form.\n'
   +'- SCHEDULE: Gantt (year) and Calendar (month) views, Philippine holidays highlighted.\n'
-  +'- JOB ORDERS: a Job Order is built ONLY from the cutting list reflected into the quotation (Designers Support). It is reserved at the Initial lock, a new version at the Final lock, and marked ready when the client approves the Final; KEYSTONE releases it to production. Open it from the quotation\'s **Job Order** button (versions, print, part labels). Labels show the exact board name. IF A BOARD OR EDGE TAPE IS CHANGED ON THE FINAL QUOTATION\'S LINES: at the Final lock the app lists each change the cutting list uses and asks to update the Job Order — OK makes a new version with the new materials and labels; Cancel keeps the old ones (logged). Already locked, or pressed Cancel? Job Order → **Check Final Quotation materials**. Reprint the Job Order and labels from the new version. Reflecting a new cutting list into the Final Quotation replaces this — that list is used as is. On the cutting layout every piece is named: a piece too small for its label gets a thin red line out to its part number and size at the side of the board.\n'
+  +'- JOB ORDERS: a Job Order is built ONLY from the cutting list reflected into the quotation (Designers Support). It is reserved at the Initial lock, a new version at the Final lock, and marked ready when the client approves the Final; KEYSTONE releases it to production. Open it from the quotation\'s **Job Order** button (versions, print, part labels). Labels show the exact board name. IF A BOARD OR EDGE TAPE IS CHANGED ON THE FINAL QUOTATION\'S LINES: at the Final lock the app lists each change the cutting list uses and asks to update the Job Order — OK makes a new version with the new materials and labels; Cancel keeps the old ones (logged). Already locked, or pressed Cancel? Job Order → **Check Final Quotation materials**. Reprint the Job Order and labels from the new version. Reflecting a new cutting list into the Final Quotation replaces this — that list is used as is. CLIENT-SUPPLIED HPL OR BOARD: in Designers Support › Cutting List › HPL builds, tick "Client supplies" HPL and/or Board on that build; on Reflect those are not priced and go to Customer-Supplied Materials (Client-supplied materials turns on, so its service uplift applies — untick services in that card if needed). Cutting, lamination, the Job Order and labels are unchanged. On the cutting layout every piece is named: a piece too small for its label gets a thin red line out to its part number and size at the side of the board.\n'
   +'- REPORTS: Dashboard KPIs, analytics by segment/status/month/agent, custom Excel/PowerPoint export. Project tracker has a search box (client, project, serial, user, agent — words in any order), status / type / prepared-by filters and sort. The Cost Report tab (profit/margin detail) is Admin/Director/Manager only.\n'
   +'- ORDERS: Wufoo form submissions land here automatically; "Export to Quotation" pre-fills a new quotation from an order.\n'
   +'- USERS & ROLES (Settings → Users, Admin/Director only): Admin > Manager > Supervisor > Approver > Encoder > Staff > Viewer. Manager/Supervisor PIN required for non-VAT, discounts, unlock, revision, holiday-premium override. Approval Routing assigns a named approver per action type per company.\n'
@@ -51913,6 +51948,11 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-11-26-hpl-client-supplied', date:'26 Nov 2026', items:[
+    {id:'hpl-client-supplied', icon:'ti-package-import', title:'Client-supplied HPL or board',
+     text:'Designers Support › Cutting List › HPL builds now has a "Client supplies" column: tick HPL, Board, or both when the client brings them. They are not priced and go to the quotation\'s Customer-Supplied Materials list, which switches on Client-supplied materials (its service uplift applies, adjustable per service). Cutting, lamination, the Job Order and labels work as before.',
+     show:'quotations'}
+  ]},
   {id:'2026-11-24-tracker-jo-materials', date:'24 Nov 2026', items:[
     {id:'jo-fq-materials', icon:'ti-replace', title:'Job Order follows Final Quotation materials',
      text:'If you change a board or edge tape on the Final Quotation, the app now asks at the Final lock whether to carry the change into the Job Order and labels. It lists each change; press OK to update. Already locked? Open Job Order and press Check Final Quotation materials.',
