@@ -2972,6 +2972,48 @@ function simPickupRpc(fn, a){
     }
     case 'pk_allow_late': { if (!can('wh_manager')) return fail('Only the Warehouse Manager (or delegate) can allow a late ticket.'); const o = O(a.p_order); if (!o) return fail('Ticket not found.');
       Object.assign(o, { late_allowed_at: now, late_allowed_name: who }); log(o.id, null, 'late_allowed', 'Late ticket allowed — recorded, not counted in promptness'); return ok(null); }
+    case 'pk_to_delivery': {   // mirrors the database function (pick-up → delivery)
+      if (!canSsTickets()) return fail('Only dispatch or Sales Support can change a pick-up to delivery.');
+      const o = O(a.p_order); if (!o) return fail('Ticket not found.');
+      if (o.status === 'in_queue') return fail(`SO ${o.so_no} is in the pick-up queue right now (the client is at ${PK_SITE[o.site]}) — finish or cancel that queue number first.`);
+      if (o.status === 'done') return fail(`SO ${o.so_no} was already fully picked up — there is nothing left to deliver.`);
+      if (o.status === 'cancelled') return ok({ so_no: o.so_no, already: true });
+      if (!String(a.p_reason || '').trim()) return fail('Say why it is changing to delivery (e.g. client asked for delivery).');
+      o.status = 'cancelled'; o.closed_at = now; log(o.id, null, 'to_delivery', 'Changed to delivery — ' + a.p_reason.trim());
+      if (a.p_job) (SIM.job_events ||= []).push({ id: newId(), job_id: a.p_job, event_type: 'note', notes: `Changed from pick-up: pick-up ticket ${o.so_no} (${fmtDay(o.pickup_date)}, ${PK_SITE[o.site]}) closed. Reason: ${a.p_reason.trim()}`, actor_name: who, created_at: now });
+      return ok({ so_no: o.so_no, company: o.company, lines: (o.lines || []).filter(l => Number(l.qty) > Number(l.taken || 0)).map(l => ({ desc: l.desc, qty: Number(l.qty) - Number(l.taken || 0), unit: l.unit })) });
+    }
+    case 'pk_from_delivery': {   // mirrors the database function (delivery → pick-up)
+      if (!canSsTickets()) return fail('Only dispatch or Sales Support can change a delivery to pick-up.');
+      const j = (SIM.jobs || []).find(x => x.id === a.p_job); if (!j) return fail('Delivery not found.');
+      const so = ((j.doc_refs || []).map(r => r.ref).find(r => /^S\d/i.test(r || '')) || j.quotation_serial || '').toUpperCase(), r = String(a.p_reason || '').trim();
+      if (j.status === 'rejected') return fail(`This delivery (${so}) is already cancelled.`);
+      if (!jobCanGoPickup(j)) return fail(`This delivery (${so}) is already loaded / on the road, so it can’t change to pick-up.`);
+      const trip = (SIM.job_trips || []).find(t => t.truck_id === j.truck_id && t.trip_date === j.scheduled_date && t.trip_no === (j.trip_no || 1));
+      if (j.truck_id && trip && (trip.departed_at || trip.load_locked_at)) return fail(`The truck for ${so} is already loaded / on the road — it can’t change to pick-up now.`);
+      if (!r) return fail('Say why it is changing to pick-up (e.g. client will pick up).');
+      const cr = a.p_create !== false;
+      if (cr && !PK_SITE[a.p_site]) return fail('Pick Plant 1 or Annex.');
+      if (cr && (!a.p_date || a.p_date < day)) return fail('Pick a pick-up date from today on.');
+      if (cr && !(j.items || []).length) return fail('This delivery has no item list — load the pick-up ticket in Pick-up mode instead.');
+      const old = SIM.pk_orders.find(o => o.so_no.toUpperCase() === so && o.status !== 'cancelled');
+      if (cr && old?.status === 'in_queue') return fail(`SO ${so} is in the pick-up queue right now — finish that pick-up first.`);
+      j.status = 'rejected';
+      (SIM.job_events ||= []).push({ id: newId(), job_id: j.id, event_type: 'rejected', notes: `Changed to pick-up${cr ? ` (${PK_SITE[a.p_site]}, ${fmtDay(a.p_date)})` : ''} by ${who}. Reason: ${r}`, actor_name: who, created_at: now });
+      const s = (SIM.delivery_schedules || []).find(x => x.delivery_date === j.scheduled_date && ['for_review','for_confirmation','for_approval','for_change_approval','approved'].includes(x.status)
+        && (x.snapshot || []).some(t => (t.drops || []).some(d => d.job_id === j.id)));
+      if (s) Object.assign(s, { status: 'returned', returned_from: s.status, approved_at: null, return_reason: `Changed to pick-up — ${so} ${j.client_name || ''} (${r}). Prepare and sign again.` });
+      let id = null;
+      if (cr){ const tot = sum(j.items, it => Number(it.qty || 0));
+        const lines = j.items.map((it, n) => { const prev = (old?.lines || []).filter(l => String(l.desc).trim().toLowerCase() === String(it.desc).trim().toLowerCase()), taken = sum(prev, l => Number(l.taken || 0));
+          return { i: n, desc: it.desc, qty: Number(it.qty || 0) + taken, unit: it.unit || null, amount: prev[0]?.amount ?? (tot ? Math.round(Number(j.order_value || 0) * Number(it.qty || 0) / tot * 100) / 100 : 0), want: true, prep: false, taken }; });
+        const f = { site: a.p_site, kind: a.p_date > day ? 'scheduled' : 'same_day', pickup_date: a.p_date, client_name: j.client_name, agent_id: j.agent_id || null, on_time: true, late_allowed_at: null,
+          lines, status: 'open', no_show_at: null, prepared_at: null, prepared_name: null, ticket_created_at: now, created_est: false, client_contact: j.client_contact_name || null, client_phone: j.client_phone || null, client_email: j.client_email || null, updated_at: now };
+        if (old){ Object.assign(old, f); id = old.id; }
+        else { id = newId(); SIM.pk_orders.push({ id, company: j.company, so_no: so, ticket_no: j.odoo_ticket || null, salesperson: null, mssi_qt: j.company === 'MSSI', instructions: j.notes || null, uploaded_at: now, uploaded_name: who, missed_count: 0, ...f }); }
+        log(id, null, 'from_delivery', `Changed from delivery (${j.scheduled_date ? fmtDay(j.scheduled_date) : 'no date'}) — ${r}. Counted as on time (the change of method was arranged by staff).`); }
+      return ok({ so_no: so, pk_order: id, schedule_returned: !!s, schedule_date: s?.delivery_date || null });
+    }
     case 'pk_cancel': { const o = O(a.p_order); if (!o || !['open','balance','no_show'].includes(o.status)) return fail('Only a ticket that isn’t in the queue can be cancelled.'); o.status = 'cancelled'; o.closed_at = now; log(o.id, null, 'cancelled', a.p_reason); return ok(null); }
     case 'pk_arrive': {
       if (!can('sales_support')) return fail('Only Sales Support can log a client’s arrival.');
@@ -3848,7 +3890,7 @@ async function fillFromOdoo(f, txt, addItem, refresh){
   const render = dup => { out.innerHTML = odooPageBox(pg, 'nj-paste') + `<div class="imp-sum"><b>Filled from ${esc(j.ticket || 'the ticket')}.</b>${dup}
     ${ok.length ? `<ul>${ok.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}${warn.length ? `<ul class="warn">${warn.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>`; };
   render('');
-  f._allDone = null;
+  f._allDone = null; f._pkMove = null;
   const instrTxt = (j.fields?.['Delivery Instructions'] || '').trim();
   const showPartial = req => { f._partialReq = req ? { instr: instrTxt } : null; const b = $('nj-partial'); if (b) b.innerHTML = req ? partialBox(instrTxt, 'id="nj-partial-ok"') : ''; };
   if (isPartialReleased(j.fulfillment)) showPartial(true);   // until the history says it's a completion
@@ -3856,19 +3898,25 @@ async function fillFromOdoo(f, txt, addItem, refresh){
     // same SO already in HATID (earlier delivery / pick-up) → load only what's left, like the upload does
     let h = null; try { h = (await soHistory([j.so]))[j.so.toUpperCase()]; } catch {}
     if (isPartialReleased(j.fulfillment)) showPartial(!soHasHistory(h));
+    f._pkMove = null;
     if (h){
       const hist = h.past.join(' · ');
-      if (!j.items.length || h.noItems){ render(` <div class="warn" style="margin-top:4px">⚠ ${esc(j.so)} is already in HATID (${esc(hist)}) — no item list to compare. Check it isn’t a duplicate before creating.</div>`); return; }
-      const L = soLeft(h, j.items), gone = j.items.filter((_, k) => L[k].left <= 0);
+      if (h.pk?.status === 'in_queue'){ f._allDone = `${j.so} is in the pick-up queue right now (the client is at the plant) — finish or cancel that queue number first`;
+        render(` <div class="warn" style="margin-top:4px"><b>⚠ ${esc(f._allDone)}.</b></div>`); return; }
+      const mv = j.items.length ? pkMoveFor(h, j.items) : (pkCanGoDelivery(h.pk) ? h.pk : null), mvNote = mv ? ` <div class="warn" style="margin-top:4px"><b>🔁 ${esc(pkMoveNote(mv).replace(/ — untick.*$/, ''))}.</b> Close this form if it is still a pick-up.</div>` : '';
+      if (!j.items.length || h.noItems){ f._pkMove = mv; render(` <div class="warn" style="margin-top:4px">⚠ ${esc(j.so)} is already in HATID (${esc(hist)}) — no item list to compare. Check it isn’t a duplicate before creating.</div>${mvNote}`); return; }
+      const L = soLeft(h, j.items, { pk: !!mv }), gone = j.items.filter((_, k) => L[k].left <= 0);
       if (gone.length === j.items.length){
-        f._allDone = `Everything on ${j.so} was already delivered or is on a job (${hist})`;
+        f._allDone = `Nothing left on ${j.so} — everything is ${soWhy(h, j.items, { pk: !!mv })} (${hist})`;
         render(` <div class="warn" style="margin-top:4px"><b>⚠ ${esc(f._allDone)}.</b> Nothing to create.</div>`); return; }
+      f._pkMove = mv;
+      if (mv && !L.some(r => r.cov > 0)){ render(mvNote); return; }   // nothing delivered / picked up yet: the ticket's items stay as they are
       const balNote = `Balance of ${j.so} — earlier: ${hist}. Only what’s left is loaded.`;
       $('nj-items').innerHTML = '';
       j.items.forEach((it, k) => { if (L[k].left > 0) addItem({ ...it, qty: L[k].left }, true); });
       syncBoardsFromItems(f); if (f.notes) f.notes.value = [balNote, j.notes].filter(Boolean).join('\n'); refresh();
       const done = j.items.map((it, k) => L[k].cov ? `${fmtQty(L[k].cov)} of ${fmtQty(it.qty)} × ${it.desc}${L[k].left > 0 ? '' : ' (all)'}` : null).filter(Boolean);
-      render(` <div class="warn" style="margin-top:4px"><b>↺ ${esc(balNote)}</b><div class="ft">Already delivered / on a job: ${done.map(esc).join('; ')}</div></div>`);
+      render(` <div class="warn" style="margin-top:4px"><b>↺ ${esc(balNote)}</b><div class="ft">Already ${esc(soWhy(h, j.items, { pk: !!mv }))}: ${done.map(esc).join('; ')}</div></div>${mvNote}`);
     }
   }
 }
@@ -4067,8 +4115,9 @@ const soKey = d => String(d || '').toLowerCase().replace(/\s+/g, ' ').trim();
 async function soHistory(sos){
   sos = [...new Set(sos.filter(Boolean).map(x => x.toUpperCase()))];
   const H = {}; if (!sos.length) return H;
-  const get = so => H[so] ??= { done: {}, busy: {}, pkTaken: {}, pkBusy: {}, past: [], jobs: [], noItems: false };   // done/busy = delivery jobs; pk* = pick-up ticket
-  const cols = 'id, quotation_serial, doc_refs, status, items, delivery_outcome, received, scheduled_date, updated_at, job_type';   // 2026-11-09: completed_at does not exist — the whole query was refused (400), so earlier deliveries were never counted
+  const get = so => H[so] ??= { done: {}, busy: {}, busyMov: {}, movJobs: [], pkTaken: {}, pkBusy: {}, past: [], jobs: [], noItems: false };   // done/busy = delivery jobs; pk* = pick-up ticket
+  // busyMov / movJobs: unfinished deliveries that can still change to pick-up (not loaded, not on the road, not on a courier) — Rommel 2026-11-27
+  const cols = 'id, quotation_serial, doc_refs, status, items, delivery_outcome, received, scheduled_date, updated_at, job_type, loaded_at, courier_booked_at';   // 2026-11-09: completed_at does not exist — the whole query was refused (400), so earlier deliveries were never counted
   const [jr, pr, ...refs] = await Promise.all([
     sb.from('jobs').select(cols).in('quotation_serial', sos).neq('status', 'rejected'),
     sb.from('pk_orders').select('id, so_no, status, lines, pickup_date, closed_at').in('so_no', sos).neq('status', 'cancelled'),
@@ -4076,10 +4125,11 @@ async function soHistory(sos){
   const seen = new Set(), all = [...(jr?.data || []).map(j => ({ ...j, _so: String(j.quotation_serial || '').toUpperCase() })), ...refs.flat()].filter(j => j && !seen.has(j.id + j._so) && seen.add(j.id + j._so));
   for (const j of all){ const h = get(j._so), its = j.items || [];
     h.jobs.push(j); if (!its.length) h.noItems = true;
-    const fin = j.status === 'completed', rec = j.received || {};
+    const fin = j.status === 'completed', rec = j.received || {}, mov = jobCanGoPickup(j);
+    if (mov) h.movJobs.push(j);
     its.forEach((it, i) => { const k = soKey(it.desc), q = Number(it.qty || 0);
       if (fin){ const got = j.delivery_outcome === 'full' || rec.items?.[i] == null ? (j.delivery_outcome === 'returned' ? 0 : q) : Math.min(q, Number(rec.items[i]) || 0); h.done[k] = (h.done[k] || 0) + got; }
-      else h.busy[k] = (h.busy[k] || 0) + q; });
+      else { h.busy[k] = (h.busy[k] || 0) + q; if (mov) h.busyMov[k] = (h.busyMov[k] || 0) + q; } });
     const dd = j.scheduled_date || String(j.updated_at || '').slice(0, 10);
     h.past.push(fin ? `delivered${dd ? ' ' + fmtDay(dd) : ''}${j.delivery_outcome && j.delivery_outcome !== 'full' ? ' (partial)' : ''}`
       : `${STATUS_LABEL[j.status] || j.status}${j.scheduled_date ? ' ' + fmtDay(j.scheduled_date) : ''}`); }
@@ -4091,13 +4141,52 @@ async function soHistory(sos){
   return H;
 }
 /* Per item of the new ticket: how much is already covered (done + on an unfinished job) and what is left */
-function soLeft(h, items, opt = {}){   // opt.pk: loading the pick-up ticket itself (its own open lines are replaced, not "busy")
+function soLeft(h, items, opt = {}){   // opt.pk: loading the pick-up ticket itself, or changing it to delivery (its open lines are replaced, not "busy")
+  // opt.mov: changing the SO's unloaded delivery job(s) to pick-up — what they hold is freed
   const used = {}, usedJ = {};   // the same description can appear twice on a ticket — spend the covered qty in order
-  return items.map(it => { const k = soKey(it.desc), q = Number(it.qty || 0), jobs = (h.done[k] || 0) + (h.busy[k] || 0);
+  return items.map(it => { const k = soKey(it.desc), q = Number(it.qty || 0), jobs = (h.done[k] || 0) + (h.busy[k] || 0) - (opt.mov ? (h.busyMov[k] || 0) : 0);
     const pool = jobs + (h.pkTaken[k] || 0) + (opt.pk ? 0 : (h.pkBusy[k] || 0)) - (used[k] || 0), cov = Math.max(0, Math.min(q, pool));
     const covJ = Math.max(0, Math.min(q, jobs - (usedJ[k] || 0)));   // covered by delivery jobs only
     used[k] = (used[k] || 0) + cov; usedJ[k] = (usedJ[k] || 0) + covJ;
     return { cov, covJ, left: q - cov }; });
+}
+/* ---- Pick-up ⇄ delivery (Rommel 2026-11-27): S80270 / S77881 / S79743 were pick-ups changed to delivery, and the upload said
+   "already delivered or is on a job" — the open pick-up ticket was holding the items, nothing had been delivered. Now the
+   message says what really holds the items, and the other method's record is closed when the new one is created. */
+function jobCanGoPickup(j){ return ['proposed','scheduled'].includes(j.status) && !j.loaded_at && !j.courier_booked_at; }
+const pkCanGoDelivery = o => !!o && ['open','no_show','balance'].includes(o.status);
+function soWhy(h, items, opt = {}){   // what holds an SO's items, in plain words
+  const ks = items.map(it => soKey(it.desc)), has = m => ks.some(k => (m[k] || 0) > 0), out = [];
+  if (has(h.done)) out.push('already delivered');
+  if (ks.some(k => (h.busy[k] || 0) - (h.busyMov[k] || 0) > 0)) out.push('on a delivery job that is loaded / on the road');
+  else if (!opt.mov && has(h.busy)) out.push('on a delivery job');
+  if (has(h.pkTaken)) out.push('already picked up');
+  if (!opt.pk && has(h.pkBusy)) out.push(`on a pick-up ticket (${PK_OST[h.pk?.status] || h.pk?.status}${h.pk?.pickup_date ? ', ' + fmtDay(h.pk.pickup_date) : ''})`);
+  return out.length ? out.join(' / ') : 'already done';
+}
+/* Is the new ticket a change of method, or a split (part picked up, part delivered)? Only a change when the old record was
+   for everything the new ticket still needs — a split keeps the old record and loads just the rest, as before. */
+function pkMoveFor(h, items){
+  const o = h?.pk; if (!pkCanGoDelivery(o)) return null;
+  const want = new Set((o.lines || []).filter(l => l.want !== false && Number(l.qty) > Number(l.taken || 0)).map(l => soKey(l.desc)));
+  const L = soLeft(h, items, { pk: true }), need = items.filter((it, k) => L[k].left > 0);
+  return need.length && need.every(it => want.has(soKey(it.desc))) ? o : null;
+}
+function jobMoveFor(h, items){
+  if (!h?.movJobs?.length) return null;
+  const its = items.filter(l => l.want !== false), L = soLeft(h, its, { pk: true, mov: true }), need = its.filter((it, k) => L[k].left > 0);
+  return need.length && need.every(it => (h.busyMov[soKey(it.desc)] || 0) > 0) ? h.movJobs : null;
+}
+const pkMoveNote = o => `Changed from pick-up: the pick-up ticket (${PK_OST[o.status] || o.status}${o.pickup_date ? ', ' + fmtDay(o.pickup_date) : ''}) is closed when this delivery is created — untick the row if it is still a pick-up`;
+const jobMoveNote = js => `Changed from delivery: ${js.length === 1 ? 'the delivery job' : js.length + ' delivery jobs'} (${js.map(j => `${STATUS_LABEL[j.status] || j.status}${j.scheduled_date ? ' ' + fmtDay(j.scheduled_date) : ''}`).join(', ')}) ${js.length === 1 ? 'is' : 'are'} cancelled when this pick-up is loaded — untick the row if it is still a delivery`;
+async function moveJobsToPickup(js, why){   // after the pick-up ticket is loaded: take the old delivery job(s) off the plan
+  const bad = [];
+  for (const j of js){ try { const r = await pkRpc('Closing the delivery', 'pk_from_delivery', { p_job: j.id, p_reason: why, p_create: false }); if (r?.schedule_returned) toast(`The delivery schedule for ${fmtDay(r.schedule_date)} went back for signing`, 'ok'); } catch { bad.push(j); } }
+  if (bad.length) toast(`The pick-up is loaded, but ${bad.length} delivery job${bad.length === 1 ? '' : 's'} could not be cancelled — open ${bad.length === 1 ? 'it' : 'them'} and use “Change to pick-up”`, 'error');
+}
+async function closePkForDelivery(o, jobId, why){   // after the delivery job is created: close the old pick-up ticket
+  try { await pkRpc('Closing the pick-up ticket', 'pk_to_delivery', { p_order: o.id, p_reason: why, p_job: jobId }); return true; }
+  catch { toast(`The delivery is created, but the pick-up ticket ${o.so_no} could not be closed — cancel it in Pick-up mode`, 'error'); return false; }
 }
 /* ---- Did the app read the upload right? (Rommel 2026-10-09) Every ticket is checked against HATID's read-only copy of
    the Odoo sales orders before anything is created: a ticket that came through with no items or no customer (grouped /
@@ -4217,6 +4306,7 @@ function openJobUpload(){
         else if (x.was && x.date !== x.was) w.push(`Ticket date ${fmtDay(x.was)} has passed — moved to ${fmtDay(x.date)}, check it`);
         if (!j.contact && !j.phone) w.push('No contact person/number');
         if (x.dup) w.push(`⚠ ${x.dup}`);
+        if (x.pkMove) w.push(`🔁 ${pkMoveNote(x.pkMove)}`); else if (x.pkSplit) w.push(`ℹ ${x.pkSplit}`);
         if (x.bal) w.push(`↺ ${x.bal}`);
         const C = x.t.chk;
         if (C?.filled?.length) w.push(`${C.filled.join(' and ').replace(/^./, c => c.toUpperCase())} taken from the Odoo copy — the file didn’t have ${C.filled.length > 1 || /lines/.test(C.filled[0]) ? 'them' : 'it'}${/chosen/.test(C.filled[0]) ? ' right' : ''}. Check before creating`);
@@ -4245,7 +4335,7 @@ function openJobUpload(){
       tr.querySelector('[data-up-agent]').addEventListener('change', e => { x.agent = e.target.value; });
       tr.querySelector('[data-up-odoo]')?.addEventListener('click', () => {   // replace this ticket's lines with what Odoo holds
         x.t.lines = x.t.odooLines.slice(); x.t.chk = { ...x.t.chk, diff: [], fromOdoo: true, filled: [`items (${x.t.lines.length} lines, chosen)`, ...(x.t.chk.filled || []).filter(f => !/^items/.test(f))] };
-        x.j = odooToJob(x.t); x.empty = upUnusable(x.j); delete x.left; delete x.held; delete x.q; delete x.lockHeld; delete x.dup; delete x.bal; delete x.full;
+        x.j = odooToJob(x.t); x.empty = upUnusable(x.j); delete x.left; delete x.held; delete x.q; delete x.lockHeld; delete x.dup; delete x.bal; delete x.full; delete x.pkMove; delete x.pkSplit;
         render(); dupCheck(); });
       tr.querySelector('[data-up-date]').addEventListener('change', e => { x.date = e.target.value; });
       tr.querySelector('[data-up-pok]')?.addEventListener('change', e => { x.pok = e.target.checked; });
@@ -4264,9 +4354,13 @@ function openJobUpload(){
     let H = {}; try { H = await soHistory(parsed.jobs.map(x => x.j.so)); } catch { return; }
     parsed.jobs.forEach(x => { const h = H[(x.j.so || '').toUpperCase()]; x.hasHist = soHasHistory(h); if (!h) return;
       x.hist = h.past.join(' · ');
+      if (h.pk?.status === 'in_queue'){ x.dup = `${x.j.so} is in the pick-up queue right now (the client is at the plant) — finish or cancel that queue number first`; x.pick = false; x.full = true; return; }
+      x.pkMove = pkMoveFor(h, x.j.items);   // a pick-up changed to delivery: its ticket no longer holds the items
+      if (!x.pkMove && pkCanGoDelivery(h.pk) && h.pk.status === 'open') x.pkSplit = `Part of ${x.j.so} is on a pick-up ticket (${fmtDay(h.pk.pickup_date)}) — only the rest is loaded. If all of it is now a delivery, open the pick-up ticket › 🚚 Change to delivery instead`;
       if (!x.j.items.length || h.noItems){ x.dup = `${x.j.so} is already in HATID (${x.hist}) — no item list to compare, check before creating`; x.pick = false; return; }
-      const L = soLeft(h, x.j.items); x.left = L; x.held = new Set(L.map((r, k) => r.left <= 0 ? k : -1).filter(k => k >= 0)); x.lockHeld = true;
-      if (x.held.size === x.j.items.length){ x.dup = `Everything on ${x.j.so} was already delivered or is on a job (${x.hist})`; x.pick = false; x.full = true; }
+      const o = { pk: !!x.pkMove }, L = soLeft(h, x.j.items, o); x.left = L; x.held = new Set(L.map((r, k) => r.left <= 0 ? k : -1).filter(k => k >= 0)); x.lockHeld = true;
+      if (x.held.size === x.j.items.length){ x.dup = `Nothing left on ${x.j.so} — everything is ${soWhy(h, x.j.items, o)} (${x.hist})`; x.pick = false; x.full = true; x.pkMove = null; }
+      else if (x.pkMove && !L.some(r => r.cov > 0)) x.bal = null;
       else x.bal = `Balance of ${x.j.so} — earlier: ${x.hist}. Only what’s left is loaded.`; });
     render();
   };
@@ -4314,7 +4408,8 @@ function openJobUpload(){
       await withRetry('Creating jobs', () => sb.from('jobs').insert(rows));
       for (const r of rows){ const xx = parsed.jobs.find(x => x.pick && (x.j.so || '').toUpperCase() === r.quotation_serial), t = xx?.t, C = t?.chk;
         await logEvent(r.id, 'proposed', `Imported from ${r.odoo_ticket ? 'Odoo ticket ' + r.odoo_ticket : 'Excel upload'}${C?.fromOdoo ? ' — items taken from the Odoo copy' : C?.filled?.length ? ' — ' + C.filled.join(', ') + ' taken from the Odoo copy' : ''}`);
-        if (xx?.prFull) await logEvent(r.id, 'note', partialConfirmNote()); }
+        if (xx?.prFull) await logEvent(r.id, 'note', partialConfirmNote());
+        if (xx?.pkMove) await closePkForDelivery(xx.pkMove, r.id, `delivery ticket uploaded by ${state.me.name || state.me.email}`); }
       const V = await upVerifyCreated(rows).catch(e => ({ err: e?.message }));
       if (V.bad?.length) alert(`Saved, but ${V.bad.length} job${V.bad.length === 1 ? ' doesn’t' : 's don’t'} match what was read from the file — open and check:\n\n• ${V.bad.join('\n• ')}`);
       else if (V.err) toast('Jobs created, but they couldn’t be read back to double-check — open one to make sure', 'error');
@@ -4340,7 +4435,7 @@ async function downloadJobTemplate(){
   } catch (err) { toast(err?.message || 'Could not make the template', 'error'); }
 }
 
-function openNewJob(){
+function openNewJob(pre = null){   // pre.pk: a pick-up ticket being changed to delivery (fills the form from it)
   const cos = myCompanies();
   openOverlay(`<div class="scrim" data-close></div>
   <div class="modal" role="dialog" aria-modal="true">
@@ -4438,6 +4533,23 @@ function openNewJob(){
   f.client_name.addEventListener('input', guessType); f.client_name.addEventListener('change', guessType);
   let impT;
   $('nj-paste').addEventListener('input', () => { clearTimeout(impT); impT = setTimeout(async () => { await fillFromOdoo(f, $('nj-paste').value, addItem, refresh); guessType(); }, 150); });
+  if (pre?.pk){   // Change to delivery, from the pick-up ticket: what's left on it goes on the form
+    const o = pre.pk;
+    if (cos.includes(o.company)){ f.company.value = o.company; f.company.dispatchEvent(new Event('change')); }
+    f.quotation_serial.value = o.so_no; f.so_ref.value = o.so_no; f.client_name.value = o.client_name || '';
+    if (o.agent_id) $('nj-agent').value = o.agent_id;
+    f.client_contact_name.value = o.client_contact || ''; f.client_phone.value = o.client_phone || ''; f.client_email.value = o.client_email || '';
+    if (o.ticket_no) f.odoo_ticket.value = o.ticket_no;
+    const gs = boardGaugeSet(), left = (o.lines || []).filter(l => Number(l.qty) > Number(l.taken || 0)).map(l => { const g = boardGaugeOf(l.desc, l.unit, gs);
+      return { desc: l.desc, qty: Number(l.qty) - Number(l.taken || 0), unit: l.unit || (g ? 'pc' : ''), ...(g ? { g } : {}) }; });
+    left.forEach(it => addItem(it, true)); syncBoardsFromItems(f);
+    const val = (o.lines || []).reduce((a, l) => a + (Number(l.qty) > 0 ? Number(l.amount || 0) * (Number(l.qty) - Number(l.taken || 0)) / Number(l.qty) : 0), 0);
+    if (val > 0) $('nj-value').value = Math.round(val * 100) / 100;
+    f.notes.value = [`Changed from pick-up — ${pre.why}`, o.instructions].filter(Boolean).join('\n');
+    f._pkMove = o; f._pkWhy = pre.why; guessType(); refresh();
+    $('nj-imp').open = false;
+    $('nj-imp').insertAdjacentHTML('beforebegin', `<div class="imp-sum warn" style="margin-bottom:8px"><b>🔁 ${esc(o.so_no)}: pick-up → delivery.</b> Filled from the pick-up ticket${left.length ? ` (${left.length} item${left.length === 1 ? '' : 's'} not yet picked up)` : ''}. Pick the destination, address and date, then ${isDispatcher() ? 'Create job' : 'Send to dispatch'} — the pick-up ticket is closed then. Close this form to keep it a pick-up.</div>`);
+  }
   f.addEventListener('submit', async e => {
     e.preventDefault();
     if (f._pickup) return toast(`${f._pickup} is a Pick-up ticket — upload it in Pick-up mode › Pick-up tickets`, 'error');
@@ -4468,9 +4580,34 @@ function openNewJob(){
       const { data } = await withRetry('Creating job', () => sb.from('jobs').insert(fd).select().single());
       await logEvent(data.id, 'proposed', fd.odoo_ticket ? `Imported from Odoo ticket ${fd.odoo_ticket}` : 'Created manually on HATID');
       if (partialOk) await logEvent(data.id, 'note', partialConfirmNote());
-      toast(isDispatcher() ? 'Job created' : 'Ticket sent to dispatch', 'ok'); closeOverlay(); afterJobsCreated();
+      if (f._pkMove) await closePkForDelivery(f._pkMove, data.id, f._pkWhy || `delivery ticket created by ${state.me.name || state.me.email}`);
+      toast(isDispatcher() ? 'Job created' : 'Ticket sent to dispatch', 'ok'); closeOverlay(); afterJobsCreated(); if (f._pkMove && /^pk-/.test(state.view || '')) loadPk(state.view);
     } catch { btn.disabled = false; }
   });
+}
+
+/* Delivery → pick-up (Rommel 2026-11-27): the client will pick it up instead. Makes (or reopens) the SO's pick-up ticket with this
+   delivery's items and takes the delivery off the plan; a delivery schedule being signed / approved goes back for signing. */
+async function openJobToPickup(job){
+  const so = ((job.doc_refs || []).map(r => r.ref).find(r => /^S\d/i.test(r || '')) || job.quotation_serial || '').toUpperCase();
+  let sst = null; try { const { data } = await sb.rpc('job_schedule_state_of', { p_job: job.id }); sst = data; } catch {}
+  const tmr = addDays(localDate(), 1);
+  openOverlay(`<div class="scrim" data-close></div><div class="modal" role="dialog" aria-modal="true"><h2 style="margin-top:0">📦 Change to pick-up — ${esc(so)}</h2>
+    <div class="ft">${esc(job.client_name || '')} · ${(job.items || []).length} item${(job.items || []).length === 1 ? '' : 's'}${job.scheduled_date ? ' · delivery was ' + esc(fmtDay(job.scheduled_date)) : ''}</div>
+    <div class="grid2" style="margin-top:8px"><label class="f">Pick-up date<input class="i" type="date" id="tp-d" min="${localDate()}" value="${esc(job.scheduled_date && job.scheduled_date >= localDate() ? job.scheduled_date : tmr)}"></label>
+      <label class="f">Pick-up at<select class="i" id="tp-s">${Object.entries(PK_SITE).map(([k, n]) => `<option value="${k}"${k === (job.company === 'WCLI' ? pkSite() : 'plant1') ? ' selected' : ''}>${n}</option>`).join('')}</select></label></div>
+    <label class="f">Reason *<input class="i" id="tp-r" value="Client will pick up instead" placeholder="e.g. client will pick up with own vehicle"></label>
+    <ul class="ft" style="margin:8px 0 0;padding-left:18px"><li>A pick-up ticket is made with these items — the warehouse is told to prepare it. It counts as on time (the change was arranged by staff).</li>
+      <li>This delivery is cancelled (marked “Changed to pick-up”)${job.truck_id ? ' and comes off its truck' : ''}.</li>
+      ${sst ? `<li><b>The ${esc(fmtDay(job.scheduled_date))} delivery schedule is ${esc(String(sst).replace(/_/g, ' '))} — it goes back for signing.</b></li>` : ''}</ul>
+    <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="tp-ok">Change to pick-up</button></div></div>`);
+  bindClose();
+  $('tp-ok').addEventListener('click', async e => { const r = $('tp-r').value.trim(), d = $('tp-d').value;
+    if (!r) return toast('Say why it is changing to pick-up', 'error'); if (!d) return toast('Pick the pick-up date', 'error');
+    e.target.disabled = true;
+    try { const res = await pkRpc('Changing to pick-up', 'pk_from_delivery', { p_job: job.id, p_reason: r, p_site: $('tp-s').value, p_date: d, p_create: true });
+      toast(`${res?.so_no || so} is now a pick-up on ${fmtDay(d)}${res?.schedule_returned ? ' — the delivery schedule went back for signing' : ''}`, 'ok'); closeOverlay(); refreshAfterChange(job.id);
+    } catch { e.target.disabled = false; } });
 }
 
 function bindClose(){ document.querySelectorAll('#overlay [data-close]').forEach(el => el.addEventListener('click', closeOverlay)); }
@@ -5171,6 +5308,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
         ${job.site_lat != null ? `<dt>Delivery spot</dt><dd>${esc(SITE_LABEL[job.site_source] || '')}${job.site_accuracy_m ? ` (±${Math.round(job.site_accuracy_m)} m)` : ''} · ${siteLink(job.site_lat, job.site_lon, 'Open in Maps')}${dispatcher ? ` · <a href="#" id="dr-onmap">Show on HATID map</a>` : ''}</dd>` : ''}
         <dt>Notes</dt><dd style="white-space:pre-wrap">${esc(job.notes || '—')}</dd>
       </dl>
+      ${jobCanGoPickup(job) && canSsTickets() && hasPickup() ? '<div class="row-btns" style="margin-top:4px"><button class="btn" id="dr-topk" title="The client will pick it up instead — makes a pick-up ticket and takes this delivery off the plan">📦 Change to pick-up</button></div>' : ''}
 
       ${dispatcher && ['proposed','scheduled'].includes(job.status) && !job.courier_vehicle_id ? economyHtml(job) : ''}
       ${dispatcher && (needsConfirm || canReassign) && !job.courier_vehicle_id ? `
@@ -5248,6 +5386,7 @@ function renderDrawer(job, events, costs = [], rep = {}){
   if ($('dr-msgs')) $('dr-msgs').addEventListener('click', () => { closeOverlay(); state.msgOpen = job.id; switchView('msgs'); });
   if ($('dr-contact')) $('dr-contact').addEventListener('click', () => openClientContact(job, () => openJob(job.id)));
   $('dr-addr')?.addEventListener('click', () => openAddressChange(job, () => refreshAfterChange(job.id)));
+  $('dr-topk')?.addEventListener('click', () => openJobToPickup(job));
   bindAddrReq(job, () => refreshAfterChange(job.id));
   undoAfter = () => refreshAfterChange(job.id);
   bindOutboxRetry(() => openJob(job.id));
@@ -7401,6 +7540,7 @@ async function openPkOrder(id, opt = {}){
       ${pkCan('warehouse','logistics') && o.status !== 'cancelled' ? '<button class="btn" id="pko-concern">⚠ Report a concern</button>' : ''}
       ${pkCan('sales_support') && ['open','no_show'].includes(o.status) ? '<button class="btn" id="pko-date">📅 Change date</button>' : ''}
       ${pkCan('sales_support') && ['open','balance','no_show','in_queue'].includes(o.status) ? '<button class="btn" id="pko-site">📍 Change location</button>' : ''}
+      ${pkCanGoDelivery(o) && canSsTickets() ? '<button class="btn" id="pko-dlv" title="The client wants it delivered instead — opens a delivery ticket; this pick-up ticket is closed when it is created">🚚 Change to delivery</button>' : ''}
       ${pkCan('sales_support') && ['open','balance','no_show'].includes(o.status) ? '<button class="btn" id="pko-cancel">Cancel ticket</button>' : ''}
       <button class="btn" data-close>Close</button>${edit && (o.lines || []).length ? '<button class="btn primary" id="pko-save">Save ticks</button>' : ''}</div>`;
   bindClose();
@@ -7446,6 +7586,8 @@ async function openPkOrder(id, opt = {}){
   $('pko-allow')?.addEventListener('click', async () => { if (!confirm('Allow this late ticket? It will be served and recorded, but not counted in promptness.')) return;
     try { await pkRpc('Allowing', 'pk_allow_late', { p_order: o.id }); toast('Allowed', 'ok'); closeOverlay(); loadPk(state.view); } catch {} });
   $('pko-concern')?.addEventListener('click', () => pkConcern(null, [o]));
+  $('pko-dlv')?.addEventListener('click', () => { const why = prompt(`Why is ${o.so_no} changing to delivery?`, o.status === 'no_show' ? 'Client did not pick up — asked for delivery' : 'Client asked for delivery');
+    if (!why || !why.trim()) return; closeOverlay(); openNewJob({ pk: o, why: why.trim() }); });
   $('pko-cancel')?.addEventListener('click', async () => { const r = prompt('Why cancel this ticket?'); if (!r) return;
     try { await pkRpc('Cancelling', 'pk_cancel', { p_order: o.id, p_reason: r }); closeOverlay(); loadPk(state.view); } catch {} });
 }
@@ -7504,7 +7646,7 @@ async function openPkPaste(){
     <div id="pkp-prev"></div>
     <div class="row-btns" style="justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn primary" id="pkp-go" disabled>Load ticket</button></div></div>`);
   bindClose();
-  let P = null, dateOv = null, PRQ = false; const pkHist = {};   // so_no → true (earlier HATID record) / false / 'loading'
+  let P = null, dateOv = null, PRQ = false; const pkHist = {}, soH = {};   // so_no → true (earlier HATID record) / false / 'loading'; soH: so_no → soHistory entry (deliveries on the same SO)
   const draw = () => {
     const txt = $('pkp-txt').value; if (!txt.trim()){ $('pkp-prev').innerHTML = ''; $('pkp-go').disabled = true; return; }
     P = pkFromTicket(txt);
@@ -7513,6 +7655,10 @@ async function openPkPaste(){
     if (!P.company || !cos.includes(P.company)) P.company = P.company && cos.includes(P.company) ? P.company : cos[0];
     const bad = !P.so_no ? 'No SO number found — copy the whole ticket page.' : !P.kind ? (P.deliveryType ? `${P.so_no} is a ${P.deliveryType} ticket, not a pick-up — not added. Only pick-up tickets go here. Upload it in Delivery mode › Delivery tickets.` : `${P.so_no}: the ticket has no Delivery Type, so it can’t be told apart from a delivery. Set it to Pickup in Odoo and copy it again.`) : !P.pickup_date && !dateOv ? '' : '';
     const pg = !bad && odooPageGap(txt);
+    if (!bad && soH[P.so_no] === undefined){ const so = P.so_no; soH[so] = 'loading';
+      soHistory([so]).then(H => { soH[so] = H[so] || null; }).catch(() => { soH[so] = null; }).then(() => { if (P && P.so_no === so) draw(); }); }
+    const sh = soH[P?.so_no] && soH[P.so_no] !== 'loading' ? soH[P.so_no] : null, mvJobs = sh ? jobMoveFor(sh, P.lines) : null;
+    const onRoad = sh && sh.jobs.some(j => !['completed','rejected'].includes(j.status) && !jobCanGoPickup(j));
     const on = !bad && pkOnTime(P);
     PRQ = !bad && isPartialReleased(P.fulfillment) && pkHist[P.so_no] !== true;   // stricter while the history is still loading
     if (!bad && isPartialReleased(P.fulfillment) && pkHist[P.so_no] === undefined){ const so = P.so_no; pkHist[so] = 'loading';
@@ -7527,6 +7673,8 @@ async function openPkPaste(){
         <label class="f">Site<select class="i" id="pkp-site">${Object.entries(PK_SITE).map(([k, n]) => `<option value="${k}"${k === pkSite() ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
         <label class="chk" style="align-self:end"><input type="checkbox" id="pkp-mssi"> MSSI quotation (own queue number)</label></div>
       ${PRQ ? partialBox(P.instructions || '', 'id="pkp-pok"') : ''}
+      ${mvJobs ? `<div class="imp-sum warn" style="margin:6px 0">🔁 ${esc(jobMoveNote(mvJobs).replace(/ — untick.*$/, ''))}. Close this if it is still a delivery.</div>` : ''}
+      ${onRoad ? `<div class="pk-alarm" style="margin:6px 0">⚠ ${esc(P.so_no)} is also on a delivery that is already loaded / on the road — check it isn’t going twice.</div>` : ''}
       <div class="ft">Tick what the client will pick up (you can change this later):</div>
       ${P.lines.length ? `<div class="tbl-wrap"><table class="rt ut"><tbody>${P.lines.map((l, i) => `<tr><td><input type="checkbox" class="pkp-w" data-i="${i}" checked aria-label="Client takes ${esc(l.desc)}"></td><td>${esc(l.desc)}</td><td class="num">${esc(fmtQty(l.qty))} ${esc(l.unit || '')}</td><td class="num"><input class="i pkp-q" type="number" min="0" max="${l.qty}" step="any" data-i="${i}" value="${l.qty}" style="width:80px" title="How many the client takes this time" aria-label="Qty this time — ${esc(l.desc)}"></td></tr>`).join('')}</tbody></table></div>
         <div class="ft">Last box = how many the client takes <b>this time</b> (e.g. a small car). Less than the qty → the rest stays as a balance.</div>` : '<div class="ft">No item lines found.</div>'}</div>`;
@@ -7544,6 +7692,7 @@ async function openPkPaste(){
     if (prFull && !$('pkp-pok')?.checked){ e.target.disabled = false; return toast(PARTIAL_MSG, 'error'); }
     if (prFull) P.instructions = [P.instructions, 'HATID: ' + partialConfirmNote()].filter(Boolean).join('\n');   // shown to the warehouse and Logistics on every list
     try { await pkRpc('Loading the ticket', 'pk_upload', { p: { ...P, pickup_date: $('pkp-date').value, company: $('pkp-co').value, site: $('pkp-site').value, mssi_qt: $('pkp-mssi').checked } });
+      const sh = soH[P.so_no], mj = sh && sh !== 'loading' ? jobMoveFor(sh, P.lines) : null; if (mj) await moveJobsToPickup(mj, `pick-up ticket loaded by ${state.me.name || state.me.email}`);
       toast(`${P.so_no} loaded`, 'ok'); closeOverlay(); loadPk(state.view); } catch { e.target.disabled = false; } });
 }
 /* Upload many pick-up tickets at once — the same Odoo export (HATID template) as Delivery mode, plus “Created on” for the cut-off */
@@ -7593,6 +7742,7 @@ async function openPkUpload(){
         if (!x.date) w.push('No pick-up date on the ticket — set one');
         else if (x.was && x.date !== x.was) w.push(`Ticket date ${fmtDay(x.was)} has passed — set to today, check it`);
         if (x.dup) w.push(x.dup);
+        if (x.jobMove) w.push(`🔁 ${jobMoveNote(x.jobMove)}`);
         if (!P.lines.length) w.push('No items in the file');
         x.prq = isPartialReleased(P.fulfillment) && !x.hasHist;
         const on = x.co && x.date ? pkOnTime({ ...P, company: x.co, pickup_date: x.date }) : true;
@@ -7643,10 +7793,11 @@ async function openPkUpload(){
       x.hist = h.past.join(' · ');
       if (h.pk?.status === 'in_queue'){ x.dup = `In the queue right now (${x.hist}) — finish that pick-up first`; x.lock = true; x.pick = false; return; }
       if (h.pk?.status === 'open' && !h.jobs.length) x.reload = true;
+      x.jobMove = jobMoveFor(h, x.P.lines);   // a delivery changed to pick-up: its unloaded job(s) no longer hold the items
       if (!x.P.lines.length) { if (h.pk || h.jobs.length) x.bal = `Already in HATID: ${x.hist} — no item list to compare`; return; }
-      const L = soLeft(h, x.P.lines, { pk: true }); x.left = L;
+      const o = { pk: true, mov: !!x.jobMove }, L = soLeft(h, x.P.lines, o); x.left = L;
       x.P.lines.forEach((l, k) => { if (L[k].left <= 0){ l.want = false; l._gone = true; } });
-      if (L.every(r => r.left <= 0)){ x.dup = `Nothing left on ${x.P.so_no} — everything was already delivered / picked up or is on a job (${x.hist})`; x.lock = true; x.pick = false; }
+      if (L.every(r => r.left <= 0)){ x.dup = `Nothing left on ${x.P.so_no} — everything is ${soWhy(h, x.P.lines, o)} (${x.hist})`; x.lock = true; x.pick = false; x.jobMove = null; }
       else if (L.some(r => r.cov > 0) || (h.pk && h.pk.status !== 'open')) x.bal = `Balance of ${x.P.so_no} — earlier: ${x.hist}. Only what’s left is loaded.`; });
     render();
   };
@@ -7677,7 +7828,8 @@ async function openPkUpload(){
       const lines = x.P.lines.map((l, k) => ({ desc: l.desc, qty: Math.max(0, Number(l.qty) - (x.left?.[k]?.covJ || 0)), unit: l.unit, amount: l.amount, want: l.want && !l._gone && l.plan !== 0, plan: l.plan ?? null })).filter(l => l.qty > 0 || !x.left);
       const instructions = x.prFull ? [x.P.instructions, 'HATID: ' + partialConfirmNote()].filter(Boolean).join('\n') : x.P.instructions;
       try { await pkRpc('Loading ' + x.P.so_no, 'pk_upload', { p: { ...x.P, instructions, lines, company: x.co, pickup_date: x.date, site: x.site, mssi_qt: x.mssi } }); ok.push(x.P.so_no); }
-      catch (err) { bad.push(x.P.so_no); }
+      catch (err) { bad.push(x.P.so_no); continue; }
+      if (x.jobMove) await moveJobsToPickup(x.jobMove, `pick-up ticket uploaded by ${state.me.name || state.me.email}`);
     }
     if (!bad.length){ toast(`${ok.length} pick-up ticket${ok.length === 1 ? '' : 's'} loaded`, 'ok'); closeOverlay(); loadPk(state.view); return; }
     R.rows = R.rows.filter(x => !ok.includes(x.P.so_no)); render();
@@ -14486,6 +14638,13 @@ function annGate(){
    show: who sees an item — 'office' (admin, manager, dispatcher, schedule signers), 'signers' (schedule signers, managers),
    'pickup' (anyone using Pick-up), 'drivers' (field). No show = everyone. */
 const WHATS_NEW = [
+  { id: '2026-11-27-method-change', date: '27 Nov 2026', items: [
+    { icon: '🔁', title: 'Change a pick-up to delivery — or a delivery to pick-up',
+      text: 'Client didn’t come and wants it delivered? Open the pick-up ticket › 🚚 Change to delivery: the delivery form is filled from the ticket, and the pick-up ticket is closed when the delivery is created. Client will pick up instead? Open the delivery › 📦 Change to pick-up: pick the date and site, and the pick-up ticket is made (counted as on time). A delivery that is already loaded or on the road can’t change; a delivery schedule being signed goes back for signing.' },
+    { icon: '📄', title: 'Uploads understand a changed method',
+      text: 'Uploading a delivery ticket for an SO that is still on a pick-up ticket (or a pick-up ticket for an SO still on a delivery) no longer stops with “already delivered”. The row says 🔁 Changed from pick-up / delivery, and the old record is closed when the new one is created. Untick the row if the old method still stands.' },
+    { icon: '💬', title: 'Clearer “nothing left” messages',
+      text: 'When an SO really has nothing left, HATID now says why — already delivered, already picked up, on a delivery job, or on a pick-up ticket — instead of “already delivered or is on a job”.' }] },
   { id: '2026-11-26-dispatcher-load', date: '26 Nov 2026', items: [
     { icon: '📦', title: 'The dispatcher checks and locks the load',
       text: 'Before a truck leaves, the dispatcher opens Trips › 📦 Check & lock load: chooses the driver (and helper), checks every line — right item, right quantity, no damage — and locks it. Only the logistics supervisor can unlock it.' },
