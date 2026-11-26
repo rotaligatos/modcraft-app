@@ -795,6 +795,26 @@ const PROFILES = {
           const old=/setTimeout\(function\(\)\{ try\{ _persistDrawingAnalysisForJo\(\); \}catch\(e\)\{\} \},1500\)/.test(s);
           return [waits, old, /prodState&&prodState\.result/.test(String(window._reserveJobOrder))];
         }, [true,false,true]);
+        check('Stage 2 BOM: typing keeps the same field (no redraw per letter) and a half-typed decimal', () => {
+          const wrap = document.getElementById('fq-items-wrap'); if (!wrap) return 'no fq wrap';
+          const sv = { mode: window.qFabMode, fq: window.fqAreas, q: window.qAreas };
+          try {
+            window.qFabMode = 'bom';
+            const mk = () => ({ name: 'A', items: [], svcItems: [], matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [],
+              bomItems: [{ type: 'Kitchen Base Cabinet', qty: 1, materials: [], hardware: [], outsourceMaterials: [], outsourceHardware: [],
+                services: [{ name: 'x', unit: 'lm', qty: 1, price: 10 }] }] });
+            window.qAreas = [mk()]; window.fqAreas = [mk()];
+            window.renderFQItems();
+            const find = (pred) => Array.prototype.find.call(wrap.querySelectorAll('input'), pred);
+            const nameInp = find(i => i.value === 'x' && /onBOMRowChange|onBOMItemSearch/.test(i.getAttribute('oninput') || ''));
+            if (!nameInp) return 'no name input';
+            nameInp.value = 'xy'; nameInp.dispatchEvent(new Event('input', { bubbles: true }));
+            const qtyInp = find(i => /'qty'/.test(i.getAttribute('oninput') || ''));
+            qtyInp.value = '1.5'; qtyInp.dispatchEvent(new Event('input', { bubbles: true }));
+            const r = window.fqAreas[0].bomItems[0].services[0];
+            return [nameInp.isConnected, r.name, qtyInp.isConnected, r.qty, window.qAreas[0].bomItems[0].services[0].name];
+          } finally { window.qFabMode = sv.mode; window.fqAreas = sv.fq; window.qAreas = sv.q; }
+        }, [true, 'xy', true, 1.5, 'x']);
         check('setting your own PIN mirrors it to the database copy; an admin reset clears the copy', () => {
           return [/mc_set_own_pin/.test(String(window.submitSetPin)), /cc_sync_user_pins/.test(String(window.resetUserPin))];
         }, [true,true]);
