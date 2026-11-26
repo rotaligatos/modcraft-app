@@ -789,6 +789,12 @@ const PROFILES = {
           const body=String(window._shadowUserCheck);
           return [i>0&&j>i&&k>j, /currentRoles*=/.test(body)||/currentUserAccs*=/.test(body)];
         }, [true,false]);
+        check('QT-M00000241: save waits for the number before saving the cutting list; Job Order can use the Designers Support list', () => {
+          const s=String(window.gSaveQuotation)+String(window._gSaveQuotationCore||'');
+          const waits=/qDraftKey&&Date\.now\(\)-t0<30000/.test(s);
+          const old=/setTimeout\(function\(\)\{ try\{ _persistDrawingAnalysisForJo\(\); \}catch\(e\)\{\} \},1500\)/.test(s);
+          return [waits, old, /prodState&&prodState\.result/.test(String(window._reserveJobOrder))];
+        }, [true,false,true]);
         check('setting your own PIN mirrors it to the database copy; an admin reset clears the copy', () => {
           return [/mc_set_own_pin/.test(String(window.submitSetPin)), /cc_sync_user_pins/.test(String(window.resetUserPin))];
         }, [true,true]);

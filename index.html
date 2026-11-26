@@ -38442,7 +38442,14 @@ function gSaveQuotation(opts){
   _reflectNewClear();
   // The reflected cutting list goes with the quotation from its first numbered save (a first save
   // claims its number asynchronously, so give it a moment).
-  setTimeout(function(){ try{ _persistDrawingAnalysisForJo(); }catch(e){} },1500);
+  // A fixed 1.5 s was too short when the claim service was slow (QT-M00000241: the number arrived
+  // later, the list was never saved, and no Job Order could ever be reserved). Wait up to 30 s.
+  (function(){ var t0=Date.now();
+    (function wait(){
+      if(qDraftKey&&Date.now()-t0<30000) return setTimeout(wait,500);
+      try{ _persistDrawingAnalysisForJo(); }catch(e){}
+    })();
+  })();
   opts=opts||{};
   if(opts.checkConflict && qLoadedSavedAt && qSerialCommitted){
     var _serial=qBaseSerial||qSerial;
@@ -43484,6 +43491,28 @@ function _reserveJobOrder(stage){
   return _joAnalysisForQuotation(base,stage).then(function(an){
     if(!an||!an.result||!(an.result.components||[]).length){
       var had=stage==='fq'?fqDrawingAnalysis:qDrawingAnalysis;
+      // The list was reflected but never saved, and the quotation is now locked/approved so it cannot
+      // be reflected again (QT-M00000241). If the list is open in Designers Support, offer to use it.
+      // Prices are not touched: only the Job Order reads it.
+      var dsr=prodState&&prodState.result;
+      if(dsr&&(dsr.components||[]).length&&!_reserveJobOrder._asking){
+        _reserveJobOrder._asking=true;
+        return new Promise(function(res){
+          _confirm('This quotation has no saved cutting list for its Job Order. Use the cutting list open in Designers Support ("'+(prodState.fileName||'cutting list')+'", '+dsr.components.length+' rows)?\n\nPrices are not changed — only the Job Order uses it. Check it is the list for '+base+'.',
+            function(){
+              _reserveJobOrder._asking=false;
+              var da={fileName:prodState.fileName||'Cutting list',fileType:prodState.fileType||'cutting-list',
+                analyzedAt:new Date().toISOString(),result:JSON.parse(JSON.stringify(dsr)),
+                parts:[_daPart()]};
+              if(stage==='fq'){ fqDrawingAnalysis=da; _saveFQDrawingAnalysis(); }
+              else { qDrawingAnalysis=da; _daPersistedSig=''; _persistDrawingAnalysisForJo(); }
+              logActivity('Cutting list for the Job Order taken from Designers Support ("'+da.fileName+'", '+dsr.components.length+' rows) — prices unchanged.',base);
+              try{ gSaveQuotation(); }catch(e){}
+              res(_reserveJobOrder(stage));
+            },
+            function(){ _reserveJobOrder._asking=false; res(null); });
+        });
+      }
       if(had&&(had.componentCount||(had.result&&had.result.components||[]).length)){
         logActivity('⚠ No Job Order reserved — a cutting list was reflected into this quotation but its full data was not saved. Reflect the cutting list again, then lock (or press Reserve a new version now).',base);
         showToast('No Job Order — the reflected cutting list was not saved with this quotation. Reflect it again.');
