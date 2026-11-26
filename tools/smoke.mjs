@@ -815,6 +815,27 @@ const PROFILES = {
             return [nameInp.isConnected, r.name, qtyInp.isConnected, r.qty, window.qAreas[0].bomItems[0].services[0].name];
           } finally { window.qFabMode = sv.mode; window.fqAreas = sv.fq; window.qAreas = sv.q; }
         }, [true, 'xy', true, 1.5, 'x']);
+        { const label='Final Quotation Job Order: a list saved only in Storage is found after a reload (QT-M00000241)'; const want=[true,7,'toast','fq',true,'fq']; try { const got = await (async () => {
+          const sv={a:window._joAnalysisForQuotation,r:window._reserveJobOrder,t:window.showToast,o:window.openJobOrders,s:window.gSaveQuotation,m:window._fqMaterialCheck,
+            fqda:window.fqDrawingAnalysis,fql:window.fqLocked,ql:window.qLocked,ser:window.qSerial,dk:window.qDraftKey};
+          const calls=[]; const comps=Array.from({length:7},(_,i)=>({part:'P'+i,length:100,width:100,qty:1}));
+          try {
+            window._joAnalysisForQuotation=(b,st)=>Promise.resolve(st==='fq'?{result:{components:comps},fileName:'List'}:null);
+            window._reserveJobOrder=(st)=>{ calls.push(st); return Promise.resolve(null); };
+            window.showToast=(m)=>{ calls.push('toast'); }; window.openJobOrders=()=>{}; window.gSaveQuotation=()=>{}; window._fqMaterialCheck=()=>{ calls.push('matcheck'); };
+            window.qSerial='QT-M00000241'; window.qDraftKey=''; window.qLocked=true;
+            window.fqDrawingAnalysis=null; window.fqLocked=false;
+            const ok=await window._fqLoadSavedList('QT-M00000241');
+            const n=(window.fqDrawingAnalysis&&window.fqDrawingAnalysis.result.components.length)||0;
+            window.fqDrawingAnalysis=null; window._joReserveNow(); await new Promise(r=>setTimeout(r,30));
+            const unlocked=calls.slice(); calls.length=0;
+            window.fqDrawingAnalysis=null; window.fqLocked=true; window._joReserveNow(); await new Promise(r=>setTimeout(r,30));
+            const locked=calls.filter(c=>c!=='toast')[0]; calls.length=0;
+            window.fqDrawingAnalysis=null; await window._fqLockJobOrder();
+            return [ok,n,unlocked.join(','),locked,!!window.fqDrawingAnalysis,calls.join(',')];
+          } finally { Object.assign(window,{_joAnalysisForQuotation:sv.a,_reserveJobOrder:sv.r,showToast:sv.t,openJobOrders:sv.o,gSaveQuotation:sv.s,_fqMaterialCheck:sv.m,
+            fqDrawingAnalysis:sv.fqda,fqLocked:sv.fql,qLocked:sv.ql,qSerial:sv.ser,qDraftKey:sv.dk}); }
+        })(); out.push({ label, got, want, ok: JSON.stringify(got) === JSON.stringify(want) }); } catch (e) { out.push({ label, err: String(e).slice(0,120), ok: false }); } }
         check('setting your own PIN mirrors it to the database copy; an admin reset clears the copy', () => {
           return [/mc_set_own_pin/.test(String(window.submitSetPin)), /cc_sync_user_pins/.test(String(window.resetUserPin))];
         }, [true,true]);
