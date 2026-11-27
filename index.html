@@ -19325,7 +19325,7 @@ function orderChannelLabel(o){ return orderChannel(o)==='web'?'Website':'Wufoo';
 //   valid state — orders accumulate over time (historical ones stay with
 //   status Done), so a real account essentially never has zero rows once
 //   backfilled. —
-var PENDING_ORDER_COLS='id,received_at,client_name,company_name,contact_number,customer_email,salesman_email,request_type,type_of_service,floor,board_substrate,haspe_flow,edging,boring,cutting,lipping,hg_included,hg_groove,hg_installation,hg_by,agent_name,attachment_1,attachment_2,status,quotation_serial,sent_at,source_company,created_at,updated_at,order_kind,address,project_name,delivery,segment,lead_source,target_date,notes,attachments,pause_history,handled_by,handled_by_email,handled_at,is_test,wufoo_extra';
+var PENDING_ORDER_COLS='id,received_at,client_name,company_name,contact_number,customer_email,salesman_email,request_type,type_of_service,floor,board_substrate,haspe_flow,edging,boring,cutting,lipping,hg_included,hg_groove,hg_installation,hg_by,agent_name,attachment_1,attachment_2,status,quotation_serial,sent_at,source_company,created_at,updated_at,order_kind,address,project_name,delivery,segment,lead_source,target_date,notes,attachments,pause_history,handled_by,handled_by_email,handled_at,assigned_to,assigned_to_email,assigned_by,assigned_by_email,assigned_at,is_test,wufoo_extra';
 function supaGetPendingOrders(){
   if(!supaReady()) return Promise.resolve(null);
   try{
@@ -19404,6 +19404,7 @@ function gLoadPendingOrders(cb) {
           notes:      r.notes||'',
           pauseHistory: Array.isArray(r.pause_history)?r.pause_history:[],
           handledBy:  r.handled_by||'', handledByEmail: r.handled_by_email||'', handledAt: r.handled_at||'',
+          assignedTo: r.assigned_to||'', assignedToEmail: r.assigned_to_email||'', assignedBy: r.assigned_by||'', assignedByEmail: r.assigned_by_email||'', assignedAt: r.assigned_at||'',
           isTest:     r.is_test===true,
           wufooExtra: _wufooExtraList(r.wufoo_extra),
           _row: null, // no Sheets row for a Supabase-sourced order — see _setOrderStatus, already handles this correctly
@@ -19650,7 +19651,7 @@ function orderMatchesSearch(o,q){
   if(!q) return true;
   var hay=[o.id,o.clientName,o.companyName,o.contact,o.custEmail,o.salesEmail,
            o.agent,o.projectName,o.address,o.notes,o.service,o.substrate,
-           o.reqType,o.kind,o.quotSerial,o.segment,o.leadSource,o.sourceCompany,o.handledBy]
+           o.reqType,o.kind,o.quotSerial,o.segment,o.leadSource,o.sourceCompany,o.handledBy,o.assignedTo]
           .join(' ').toLowerCase();
   // every word must appear somewhere, in any order — so "kaye gymfix" works
   var words=q.split(/\s+/);
@@ -19677,6 +19678,137 @@ function _setOrderHandler(orderId){
   }
 }
 // Who has it, for display and filtering: the recorded handler, else the linked quotation's preparer.
+// ── Assigning orders (Rommel, 2026-11-27) ─────────────────────────────────────────────────
+// Manager, Director and Admin can assign an order to a colleague; so can anyone they tick in
+// the "Who can assign orders" list (PPIC, for instance — there is no PPIC role). Assigning sets
+// the order's handler, so "Handled by" filters work at once, and messages the assignee. It does
+// NOT move credit: the quotation's preparer is whoever actually makes it (Rommel's rule), and
+// every order stays visible to everyone. Anyone may still pick up an assigned order — Export
+// warns first and the log records the takeover. All writes go through the order_assign /
+// order_set_assigner database functions, which check the same rule on the server.
+var myOrderAssign=false;
+function _isOrderGranter(){ return currentRole==='Manager'||currentRole==='Director'||currentRole==='Admin'; }
+function _canAssignOrders(){ return _isOrderGranter()||myOrderAssign; }
+function _loadMyOrderAssign(tries){
+  tries=tries||0;
+  if(window._TRN) return;
+  if(typeof supaReady!=='function'||!supaReady()){ if(tries<20) setTimeout(function(){ _loadMyOrderAssign(tries+1); },3000); return; }
+  supa.rpc('order_can_assign').then(function(r){
+    var on=!!(r&&!r.error&&r.data===true);
+    if(on!==myOrderAssign){ myOrderAssign=on; try{ if(el('page-orders')&&el('page-orders').classList.contains('active')) renderOrders(); }catch(e){} }
+  });
+}
+function _orderAssignPill(o){
+  if(!o.assignedTo) return '';
+  var tip='Assigned by '+(o.assignedBy||'?')+(o.assignedAt?' '+fmtDT(o.assignedAt):'');
+  var same=String(o.handledByEmail||'').toLowerCase()===String(o.assignedToEmail||'').toLowerCase();
+  return same?'<span style="font-size:11px;color:var(--text2)" title="'+escHtml(tip)+'">assigned by '+escHtml(o.assignedBy||'?')+'</span>'
+             :'<span class="pill pill-amber" title="'+escHtml(tip)+'"><i class="ti ti-user-share" style="font-size:11px"></i> Assigned to '+escHtml(o.assignedTo)+'</span>';
+}
+function _orderAssignOverlay(){
+  var ov=el('ov-order-assign'); if(ov) return ov;
+  ov=document.createElement('div'); ov.className='overlay'; ov.id='ov-order-assign';
+  ov.innerHTML='<div class="modal" style="max-width:480px"><div class="modal-head"><h3><i class="ti ti-user-share"></i> <span id="oa-title">Assign order</span></h3>'
+    +'<button class="btn" onclick="closeModal(\'ov-order-assign\')" style="font-size:12px;padding:3px 8px">&times;</button></div>'
+    +'<div class="modal-body" id="oa-body"></div>'
+    +'<div class="modal-foot" id="oa-foot" style="display:flex;gap:10px;justify-content:flex-end;padding:14px 18px"></div></div>';
+  document.body.appendChild(ov); return ov;
+}
+function _orderAssignees(){
+  var seen={}, out=[];
+  (sheetUsers||[]).forEach(function(u){
+    var e=String(u.email||'').trim().toLowerCase();
+    if(!e||seen[e]||u.active===false||String(u.active).toLowerCase()==='no') return;
+    seen[e]=1; out.push({email:e,name:u.name||e,company:u.company||''});
+  });
+  out.sort(function(a,b){ return a.name.localeCompare(b.name); });
+  return out;
+}
+function openOrderAssign(orderId){
+  if(!_canAssignOrders()){ showToast('You are not allowed to assign orders.'); return; }
+  var o=pendingOrders.filter(function(x){ return x.id===orderId; })[0]; if(!o){ showToast('Order not found.'); return; }
+  _orderAssignOverlay();
+  el('oa-title').textContent='Assign order #'+o.id;
+  var cur=String(o.assignedToEmail||'').toLowerCase();
+  var opts='<option value="">— Choose a person —</option>'+_orderAssignees().map(function(p){
+    return '<option value="'+escHtml(p.email)+'"'+(p.email===cur?' selected':'')+'>'+escHtml(p.name)+(p.company?' — '+escHtml(coShow(p.company)):'')+'</option>'; }).join('');
+  el('oa-body').innerHTML=
+    '<div style="font-size:13px;margin-bottom:10px"><b>'+escHtml(o.clientName||o.companyName||'')+'</b>'+(o.projectName?' · '+escHtml(o.projectName):'')+'</div>'
+    +(o.assignedTo?'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Now assigned to <b>'+escHtml(o.assignedTo)+'</b> by '+escHtml(o.assignedBy||'?')+(o.assignedAt?' · '+fmtDT(o.assignedAt):'')+'</div>':'')
+    +(o.handledBy&&String(o.handledByEmail||'').toLowerCase()!==cur?'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Handled by <b>'+escHtml(o.handledBy)+'</b></div>':'')
+    +'<label class="fld">Assign to</label><select id="oa-person" style="height:36px;width:100%">'+opts+'</select>'
+    +'<div style="font-size:11px;color:var(--text2);margin-top:6px">They get a message. Credit stays with whoever actually prepares the quotation, and everyone can still see this order.</div>';
+  el('oa-foot').innerHTML=
+    (_isOrderGranter()?'<button class="btn" style="margin-right:auto" onclick="openOrderAssigners()"><i class="ti ti-users"></i> Who can assign</button>':'')
+    +(o.assignedTo?'<button class="btn" onclick="_orderAssignDo(\''+escHtml(o.id)+'\',true)">Remove assignment</button>':'')
+    +'<button class="btn btn-primary" onclick="_orderAssignDo(\''+escHtml(o.id)+'\',false)"><i class="ti ti-check"></i> Assign</button>';
+  openModal('ov-order-assign');
+}
+function _orderAssignDo(orderId,clear){
+  var o=pendingOrders.filter(function(x){ return x.id===orderId; })[0]; if(!o) return;
+  var to='', toName='';
+  if(!clear){
+    to=(el('oa-person')&&el('oa-person').value)||'';
+    if(!to){ showToast('Choose a person first.'); return; }
+    var p=_orderAssignees().filter(function(x){ return x.email===to; })[0]; toName=p?p.name:to;
+    if(to===String(o.assignedToEmail||'').toLowerCase()){ closeModal('ov-order-assign'); return; }
+  }
+  var prev=o.assignedTo||'';
+  var me=(gUser&&gUser.name)||(gUser&&gUser.email)||'';
+  var apply=function(res){
+    var at=(res&&res.at)||new Date().toISOString(), by=(res&&res.by)||me;
+    o.assignedBy=by; o.assignedByEmail=String((gUser&&gUser.email)||'').toLowerCase(); o.assignedAt=at;
+    if(clear){ o.assignedTo=''; o.assignedToEmail=''; }
+    else { o.assignedTo=toName; o.assignedToEmail=to; o.handledBy=toName; o.handledByEmail=to; o.handledAt=at; }
+    try{ _trnSavePracticeOrder(o); }catch(e){}
+    var ref=''; try{ ref=_orderLogSerial(o); }catch(e){}
+    logActivity(clear?('Order #'+o.id+': assignment to '+prev+' removed by '+by+'.')
+                     :('Order #'+o.id+' assigned to '+toName+' by '+by+(prev?' (was '+prev+')':'')+'.'),ref);
+    if(!clear&&!window._TRN&&to!==String((gUser&&gUser.email)||'').toLowerCase()){
+      try{ gSendMessage(to,toName,by+' assigned you Order #'+o.id+' — '+(o.clientName||o.companyName||'')
+        +(o.projectName?' · '+o.projectName:'')+'. Open Orders to pick it up.','normal'); }catch(e){}
+    }
+    closeModal('ov-order-assign');
+    showToast(clear?'Assignment removed.':'Order #'+o.id+' assigned to '+toName+'.');
+    try{ _fillOrdersHandlerFilter(); }catch(e){}
+    renderOrders();
+  };
+  if(window._TRN){ apply(null); return; }
+  if(typeof supaReady!=='function'||!supaReady()){ showToast('Connect the fast database first (Settings → Company & DB).'); return; }
+  supa.rpc('order_assign',{p_order_id:String(o.id),p_to_email:to,p_to_name:toName}).then(function(r){
+    if(r&&r.error){ showToast('Could not assign: '+(r.error.message||r.error)); return; }
+    apply(r&&r.data);
+  });
+}
+function openOrderAssigners(){
+  if(!_isOrderGranter()){ showToast('Only a Manager, Director or Admin can change this.'); return; }
+  _orderAssignOverlay();
+  el('oa-title').textContent='Who can assign orders';
+  el('oa-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Loading…</div>';
+  el('oa-foot').innerHTML='<button class="btn" onclick="closeModal(\'ov-order-assign\')">Done</button>';
+  openModal('ov-order-assign');
+  if(window._TRN||typeof supaReady!=='function'||!supaReady()){ el('oa-body').innerHTML='<div style="font-size:12px;color:var(--text2)">Needs the fast database (Settings → Company &amp; DB). Not available in training.</div>'; return; }
+  supa.rpc('order_assigners').then(function(r){
+    if(r&&r.error){ el('oa-body').innerHTML='<div style="color:var(--coral);font-size:12px">'+escHtml(r.error.message||String(r.error))+'</div>'; return; }
+    var rows=(r&&r.data)||[];
+    el('oa-body').innerHTML='<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Managers, Directors and Admins can always assign. Tick anyone else who should (for example PPIC).</div>'
+      +'<div style="max-height:360px;overflow:auto">'+rows.map(function(u){
+        var always=u.role==='Manager'||u.role==='Director'||u.role==='Admin';
+        return '<label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:5px 0;border-bottom:.5px solid var(--border);'+(always?'opacity:.6':'cursor:pointer')+'">'
+          +'<input type="checkbox" '+((always||u.can_assign)?'checked':'')+(always?' disabled':'')
+          +' onchange="_orderSetAssigner(\''+escHtml(u.email)+'\',this.checked,this)">'
+          +'<span style="flex:1">'+escHtml(u.name||u.email)+'</span><span style="font-size:11px;color:var(--text2)">'+escHtml(u.role||'')+(always?' · always':'')+'</span></label>';
+      }).join('')+'</div>';
+  });
+}
+function _orderSetAssigner(email,on,cb){
+  supa.rpc('order_set_assigner',{p_email:email,p_on:!!on}).then(function(r){
+    if(r&&r.error){ showToast('Could not save: '+(r.error.message||r.error)); if(cb) cb.checked=!on; return; }
+    logActivity('Assigning orders '+(on?'allowed':'removed')+' for '+email+'.','');
+    showToast(on?'They can now assign orders.':'They can no longer assign orders.');
+  });
+}
+
 function _orderHandler(o){
   if(o.handledBy) return o.handledBy;
   var q=(o.quotSerial&&!/^DRAFT-/.test(o.quotSerial))?_orderQuotationEntry(o.quotSerial):null;
@@ -20014,6 +20146,7 @@ function renderOrders(){
       +(function(){ var hb=_orderHandler(o); return hb
         ? '<span class="pill pill-navy" title="'+(o.handledBy?'Picked up'+(o.handledAt?' '+fmtDT(o.handledAt):''):'Prepared the linked quotation')+'"><i class="ti ti-user" style="font-size:11px"></i> '+escHtml(hb)+'</span>'
         : (o.status==='Pending'?'<span class="pill pill-muted"><i class="ti ti-user-question" style="font-size:11px"></i> Not picked up</span>':''); })()
+      +_orderAssignPill(o)
       +'<span style="font-size:11px;color:var(--text2)">Received: '+fmtDT(o.receivedAt)+'</span>'
       +'</div>'
       // Timer
@@ -20055,6 +20188,7 @@ function renderOrders(){
       +'<div style="display:flex;gap:6px">'
       +'<button class="btn" onclick="viewOrderDetail(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-eye"></i> View</button>'
       +(_kind==='Cutting List'?'<button class="btn" onclick="openOrderCuttingList(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-list-details"></i> Cutting list</button>':'')
+      +(!_finished&&_canAssignOrders()?'<button class="btn" onclick="openOrderAssign(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-user-share"></i> '+(o.assignedTo?'Reassign':'Assign')+'</button>':'')
       +(!_finished?'<button class="btn btn-primary" onclick="exportOrderToQuotation(\''+escHtml(o.id)+'\')" style="font-size:12px"><i class="ti ti-file-plus"></i> Export to Quotation</button>':'')
       // Pause needs an approver (all users can request it); Resume needs none, but is always
       // logged. Not offered on a finished order or one with no SLA clock to freeze in the first place.
@@ -20677,6 +20811,13 @@ function exportOrderToQuotation(orderId){
       +'again here would.',
     function(){ openQuotationFromOrder(linkedSerial); },
     function(){});
+    return;
+  }
+  // Assigned to someone else: allowed, but say so first (Rommel, 2026-11-27). The takeover is logged by _setOrderHandler.
+  var meE=String((gUser&&gUser.email)||'').trim().toLowerCase(), asg=String(o.assignedToEmail||'').trim().toLowerCase();
+  if(asg&&meE&&asg!==meE){
+    _confirm('Order #'+o.id+' is assigned to '+(o.assignedTo||asg)+(o.assignedBy?' (by '+o.assignedBy+')':'')+'.\n\nPick it up anyway? It will show you as handling it, and the log records that you took it over.',
+      function(){ _exportOrderToQuotationForced(orderId); }, function(){});
     return;
   }
   _exportOrderToQuotationForced(orderId);
@@ -32823,6 +32964,7 @@ function gCheckRole(){
       _gPassSave();
       gShowApp();
       setTimeout(_loadMySkuAccess,2500);
+      setTimeout(_loadMyOrderAssign,2700);
       setTimeout(_shadowUserCheck,3000); // phase 3: compare the Sheet with the database copy, record only
     })
     .catch(function(err){
@@ -51236,7 +51378,7 @@ var LAMI_APP_MANUAL=
   +'- SCHEDULE: Gantt (year) and Calendar (month) views, Philippine holidays highlighted.\n'
   +'- JOB ORDERS: a Job Order is built ONLY from the cutting list reflected into the quotation (Designers Support). It is reserved at the Initial lock, a new version at the Final lock, and marked ready when the client approves the Final; KEYSTONE releases it to production. Open it from the quotation\'s **Job Order** button (versions, print, part labels). Labels show the exact board name. IF A BOARD OR EDGE TAPE IS CHANGED ON THE FINAL QUOTATION\'S LINES: at the Final lock the app lists each change the cutting list uses and asks to update the Job Order — OK makes a new version with the new materials and labels; Cancel keeps the old ones (logged). Already locked, or pressed Cancel? Job Order → **Check Final Quotation materials**. Reprint the Job Order and labels from the new version. Reflecting a new cutting list into the Final Quotation replaces this — that list is used as is. CLIENT-SUPPLIED HPL OR BOARD: in Designers Support › Cutting List › HPL builds, tick "Client supplies" HPL and/or Board on that build; on Reflect those are not priced and go to Customer-Supplied Materials (Client-supplied materials turns on, so its service uplift applies — untick services in that card if needed). Cutting, lamination, the Job Order and labels are unchanged. On the cutting layout every piece is named: a piece too small for its label gets a thin red line out to its part number and size at the side of the board.\n'
   +'- REPORTS: Dashboard KPIs, analytics by segment/status/month/agent, custom Excel/PowerPoint export. Team trend tab (also the Trend button on the Dashboard team table): a line graph per person plus the whole team, Daily/Weekly/Monthly/Yearly, for average response time, won, win rate, quotations sent, revenue, timed quotations or drafts, within the dates and company chosen at the top; the table under it compares the first half of the range with the second half (Improving/Slipping). Project tracker has a search box (client, project, serial, user, agent — words in any order), status / type / prepared-by filters and sort. The Cost Report tab (profit/margin detail) is Admin/Director/Manager only.\n'
-  +'- ORDERS: Wufoo form submissions land here automatically; "Export to Quotation" pre-fills a new quotation from an order.\n'
+  +'- ORDERS: Wufoo form submissions land here automatically; "Export to Quotation" pre-fills a new quotation from an order. Managers, Directors, Admins and anyone they tick under Assign → Who can assign can assign an order to a colleague (the person gets a message; everyone still sees all orders; picking up someone else\'s order warns first and is logged; credit stays with whoever prepares the quotation).\n'
   +'- USERS & ROLES (Settings → Users, Admin/Director only): Admin > Manager > Supervisor > Approver > Encoder > Staff > Viewer. Manager/Supervisor PIN required for non-VAT, discounts, unlock, revision, holiday-premium override. Approval Routing assigns a named approver per action type per company.\n'
   +'- APPROVALS: there is an **Approvals tab in the top nav** (visible to anyone with Approvals access). The badge counts what is waiting on YOU — requests you must decide, plus a counter-offer on your own request. A COUNTER-OFFER IS AN OFFER, NOT A DECISION: when an approver counters a discount, nothing changes on the quotation until the ORIGINAL REQUESTER opens Approvals and presses "Accept X% counter". Until then the quotation keeps its original price and the printout shows no discount. If someone says "my counter-offer did not reflect", that is almost always the reason — tell them to accept it.\n'
   +'- PINS: an own PIN is MANDATORY for Manager/Director/Admin (they approve things) and for anyone ticked "Require own PIN" in Settings → Users — typically people named as signatories. For those people the old shared PIN no longer works. Anyone can set or change their own PIN from the avatar menu (top right) → "Set / Change PIN". An Admin can reset someone\'s PIN from Settings → Users. If a required PIN is missing, a reminder appears at every login until it is set.\n'
@@ -52380,6 +52522,10 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-11-27-order-assign', date:'27 Nov 2026', items:[
+    {id:'order-assign', icon:'ti-user-share', title:'Assign orders to a colleague',
+     text:'Managers, Directors and Admins (and anyone they allow) now see an Assign button on each order. Pick a person and they get a message; the order shows who it is assigned to and who assigned it. Everyone still sees every order, anyone can still pick one up (the app warns first and records it), and credit still goes to whoever makes the quotation. Who else may assign is set from the Assign window: Who can assign.'}
+  ]},
   {id:'2026-11-27-team-trend', date:'27 Nov 2026', items:[
     {id:'team-trend', icon:'ti-chart-line', title:'Team trend graph',
      text:'Reports › Team trend draws a line per person, and one for the whole team, by day, week, month or year. Pick average response time, won, win rate, quotations sent, revenue, timed quotations or drafts, and set the dates and company at the top. The table under the graph compares the first half of the range with the second half, so you can see who is improving.',
