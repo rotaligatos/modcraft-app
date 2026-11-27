@@ -3059,6 +3059,41 @@ const PROFILES = {
           } finally { w.liveClients = keep.lc; try { w.initQuotation(); } catch (e) {} w._linkedClientId = keep.linked; }
         }, { scope: 'Fabrication with Installation', noScope: '', address: '12 Mabini St', city: 'Quezon City', email: 'rei@test.ph',
              orderContactKept: '0917-ORDER', orderBizKept: 'Intensity Test Builder', reported: true });
+      /* 2026-11-27: Reports > Team trend. Each point is _teamStats() on that period alone, so the
+         periods must add up to the table for the same dates, and the first/second-half comparison
+         must pool the jobs (not average the weekly averages) and know that a LOWER response is better. */
+      if (typeof window._ttData === 'function' && typeof window._ttCompare === 'function')
+        check('team trend: periods cover the chosen dates exactly, add up to the team table, and judge improvement the right way round', () => {
+          const w = window, $ = id => document.getElementById(id);
+          const keep = { su: w.sheetUsers, dd: w.dirData, sq: w.sessionQuotations, po: w.pendingOrders, fn: w._orderElapsedWorkingMinutes,
+                         f: $('rep-from').value, t: $('rep-to').value, co: $('rep-co').value, p: w._ttF.period, m: w._ttF.metric };
+          try {
+            w.sheetUsers = [{ name: 'Ana Test', pos: 'Staff', active: true, includeKpi: true, company: 'World Class Laminate, Inc.' }];
+            const q = (id, day, hrs) => ({ id, created: day + 'T01:00:00.000Z', user: 'Ana Test', value: 1000, status: 'IQ Locked',
+              company: 'World Class Laminate, Inc.', sourceOrder: 'o' + id, initLockedAt: day + 'T09:00:00.000Z', _h: hrs });
+            // week of 5 Jan: one slow job (40h). week of 12 Jan: three fast jobs (4h each).
+            const ents = [q('QT-W00000001', '2026-01-06', 40), q('QT-W00000002', '2026-01-13', 4), q('QT-W00000003', '2026-01-14', 4), q('QT-W00000004', '2026-01-15', 4)];
+            w.dirData = ents; w.sessionQuotations = {};
+            w.pendingOrders = ents.map(e => ({ id: e.sourceOrder, receivedAt: e.created, sentAt: e.initLockedAt, quotSerial: e.id, status: 'Done', _h: e._h }))
+              .concat([{ id: 'unclaimed', receivedAt: '2026-01-07T01:00:00.000Z', status: 'Pending', kind: 'Wufoo', orderKind: 'Wufoo', _h: 900 }]);
+            w._orderElapsedWorkingMinutes = o => o._h * 60;
+            $('rep-co').value = ''; $('rep-from').value = '2026-01-07'; $('rep-to').value = '2026-01-18';
+            const bk = w._ttBuckets('2026-01-07', '2026-01-18', 'week');
+            $('rep-from').value = '2026-01-05';
+            w._ttF.period = 'week'; w._ttF.metric = 'resp';
+            const d = w._ttData(), ser = w._ttSeries(d), ana = ser.filter(x => x.name === 'Ana Test')[0];
+            const c = w._ttCompare(ana, 'resp'), tot = w._ttSum(ana.cells);
+            return { firstCutToRange: bk[0].from + '..' + bk[0].to, lastCutToRange: bk[bk.length - 1].from + '..' + bk[bk.length - 1].to,
+                     weeks: d.buckets.length, issuedAddsUp: tot.issued, timedWithoutUnclaimed: tot.respN,
+                     firstHalfHrs: c.a / 60, secondHalfHrs: c.b / 60, fasterIsImproving: c.txt.indexOf('Improving') >= 0,
+                     pooledWhole: Math.round(c.all / 60), months: w._ttBuckets('2026-01-15', '2026-03-02', 'month').map(b => b.from + '..' + b.to).join(' ') };
+          } finally {
+            w.sheetUsers = keep.su; w.dirData = keep.dd; w.sessionQuotations = keep.sq; w.pendingOrders = keep.po; w._orderElapsedWorkingMinutes = keep.fn;
+            $('rep-from').value = keep.f; $('rep-to').value = keep.t; $('rep-co').value = keep.co; w._ttF.period = keep.p; w._ttF.metric = keep.m;
+          }
+        }, { firstCutToRange: '2026-01-07..2026-01-11', lastCutToRange: '2026-01-12..2026-01-18', weeks: 2, issuedAddsUp: 4, timedWithoutUnclaimed: 4,
+             firstHalfHrs: 40, secondHalfHrs: 4, fasterIsImproving: true, pooledWhole: 13,
+             months: '2026-01-15..2026-01-31 2026-02-01..2026-02-28 2026-03-01..2026-03-02' });
       /* 2026-09-16: Rommel reported "I am somehow blinded on what option am I signing or
          unlocking since it doesnt show what option it is" -- a quotation's lock state genuinely
          IS per-option (captureQuotationSnapshot carries `locked` inside each option's own

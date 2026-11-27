@@ -796,6 +796,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
           <option value="C">Team: Cebu World Laminate</option>
         </select>
         <span id="dash-team-scope" style="font-size:11px;color:var(--text2)"></span>
+        <button class="btn" onclick="navigate('reports');setRepTab('trend')" title="Line graph per person, by day, week, month or year" style="font-size:12px;padding:4px 10px"><i class="ti ti-chart-line"></i>Trend</button>
         <button class="btn" onclick="navigate('reports')" style="font-size:12px;padding:4px 10px"><i class="ti ti-external-link"></i>Full report</button>
       </div>
     </div>
@@ -1584,6 +1585,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
   <div class="tab-bar">
     <button class="tab active" onclick="setRepTab('overview')">Overview</button>
     <button class="tab" onclick="setRepTab('user')">User KPI</button>
+    <button class="tab" onclick="setRepTab('trend')"><i class="ti ti-chart-line" style="font-size:12px"></i> Team trend</button>
     <button class="tab" onclick="setRepTab('projects')">Project tracker</button>
     <button class="tab" onclick="setRepTab('archive')">Archive</button>
     <button class="tab" onclick="setRepTab('export')"><i class="ti ti-table-export" style="font-size:12px"></i> Custom export</button>
@@ -1610,6 +1612,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
     <div class="kpi-grid" id="user-kpis"></div>
     <div class="card"><div class="card-head"><h3 id="user-kpi-title"><i class="ti ti-users"></i>All users</h3></div><div class="card-body" style="padding:0"><table class="data" id="user-kpi-tbl"></table></div></div>
   </div>
+  <div id="rep-trend" style="display:none"></div>
   <div id="rep-projects" style="display:none">
     <div class="card"><div class="card-head"><h3><i class="ti ti-list-check"></i>Project tracker</h3><span id="pt-count" style="font-size:12px;color:var(--text2);margin-left:auto"></span></div>
       <div id="pt-bar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border)">
@@ -14071,6 +14074,7 @@ function _teamStats(opt){
   var unclaimedCount=0, unclaimedMinsTotal=0;
   var nowIsoUnclaimed=new Date().toISOString();
   (typeof pendingOrders!=='undefined'?pendingOrders:[]).forEach(function(o){
+    if(opt.noUnclaimed) return;                          // Team trend: nobody's own result, see _ttData
     if(!o||o.status!=='Pending'||!o.receivedAt) return;
     if(!(ORDER_KINDS[orderKind(o)]||{}).sla) return;     // site visits etc. are SLA-exempt everywhere else too
     if(opt.orderInScope&&!opt.orderInScope(o)) return;
@@ -16001,12 +16005,12 @@ function setRepTab(t) {
   if((t==="costrep"||t==="compref"||t==="series")&&!canViewCostReport()) t="overview";
   repTab=t;
   var _rf=el('rep-filters'); if(_rf) _rf.style.display=REP_FILTERED_TABS.indexOf(t)>=0?'flex':'none';
-  var tabs=["overview","user","projects","archive","export","leadsrc","costrep","compref","series"];
+  var tabs=["overview","user","trend","projects","archive","export","leadsrc","costrep","compref","series"];
   for(var i=0;i<tabs.length;i++){var e=el("rep-"+tabs[i]);if(e)e.style.display=tabs[i]===t?"block":"none";}
   document.querySelectorAll("#page-reports .tab").forEach(function(b,i){b.classList.toggle("active",tabs[i]===t);});
   // The four real-data tabs read the Project List; gLoadDirData re-reads it when it is older than
   // 30 s, so a report is never a stale snapshot of the list.
-  var _dirTab={user:renderUserKpi,projects:renderProjTracker,archive:renderArchive,overview:renderRepOverview}[t];
+  var _dirTab={user:renderUserKpi,trend:renderTeamTrend,projects:renderProjTracker,archive:renderArchive,overview:renderRepOverview}[t];
   if(_dirTab){
     try{ _ensureStageFlags(); }catch(e){}
     if(t==='user') _repLoading('user-kpi-tbl',9); else if(t==='projects') _repLoading('proj-tbl',9); else if(t==='archive') _repLoading('arch-tbl',8);
@@ -16597,7 +16601,7 @@ function _repStatusPill(st){
 // Overview, User KPI, Project tracker, Archive and Custom export all read _reportEntries(), so with
 // the same choices on both pages the figures agree. Lead Source and Cost report have their own.
 var _repCoHidden=0;
-var REP_FILTERED_TABS=['overview','user','projects','archive','export'];
+var REP_FILTERED_TABS=['overview','user','trend','projects','archive','export'];
 function _repCoKey(){ return (el('rep-co')||{}).value||''; }
 function _repFrom(){ return (el('rep-from')||{}).value||''; }
 function _repTo(){ return (el('rep-to')||{}).value||''; }
@@ -16645,6 +16649,279 @@ function renderRepOverview(){
   var tgt=tr[0]&&tr[0].target!=null?tr.map(function(m){return m.target;}):null;
   drawChart('rep-chart',tr.map(function(m){return m.actual;}),tgt);
 }
+// ── Team trend (2026-11-27) ─────────────────────────────────────────────────────────────
+// Rommel: "i want to see their progression, if they were improving … I chose weekly from january to
+// november. with this i can see like a line graph of their avg. response."
+// Every point is _teamStats() run on that period alone — the same count as the Dashboard table and
+// User KPI — so a point always equals what those tables show for the same dates. The one difference:
+// the shared wait of unclaimed orders is left out (noUnclaimed), because it is nobody's own result
+// and an old unclaimed order would otherwise sit on every person's line for the week it arrived.
+var _ttF={period:'week',metric:'resp',hidden:{}};
+var _ttCache=null, _ttHover=-1;
+var TT_MAX=400;
+var TT_METRICS={
+  resp:{label:'Avg. response time',better:'low'},
+  won:{label:'Won',better:'high'},
+  rate:{label:'Win rate',better:'high'},
+  issued:{label:'Issued',better:'high'},
+  revenue:{label:'Won revenue',better:'high'},
+  timed:{label:'Jobs timed',better:''},
+  drafts:{label:'Drafts',better:''}
+};
+var TT_PERIODS={day:'Daily',week:'Weekly',month:'Monthly',year:'Yearly'};
+var TT_COLORS=['#2563eb','#d97706','#059669','#dc2626','#7c3aed','#0891b2','#db2777','#65a30d','#ea580c','#64748b'];
+var TT_MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function _ttIso(d){ return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2); }
+function _ttNice(iso){ var p=String(iso).split('-'); return (+p[2])+' '+TT_MON[(+p[1])-1]+' '+p[0]; }
+// The periods between two dates. The first and last are cut to the chosen dates, so the periods add
+// up to exactly the range picked (a week that starts before the range is not counted in full).
+function _ttBuckets(from,to,period){
+  var out=[], d=new Date(from+'T00:00:00'), end=new Date(to+'T00:00:00');
+  if(isNaN(d)||isNaN(end)||d>end) return out;
+  if(period==='week') d.setDate(d.getDate()-((d.getDay()+6)%7));       // Monday
+  else if(period==='month') d.setDate(1);
+  else if(period==='year') d.setMonth(0,1);
+  while(d<=end&&out.length<=TT_MAX){
+    var s=new Date(d), n=new Date(d);
+    if(period==='day') n.setDate(n.getDate()+1);
+    else if(period==='week') n.setDate(n.getDate()+7);
+    else if(period==='month') n.setMonth(n.getMonth()+1);
+    else n.setFullYear(n.getFullYear()+1);
+    var e=new Date(n); e.setDate(e.getDate()-1);
+    var bf=_ttIso(s), bt=_ttIso(e);
+    if(bf<from) bf=from;
+    if(bt>to) bt=to;
+    var label=period==='year'?String(s.getFullYear())
+      :period==='month'?TT_MON[s.getMonth()]+' '+String(s.getFullYear()).slice(2)
+      :TT_MON[(+bf.substring(5,7))-1]+' '+(+bf.substring(8,10));
+    var long=period==='day'?_ttNice(bf):period==='year'?String(s.getFullYear())
+      :period==='month'?TT_MON[s.getMonth()]+' '+s.getFullYear():_ttNice(bf)+' to '+_ttNice(bt);
+    out.push({from:bf,to:bt,label:label,long:long});
+    d=n;
+  }
+  return out;
+}
+function _ttRange(){
+  var f=_repFrom(), t=_repTo(), today=_ttIso(new Date()), assumed=!f;
+  if(!t) t=today;
+  if(!f) f=t.substring(0,4)+'-01-01';
+  return {from:f,to:t,assumed:assumed};
+}
+function _ttData(){
+  var co=_repCoKey(), r=_ttRange(), base=_reportCompanyEntries();
+  var bks=_ttBuckets(r.from,r.to,_ttF.period);
+  var out={range:r,buckets:bks,people:[],tooMany:bks.length>TT_MAX};
+  if(out.tooMany) return out;
+  var byName={};
+  bks.forEach(function(b,i){
+    var ts=_teamStats({entries:_entriesInDates(base,b.from,b.to),lookup:base,teamCo:co,noUnclaimed:true,
+      orderInScope:function(o){ return _orderInFilter(o,co,b.from,b.to); }});
+    ts.users.forEach(function(u){
+      var p=byName[u.name];
+      if(!p){ p=byName[u.name]={name:u.name,cells:[]}; out.people.push(p); }
+      var sum=0; u.respMins.forEach(function(v){ sum+=v; });
+      p.cells[i]={issued:u.quotes,drafts:u.drafts,won:u.won,revenue:u.revenue,respSum:sum,respN:u.respMins.length};
+    });
+  });
+  out.people.sort(function(a,b){ return a.name<b.name?-1:a.name>b.name?1:0; });
+  return out;
+}
+// Adds up cells (one person over several periods, or several people in one period).
+function _ttSum(cells){
+  var s={issued:0,drafts:0,won:0,revenue:0,respSum:0,respN:0};
+  (cells||[]).forEach(function(c){ if(!c) return; for(var k in s) s[k]+=c[k]||0; });
+  return s;
+}
+// null = nothing to measure in that period (no job timed, nothing issued) — drawn as a gap, not as 0.
+function _ttVal(c,m){
+  if(!c) return null;
+  if(m==='resp') return c.respN?c.respSum/c.respN:null;         // minutes
+  if(m==='rate') return c.issued?c.won/c.issued*100:null;
+  if(m==='timed') return c.respN;
+  return c[m]||0;
+}
+function _ttFmt(v,m){
+  if(v==null) return '—';
+  if(m==='resp') return typeof fmtWorkMins==='function'?fmtWorkMins(Math.round(v)):Math.round(v)+'m';
+  if(m==='rate') return Math.round(v)+'%';
+  if(m==='revenue') return fmtK(Math.round(v));
+  return String(Math.round(v*10)/10);
+}
+function _ttSeries(d){
+  var m=_ttF.metric, list=d.people.map(function(p,i){
+    return {key:p.name,name:p.name,color:TT_COLORS[i%TT_COLORS.length],
+      vals:d.buckets.map(function(b,bi){ return _ttVal(p.cells[bi],m); }),cells:p.cells};
+  });
+  var teamCells=d.buckets.map(function(b,bi){ return _ttSum(d.people.map(function(p){ return p.cells[bi]; })); });
+  list.push({key:'__team',name:'Whole team',color:'',team:true,
+    vals:teamCells.map(function(c){ return _ttVal(c,m); }),cells:teamCells});
+  return list;
+}
+function _ttSet(k,v){ _ttF[k]=v; renderTeamTrend(); }
+function _ttToggle(key){ _ttF.hidden[key]=!_ttF.hidden[key]; renderTeamTrend(); }
+function _ttAll(show){
+  _ttF.hidden={};
+  if(!show&&_ttCache) _ttCache.series.forEach(function(s){ if(!s.team) _ttF.hidden[s.key]=true; });
+  renderTeamTrend();
+}
+// First half of the periods against the second half. Averages are pooled (total minutes / total jobs),
+// never an average of weekly averages, so a week with one job does not weigh the same as one with ten.
+function _ttCompare(s,m){
+  var n=s.cells.length, mid=Math.floor(n/2);
+  if(n<2) return {a:null,b:null,all:_ttVal(_ttSum(s.cells),m),txt:'—',col:''};
+  var a=_ttVal(_ttSum(s.cells.slice(0,mid)),m), b=_ttVal(_ttSum(s.cells.slice(mid)),m);
+  var out={a:a,b:b,all:_ttVal(_ttSum(s.cells),m),txt:'—',col:''};
+  if(a==null||b==null) return out;
+  if(a===0&&b===0){ out.txt='No change'; return out; }
+  var pct=a===0?null:(b-a)/a*100, better=TT_METRICS[m].better;
+  if(pct!=null&&Math.abs(pct)<5){ out.txt='About the same'; return out; }
+  var up=b>a, arrow=up?'▲':'▼', amt=pct==null?'':' '+Math.abs(Math.round(pct))+'%';
+  if(!better){ out.txt=arrow+(up?' Up':' Down')+amt; return out; }
+  var good=(better==='high')===up;
+  out.txt=arrow+(good?' Improving':' Slipping')+amt;
+  out.col=good?'var(--pill-teal)':'var(--pill-coral)';
+  return out;
+}
+function renderTeamTrend(){
+  var w=el('rep-trend'); if(!w) return;
+  var d=_ttData(), m=_ttF.metric, r=d.range;
+  var head='<div class="card"><div class="card-head" style="flex-wrap:wrap;gap:8px"><h3><i class="ti ti-chart-line"></i>Team trend</h3>'
+    +'<div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    +'<div style="display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden">'
+    +Object.keys(TT_PERIODS).map(function(k){
+      var on=_ttF.period===k;
+      return '<button onclick="_ttSet(\'period\',\''+k+'\')" style="border:0;padding:6px 12px;font-size:12px;cursor:pointer;background:'
+        +(on?'var(--navy)':'var(--card)')+';color:'+(on?'var(--card)':'var(--text)')+'">'+TT_PERIODS[k]+'</button>';
+    }).join('')+'</div>'
+    +'<select id="tt-metric" onchange="_ttSet(\'metric\',this.value)" style="width:auto;height:32px;font-size:12px">'
+    +Object.keys(TT_METRICS).map(function(k){ return '<option value="'+k+'"'+(k===m?' selected':'')+'>'+TT_METRICS[k].label+'</option>'; }).join('')
+    +'</select></div></div><div class="card-body">';
+  var dates='<div style="font-size:12px;color:var(--text2);margin-bottom:10px">'+_ttNice(r.from)+' to '+_ttNice(r.to)
+    +(r.assumed?' (this year so far — set the dates above for another range)':'')+' · '+escHtml(_repFilterLabel().split(' · ')[0])+'</div>';
+  if(d.tooMany){
+    _ttCache=null;
+    w.innerHTML=head+dates+'<div class="alert alert-info">That is more than '+TT_MAX+' points. Choose Weekly, Monthly or Yearly, or a shorter date range.</div></div></div>';
+    return;
+  }
+  if(!d.people.length){
+    _ttCache=null;
+    w.innerHTML=head+dates+'<div class="alert alert-info">Nobody is measured yet. Tick <b>Include in Team performance</b> for each person in Settings › Users.</div></div></div>';
+    return;
+  }
+  var series=_ttSeries(d);
+  _ttCache={d:d,series:series}; _ttHover=-1;
+  var chips='<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px">'
+    +series.map(function(s){
+      var off=!!_ttF.hidden[s.key];
+      return '<button onclick="_ttToggle(\''+String(s.key).replace(/'/g,"\\'")+'\')" title="Click to '+(off?'show':'hide')+'" style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:14px;padding:4px 10px;font-size:12px;cursor:pointer;background:var(--card);color:var(--text);opacity:'+(off?'.45':'1')+'">'
+        +'<span style="width:14px;height:0;border-top:3px '+(s.team?'dashed var(--text2)':'solid '+s.color)+'"></span>'+escHtml(s.name)+'</button>';
+    }).join('')
+    +'<button class="btn" onclick="_ttAll(true)" style="font-size:11px;padding:3px 8px">Show all</button>'
+    +'<button class="btn" onclick="_ttAll(false)" style="font-size:11px;padding:3px 8px">Team only</button></div>';
+  var chart='<div id="tt-wrap" style="position:relative"><canvas id="tt-chart" style="width:100%;height:340px;display:block"></canvas>'
+    +'<div id="tt-tip" style="display:none;position:absolute;top:8px;pointer-events:none;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.18);min-width:170px;z-index:2"></div></div>';
+  var n=d.buckets.length, mid=Math.floor(n/2);
+  var hA=n>=2?_ttNice(d.buckets[0].from)+' – '+_ttNice(d.buckets[mid-1].to):'First half';
+  var hB=n>=2?_ttNice(d.buckets[mid].from)+' – '+_ttNice(d.buckets[n-1].to):'Second half';
+  var tbl='<div style="overflow-x:auto;margin-top:14px"><table class="data"><thead><tr><th>'+escHtml(TT_METRICS[m].label)+'</th>'
+    +'<th style="text-align:right">First half<div style="font-weight:400;font-size:10px;color:var(--text2)">'+hA+'</div></th>'
+    +'<th style="text-align:right">Second half<div style="font-weight:400;font-size:10px;color:var(--text2)">'+hB+'</div></th>'
+    +'<th>Change</th><th style="text-align:right">Whole range</th></tr></thead><tbody>'
+    +series.map(function(s){
+      var c=_ttCompare(s,m);
+      return '<tr'+(s.team?' style="font-weight:600"':'')+'><td><span style="display:inline-block;width:14px;height:0;vertical-align:middle;margin-right:7px;border-top:3px '
+        +(s.team?'dashed var(--text2)':'solid '+s.color)+'"></span>'+escHtml(s.name)+'</td>'
+        +'<td style="text-align:right">'+_ttFmt(c.a,m)+'</td><td style="text-align:right">'+_ttFmt(c.b,m)+'</td>'
+        +'<td style="'+(c.col?'color:'+c.col+';font-weight:600':'color:var(--text2)')+'">'+c.txt+'</td>'
+        +'<td style="text-align:right">'+_ttFmt(c.all,m)+'</td></tr>';
+    }).join('')+'</tbody></table></div>';
+  var note='<div style="font-size:11px;color:var(--text2);margin-top:10px;line-height:1.5">'
+    +'Each point counts the quotations created, and the orders received, in that period — the same count as the Team performance table. '
+    +(m==='resp'?'A gap in a line means no job was timed for that person in that period. Lower is better. ':'')
+    +(m==='rate'?'A gap means nothing was issued in that period. ':'')
+    +'Orders nobody has picked up yet are not on these lines. Only people ticked <b>Include in Team performance</b> are shown.</div>';
+  w.innerHTML=head+dates+chips+chart+tbl+note+'</div></div>';
+  var cv=el('tt-chart');
+  if(cv){
+    cv.onmousemove=function(ev){ _ttMove(ev); };
+    cv.onmouseleave=function(){ _ttHover=-1; var t=el('tt-tip'); if(t) t.style.display='none'; _ttDraw(); };
+  }
+  _ttDraw();
+}
+function _ttGeom(cv){
+  var W=cv.clientWidth||900, H=cv.clientHeight||340;
+  return {W:W,H:H,l:58,r:16,t:12,b:30};
+}
+function _ttAxisMax(max,m){
+  if(!(max>0)) return m==='rate'?100:1;
+  if(m==='rate') return 100;
+  if(m==='resp'){ var hrs=max/60, st=[1,2,4,8,12,24,48,96,120,240,480,960]; for(var i=0;i<st.length;i++) if(hrs<=st[i]) return st[i]*60; return Math.ceil(hrs/480)*480*60; }
+  var p=Math.pow(10,Math.floor(Math.log(max)/Math.LN10)), f=max/p;
+  var top=(f<=1?1:f<=2?2:f<=4?4:f<=5?5:f<=8?8:10)*p;
+  return (m!=='revenue'&&top<4)?4:top;
+}
+function _ttDraw(){
+  var cv=el('tt-chart'); if(!cv||!cv.getContext||!_ttCache) return;
+  var g=_ttGeom(cv), dpr=window.devicePixelRatio||1, m=_ttF.metric;
+  cv.width=Math.round(g.W*dpr); cv.height=Math.round(g.H*dpr);
+  var ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,g.W,g.H);
+  var css=getComputedStyle(document.documentElement);
+  var cText=(css.getPropertyValue('--text2')||'#667').trim(), cLine=(css.getPropertyValue('--border')||'#ddd').trim(),
+      cTeam=(css.getPropertyValue('--text')||'#222').trim();
+  var bks=_ttCache.d.buckets, n=bks.length;
+  var shown=_ttCache.series.filter(function(s){ return !_ttF.hidden[s.key]; });
+  var max=0; shown.forEach(function(s){ s.vals.forEach(function(v){ if(v!=null&&v>max) max=v; }); });
+  var top=_ttAxisMax(max,m), pw=g.W-g.l-g.r, ph=g.H-g.t-g.b;
+  function X(i){ return n<=1?g.l+pw/2:g.l+pw*i/(n-1); }
+  function Y(v){ return g.t+ph-(v/top)*ph; }
+  ctx.font='11px system-ui,sans-serif'; ctx.lineWidth=1;
+  for(var k=0;k<=4;k++){
+    var v=top*k/4, y=Math.round(Y(v))+.5;
+    ctx.strokeStyle=cLine; ctx.beginPath(); ctx.moveTo(g.l,y); ctx.lineTo(g.W-g.r,y); ctx.stroke();
+    ctx.fillStyle=cText; ctx.textAlign='right'; ctx.textBaseline='middle';
+    ctx.fillText(m==='resp'?Math.round(v/60)+'h':_ttFmt(v,m),g.l-8,y);
+  }
+  var every=Math.max(1,Math.ceil(n/Math.max(4,Math.floor(pw/64))));
+  ctx.textAlign='center'; ctx.textBaseline='top'; ctx.fillStyle=cText;
+  for(var i=0;i<n;i++) if(i%every===0) ctx.fillText(bks[i].label,X(i),g.H-g.b+8);
+  if(_ttHover>=0&&_ttHover<n){
+    ctx.strokeStyle=cText; ctx.setLineDash([3,3]); ctx.beginPath();
+    ctx.moveTo(Math.round(X(_ttHover))+.5,g.t); ctx.lineTo(Math.round(X(_ttHover))+.5,g.t+ph); ctx.stroke(); ctx.setLineDash([]);
+  }
+  shown.forEach(function(s){
+    var col=s.team?cTeam:s.color, started=false;
+    ctx.strokeStyle=col; ctx.lineWidth=s.team?2.5:2; ctx.lineJoin='round';
+    if(s.team) ctx.setLineDash([6,4]);
+    ctx.beginPath();
+    s.vals.forEach(function(v,i){ if(v==null) return; if(!started){ ctx.moveTo(X(i),Y(v)); started=true; } else ctx.lineTo(X(i),Y(v)); });
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle=col;
+    s.vals.forEach(function(v,i){
+      if(v==null) return;
+      if(n>70&&i!==_ttHover) return;
+      ctx.beginPath(); ctx.arc(X(i),Y(v),i===_ttHover?4.5:3,0,Math.PI*2); ctx.fill();
+    });
+  });
+}
+function _ttMove(ev){
+  var cv=el('tt-chart'), tip=el('tt-tip'); if(!cv||!tip||!_ttCache) return;
+  var g=_ttGeom(cv), n=_ttCache.d.buckets.length, rect=cv.getBoundingClientRect();
+  var x=ev.clientX-rect.left, pw=g.W-g.l-g.r;
+  var i=n<=1?0:Math.round((x-g.l)/pw*(n-1));
+  if(i<0) i=0; if(i>n-1) i=n-1;
+  if(i!==_ttHover){ _ttHover=i; _ttDraw(); }
+  var m=_ttF.metric, b=_ttCache.d.buckets[i];
+  var rows=_ttCache.series.filter(function(s){ return !_ttF.hidden[s.key]; });
+  tip.innerHTML='<div style="font-weight:600;margin-bottom:5px">'+b.long+'</div>'
+    +rows.map(function(s){
+      return '<div style="display:flex;align-items:center;gap:6px;white-space:nowrap"><span style="width:12px;height:0;border-top:3px '
+        +(s.team?'dashed var(--text2)':'solid '+s.color)+'"></span><span style="flex:1">'+escHtml(s.name)+'</span><b>'+_ttFmt(s.vals[i],m)+'</b></div>';
+    }).join('');
+  tip.style.display='block';
+  var px=g.l+(n<=1?pw/2:pw*i/(n-1)), tw=tip.offsetWidth||190;
+  tip.style.left=(px+14+tw>g.W?Math.max(0,px-14-tw):px+14)+'px';
+}
+window.addEventListener('resize',function(){ if(typeof repTab!=='undefined'&&repTab==='trend'&&_ttCache) _ttDraw(); });
 function renderUserKpi(){
   var sel=el('kpi-filter'), _rts=_reportTeamNumbers(), stats=_reportTeamStats(_rts);
   var fmtAvg=function(m){ return m==null?'—':(typeof fmtWorkMins==='function'?fmtWorkMins(Math.round(m)):Math.round(m)+'m'); };
@@ -50885,7 +51162,7 @@ var LAMI_APP_MANUAL=
   +'- CLIENTS: full directory (B2B: contractors/architects/developers/hotels; B2C: homeowners/condo owners), autocomplete + transaction history on the quotation form.\n'
   +'- SCHEDULE: Gantt (year) and Calendar (month) views, Philippine holidays highlighted.\n'
   +'- JOB ORDERS: a Job Order is built ONLY from the cutting list reflected into the quotation (Designers Support). It is reserved at the Initial lock, a new version at the Final lock, and marked ready when the client approves the Final; KEYSTONE releases it to production. Open it from the quotation\'s **Job Order** button (versions, print, part labels). Labels show the exact board name. IF A BOARD OR EDGE TAPE IS CHANGED ON THE FINAL QUOTATION\'S LINES: at the Final lock the app lists each change the cutting list uses and asks to update the Job Order — OK makes a new version with the new materials and labels; Cancel keeps the old ones (logged). Already locked, or pressed Cancel? Job Order → **Check Final Quotation materials**. Reprint the Job Order and labels from the new version. Reflecting a new cutting list into the Final Quotation replaces this — that list is used as is. CLIENT-SUPPLIED HPL OR BOARD: in Designers Support › Cutting List › HPL builds, tick "Client supplies" HPL and/or Board on that build; on Reflect those are not priced and go to Customer-Supplied Materials (Client-supplied materials turns on, so its service uplift applies — untick services in that card if needed). Cutting, lamination, the Job Order and labels are unchanged. On the cutting layout every piece is named: a piece too small for its label gets a thin red line out to its part number and size at the side of the board.\n'
-  +'- REPORTS: Dashboard KPIs, analytics by segment/status/month/agent, custom Excel/PowerPoint export. Project tracker has a search box (client, project, serial, user, agent — words in any order), status / type / prepared-by filters and sort. The Cost Report tab (profit/margin detail) is Admin/Director/Manager only.\n'
+  +'- REPORTS: Dashboard KPIs, analytics by segment/status/month/agent, custom Excel/PowerPoint export. Team trend tab (also the Trend button on the Dashboard team table): a line graph per person plus the whole team, Daily/Weekly/Monthly/Yearly, for average response time, won, win rate, issued, revenue, jobs timed or drafts, within the dates and company chosen at the top; the table under it compares the first half of the range with the second half (Improving/Slipping). Project tracker has a search box (client, project, serial, user, agent — words in any order), status / type / prepared-by filters and sort. The Cost Report tab (profit/margin detail) is Admin/Director/Manager only.\n'
   +'- ORDERS: Wufoo form submissions land here automatically; "Export to Quotation" pre-fills a new quotation from an order.\n'
   +'- USERS & ROLES (Settings → Users, Admin/Director only): Admin > Manager > Supervisor > Approver > Encoder > Staff > Viewer. Manager/Supervisor PIN required for non-VAT, discounts, unlock, revision, holiday-premium override. Approval Routing assigns a named approver per action type per company.\n'
   +'- APPROVALS: there is an **Approvals tab in the top nav** (visible to anyone with Approvals access). The badge counts what is waiting on YOU — requests you must decide, plus a counter-offer on your own request. A COUNTER-OFFER IS AN OFFER, NOT A DECISION: when an approver counters a discount, nothing changes on the quotation until the ORIGINAL REQUESTER opens Approvals and presses "Accept X% counter". Until then the quotation keeps its original price and the printout shows no discount. If someone says "my counter-offer did not reflect", that is almost always the reason — tell them to accept it.\n'
@@ -52030,6 +52307,11 @@ function _chipHandleMsgMarker(raw){
 //           dot:     a button id that wears a small NEW tag until it is first clicked
 // Keep each line ONE plain sentence.
 var WHATS_NEW=[
+  {id:'2026-11-27-team-trend', date:'27 Nov 2026', items:[
+    {id:'team-trend', icon:'ti-chart-line', title:'Team trend graph',
+     text:'Reports › Team trend draws a line per person, and one for the whole team, by day, week, month or year. Pick average response time, won, win rate, issued, revenue, jobs timed or drafts, and set the dates and company at the top. The table under the graph compares the first half of the range with the second half, so you can see who is improving.',
+     show:'reports'}
+  ]},
   {id:'2026-11-26-hpl-client-supplied', date:'26 Nov 2026', items:[
     {id:'hpl-client-supplied', icon:'ti-package-import', title:'Client-supplied HPL or board',
      text:'Designers Support › Cutting List › HPL builds now has a "Client supplies" column: tick HPL, Board, or both when the client brings them. They are not priced and go to the quotation\'s Customer-Supplied Materials list, which switches on Client-supplied materials (its service uplift applies, adjustable per service). Cutting, lamination, the Job Order and labels work as before.',
