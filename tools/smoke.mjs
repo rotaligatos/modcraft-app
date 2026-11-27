@@ -3036,6 +3036,29 @@ const PROFILES = {
             $('page-quotation').classList.remove('active'); pages.forEach(x => x.classList.add('active'));
           }
         }, { previewSwitchRedrawsForm: true, opt1HasNoOpt2Discount: true, opt2KeepsItsOwn: true });
+      /* 2026-11-27: "exported order does not capture the other information such as the address".
+         The export filled only what the order carries; the client's saved address/city/email/account
+         type were left blank, and the service stayed "Fabrication only" whatever the order asked for. */
+      if (typeof window._fillOrderBlanksFromClient === 'function' && typeof window._orderServiceScope === 'function')
+        check('order export: service follows Project Scope, and blanks are filled from the client directory without overwriting the order', () => {
+          const w = window, $ = id => document.getElementById(id);
+          const keep = { lc: w.liveClients, linked: w._linkedClientId };
+          try {
+            w.initQuotation();
+            const o = { clientName: 'Rei Test', companyName: 'Intensity Test Builder', custEmail: '', service: 'Cutting & Edging',
+                        wufooExtra: [{ t: 'Project Scope', v: 'Fabrication, Fabrication & Installation' }] };
+            w.liveClients = [{ id: 77, name: 'Rei Test', bizname: 'INTENSITY TEST BUILDER', contact: '0900', email: 'rei@test.ph',
+                               address: '12 Mabini St', city: 'Quezon City', type: 'Direct', txns: [] }];
+            $('cl-name').value = 'Rei Test'; $('cl-bizname').value = 'Intensity Test Builder'; $('cl-contact').value = '0917-ORDER';
+            const filled = w._fillOrderBlanksFromClient(o);
+            return { scope: w._orderServiceScope(o),
+                     noScope: w._orderServiceScope({ service: 'Cutting & Edging', wufooExtra: [] }),
+                     address: $('cl-address').value, city: $('cl-city').value, email: $('cl-email').value,
+                     orderContactKept: $('cl-contact').value, orderBizKept: $('cl-bizname').value,
+                     reported: filled.indexOf('address') >= 0 && filled.indexOf('contact') < 0 };
+          } finally { w.liveClients = keep.lc; try { w.initQuotation(); } catch (e) {} w._linkedClientId = keep.linked; }
+        }, { scope: 'Fabrication with Installation', noScope: '', address: '12 Mabini St', city: 'Quezon City', email: 'rei@test.ph',
+             orderContactKept: '0917-ORDER', orderBizKept: 'Intensity Test Builder', reported: true });
       /* 2026-09-16: Rommel reported "I am somehow blinded on what option am I signing or
          unlocking since it doesnt show what option it is" -- a quotation's lock state genuinely
          IS per-option (captureQuotationSnapshot carries `locked` inside each option's own
