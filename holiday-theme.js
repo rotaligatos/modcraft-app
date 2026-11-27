@@ -151,6 +151,64 @@
   function ls(k,v){ try{ if(v===undefined) return localStorage.getItem(k); if(v===null) localStorage.removeItem(k); else localStorage.setItem(k,v); }catch(e){ return null; } }
   function hideKey(h,now){ return 'mc_hol_hide_'+h.k+'_'+now.toDateString(); }
 
+  // What each occasion is decorated with: a garland of its icons and the colours of its lights.
+  // Rommel, 2026-11-27: the first version was "so boring… not even noticeable" — so the strip is
+  // taller and moves, a row of lights twinkles under it, Lami's outfit bounces, and the first open
+  // of the day gets a short shower of icons. Anyone with "reduce motion" set gets it all still.
+  var DECO={
+    christmas:{g:['🎄','❄️','🎁','⭐','🔔','🍬','☃️'],lights:['#ef4444','#22c55e','#facc15','#3b82f6','#f97316']},
+    newyear:{g:['🎆','🎉','🥂','✨','🎊','🎇'],lights:['#facc15','#f472b6','#60a5fa','#fbbf24','#a78bfa']},
+    kings:{g:['👑','⭐','🎁','🐫','✨'],lights:['#facc15','#fbbf24','#f59e0b']},
+    bday:{g:['🎈','🎂','🎉','🧁','🎁','🥳'],lights:['#f472b6','#a78bfa','#38bdf8','#facc15']},
+    valentine:{g:['💘','🌹','💕','💌','💝'],lights:['#f43f5e','#ec4899','#fda4af']},
+    cny:{g:['🧧','🏮','🐉','🎊','🍊'],lights:['#ef4444','#facc15','#f59e0b']},
+    fools:{g:['🃏','🤡','🙃','🎭','😜'],lights:['#22c55e','#facc15','#3b82f6','#ec4899']},
+    holyweek:{g:['🕊️'],lights:[]},
+    easter:{g:['🐣','🌷','🥚','🐰','🌸'],lights:['#f9a8d4','#a5f3fc','#fde68a','#c4b5fd']},
+    independence:{g:['☀️','⭐','🌟','🎆'],lights:['#3b82f6','#ef4444','#facc15','#ffffff']},
+    heroes:{g:['🎖️','🏅','🫡','⭐'],lights:['#3b82f6','#ef4444','#facc15']},
+    halloween:{g:['🎃','🦇','👻','🕸️','🕷️','🍬'],lights:['#f97316','#a855f7','#84cc16']},
+    souls:{g:['🕯️','🌼'],lights:[]},
+    thanks:{g:['🍂','🦃','🍁','🥧','🌽'],lights:['#f97316','#b45309','#facc15']},
+    blackfri:{g:['🛍️','🏷️','💸','🛒','🔥'],lights:['#facc15','#ef4444','#ffffff']}
+  };
+  var _styled=false;
+  function style(){
+    if(_styled) return; _styled=true;
+    var css='@keyframes holShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}'
+      +'@keyframes holSlide{from{transform:translateX(0)}to{transform:translateX(-50%)}}'
+      +'@keyframes holBlink{0%,100%{opacity:1;filter:brightness(1.25)}50%{opacity:.35;filter:brightness(.8)}}'
+      +'@keyframes holBob{0%,100%{transform:translateX(-50%) rotate(-14deg) translateY(0)}50%{transform:translateX(-50%) rotate(-6deg) translateY(-3px)}}'
+      +'@keyframes holFall{0%{transform:translateY(-40px) rotate(0)}100%{transform:translateY(105vh) rotate(360deg)}}'
+      +'@keyframes holPop{0%{transform:scale(.85);opacity:0}100%{transform:scale(1);opacity:1}}'
+      +'#hol-strip{background-size:220% 220%!important;animation:holShift 10s ease infinite;overflow:hidden}'
+      +'#hol-strip .hol-track{flex:1 1 0;min-width:0;overflow:hidden;display:flex;align-items:center;white-space:nowrap;font-size:17px;opacity:.95;pointer-events:none;-webkit-mask-image:linear-gradient(90deg,transparent,#000 8%,#000 92%,transparent);mask-image:linear-gradient(90deg,transparent,#000 8%,#000 92%,transparent)}'
+      +'#hol-strip .hol-track span{display:inline-block;animation:holSlide 40s linear infinite;letter-spacing:10px}'
+      +'#hol-strip .hol-track.r span{animation-direction:reverse}'
+      +'#hol-strip .hol-pill{flex:0 1 auto;margin:0 12px;position:relative;z-index:1;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.35);border-radius:999px;padding:5px 16px;'
+        +'box-shadow:0 2px 10px rgba(0,0,0,.25);animation:holPop .5s ease-out;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+      +'#hol-strip .hol-lights{position:absolute;left:0;right:0;bottom:0;height:6px;display:flex;justify-content:space-around;align-items:center;pointer-events:none}'
+      +'#hol-strip .hol-lights i{width:7px;height:7px;border-radius:50%;display:block;box-shadow:0 0 6px currentColor;animation:holBlink 1.6s ease-in-out infinite}'
+      +'#hol-hat{animation:holBob 2.4s ease-in-out infinite}'
+      +'.hol-drop{position:fixed;top:0;z-index:2147483000;pointer-events:none;animation:holFall linear forwards;will-change:transform}'
+      +'@media (prefers-reduced-motion:reduce){#hol-strip,#hol-strip *,#hol-hat{animation:none!important}.hol-drop{display:none!important}}'
+      +'@media (max-width:700px){#hol-strip .hol-track{display:none}}';
+    var el=document.createElement('style'); el.id='hol-style'; el.textContent=css; (document.head||document.documentElement).appendChild(el);
+  }
+  function garland(icons,n){ var o=''; for(var i=0;i<n;i++) o+=icons[i%icons.length]; return o+o; }
+  function shower(h,now){
+    var key='mc_hol_shower_'+h.k+'_'+now.toDateString();
+    if(ls(key)) return; ls(key,'1');
+    if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    var icons=(DECO[h.k]&&DECO[h.k].g)||[h.ic]; if(!icons.length) return;
+    for(var i=0;i<22;i++)(function(i){
+      var d=document.createElement('div'); d.className='hol-drop'; d.textContent=icons[i%icons.length];
+      var dur=2.6+Math.random()*2.2;
+      d.style.cssText='left:'+(Math.random()*96)+'vw;font-size:'+(18+Math.random()*16)+'px;animation-duration:'+dur+'s;animation-delay:'+(Math.random()*1.2)+'s';
+      document.body.appendChild(d); setTimeout(function(){ if(d.parentNode) d.parentNode.removeChild(d); },(dur+1.5)*1000);
+    })(i);
+  }
+
   var opts={}, cur=null, timer=null, tick=null;
   function find(x){ return typeof x==='string'?document.querySelector(x):x; }
 
@@ -166,19 +224,27 @@
     }
     var hidden=!!(h&&ls(hideKey(h,now)));
     if(h&&!hidden){
-      strip.style.cssText='display:flex;align-items:center;justify-content:center;gap:10px;min-height:26px;padding:3px 44px;box-sizing:border-box;'
-        +'background:'+h.bg+';color:#fff;font:500 12px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;position:relative;'
-        +'text-shadow:0 1px 1px rgba(0,0,0,.25);text-align:center;'+(opts.stripStyle||'');
-      strip.innerHTML='<span id="hol-msg">'+esc(h.msg(now))+'</span>'
+      style();
+      var dc=DECO[h.k]||{g:[h.ic],lights:[]}, quiet=!dc.lights.length;
+      strip.style.cssText='display:flex;align-items:center;justify-content:center;min-height:'+(quiet?30:40)+'px;padding:4px 44px '+(quiet?4:10)+'px;box-sizing:border-box;'
+        +'background:'+h.bg+';color:#fff;font:600 13px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;position:relative;'
+        +'text-shadow:0 1px 2px rgba(0,0,0,.35);text-align:center;'+(quiet?'animation:none;':'')+(opts.stripStyle||'');
+      var lights='';
+      if(dc.lights.length){ for(var li=0;li<40;li++) lights+='<i style="color:'+dc.lights[li%dc.lights.length]+';background:'+dc.lights[li%dc.lights.length]+';animation-delay:'+((li%5)*0.3)+'s"></i>'; }
+      strip.innerHTML=(quiet?'':'<div class="hol-track"><span>'+garland(dc.g,24)+'</span></div>')
+        +'<span class="hol-pill" id="hol-msg">'+esc(h.msg(now))+'</span>'
+        +(quiet?'':'<div class="hol-track r"><span>'+garland(dc.g,24)+'</span></div>')
+        +(lights?'<div class="hol-lights">'+lights+'</div>':'')
         +'<button type="button" id="hol-x" title="Hide for today" aria-label="Hide for today" '
         +'style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:transparent;border:none;color:#fff;opacity:.85;cursor:pointer;font-size:15px;line-height:1;padding:2px 4px">&times;</button>';
       document.getElementById('hol-x').onclick=function(){ hideToday(); };
     } else { strip.style.display='none'; strip.innerHTML=''; }
     var host=find(opts.mascot), hat=document.getElementById('hol-hat');
     if(host&&!hat){ hat=document.createElement('div'); hat.id='hol-hat';
-      hat.style.cssText='position:absolute;top:-9px;left:44%;transform:translateX(-50%) rotate(-14deg);font-size:21px;line-height:1;pointer-events:none;user-select:none;'+(opts.hatStyle||'');
+      hat.style.cssText='position:absolute;top:-14px;left:46%;transform:translateX(-50%) rotate(-14deg);font-size:28px;line-height:1;pointer-events:none;user-select:none;filter:drop-shadow(0 2px 2px rgba(0,0,0,.3));'+(opts.hatStyle||'');
       host.appendChild(hat); }
     if(hat){ hat.textContent=(h&&h.hat)||''; hat.style.display=(h&&h.hat)?'':'none'; }
+    if(h&&!hidden&&!nowOverride&&DECO[h.k]&&DECO[h.k].lights.length){ try{ shower(h,now); }catch(e){} }
     clearInterval(tick); tick=null;
     if(h&&h.tick&&!hidden&&!nowOverride&&now.getMonth()===11&&now.getDate()===31)
       tick=setInterval(function(){ var m=document.getElementById('hol-msg'); if(m&&cur) m.textContent=cur.msg(new Date()); else clearInterval(tick); },1000);
