@@ -3000,6 +3000,42 @@ const PROFILES = {
             if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
           }
         }, { routedByRequest: true, storedCompany: true, preparerExcluded: true });
+      /* 2026-11-27: "when you make changes on option 2, option 1 follows". Two causes.
+         (a) The print preview's option buttons switched the active option without redrawing the form,
+             so the screen kept showing the option just left while edits went into the other one.
+         (b) The Final Quotation's discount / premium / cost-factor override / cost basis were one set
+             of values for the whole quotation, so setting one on Option 2 repriced Option 1 as well. */
+      if (typeof window.printSwitchOption === 'function' && typeof window._doCreateNewOption === 'function')
+        check('options: a change on Option 2 does not reach Option 1 (preview switch redraws the form; Final Quotation values are per option)', () => {
+          const w = window, $ = id => document.getElementById(id);
+          const keep = { save: w.gSaveQuotation, log: w.logActivity, conf: w._confirm, role: w.currentRole, user: w.gUser };
+          const pages = [...document.querySelectorAll('.page.active')];
+          try {
+            w.gSaveQuotation = () => {}; w.logActivity = () => {}; w._confirm = (m, f) => f && f();
+            w.gUser = { email: 't@test', name: 'T' }; w.currentRole = 'Admin';
+            pages.forEach(x => x.classList.remove('active')); $('page-quotation').classList.add('active');
+            w.initQuotation(); $('cl-name').value = 'Opt Test'; $('cl-service').value = 'Fabrication only'; w.onServiceChange();
+            w.qAreas[0].items[0].qty = 5; w.renderItems(); w.recalc();
+            w.qLocked = true; w.qSaved = true; w.qApproved = true; w.qClientApproved = true;
+            w._doCreateNewOption();                                   // Option 2
+            w.qAreas[0].items[0].qty = 9; w.renderItems(); w.recalc();
+            // (b) a Final Quotation discount + cost basis set on Option 2
+            w.fqDiscPct = 7; w.fqDiscApproved = true; w.fqFabBasis = 'cutting'; w.fqFabCostOverride = 12345;
+            // (a) switch from the print preview
+            w.printSwitchOption(1);
+            const field = document.querySelector('#items-wrap input[type=number]');
+            const onOpt1 = { active: w.qActiveOptionId, fieldShowsOpt1: !!field && +field.value === 5,
+                             disc: w.fqDiscPct, discApproved: w.fqDiscApproved, basis: w.fqFabBasis };
+            w.switchToOption(2);
+            return { previewSwitchRedrawsForm: onOpt1.active === 1 && onOpt1.fieldShowsOpt1,
+                     opt1HasNoOpt2Discount: onOpt1.disc === 0 && onOpt1.discApproved === false && onOpt1.basis === 'own',
+                     opt2KeepsItsOwn: w.fqDiscPct === 7 && w.fqDiscApproved === true && w.fqFabBasis === 'cutting' && w.fqFabCostOverride === 12345 };
+          } finally {
+            try { w.initQuotation(); } catch (e) {}
+            w.gSaveQuotation = keep.save; w.logActivity = keep.log; w._confirm = keep.conf; w.currentRole = keep.role; w.gUser = keep.user;
+            $('page-quotation').classList.remove('active'); pages.forEach(x => x.classList.add('active'));
+          }
+        }, { previewSwitchRedrawsForm: true, opt1HasNoOpt2Discount: true, opt2KeepsItsOwn: true });
       /* 2026-09-16: Rommel reported "I am somehow blinded on what option am I signing or
          unlocking since it doesnt show what option it is" -- a quotation's lock state genuinely
          IS per-option (captureQuotationSnapshot carries `locked` inside each option's own

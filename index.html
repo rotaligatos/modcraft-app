@@ -12598,17 +12598,10 @@ function _renderPrintOptBar(){
   bar.innerHTML=h;
 }
 function printSwitchOption(optId){
-  // Save current option snapshot, switch to selected, re-render print body
-  if(qActiveOptionId>0){
-    var cur=qOptionsList.find(function(o){return o.id===qActiveOptionId;});
-    if(cur){cur.snapshot=captureQuotationSnapshot();cur.grand=_pCalc.grand||0;}
-  }
+  // Switch to the selected option (switchToOption saves the current one first), then re-render.
   var target=qOptionsList.find(function(o){return o.id===optId;});
   if(!target) return;
-  qActiveOptionId=optId;
-  restoreQuotationSnapshot(target.snapshot);
-  if(target.locked!==undefined){qLocked=!!target.locked;qSaved=!!target.saved;}
-  recalc();
+  switchToOption(optId);
   html('print-body',_buildPrintBody());
   _renderPrintOptBar();
 }
@@ -25427,6 +25420,12 @@ function captureQuotationSnapshot(){
     // without this, switching options would leave the previous option's Final Quotation scope in
     // place and price the new one off it.
     fqAreas:fqAreas?JSON.parse(JSON.stringify(fqAreas)):null, fqScopeForked:fqScopeForked,
+    // The Final Quotation's own discount, premium, cost-factor override and cost basis were ONE
+    // set of values for the whole quotation, so setting one on Option 2 also repriced Option 1's
+    // Final Quotation (reported 2026-11-27: "changes on option 2, option 1 follows").
+    fq:{discPct:fqDiscPct,discApproved:fqDiscApproved,premApproved:fqPremApproved,
+        customCF:fqCustomCF?JSON.parse(JSON.stringify(fqCustomCF)):null,customCFApproved:fqCustomCFApproved,
+        fabBasis:fqFabBasis,fabCostOverride:fqFabCostOverride},
     fabMode:qFabMode,
     assembly:JSON.parse(JSON.stringify(qAssembly)),
     carcassUnitCount:qCarcassUnitCount,
@@ -25489,7 +25488,7 @@ function restoreQuotationSnapshot(snap){
   if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';qSentAt=snap.sentAt||'';}
   if(snap.initLockedAt!==undefined){qInitLockedAt=snap.initLockedAt||'';qInitApprovedAt=snap.initApprovedAt||'';fqLockedAt=snap.finalLockedAt||'';qClosedAt=snap.closedAt||'';}
   if(snap.fqStarted!==undefined) fqStarted=!!snap.fqStarted;
-  qProjectSize=snap.projectSize||0; if(snap.matRoundOn) qMatRoundOn=true;
+  qProjectSize=snap.projectSize||0; qMatRoundOn=!!snap.matRoundOn;   // per option: an option issued before rounding stays as issued
   qInstWorkers=snap.instWorkers||0; qInstDays=snap.instDays||0;
   qInstRegion=snap.instRegion||'z1'; if(qInstRegion==='metro')qInstRegion='z1'; if(qInstRegion==='outside')qInstRegion='z2';
   qInstRegionManual=!!(snap.instRegion); // treat saved zone as manual (user explicitly set it at some point)
@@ -25515,6 +25514,15 @@ function restoreQuotationSnapshot(snap){
   qOtherCosts=Array.isArray(snap.otherCosts)?JSON.parse(JSON.stringify(snap.otherCosts)):[];
   fqAreas=snap.fqAreas?JSON.parse(JSON.stringify(snap.fqAreas)):null;
   fqScopeForked=!!(snap.fqScopeForked&&fqAreas);
+  // This option's own Final Quotation values. A snapshot saved before these were kept per option
+  // has none: start empty, so initFinalQuotation takes them from THIS option's Initial Quotation
+  // rather than leaving the previous option's in place.
+  var _f=snap.fq||{};
+  fqDiscPct=+_f.discPct||0; fqDiscApproved=!!_f.discApproved; fqPremApproved=!!_f.premApproved;
+  fqCustomCF=_f.customCF?JSON.parse(JSON.stringify(_f.customCF)):null;
+  fqCustomCFApproved=!!(_f.customCFApproved&&fqCustomCF);
+  fqFabBasis=_f.fabBasis||'own'; fqFabCostOverride=+_f.fabCostOverride||0;
+  fqBasisFromSave=!!snap.fq;   // keep this option's basis through initFinalQuotation
   fqInitialized=false;   // this option's Stage 2 must re-initialise from its own snapshot, not the previous option's
   populateInstRegionSelect();
 }
@@ -25529,6 +25537,7 @@ function syncOptionUI(){
   if(el('assm-toggle')) el('assm-toggle').checked=qAssembly.enabled;
   if(el('assm-body')) el('assm-body').style.display=qAssembly.enabled?'block':'none';
   if(el('carcass-unit-count')) el('carcass-unit-count').value=qCarcassUnitCount||'';
+  if(el('project-size')) el('project-size').value=qProjectSize||'';   // was left showing the previous option's typed size
   _updateCarcassCountCardVisibility();
   if(el('cl-charge-toggle')) el('cl-charge-toggle').checked=qCuttingList.enabled;
   if(el('cl-charge-body')) el('cl-charge-body').style.display=qCuttingList.enabled?'block':'none';
@@ -25603,7 +25612,7 @@ function _doCreateNewOption(){
   // while Option 2's edits correctly went nowhere near it. Reset so Stage 2 keeps mirroring Stage 1
   // (the documented default) until this specific option's Stage 2 is genuinely, independently
   // touched -- at which point _forkFQScope() forks fresh from THIS option's current scope.
-  newSnap.fqAreas=null; newSnap.fqScopeForked=false;
+  newSnap.fqAreas=null; newSnap.fqScopeForked=false; delete newSnap.fq;
   qOptionsList.push({id:newId,label:'Option '+newId,snapshot:newSnap,status:'active',locked:false,saved:false,grand:_pCalc.grand||0});
   switchToOption(newId);
   // New option starts unlocked so user can freely edit before locking and sending
@@ -25632,6 +25641,12 @@ function switchToOption(optId){
   updateSentStatus();
   renderItems();
   recalc();
+  // On the Final Quotation tab the cards on screen belonged to the option just left: redraw them
+  // for this one (goStage re-initialises Stage 2 from this option's own values).
+  if(qStage===2){
+    if(qApproved){ var _fw=el('fq-cards-wrap'); if(_fw) _fw.innerHTML=''; goStage(2); }
+    else goStage(1);
+  }
   renderOptionBar();
   // Update serial display
   var qs=el('q-serial'); if(qs) qs.textContent=getDisplaySerial();
