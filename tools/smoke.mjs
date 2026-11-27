@@ -2975,6 +2975,31 @@ const PROFILES = {
             if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
           }
         }, { carriedAmountUsed: true, carriedDecisionUsed: true, noCarryReproducesOldFailure: true });
+      /* 2026-11-27: QT-W00000411 (WCL) showed "Cebu World Laminate" on its Noted-by request and went to
+         CWL's fallback. The auto-forward runs in the Checked-by signer's browser, where the quotation
+         is not open, and took the company from that screen. It must route by the request's company. */
+      if (typeof window._sendSignatureRequest === 'function')
+        check('_sendSignatureRequest: auto-forwarded Noted-by routes by the request\'s company, not the open screen', () => {
+          const w = window;
+          const saved = { findSig: w._findSignatory, saveReq: w.gSaveApprovalRequest, sendMsg: w.gSendMessage,
+                           gco: w.getCompanyName, gUser: w.gUser, notifsLen: w.NOTIFS ? w.NOTIFS.length : 0 };
+          let routedCo = null, routedEx = null;
+          try {
+            w._findSignatory = (slot, ex, co) => { routedCo = co; routedEx = ex; return { email: 'noter@test.com', name: 'N' }; };
+            w.gSaveApprovalRequest = () => {}; w.gSendMessage = () => {};
+            w.getCompanyName = () => 'Cebu World Laminate, Inc.';
+            w.gUser = { email: 'checker@test.com', name: 'Checker' };
+            const req = w._sendSignatureRequest('noted', true, 'QT-TEST-0411', 'Client', 'checker@test.com',
+              { amount: 1, decision: null, company: 'World Class Laminate, Inc.', preparerEmail: 'prep@test.com' });
+            return { routedByRequest: routedCo === 'World Class Laminate, Inc.',
+                     storedCompany: !!req && req.company === 'World Class Laminate, Inc.',
+                     preparerExcluded: Array.isArray(routedEx) && routedEx.indexOf('prep@test.com') >= 0 };
+          } finally {
+            w._findSignatory = saved.findSig; w.gSaveApprovalRequest = saved.saveReq; w.gSendMessage = saved.sendMsg;
+            w.getCompanyName = saved.gco; w.gUser = saved.gUser;
+            if (w.NOTIFS) w.NOTIFS.splice(0, w.NOTIFS.length - saved.notifsLen);
+          }
+        }, { routedByRequest: true, storedCompany: true, preparerExcluded: true });
       /* 2026-09-16: Rommel reported "I am somehow blinded on what option am I signing or
          unlocking since it doesnt show what option it is" -- a quotation's lock state genuinely
          IS per-option (captureQuotationSnapshot carries `locked` inside each option's own
