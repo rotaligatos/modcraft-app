@@ -13754,3 +13754,43 @@ Commits `b040a95`, plus the serial-number follow-up; live. Rommel: "it keeps say
 - Smoke check "Lami never says HTML codes, tags, links or file names aloud" (incl. the serial cases).
 - Not heard on a real device yet. If a voice still sounds mechanical: Settings → Lami → Voice, pick a
   "Natural" (Edge Online) voice — the OS voice matters as much as the text.
+
+## What was changed on 2026-11-28 (session 3 — signature reminders, company price lists for CWLI)
+All live, each with a smoke check.
+- **Signature reminders** (`_sigMissing`, `_lockSigNote`, `#ov-lock-sig`): the Final Quotation's Lock & send
+  warns when it is not signed (what is outstanding; lock only → Request signature → Share) and logs a Final
+  sent unsigned. Lami's audit (`_chipRunAudit`) flags a locked quotation that is unsigned with no request out,
+  every time it is opened. Stage 1 Lock & send unchanged (nothing can be signed before locking).
+  Signatures are ONE set per quotation; the Final keeps the Initial's while its total is unchanged
+  (`qSigBaseTotal`, `_sigCheckCostChanged`), cleared on unlock or a total change.
+- **Company price lists (CWLI)** — Rommel: CWLI's small admin/overhead can price lower; prepare the system,
+  no data yet. Decisions (do not re-ask):
+  - C-series quotation = the quotation's company is CWLI (mostly MSSI/WCL staff quoting a CWLI client,
+    Subsidiary → CWL). It uses CWLI's list, whoever prepares it. W/M quotations keep the shared list.
+  - A LAYER on the shared list, never a copy: only what differs is stored; unset = shared price.
+    Saved service lines point to SERVICES by position, so a second list would silently misprice.
+  - Edit: Admin/Director + "Can edit company price lists" tick. Costs/margins: Admin/Director +
+    "Can see company costs & margins" tick (Settings → Users, `users.can_edit_company_prices` /
+    `can_see_company_costs`). Selling prices readable by all staff (preparers need them).
+  - Database only (the Google Sheet is open to every user). Migration `company_price_books`
+    (file `supabase_company_price_books.sql`): `company_prices` (company_key, kind material|hardware|service,
+    name, unit, price, company_only), `company_pricing` (enabled, enabled_at, cost_factors, carcass_prices,
+    inst_cost), `company_costs` (overhead, item_costs, material_margin_pct). RLS: staff read prices,
+    editors write (`app_can_edit_company_prices()`), costs only `app_can_see_company_costs()`. Tested by
+    impersonation (staff read-only, ungranted Manager no costs, anon nothing).
+  - **Company prices** page (nav, `page-compprices`, `renderCompanyPrices`): prices per tab (shared item →
+    shows shared price; new name → CWLI-only product), pricing settings (contingencies, markups, charges;
+    blank = shared), private costs. Every change logged.
+  - **The switch** (`_cpbSetEnabled`, starts OFF): `_quotPriceBook()` → 'C' only when enabled AND C-series
+    AND started after `enabled_at` (`qDraftStartedAt`); live on a draft, fixed at first save
+    (`qPriceBook`, saved as `state.client.priceBook`; older saves = shared). Hooks: `getMatSource`/
+    `getHwSource`/`_dbForCat` → `_pbAdjust` (copy of the list with CWLI prices + CWLI-only items, cached per
+    layer version), services via `_pbSvcPrice` (add line, select, `_svcEffectivePrice`), cost factors and
+    carcass via `_withFrozenRates` (+ `_capturePricingRates` so a lock freezes CWLI's set), reflected
+    cutting lists. Layer loaded at sign-in (`_loadPriceLayer`), cached in localStorage `mc_cpb_layer`.
+    Nothing open → shared. Switching off: new picks/CF shared; prices already on lines stay.
+  - Not yet: carcass-price fields on the page (DB column exists); profitability reports reading
+    `company_costs` (Phase 4); a quotation renumbered to C after its first save keeps the shared list;
+    first real use with the switch on is untested.
+- Patch-script lesson again: joining an already-CRLF block into a CRLF-converting `rep()` made `\r\r\n`
+  (288 lines) — normalise once, check `\r\r` count after every patch.
