@@ -6920,6 +6920,8 @@ const PROFILES = {
           w._chipCleanText('Keep mc_lami_voice_id as it is.')
         ];
         const bad = said.filter(t => /&\w+;|quot|amp\b|<|>|href|onclick|html|https|github/i.test(t));
+        const ser = [w._chipCleanText('QT-W00000321 is ready.'), w._chipCleanText('Open QT-M00000217-3 now.'), w._chipCleanText('QT-C00000006.R1 is locked.')];
+        if (ser[0] !== 'quotation W 321 is ready.' || ser[1] !== 'Open quotation M 217 option 3 now.' || ser[2] !== 'quotation C 6 revision 1 is locked.') return { serials: ser };
         return { bad: bad.length, keepsName: said[4].indexOf('mc_lami_voice_id') >= 0, pause: said[3].indexOf('Settings to') < 0 && said[3].indexOf('Settings,') >= 0 };
       }, { bad: 0, keepsName: true, pause: true });
       check('The Final Quotation has its own fabrication mode; the Initial keeps pricing its BOM cabinets (QT-W00000321)', () => {
