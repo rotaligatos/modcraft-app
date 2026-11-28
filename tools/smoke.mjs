@@ -7760,6 +7760,13 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 AI daily limits in Settings → Lami (Admin/Director). */
+      if (typeof window._renderAiLimits === 'function')
+        check('Settings → Lami shows AI limits to Admin/Director only, saved through ai_set_limits', () => {
+          const src = window.renderLamiSettings.toString();
+          return { gated: /\(currentRole==='Admin'\|\|currentRole==='Director'\)\?'<div id="ai-limits-section"/.test(src),
+                   saves: /ai_set_limits/.test(window._saveAiLimits.toString()) };
+        }, { gated: true, saves: true });
       /* 2026-11-28 bugs 8-9: retry time limit; background save failures are shown and logged. */
       if (typeof window.gApiFetch === 'function')
         check('A retry after renewing sign-in gets its own time limit', () => {

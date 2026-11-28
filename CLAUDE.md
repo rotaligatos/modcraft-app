@@ -13976,3 +13976,10 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
 - NOT covered: the main desktop app's AI (Lami chat, drawing analysis, Read drawing, mobility) calls Claude
   straight from the browser with the shared key in User Roles col R — uncapped. Capping it means routing those
   calls through an Edge Function (bigger change, not started).
+
+### Same session — AI limits: Directors/Admins unlimited, editable in Settings → Lami
+- Migration `ai_usage_no_limit_admin_director`: `ai_usage_take` lets Admin/Director (`app_is_admin_tier`) through
+  always (still counted); new `ai_set_limits(lami, keystone)` (Admin/Director only, 0–1000).
+- Settings → Lami → "AI daily limits" (Admin/Director only, `_renderAiLimits` / `_saveAiLimits`): the two limits,
+  and who used how many questions/tokens today. Change is logged. Tested by impersonation: Admin past the limit OK,
+  Staff refused at the limit, Staff can't change limits.
