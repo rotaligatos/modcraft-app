@@ -6955,6 +6955,46 @@ const PROFILES = {
         }
       }, { cBook: 'C', cMat: 1300, cSvc: 30, cOnly: true, cCF: 7, capCF: 7, oldDraft: '', oldMat: 1450,
            mBook: '', mMat: 1450, mSvc: 35, mCF: 0, savedC: 'C', savedOld: '', off: '', offMat: 1450, none: '', sharedCF: 0 });
+      check('Company price layer: carcass, installation and template lines follow CWLI; a locked quotation never moves', () => {
+        const w = window;
+        if (typeof w._pbInst !== 'function' || typeof w._pbPpic !== 'function') return 'missing';
+        const keep = { L: w.cpbLayer, v: w.cpbLayerVer, pb: w.qPriceBook, ds: w.qDraftStartedAt, s: w.qSerial, dk: w.qDraftKey, lr: w.qLockedRates, gcn: w.getCompanyName, m: w.dbMaterials, mc: w._matSrcCache };
+        try {
+          const type = Object.keys(w.CARCASS_PRICES)[0], sharedCarc = w.CARCASS_PRICES[type];
+          const sharedRate = w._instCalc().priceUnit;
+          const lab = (w.INST_COST.labor[0] || {}).label;
+          const rows = {}; rows['labor|' + lab] = 5000;
+          w.cpbLayer = w._cpbBuildLayer(
+            [{ company_key: 'C', enabled: true, enabled_at: '2026-11-28T00:00:00.000Z', cost_factors: {}, carcass_prices: { [type]: 1234 }, inst_cost: { rows: rows, cabPerTeamDay: 6, teamsPerDay: 1 } }],
+            [{ company_key: 'C', kind: 'material', name: 'Tpl Board', unit: 'pc', price: 77, company_only: false, active: true }]);
+          w.cpbLayerVer++;
+          w.getCompanyName = () => 'Cebu World Laminate, Inc.';
+          w.qLockedRates = null; w.qSerial = ''; w.qDraftKey = 'DRAFT-tst002'; w.qPriceBook = null; w.qDraftStartedAt = '2026-11-28T06:00:00.000Z';
+          const r = {};
+          r.carc = w._carcassUnitPrice(type) === 1234 || (w._chargeMatHw && !w._chargeMatHw());
+          r.carcInRecalc = w._withFrozenRates(() => w.CARCASS_PRICES[type]);
+          const exp = (() => { const ic = JSON.parse(JSON.stringify(w.INST_COST)); ic.labor[0].cost = 5000; const pp = JSON.parse(JSON.stringify(w.ppicSettings)); pp.installation.cabPerTeamDay = 6; pp.installation.teamsPerDay = 1; pp.installation.typeCapacity = {}; return w._cpbInstRate(ic, pp); })();
+          r.instRate = Math.abs(w._withFrozenRates(() => w._instCalc().priceUnit) - exp) < 0.01;
+          r.instMoved = Math.abs(exp - sharedRate) > 0.01;
+          r.tplPrice = w._pbItemPrice('material', 'Tpl Board', 'pc', 50);
+          // lock: the captured set carries CWLI's values; editing the list afterwards changes nothing
+          w.qLockedRates = w._capturePricingRates();
+          r.frozenCarc = w._withFrozenRates(() => w.CARCASS_PRICES[type]);
+          w.cpbLayer.C.carcass[type] = 9999; w.cpbLayer.C.inst.cabPerTeamDay = 1; w.cpbLayerVer++;
+          r.lockedCarc = w._withFrozenRates(() => w.CARCASS_PRICES[type]);
+          r.lockedInst = Math.abs(w._withFrozenRates(() => w._instCalc().priceUnit) - exp) < 0.01;
+          w.qLockedRates = null;
+          // shared quotation untouched
+          w.getCompanyName = () => 'World Class Laminate, Inc.';
+          r.wCarc = w._withFrozenRates(() => w.CARCASS_PRICES[type]) === sharedCarc;
+          r.wInst = Math.abs(w._withFrozenRates(() => w._instCalc().priceUnit) - sharedRate) < 0.01;
+          r.globalsBack = w.CARCASS_PRICES[type] === sharedCarc && Math.abs(w._instCalc().priceUnit - sharedRate) < 0.01;
+          return r;
+        } finally {
+          w.cpbLayer = keep.L; w.cpbLayerVer = keep.v + 3; w.qPriceBook = keep.pb; w.qDraftStartedAt = keep.ds; w.qSerial = keep.s; w.qDraftKey = keep.dk;
+          w.qLockedRates = keep.lr; w.getCompanyName = keep.gcn; w.dbMaterials = keep.m; w._matSrcCache = keep.mc;
+        }
+      }, { carc: true, carcInRecalc: 1234, instRate: true, instMoved: true, tplPrice: 77, frozenCarc: 1234, lockedCarc: 1234, lockedInst: true, wCarc: true, wInst: true, globalsBack: true });
       check('Company price lists: only Admin/Director or ticked people open them; nothing touches shared prices', () => {
         const w = window;
         if (typeof w._cpbCanOpen !== 'function') return 'missing';

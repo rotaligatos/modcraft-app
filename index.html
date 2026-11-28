@@ -3675,18 +3675,20 @@ function _capturePricingRates(){
   return {at:new Date().toISOString(), by:(gUser&&(gUser.name||gUser.email))||'',
           cf:cp(_pbCF()||CF), carcassPrices:cp(_pbCarcass()||(typeof CARCASS_PRICES!=='undefined'?CARCASS_PRICES:{})),
           mobLocations:cp(typeof MOB_LOCATIONS!=='undefined'?MOB_LOCATIONS:[]),
-          instCost:cp(typeof INST_COST!=='undefined'?INST_COST:{})};
+          instCost:cp(_pbInst()||(typeof INST_COST!=='undefined'?INST_COST:{})),
+          ppic:(function(){ var p=_pbPpic(); return p?cp(p):undefined; })()};
 }
 // Swaps the rate globals for the frozen set, runs fn, and always puts them back — one place
 // instead of threading a rate object through every pricing function. try/finally matters: if
 // anything inside throws, the app must not be left running on a dead quotation's rates.
 function _withFrozenRates(fn){
   if(!qLockedRates||!qLockedRates.cf){
-    var pcf=_pbCF(), pcp=_pbCarcass(); if(!pcf&&!pcp) return fn();
-    var oCF=CF, oCP=(typeof CARCASS_PRICES!=='undefined')?CARCASS_PRICES:null;
-    try{ if(pcf) CF=pcf; if(pcp&&oCP!==null) CARCASS_PRICES=pcp; return fn(); }
-    finally { CF=oCF; if(oCP!==null) CARCASS_PRICES=oCP; }
+    var pcf=_pbCF(), pcp=_pbCarcass(), pic=_pbInst(), ppp=_pbPpic(); if(!pcf&&!pcp&&!pic&&!ppp) return fn();
+    var oCF=CF, oCP=(typeof CARCASS_PRICES!=='undefined')?CARCASS_PRICES:null, oIC=INST_COST, oPP=ppicSettings;
+    try{ if(pcf) CF=pcf; if(pcp&&oCP!==null) CARCASS_PRICES=pcp; if(pic) INST_COST=pic; if(ppp) ppicSettings=ppp; return fn(); }
+    finally { CF=oCF; if(oCP!==null) CARCASS_PRICES=oCP; INST_COST=oIC; ppicSettings=oPP; }
   }
+  var sPP=ppicSettings;
   var sCF=CF, sCP=(typeof CARCASS_PRICES!=='undefined')?CARCASS_PRICES:null,
       sML=(typeof MOB_LOCATIONS!=='undefined')?MOB_LOCATIONS:null,
       sIC=(typeof INST_COST!=='undefined')?INST_COST:null;
@@ -3695,8 +3697,10 @@ function _withFrozenRates(fn){
     if(sCP!==null&&qLockedRates.carcassPrices) CARCASS_PRICES=qLockedRates.carcassPrices;
     if(sML!==null&&qLockedRates.mobLocations)  MOB_LOCATIONS=qLockedRates.mobLocations;
     if(sIC!==null&&qLockedRates.instCost)      INST_COST=qLockedRates.instCost;
+    if(qLockedRates.ppic) ppicSettings=qLockedRates.ppic;   // only company-list quotations freeze capacity
     return fn();
   } finally {
+    ppicSettings=sPP;
     CF=sCF;
     if(sCP!==null) CARCASS_PRICES=sCP;
     if(sML!==null) MOB_LOCATIONS=sML;
@@ -5566,7 +5570,7 @@ var qPriceBook=null;          // null = unsaved draft (decided live); '' = share
 var qDraftStartedAt='';       // when this draft was started — a draft older than the switch stays shared
 function _cpbBuildLayer(pricing,prices){
   var L={};
-  (pricing||[]).forEach(function(p){ L[p.company_key]={enabled:!!p.enabled, enabledAt:p.enabled_at||'', cf:p.cost_factors||{}, carcass:p.carcass_prices||{}, items:{material:{},hardware:{},service:{}}, only:{material:[],hardware:[],service:[]}}; });
+  (pricing||[]).forEach(function(p){ L[p.company_key]={enabled:!!p.enabled, enabledAt:p.enabled_at||'', cf:p.cost_factors||{}, carcass:p.carcass_prices||{}, inst:p.inst_cost||{}, items:{material:{},hardware:{},service:{}}, only:{material:[],hardware:[],service:[]}}; });
   (prices||[]).forEach(function(r){
     if(r.active===false) return;
     var Lc=L[r.company_key]; if(!Lc||!Lc.items[r.kind]) return;
@@ -5581,7 +5585,7 @@ function _loadPriceLayer(tries,cb){
   tries=tries||0;
   if(typeof supaReady!=='function'||!supaReady()){ if(tries<20) setTimeout(function(){ _loadPriceLayer(tries+1,cb); },3000); return; }
   Promise.all([
-    supa.from('company_pricing').select('company_key,enabled,enabled_at,cost_factors,carcass_prices'),
+    supa.from('company_pricing').select('company_key,enabled,enabled_at,cost_factors,carcass_prices,inst_cost'),
     supa.from('company_prices').select('company_key,kind,name,unit,price,company_only,active').eq('active',true)
   ]).then(function(rs){
     if(rs[0].error||rs[1].error){ console.warn('[price layer] not loaded',rs[0].error||rs[1].error); return; }
@@ -5644,12 +5648,12 @@ function _pbAdjust(kind,base){
 function _pbSvcPrice(svc){ return svc?_pbItemPrice('service',svc.name,svc.unit,svc.price||0):0; }
 // Cost factors / carcass prices with the company's pricing settings applied (shared otherwise).
 function _pbCF(){
-  var b=_quotPriceBook(); if(!b) return null;
+  var b=_quotPriceBook(); if(!b||_pbFrozen()) return null;
   var cf=cpbLayer[b].cf||{}; if(!Object.keys(cf).length) return null;
   return Object.assign({},CF,cf);
 }
 function _pbCarcass(){
-  var b=_quotPriceBook(); if(!b||typeof CARCASS_PRICES==='undefined') return null;
+  var b=_quotPriceBook(); if(!b||_pbFrozen()||typeof CARCASS_PRICES==='undefined') return null;
   var cp=cpbLayer[b].carcass||{}; if(!Object.keys(cp).length) return null;
   return Object.assign({},CARCASS_PRICES,cp);
 }
@@ -5669,6 +5673,137 @@ function _cpbSetEnabled(on){
     showToast(name.toUpperCase()+' price list switched '+(on?'on.':'off.'));
     _loadPriceLayer(); renderCompanyPrices();
   });
+}
+
+// Installation and carcass pricing for a company list. A LOCKED quotation never reads these — it
+// keeps the set frozen at lock (_capturePricingRates stores the company's values when it is a
+// company-list quotation), so a later edit here can never move an issued price.
+function _pbFrozen(){ return !!(qLockedRates&&qLockedRates.cf); }
+function _pbInst(){
+  var b=_quotPriceBook(); if(!b||_pbFrozen()||typeof INST_COST==='undefined') return null;
+  var o=(cpbLayer[b]&&cpbLayer[b].inst)||{}; if(!Object.keys(o).length) return null;
+  var ic=JSON.parse(JSON.stringify(INST_COST)), rows=o.rows||{};
+  ['labor','lunch','dinner','allowance','consumables','breakfast'].forEach(function(g){
+    (ic[g]||[]).forEach(function(r){ var v=rows[g+'|'+r.label]; if(v!=null&&v!=='') r.cost=+v; });
+  });
+  if(o.contingency!=null) ic.contingency=+o.contingency;
+  if(o.profitMargin!=null) ic.profitMargin=+o.profitMargin;
+  if(o.adminDaily!=null) ic.adminDailyOverride=+o.adminDaily;
+  return ic;
+}
+function _pbPpic(){
+  var b=_quotPriceBook(); if(!b||_pbFrozen()||typeof ppicSettings==='undefined') return null;
+  var o=(cpbLayer[b]&&cpbLayer[b].inst)||{};
+  if(o.teamsPerDay==null&&o.cabPerTeamDay==null) return null;
+  var p=JSON.parse(JSON.stringify(ppicSettings)); p.installation=p.installation||{};
+  if(o.teamsPerDay!=null) p.installation.teamsPerDay=+o.teamsPerDay;
+  if(o.cabPerTeamDay!=null){ p.installation.cabPerTeamDay=+o.cabPerTeamDay; p.installation.typeCapacity={}; }
+  return p;
+}
+var CPB_INST_GROUPS=[['labor','Labor (per person per day)'],['lunch','Lunch'],['dinner','Dinner'],['allowance','Allowances'],['consumables','Consumables']];
+// What one cabinet's installation costs with a given installation set — the same _instCalc the
+// quotation uses, run with the globals swapped, so the preview cannot disagree with the price.
+function _cpbInstRate(ic,pp){
+  var oI=INST_COST, oP=ppicSettings;
+  try{ if(ic) INST_COST=ic; if(pp) ppicSettings=pp; return _instCalc().priceUnit; }catch(e){ return 0; }
+  finally{ INST_COST=oI; ppicSettings=oP; }
+}
+function _cpbFormInst(){
+  var rows={}, bad='';
+  document.querySelectorAll('[data-cpbinst]').forEach(function(i){
+    var v=String(i.value||'').trim(); if(v==='') return; var n=parseFloat(v);
+    if(!isFinite(n)||n<0){ bad=i.getAttribute('data-cpbinst'); return; } rows[i.getAttribute('data-cpbinst')]=n;
+  });
+  var o={rows:rows};
+  [['cpbi-cont','contingency'],['cpbi-marg','profitMargin'],['cpbi-admin','adminDaily'],['cpbi-teams','teamsPerDay'],['cpbi-cabs','cabPerTeamDay']].forEach(function(p){
+    var v=String((el(p[0])||{}).value||'').trim(); if(v==='') return; var n=parseFloat(v);
+    if(!isFinite(n)||n<0){ bad=p[1]; return; } o[p[1]]=n;
+  });
+  return {o:o,bad:bad};
+}
+function _cpbInstHtml(ed){
+  var pr=cpbState.pricing||{}, o=pr.inst_cost||{}, rows=o.rows||{}, dis=ed?'':' disabled';
+  var inp=function(id,val,ph,attr){ return '<input type="number" step="0.01" min="0"'+(attr?' data-cpbinst="'+escHtml(attr)+'"':' id="'+id+'"')+' value="'+(val==null||val===''?'':escHtml(String(val)))+'" placeholder="shared '+escHtml(String(ph))+'"'+dis+' oninput="_cpbInstPreview()" style="width:100%;margin-top:3px">'; };
+  var h='<div class="card" style="margin-bottom:14px"><div class="card-head"><h3><i class="ti ti-tool"></i>Installation</h3></div><div class="card-body">'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Sets the installation rate per cabinet on C-series quotations: daily team cost ÷ cabinets installed per day. Blank = shared value. Shared settings: Cost Breakdown → Installation and PPIC.</div>';
+  CPB_INST_GROUPS.forEach(function(g){
+    var arr=INST_COST[g[0]]||[]; if(!arr.length) return;
+    h+='<div style="font-size:12px;font-weight:600;margin:8px 0 4px">'+escHtml(g[1])+'</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">'
+      +arr.map(function(r){ return '<label style="font-size:12px">'+escHtml(r.label)+' (₱)'+inp('',rows[g[0]+'|'+r.label],r.cost,g[0]+'|'+r.label)+'</label>'; }).join('')+'</div>';
+  });
+  var p=(ppicSettings&&ppicSettings.installation)||{};
+  h+='<div style="font-size:12px;font-weight:600;margin:12px 0 4px">Rates and capacity</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">'
+    +'<label style="font-size:12px">Admin overhead per working day (₱)'+inp('cpbi-admin',o.adminDaily,(function(){ try{ return Math.round(_instCalc().adminDaily*100)/100; }catch(e){ return 0; } })())+'</label>'
+    +'<label style="font-size:12px">Contingency (%)'+inp('cpbi-cont',o.contingency,INST_COST.contingency||0)+'</label>'
+    +'<label style="font-size:12px">Profit margin (%)'+inp('cpbi-marg',o.profitMargin,INST_COST.profitMargin||0)+'</label>'
+    +'<label style="font-size:12px">Installation teams per day'+inp('cpbi-teams',o.teamsPerDay,p.teamsPerDay||1)+'</label>'
+    +'<label style="font-size:12px">Cabinets per team per day'+inp('cpbi-cabs',o.cabPerTeamDay,p.cabPerTeamDay||3)+'</label>'
+    +'</div><div id="cpbi-preview" style="font-size:12px;margin-top:10px"></div>'
+    +(ed?'<button class="btn btn-primary" style="margin-top:12px" onclick="_cpbSaveInst()"><i class="ti ti-device-floppy"></i>Save installation</button>':'')+'</div></div>';
+  return h;
+}
+function _cpbInstPreview(){
+  var w=el('cpbi-preview'); if(!w) return;
+  var f=_cpbFormInst().o, has=Object.keys(f.rows).length||Object.keys(f).length>1;
+  var shared=_cpbInstRate(null,null);
+  if(!has){ w.innerHTML='<span style="color:var(--text2)">Installation rate per cabinet: '+fmtMoney(shared)+' (shared — nothing set for this company yet).</span>'; return; }
+  // Build the company set exactly as a quotation would, from what is typed.
+  var ic=JSON.parse(JSON.stringify(INST_COST));
+  ['labor','lunch','dinner','allowance','consumables','breakfast'].forEach(function(g){ (ic[g]||[]).forEach(function(r){ var v=f.rows[g+'|'+r.label]; if(v!=null) r.cost=+v; }); });
+  if(f.contingency!=null) ic.contingency=f.contingency; if(f.profitMargin!=null) ic.profitMargin=f.profitMargin; if(f.adminDaily!=null) ic.adminDailyOverride=f.adminDaily;
+  var pp=JSON.parse(JSON.stringify(ppicSettings)); pp.installation=pp.installation||{};
+  if(f.teamsPerDay!=null) pp.installation.teamsPerDay=f.teamsPerDay; if(f.cabPerTeamDay!=null){ pp.installation.cabPerTeamDay=f.cabPerTeamDay; pp.installation.typeCapacity={}; }
+  var mine=_cpbInstRate(ic,pp);
+  w.innerHTML='Installation rate per cabinet: <b>'+fmtMoney(mine)+'</b> <span style="color:var(--text2)">(shared '+fmtMoney(shared)+(shared?', '+(mine>=shared?'+':'')+Math.round((mine-shared)/shared*1000)/10+'%':'')+')</span>';
+}
+function _cpbSaveInst(){
+  if(!_cpbCanEdit()){ showToast('You do not have access to edit this.'); return; }
+  var f=_cpbFormInst(); if(f.bad){ showToast('Check the value for '+f.bad+'.'); return; }
+  supa.from('company_pricing').upsert({company_key:cpbState.co,inst_cost:f.o},{onConflict:'company_key'}).select('*').then(function(x){
+    if(x&&x.error){ showToast('Could not save: '+(x.error.message||x.error)); return; }
+    cpbState.pricing=x.data[0]; logActivity((cpbState.co==='C'?'CWLI':'Company')+' installation settings saved.',''); showToast('Installation saved.'); _loadPriceLayer();
+  });
+}
+function _cpbCarcassHtml(ed){
+  var pr=cpbState.pricing||{}, cp=pr.carcass_prices||{}, dis=ed?'':' disabled';
+  var names=(typeof CARCASS_NAMES!=='undefined'?CARCASS_NAMES:Object.keys(CARCASS_PRICES||{}));
+  return '<div class="card" style="margin-bottom:14px"><div class="card-head"><h3><i class="ti ti-box-model-2"></i>Carcass prices</h3></div><div class="card-body">'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Price per cabinet type for C-series quotations built by furniture type (carcass). Blank = shared price (Settings → Carcass pricing).</div>'
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px">'
+    +names.map(function(n){ var v=cp[n];
+      return '<label style="font-size:12px">'+escHtml(n)+' (₱)<input type="number" step="0.01" min="0" data-cpbcarc="'+escHtml(n)+'" value="'+(v==null?'':escHtml(String(v)))+'" placeholder="shared '+escHtml(fmtMoney(CARCASS_PRICES[n]||0))+'"'+dis+' style="width:100%;margin-top:3px"></label>'; }).join('')
+    +'</div>'+(ed?'<button class="btn btn-primary" style="margin-top:12px" onclick="_cpbSaveCarcass()"><i class="ti ti-device-floppy"></i>Save carcass prices</button>':'')+'</div></div>';
+}
+function _cpbSaveCarcass(){
+  if(!_cpbCanEdit()){ showToast('You do not have access to edit this.'); return; }
+  var r=_cpbReadNums('cpbcarc'); if(r.bad){ showToast('Check the price for '+r.bad+'.'); return; }
+  supa.from('company_pricing').upsert({company_key:cpbState.co,carcass_prices:r.vals},{onConflict:'company_key'}).select('*').then(function(x){
+    if(x&&x.error){ showToast('Could not save: '+(x.error.message||x.error)); return; }
+    cpbState.pricing=x.data[0]; logActivity((cpbState.co==='C'?'CWLI':'Company')+' carcass prices saved ('+Object.keys(r.vals).length+' set).',''); showToast('Carcass prices saved.'); _loadPriceLayer();
+  });
+}
+// Per-service cost (private): what one unit of the service costs this company — the figure the
+// Cost Breakdown works out as "op cost" for the shared list. Stored with the item costs.
+function _cpbSvcCostHtml(){
+  var ic=(cpbState.costs&&cpbState.costs.item_costs)||{};
+  var rows=(SERVICES||[]).filter(function(s){ return s&&s.name&&!/minimum charge/i.test(s.name); });
+  return '<div style="font-size:12px;font-weight:600;margin:14px 0 6px">Service costs per unit</div>'
+    +'<div style="font-size:11px;color:var(--text2);margin-bottom:6px">What one unit of each service costs this company (labour, machine, consumables, overhead share). Shared cost comes from Cost Breakdown → Services. Blank = shared.</div>'
+    +'<div style="max-height:360px;overflow:auto;border:.5px solid var(--border);border-radius:6px"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="color:var(--text2);text-align:left;position:sticky;top:0;background:var(--card)"><th style="padding:5px">Service</th><th>Unit</th><th style="text-align:right">Price</th><th style="text-align:right">Shared cost</th><th style="text-align:right;padding-right:6px">'+(cpbState.co==='C'?'CWLI':'Company')+' cost</th></tr></thead><tbody>'
+    +rows.map(function(s){
+      var key='service|'+String(s.name).trim().toLowerCase()+'|'+String(s.unit||'').trim().toLowerCase();
+      var oc=0; try{ var cc=computeServiceCosts(s); oc=cc&&cc.opCost>0?cc.opCost:0; }catch(e){}
+      var pr=_cpbPriceFor('service',s.name,s.unit);
+      return '<tr style="border-top:.5px solid var(--border)"><td style="padding:4px 5px">'+escHtml(s.name)+'</td><td>'+escHtml(s.unit||'')+'</td>'
+        +'<td style="text-align:right">'+fmtMoney(pr!=null?pr:(+s.price||0))+(pr!=null?' <span class="pill pill-teal" style="font-size:9px">'+(cpbState.co==='C'?'CWLI':'co')+'</span>':'')+'</td>'
+        +'<td style="text-align:right;color:var(--text2)">'+(oc?fmtMoney(oc):'—')+'</td>'
+        +'<td style="text-align:right;padding-right:6px"><input type="number" min="0" step="0.01" value="'+(ic[key]==null?'':ic[key])+'" onchange="_cpbSetItemCost(\''+key.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\',this.value)" style="width:100px;text-align:right"></td></tr>';
+    }).join('')+'</tbody></table></div>';
+}
+function _cpbPriceFor(kind,name,unit){
+  var n=String(name||'').trim().toLowerCase(), u=String(unit||'').trim().toLowerCase();
+  var hit=cpbState.prices.filter(function(p){ return p.kind===kind&&String(p.name).trim().toLowerCase()===n&&String(p.unit||'').trim().toLowerCase()===u; })[0];
+  return hit?+hit.price:null;
 }
 
 // ── Company price lists (Rommel, 2026-11-28) ──────────────────────────────────────────────
@@ -5833,6 +5968,7 @@ function renderCompanyPrices(){
       return '<label style="font-size:12px">'+escHtml(k[1])+(k[2]?' <span style="color:var(--text2)">('+k[2]+')</span>':'')
         +'<input type="number" step="0.01" data-cpbcf="'+k[0]+'" value="'+(v===undefined||v===null?'':escHtml(String(v)))+'" placeholder="shared '+escHtml(String(CF[k[0]]))+'"'+(ed?'':' disabled')+' style="width:100%;margin-top:3px"></label>'; }).join('')
     +'</div>'+(ed?'<button class="btn btn-primary" style="margin-top:12px" onclick="_cpbSavePricing()"><i class="ti ti-device-floppy"></i>Save pricing settings</button>':'')+'</div></div>';
+  h+=_cpbCarcassHtml(ed)+_cpbInstHtml(ed);
 
   // costs
   if(_cpbCanCosts()){
@@ -5845,9 +5981,11 @@ function renderCompanyPrices(){
           +'<input type="number" step="0.01" data-cpboh="'+k[0]+'" value="'+(v===undefined||v===null?'':escHtml(String(v)))+'" placeholder="shared '+escHtml(String(CF[k[0]]))+'" style="width:100%;margin-top:3px"></label>'; }).join('')
       +'<label style="font-size:12px">Material &amp; hardware margin <span style="color:var(--text2)">(% of selling price)</span><input type="number" step="0.1" id="cpb-mmp" value="'+(co.material_margin_pct==null?'':escHtml(String(co.material_margin_pct)))+'" placeholder="shared '+escHtml(String(CF.materialMarginPct))+'" style="width:100%;margin-top:3px"></label>'
       +'</div><label style="display:block;font-size:12px;margin-top:10px">Notes<textarea id="cpb-cost-notes" rows="2" style="width:100%;margin-top:3px">'+escHtml(co.notes||'')+'</textarea></label>'
-      +'<button class="btn btn-primary" style="margin-top:12px" onclick="_cpbSaveCosts()"><i class="ti ti-device-floppy"></i>Save costs</button></div></div>';
+      +'<button class="btn btn-primary" style="margin-top:12px" onclick="_cpbSaveCosts()"><i class="ti ti-device-floppy"></i>Save costs</button>'
+      +_cpbSvcCostHtml()+'</div></div>';
   }
   w.innerHTML=h;
+  _cpbInstPreview();
 }
 function _cpbRowsHtml(list){
   if(!list.length) return '<div style="font-size:12px;color:var(--text2);padding:8px 0">Nothing here yet'+(cpbState.q?' for that search':'')+'.</div>';
@@ -8714,7 +8852,7 @@ function renderChargeMatHwRow(){
     +'</div></div>';
 }
 function _carcassUnitPrice(type){
-  var full=CARCASS_PRICES[type]||0;
+  var full=(_pbCarcass()||CARCASS_PRICES)[type]||0;
   if(_chargeMatHw()) return full;
   var mh=_carcassMatHwValue(type);
   if(mh===null) return full;                  // no template — nothing reliable to remove
@@ -10390,7 +10528,7 @@ function loadCabinetTemplate(a,ci,silent) {
       continue;
     }
     if(cat==='materials'||cat==='hardware'||cat==='services'){
-      bItem[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:r.price,scaleBy:r.scaleBy||'',addon:r.addon||undefined});
+      bItem[cat].push({name:r.name,unit:r.unit,qty:r.qty,price:_pbItemPrice(cat==='materials'?'material':cat==='hardware'?'hardware':'service',r.name,r.unit,r.price),scaleBy:r.scaleBy||'',addon:r.addon||undefined});
     }
   }
   _applyCabScale(bItem);   // template qtys are the reference; a size already entered applies at once
@@ -25411,7 +25549,7 @@ function _instCalc() {
   var fixedTotal = (parseFloat(CF.adminMonthlyCost)||0)+(parseFloat(CF.utilityCost)||0)+(parseFloat(CF.otherExpenses)||0)+(parseFloat(CF.packingCost)||0);
   var installMixPct = parseFloat(CF.installMix)||30;
   var adminMonthly = fixedTotal * installMixPct / 100;
-  var adminDaily = adminMonthly / wd;
+  var adminDaily = (INST_COST.adminDailyOverride!=null) ? +INST_COST.adminDailyOverride : adminMonthly / wd;   // company list may set it directly
   var laborT    = _instSumArr(INST_COST.labor);
   var breakT    = _instSumArr(INST_COST.breakfast);
   var lunchT    = _instSumArr(INST_COST.lunch);
