@@ -13899,3 +13899,13 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
 - First real use of My delegation and Re-assign. If someone says "I can't approve", check whether they are the
   assigned person or an in-date delegate — the database now refuses everyone else (error text names the rule).
 - One existing delegation is on with no dates (open-ended), as before.
+
+### Same session — notification function locked down (`send-approval-push` v9, migration `push_sent_log_throttle`)
+- Caller must be signed in AND staff (`app_is_internal()`, asked as the caller) AND the request's requester,
+  assigned approver, or an active Admin/Director. Anything else gets the same `403 not allowed`, including
+  "no such request", so request ids can't be probed. Website clients signing in with Google are refused.
+- Missing VAPID secrets are only reported (generically) after that check; names go to the function log.
+- Repeat for the same request + recipient within 60 s is skipped (`push_sent_log`, service-role only).
+- Verified: no header / publishable key / garbage token → 401; `app_is_internal` true for staff, false for a client email.
+- Re-assign now also pushes to the new person (`confirmReassignRequest` → `_pushApprovalRequest`).
+- Audit OPEN item 1 is DONE.
