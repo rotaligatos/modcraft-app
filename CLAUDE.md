@@ -13735,3 +13735,22 @@ Why: WCLI Annex has no Logistics staff (only "Annex Checker" = Warehouse, "WCLI-
 - **hatid.html:** `pkRolesOf`, `pkHas`, `pkRoleLbl`, `pkOwnViews` (all own tabs; `pkOwnView` = main). Practice persona `pwl` (Warehouse + Logistics, Annex) and scenario **p-annex**; personas always set their own `pickup_roles` (never carry the real person's list). What's new `2026-11-28-pk-two-jobs`.
 - Tests: `tools/sim_cc_hatid_pk_roles.mjs` (9/9), `tools/sim_hatid_pk_two_jobs.mjs` (11/11, boots HATID with a stubbed backend and runs p-annex), `sim_cc_hatid_undo.mjs` still passes. DB checked as the Annex Checker in a rolled-back transaction: can prepare + release, not Sales Support.
 - Not changed: labels in Team progress / announcement "Who read it" lists come from database lists that return only the main job.
+
+## What was changed on 2026-11-28 (session 2 — Lami's voice sounds like a person)
+Commits `b040a95`, plus the serial-number follow-up; live. Rommel: "it keeps saying even the html … too robotic".
+- **Speech cleaner** (`_chipCleanText`, new `_chipDecodeEntities`): HTML codes decoded (`&amp;` → and, `&quot;` → "),
+  whole tags and half-tags (cut at a sentence boundary) dropped, links, `www.`, file names (`.html/.js/.pdf/.xlsx`…),
+  `[NAV/SEARCH/CALLME/MSG]` markers removed; arrows (→ › >>) said as a pause, not "to"; `_italic_` stripping no
+  longer eats snake_case names.
+- **Serial numbers aloud**: QT-W00000321 → "quotation W 321"; `-3` → "option 3", `.R1` → "revision 1". Old
+  QT-YYMMDD-RRRR unchanged. Display/printouts untouched.
+- **Streaming**: mid-stream a sentence ends only at ". " (not a "." at the end of the buffer) — "index.html" and
+  peso amounts were spoken in two halves. Once a list/heading/table starts, the rest is not read
+  (`_speakStopped`); at the end she says "I've put the details on your screen" (Taglish: "Nasa screen ang details").
+- Rate 0.93 → 1.0.
+- **Prompt**: new "HOW YOU TALK" section (colleague at the next desk, answer first, no "Great question"/"As an AI",
+  puns only occasionally, never mention HTML/code/ids/files/links/markers, name things by their on-screen label).
+- `LAMI_GREETINGS` scripted puns replaced with plain greetings.
+- Smoke check "Lami never says HTML codes, tags, links or file names aloud" (incl. the serial cases).
+- Not heard on a real device yet. If a voice still sounds mechanical: Settings → Lami → Voice, pick a
+  "Natural" (Edge Online) voice — the OS voice matters as much as the text.
