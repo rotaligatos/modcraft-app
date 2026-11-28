@@ -6909,6 +6909,24 @@ const PROFILES = {
         } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
         return res;
       }, true);
+      check('The Final Quotation has its own fabrication mode; the Initial keeps pricing its BOM cabinets (QT-W00000321)', () => {
+        const w = window;
+        if (typeof w._splitLegacyFabMode !== 'function') return 'missing';
+        const keep = { m: w.qFabMode, f: w.fqFabMode, a: w.qAreas, q: w.fqAreas, k: w.fqScopeForked, l: w.logActivity };
+        w.logActivity = function(){};
+        try {
+          const bom = { qty: 5, type: 'Kitchen Base Cabinet', materials: [{ qty: 1, name: 'Board', unit: 'pc', price: 4170 }], hardware: [], services: [], outsourceMaterials: [], outsourceHardware: [] };
+          w.qAreas = [{ name: 'S1', items: [{ qty: 0, type: 'Kitchen Hanging Cabinet' }], bomItems: [bom], svcItems: [], matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+          w.fqAreas = [{ name: 'S2', items: [], bomItems: [], svcItems: [{ qty: 10, svcIdx: 0 }], matItems: [], hwItems: [], outsourceMaterials: [], outsourceHardware: [] }];
+          w.qFabMode = 'services'; w.fqFabMode = null; w.fqScopeForked = true;
+          const split = w._splitLegacyFabMode({});
+          const s1 = w.getAreaSubtotal(0);
+          const s2mode = w._withFQAreas(function(){ return w.qFabMode; });
+          const after = w.qFabMode;
+          const again = w._splitLegacyFabMode({ fqFabMode: 'services' });
+          return { split, s1Mode: after, s1Priced: s1 > 0, s2mode, again };
+        } finally { w.qFabMode = keep.m; w.fqFabMode = keep.f; w.qAreas = keep.a; w.fqAreas = keep.q; w.fqScopeForked = keep.k; w.logActivity = keep.l; }
+      }, { split: true, s1Mode: 'bom', s1Priced: true, s2mode: 'services', again: false });
       check('Final Quotation Save Draft saves the quotation, not only a printout (QT-W00000321)', () => {
         const w = window;
         if (typeof w.fqSaveDraft !== 'function') return 'missing';
