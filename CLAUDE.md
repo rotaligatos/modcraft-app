@@ -13824,3 +13824,78 @@ All live, each with a smoke check.
   (shown when `_cpbCanOpen()`); the single `#cpb-wrap` box is moved into whichever host opens it
   (`_cpbMount`) so its ids exist once. The top-menu entry stays only for ticked people without
   Settings access (same pattern as "Can add SKUs").
+
+## What was changed on 2026-11-28 (session 5 — whole-app audit, 5 low-risk fixes, approval authority)
+
+### Audit (read-only first, Rommel's ask: bugs, weaknesses, cost)
+Full list was given in chat; the items NOT yet fixed are in the OPEN list below. Measured, not guessed:
+DB 201 MB of 500; `price_materials` 105 MB; all 153,428 material rows were rewritten today; `push_subscriptions` = 0
+rows (no phone gets pushes); the poll fingerprint queries (approval_requests / pending_orders / messages) are seq scans
+at 40–80 ms, ~70k calls each since 24 Sep. Supabase advisor: 5 definer views, leaked-password protection off,
+42 unindexed FKs (mostly PMES/KEYSTONE), 40 unused indexes.
+
+### Five low-risk fixes (`12362a9`)
+- Dashboard order card: `Cancelled` orders counted as settled (it tested `'Declined'`, which orders never have).
+- Project List: no "New Option" on Voided/Declined (it tested the retired `'Closed'`).
+- Profile photos: the 10-min refresh skips a hidden tab.
+- **Lami prompt caching**: `_lamiSystemBlocks(sys)` sends everything before `User: **` as a cached block
+  (`cache_control: ephemeral`), the rest uncached. Same text. Used by the streaming chat and the help chat.
+  ⚠ Keep the fixed part (identity, `LAMI_APP_MANUAL`, rules) BEFORE `User: **` in `_chipBuildSystemPrompt`, or caching stops.
+- **Save settings no longer rewrites the Price DB Services sheet when unchanged** (`_saveServicesToPriceDb` reads
+  `Services!A:Z` and compares). Rewriting it changed the spreadsheet's modified time → every browser re-mirrored and
+  re-downloaded all 153k materials. Supabase `price_services` is still written each time (small).
+
+### Approval authority (`b3c2f2e`, migrations `approval_authority_and_delegation_dates`,
+`approval_guard_signatures_not_delegable_and_my_delegators`; file `supabase_approval_authority.sql`)
+Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Director may re-assign, or act when urgent.**
+- Found: one ALL policy on `approval_requests` let the REQUESTER update their own row → could set it approved.
+- Now: policies `approval read/insert/update/delete` + trigger `approval_requests_guard` (runs as the caller —
+  NOT security definer, or `current_user` is always the owner). Allowed: Admin/Director anything; assigned person or
+  active delegate (delegate: decisions only, never `signature`) decide; requester only `cancelled` (from pending/
+  countered) or `accepted` (from countered); `to_email` changes only by Admin/Director or the requester while pending.
+  For everyone else payload keys reqDisc/cfValues/ctx/sigSlot/decision/amount/counterDisc/optionId/orderId,
+  `counter_disc`, `actioned_by`, `req_type`, `from_email` are restored from the old row. A new row by a
+  non-decider must be `pending`. Service role / no-JWT callers pass. Delete = Admin/Director only.
+  Tested by impersonation for every role, rolled back.
+- **Delegation dates**: `users.delegate_from/delegate_until` (date, both optional, inclusive, PH date via `app_today_ph()`);
+  User Roles **AC = Delegate from, AD = Delegate until**, written as text (leading `'`) so Sheets doesn't reformat;
+  parse also accepts Sheets serials and M/D/YYYY. All User Roles ranges now `A:AD`. DB: `app_is_delegate_of(email)`,
+  `app_visible_companies()` and `app_my_delegators()` apply the window. App: every check goes through
+  `_delegationOn(u)` (+ `_delegationRange`, `_delegationState`, `_phTodayStr`). ⚠ Never test `u.delegateActive` directly.
+- **My delegation** (account menu, Manager/Director/Admin): `openMyDelegationModal` / `saveMyDelegation` →
+  RPC `mc_set_own_delegation` (refuses below Manager) + own Sheet row O:P and AC:AD; messages the delegate, logs.
+- **Re-assign** (Admin/Director, any pending request incl. signatures): `openReassignRequest` / `confirmReassignRequest`,
+  excludes requester and current assignee, messages the new person (urgent), logs with reason.
+- Approvals card: Action shows when `_apprWhoMayAct(n).ok` (assigned/delegate/Admin/Director) — a Manager who only
+  sees it gets "Awaiting …". Settings → Users editor has From/Until; pill shows Delegating / scheduled / ended.
+- Phone (`approve.html`): list includes delegators' decisions (not signatures), "Covering for …"; `render()` treats
+  a delegate as `mine` for decisions (`MY_DELEGATORS` from `app_my_delegators`).
+- What's new entry + Lami guide lines added. NOT done: a training-mode practice scenario for delegation/re-assign.
+
+# OPEN — updated 2026-11-28 (session 5) — THIS IS THE AUTHORITATIVE LIST
+> Everything above stands; this adds the audit's unfixed items in agreed order.
+
+## From the audit, not yet done (Rommel to approve each)
+1. `send-approval-push`: require staff + requester/approver/Admin, check secrets AFTER auth, throttle per request.
+2. Daily per-user cap on `lami-ask` and `keystone-ai` (suggested 30/day); main-app Claude key sits in every browser.
+3. Polls re-download whole tables after any change (approvals 60 s, messages/orders 45 s; `order_cutting_lists`
+   totals unfingerprinted every orders poll) → fetch only rows changed since last max `updated_at`. Fingerprint
+   queries are seq scans — make them cheap.
+4. `supaMigratePriceDb` deletes/re-inserts all 153k materials with no content diff, and its 10-min lock is per
+   browser → skip unchanged tables, one company-wide lock.
+5. Bugs: quick-click opens the wrong quotation (no load token in `openQuotationFromDir`); `sheetsDeleteRowByKey`
+   reports success on failure and skips the Deleted Rows archive; unlock doesn't cancel a Noted-by request the
+   preparer can't see; `acceptCounter`/`doApprovalAction` partial writes drop decision/applied/sigSlot fields;
+   Final Quotation can flip `qMatRoundOn` for an issued Initial; phone `act()` overwrites a decision already made
+   (no `.eq('status','pending')`, no row check, no refresh); phone biometric credential is per device not per person;
+   counter slider indexes by position; `gApiFetch` 401 retry has no timeout; silent `.catch(function(){})` on
+   serial counter / order status writes.
+6. Save Draft conflict check downloads the whole state; each save writes the state 4 times.
+7. Housekeeping: leaked-password protection (Supabase Auth setting, Rommel); unused indexes / unindexed FKs.
+8. Approvers must re-enable notifications on their phones (0 subscriptions).
+9. Training scenario for My delegation / Re-assign.
+
+## Watch
+- First real use of My delegation and Re-assign. If someone says "I can't approve", check whether they are the
+  assigned person or an in-date delegate — the database now refuses everyone else (error text names the rule).
+- One existing delegation is on with no dates (open-ended), as before.
