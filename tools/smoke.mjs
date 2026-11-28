@@ -6890,6 +6890,25 @@ const PROFILES = {
         try { const got = await _vRun(); out.push({ label: _vLabel, got, want: _vWant, ok: JSON.stringify(got) === JSON.stringify(_vWant) }); }
         catch (e) { out.push({ label: _vLabel, err: String(e).slice(0,120), ok: false }); }
       }
+      check('Unlocking the Final Quotation keeps the Final total, not the Initial Quotation\'s (QT-W00000321)', () => {
+        const w = window;
+        if (typeof w._thawRatesVisible !== 'function') return 'missing';
+        const keep = { r: w.recalc, f: w.recalcFQ, t: w.showToast, l: w.logActivity, p: w._renderFrozenRatePill, c: w._pCalc, q: w.qLockedRates };
+        const logs = [];
+        w.recalc = function(){ w._pCalc = { grand: 0 }; };            // W321 Option 4: Stage 1 prices at 0
+        w.recalcFQ = function(){ w._pCalc = { grand: 70108.01 }; };   // its Final Quotation
+        w.showToast = function(){}; w.logActivity = function(m){ logs.push(m); }; w._renderFrozenRatePill = function(){};
+        let res;
+        try {
+          w.qLockedRates = { at: 1 }; w._pCalc = { grand: 70108.01 };
+          w._thawRatesVisible('Final Quotation unlocked', 2);
+          const fq = w._pCalc.grand, repriced = logs.some(m => /repriced/.test(m));
+          w.qLockedRates = { at: 1 }; logs.length = 0;
+          w._thawRatesVisible('quotation unlocked');
+          res = (fq === 70108.01 && !repriced && w._pCalc.grand === 0) ? true : JSON.stringify({ fq, repriced, s1: w._pCalc.grand });
+        } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
+        return res;
+      }, true);
       check('Final Quotation Save Draft saves the quotation, not only a printout (QT-W00000321)', () => {
         const w = window;
         if (typeof w.fqSaveDraft !== 'function') return 'missing';
