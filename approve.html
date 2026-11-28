@@ -648,6 +648,31 @@ function loadList(){
       wirePushCard();
     });
 }
+/* Live (2026-11-28): the open request is watched, so a decision, cancellation or re-assignment
+   made on another device shows here within a second or two. Coming back to the app also reloads. */
+var REQ_WATCH=null;
+function watchRequest(id){
+  try{
+    if(REQ_WATCH&&REQ_WATCH.id===id) return;
+    if(REQ_WATCH&&REQ_WATCH.ch) supa.removeChannel(REQ_WATCH.ch);
+    if(typeof supa.channel!=='function') return;
+    var ch=supa.channel('appr-'+id)
+      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'approval_requests',filter:'id=eq.'+id},function(ev){
+        if(BUSY||!ev||!ev.new) return;
+        var was=REQ&&REQ.status;
+        REQ=ev.new;
+        DEC=(REQ.payload&&REQ.payload.decision)||null;
+        COUNTER=(DEC&&DEC.counter&&DEC.counter.length)?DEC.counter:null;
+        render();
+        if(was==='pending'&&REQ.status!=='pending') loadHistory();
+      }).subscribe();
+    REQ_WATCH={id:id,ch:ch};
+  }catch(e){}
+}
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden||BUSY) return;
+  try{ if(reqIdFromUrl()) loadRequest(); else if(typeof loadList==='function'&&ME) loadList(); }catch(e){}
+});
 var MY_DELEGATORS=[];   // emails this person is covering for today (app_my_delegators)
 function loadRequest(){
   var id=reqIdFromUrl();
@@ -659,7 +684,7 @@ function loadRequest(){
     DEC=(REQ.payload&&REQ.payload.decision)||null;
     COUNTER=(DEC&&DEC.counter&&DEC.counter.length)?DEC.counter:null;
     supa.rpc('app_my_delegators').then(function(d){ MY_DELEGATORS=(d&&!d.error&&Array.isArray(d.data))?d.data:[]; },function(){})
-      .then(function(){ render(); loadHistory(); });
+      .then(function(){ render(); loadHistory(); watchRequest(REQ.id); });
   });
 }
 
@@ -1085,12 +1110,18 @@ function act(status){
       pay.cfValues=ovrRead();
       patch.payload=pay;
     }
-    return supa.from('approval_requests').update(patch).eq('id',REQ.id).then(function(r){
+    /* Saved only if it is STILL pending (2026-11-28). If it was decided, cancelled or moved
+       elsewhere meanwhile, nothing is overwritten: the screen reloads and says what happened. */
+    return supa.from('approval_requests').update(patch).eq('id',REQ.id).eq('status','pending').select('id').then(function(r){
       BUSY=false;
       if(r.error){
         alert('Could not save that. '+r.error.message);
         ['ok','no','ctr'].forEach(function(i){ if(el(i)) el(i).disabled=false; });
         return;
+      }
+      if(!r.data||!r.data.length){
+        alert('This request was already handled elsewhere, so nothing was changed. Showing the latest.');
+        loadRequest(); return;
       }
       REQ.status=status; REQ.actioned_by=ME; if(counter!=null) REQ.counter_disc=counter;
       render(); loadHistory();

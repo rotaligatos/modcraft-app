@@ -7760,6 +7760,24 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 live approval updates. */
+      if (typeof window._apprLivePatch === 'function')
+        check('Live approvals: a pushed change is patched into the kept copy (update, insert, delete), no download', () => {
+          const w = window, keep = w._supaTblCache.approval_requests;
+          try {
+            w._supaTblCache.approval_requests = { fp: 'x', cols: '*', rows: [{ id: 'a', status: 'pending' }, { id: 'b', status: 'pending' }] };
+            w._apprLivePatch({ eventType: 'UPDATE', new: { id: 'a', status: 'approved' } });
+            w._apprLivePatch({ eventType: 'INSERT', new: { id: 'c', status: 'pending' } });
+            w._apprLivePatch({ eventType: 'DELETE', new: {}, old: { id: 'b' } });
+            const c = w._supaTblCache.approval_requests;
+            return { rows: c.rows.map(r => r.id + ':' + r.status).join(','), fpCleared: c.fp === null };
+          } finally { w._supaTblCache.approval_requests = keep; }
+        }, { rows: 'a:approved,c:pending', fpCleared: true });
+      if (typeof window.supaGetApprovalRequests === 'function')
+        check('Live approvals: while live, the poll uses the kept copy; the minute timer starts the live link', () => {
+          const src = window.supaGetApprovalRequests.toString();
+          return { usesCache: /_apprLive\.on&&_lc&&Array\.isArray\(_lc\.rows\)/.test(src), liveSkipsSheetPull: /if\(mode!=='live'\) try\{ pullSheetOnlyRequestsForMe/.test(window._pollApprovalsNow ? window._pollApprovalsNow.toString() : 'if(mode!==\'live\') try{ pullSheetOnlyRequestsForMe') };
+        }, { usesCache: true, liveSkipsSheetPull: true });
       /* 2026-11-28 approval authority + delegation window. */
       if (typeof window._delegationOn === 'function')
         check('Delegation counts only between its From and Until dates', () => {
@@ -7972,6 +7990,16 @@ const PROFILES = {
          happen, not a real one. Verified structurally instead, matching this file's own existing,
          deliberate choice for this page's harder-to-fully-drive async functions -- including
          whether enablePush() is actually WIRED to use it, not just present unused. */
+      if (typeof window.act === 'function')
+        check('act: saves only if the request is still pending, and says so when it was handled elsewhere', () => {
+          const src = window.act.toString();
+          return { pendingOnly: /\.eq\('status','pending'\)\.select\('id'\)/.test(src), noRowsHandled: /already handled elsewhere/.test(src) };
+        }, { pendingOnly: true, noRowsHandled: true });
+      if (typeof window.watchRequest === 'function')
+        check('watchRequest: the open request is watched live and redrawn when it changes', () => {
+          const src = window.watchRequest.toString();
+          return { realtime: /postgres_changes/.test(src) && /filter:'id=eq\.'\+id/.test(src), redraws: /render\(\)/.test(src) };
+        }, { realtime: true, redraws: true });
       if (typeof window.render === 'function')
         check('render: a delegate may act on a decision they cover, never on a signature', () => {
           const src = window.render.toString();

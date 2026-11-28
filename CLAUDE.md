@@ -13909,3 +13909,16 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
 - Verified: no header / publishable key / garbage token → 401; `app_is_internal` true for staff, false for a client email.
 - Re-assign now also pushes to the new person (`confirmReassignRequest` → `_pushApprovalRequest`).
 - Audit OPEN item 1 is DONE.
+
+### Same session — live approval updates (migration `realtime_approval_requests`)
+- `approval_requests` is in the `supabase_realtime` publication (Pro plan; Rommel confirmed the project is paid).
+  Each subscriber only receives rows its read policy allows.
+- Laptop: `_apprLiveStart()` (started where the 60 s approval timer is set) subscribes to all changes;
+  `_apprLivePatch(ev)` patches the one row into `_supaTblCache.approval_requests` and
+  `_pollApprovalsNow(true,'live')` runs the usual processing (bell, toasts, Lami, badge, page) without the
+  Sheet-only pickup. While live, `supaGetApprovalRequests` returns the kept copy and does a real read only every
+  `APPR_LIVE_FULL_MS` (5 min) as a backup. If the link drops it falls back to the minute check.
+- Phone (`approve.html`): `watchRequest(id)` subscribes to the open request and redraws on change;
+  returning to the app reloads; `act()` saves with `.eq('status','pending').select('id')` and, if nothing was
+  updated, says it was handled elsewhere and reloads (no overwrite).
+- NOT yet seen working with two real devices. Next in the same pattern: Messages, then Orders.

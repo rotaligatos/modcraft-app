@@ -33372,10 +33372,72 @@ function supaGetQuotationsForTxns(){
 //   NOT be treated as "couldn't reach Supabase" or these would always fall
 //   back to Sheets on an otherwise-quiet day. Only a genuine query error
 //   returns null (triggering the Sheets fallback); an empty table returns []. —
+// ── Live approval updates (2026-11-28) ───────────────────────────────────────────────────
+// The database tells this screen the moment a request is raised, decided, cancelled or
+// re-assigned (Supabase Realtime on approval_requests; the read policy still decides what each
+// person receives). The changed row is patched into the kept copy and the usual poll processing
+// runs on it, so toasts, the bell, Lami and the Approvals page react within a second or two —
+// without re-downloading the whole table. While live, the network read happens only as a
+// backup every APPR_LIVE_FULL_MS; if the live link drops, everything falls back to the
+// minute-by-minute check exactly as before.
+var _apprLive={on:false, ch:null, fullAt:0, timer:null, starting:false};
+var APPR_LIVE_FULL_MS=5*60*1000;
+function _apprLivePatch(ev){
+  var c=_supaTblCache['approval_requests'];
+  if(!c||!Array.isArray(c.rows)) return false;           // nothing kept yet: the next poll loads it
+  var row=ev&&(ev.new&&ev.new.id?ev.new:null), old=ev&&ev.old;
+  if(ev.eventType==='DELETE'){
+    var id=old&&old.id; if(!id) return false;
+    c.rows=c.rows.filter(function(r){ return r.id!==id; });
+  } else if(row){
+    var k=-1; for(var i=0;i<c.rows.length;i++){ if(c.rows[i].id===row.id){ k=i; break; } }
+    if(k>=0) c.rows[k]=row; else c.rows.push(row);
+  } else return false;
+  c.fp=null;   // the kept copy is now newer than any fingerprint taken earlier
+  return true;
+}
+function _apprLiveOnChange(ev){
+  _apprLivePatch(ev);
+  clearTimeout(_apprLive.timer);
+  _apprLive.timer=setTimeout(function(){
+    if(typeof _pollApprovalsNow==='function') _pollApprovalsNow(true,'live');
+  },400);
+}
+function _apprLiveStart(tries){
+  tries=tries||0;
+  if(window._TRN||_apprLive.on||_apprLive.starting) return;
+  if(typeof supaReady!=='function'||!supaReady()||!supa||typeof supa.channel!=='function'){
+    if(tries<40) setTimeout(function(){ _apprLiveStart(tries+1); },3000);
+    return;
+  }
+  _apprLive.starting=true;
+  try{
+    var ch=supa.channel('mc-approvals')
+      .on('postgres_changes',{event:'*',schema:'public',table:'approval_requests'},_apprLiveOnChange)
+      .subscribe(function(status){
+        if(status==='SUBSCRIBED'){
+          _apprLive.on=true; _apprLive.starting=false;
+          console.log('[approvals] live updates on');
+          // Anything that changed while the link was down: one ordinary read now.
+          _apprLive.fullAt=0;
+          if(typeof _pollApprovalsNow==='function') _pollApprovalsNow(true,'live');
+        } else if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'||status==='CLOSED'){
+          if(_apprLive.on) console.warn('[approvals] live updates off ('+status+') — back to the minute check');
+          _apprLive.on=false; _apprLive.starting=false;
+        }
+      });
+    _apprLive.ch=ch;
+  }catch(e){ _apprLive.starting=false; console.warn('[approvals] live updates could not start',e); }
+}
 function supaGetApprovalRequests(){
   if(!supaReady()) return Promise.resolve(null);
+  // Live link up and a full copy kept recently: the kept copy IS current (changes are patched in).
+  var _lc=_supaTblCache['approval_requests'];
+  if(_apprLive.on&&_lc&&Array.isArray(_lc.rows)&&_apprLive.fullAt&&Date.now()-_apprLive.fullAt<APPR_LIVE_FULL_MS)
+    return Promise.resolve(_lc.rows);
   try{
     return _supaCachedSelect('approval_requests','*').then(function(r){
+      if(!r.error) _apprLive.fullAt=Date.now();
       if(r.error) return null;
       return r.data||[];
     }).catch(function(){ return null; });
@@ -34302,10 +34364,11 @@ function gShowApp(){
   // waited a full poll to see their approval land — longer if their tab was in the background,
   // because the poll deliberately skips while hidden. Now it also runs the moment they come
   // back to the tab, and when they open the notification panel.
-  window._pollApprovalsNow=function(force){
+  window._pollApprovalsNow=function(force,mode){
     if(!gToken||gSessionExpired) return;
     if(document.hidden&&!force) return;   // skip background polling, but never an on-demand call
-    try{ pullSheetOnlyRequestsForMe(!!force); }catch(ePull){ console.warn('[approval] sheet pull failed',ePull); }
+    // A live change is about the database row that just changed; the Sheet-only pickup keeps its own pace.
+    if(mode!=='live') try{ pullSheetOnlyRequestsForMe(!!force); }catch(ePull){ console.warn('[approval] sheet pull failed',ePull); }
     var me=(gUser&&gUser.email||'').toLowerCase();
     // Snapshot current statuses of own requests before reloading
     var ownBefore={};
@@ -34399,7 +34462,8 @@ function gShowApp(){
     });
   };
   if(window._apprPollTimer) clearInterval(window._apprPollTimer);
-  window._apprPollTimer=setInterval(function(){ _pollApprovalsNow(false); }, 60000); // every 60 seconds
+  window._apprPollTimer=setInterval(function(){ _pollApprovalsNow(false); }, 60000); // every 60 seconds (no network for approvals while live)
+  _apprLiveStart();
   // Coming back to the tab is exactly when a requester expects to see the answer.
   if(!window._apprVisHooked){
     window._apprVisHooked=true;
