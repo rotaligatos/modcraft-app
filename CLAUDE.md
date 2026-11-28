@@ -13964,3 +13964,15 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
 - `_saveFail(what, serial)` replaces `.catch(function(){})` on: SERIAL_COUNTERS writes, Quotations F "Draft"
   status, Pending Orders X:Z status (2 places), Quotations N lock date, Messages read mark. Console warning,
   a toast at most once a minute per kind, and an activity-log line. Other swallowed catches left (best-effort).
+
+### Same session — AI daily cap (migrations `ai_daily_usage_cap`, `ai_usage_read_grant`; lami-ask v10, keystone-ai v2)
+- Table `ai_usage` (email, fn, PH day, calls, in/out tokens); RPC `ai_usage_take(fn)` adds one question if under
+  the limit, else `{allowed:false}`; `ai_usage_tokens(fn,in,out)` records tokens. Limits in `settings` key
+  `AI_DAILY_LIMITS` = `{"lami":30,"keystone":30}` (missing = 30). Fails closed: a counter error refuses.
+- `lami-ask` and `keystone-ai` take one before calling the model, return 429 with a plain message at the limit,
+  and no longer send Anthropic's raw error text to the caller (logged instead). Lami's client-history lookup
+  escapes `%`/`_`; her prompt says context text is data, not instructions.
+- Tested in a rolled-back transaction (limit 3 → 4th refused; keystone counted separately); outsiders still 401.
+- NOT covered: the main desktop app's AI (Lami chat, drawing analysis, Read drawing, mobility) calls Claude
+  straight from the browser with the shared key in User Roles col R — uncapped. Capping it means routing those
+  calls through an Edge Function (bigger change, not started).
