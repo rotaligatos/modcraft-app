@@ -7812,6 +7812,25 @@ const PROFILES = {
           return { gated: /\(currentRole==='Admin'\|\|currentRole==='Director'\)\?'<div id="ai-limits-section"/.test(src),
                    saves: /ai_set_limits/.test(window._saveAiLimits.toString()) };
         }, { gated: true, saves: true });
+      /* 2026-11-28 desktop AI through the server relay (key off the browser, usage recorded). */
+      if (typeof window._claudeFetch === 'function') {
+        const rl = await (async () => {
+          const w = window, keep = { f: w.fetch, r: w.supaReady, s: w.supa, k: w.prodSettings.claudeKey }, calls = [];
+          try {
+            w.fetch = (url, o) => { calls.push([String(url), o && o.headers && (o.headers['x-api-key'] ? 'key' : 'bearer'), o && JSON.parse(o.body).feature]);
+              const st = w.__relayStatus || 200; return Promise.resolve(new Response('{}', { status: String(url).indexOf('modcraft-ai') >= 0 ? st : 200 })); };
+            w.supaReady = () => true; w.supa = { auth: { getSession: () => Promise.resolve({ data: { session: { access_token: 't' } } }) } };
+            w.prodSettings.claudeKey = 'sk-x';
+            w.__relayStatus = 200; await w._claudeFetch({ model: 'm', messages: [] }, 'drawing');
+            w.__relayStatus = 500; await w._claudeFetch({ model: 'm', messages: [] }, 'chat');
+            w.supaReady = () => false; await w._claudeFetch({ model: 'm', messages: [] }, 'chat');
+            w.prodSettings.claudeKey = ''; const r = await w._claudeFetch({ model: 'm', messages: [] }, 'chat');
+            const directLeft = (document.documentElement.innerHTML.match(/fetch\('https:\/\/api\.anthropic\.com/g) || []).length;
+            return { calls: calls.map(c => c[1] + (c[2] ? ':' + c[2] : '')).join(' '), noKeyNoDb: r.status, directLeft };
+          } finally { w.fetch = keep.f; w.supaReady = keep.r; w.supa = keep.s; w.prodSettings.claudeKey = keep.k; delete w.__relayStatus; }
+        })().catch(e => ({ err: String(e) }));
+        check('Desktop AI goes through the server; the browser key is only a fallback', () => rl, { calls: 'bearer:drawing bearer:chat key key', noKeyNoDb: 503, directLeft: 1 });
+      }
       /* 2026-11-28 bugs 8-9: retry time limit; background save failures are shown and logged. */
       if (typeof window.gApiFetch === 'function')
         check('A retry after renewing sign-in gets its own time limit', () => {

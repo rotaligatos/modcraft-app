@@ -14003,3 +14003,21 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
   the per-browser one. Tested by impersonation: second claimer refused until released.
 - Still true (pre-existing, noticed): a re-sync writes `price_services` with name/unit/price only, dropping the
   capacity/cost columns `_saveServicesToPriceDb` writes. Capacity now comes from PMES, so low impact.
+
+### Same session — desktop AI through the server (edge function `modcraft-ai` v1, migration `ai_usage_count_no_limit`)
+- All 8 direct Claude calls in index.html (API test, Read drawing, Read with AI, mobility planner, drawing
+  analysis, Lami search, Lami chat, help chat) now call `_claudeFetch(body, feature)`. It POSTs
+  `{feature, body}` to `modcraft-ai` with the person's Supabase token; the function checks signed-in + staff
+  (`app_is_internal`) before anything else, allows only listed fields/models (sonnet-4-6, haiku-4-5, opus-4-8,
+  max_tokens ≤ 64000), uses the server secret ANTHROPIC_API_KEY, streams the answer back unchanged and records
+  calls + tokens as `desktop:<feature>` via `ai_usage_count` (no limit; only `desktop:%` names accepted).
+  Outsiders (no token / publishable key / garbage) get 401.
+- Fallback: not connected to the fast database, or the relay answers 500/503/504/546 or is unreachable →
+  `_claudeDirect` uses the browser key while one is still set. `_aiAvailable()` replaces every
+  `!prodSettings.claudeKey` gate (relay OR key).
+- Settings → Lami → AI limits now shows Today and This month per person: Lami (phone), KEYSTONE, Desktop app, tokens.
+- ⚠ Edge functions stop at ~400 s; a drawing analysis that streams longer would be cut off (shows as truncated).
+  Not seen yet — watch the first big cutting lists.
+- NEXT (Rommel to agree): once desktop use shows in the usage table, blank the key in User Roles col R (and
+  Settings → Designers Support) so browsers no longer hold it, then rotate the key at Anthropic and update
+  the ANTHROPIC_API_KEY secret.

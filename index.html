@@ -7329,9 +7329,9 @@ function renderMobCalc(){
     +'<div>'+(c._aiRunning
       ?'<span style="font-size:12px;color:var(--muted)"><i class="ti ti-loader"></i> AI estimating costs…</span>'
       :'<button class="btn" onclick="computeMobCalcAI()" style="font-size:12px;color:var(--teal);border-color:var(--teal)"'
-        +(!prodSettings.claudeKey&&prodSettings.mobAiEnabled?' title="No Claude API key — go to Settings → Designers Support"':'')+'>'
+        +(!_aiAvailable()&&prodSettings.mobAiEnabled?' title="No Claude API key — go to Settings → Designers Support"':'')+'>'
         +'<i class="ti ti-sparkles"></i> '+(!prodSettings.mobAiEnabled?'Mock estimate':'AI Estimate')+'</button>'
-        +(!prodSettings.claudeKey&&prodSettings.mobAiEnabled?'<span style="font-size:10px;color:var(--text2);margin-left:6px">No API key</span>':''))
+        +(!_aiAvailable()&&prodSettings.mobAiEnabled?'<span style="font-size:10px;color:var(--text2);margin-left:6px">No API key</span>':''))
     +'</div>'
     +'<div style="display:flex;gap:8px">'
     +'<button class="btn" onclick="closeModal(\'ov-mob-calc\')" style="font-size:12px">Cancel</button>'
@@ -7360,7 +7360,7 @@ function applyMobCalc(){
 function computeMobCalcAI(){
   if(!qMobCalc) return;
   var mobOff=!prodSettings.mobAiEnabled;
-  if(!mobOff&&!prodSettings.claudeKey){
+  if(!mobOff&&!_aiAvailable()){
     showToast('No Claude API key — set it in Settings → Designers Support.');
     return;
   }
@@ -15878,16 +15878,54 @@ function _tkResetMonth(){
   });
 }
 
+// ── Desktop AI goes through the server (2026-11-28) ─────────────────────────────────────
+// Every Claude call from this app used to send the company key from the browser, so anyone signed
+// in could read it, and nobody could see who used how much. _claudeFetch sends the same Messages API
+// body to the modcraft-ai function instead: the key stays on the server and each person's use is
+// recorded (ai_usage, 'desktop:<feature>'). Work tools have no daily limit (Rommel's decision).
+// It answers with a normal fetch Response (streaming too), so callers did not change shape.
+// Not connected to the fast database: falls back to the key in this browser while one is still set.
+var AI_RELAY_URL=SUPA_URL+'/functions/v1/modcraft-ai';
+function _aiRelayReady(){ return !!(typeof supaReady==='function'&&supaReady()&&supa&&supa.auth); }
+function _aiAvailable(){ return _aiRelayReady()||!!(prodSettings&&prodSettings.claudeKey); }
+function _aiErrResponse(msg,status){
+  return new Response(JSON.stringify({type:'error',error:{type:'relay_error',message:msg}}),
+    {status:status||503,headers:{'content-type':'application/json'}});
+}
+function _claudeDirect(body){
+  if(!(prodSettings&&prodSettings.claudeKey))
+    return Promise.resolve(_aiErrResponse('The AI needs the fast database connection \u2014 Settings \u2192 Company & DB \u2192 Connect now.'));
+  return fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+    headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify(body)});
+}
+function _claudeFetch(body,feature){
+  if(!_aiRelayReady()) return _claudeDirect(body);
+  return supa.auth.getSession().then(function(r){
+    var tok=r&&r.data&&r.data.session&&r.data.session.access_token;
+    if(!tok) return _claudeDirect(body);
+    return fetch(AI_RELAY_URL,{method:'POST',
+      headers:{'content-type':'application/json','Authorization':'Bearer '+tok,'apikey':SUPA_ANON_KEY},
+      body:JSON.stringify({feature:feature||'chat',body:body})
+    }).then(function(resp){
+      // The server itself failed (not the AI's answer): use this browser's key if there still is one.
+      if([500,503,504,546].indexOf(resp.status)>=0&&prodSettings&&prodSettings.claudeKey){
+        console.warn('[ai] server relay failed ('+resp.status+') \u2014 using the key in this browser');
+        return _claudeDirect(body);
+      }
+      return resp;
+    },function(e){
+      if(prodSettings&&prodSettings.claudeKey){ console.warn('[ai] server relay unreachable \u2014 using the key in this browser',e); return _claudeDirect(body); }
+      throw e;
+    });
+  });
+}
 function _testClaudeApi(){
   var btn=el('claude-test-btn'); if(btn){btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2 ti-spin"></i>Testing…';}
   var res=el('claude-test-result'); if(res) res.innerHTML='';
   var key=prodSettings&&prodSettings.claudeKey?prodSettings.claudeKey:'';
-  if(!key){showToast('No API key configured.');if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-plug-connected"></i>Test';}return;}
-  fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'x-api-key':key,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:10,messages:[{role:'user',content:'ping'}]})
-  }).then(function(r){return r.json();}).then(function(d){
+  if(!_aiAvailable()){showToast('No API key configured.');if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-plug-connected"></i>Test';}return;}
+  _claudeFetch({model:'claude-sonnet-4-6',max_tokens:10,messages:[{role:'user',content:'ping'}]},'test').then(function(r){return r.json();}).then(function(d){
     if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-plug-connected"></i>Test';}
     if(d&&d.content){
       _tkRecord('chat',(d.usage&&d.usage.input_tokens)||0,(d.usage&&d.usage.output_tokens)||0);
@@ -42004,7 +42042,7 @@ function renderProductionSettings() {
   }
   jmHtml+='<button class="btn" style="font-size:11px;padding:4px 10px;margin-top:4px" onclick="prodAddJargonRow()"><i class="ti ti-plus"></i>Add mapping</button>';
   w.innerHTML='<div class="card"><div class="card-head"><h3><i class="ti ti-cpu"></i>Designers Support</h3></div><div class="card-body">'
-    +(!prodSettings.claudeKey
+    +(!_aiAvailable()
       ?'<div class="alert alert-info" style="margin-bottom:14px"><i class="ti ti-info-circle"></i>'
         +'<div><b>How to get your Claude API key:</b><br>'
         +'1. Go to <a href="https://console.anthropic.com" target="_blank" style="color:var(--navy)">console.anthropic.com</a> — separate account from your claude.ai subscription<br>'
@@ -42218,7 +42256,7 @@ function renderProductionPage() {
       recalc();
     }
   }
-  var noKey=!prodSettings.claudeKey;
+  var noKey=!_aiAvailable();
   var fileLabelHtml='';
   if(prodState.file){
     fileLabelHtml='<div style="display:flex;align-items:center;gap:8px;margin-top:10px;background:var(--wash-teal);border-radius:8px;padding:8px 12px">'
@@ -43328,7 +43366,7 @@ var MCL=(function(){
       var p=S.panels[i]; if(!p||!p.drawing) return;
       var d=(S.drawings||[]).filter(function(x){ return x.source===p.drawing.source&&x.page===p.drawing.page; })[0];
       if(!d||!d.dataUrl){ showToast('The drawing picture is not here any more — import the client file again.'); return; }
-      if(!prodSettings.claudeKey){ showToast('No Claude API key — set it in Settings → Designers Support.'); return; }
+      if(!_aiAvailable()){ showToast('No Claude API key — set it in Settings → Designers Support.'); return; }
       _mclAiShow(i,null,'Reading the drawing…');
       var prompt='This is page '+d.page+' of a client\'s cutting list for cabinet work (sizes in mm). '
         +'Find the piece for this row: cabinet/group "'+p.group+'", part "'+p.part+'", quantity '+(p.qty||1)
@@ -43358,12 +43396,9 @@ var MCL=(function(){
         +'Use the list\'s edge banding; null if the piece is not banded. A special-cut piece is banded by hand. '
         +'Use only dimensions printed on the drawing; if you had to add figures up, say which in notes. '
         +'If you cannot tell which piece on the page is this row, set found to false and say why in notes.';
-      fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-        headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1500,messages:[{role:'user',content:[
+      _claudeFetch({model:'claude-sonnet-4-6',max_tokens:1500,messages:[{role:'user',content:[
           {type:'image',source:{type:'base64',media_type:'image/jpeg',data:String(d.dataUrl).replace(/^data:[^,]*,/,'')}},
-          {type:'text',text:prompt}]}]})
-      }).then(function(r){
+          {type:'text',text:prompt}]}]},'readdrawing').then(function(r){
         if(!r.ok) return r.json().then(function(e){ throw new Error((e.error&&e.error.message)||r.statusText); });
         return r.json();
       }).then(function(res){
@@ -45122,7 +45157,7 @@ function linesToAoa(lines) {
   // normal import (material mapping, flags, check) — the AI only suggests, a person imports.
   function aiRead(fi){
     var f=ST.files[fi]; if(!f||!f.scans||!f.scans.length||f.aiBusy) return;
-    if(!prodSettings.claudeKey){ showToast('No Claude API key — set it in Settings → Designers Support.'); return; }
+    if(!_aiAvailable()){ showToast('No Claude API key — set it in Settings → Designers Support.'); return; }
     var parts=[], pagesWithParts=[], done=0, failed=[];
     var prompt='This is one page of a cabinet-work PDF (sizes in mm). It may be a cut-optimizer report (e.g. OpenCutList), a cutting list, or a drawing. '
       +'If it has a table of parts to cut, read EVERY row of it. Reply with JSON only, no other text: '
@@ -45142,12 +45177,9 @@ function linesToAoa(lines) {
       if(k>=f.scans.length) return finish();
       f.aiBusy='Reading page '+(k+1)+' of '+f.scans.length+'…'; render();
       var d=f.scans[k];
-      fetch('https://api.anthropic.com/v1/messages',{method:'POST',
-        headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:8000,messages:[{role:'user',content:[
+      _claudeFetch({model:'claude-sonnet-4-6',max_tokens:8000,messages:[{role:'user',content:[
           {type:'image',source:{type:'base64',media_type:'image/jpeg',data:String(d.dataUrl).replace(/^data:[^,]*,/,'')}},
-          {type:'text',text:prompt}]}]})
-      }).then(function(r){
+          {type:'text',text:prompt}]}]},'readlist').then(function(r){
         if(!r.ok) return r.json().then(function(e){ throw new Error((e.error&&e.error.message)||r.statusText); });
         return r.json();
       }).then(function(res){
@@ -46623,7 +46655,7 @@ function _buildMobilityCard(){
   if(!mobilityState.origin) mobilityState.origin=_defaultMobilityOrigin();
   // Ensure mobAiEnabled is never undefined (guard against stale localStorage)
   if(prodSettings.mobAiEnabled===undefined) prodSettings.mobAiEnabled=true;
-  var noKey=!prodSettings.claudeKey;
+  var noKey=!_aiAvailable();
   var mobOff=!prodSettings.mobAiEnabled;
   var fld='height:34px;font-size:12px;width:100%';
   var destVal=mobilityState.destination||projLoc||'';
@@ -47594,11 +47626,7 @@ function _copyOrderAttachmentsToQuotationFolder(){
   });
 }
 function _mobCallClaude(prompt, callback){
-  fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:4096,messages:[{role:'user',content:prompt}]})
-  }).then(function(r){
+  _claudeFetch({model:'claude-sonnet-4-6',max_tokens:4096,messages:[{role:'user',content:prompt}]},'mobility').then(function(r){
     if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
     return r.json();
   }).then(function(d){
@@ -47649,7 +47677,7 @@ function computeTransportation(){
   var mobOff=!prodSettings.mobAiEnabled;
   var _dest=el('mob-dest')?el('mob-dest').value.trim():mobilityState.destination;
   if(!_dest){showToast('Enter the project site / destination first.');return;}
-  if(!mobOff&&!prodSettings.claudeKey){showToast('No Claude API key configured. Set it in Settings → Designers Support.');return;}
+  if(!mobOff&&!_aiAvailable()){showToast('No Claude API key configured. Set it in Settings → Designers Support.');return;}
   if(mobOff){
     // Mock mode — no API call
     var dest=_dest;
@@ -47868,7 +47896,7 @@ function computeAccommodation(){
   var mobOff=!prodSettings.mobAiEnabled;
   var _dest=el('mob-dest')?el('mob-dest').value.trim():mobilityState.destination;
   if(!_dest){showToast('Enter the project site / destination first.');return;}
-  if(!mobOff&&!prodSettings.claudeKey){showToast('No Claude API key configured. Set it in Settings → Designers Support.');return;}
+  if(!mobOff&&!_aiAvailable()){showToast('No Claude API key configured. Set it in Settings → Designers Support.');return;}
   if(mobOff){
     // Mock mode — no API call
     var dest=_dest;
@@ -48142,7 +48170,7 @@ function callClaudeProduction(){
     },600);
     return;
   }
-  if(!prodState.file||!prodSettings.claudeKey) return;
+  if(!prodState.file||!_aiAvailable()) return;
   prodState.analyzing=true; renderProductionPage();
   var f=prodState.file;
   var ext=f.name.split('.').pop().toLowerCase();
@@ -48421,16 +48449,7 @@ var PROD_ELEVATION_TOOL={
 function prodApiCall(bodyObj,toolDef){
   var body=Object.assign({},bodyObj,{stream:true});
   if(toolDef){ body.tools=[toolDef]; body.tool_choice={type:'tool',name:toolDef.name}; }
-  return fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{
-      'content-type':'application/json',
-      'x-api-key':prodSettings.claudeKey,
-      'anthropic-version':'2023-06-01',
-      'anthropic-dangerous-direct-browser-access':'true'
-    },
-    body:JSON.stringify(body)
-  }).then(function(r){
+  return _claudeFetch(body,'drawing').then(function(r){
     if(!r.ok) return r.json().then(function(e){throw new Error((e.error&&e.error.message)||r.statusText);});
     var reader=r.body.getReader();
     var decoder=new TextDecoder();
@@ -48629,7 +48648,7 @@ function prodApproveElevation(){
     },800);
     return;
   }
-  if(!prodSettings.claudeKey) return;
+  if(!_aiAvailable()) return;
   prodState.analyzing=true; renderProductionPage();
   var ebtDesc=prodSettings.ebtLegend.map(function(e){return (e.code||e.pos)+'='+(e.desc||'')+(e.condition?' ('+e.condition+')':'');}).join(', ');
   var wasteMult2=(1+(prodSettings.ebtWastage||0)/100).toFixed(3);
@@ -52852,13 +52871,25 @@ function _renderAiLimits(){
   var today=_phTodayStr();
   Promise.all([
     supa.from('settings').select('value').eq('key','AI_DAILY_LIMITS').maybeSingle(),
-    supa.from('ai_usage').select('email,fn,calls,in_tokens,out_tokens').eq('day',today).order('calls',{ascending:false})
+    supa.from('ai_usage').select('email,fn,day,calls,in_tokens,out_tokens').gte('day',today.slice(0,8)+'01').order('calls',{ascending:false})
   ]).then(function(r){
     var lim=(r[0]&&r[0].data&&r[0].data.value)||{}, rows=(r[1]&&r[1].data)||[];
     var lami=(lim.lami!=null?lim.lami:30), ks=(lim.keystone!=null?lim.keystone:30);
     var name=function(e){ var u=(sheetUsers||[]).find(function(x){return String(x.email||'').toLowerCase()===String(e||'').toLowerCase();}); return u?u.name:e; };
-    var by={}; rows.forEach(function(x){ var k=x.email; by[k]=by[k]||{lami:0,keystone:0,tok:0}; by[k][x.fn]=(by[k][x.fn]||0)+x.calls; by[k].tok+=(+x.in_tokens||0)+(+x.out_tokens||0); });
-    var list=Object.keys(by).map(function(e){ return [e,by[e]]; }).sort(function(a,b){ return (b[1].lami+b[1].keystone)-(a[1].lami+a[1].keystone); });
+    // Desktop work tools (fn 'desktop:<feature>') are counted, never limited.
+    var group=function(list){
+      var by={}; list.forEach(function(x){ var k=x.email, g=/^desktop:/.test(x.fn)?'desktop':x.fn;
+        by[k]=by[k]||{lami:0,keystone:0,desktop:0,tok:0}; by[k][g]=(by[k][g]||0)+x.calls; by[k].tok+=(+x.in_tokens||0)+(+x.out_tokens||0); });
+      return Object.keys(by).map(function(e){ return [e,by[e]]; }).sort(function(a,b){ return b[1].tok-a[1].tok; });
+    };
+    var table=function(list,none){
+      if(!list.length) return '<div style="font-size:12px;color:var(--text2)">'+none+'</div>';
+      var tot={lami:0,keystone:0,desktop:0,tok:0}; list.forEach(function(x){ ['lami','keystone','desktop','tok'].forEach(function(k){ tot[k]+=x[1][k]||0; }); });
+      var row=function(n,v,b){ return '<tr style="border-top:.5px solid var(--border)'+(b?';font-weight:600':'')+'"><td>'+n+'</td><td>'+v.lami+'</td><td>'+v.keystone+'</td><td>'+v.desktop+'</td><td>'+v.tok.toLocaleString()+'</td></tr>'; };
+      return '<table style="width:100%;font-size:12px;border-collapse:collapse"><tr style="color:var(--text2);text-align:left"><th>Person</th><th>Lami (phone)</th><th>KEYSTONE</th><th>Desktop app</th><th>Tokens</th></tr>'
+        +list.map(function(x){ return row(escHtml(name(x[0])),x[1]); }).join('')+(list.length>1?row('Total',tot,true):'')+'</table>';
+    };
+    var list=group(rows.filter(function(x){ return x.day===today; })), month=group(rows);
     box.innerHTML='<div style="font-size:14px;font-weight:600;color:var(--text1);margin-bottom:4px">AI daily limits</div>'
       +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Questions per person per day. Resets at midnight. <b>Directors and Admins have no limit</b> (still counted below). 0 = switched off for everyone else.</div>'
       +'<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">'
@@ -52867,10 +52898,10 @@ function _renderAiLimits(){
         +'<button class="btn btn-primary" style="font-size:12px" onclick="_saveAiLimits()"><i class="ti ti-device-floppy"></i> Save limits</button>'
       +'</div>'
       +'<div style="font-size:13px;font-weight:600;margin:14px 0 6px">Used today</div>'
-      +(list.length?'<table style="width:100%;font-size:12px;border-collapse:collapse"><tr style="color:var(--text2);text-align:left"><th>Person</th><th>Lami</th><th>KEYSTONE</th><th>Tokens</th></tr>'
-        +list.map(function(x){ return '<tr style="border-top:.5px solid var(--border)"><td>'+escHtml(name(x[0]))+'</td><td>'+x[1].lami+'</td><td>'+x[1].keystone+'</td><td>'+x[1].tok.toLocaleString()+'</td></tr>'; }).join('')+'</table>'
-        :'<div style="font-size:12px;color:var(--text2)">No AI questions yet today.</div>')
-      +'<div style="font-size:11px;color:var(--text2);margin-top:8px">Not counted here: the AI on this desktop app (Lami chat, drawing analysis, Read drawing, mobility planner) \u2014 it uses the key in Settings directly.</div>';
+      +table(list,'No AI questions yet today.')
+      +'<div style="font-size:13px;font-weight:600;margin:14px 0 6px">This month</div>'
+      +table(month,'No AI questions yet this month.')
+      +'<div style="font-size:11px;color:var(--text2);margin-top:8px">Desktop app = Lami chat, drawing analysis, Read drawing, Read with AI, mobility planner. Counted, never limited. Questions are counted per call to the AI.</div>';
   }).catch(function(e){ box.innerHTML='<div style="font-size:12px;color:var(--coral)">Could not load AI limits: '+escHtml(String(e&&e.message||e))+'</div>'; });
 }
 function _saveAiLimits(){
@@ -53561,7 +53592,7 @@ function _chipParseSearch(text){
 }
 
 function _chipDoSearch(query){
-  if(!query||!prodSettings.claudeKey) return;
+  if(!query||!_aiAvailable()) return;
   // Show a "searching…" indicator in chat
   var msgs=el('chip-msgs'); if(!msgs) return;
   var searchDiv=document.createElement('div');
@@ -53576,17 +53607,12 @@ function _chipDoSearch(query){
     +'Format as 3-5 concise bullet points. Include any relevant pricing, regulations, or industry standards. '
     +'Note if information may be outdated and a live web check is recommended.';
 
-  fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,
-      'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({
+  _claudeFetch({
       model:'claude-sonnet-4-6',
       max_tokens:500,
       system:searchPrompt,
       messages:[{role:'user',content:query}]
-    })
-  }).then(function(r){return r.json();}).then(function(data){
+    },'search').then(function(r){return r.json();}).then(function(data){
     var result=(data.content&&data.content[0]&&data.content[0].text)||'No results found.';
     searchDiv.innerHTML='<div style="border-left:3px solid #14b8a6;padding-left:8px;margin-top:4px">'
       +'<div style="font-size:10px;font-weight:600;opacity:.6;margin-bottom:4px">🌐 WEB SEARCH: '+escHtml(query)+'</div>'
@@ -54515,7 +54541,7 @@ function _chipCallAI(userMsg){
     _restartLoopAfterPlain();
     return;
   }
-  if(!prodSettings.claudeKey){
+  if(!_aiAvailable()){
     _lamiVoiceTurn=false;
     _chipAppendAi('I need a Claude API key to answer that. Ask your Admin to set it up in Settings, under Designers Support.');
     _chipRefreshSuggestions();
@@ -54647,18 +54673,13 @@ function _chipCallAI(userMsg){
     _chipRefreshSuggestions();
   }
 
-  fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,
-      'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({
+  _claudeFetch({
       model:'claude-sonnet-4-6',
       max_tokens:maxTok,
       stream:true,
       system:_lamiSystemBlocks(sys),
       messages:chipHistory
-    })
-  }).then(function(resp){
+    },'chat').then(function(resp){
     if(!resp.ok||!resp.body){ throw new Error('http '+resp.status); }
     var reader=resp.body.getReader();
     var decoder=new TextDecoder();
@@ -54713,7 +54734,7 @@ function _chipRunAuditSilent(){
 // Also update Help page sendChat to use real AI if key present
 var _origSendChat=window.sendChat;
 window.sendChat=function(){
-  if(!prodSettings.claudeKey){if(_origSendChat) _origSendChat();return;}
+  if(!_aiAvailable()){if(_origSendChat) _origSendChat();return;}
   var inp=el('chat-inp'); if(!inp) return;
   var text=inp.value.trim(); if(!text) return;
   inp.value='';
@@ -54723,12 +54744,7 @@ window.sendChat=function(){
   var msgs=el('chat-msgs');
   var dot=document.createElement('div');dot.className='msg msg-ai';dot.innerHTML='<i>Chip is thinking…</i>';
   if(msgs){msgs.appendChild(dot);msgs.scrollTop=msgs.scrollHeight;}
-  fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,
-      'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:512,system:_lamiSystemBlocks(_chipBuildSystemPrompt()),messages:chipHistory})
-  }).then(function(r){return r.json();}).then(function(data){
+  _claudeFetch({model:'claude-sonnet-4-6',max_tokens:512,system:_lamiSystemBlocks(_chipBuildSystemPrompt()),messages:chipHistory},'chat').then(function(r){return r.json();}).then(function(data){
     var reply=(data.content&&data.content[0]&&data.content[0].text)||'Sorry, couldn\'t get a response.';
     chipHistory.push({role:'assistant',content:reply});
     if(dot) dot.remove();
