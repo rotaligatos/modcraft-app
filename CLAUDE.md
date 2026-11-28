@@ -13951,3 +13951,9 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
   fresh 3% requests). Now `_renderCounterBanner()` puts a banner under the signature bar while a discount counter
   waits (Accept/Decline for the requester, "waiting for …" for others), refreshed with the signature bar and on
   every poll/live change; `_counterInsteadOfNewRequest()` makes Request offer to accept the waiting counter.
+
+### Same session — bug 5: rounding switch per stage
+- `fqMatRoundOn` beside `qMatRoundOn`; `_materialRoundingTopUps(locked, fq)` reads/sets the stage's own switch
+  (Stage 2 call passes `true`). Saved in state and option snapshots; an older save without it takes `matRoundOn`
+  (what it shared before). An open Final no longer makes an Initial issued before 14 Oct display/reprint rounded.
+- Rommel confirmed: edgebanding (lm) DOES round up like other materials — not an exception.

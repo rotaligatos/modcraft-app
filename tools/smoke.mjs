@@ -7760,6 +7760,19 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 bug 5: each stage has its own rounding switch. */
+      if (typeof window._materialRoundingTopUps === 'function' && 'fqMatRoundOn' in window)
+        check('Rounding: an open Final Quotation no longer switches rounding on for an issued Initial', () => {
+          const w = window, keep = { a: w.qMatRoundOn, b: w.fqMatRoundOn, m: w.qFabMode, ar: w.qAreas };
+          try {
+            w.qFabMode = 'services';
+            w.qAreas = [{ matItems: [{ name: 'Board X', unit: 'pc', qty: 2.4, price: 100 }], hwItems: [] }];
+            w.qMatRoundOn = false; w.fqMatRoundOn = false;
+            w._materialRoundingTopUps(false, true);            // Final, unlocked: rounds
+            const initial = w._materialRoundingTopUps(true, false); // Initial, locked before rounding
+            return { finalOn: w.fqMatRoundOn, initialStillOff: w.qMatRoundOn === false, initialTopUp: initial.rows.length };
+          } finally { w.qMatRoundOn = keep.a; w.fqMatRoundOn = keep.b; w.qFabMode = keep.m; w.qAreas = keep.ar; }
+        }, { finalOn: true, initialStillOff: true, initialTopUp: 0 });
       /* 2026-11-28 bug fixes 3-4 + counter-offer banner. */
       if (typeof window.sheetsDeleteRowByKey === 'function') {
         const del = await (async () => {

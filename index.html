@@ -3943,6 +3943,10 @@ var qProjectSize = 0;
 // true once this quotation has been priced with whole-unit rounding while open for editing; a
 // quotation locked before rounding existed keeps its issued figures until it is unlocked.
 var qMatRoundOn = false;
+// Its own switch for the Final Quotation (2026-11-28). One shared switch let an open Final turn
+// rounding on for an Initial issued before rounding existed, so the issued Initial displayed and
+// reprinted with figures the client never received.
+var fqMatRoundOn = false;
 var qInstWorkers = 0;   // legacy installation workers override (kept for old saved states)
 var qInstDays = 0;      // legacy installation days override (kept for old saved states)
 var qInstRegion = 'z1';  // installation zone key — drives per-unit install price from rate matrix
@@ -7538,7 +7542,7 @@ function initQuotation() {
   _updateProjLocationLock(false);
   if(el('fab-date'))el('fab-date').value='';
   if(el('inst-date'))el('inst-date').value='';
-  qProjectSize=0; var _ps=el('project-size'); if(_ps) _ps.value=''; qMatRoundOn=false;
+  qProjectSize=0; var _ps=el('project-size'); if(_ps) _ps.value=''; qMatRoundOn=false; fqMatRoundOn=false;
   qInstWorkers=0; qInstDays=0;
   qClientSupplyMat=false; qChargeMatHw=null; qClientSupplyMatList=[]; qClientMatMultOverride=0;
   qInstRegion='metro'; qInstRegionManual=false;
@@ -9397,11 +9401,12 @@ function _minChargeFamilyFor(name,fams){
 // The extra is charged only where the item is charged: materials/hardware not billed to a
 // Subsidiary still round (that count is what they order and supply back to MSSI) but add P0.
 // Outsource items round at their own markup (outTotal). Carcass mode prices whole cabinets.
-function _materialRoundingTopUps(locked){
+function _materialRoundingTopUps(locked,fq){
   var res={total:0,outTotal:0,rows:[]};
   if(qFabMode!=='bom'&&qFabMode!=='services') return res;
-  if(locked&&!qMatRoundOn) return res;   // issued before rounding existed: keep it as issued
-  if(!locked) qMatRoundOn=true;
+  var _on=fq?fqMatRoundOn:qMatRoundOn;
+  if(locked&&!_on) return res;   // issued before rounding existed: keep it as issued
+  if(!locked){ if(fq) fqMatRoundOn=true; else qMatRoundOn=true; }
   var chargeMH=_chargeMatHw(), kinds={}, order=[];
   function add(cat,r,mult,isOut){
     var n=String((r&&r.name)||'').trim(); if(!n) return;
@@ -27214,7 +27219,7 @@ function captureQuotationSnapshot(){
     outMarkup:qOutMarkup,outContingency:qOutContingency,outBuffer:qOutBuffer,
     vatApproved:qVatApproved,discApproved:qDiscApproved,discPct:qDiscPct,discScope:JSON.parse(JSON.stringify(qDiscScope)),premApproved:qPremApproved,
     locked:qLocked,saved:qSaved,sentStatus:qSentStatus,sentAt:qSentAt,
-    projectSize:qProjectSize, matRoundOn:!!qMatRoundOn,
+    projectSize:qProjectSize, matRoundOn:!!qMatRoundOn, fqMatRoundOn:!!fqMatRoundOn,
     instWorkers:qInstWorkers,instDays:qInstDays,
     instRegion:qInstRegion,
     mobTransport:qMobTransport?JSON.parse(JSON.stringify(qMobTransport)):null,
@@ -27258,7 +27263,7 @@ function restoreQuotationSnapshot(snap){
   if(snap.locked!==undefined){qLocked=snap.locked;qSaved=snap.saved||false;qSentStatus=snap.sentStatus||'';qSentAt=snap.sentAt||'';}
   if(snap.initLockedAt!==undefined){qInitLockedAt=snap.initLockedAt||'';qInitApprovedAt=snap.initApprovedAt||'';fqLockedAt=snap.finalLockedAt||'';qClosedAt=snap.closedAt||'';}
   if(snap.fqStarted!==undefined) fqStarted=!!snap.fqStarted;
-  qProjectSize=snap.projectSize||0; qMatRoundOn=!!snap.matRoundOn;   // per option: an option issued before rounding stays as issued
+  qProjectSize=snap.projectSize||0; qMatRoundOn=!!snap.matRoundOn; fqMatRoundOn=(snap.fqMatRoundOn!==undefined)?!!snap.fqMatRoundOn:!!snap.matRoundOn;   // per option: an option issued before rounding stays as issued
   qInstWorkers=snap.instWorkers||0; qInstDays=snap.instDays||0;
   qInstRegion=snap.instRegion||'z1'; if(qInstRegion==='metro')qInstRegion='z1'; if(qInstRegion==='outside')qInstRegion='z2';
   qInstRegionManual=!!(snap.instRegion); // treat saved zone as manual (user explicitly set it at some point)
@@ -31151,7 +31156,7 @@ function _recalcFQCore() {
     // what Stage 2 actually quotes rather than what Stage 1 did.
     _minCh=_minChargeTopUps(); fabBase+=_minCh.total;
     // Same rule as Stage 1, on Stage 2's own scope.
-    _matRnd=_materialRoundingTopUps(!!fqLocked); fabBase+=_matRnd.total+_matRnd.outTotal;
+    _matRnd=_materialRoundingTopUps(!!fqLocked,true); fabBase+=_matRnd.total+_matRnd.outTotal;
   }
   var outsourceBase=0;
   if(fqFabBasis!=='cutting') for(var _oa=0;_oa<qAreas.length;_oa++) outsourceBase+=getAreaOutsourceSubtotal(_oa);
@@ -41098,7 +41103,7 @@ function getFullQuotationState(){
     siteVisit:JSON.parse(JSON.stringify(qSiteVisit)),
     fabCont:JSON.parse(JSON.stringify(qFabCont||{pct:null,mode:'line'})),
     lockedRates:qLockedRates?JSON.parse(JSON.stringify(qLockedRates)):null,
-    projectSize:qProjectSize, matRoundOn:!!qMatRoundOn,
+    projectSize:qProjectSize, matRoundOn:!!qMatRoundOn, fqMatRoundOn:!!fqMatRoundOn,
     // Neither of these was persisted before. revisedFrom drives the "Revised from:"
     // line on the printout, so it was silently lost whenever a quotation was
     // reopened; revisionPending is the unlock-owes-a-revision flag, which has to
@@ -41505,7 +41510,7 @@ function restoreFullQuotationState(state){
   qLockedRates=state.lockedRates?JSON.parse(JSON.stringify(state.lockedRates)):null;
   _renderFrozenRatePill();
   _fabContLast=qFabCont.pct; syncFabContUI();
-  qProjectSize=state.projectSize||0; qMatRoundOn=!!state.matRoundOn;
+  qProjectSize=state.projectSize||0; qMatRoundOn=!!state.matRoundOn; fqMatRoundOn=(state.fqMatRoundOn!==undefined)?!!state.fqMatRoundOn:!!state.matRoundOn;
   qRevisedFrom=state.revisedFrom||'';
   qAdditionalFrom=state.additionalFrom||'';
   qRevisionPending=!!state.revisionPending;
