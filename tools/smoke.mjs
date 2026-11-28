@@ -6909,6 +6909,12 @@ const PROFILES = {
         } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
         return res;
       }, true);
+      check('The top-bar tabs can always shrink, so no page is wider than the window', () => {
+        const nav = document.querySelector('.topbar>div:first-child'); if (!nav) return 'missing';
+        const cs = getComputedStyle(nav);
+        const grid = getComputedStyle(document.getElementById('dash-grid') || document.body).gridTemplateColumns || '';
+        return { minW: cs.minWidth, scroll: cs.overflowX, dashMin: !/repeat\(12, 1fr\)/.test(document.querySelector('style') ? [...document.styleSheets].map(s => { try { return [...s.cssRules].map(r => r.cssText).join(''); } catch (e) { return ''; } }).join('') : '') };
+      }, { minW: '0px', scroll: 'auto', dashMin: true });
       check('Profile photos get a holiday frame during an occasion and none outside one', () => {
         const w = window;
         if (!w.HolidayTheme || typeof w.HolidayTheme.frame !== 'function' || typeof w._holFrame !== 'function') return 'missing';
