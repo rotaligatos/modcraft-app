@@ -13983,3 +13983,12 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
 - Settings → Lami → "AI daily limits" (Admin/Director only, `_renderAiLimits` / `_saveAiLimits`): the two limits,
   and who used how many questions/tokens today. Change is logged. Tested by impersonation: Admin past the limit OK,
   Staff refused at the limit, Staff can't change limits.
+
+### Same session — live Messages and Orders (migration `realtime_messages_pending_orders`)
+- `messages` and `pending_orders` added to `supabase_realtime`. Generic `_tblLiveStart(table, onChange, dropCols)`,
+  `_tblLivePatch`, `_tblLiveFresh` (same pattern as approvals). The 45 s timer body is now
+  `_pollMessagesNow()` / `_pollOrdersNow()`; while live, `supaGetMessages` / `supaGetPendingOrders` return the kept
+  copy and do a real read only every `TBL_LIVE_FULL_MS` (5 min). Orders drop `raw` from pushed rows.
+- `supaGetOrderCutListTotals(orderIds)` looks each order up once per session (`_cutTotKnown`) instead of reading the
+  whole `order_cutting_lists` table on every 45 s check.
+- Audit item "polls re-download whole tables" is DONE for approvals, messages and orders. Not yet seen live with two users.

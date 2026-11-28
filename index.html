@@ -20225,7 +20225,9 @@ function supaGetPendingOrders(){
   if(!supaReady()) return Promise.resolve(null);
   try{
     // Every column except `raw` (the untouched Wufoo POST, 89% of the table) - nothing reads it back.
+    if(_tblLiveFresh('pending_orders')&&_supaTblCache['pending_orders'].rows.length) return Promise.resolve(_supaTblCache['pending_orders'].rows);
     return _supaCachedSelect('pending_orders',PENDING_ORDER_COLS).then(function(r){
+      if(!r.error&&_tblLive.pending_orders) _tblLive.pending_orders.fullAt=Date.now();
       if(r.error) return null;
       if(!r.data||!r.data.length) return null;
       return r.data;
@@ -20235,14 +20237,22 @@ function supaGetPendingOrders(){
 // — The website's cutting list lives in its own table, one row per order. Totals are
 //   cheap and drive the card summary, so they ride along with the queue; the panel /
 //   HPL / hardware arrays are only fetched when someone actually opens the list. —
-function supaGetOrderCutListTotals(){
+// Totals never change after an order is filed, so each order is looked up once per session
+// (2026-11-28) — this ran a full read of the table on every 45-second check.
+var _cutTotKnown={};   // order_id -> totals (or null = looked up, has none)
+function supaGetOrderCutListTotals(orderIds){
   if(!supaReady()) return Promise.resolve(null);
+  var ids=(orderIds||[]).map(String).filter(function(id){ return id&&!(id in _cutTotKnown); });
+  var known=function(){ return Object.keys(_cutTotKnown).filter(function(k){ return _cutTotKnown[k]; }).map(function(k){ return {order_id:k,totals:_cutTotKnown[k]}; }); };
+  if(!ids.length) return Promise.resolve(known());
   try{
-    return supa.from('order_cutting_lists').select('order_id,totals').then(function(r){
-      if(r.error||!r.data) return null;
-      return r.data;
-    }).catch(function(){ return null; });
-  }catch(e){ return Promise.resolve(null); }
+    return supa.from('order_cutting_lists').select('order_id,totals').in('order_id',ids.slice(0,300)).then(function(r){
+      if(r.error||!r.data) return known();
+      ids.slice(0,300).forEach(function(id){ _cutTotKnown[id]=null; });
+      r.data.forEach(function(x){ _cutTotKnown[String(x.order_id)]=x.totals||null; });
+      return known();
+    }).catch(function(){ return known(); });
+  }catch(e){ return Promise.resolve(known()); }
 }
 function supaGetOrderCutList(orderId){
   if(!supaReady()) return Promise.resolve(null);
@@ -20315,7 +20325,7 @@ function gLoadPendingOrders(cb) {
       _updateOrdersBadge();
       // Card summary for cutting-list orders — one extra query, totals only. The card
       // has always had a "attached but not loaded yet" branch; nothing ever filled it.
-      supaGetOrderCutListTotals().then(function(tot){
+      supaGetOrderCutListTotals(pendingOrders.concat(testOrders).map(function(o){ return o.id; })).then(function(tot){
         if(tot&&tot.length){
           var byId={};
           for(var t=0;t<tot.length;t++) byId[tot[t].order_id]=tot[t].totals||null;
@@ -33552,10 +33562,61 @@ function supaGetApprovalRequests(){
     }).catch(function(){ return null; });
   }catch(e){ return Promise.resolve(null); }
 }
+// ── Live updates for messages and the order queue (2026-11-28) ──────────────────────────
+// Same pattern as approvals (_apprLive): the database pushes each changed row, it is patched into
+// the kept copy, and the usual refresh runs on it. While live, the full read happens only as a
+// backup every TBL_LIVE_FULL_MS; if the link drops, the 45-second check works as before.
+var TBL_LIVE_FULL_MS=5*60*1000;
+var _tblLive={};   // table -> {on, starting, fullAt, timer}
+function _tblLivePatch(table,ev,dropCols){
+  var c=_supaTblCache[table];
+  if(!c||!Array.isArray(c.rows)) return false;
+  if(ev.eventType==='DELETE'){
+    var id=ev.old&&ev.old.id; if(!id) return false;
+    c.rows=c.rows.filter(function(r){ return r.id!==id; });
+  } else if(ev.new&&ev.new.id){
+    var row=Object.assign({},ev.new); (dropCols||[]).forEach(function(k){ delete row[k]; });
+    var k=-1; for(var i=0;i<c.rows.length;i++){ if(c.rows[i].id===row.id){ k=i; break; } }
+    if(k>=0) c.rows[k]=row; else c.rows.push(row);
+  } else return false;
+  c.fp=null;
+  return true;
+}
+function _tblLiveFresh(table){
+  var L=_tblLive[table], c=_supaTblCache[table];
+  return !!(L&&L.on&&c&&Array.isArray(c.rows)&&L.fullAt&&Date.now()-L.fullAt<TBL_LIVE_FULL_MS);
+}
+function _tblLiveStart(table,onChange,dropCols,tries){
+  tries=tries||0;
+  var L=_tblLive[table]=_tblLive[table]||{on:false,starting:false,fullAt:0,timer:null};
+  if(window._TRN||L.on||L.starting) return;
+  if(typeof supaReady!=='function'||!supaReady()||!supa||typeof supa.channel!=='function'){
+    if(tries<40) setTimeout(function(){ _tblLiveStart(table,onChange,dropCols,tries+1); },3000);
+    return;
+  }
+  L.starting=true;
+  try{
+    supa.channel('mc-live-'+table)
+      .on('postgres_changes',{event:'*',schema:'public',table:table},function(ev){
+        _tblLivePatch(table,ev,dropCols);
+        clearTimeout(L.timer);
+        L.timer=setTimeout(function(){ try{ onChange(); }catch(e){ console.warn('[live] '+table+' refresh failed',e); } },400);
+      })
+      .subscribe(function(status){
+        if(status==='SUBSCRIBED'){ L.on=true; L.starting=false; L.fullAt=0; console.log('[live] '+table+' on'); try{ onChange(); }catch(e){} }
+        else if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'||status==='CLOSED'){
+          if(L.on) console.warn('[live] '+table+' off ('+status+') — back to the 45 s check');
+          L.on=false; L.starting=false;
+        }
+      });
+  }catch(e){ L.starting=false; console.warn('[live] '+table+' could not start',e); }
+}
 function supaGetMessages(){
   if(!supaReady()) return Promise.resolve(null);
+  if(_tblLiveFresh('messages')) return Promise.resolve(_supaTblCache['messages'].rows);
   try{
     return _supaCachedSelect('messages','*').then(function(r){
+      if(!r.error&&_tblLive.messages) _tblLive.messages.fullAt=Date.now();
       if(r.error) return null;
       return r.data||[];
     }).catch(function(){ return null; });
@@ -34591,8 +34652,8 @@ function gShowApp(){
     });
   });
   if(window._msgPollTimer) clearInterval(window._msgPollTimer);
-  window._msgPollTimer=setInterval(function(){
-    if(!gToken||gSessionExpired||document.hidden) return;   // skip polling when tab not visible
+  window._pollMessagesNow=function(){
+    if(!gToken||gSessionExpired) return;
     gLoadMessages(function(){
       var me=((gUser&&gUser.email)||'').toLowerCase();
       messagesData.forEach(function(m){
@@ -34604,12 +34665,21 @@ function gShowApp(){
       _updateMsgBadge();
       var p=el('msg-panel'); if(p&&p.style.display==='block') renderMsgPanel();
     });
+  };
+  window._pollOrdersNow=function(){
+    if(!gToken||gSessionExpired) return;
     // Keep the Orders badge live; re-render the Orders page if it's the active one
     gLoadPendingOrders(function(){
       _updateOrdersBadge();
       var op=el('page-orders'); if(op&&op.classList.contains('active')) renderOrders();
     });
+  };
+  window._msgPollTimer=setInterval(function(){
+    if(!gToken||gSessionExpired||document.hidden) return;   // skip polling when tab not visible
+    _pollMessagesNow(); _pollOrdersNow();   // no network while the live links are up (kept copy)
   }, 45000); // every 45 seconds
+  _tblLiveStart('messages',function(){ _pollMessagesNow(); });
+  _tblLiveStart('pending_orders',function(){ _pollOrdersNow(); },['raw']);
 
   if(!_gPassRestored) _showFullscreenPrompt();
   // After the fullscreen prompt so the two never stack. sheetUsers is populated by gCheckRole

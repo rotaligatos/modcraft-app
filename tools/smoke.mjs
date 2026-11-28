@@ -7760,6 +7760,37 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 live messages + orders; cutting-list totals looked up once. */
+      if (typeof window._tblLivePatch === 'function')
+        check('Live messages/orders: a pushed row is patched in (raw Wufoo POST dropped), the kept copy is used while live', () => {
+          const w = window, keep = w._supaTblCache.pending_orders, keepL = w._tblLive.pending_orders;
+          try {
+            w._supaTblCache.pending_orders = { fp: 'x', cols: 'c', rows: [{ id: 'o1', status: 'Pending' }] };
+            w._tblLivePatch('pending_orders', { eventType: 'UPDATE', new: { id: 'o1', status: 'Done', raw: { big: 1 } } }, ['raw']);
+            w._tblLivePatch('pending_orders', { eventType: 'INSERT', new: { id: 'o2', status: 'Pending', raw: {} } }, ['raw']);
+            const rows = w._supaTblCache.pending_orders.rows;
+            w._tblLive.pending_orders = { on: true, fullAt: Date.now() };
+            const fresh = w._tblLiveFresh('pending_orders');
+            w._tblLive.pending_orders = { on: false, fullAt: Date.now() };
+            const offNotFresh = !w._tblLiveFresh('pending_orders');
+            return { rows: rows.map(r => r.id + ':' + r.status + ('raw' in r ? ':RAW' : '')).join(','), fresh, offNotFresh };
+          } finally { w._supaTblCache.pending_orders = keep; w._tblLive.pending_orders = keepL; }
+        }, { rows: 'o1:Done,o2:Pending', fresh: true, offNotFresh: true });
+      if (typeof window.supaGetOrderCutListTotals === 'function' && window.supaGetOrderCutListTotals.length === 1) {
+        const ct = await (async () => {
+          const w = window, keep = { s: w.supa, r: w.supaReady, k: w._cutTotKnown };
+          const asked = [];
+          try {
+            w.supaReady = () => true; w._cutTotKnown = {};
+            w.supa = { from: () => ({ select: () => ({ in: (c, ids) => { asked.push(ids.join(',')); return Promise.resolve({ data: ids.includes('a') ? [{ order_id: 'a', totals: { pieces: 3 } }] : [] }); } }) }) };
+            const r1 = await w.supaGetOrderCutListTotals(['a', 'b']);
+            const r2 = await w.supaGetOrderCutListTotals(['a', 'b']);
+            const r3 = await w.supaGetOrderCutListTotals(['a', 'b', 'c']);
+            return { asked: asked.join(' | '), r1: r1.length, r2: r2.length, r3: r3.length };
+          } finally { w.supa = keep.s; w.supaReady = keep.r; w._cutTotKnown = keep.k; }
+        })().catch(e => ({ err: String(e) }));
+        check('Cutting-list totals: each order looked up once, not the whole table every 45 s', () => ct, { asked: 'a,b | c', r1: 1, r2: 1, r3: 1 });
+      }
       /* 2026-11-28 AI daily limits in Settings → Lami (Admin/Director). */
       if (typeof window._renderAiLimits === 'function')
         check('Settings → Lami shows AI limits to Admin/Director only, saved through ai_set_limits', () => {
