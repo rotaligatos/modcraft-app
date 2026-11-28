@@ -7760,6 +7760,75 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 audit fixes (least-risky set). */
+      if (typeof window._renderOrderQueueCard === 'function')
+        check('Order queue card: a Cancelled order is settled, not counted as waiting or late', () => {
+          const src = window._renderOrderQueueCard.toString();
+          return { cancelledIsClosed: /st==='Cancelled'/.test(src) };
+        }, { cancelledIsClosed: true });
+      if (typeof window.renderDirectoryTable === 'function')
+        check('Project List: no New Option button on a voided or declined quotation', () => {
+          const src = window.renderDirectoryTable.toString();
+          return { voided: /dispSt==='Voided'/.test(src), declined: /dispSt==='Declined'/.test(src) };
+        }, { voided: true, declined: true });
+      if (typeof window._loadProfiles === 'function')
+        check('Profile photos: the 10-minute refresh skips a tab nobody is looking at', () => {
+          return { skipsHidden: /setInterval\(function\(\)\{\s*if\(document\.hidden\)\s*return;/.test(window._loadProfiles.toString()) };
+        }, { skipsHidden: true });
+      if (typeof window._lamiSystemBlocks === 'function')
+        check('Lami: the fixed instructions are sent as a cached block, the text is unchanged', () => {
+          const w = window, keepU = w.gUser;
+          w.gUser = w.gUser || { name: 'Test Person', email: 't@x' };
+          let sys = '';
+          try { sys = w._chipBuildSystemPrompt(); } finally { w.gUser = keepU; }
+          const b = w._lamiSystemBlocks(sys);
+          const arr = Array.isArray(b);
+          return { arr, two: arr && b.length === 2, cached: arr && !!b[0].cache_control && !b[1].cache_control,
+                   sameText: arr && (b[0].text + b[1].text) === sys, restStartsAtUser: arr && b[1].text.indexOf('User: **') === 0,
+                   fallback: w._lamiSystemBlocks('short text') === 'short text' };
+        }, { arr: true, two: true, cached: true, sameText: true, restStartsAtUser: true, fallback: true });
+      if (typeof window._saveServicesToPriceDb === 'function') {
+        const svc = await (async () => {
+          const w = window, keep = { tok: w.gToken, S: w.SERVICES, db: w.dbServices, get: w.priceDbGet, clr: w.priceDbClear, upd: w.priceDbUpdate, rep: w.supaReplaceTable };
+          let clears = 0, updates = 0, reps = 0, sheet = null;
+          try {
+            w.gToken = 'x';
+            w.SERVICES = [{ name: 'Cutting', unit: 'lm', price: 35 }, { name: 'Boring 35mm (Hinges)', unit: 'hole', price: 10 }];
+            w.dbServices = w.SERVICES.map(s => ({ name: s.name, unit: s.unit, price: s.price }));
+            w.priceDbGet = () => Promise.resolve({ values: sheet });
+            w.priceDbClear = () => { clears++; return Promise.resolve({}); };
+            w.priceDbUpdate = () => { updates++; return Promise.resolve({}); };
+            w.supaReplaceTable = () => { reps++; return Promise.resolve(true); };
+            sheet = [['Name', 'Unit', 'Price'], ['Cutting', 'lm', 35], ['Boring 35mm (Hinges)', 'hole', 10]];
+            await w._saveServicesToPriceDb();
+            const same = { clears, updates, reps };
+            clears = updates = reps = 0;
+            sheet = [['Name', 'Unit', 'Price'], ['Cutting', 'lm', 30], ['Boring 35mm (Hinges)', 'hole', 10]];
+            await w._saveServicesToPriceDb();
+            const priced = { clears, updates };
+            clears = updates = 0;
+            sheet = [['Name', 'Unit', 'Price'], ['Cutting', 'lm', 35]];
+            await w._saveServicesToPriceDb();
+            const shorter = { clears, updates };
+            clears = updates = 0;
+            sheet = [['Name', 'Unit', 'Price', 'Note'], ['Cutting', 'lm', 35, 'x'], ['Boring 35mm (Hinges)', 'hole', 10]];
+            await w._saveServicesToPriceDb();
+            const extraCol = { clears, updates };
+            clears = updates = 0;
+            w.priceDbGet = () => Promise.reject(new Error('offline'));
+            await w._saveServicesToPriceDb();
+            const readFailed = { clears, updates };
+            return { same, priced, shorter, extraCol, readFailed };
+          } finally {
+            w.gToken = keep.tok; w.SERVICES = keep.S; w.dbServices = keep.db; w.priceDbGet = keep.get;
+            w.priceDbClear = keep.clr; w.priceDbUpdate = keep.upd; w.supaReplaceTable = keep.rep;
+          }
+        })().catch(e => ({ err: String(e) }));
+        check('Save settings: the Services sheet is rewritten only when it differs (otherwise every browser re-downloads the price list)',
+          () => svc,
+          { same: { clears: 0, updates: 0, reps: 1 }, priced: { clears: 1, updates: 1 }, shorter: { clears: 1, updates: 1 },
+            extraCol: { clears: 1, updates: 1 }, readFailed: { clears: 1, updates: 1 } });
+      }
       return out;
     }
   },

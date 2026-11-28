@@ -15473,7 +15473,8 @@ function _renderOrderQueueCard(teamCo, allQuots, useDashScope){
     var st=o.status||'Pending';
     // Cancelled and Archived are settled, not waiting — they would only inflate the
     // backlog. Counted so their absence is visible rather than assumed.
-    if(st==='Declined'||st==='Archived'){ closed++; return; }
+    // ('Cancelled' is the order status; 'Declined' kept for safety, it is never written.)
+    if(st==='Cancelled'||st==='Declined'||st==='Archived'){ closed++; return; }
 
     if(st==='Pending') pending++;
     else if(st==='In Progress') inprog++;
@@ -20401,7 +20402,8 @@ function _loadProfiles(tries){
     PROFILES=next; _profilesSaveLocal();
     if(changed) _profilesRefreshUI();
   });
-  if(!_profilesTimer) _profilesTimer=setInterval(function(){ _loadProfiles(20); },10*60*1000);
+  // Photos are up to ~70 KB each, so a tab nobody is looking at does not re-fetch them (2026-11-28).
+  if(!_profilesTimer) _profilesTimer=setInterval(function(){ if(document.hidden) return; _loadProfiles(20); },10*60*1000);
 }
 
 // The bigger photo (name pill in the top bar, profile tile on the Dashboard) is a big visual
@@ -29182,8 +29184,9 @@ function renderDirectoryTable(){
   var h="";
   for(var i=0;i<list.length;i++){
     var p=list[i];
-    var isClosed=(p.status==='Closed');
     var dispSt=p.status==='On-going'?'On-going':_displayStatus(p);
+    // A voided or declined quotation takes no new options ('Closed' was retired long ago).
+    var isClosed=(dispSt==='Voided'||dispSt==='Declined'||p.status==='Closed');
     var sc=dispSt==='On-going'?'amber':(_STATUS_PILL_COLOR[dispSt]||'muted');
     var fol=qFollowed[p.id];
     var isCurrentQuot=(p.id===(qBaseSerial||qSerial)||p.id===qSerial);
@@ -39652,8 +39655,31 @@ function _saveServicesToPriceDb(){
     return Promise.resolve();
   }
   var rows=[['Name','Unit','Price']].concat(SERVICES.map(function(s){return [s.name,s.unit,s.price];}));
-  return priceDbClear('Services!A:Z')
-    .then(function(){ return priceDbUpdate('Services!A1',rows); })
+  // 2026-11-28: rewrite the Services SHEET only when it actually differs. Rewriting it on every
+  // Save settings click changed the spreadsheet's modified time, which made every browser decide
+  // the price list was stale, re-mirror all 153k materials and download them again. The sheet is
+  // read first (≈60 rows) and compared exactly as it would be written; any difference, any extra
+  // column, or a failed read means it is written as before. Supabase is always written (it holds
+  // the capacity/cost fields and is small).
+  function _svcCell(v){ return v==null?'':String(v).trim(); }
+  function _svcNum(v){ var n=parseFloat(v); return isNaN(n)?'':String(Math.round(n*10000)/10000); }
+  function _svcSheetSame(vals){
+    if(!vals||vals.length!==rows.length) return false;
+    for(var i=0;i<rows.length;i++){
+      var a=rows[i], b=vals[i]||[];
+      for(var k=3;k<b.length;k++){ if(_svcCell(b[k])!=='') return false; }
+      if(_svcCell(a[0])!==_svcCell(b[0])||_svcCell(a[1])!==_svcCell(b[1])) return false;
+      if(i===0){ if(_svcCell(a[2])!==_svcCell(b[2])) return false; }
+      else if(_svcNum(a[2])!==_svcNum(b[2])) return false;
+    }
+    return true;
+  }
+  return priceDbGet('Services!A:Z')
+    .then(function(d){ return !!(d&&!d.error&&_svcSheetSame(d.values||[])); }, function(){ return false; })
+    .then(function(same){
+      if(same){ console.log('[pricedb] Services sheet unchanged — not rewritten.'); return; }
+      return priceDbClear('Services!A:Z').then(function(){ return priceDbUpdate('Services!A1',rows); });
+    })
     .then(function(){
       dbServices=SERVICES.map(function(s){return {name:s.name,unit:s.unit,price:s.price};});
       supaReplaceTable('price_services',SERVICES.map(function(s){return {
@@ -53064,6 +53090,17 @@ function _lamiClientsContext(){
   return '\n**CLIENT DIRECTORY ('+liveClients.length+' total, showing up to 60):**\nBusiness|Contact|Segment\n'+lines.join('\n')+'\n';
 }
 
+// Prompt caching (2026-11-28): everything before "User: **" is the same on every message (who
+// Lami is, the app manual, rules), so it is sent as its own block marked for caching. Anthropic
+// then bills it at about a tenth of the normal input price after the first message. The part
+// after it (user, page, open quotation, projects, orders) changes and is sent uncached.
+// The text is identical either way; only how it is billed changes.
+function _lamiSystemBlocks(sys){
+  var at=String(sys||'').indexOf('User: **');
+  if(at<200) return sys;   // marker missing: send as before
+  return [{type:'text',text:sys.slice(0,at),cache_control:{type:'ephemeral'}},
+          {type:'text',text:sys.slice(at)}];
+}
 function _chipBuildSystemPrompt(){
   var pg=document.querySelector('.page.active');
   var pgId=pg?pg.id:'';
@@ -54066,7 +54103,7 @@ function _chipCallAI(userMsg){
       model:'claude-sonnet-4-6',
       max_tokens:maxTok,
       stream:true,
-      system:sys,
+      system:_lamiSystemBlocks(sys),
       messages:chipHistory
     })
   }).then(function(resp){
@@ -54138,7 +54175,7 @@ window.sendChat=function(){
     method:'POST',
     headers:{'content-type':'application/json','x-api-key':prodSettings.claudeKey,
       'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:512,system:_chipBuildSystemPrompt(),messages:chipHistory})
+    body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:512,system:_lamiSystemBlocks(_chipBuildSystemPrompt()),messages:chipHistory})
   }).then(function(r){return r.json();}).then(function(data){
     var reply=(data.content&&data.content[0]&&data.content[0].text)||'Sorry, couldn\'t get a response.';
     chipHistory.push({role:'assistant',content:reply});
