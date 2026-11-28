@@ -6890,6 +6890,16 @@ const PROFILES = {
         try { const got = await _vRun(); out.push({ label: _vLabel, got, want: _vWant, ok: JSON.stringify(got) === JSON.stringify(_vWant) }); }
         catch (e) { out.push({ label: _vLabel, err: String(e).slice(0,120), ok: false }); }
       }
+      check('Final Quotation Save Draft saves the quotation, not only a printout (QT-W00000321)', () => {
+        const w = window;
+        if (typeof w.fqSaveDraft !== 'function') return 'missing';
+        const keep = { g: w.gSaveQuotation, d: w.saveQuotationToDrive, l: w.logActivity, u: w.updateFQLockUI };
+        let saved = null;
+        w.gSaveQuotation = function(o){ saved = o || {}; };
+        w.saveQuotationToDrive = function(){}; w.logActivity = function(){}; w.updateFQLockUI = function(){};
+        try { w.fqSaveDraft(); } finally { w.gSaveQuotation = keep.g; w.saveQuotationToDrive = keep.d; w.logActivity = keep.l; w.updateFQLockUI = keep.u; }
+        return saved ? (saved.checkConflict ? true : 'saved without the conflict check') : 'did not call gSaveQuotation';
+      }, true);
       check('Final Quotation board/tape changes are offered as swaps and rebuild the Job Order with the new materials', () => {
         const w = window;
         if (typeof w._fqMaterialSwaps !== 'function') return 'missing';
