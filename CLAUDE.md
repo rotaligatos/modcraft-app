@@ -13794,3 +13794,13 @@ All live, each with a smoke check.
     first real use with the switch on is untested.
 - Patch-script lesson again: joining an already-CRLF block into a CRLF-converting `rep()` made `\r\r\n`
   (288 lines) — normalise once, check `\r\r` count after every patch.
+- **Company prices, follow-up (same day):** page gained **Carcass prices** (`company_pricing.carcass_prices`),
+  **Installation** (`company_pricing.inst_cost` = {rows:{'labor|Installer':cost…}, contingency, profitMargin,
+  adminDaily, teamsPerDay, cabPerTeamDay}; live preview via `_cpbInstRate` = the real `_instCalc` with globals
+  swapped), and private **Service costs per unit** (`company_costs.item_costs['service|name|unit']`).
+  Hooks: `_pbInst`/`_pbPpic` swapped into `_withFrozenRates` with CF/carcass; `_instCalc` honours
+  `INST_COST.adminDailyOverride`; `_carcassUnitPrice` reads `_pbCarcass()`; `loadCabinetTemplate` lines take
+  `_pbItemPrice`. `_pbFrozen()` makes every company read return null on a locked quotation; the lock captures
+  CWLI's set including `ppic`, so later edits never move an issued price. Switch still OFF, no data entered.
+  **Parked by Rommel ("we will get back on this").** Next when resumed: Phase 4 — Cost Report / Dashboard
+  margin reading `company_costs` for C quotations; first real test with the switch on.
