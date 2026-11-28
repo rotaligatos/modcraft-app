@@ -6909,6 +6909,19 @@ const PROFILES = {
         } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
         return res;
       }, true);
+      check('Lami never says HTML codes, tags, links or file names aloud', () => {
+        const w = window;
+        if (typeof w._chipCleanText !== 'function' || typeof w._chipDecodeEntities !== 'function') return 'missing';
+        const said = [
+          w._chipCleanText('Open &quot;Settings&quot; &amp; Users &rarr; Save.'),
+          w._chipCleanText('See <a href="#" onclick="x()">Open Modcraft in a new tab</a> to use voice.'),
+          w._chipCleanText('The page is index.html at https://rotaligatos.github.io/modcraft-app/ now.'),
+          w._chipCleanText('Go to Settings → Company & DB → Connect now.'),
+          w._chipCleanText('Keep mc_lami_voice_id as it is.')
+        ];
+        const bad = said.filter(t => /&\w+;|quot|amp\b|<|>|href|onclick|html|https|github/i.test(t));
+        return { bad: bad.length, keepsName: said[4].indexOf('mc_lami_voice_id') >= 0, pause: said[3].indexOf('Settings to') < 0 && said[3].indexOf('Settings,') >= 0 };
+      }, { bad: 0, keepsName: true, pause: true });
       check('The Final Quotation has its own fabrication mode; the Initial keeps pricing its BOM cabinets (QT-W00000321)', () => {
         const w = window;
         if (typeof w._splitLegacyFabMode !== 'function') return 'missing';
