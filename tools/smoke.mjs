@@ -7760,6 +7760,41 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 approval authority + delegation window. */
+      if (typeof window._delegationOn === 'function')
+        check('Delegation counts only between its From and Until dates', () => {
+          const t = window._phTodayStr();
+          const d = n => { const x = new Date(t + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+          const on = o => window._delegationOn(Object.assign({ delegateActive: true, delegateTo: 'x@y' }, o));
+          return { open: on({}), inside: on({ delegateFrom: d(-1), delegateUntil: d(1) }), lastDay: on({ delegateUntil: t }),
+                   ended: on({ delegateUntil: d(-1) }), notYet: on({ delegateFrom: d(1) }),
+                   switchedOff: window._delegationOn({ delegateActive: false, delegateTo: 'x@y' }), noPerson: window._delegationOn({ delegateActive: true }) };
+        }, { open: true, inside: true, lastDay: true, ended: false, notYet: false, switchedOff: false, noPerson: false });
+      if (typeof window.parseUserRows === 'function')
+        check('Users sheet: delegation From/Until read from columns AC/AD (dates and Sheets serial numbers)', () => {
+          const row = ['N', 'n@x', 'Manager', 'yes', 'WCL', ''];
+          while (row.length < 28) row.push('');
+          row[14] = 'd@x'; row[15] = 'TRUE'; row.push('2026-12-01', 46030); const row2 = row.slice(); row2[28] = '12/1/2026';
+          const u = window.parseUserRows([['h'], row])[0];
+          return { from: u.delegateFrom, until: u.delegateUntil, slash: window.parseUserRows([['h'], row2])[0].delegateFrom };
+        }, { from: '2026-12-01', until: '2026-01-08', slash: '2026-12-01' });
+      if (typeof window.renderApprovals === 'function')
+        check('Approvals: the Action button follows who may decide (not just being an approver); Admin/Director get Re-assign', () => {
+          const src = window.renderApprovals.toString();
+          return { gated: /_apprWhoMayAct\(n\)\.ok\?/.test(src), reassign: /openReassignRequest\(/.test(src) };
+        }, { gated: true, reassign: true });
+      if (typeof window.saveMyDelegation === 'function')
+        check('My delegation: saved through mc_set_own_delegation and written to Sheet O:P and AC:AD of the person’s own row', () => {
+          const src = window.saveMyDelegation.toString();
+          return { rpc: /mc_set_own_delegation/.test(src), op: /User Roles!O'\+r0\+':P'\+r0/.test(src), acad: /User Roles!AC'\+r0\+':AD'\+r0/.test(src) };
+        }, { rpc: true, op: true, acad: true });
+      if (typeof window.openReassignRequest === 'function')
+        check('Re-assign: only Admin or Director', () => {
+          const w = window, keep = w.currentRole, keepN = w.NOTIFS, keepT = w.showToast; let msg = '';
+          try { w.currentRole = 'Manager'; w.NOTIFS = [{ status: 'pending', type: 'discount' }]; w.showToast = m => { msg = m; };
+                w.openReassignRequest(0); } finally { w.currentRole = keep; w.NOTIFS = keepN; w.showToast = keepT; }
+          return { refused: /Admin or Director/.test(msg) };
+        }, { refused: true });
       /* 2026-11-28 audit fixes (least-risky set). */
       if (typeof window._renderOrderQueueCard === 'function')
         check('Order queue card: a Cancelled order is settled, not counted as waiting or late', () => {
@@ -7937,6 +7972,16 @@ const PROFILES = {
          happen, not a real one. Verified structurally instead, matching this file's own existing,
          deliberate choice for this page's harder-to-fully-drive async functions -- including
          whether enablePush() is actually WIRED to use it, not just present unused. */
+      if (typeof window.render === 'function')
+        check('render: a delegate may act on a decision they cover, never on a signature', () => {
+          const src = window.render.toString();
+          return { delegate: /t!=='signature'&&MY_DELEGATORS\.indexOf\(_to\)>=0/.test(src) };
+        }, { delegate: true });
+      if (typeof window.loadList === 'function')
+        check('loadList: lists requests of people who delegated to you, without their signatures', () => {
+          const src = window.loadList.toString();
+          return { rpc: /app_my_delegators/.test(src), noSig: /x\.req_type!=='signature'/.test(src) };
+        }, { rpc: true, noSig: true });
       if (typeof window._withTimeout === 'function')
         check('_withTimeout: races the real promise against a real timeout and rejects with the step name', () => {
           const src = window._withTimeout.toString();

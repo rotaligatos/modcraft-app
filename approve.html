@@ -594,13 +594,24 @@ function switchAccount(){
 function loadList(){
   el('root').innerHTML='<div class="card"><div class="lbl">Waiting on you</div>'
     +'<div class="sk"></div><div class="sk"></div></div>';
-  supa.from('approval_requests')
-    .select('id,req_type,serial,client_name,company,from_email,note,created_at,payload')
-    .eq('status','pending').ilike('to_email',ME.trim())
-    .order('created_at',{ascending:true}).limit(30)
+  // Also the requests of anyone who has delegated to you today (2026-11-28). Signatures are
+  // never delegated: a signature names the person who signed.
+  var me=ME.trim().toLowerCase();
+  supa.rpc('app_my_delegators').then(function(d){ return (d&&!d.error&&Array.isArray(d.data))?d.data:[]; },function(){ return []; })
+  .then(function(dels){
+    var who=[me].concat((dels||[]).filter(function(e){ return e&&e!==me; }));
+    return supa.from('approval_requests')
+      .select('id,req_type,serial,client_name,company,from_email,to_email,note,created_at,payload')
+      .eq('status','pending').or(who.map(function(e){ return 'to_email.ilike.'+e; }).join(','))
+      .order('created_at',{ascending:true}).limit(30);
+  })
     .then(function(r){
       if(r.error){ fail('Could not load your approvals. '+r.error.message); return; }
-      var rows=r.data||[];
+      var rows=(r.data||[]).filter(function(x){
+        var mine=String(x.to_email||'').trim().toLowerCase()===me;
+        if(!mine) x._forDelegator=x.to_email;
+        return mine||x.req_type!=='signature';
+      });
       var h='<div class="card"><div class="lbl">Waiting on you</div>';
       if(!rows.length){
         h+='<div style="padding:6px 0"><div style="font-size:16px;font-weight:600">Nothing waiting</div>'
@@ -624,6 +635,7 @@ function loadList(){
             +'<div style="font-weight:600;margin-top:8px">'+esc(x.client_name||'—')+'</div>'
             +'<div class="muted">'+esc(x.serial||'')+' · from '+esc((x.payload&&x.payload.from)||x.from_email||'')+'</div>'
             +(x.note?'<div class="muted" style="margin-top:4px">'+esc(x.note)+'</div>':'')
+            +(x._forDelegator?'<div class="muted" style="margin-top:4px">Covering for '+esc(x._forDelegator)+' (delegated to you)</div>':'')
             +'</a>';
         });
       }
@@ -636,6 +648,7 @@ function loadList(){
       wirePushCard();
     });
 }
+var MY_DELEGATORS=[];   // emails this person is covering for today (app_my_delegators)
 function loadRequest(){
   var id=reqIdFromUrl();
   if(!id){ loadList(); return; }
@@ -645,15 +658,17 @@ function loadRequest(){
     if(!REQ){ fail('That request was not found, or it belongs to a company you cannot see.'); return; }
     DEC=(REQ.payload&&REQ.payload.decision)||null;
     COUNTER=(DEC&&DEC.counter&&DEC.counter.length)?DEC.counter:null;
-    render();
-    loadHistory();
+    supa.rpc('app_my_delegators').then(function(d){ MY_DELEGATORS=(d&&!d.error&&Array.isArray(d.data))?d.data:[]; },function(){})
+      .then(function(){ render(); loadHistory(); });
   });
 }
 
 function render(){
   var t=REQ.req_type||'', label=TYPE_LABEL[t]||'Request';
   var pending=(REQ.status==='pending');
-  var mine=(REQ.to_email||'').trim().toLowerCase()===ME.trim().toLowerCase();
+  var _to=(REQ.to_email||'').trim().toLowerCase();
+  // The assigned person, or (for a decision, never a signature) someone covering for them today.
+  var mine=_to===ME.trim().toLowerCase()||(t!=='signature'&&MY_DELEGATORS.indexOf(_to)>=0);
   var h='';
 
   var optBadge=(REQ.payload&&REQ.payload.optionLabel)?(' <span class="pill p-navy">'+esc(REQ.payload.optionLabel)+'</span>'):'';
