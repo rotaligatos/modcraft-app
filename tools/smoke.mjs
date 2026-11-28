@@ -6909,6 +6909,18 @@ const PROFILES = {
         } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
         return res;
       }, true);
+      check('Profile photos get a holiday frame during an occasion and none outside one', () => {
+        const w = window;
+        if (!w.HolidayTheme || typeof w.HolidayTheme.frame !== 'function' || typeof w._holFrame !== 'function') return 'missing';
+        const root = document.documentElement;
+        const xmas = w.HolidayTheme.apply(new Date(2026, 11, 20));
+        const r = { xmas: xmas && xmas.k, attr: root.getAttribute('data-hol-frame'), ring: !!root.style.getPropertyValue('--hol-ring'),
+                    wrapped: /class="hol-frame/.test(w._holFrame('<img>', 40)), keepsSize: /width:40px;height:40px/.test(w._holFrame('<img>', 40)) };
+        w.HolidayTheme.apply(new Date(2026, 6, 15));
+        r.none = root.getAttribute('data-hol-frame');
+        w.HolidayTheme.apply();
+        return r;
+      }, { xmas: 'christmas', attr: 'christmas', ring: true, wrapped: true, keepsSize: true, none: null });
       check('Company price layer: only C-series quotations started after the switch use CWLI prices', () => {
         const w = window;
         if (typeof w._quotPriceBook !== 'function' || typeof w._pbAdjust !== 'function') return 'missing';

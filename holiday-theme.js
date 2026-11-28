@@ -249,8 +249,43 @@
     if(h&&h.tick&&!hidden&&!nowOverride&&now.getMonth()===11&&now.getDate()===31)
       tick=setInterval(function(){ var m=document.getElementById('hol-msg'); if(m&&cur) m.textContent=cur.msg(new Date()); else clearInterval(tick); },1000);
     if(!timer&&!nowOverride) timer=setInterval(function(){ apply(); },10*60*1000);
+    try{ setFrame(h); }catch(e){}
     if(typeof opts.onChange==='function'){ try{ opts.onChange(h); }catch(e){} }
     return h;
+  }
+  // Photo frames (Rommel, 2026-11-28): a ring in the occasion's colours round every profile photo,
+  // with the occasion's emoji on the corner (and a second one on a big photo). An app wraps a photo
+  // with HolidayTheme.frame(html,size); with no occasion, or the theme switched off, the wrapper is
+  // plain and the photo looks exactly as before. The outer size never changes, so nothing reflows.
+  // Follows the person's own switch-off, not the strip's "hide for today".
+  function frameStyle(){
+    if(document.getElementById('hol-frame-style')) return;
+    var css='.hol-frame{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;flex:none;vertical-align:middle;position:relative;box-sizing:border-box}'
+      +'html[data-hol-frame] .hol-frame{background:var(--hol-ring);padding:var(--hol-w)}'
+      +'html[data-hol-frame] .hol-frame>img,html[data-hol-frame] .hol-frame>span,html[data-hol-frame] .hol-frame>div{width:calc(var(--hol-s) - 2*var(--hol-w))!important;height:calc(var(--hol-s) - 2*var(--hol-w))!important;margin:0!important;box-shadow:0 0 0 1.5px rgba(255,255,255,.85)}'
+      +'html[data-hol-frame] .hol-frame::after{content:var(--hol-badge);position:absolute;right:calc(var(--hol-s) * -0.12);top:calc(var(--hol-s) * -0.16);font-size:calc(var(--hol-s) * 0.42);line-height:1;filter:drop-shadow(0 1px 1px rgba(0,0,0,.35));pointer-events:none;transform:rotate(12deg)}'
+      +'html[data-hol-frame] .hol-frame.big::before{content:var(--hol-badge2);position:absolute;left:calc(var(--hol-s) * -0.06);bottom:calc(var(--hol-s) * -0.06);font-size:calc(var(--hol-s) * 0.26);line-height:1;filter:drop-shadow(0 1px 1px rgba(0,0,0,.35));pointer-events:none;z-index:1}'
+      +'html[data-hol-frame] .hol-frame.sm::after{display:none}';
+    var el=document.createElement('style'); el.id='hol-frame-style'; el.textContent=css; (document.head||document.documentElement).appendChild(el);
+  }
+  function setFrame(h){
+    var root=document.documentElement; frameStyle();
+    if(!h){ root.removeAttribute('data-hol-frame'); ['--hol-ring','--hol-badge','--hol-badge2'].forEach(function(v){ root.style.removeProperty(v); }); return; }
+    var dc=DECO[h.k]||{g:[h.ic],lights:[]};
+    var cols=(dc.lights&&dc.lights.length)?dc.lights.slice():(String(h.bg).match(/#[0-9a-fA-F]{3,8}/g)||['#64748b']);
+    var ring=cols.length>1?'conic-gradient('+cols.concat([cols[0]]).join(',')+')':cols[0];
+    var g=dc.g&&dc.g.length?dc.g:[h.ic||''];
+    var b1=h.hat||g[0]||'', b2=g[1]||g[0]||'';
+    var q=function(x){ return '"'+String(x).replace(/["\\]/g,'')+'"'; };
+    root.setAttribute('data-hol-frame',h.k);
+    root.style.setProperty('--hol-ring',ring);
+    root.style.setProperty('--hol-badge',q(b1));
+    root.style.setProperty('--hol-badge2',q(b2));
+  }
+  function frame(html,size){
+    size=+size||24;
+    var w=Math.max(2,Math.round(size*0.06));
+    return '<span class="hol-frame'+(size<22?' sm':'')+(size>=80?' big':'')+'" style="--hol-s:'+size+'px;--hol-w:'+w+'px;width:'+size+'px;height:'+size+'px">'+html+'</span>';
   }
   function hideToday(){
     if(cur) ls(hideKey(cur,new Date()),'1');
@@ -265,7 +300,7 @@
     setTimeout(go,4000); setTimeout(go,15000);
   }
   window.HolidayTheme={
-    mount:mount, apply:apply, hideToday:hideToday, occasionFor:occasionFor, current:function(){ return cur; },
+    mount:mount, apply:apply, hideToday:hideToday, occasionFor:occasionFor, current:function(){ return cur; }, frame:frame,
     isOffForMe:function(){ return ls('mc_holiday_off')==='1'; },
     setForMe:function(on){ ls('mc_holiday_off',on?null:'1'); apply(); }
   };
