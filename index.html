@@ -12326,7 +12326,51 @@ function _requireSavedForRequest(){
   showToast('Save the quotation first — a discount or override request needs a real quotation number to be approved into.');
   return false;
 }
+// ── Counter-offer on the quotation itself (2026-11-28) ─────────────────────────────────
+// Rommel: "whenever I counter, users cannot see my counter." The counter was shown on the quotation
+// only if it happened to be open at the moment the poll noticed — opening it later showed nothing,
+// Stage 2 never showed it, and the Discount button still said "Request", so people raised a NEW
+// request (QT-M00000241: countered 10%->3%, then two fresh 3% requests). Now a countered discount
+// on this quotation is a banner above the form for as long as it is waiting, with Accept/Decline
+// for the person who asked; pressing Request while it waits offers to accept it instead.
+function _counterWaitingIdx(){
+  var base=String(qBaseSerial||qSerial||''); if(!base||!Array.isArray(NOTIFS)) return -1;
+  for(var i=0;i<NOTIFS.length;i++){
+    var n=NOTIFS[i];
+    if(n&&n.type==='discount'&&n.status==='countered'&&_serialRoot(String(n.serial||''))===_serialRoot(base)) return i;
+  }
+  return -1;
+}
+function _renderCounterBanner(){
+  var bar=el('sig-bar'); if(!bar||!bar.parentNode) return;
+  var b=el('counter-banner');
+  var idx=_counterWaitingIdx();
+  if(idx<0){ if(b) b.remove(); return; }
+  var n=NOTIFS[idx], me=((gUser&&gUser.email)||'').toLowerCase(), mine=String(n.fromEmail||'').toLowerCase()===me;
+  if(!b){ b=document.createElement('div'); b.id='counter-banner'; bar.parentNode.insertBefore(b,bar.nextSibling); }
+  b.setAttribute('style','margin:6px 0;padding:9px 12px;border:1px solid var(--amber);background:var(--wash-amber);border-radius:8px;font-size:13px;display:flex;flex-wrap:wrap;gap:8px;align-items:center');
+  b.innerHTML='<i class="ti ti-arrows-exchange" style="color:var(--amber);font-size:18px"></i>'
+    +'<span><b>Counter-offer:</b> '+escHtml(n.by||'The approver')+' offered <b>'+escHtml(String(n.counterDisc||0))+'%</b>'
+    +(n.reqDisc?' instead of the '+escHtml(String(n.reqDisc))+'% requested':'')
+    +(n.optionLabel?' ('+escHtml(n.optionLabel)+')':'')+'. '
+    +(mine?'It is not applied until you accept it.':'Waiting for '+escHtml(n.from||'the requester')+' to accept it.')+'</span>'
+    +(n.actionReason?'<span style="color:var(--text2)">Reason: '+escHtml(n.actionReason)+'</span>':'')
+    +(mine?'<span style="margin-left:auto;display:flex;gap:6px">'
+      +'<button class="btn btn-success" style="font-size:12px" onclick="acceptCounter('+idx+');_renderCounterBanner()"><i class="ti ti-check"></i> Accept '+escHtml(String(n.counterDisc||0))+'%</button>'
+      +'<button class="btn btn-danger" style="font-size:12px" onclick="cancelApprovalRequest(\''+escHtml(n.reqId||'')+'\',\'discount\')"><i class="ti ti-x"></i> Decline</button></span>':'');
+}
+// Pressing "Request" while a counter waits: offer to accept it rather than raising a duplicate.
+function _counterInsteadOfNewRequest(){
+  var idx=_counterWaitingIdx(); if(idx<0) return false;
+  var n=NOTIFS[idx], me=((gUser&&gUser.email)||'').toLowerCase();
+  if(String(n.fromEmail||'').toLowerCase()!==me) return false;
+  _confirm((n.by||'The approver')+' already answered your discount request with a counter-offer of '+(n.counterDisc||0)
+    +'%. Accept '+(n.counterDisc||0)+'% now? (Cancel keeps it waiting \u2014 you can also Decline it on the banner above the quotation.)',
+    function(){ acceptCounter(idx); _renderCounterBanner(); });
+  return true;
+}
 function onDiscRequest() {
+  if(_counterInsteadOfNewRequest()) return;
   modalCtx='s1';
   var d=parseFloat(el("disc-inp").value);
   if(!d||d<=0){alert("Enter a valid discount %."); return;}
@@ -19025,6 +19069,7 @@ function acceptCounter(idx){
       amount:n.amount||0,reqDisc:n.reqDisc||0,counterDisc:n.counterDisc||0,
       cfValues:n.cfValues||null,ctx:n.ctx||'s1',by:byMe,actionDate:new Date().toISOString(),
       optionId:n.optionId||0,optionLabel:n.optionLabel||''};
+    updReq=_apprMergeWithKnown(updReq);   // keep decision/applied/actionReason/orderId (2026-11-28)
     var row=[key,JSON.stringify(updReq),new Date().toISOString()];
     sheetsGet('Settings!A:A').then(function(d){
       var vals=(d&&d.values)||[]; var rowIdx=-1;
@@ -19174,7 +19219,7 @@ function _mergeApprovalReqsIntoNotifs(reqs){
         // lost on every reload. sigSlot decides which signature the request is for.
         sigSlot:_apprSigSlot(req),notedRequired:req.notedRequired,
         decision:req.decision||null,applied:!!req.applied,orderId:req.orderId||'',
-        optionId:req.optionId||0,optionLabel:req.optionLabel||'',
+        optionId:req.optionId||0,optionLabel:req.optionLabel||'',actionReason:req.actionReason||'',
         ctx:req.ctx||'s1',by:req.by||''});
     }
   }
@@ -20028,6 +20073,9 @@ function doApprovalAction(idx, action) {
       cfValues:n.cfValues||null,orderId:n.orderId||'',
       ctx:n.ctx||'s1',by:byName,actionDate:new Date().toISOString(),overrodeRouting:!!_may.override,
       actionReason:actionReason,optionId:n.optionId||0,optionLabel:n.optionLabel||''};
+    // Through the merge (2026-11-28): this record replaces the stored one wholesale, and the fields
+    // not named above (decision, applied, sigSlot, notedRequired) were being written back as empty.
+    updReq=_apprMergeWithKnown(updReq);
     var row=[key,JSON.stringify(updReq),new Date().toISOString()];
     sheetsGet('Settings!A:A').then(function(d){
       var vals=(d&&d.values)||[]; var rowIdx=-1;
@@ -22984,8 +23032,12 @@ function deleteOrder(orderId){
   pendingOrders.splice(idx,1);
   _updateOrdersBadge();
   renderOrders();
-  if(gToken) sheetsDeleteRowByKey('Pending Orders',orderId,function(){});
-  try{ supaDeleteOrder(orderId); }catch(e){}
+  // The database copy goes only once the Sheet agreed (or never had the row).
+  if(gToken) sheetsDeleteRowByKey('Pending Orders',orderId,function(ok,msg){
+    if(ok||msg==='Row not found'){ try{ supaDeleteOrder(orderId); }catch(e){} }
+    else { showToast('\u26a0 Order #'+orderId+' was NOT deleted from the Sheet ('+msg+'). Refresh and try again.'); }
+  });
+  else { try{ supaDeleteOrder(orderId); }catch(e){} }
   logActivity('Order #'+orderId+' deleted', _orderLogSerial(orderId));
   showToast('Order #'+orderId+' deleted');
 }
@@ -24180,6 +24232,7 @@ function _renderSigTopPill(){
     +(pend?'':'<button class="btn btn-amber" data-lock-exempt="1" onclick="requestSignatures()" style="font-size:11px;padding:3px 9px"><i class="ti ti-send"></i>Request signature</button>');
 }
 function renderSignatureBar(){
+  try{ setTimeout(_renderCounterBanner,0); }catch(e){}
   _renderSigTopPill();
   var w=el('sig-bar'); if(!w) return;
   var locked=(qStage===2?fqLocked:qLocked);
@@ -29505,26 +29558,43 @@ function openQuotationFromDir(quotId,optId){
   });
 }
 // ── Admin delete helpers ───────────────────────────────────────────────────
+// Deletes every row whose column A is keyVal (2026-11-28). It used to report success even when
+// Google refused the delete, call back twice when the tab was missing, delete only the FIRST match
+// (the live row when a duplicate exists), and skip the Deleted Rows backup. Now each row is copied
+// to Deleted Rows first (_sheetsDeleteRowsByIndex: no copy, no delete) and the answer is the truth:
+//   callback(true)                 removed
+//   callback(false,'Row not found')  nothing there to remove (safe to remove elsewhere)
+//   callback(false,<reason>)       NOT removed — callers must not delete other copies
 function sheetsDeleteRowByKey(sheetName, keyVal, callback){
-  var keyStr=String(keyVal);
+  var keyStr=String(keyVal), answered=false;
+  function cb(ok,msg){ if(answered) return; answered=true; if(callback) callback(ok,msg); }
   sheetsGet(sheetName+'!A:A').then(function(d){
-    var vals=d.values||[];
-    var rowIdx=-1;
-    for(var i=1;i<vals.length;i++){if(String(vals[i][0])===keyStr){rowIdx=i;break;}}
-    if(rowIdx<0){if(callback)callback(false,'Row not found');return Promise.resolve();}
-    return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+'?fields=sheets.properties',{}).then(function(meta){
-      var sheets=meta.sheets||[];
-      var sheetId=null;
-      for(var j=0;j<sheets.length;j++){if(sheets[j].properties.title===sheetName){sheetId=sheets[j].properties.sheetId;break;}}
-      if(sheetId===null){if(callback)callback(false,'Sheet not found');return;}
-      return gApiFetch('https://sheets.googleapis.com/v4/spreadsheets/'+SHEETS_ID+':batchUpdate',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({requests:[{deleteDimension:{range:{sheetId:sheetId,dimension:'ROWS',startIndex:rowIdx,endIndex:rowIdx+1}}}]})
-      });
+    if(!d||d.error){ cb(false,'could not read '+sheetName); return; }
+    var vals=d.values||[], rows=[];
+    for(var i=1;i<vals.length;i++){ if(String(vals[i][0])===keyStr) rows.push(i+1); }
+    if(!rows.length){ cb(false,'Row not found'); return; }
+    var who=(gUser&&(gUser.name||gUser.email))||'';
+    return _sheetsDeleteRowsByIndex(sheetName,rows,'Deleted '+keyStr+(who?' by '+who:'')).then(function(j){
+      if(j&&j.error) cb(false,(j.error.message||'Google Sheets refused the delete'));
+      else cb(true);
     });
-  }).then(function(){if(callback)callback(true);})
-    .catch(function(e){console.warn('sheetsDeleteRowByKey failed:',e);if(callback)callback(false,e&&e.message);});
+  }).catch(function(e){ console.warn('sheetsDeleteRowByKey failed:',e); cb(false,(e&&e.message)||'delete failed'); });
+}
+// A quotation's rows in both tabs, then the database copy — the database is only touched once the
+// Sheet has agreed, so a refused delete can no longer leave the two stores disagreeing.
+function _deleteQuotationEverywhere(serial,cb){
+  sheetsDeleteRowByKey('Quotations',serial,function(ok,msg){
+    if(!ok&&msg!=='Row not found'){
+      showToast('\u26a0 '+serial+' was NOT deleted \u2014 Google Sheets: '+msg+'. Nothing else was removed; try again.');
+      try{ logActivity('Delete of '+serial+' did not go through (Google Sheets: '+msg+'). Nothing was removed.',serial); }catch(e){}
+      if(cb) cb(false); return;
+    }
+    sheetsDeleteRowByKey('Quotation State',serial,function(){
+      try{ supaDeleteQuotation(serial); }catch(e){}
+      _qStateRowCache={};   // row numbers shift after a delete
+      if(cb) cb(true);
+    });
+  });
 }
 // ── Discarding a draft ───────────────────────────────────────────────────────────────────
 // Abandoned quotations were being saved and left to rot in the Project List, because the only
@@ -29589,10 +29659,7 @@ function discardQuotation(){
     var val=(sessionQuotations[serial]&&sessionQuotations[serial].value)||(_pCalc&&_pCalc.grand)||0;
     dirData=(dirData||[]).filter(function(e){return e.id!==serial;});
     delete sessionQuotations[serial];
-    sheetsDeleteRowByKey('Quotations',serial,function(){});
-    sheetsDeleteRowByKey('Quotation State',serial,function(){});
-    try{ supaDeleteQuotation(serial); }catch(e){}
-    _qStateRowCache={};                 // row indices shift after a delete
+    _deleteQuotationEverywhere(serial);
     if(_stageFlags) delete _stageFlags[serial];
     // The quotation goes; the fact that it existed and who removed it does not. The activity log
     // is append-only, so this survives even though the quotation itself does not.
@@ -29772,12 +29839,7 @@ function deleteQuotation(serial){
     dirData=dirData.filter(function(e){return e.id!==serial;});
     delete sessionQuotations[serial];
     renderDirectoryTable();
-    sheetsDeleteRowByKey('Quotations',serial,function(ok){
-      if(!ok) console.warn('Quotations row not found for',serial);
-    });
-    sheetsDeleteRowByKey('Quotation State',serial,function(){});
-    supaDeleteQuotation(serial);   // Sheets alone left it alive in Supabase
-    _qStateRowCache={}; // row indices shift after a delete — invalidate the cache
+    _deleteQuotationEverywhere(serial);   // Sheet first; the database copy only once the Sheet agreed
     // A permanent delete left no trace anywhere — against the rule that everything is recorded
     // and cannot be erased, and the reason the Sheet/Supabase gap could not be explained later.
     logActivity('Quotation DELETED: '+serial+(_gone&&_gone.client?' — '+_gone.client:'')
@@ -29796,10 +29858,10 @@ function deleteClient(id){
     delete clientSelected[id];
     closeModal('ov-client');
     renderClients();
-    supaDeleteClient(id);
     try{ logActivity('Client deleted — '+(c.bizname||c.name)+' (#'+id+')',''); }catch(e){}
-    sheetsDeleteRowByKey('Clients',String(id),function(ok){
-      showToast(ok?'Client deleted':'Client deleted (no Sheets row found)');
+    sheetsDeleteRowByKey('Clients',String(id),function(ok,msg){
+      if(ok||msg==='Row not found'){ supaDeleteClient(id); showToast(ok?'Client deleted':'Client deleted (no Sheets row found)'); }
+      else showToast('\u26a0 Client was NOT deleted from the Sheet ('+msg+'). Refresh and try again.');
     });
   });
 }
@@ -29851,9 +29913,7 @@ function deleteSelectedQuotations(){
     dirData=dirData.filter(function(e){return e.id!==serial;});
     delete sessionQuotations[serial];
     delete dirSelected[serial];
-    sheetsDeleteRowByKey('Quotations',serial,function(){});
-    sheetsDeleteRowByKey('Quotation State',serial,function(){});
-    supaDeleteQuotation(serial);   // same gap as the single delete
+    _deleteQuotationEverywhere(serial);
     logActivity('Quotation DELETED: '+serial+' (bulk delete).');
   });
   _qStateRowCache={}; // row indices shift after deletes — invalidate the cache
@@ -29904,8 +29964,10 @@ function deleteSelectedClients(){
     ids.forEach(function(id){
       liveClients=liveClients.filter(function(x){return x.id!==id;});
       delete clientSelected[id];
-      supaDeleteClient(id);
-      sheetsDeleteRowByKey('Clients',String(id),function(){});
+      sheetsDeleteRowByKey('Clients',String(id),function(ok,msg){
+        if(ok||msg==='Row not found') supaDeleteClient(id);
+        else showToast('\u26a0 A client was NOT deleted from the Sheet ('+msg+'). Refresh and try again.');
+      });
     });
     try{ logActivity('Clients deleted — '+names.join(', '),''); }catch(e){}
     renderClients();
@@ -30799,6 +30861,7 @@ function fqOnDiscInput() {
   var dBtn=el('fq-disc-req-btn'); if(dBtn){dBtn.innerHTML='<i class="ti ti-send"></i>Request';dBtn.className='btn btn-amber';}
 }
 function fqOnDiscRequest() {
+  if(_counterInsteadOfNewRequest()) return;
   modalCtx='fq';
   var d=parseFloat(el('fq-disc-inp')?el('fq-disc-inp').value:0);
   if(!d||d<=0){alert('Enter a valid discount %.'); return;}
@@ -34497,6 +34560,8 @@ function gShowApp(){
           _showCounterBadge(n.type, n);
         }
       }
+      // A counter-offer on the open quotation shows (or clears) on the quotation itself.
+      try{ _renderCounterBanner(); }catch(eCb){}
       // Re-render Approvals page if currently visible
       var ap=el('page-approvals');
       if(ap&&ap.classList.contains('active')) renderApprovals();
@@ -40441,10 +40506,7 @@ function _cleanupPrevSerialRows(currentSerial){
     if(sessionQuotations[old]) delete sessionQuotations[old];
     for(var i=dirData.length-1;i>=0;i--) if(dirData[i].id===old) dirData.splice(i,1);
     delete _qStateRowCache[old];
-    sheetsDeleteRowByKey('Quotations',old,function(){
-      sheetsDeleteRowByKey('Quotation State',old,function(){});
-    });
-    try{ supaDeleteQuotation(old); }catch(e){}
+    _deleteQuotationEverywhere(old);
     logActivity('Removed the superseded Project List entry '+old+' — this quotation is now '+currentSerial+'.');
   });
   // qPrevSerials is deliberately NOT cleared — it is what the "(was QT-W00000061)" note beside the

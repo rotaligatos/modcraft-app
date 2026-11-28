@@ -7760,6 +7760,50 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 bug fixes 3-4 + counter-offer banner. */
+      if (typeof window.sheetsDeleteRowByKey === 'function') {
+        const del = await (async () => {
+          const w = window, keep = { g: w.sheetsGet, d: w._sheetsDeleteRowsByIndex };
+          const run = (vals, delResult) => new Promise(res => {
+            w.sheetsGet = () => Promise.resolve({ values: vals });
+            w._sheetsDeleteRowsByIndex = (sh, rows) => { run.rows = rows; return Promise.resolve(delResult); };
+            const calls = []; w.sheetsDeleteRowByKey('Quotations', 'QT-1', (ok, msg) => { calls.push([ok, msg]); setTimeout(() => res({ calls, rows: run.rows }), 10); });
+          });
+          try {
+            const refused = await run([['h'], ['QT-1'], ['QT-2'], ['QT-1']], { error: { message: 'quota' } });
+            const okRun = await run([['h'], ['QT-1'], ['QT-2'], ['QT-1']], {});
+            const none = await run([['h'], ['QT-2']], {});
+            return { refused: refused.calls, okCalls: okRun.calls, allRows: okRun.rows, none: none.calls };
+          } finally { w.sheetsGet = keep.g; w._sheetsDeleteRowsByIndex = keep.d; }
+        })().catch(e => ({ err: String(e) }));
+        check('Sheet delete: a refused delete is reported as NOT done, every matching row goes via the backed-up path', () => del,
+          { refused: [[false, 'quota']], okCalls: [[true, null]], allRows: [2, 4], none: [[false, 'Row not found']] });
+      }
+      if (typeof window.doApprovalAction === 'function')
+        check('Approving / accepting a counter keeps everything the request carried (goes through _apprMergeWithKnown)', () => {
+          return { approve: /updReq=_apprMergeWithKnown\(updReq\)/.test(window.doApprovalAction.toString()),
+                   accept: /updReq=_apprMergeWithKnown\(updReq\)/.test(window.acceptCounter.toString()) };
+        }, { approve: true, accept: true });
+      if (typeof window._renderCounterBanner === 'function') {
+        const cb = (() => {
+          const w = window, keep = { N: w.NOTIFS, s: w.qSerial, u: w.gUser, b: w.qBaseSerial };
+          try {
+            w.qSerial = 'QT-W00000999'; w.gUser = { email: 'req@x', name: 'Req' };
+            w.NOTIFS = [{ type: 'discount', status: 'countered', serial: 'QT-W00000999', fromEmail: 'req@x', by: 'Rommel', counterDisc: 2, reqDisc: 10, reqId: 'r1' }];
+            w._renderCounterBanner();
+            const b = document.getElementById('counter-banner');
+            const out = { shown: !!b, says: !!b && /offered <b>2%<\/b> instead of the 10%/.test(b.innerHTML), accept: !!b && /acceptCounter\(0\)/.test(b.innerHTML) };
+            w.NOTIFS[0].status = 'accepted'; w._renderCounterBanner();
+            out.clears = !document.getElementById('counter-banner');
+            w.NOTIFS[0].status = 'countered'; w.NOTIFS[0].fromEmail = 'someone@x'; w._renderCounterBanner();
+            const b2 = document.getElementById('counter-banner'); out.othersNoButton = !!b2 && !/acceptCounter/.test(b2.innerHTML);
+            if (b2) b2.remove();
+            return out;
+          } finally { w.NOTIFS = keep.N; w.qSerial = keep.s; w.gUser = keep.u; }
+        })();
+        check('Counter-offer shows on the quotation with Accept for the requester, clears once answered', () => cb,
+          { shown: true, says: true, accept: true, clears: true, othersNoButton: true });
+      }
       /* 2026-11-28 bug fixes: latest open wins; unlock cancels hidden signature requests. */
       if (typeof window.openQuotationFromDir === 'function') {
         const opened = await (async () => {

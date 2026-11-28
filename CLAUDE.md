@@ -13934,3 +13934,20 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
   impersonation: preparer sees 0 rows yet it is cancelled; an uninvolved staff member is refused.
 - Note: `index.html`'s working copy is now plain LF (a `sed -i` converted it); git stores LF anyway. Patch scripts
   must not assume CRLF.
+
+### Same session — bug fixes 3 and 4, and counter-offers shown on the quotation
+- **Sheet delete tells the truth.** `sheetsDeleteRowByKey` now deletes EVERY matching row through
+  `_sheetsDeleteRowsByIndex` (Deleted Rows backup first; no backup, no delete), and calls back once:
+  `(true)` / `(false,'Row not found')` / `(false,reason)`. It used to report success when Google refused, call
+  back twice, delete only the first match and skip the backup. `_deleteQuotationEverywhere(serial)` deletes the
+  Quotations + Quotation State rows and only then the database copy; a refused Sheet delete leaves everything and
+  toasts + logs it. Orders and clients likewise delete the database copy only after the Sheet agreed.
+- **Approve / accept-counter keep the request's details.** `doApprovalAction` and `acceptCounter` pass their
+  hand-built record through `_apprMergeWithKnown` (it was writing decision/applied/sigSlot/notedRequired, and in
+  accept also actionReason/orderId, back as empty). A freshly loaded request now keeps `actionReason`.
+- **Counter-offers are visible on the quotation** (Rommel: "whenever I counter users cannot see my counter").
+  Cause: the counter showed on the quotation only if it was open when the poll noticed; opening it later showed
+  nothing, Stage 2 never did, and "Request" still raised a new request (QT-M00000241: 10%→3% countered, then two
+  fresh 3% requests). Now `_renderCounterBanner()` puts a banner under the signature bar while a discount counter
+  waits (Accept/Decline for the requester, "waiting for …" for others), refreshed with the signature bar and on
+  every poll/live change; `_counterInsteadOfNewRequest()` makes Request offer to accept the waiting counter.
