@@ -14037,3 +14037,13 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
   skipped when unchanged (`_strHash`), at most every 10 min (`STATE_BACKUP_MIN_MS`), written at once
   when lock/send/approval/void changes; a deferred edit is written when the 10 min are up (tab open).
 - Database + Sheet copies are written on every save exactly as before.
+
+### Same session — database housekeeping (migration `tbl_change_stamp`)
+- The "has it changed?" check on approval_requests / pending_orders / messages counted rows through RLS
+  (~70 ms, ~70k calls each — the top DB time). `_supaFingerprint` now calls RPC `tbl_change_stamp(table)`
+  (security definer, staff only via app_is_internal, those 3 tables only, returns count|max(updated_at),
+  ~6 ms); falls back to the old RLS count (`_supaFingerprintRls`) on any error. The real read still uses RLS.
+  Limit: a visibility change with no row change (e.g. new company access) shows after a reload.
+- Unused indexes: all under 1 MB total — left alone (no gain; some needed as tables grow).
+- Leaked-password protection: applies only to email+password accounts; all staff sign in with Google, so it
+  changes nothing today. Optional switch in Supabase → Authentication → Attack protection.
