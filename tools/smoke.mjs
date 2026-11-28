@@ -7760,6 +7760,22 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 bugs 8-9: retry time limit; background save failures are shown and logged. */
+      if (typeof window.gApiFetch === 'function')
+        check('A retry after renewing sign-in gets its own time limit', () => {
+          return { dropsOldSignal: /if\(opts\._timeoutMs\) delete opts\.signal;/.test(window.gApiFetch.toString()) };
+        }, { dropsOldSignal: true });
+      if (typeof window._saveFail === 'function')
+        check('A failed background save warns once a minute and writes a log line', () => {
+          const w = window, keep = { t: w.showToast, l: w.logActivity }, toasts = [], logs = [];
+          try {
+            w.showToast = m => toasts.push(m); w.logActivity = (a, s) => logs.push([a, s]);
+            w._saveFailSeen = {};
+            const f = w._saveFail('order status', 'QT-1');
+            f(new Error('quota')); f(new Error('quota'));
+            return { toasts: toasts.length, logs: logs.length, says: /order status/.test(toasts[0]) && /quota/.test(toasts[0]), serial: logs[0] && logs[0][1] };
+          } finally { w.showToast = keep.t; w.logActivity = keep.l; }
+        }, { toasts: 1, logs: 1, says: true, serial: 'QT-1' });
       /* 2026-11-28 bug 5: each stage has its own rounding switch. */
       if (typeof window._materialRoundingTopUps === 'function' && 'fqMatRoundOn' in window)
         check('Rounding: an open Final Quotation no longer switches rounding on for an issued Initial', () => {

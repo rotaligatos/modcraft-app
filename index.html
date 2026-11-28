@@ -5368,9 +5368,9 @@ function _saveSerialCounters(){
     serialCounters.W=merged.W; serialCounters.C=merged.C; serialCounters.M=merged.M;
     var payload=JSON.stringify(merged);
     if(rowIdx>0){
-      sheetsUpdate('Settings!A'+rowIdx+':B'+rowIdx,[['SERIAL_COUNTERS',payload]]).catch(function(){});
+      sheetsUpdate('Settings!A'+rowIdx+':B'+rowIdx,[['SERIAL_COUNTERS',payload]]).catch(_saveFail('serial-number counter'));
     } else {
-      sheetsAppend('Settings!A:B',[['SERIAL_COUNTERS',payload]]).catch(function(){});
+      sheetsAppend('Settings!A:B',[['SERIAL_COUNTERS',payload]]).catch(_saveFail('serial-number counter'));
     }
   }).catch(function(){});
 }
@@ -18672,7 +18672,7 @@ function _applyApprovedRequest(notif){
       sheetsGet('Quotations!A:A').then(function(d){
         var vals=d.values||[];
         for(var i=1;i<vals.length;i++){
-          if((vals[i]||[])[0]===ser){sheetsUpdate('Quotations!F'+(i+1),[['Draft']]).catch(function(){});break;}
+          if((vals[i]||[])[0]===ser){sheetsUpdate('Quotations!F'+(i+1),[['Draft']]).catch(_saveFail('quotation status (Draft)'));break;}
         }
       }).catch(function(){});
       showToast('Reactivation approved — quotation '+ser+' is now active.');
@@ -23069,7 +23069,7 @@ function _setOrderStatus(orderId, status, quotSerial, sentAtOverride){
       var row=pendingOrders[i]._row;
       if(row&&gToken){
         var sentAt=pendingOrders[i].sentAt||'';
-        sheetsUpdate('Pending Orders!X'+row+':Z'+row,[[status,quotSerial||pendingOrders[i].quotSerial||'',sentAt]]).catch(function(){});
+        sheetsUpdate('Pending Orders!X'+row+':Z'+row,[[status,quotSerial||pendingOrders[i].quotSerial||'',sentAt]]).catch(_saveFail('order status',quotSerial||''));
       }
       supaUpdateOrderStatus(orderId,status,quotSerial||pendingOrders[i].quotSerial||'',pendingOrders[i].sentAt||null);
       _trnSavePracticeOrder(pendingOrders[i]);
@@ -28143,7 +28143,7 @@ function doReactivate(){
     var vals=d.values||[];
     for(var i=1;i<vals.length;i++){
       if((vals[i]||[])[0]===ser){
-        sheetsUpdate('Quotations!F'+(i+1),[['Draft']]).catch(function(){});
+        sheetsUpdate('Quotations!F'+(i+1),[['Draft']]).catch(_saveFail('quotation status (Draft)'));
         break;
       }
     }
@@ -29823,7 +29823,7 @@ function _releaseOrdersForQuotation(ref,why,orderId){
     if(!ok) continue;
     var prevH=o.handledBy||'';
     o.status='Pending'; o.quotSerial=''; o.handledBy=''; o.handledByEmail=''; o.handledAt='';
-    if(o._row&&gToken){ try{ sheetsUpdate('Pending Orders!X'+o._row+':Z'+o._row,[['Pending','','']]).catch(function(){}); }catch(e){} }
+    if(o._row&&gToken){ try{ sheetsUpdate('Pending Orders!X'+o._row+':Z'+o._row,[['Pending','','']]).catch(_saveFail('order status')); }catch(e){} }
     if(typeof SUPA_DUAL_WRITE!=='undefined'&&SUPA_DUAL_WRITE&&typeof supaReady==='function'&&supaReady()){
       try{ supa.from('pending_orders').update({status:'Pending',quotation_serial:null,handled_by:null,handled_by_email:null,handled_at:null})
         .eq('id',String(o.id)).then(function(r){ if(r.error) console.warn('[supa] order release error:',r.error.message||r.error); }); }
@@ -34850,6 +34850,20 @@ function hideSessionBanner(){ var b=el('session-banner'); if(b) b.style.display=
 // Auth-aware fetch: ensures a valid token, retries once on 401 via silent refresh,
 // and on persistent auth failure shows the banner and throws so callers never treat it as success.
 function _gExpire(){ gOnSessionExpired(); throw new Error('SESSION_EXPIRED'); }
+// A background save that fails must not fail silently (2026-11-28). These used to end in
+// .catch(function(){}), so a refused write (quota, permission, connection) left the Sheet out of
+// date with nothing shown or recorded. Warns once per kind per minute and writes a log line.
+var _saveFailSeen={};
+function _saveFail(what,serial){
+  return function(e){
+    var msg=(e&&e.message)||String(e||'unknown error');
+    console.warn('[save] '+what+' not saved:',msg);
+    var now=Date.now(); if(_saveFailSeen[what]&&now-_saveFailSeen[what]<60000) return;
+    _saveFailSeen[what]=now;
+    try{ showToast('\u26a0 Could not save the '+what+' to Google Sheets ('+msg+'). It will be retried on the next save.'); }catch(x){}
+    try{ logActivity('Background save failed: '+what+' \u2014 '+msg+'.', serial==null?'':serial); }catch(x){}
+  };
+}
 function gApiFetch(url,opts,_retried){
   opts=opts||{}; opts.headers=opts.headers||{};
   // Proactively refresh if the token is missing/expired; any refresh failure = expired session
@@ -34870,6 +34884,9 @@ function gApiFetch(url,opts,_retried){
   }).then(function(r){
     if(r.status===401){
       if(_retried) _gExpire();                 // already retried once → give up
+      // The first try's signal is still on opts, so the retry would skip its own time limit and
+      // could wait forever (2026-11-28). Drop it so the retry gets a fresh 45 s limit too.
+      if(opts._timeoutMs) delete opts.signal;
       return gRefreshToken().then(function(){ return gApiFetch(url,opts,true); }, _gExpire);
     }
     return r.json();
@@ -36216,7 +36233,7 @@ function fixLostLockTimes(){
         _persistApprovedFieldToQuotation({serial:f.serial,type:'lockts',lockedAt:f.lockedAt},function(ok){
           if(!ok) failed++; else done++;
           var r=rowOf[f.serial];
-          if(ok&&r) sheetsUpdate('Quotations!N'+r,[[f.lockedAt]]).catch(function(){});
+          if(ok&&r) sheetsUpdate('Quotations!N'+r,[[f.lockedAt]]).catch(_saveFail('Initial Locked date'));
           if(ok){ try{ supa.from('quotations').update({initial_locked_at:f.lockedAt}).eq('serial',f.serial)
             .then(function(){}); }catch(e){} }
           setTimeout(function(){ next(i+1); },150);
@@ -53739,7 +53756,7 @@ function _msgMarkRead(id){
   // just sent in this session); messages loaded from Supabase (see gLoadMessages)
   // have no Sheets row cached, so skip the Sheets write rather than requiring it —
   // the Supabase update below always fires regardless of where it was loaded from.
-  if(m.rowIdx) sheetsUpdate('Messages!I'+m.rowIdx+':J'+m.rowIdx,[['read',m.readAt]]).catch(function(){});
+  if(m.rowIdx) sheetsUpdate('Messages!I'+m.rowIdx+':J'+m.rowIdx,[['read',m.readAt]]).catch(_saveFail('message read mark'));
   supaMarkMessageRead(id,m.readAt);
 }
 function _msgUnreadForMe(){

@@ -13957,3 +13957,10 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
   (Stage 2 call passes `true`). Saved in state and option snapshots; an older save without it takes `matRoundOn`
   (what it shared before). An open Final no longer makes an Initial issued before 14 Oct display/reprint rounded.
 - Rommel confirmed: edgebanding (lm) DOES round up like other materials — not an exception.
+
+### Same session — bugs 8 and 9 (7 left alone: Rommel says not a bug; 6 dropped: phones aren't shared)
+- `gApiFetch`: on a 401 retry the first try's `opts.signal` is deleted, so the retry gets its own 45 s limit
+  (before, it could wait forever and block that quotation's row-write queue).
+- `_saveFail(what, serial)` replaces `.catch(function(){})` on: SERIAL_COUNTERS writes, Quotations F "Draft"
+  status, Pending Orders X:Z status (2 places), Quotations N lock date, Messages read mark. Console warning,
+  a toast at most once a minute per kind, and an activity-log line. Other swallowed catches left (best-effort).
