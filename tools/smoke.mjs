@@ -7760,6 +7760,30 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 bug fixes: latest open wins; unlock cancels hidden signature requests. */
+      if (typeof window.openQuotationFromDir === 'function') {
+        const opened = await (async () => {
+          const w = window, keep = { l: w.loadQuotationJson, r: w.restoreFullQuotationState, c: w.confirmUnsavedThen };
+          const shown = []; const pend = {};
+          try {
+            w.confirmUnsavedThen = fn => fn();
+            w.loadQuotationJson = (id, cb) => { pend[id] = cb; };
+            w.restoreFullQuotationState = st => shown.push(st.serial);
+            w.openQuotationFromDir('QT-A');
+            w.openQuotationFromDir('QT-B');
+            pend['QT-B']({ serial: 'QT-B' });   // B comes back first
+            pend['QT-A']({ serial: 'QT-A' });   // A comes back last: must be dropped
+            return { shown: shown.join(',') };
+          } finally { w.loadQuotationJson = keep.l; w.restoreFullQuotationState = keep.r; w.confirmUnsavedThen = keep.c; }
+        })().catch(e => ({ err: String(e) }));
+        check('Opening two quotations quickly: the last one clicked is the one shown', () => opened, { shown: 'QT-B' });
+      }
+      if (typeof window._cancelPendingSignaturesFor === 'function')
+        check('Unlock also cancels signature requests this screen cannot see (sig_cancel_pending_on)', () => {
+          const src = window._cancelPendingSignaturesFor.toString();
+          const h = window._cancelHiddenSignatures ? window._cancelHiddenSignatures.toString() : '';
+          return { calls: /_cancelHiddenSignatures\(serial/.test(src), rpc: /sig_cancel_pending_on/.test(h) };
+        }, { calls: true, rpc: true });
       /* 2026-11-28 live approval updates. */
       if (typeof window._apprLivePatch === 'function')
         check('Live approvals: a pushed change is patched into the kept copy (update, insert, delete), no download', () => {

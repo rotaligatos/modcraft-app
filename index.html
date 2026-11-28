@@ -7480,6 +7480,7 @@ function renderMobCalcBar(){
   });
 }
 function initQuotation() {
+  _openQuotSeq=(_openQuotSeq||0)+1;   // a load still in flight must not replace the new quotation
   qStep=1;   // a new quotation starts on the client step
   try{ _buildQuotationLayout(); qGoStep(1); }catch(e){}
   // ── Full state reset — every field, every variable ──────────────────────
@@ -24104,6 +24105,37 @@ function _cancelPendingSignaturesFor(serial,why){
     _updateNotifBadge();
     if(el('page-approvals')&&el('page-approvals').classList.contains('active')) renderApprovals();
   }
+  _cancelHiddenSignatures(serial,why,cancelled.map(function(n){ return n.reqId; }));
+}
+// The loop above only sees requests in THIS browser. The automatic Noted-by request goes from the
+// checker to the signatory, so the preparer who unlocks never has it and could not update it anyway
+// (read policy). sig_cancel_pending_on cancels every pending signature on the quotation in the
+// database; whoever it reaches that was not already told here gets the same message. 2026-11-28.
+function _cancelHiddenSignatures(serial,why,alreadyIds){
+  try{
+    if(!serial||/^DRAFT-/.test(serial)||typeof supaReady!=='function'||!supaReady()||!supa||typeof supa.rpc!=='function') return;
+    var told={}; (alreadyIds||[]).forEach(function(id){ if(id) told[id]=true; });
+    supa.rpc('sig_cancel_pending_on',{p_serial:serial,p_reason:why||'Quotation unlocked'}).then(function(r){
+      if(!r||r.error){ if(r&&r.error) console.warn('[signature] could not cancel hidden requests on '+serial,r.error.message); return; }
+      var extra=(r.data||[]).filter(function(x){ return x&&!told[x.id]; });
+      extra.forEach(function(x){
+        for(var i=0;i<NOTIFS.length;i++){ if(NOTIFS[i].reqId===x.id) NOTIFS[i].status='cancelled'; }
+        if(x.to_email&&typeof gSendMessage==='function'){
+          var u=(sheetUsers||[]).find(function(q){ return String(q.email||'').toLowerCase()===String(x.to_email).toLowerCase(); });
+          gSendMessage(x.to_email,u?u.name:x.to_email,
+            (_sigLabel?_sigLabel(x.sig_slot):'Signature')+' request on '+serial+' was cancelled \u2014 the quotation was unlocked'
+              +(why?' ('+why+')':'')+'. A new request will follow once it is locked again.',
+            'normal','signature_cancelled_on_unlock:'+(x.sig_slot||'')+':'+serial,function(){});
+        }
+      });
+      if(extra.length){
+        logActivity('Cancelled '+extra.length+' more pending signature request'+(extra.length===1?'':'s')
+          +' on '+serial+' that this screen could not see (e.g. the automatic Noted-by) \u2014 the quotation was unlocked.',serial);
+        _updateNotifBadge();
+        if(el('page-approvals')&&el('page-approvals').classList.contains('active')) renderApprovals();
+      }
+    }).catch(function(e){ console.warn('[signature] hidden cancel failed',e); });
+  }catch(e){ console.warn('[signature] hidden cancel threw',e); }
 }
 function clearSignaturesOnUnlock(why){
   var had=[];
@@ -29441,12 +29473,19 @@ function _dirSyncScrollbarTop(){
   bar.style.top=(52+h)+'px';
 }
 window.addEventListener('resize',function(){ try{ _dirSyncScrollbarTop(); }catch(e){} });
+// Only the most recent open may land on screen (2026-11-28). Loading takes several hops (newer-copy
+// check, database, Sheet fallback), so clicking A then B could let A finish last and replace B,
+// leaving someone editing a different job than the one they chose. Every open, and starting a
+// new quotation, takes a ticket; a load that comes back with an older ticket is dropped.
+var _openQuotSeq=0;
 function openQuotationFromDir(quotId,optId){
   confirmUnsavedThen(function(){
+    var _ticket=++_openQuotSeq;
     // Show loading toast
     var t=el('drive-toast');
     if(t){t.innerHTML='<i class="ti ti-loader" style="font-size:16px;color:var(--navy);flex-shrink:0;animation:spin 1s linear infinite"></i><span><b>Loading quotation…</b><br><span style="font-size:12px;color:var(--text2)">'+escHtml(quotId)+'</span></span>';t.style.display='flex';clearTimeout(t._timer);}
     loadQuotationJson(quotId, function(state){
+      if(_ticket!==_openQuotSeq){ console.log('[open] '+quotId+' finished after a later open — not shown'); return; }
       if(t){t.style.display='none';}
       if(state){
         restoreFullQuotationState(state);
@@ -29876,7 +29915,9 @@ function deleteSelectedClients(){
 }
 function openNewOptionFromDir(quotId){
   confirmUnsavedThen(function(){
+    var _ticket=++_openQuotSeq;
     loadQuotationJson(quotId, function(state){
+      if(_ticket!==_openQuotSeq) return;   // a later open won
       if(!state) return;
       restoreFullQuotationState(state);
       // After restoring, check if this quotation is locked before creating option

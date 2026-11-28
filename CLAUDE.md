@@ -13922,3 +13922,15 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
   returning to the app reloads; `act()` saves with `.eq('status','pending').select('id')` and, if nothing was
   updated, says it was handled elsewhere and reloads (no overwrite).
 - NOT yet seen working with two real devices. Next in the same pattern: Messages, then Orders.
+
+### Same session — bug fixes 1 and 2 from the audit list
+- **Latest open wins.** `_openQuotSeq`: `openQuotationFromDir` and `openNewOptionFromDir` take a ticket, and a
+  load that returns after a later open (or after `initQuotation`) is dropped. Before, clicking A then B could let A
+  finish last and replace B (smoke check reproduces it on the old code).
+- **Unlock cancels hidden signature requests.** `_cancelPendingSignaturesFor` now also calls
+  `_cancelHiddenSignatures` → RPC `sig_cancel_pending_on(serial, reason)` (security definer; Admin/Director or
+  anyone with a request on that serial), which cancels EVERY pending signature request on the quotation — including
+  the automatic Noted-by the preparer can't see — and messages each signatory not already told. Tested by
+  impersonation: preparer sees 0 rows yet it is cancelled; an uninvolved staff member is refused.
+- Note: `index.html`'s working copy is now plain LF (a `sed -i` converted it); git stores LF anyway. Patch scripts
+  must not assume CRLF.
