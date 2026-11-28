@@ -673,6 +673,7 @@ th.dir-actions-col{position:sticky;right:0;z-index:4;background:var(--card2);
     <button class="nav-btn" data-pg="reports"><i class="ti ti-chart-bar"></i>Reports</button>
     <button class="nav-btn" data-pg="settings"><i class="ti ti-settings"></i>Settings</button>
     <button class="nav-btn" data-pg="pricelist" style="display:none"><i class="ti ti-list-search"></i>Price list</button>
+    <button class="nav-btn" data-pg="compprices" style="display:none"><i class="ti ti-building-store"></i>Company prices</button>
     <button class="nav-btn" data-pg="help" style="color:var(--teal)"><i class="ti ti-help-circle"></i>Help</button>
   </div>
   <div style="display:flex;align-items:center;gap:8px">
@@ -2169,6 +2170,10 @@ Everything not in the file is removed. To add a few items instead, use the save 
 </div>
 
 <!-- HELP -->
+<div class="page" id="page-compprices">
+  <div style="margin-bottom:14px"><h2 style="font-size:20px;font-weight:500">Company prices</h2><p style="color:var(--text2);font-size:13px;margin-top:2px">A company's own prices, pricing settings and costs, on top of the shared price list.</p></div>
+  <div id="cpb-wrap"></div>
+</div>
 <div class="page" id="page-pricelist">
   <div style="margin-bottom:14px"><h2 style="font-size:20px;font-weight:500">Price list</h2><p style="color:var(--text2);font-size:13px;margin-top:2px">Add new materials and hardware. Every line is checked against the price list first.</p></div>
   <div id="pl-bulk-wrap"></div>
@@ -5462,6 +5467,7 @@ function navigate(pg) {
   else if(pg==="quotation"){ if(!qSerial&&!qDraftKey) initQuotation(); try{ _buildQuotationLayout(); }catch(e){} } // only init if no quotation loaded
   else if(pg==="help") renderHelp();
   else if(pg==="pricelist") renderMatBulkAdd('pl-bulk-wrap');
+  else if(pg==="compprices") { cpbState.loaded=false; renderCompanyPrices(); }
   else if(pg==="production") renderProductionPage();
   else if(pg==="orders") { if(!ordersLoaded){gLoadPendingOrders(function(){renderOrders();});}else{renderOrders();} }
 }
@@ -5538,6 +5544,294 @@ function _mergeLamiFlags(){
     if(ch) renderUsers();
   });
 }
+// ── Company price lists (Rommel, 2026-11-28) ──────────────────────────────────────────────
+// CWLI's own selling prices, pricing settings and costs, kept as a LAYER on top of the shared
+// price list — never a copy. Anything a company has not set falls back to the shared figure, so
+// nothing existing moves. Stored in the database only (company_prices / company_pricing /
+// company_costs), never the Google Sheet, which every user can open.
+// Phase 1 (this): stored and edited only. NO quotation reads it — the switch that makes C-series
+// quotations use it comes in a later step and starts OFF.
+// Who: everyone reads prices + pricing settings (whoever prepares a C quotation needs them);
+//      Admin/Director, or the "Can edit company price lists" tick, edit them;
+//      Admin/Director, or the "Can see company costs & margins" tick, see/edit the costs.
+var CPB_COMPANIES={C:'Cebu World Laminate, Inc.'};
+var CPB_PRICING_KEYS=[
+  ['fabContingency','Fabrication contingency','%'],['fabBuffer','Fabrication buffer','%'],
+  ['mobContingency','Mobilization contingency','%'],['mobBuffer','Mobilization buffer','%'],['mobMarkup','Mobilization markup','%'],
+  ['instContingency','Installation contingency','%'],['instBuffer','Installation buffer','%'],['instMarkup','Installation markup','%'],
+  ['discountBuffer','Discount buffer','%'],
+  ['outContingency','Outsource contingency','%'],['outBuffer','Outsource buffer','%'],['outMarkup','Outsource markup','%'],
+  ['assemblyCostPerUnit','Assembly charge per carcass','₱'],['siteVisitFee','Site visit fee','₱'],
+  ['cuttingListPerUnit','Cutting list charge per carcass','₱'],['designChargePerUnit','Design charge per carcass','₱'],
+  ['clientMatServiceMult','Client-supplied materials multiplier','×']
+];
+var CPB_COST_KEYS=[
+  ['adminMonthlyCost','Admin cost per month','₱'],['utilityCost','Utilities per month','₱'],
+  ['otherExpenses','Other expenses per month','₱'],['packingCost','Packing per month','₱'],
+  ['workdaysPerMonth','Working days per month',''],['productionMix','Production share of revenue','%'],
+  ['installMix','Installation share of revenue','%']
+];
+var myCpbEdit=false, myCpbCosts=false;
+var cpbState={co:'C', tab:'material', q:'', prices:[], pricing:null, costs:null, loaded:false, err:''};
+function _cpbIsAdmin(){ return currentRole==='Admin'||currentRole==='Director'; }
+function _cpbCanEdit(){ return _cpbIsAdmin()||myCpbEdit; }
+function _cpbCanCosts(){ return _cpbIsAdmin()||myCpbCosts; }
+function _cpbCanOpen(){ return _cpbIsAdmin()||myCpbEdit||myCpbCosts; }
+function _loadMyCpbAccess(tries){
+  tries=tries||0;
+  if(typeof supaReady!=='function'||!supaReady()){ if(tries<20) setTimeout(function(){ _loadMyCpbAccess(tries+1); },3000); return; }
+  var me=String((gUser&&gUser.email)||'').trim(); if(!me) return;
+  supa.from('users').select('can_edit_company_prices,can_see_company_costs').ilike('email',me).limit(1).then(function(r){
+    var row=(r&&!r.error&&r.data&&r.data[0])||{};
+    var e=!!row.can_edit_company_prices, c=!!row.can_see_company_costs;
+    if(e!==myCpbEdit||c!==myCpbCosts){ myCpbEdit=e; myCpbCosts=c; if(typeof applyNavAccess==='function') applyNavAccess(); }
+  });
+}
+function _setCpbFlag(i,col,on){
+  if(!_cpbIsAdmin()){ showToast('Only an Admin or Director can change this.'); return; }
+  var u=sheetUsers[i]; if(!u) return;
+  var prop=col==='can_edit_company_prices'?'cpbEdit':'cpbCosts', id='u'+i+(prop==='cpbEdit'?'cpbe':'cpbc');
+  var put=function(){ var cb=el(id); if(cb) cb.checked=!!u[prop]; };
+  if(typeof supaReady!=='function'||!supaReady()){ showToast('Connect the fast database first (Settings → Company & DB) — this setting lives there.'); put(); return; }
+  var patch={}; patch[col]=!!on;
+  supa.from('users').update(patch).ilike('email',(u.email||'').trim()).select('email').then(function(r){
+    if(r&&r.error){ showToast('Could not save that: '+(r.error.message||r.error)); put(); return; }
+    if(!r||!r.data||!r.data.length){ showToast('Could not save that — '+(u.name||u.email)+' is not in the fast database yet. Save the user first.'); put(); return; }
+    u[prop]=!!on;
+    var what=prop==='cpbEdit'?'Editing company price lists':'Seeing company costs & margins';
+    logActivity(what+' '+(on?'allowed':'removed')+' for '+(u.name||u.email)+'.','');
+    showToast((u.name||u.email)+': '+what.toLowerCase()+' '+(on?'allowed.':'removed.'));
+  });
+}
+function _mergeCpbFlags(){
+  if(typeof supaReady!=='function'||!supaReady()||!_cpbIsAdmin()) return;
+  supa.from('users').select('email,can_edit_company_prices,can_see_company_costs').then(function(r){
+    if(!r||r.error||!r.data) return;
+    var by={}; r.data.forEach(function(x){ by[String(x.email||'').trim().toLowerCase()]=x; });
+    var ch=false;
+    sheetUsers.forEach(function(u){
+      var x=by[String(u.email||'').trim().toLowerCase()]; if(!x) return;
+      if(u.cpbEdit!==!!x.can_edit_company_prices){ u.cpbEdit=!!x.can_edit_company_prices; ch=true; }
+      if(u.cpbCosts!==!!x.can_see_company_costs){ u.cpbCosts=!!x.can_see_company_costs; ch=true; }
+    });
+    if(ch&&typeof renderUsers==='function') renderUsers();
+  });
+}
+function _cpbUserTicksHtml(u,i,isAdmin){
+  var row=function(id,on,col,label){
+    return '<label style="display:flex;align-items:center;gap:7px;font-size:12px;'+(isAdmin?'cursor:pointer':'cursor:default;opacity:.55')+'">'
+      +'<input type="checkbox" id="'+id+'" '+(on?'checked':'')+(isAdmin?'':' disabled')+' onchange="_setCpbFlag('+i+',\''+col+'\',this.checked)">'+label+'</label>';
+  };
+  var always=(u.pos==='Admin'||u.pos==='Director');
+  return '<div class="dvdr" style="margin:10px 0 8px"><span>Company price lists</span></div>'
+    +(always?'<div style="font-size:11px;color:var(--text2)">Always: Admin and Director edit company price lists and see their costs.</div>'
+      :row('u'+i+'cpbe',u.cpbEdit,'can_edit_company_prices','Can edit company price lists (e.g. CWLI)')
+       +row('u'+i+'cpbc',u.cpbCosts,'can_see_company_costs','Can see company costs & margins')
+       +'<div style="font-size:11px;color:var(--text2);margin-top:4px">Opens the Company prices page. Costs and margins are private: without the second tick they stay hidden.</div>');
+}
+
+// ── data ──
+function _cpbLoad(){
+  if(typeof supaReady!=='function'||!supaReady()){ cpbState.err='Connect the fast database first (Settings → Company & DB → Connect now). Company price lists are kept there.'; cpbState.loaded=true; renderCompanyPrices(); return; }
+  var co=cpbState.co; cpbState.err='';
+  var jobs=[
+    supa.from('company_prices').select('*').eq('company_key',co).order('kind').order('name'),
+    supa.from('company_pricing').select('*').eq('company_key',co).maybeSingle()
+  ];
+  if(_cpbCanCosts()) jobs.push(supa.from('company_costs').select('*').eq('company_key',co).maybeSingle());
+  Promise.all(jobs).then(function(rs){
+    var bad=rs.filter(function(r){ return r&&r.error; })[0];
+    if(bad){ cpbState.err='Could not load: '+(bad.error.message||bad.error); }
+    cpbState.prices=(rs[0]&&rs[0].data)||[];
+    cpbState.pricing=(rs[1]&&rs[1].data)||{company_key:co,enabled:false,cost_factors:{}};
+    cpbState.costs=rs[2]?((rs[2].data)||{company_key:co,overhead:{},item_costs:{}}):null;
+    cpbState.loaded=true; renderCompanyPrices();
+  }).catch(function(e){ cpbState.err='Could not load: '+(e&&e.message||e); cpbState.loaded=true; renderCompanyPrices(); });
+}
+function _cpbShared(kind,name,unit){
+  var src=kind==='service'?(SERVICES||[]):(kind==='hardware'?(typeof getHwSource==='function'?getHwSource():dbHardware):(typeof getMatSource==='function'?getMatSource():dbMaterials));
+  var hit=(typeof lookupInSource==='function')?lookupInSource(src,name):null;
+  if(!hit) return null;
+  if(unit&&hit.unit&&String(hit.unit).trim().toLowerCase()!==String(unit).trim().toLowerCase()){
+    var n=String(name).trim().toLowerCase();
+    for(var i=0;i<src.length;i++){ var s=src[i]; if(s&&String(s.name||'').trim().toLowerCase()===n&&String(s.unit||'').trim().toLowerCase()===String(unit).trim().toLowerCase()) return s; }
+  }
+  return hit;
+}
+
+// ── page ──
+function renderCompanyPrices(){
+  var w=el('cpb-wrap'); if(!w) return;
+  if(!_cpbCanOpen()){ w.innerHTML='<div class="alert alert-warn">You do not have access to company price lists.</div>'; return; }
+  if(!cpbState.loaded){ w.innerHTML='<div style="font-size:12px;color:var(--text2)"><i class="ti ti-loader" style="animation:spin 1s linear infinite"></i> Loading…</div>'; _cpbLoad(); return; }
+  var ed=_cpbCanEdit(), pr=cpbState.pricing||{};
+  var h='';
+  if(cpbState.err) h+='<div class="alert alert-warn" style="margin-bottom:12px">'+escHtml(cpbState.err)+'</div>';
+  h+='<div class="card" style="margin-bottom:14px"><div class="card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">'
+    +'<div style="flex:1;min-width:260px"><div style="font-weight:600">'+escHtml(coShow(CPB_COMPANIES[cpbState.co]))+' — own price list</div>'
+    +'<div style="font-size:12px;color:var(--text2);margin-top:3px">Only what differs from the shared price list goes here. Anything not set uses the shared price.</div></div>'
+    +'<span class="pill pill-navy" title="Quotations keep today\'s prices until this is switched on">'+(pr.enabled?'In use':'Not in use yet')+'</span></div>'
+    +'<div style="font-size:12px;color:var(--text2);padding:0 16px 12px">Not used for pricing yet: every quotation, including C-series, keeps today\'s prices. When it is switched on later, only C-series quotations created after that moment use this list; drafts in progress and locked quotations are not affected.</div></div>';
+
+  // prices
+  var tabs=[['material','Materials'],['hardware','Hardware'],['service','Services']];
+  var rows=cpbState.prices.filter(function(p){ return p.kind===cpbState.tab; });
+  var q=(cpbState.q||'').trim().toLowerCase();
+  var shown=q?rows.filter(function(p){ return q.split(/\s+/).every(function(t){ return (p.name+' '+(p.unit||'')+' '+(p.notes||'')).toLowerCase().indexOf(t)>=0; }); }):rows;
+  h+='<div class="card" style="margin-bottom:14px"><div class="card-head"><h3><i class="ti ti-tags"></i>Prices</h3></div><div class="card-body">'
+    +'<div class="tabs" style="margin-bottom:10px">'+tabs.map(function(t){ var n=cpbState.prices.filter(function(p){ return p.kind===t[0]; }).length;
+      return '<button class="tab'+(cpbState.tab===t[0]?' active':'')+'" onclick="cpbState.tab=\''+t[0]+'\';cpbState.q=\'\';renderCompanyPrices()">'+t[1]+' <span class="pdb-cnt">'+n+'</span></button>'; }).join('')+'</div>';
+  if(ed){
+    h+='<div style="display:grid;grid-template-columns:2fr 90px 120px auto;gap:8px;align-items:end;margin-bottom:6px">'
+      +'<div><div style="font-size:11px;color:var(--text2)">Item (from the shared list, or a '+escHtml(cpbState.co==='C'?'CWLI':'company')+'-only product)</div><input id="cpb-new-name" list="cpb-new-dl" oninput="_cpbNewName(this.value)" placeholder="Type to search…" style="width:100%"><datalist id="cpb-new-dl"></datalist></div>'
+      +'<div><div style="font-size:11px;color:var(--text2)">Unit</div><input id="cpb-new-unit" style="width:100%"></div>'
+      +'<div><div style="font-size:11px;color:var(--text2)">Price (₱)</div><input id="cpb-new-price" type="number" min="0" step="0.01" style="width:100%"></div>'
+      +'<button class="btn btn-primary" onclick="_cpbAdd()"><i class="ti ti-plus"></i>Add</button></div>'
+      +'<div id="cpb-new-hint" style="font-size:11px;color:var(--text2);margin-bottom:12px"></div>';
+  }
+  h+='<input placeholder="Search this list…" value="'+escHtml(cpbState.q)+'" oninput="cpbState.q=this.value;_cpbRenderRows()" style="width:100%;margin-bottom:8px">'
+    +'<div id="cpb-rows">'+_cpbRowsHtml(shown)+'</div></div></div>';
+
+  // pricing settings
+  var cf=pr.cost_factors||{};
+  h+='<div class="card" style="margin-bottom:14px"><div class="card-head"><h3><i class="ti ti-adjustments"></i>Pricing settings</h3></div><div class="card-body">'
+    +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Leave a field blank to use the shared value (shown faintly).</div>'
+    +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px">'
+    +CPB_PRICING_KEYS.map(function(k){ var v=cf[k[0]];
+      return '<label style="font-size:12px">'+escHtml(k[1])+(k[2]?' <span style="color:var(--text2)">('+k[2]+')</span>':'')
+        +'<input type="number" step="0.01" data-cpbcf="'+k[0]+'" value="'+(v===undefined||v===null?'':escHtml(String(v)))+'" placeholder="shared '+escHtml(String(CF[k[0]]))+'"'+(ed?'':' disabled')+' style="width:100%;margin-top:3px"></label>'; }).join('')
+    +'</div>'+(ed?'<button class="btn btn-primary" style="margin-top:12px" onclick="_cpbSavePricing()"><i class="ti ti-device-floppy"></i>Save pricing settings</button>':'')+'</div></div>';
+
+  // costs
+  if(_cpbCanCosts()){
+    var co=cpbState.costs||{}, oh=co.overhead||{};
+    h+='<div class="card" style="margin-bottom:14px;border-color:var(--amber)"><div class="card-head"><h3><i class="ti ti-lock"></i>Costs &amp; margins (private)</h3></div><div class="card-body">'
+      +'<div style="font-size:12px;color:var(--text2);margin-bottom:10px">What the company spends. Used for profitability only, never for the price the client sees. Visible only to Admin, Director and people given access in Settings → Users.</div>'
+      +'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px">'
+      +CPB_COST_KEYS.map(function(k){ var v=oh[k[0]];
+        return '<label style="font-size:12px">'+escHtml(k[1])+(k[2]?' <span style="color:var(--text2)">('+k[2]+')</span>':'')
+          +'<input type="number" step="0.01" data-cpboh="'+k[0]+'" value="'+(v===undefined||v===null?'':escHtml(String(v)))+'" placeholder="shared '+escHtml(String(CF[k[0]]))+'" style="width:100%;margin-top:3px"></label>'; }).join('')
+      +'<label style="font-size:12px">Material &amp; hardware margin <span style="color:var(--text2)">(% of selling price)</span><input type="number" step="0.1" id="cpb-mmp" value="'+(co.material_margin_pct==null?'':escHtml(String(co.material_margin_pct)))+'" placeholder="shared '+escHtml(String(CF.materialMarginPct))+'" style="width:100%;margin-top:3px"></label>'
+      +'</div><label style="display:block;font-size:12px;margin-top:10px">Notes<textarea id="cpb-cost-notes" rows="2" style="width:100%;margin-top:3px">'+escHtml(co.notes||'')+'</textarea></label>'
+      +'<button class="btn btn-primary" style="margin-top:12px" onclick="_cpbSaveCosts()"><i class="ti ti-device-floppy"></i>Save costs</button></div></div>';
+  }
+  w.innerHTML=h;
+}
+function _cpbRowsHtml(list){
+  if(!list.length) return '<div style="font-size:12px;color:var(--text2);padding:8px 0">Nothing here yet'+(cpbState.q?' for that search':'')+'.</div>';
+  var ed=_cpbCanEdit(), costs=_cpbCanCosts()&&cpbState.costs, ic=(costs&&cpbState.costs.item_costs)||{};
+  return '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="color:var(--text2);text-align:left">'
+    +'<th style="padding:4px">Item</th><th>Unit</th><th style="text-align:right">Shared price</th><th style="text-align:right">'+escHtml(cpbState.co==='C'?'CWLI':'Company')+' price</th>'
+    +(costs?'<th style="text-align:right">Cost (private)</th>':'')+'<th></th></tr></thead><tbody>'
+    +list.slice(0,300).map(function(p){
+      var sh=p.company_only?null:_cpbShared(p.kind,p.name,p.unit);
+      var key=p.kind+'|'+String(p.name).trim().toLowerCase()+'|'+String(p.unit||'').trim().toLowerCase();
+      return '<tr style="border-top:.5px solid var(--border)'+(p.active?'':';opacity:.5')+'"><td style="padding:5px 4px">'+escHtml(p.name)
+        +(p.company_only?' <span class="pill pill-teal" style="font-size:10px">'+escHtml(cpbState.co==='C'?'CWLI':'company')+' only</span>':'')
+        +(!p.company_only&&!sh?' <span class="pill pill-amber" style="font-size:10px" title="Not found in the shared list — renamed or removed there?">not in shared list</span>':'')+'</td>'
+        +'<td>'+escHtml(p.unit||'')+'</td><td style="text-align:right;color:var(--text2)">'+(sh&&sh.price!=null?fmtMoney(+sh.price):'—')+'</td>'
+        +'<td style="text-align:right">'+(ed?'<input type="number" min="0" step="0.01" value="'+(+p.price)+'" onchange="_cpbSetPrice('+p.id+',this.value)" style="width:110px;text-align:right">':fmtMoney(+p.price))+'</td>'
+        +(costs?'<td style="text-align:right"><input type="number" min="0" step="0.01" value="'+(ic[key]==null?'':ic[key])+'" onchange="_cpbSetItemCost(\''+key.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\',this.value)" style="width:100px;text-align:right"></td>':'')
+        +'<td style="text-align:right">'+(ed?'<button class="btn" style="font-size:11px;padding:2px 8px" onclick="_cpbRemove('+p.id+')" title="Remove — the shared price applies again"><i class="ti ti-trash"></i></button>':'')+'</td></tr>';
+    }).join('')+'</tbody></table>'+(list.length>300?'<div style="font-size:11px;color:var(--text2);margin-top:6px">Showing 300 of '+list.length+' — search to narrow.</div>':'');
+}
+function _cpbRenderRows(){
+  var rows=cpbState.prices.filter(function(p){ return p.kind===cpbState.tab; });
+  var q=(cpbState.q||'').trim().toLowerCase();
+  if(q) rows=rows.filter(function(p){ return q.split(/\s+/).every(function(t){ return (p.name+' '+(p.unit||'')+' '+(p.notes||'')).toLowerCase().indexOf(t)>=0; }); });
+  var r=el('cpb-rows'); if(r) r.innerHTML=_cpbRowsHtml(rows);
+}
+function _cpbNewName(v){
+  var kind=cpbState.tab, dl=el('cpb-new-dl'), hint=el('cpb-new-hint');
+  if(dl){
+    var src=kind==='service'?(SERVICES||[]):(kind==='hardware'?(typeof getHwSource==='function'?getHwSource():dbHardware):(typeof getMatSource==='function'?getMatSource():dbMaterials));
+    var opts=(typeof _dlOptions==='function')?_dlOptions(src,v,40):'';
+    dl.innerHTML=opts;
+  }
+  var sh=v?_cpbShared(kind,v,''):null;
+  if(sh&&String(sh.name||'').trim().toLowerCase()===String(v).trim().toLowerCase()){
+    var u=el('cpb-new-unit'); if(u&&!u.value) u.value=sh.unit||'';
+    if(hint) hint.textContent='Shared price: '+(sh.price!=null?fmtMoney(+sh.price):'—')+(sh.unit?' / '+sh.unit:'')+'. Enter the '+(cpbState.co==='C'?'CWLI':'company')+' price.';
+  } else if(hint) hint.textContent=v?'Not in the shared list — it will be added as a '+(cpbState.co==='C'?'CWLI':'company')+'-only product.':'';
+}
+function _cpbAdd(){
+  if(!_cpbCanEdit()){ showToast('You do not have access to edit this price list.'); return; }
+  var name=(el('cpb-new-name').value||'').trim(), unit=(el('cpb-new-unit').value||'').trim(), price=parseFloat(el('cpb-new-price').value);
+  if(!name){ showToast('Type the item first.'); return; }
+  if(!(price>=0)){ showToast('Enter a price.'); return; }
+  var sh=_cpbShared(cpbState.tab,name,unit);
+  var exact=sh&&String(sh.name||'').trim().toLowerCase()===name.toLowerCase();
+  if(exact){ name=sh.name; if(!unit) unit=sh.unit||''; }
+  var dup=cpbState.prices.some(function(p){ return p.kind===cpbState.tab&&String(p.name).trim().toLowerCase()===name.toLowerCase()&&String(p.unit||'').trim().toLowerCase()===unit.toLowerCase(); });
+  if(dup){ showToast('That item is already in this list — change its price below.'); return; }
+  var row={company_key:cpbState.co,kind:cpbState.tab,name:name,unit:unit,price:price,company_only:!exact};
+  supa.from('company_prices').insert(row).select('*').then(function(r){
+    if(r&&r.error){ showToast('Could not add: '+(r.error.message||r.error)); return; }
+    cpbState.prices.push(r.data[0]);
+    logActivity((cpbState.co==='C'?'CWLI':'Company')+' price list: added '+name+(unit?' ('+unit+')':'')+' at '+fmtMoney(price)+(exact?'':' — own product')+'.','');
+    renderCompanyPrices(); showToast('Added.');
+  });
+}
+function _cpbSetPrice(id,v){
+  var p=cpbState.prices.filter(function(x){ return x.id===id; })[0]; if(!p) return;
+  var n=parseFloat(v); if(!(n>=0)){ showToast('Enter a price of 0 or more.'); renderCompanyPrices(); return; }
+  var was=+p.price;
+  supa.from('company_prices').update({price:n}).eq('id',id).select('id').then(function(r){
+    if(r&&r.error||!(r&&r.data&&r.data.length)){ showToast('Could not save: '+((r&&r.error&&r.error.message)||'no access')); renderCompanyPrices(); return; }
+    p.price=n; logActivity((cpbState.co==='C'?'CWLI':'Company')+' price list: '+p.name+' '+fmtMoney(was)+' → '+fmtMoney(n)+'.','');
+    showToast('Saved.');
+  });
+}
+function _cpbRemove(id){
+  var p=cpbState.prices.filter(function(x){ return x.id===id; })[0]; if(!p) return;
+  if(!confirm('Remove '+p.name+' from the '+(cpbState.co==='C'?'CWLI':'company')+' list?'+(p.company_only?'':' The shared price applies again.'))) return;
+  supa.from('company_prices').delete().eq('id',id).select('id').then(function(r){
+    if(r&&r.error||!(r&&r.data&&r.data.length)){ showToast('Could not remove: '+((r&&r.error&&r.error.message)||'no access')); return; }
+    cpbState.prices=cpbState.prices.filter(function(x){ return x.id!==id; });
+    logActivity((cpbState.co==='C'?'CWLI':'Company')+' price list: removed '+p.name+' (was '+fmtMoney(+p.price)+').','');
+    renderCompanyPrices();
+  });
+}
+function _cpbReadNums(attr){
+  var out={}, bad='';
+  document.querySelectorAll('[data-'+attr+']').forEach(function(i){
+    var k=i.getAttribute('data-'+attr), v=String(i.value||'').trim();
+    if(v==='') return;
+    var n=parseFloat(v); if(!isFinite(n)||n<0){ bad=k; return; } out[k]=n;
+  });
+  return {vals:out,bad:bad};
+}
+function _cpbSavePricing(){
+  if(!_cpbCanEdit()){ showToast('You do not have access to edit this.'); return; }
+  var r=_cpbReadNums('cpbcf'); if(r.bad){ showToast('Check the value for '+r.bad+'.'); return; }
+  supa.from('company_pricing').upsert({company_key:cpbState.co,cost_factors:r.vals},{onConflict:'company_key'}).select('*').then(function(x){
+    if(x&&x.error){ showToast('Could not save: '+(x.error.message||x.error)); return; }
+    cpbState.pricing=x.data[0];
+    logActivity((cpbState.co==='C'?'CWLI':'Company')+' pricing settings saved ('+Object.keys(r.vals).length+' set, the rest use the shared values).','');
+    showToast('Pricing settings saved.');
+  });
+}
+function _cpbSaveCosts(){
+  if(!_cpbCanCosts()){ showToast('You do not have access to costs.'); return; }
+  var r=_cpbReadNums('cpboh'); if(r.bad){ showToast('Check the value for '+r.bad+'.'); return; }
+  var mm=String((el('cpb-mmp')||{}).value||'').trim(), mmn=mm===''?null:parseFloat(mm);
+  if(mm!==''&&!(mmn>=0&&mmn<100)){ showToast('Margin must be between 0 and 100.'); return; }
+  var row={company_key:cpbState.co,overhead:r.vals,material_margin_pct:mmn,notes:(el('cpb-cost-notes')||{}).value||null,item_costs:(cpbState.costs&&cpbState.costs.item_costs)||{}};
+  supa.from('company_costs').upsert(row,{onConflict:'company_key'}).select('*').then(function(x){
+    if(x&&x.error){ showToast('Could not save: '+(x.error.message||x.error)); return; }
+    cpbState.costs=x.data[0]; logActivity((cpbState.co==='C'?'CWLI':'Company')+' costs saved.',''); showToast('Costs saved.');
+  });
+}
+function _cpbSetItemCost(key,v){
+  if(!_cpbCanCosts()||!cpbState.costs) return;
+  var ic=Object.assign({},cpbState.costs.item_costs||{}), s=String(v||'').trim();
+  if(s===''){ delete ic[key]; } else { var n=parseFloat(s); if(!(n>=0)){ showToast('Enter a cost of 0 or more.'); return; } ic[key]=n; }
+  supa.from('company_costs').upsert({company_key:cpbState.co,item_costs:ic,overhead:cpbState.costs.overhead||{},material_margin_pct:cpbState.costs.material_margin_pct,notes:cpbState.costs.notes},{onConflict:'company_key'}).select('*').then(function(x){
+    if(x&&x.error){ showToast('Could not save: '+(x.error.message||x.error)); return; }
+    cpbState.costs=x.data[0]; showToast('Cost saved.');
+  });
+}
+
 // ── Adding SKUs to the price list (Rommel, 2026-10-30) ─────────────────────────────────────
 // PPIC staff add new materials/hardware without the rest of Settings. Granted per person in
 // Settings → Users ("Can add SKUs"), stored in users.can_add_skus (Supabase only, like Lami).
@@ -25802,6 +26096,7 @@ function loadUsersFromSheet(){
          if Supabase is not connected the Users page must still work exactly as before, with the
          tickbox simply showing unticked and refusing to save. */
       _mergeLamiFlags();
+      try{ _mergeCpbFlags(); }catch(e){}
     })
     .catch(function(){if(wrap)wrap.innerHTML='<div class="alert alert-warn"><i class="ti ti-alert-triangle"></i>Could not load users. Check sheet permissions.</div>';});
 }
@@ -25897,6 +26192,7 @@ function renderUsers(){
       +' onchange="_setCanAddSkus('+i+',this.checked)">'
       +'Can add SKUs (materials and hardware)</label>'
       +'<div style="font-size:11px;color:var(--text2);margin-top:4px">For PPIC. Opens a Price list tab where they can add new items, checked for duplicates first. They cannot change or remove existing items, or open the rest of Settings.</div>'
+      +_cpbUserTicksHtml(u,i,isAdmin)
       +(function(){ var always=(u.pos==='Manager'||u.pos==='Director'||u.pos==='Admin'), canEdit=_isOrderGranter()&&!always;
         return '<div class="dvdr" style="margin:10px 0 8px"><span>Orders</span></div>'
         +'<label style="display:flex;align-items:center;gap:7px;font-size:12px;'+(canEdit?'cursor:pointer':'cursor:default;opacity:.55')+'">'
@@ -33391,6 +33687,7 @@ function gCheckRole(){
       _gPassSave();
       gShowApp();
       setTimeout(_loadMySkuAccess,2500);
+      setTimeout(_loadMyCpbAccess,2600);
       setTimeout(_loadMyOrderAssign,2700);
       setTimeout(_loadProfiles,2900);
       setTimeout(_shadowUserCheck,3000); // phase 3: compare the Sheet with the database copy, record only
@@ -33704,6 +34001,7 @@ function canNavigate(pg){
   if(pg==='help') return true;
   if(pg==='users') return currentRole==='Admin'||currentRole==='Director';
   if(pg==='pricelist') return _canAddSkus();
+  if(pg==='compprices') return _cpbCanOpen();
   if(pg==='approvals'&&_isSignatory()) return true;
 
   if(pg==='quotation'||pg==='directory') return !!(currentUserAcc['Quotations']||currentUserAcc['Projects']);
@@ -33721,6 +34019,7 @@ function applyNavAccess(){
     if(pg==='help'){btn.style.display='';return;}
     // Only for someone allowed to add SKUs WITHOUT Settings — Settings already holds the same tool.
     if(pg==='pricelist'){btn.style.display=(mySkuAccess&&!currentUserAcc['Settings'])?'':'none';return;}
+    if(pg==='compprices'){btn.style.display=_cpbCanOpen()?'':'none';return;}
     if(pg==='quotation'||pg==='directory'){btn.style.display=(hasQ||hasP)?'':'none';return;}
     // Same exemption as canNavigate: hiding the tab from a signatory would leave
     // them reaching Approvals only through a notification, with no way back.

@@ -6909,6 +6909,22 @@ const PROFILES = {
         } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
         return res;
       }, true);
+      check('Company price lists: only Admin/Director or ticked people open them; nothing touches shared prices', () => {
+        const w = window;
+        if (typeof w._cpbCanOpen !== 'function') return 'missing';
+        const keep = { r: w.currentRole, e: w.myCpbEdit, c: w.myCpbCosts };
+        const cfBefore = JSON.stringify(w.CF), carcBefore = JSON.stringify(w.CARCASS_PRICES);
+        try {
+          const res = {};
+          w.currentRole = 'Staff'; w.myCpbEdit = false; w.myCpbCosts = false;
+          res.staff = [w._cpbCanOpen(), w._cpbCanEdit(), w._cpbCanCosts(), w.canNavigate('compprices')];
+          w.myCpbEdit = true; res.editor = [w._cpbCanOpen(), w._cpbCanEdit(), w._cpbCanCosts()];
+          w.myCpbEdit = false; w.myCpbCosts = true; res.costOnly = [w._cpbCanOpen(), w._cpbCanEdit(), w._cpbCanCosts()];
+          w.myCpbCosts = false; w.currentRole = 'Director'; res.director = [w._cpbCanOpen(), w._cpbCanEdit(), w._cpbCanCosts()];
+          res.sharedUntouched = JSON.stringify(w.CF) === cfBefore && JSON.stringify(w.CARCASS_PRICES) === carcBefore;
+          return res;
+        } finally { w.currentRole = keep.r; w.myCpbEdit = keep.e; w.myCpbCosts = keep.c; }
+      }, { staff: [false, false, false, false], editor: [true, true, false], costOnly: [true, false, true], director: [true, true, true], sharedUntouched: true });
       check('An unsigned Final Quotation is flagged in Lock & send and by Lami; a signed one is not', () => {
         const w = window;
         if (typeof w._lockSigNote !== 'function' || typeof w._sigMissing !== 'function') return 'missing';
