@@ -36566,11 +36566,15 @@ var _priceDbMigrationInFlight=false;
 var priceDbStale=null;   // {sheetModified, mirrorWritten, days} once checked, false when fresh
 function _checkPriceDbFreshness(){
   if(!gToken||!PRICE_DB_ID||!supaReady()) return Promise.resolve(null);
+  var _verifiedAt=null;
   return Promise.all([
     gApiFetch('https://www.googleapis.com/drive/v3/files/'+PRICE_DB_ID
       +'?fields=modifiedTime&supportsAllDrives=true',{}).catch(function(){return null;}),
-    _priceMaterialsStamp()
+    _priceMaterialsStamp(),
+    supa.from('settings').select('value').eq('key','PRICEDB_VERIFIED').maybeSingle()
+      .then(function(r){ return (r&&r.data&&r.data.value&&r.data.value.at)||null; },function(){ return null; })
   ]).then(function(a){
+    _verifiedAt=a[2];
     if(a[1]) return [a[0],a[1].updated_at||null,typeof a[1].expected==='number'?a[1].expected:null,a[1].n];
     return Promise.all([a[0],
     supa.from('price_materials').select('updated_at').order('updated_at',{ascending:false}).limit(1)
@@ -36596,6 +36600,10 @@ function _checkPriceDbFreshness(){
     }
     var sheetT=res[0]&&res[0].modifiedTime?Date.parse(res[0].modifiedTime):NaN;
     var mirrorT=res[1]?Date.parse(res[1]):NaN;
+    // A re-sync that found a table unchanged rewrites nothing, so the rows keep their old time.
+    // Its own "verified at" marker says the mirror matched the sheet at that moment.
+    var verT=_verifiedAt?Date.parse(_verifiedAt):NaN;
+    if(isFinite(verT)&&(!isFinite(mirrorT)||verT>mirrorT)) mirrorT=verT;
     if(!isFinite(sheetT)||!isFinite(mirrorT)){ priceDbStale=null; return null; }   // cannot tell — say nothing
     // A minute of slack: the mirror is written moments after the sheet, so they are never equal.
     if(sheetT-mirrorT < 60000){ priceDbStale=false; return false; }
@@ -36641,6 +36649,21 @@ function _syncLooksSafe(incomingCount,currentCount){
   if(currentCount==null||currentCount<10) return true;    // nothing meaningful to compare against
   return incomingCount>=currentCount*0.5;
 }
+// Content fingerprint of the rows a sync would write (2026-11-28). Any edit anywhere in the price
+// spreadsheet wakes the re-sync, which then deleted and re-inserted all four tables — 153k
+// materials included — so every browser downloaded the whole list again even when only a service
+// price had changed. Now a table whose rows are identical to what the last sync wrote is skipped.
+function _pdbHash(rows){
+  var h1=0xdeadbeef^rows.length, h2=0x41c6ce57^rows.length, SEP=String.fromCharCode(1);
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i], k=Object.keys(r).sort(), line='';
+    for(var j=0;j<k.length;j++) line+=k[j]+'='+(r[k[j]]==null?'':r[k[j]])+SEP;
+    for(var c=0;c<line.length;c++){ var ch=line.charCodeAt(c); h1=Math.imul(h1^ch,2654435761); h2=Math.imul(h2^ch,1597334677); }
+    h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);
+    h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);
+  }
+  return rows.length+'-'+(h2>>>0).toString(36)+(h1>>>0).toString(36);
+}
 function supaMigratePriceDb(){
   if(_priceDbMigrationInFlight){ console.warn('[migrate] already running — wait for the "Price DB backfill done" log before running this again.'); return Promise.resolve(null); }
   if(!supaReady()){ console.warn('[migrate] run supaConnect() first'); return Promise.resolve(null); }
@@ -36665,13 +36688,22 @@ function supaMigratePriceDb(){
     var tableKeys=Object.keys(parsed);
     // Current row count per table, fetched BEFORE anything is deleted — the check this whole
     // function exists for.
+    var _hashP=supa.from('settings').select('value').eq('key','PRICEDB_HASHES').maybeSingle()
+      .then(function(r){ return (r&&r.data&&r.data.value)||{}; },function(){ return {}; });
+    var newHash={}; tableKeys.forEach(function(t){ newHash[t]=_pdbHash(parsed[t]); });
+    stats.unchanged=[];
     return Promise.all(tableKeys.map(function(t){
       return supa.from(t).select('id',{count:'exact',head:true})
         .then(function(r){ return (r&&typeof r.count==='number')?r.count:null; },function(){ return null; });
-    })).then(function(counts){
+    }).concat([_hashP])).then(function(counts){
+      var oldHash=counts.pop()||{};
       var tasks=[];
       tableKeys.forEach(function(t,i){
         var incoming=parsed[t], currentCount=counts[i];
+        // Same rows as the last sync wrote, and the table still holds them all: nothing to do.
+        if(oldHash[t]&&oldHash[t]===newHash[t]&&currentCount===incoming.length){
+          stats[statKeys[t]]=incoming.length; stats.unchanged.push(t); return;
+        }
         if(!_syncLooksSafe(incoming.length,currentCount)){
           console.warn('[migrate] REFUSED to replace '+t+' — the sheet read only '+incoming.length
             +' row(s), but Supabase currently holds '+currentCount+'. Left untouched: this looks '
@@ -36706,7 +36738,16 @@ function supaMigratePriceDb(){
             stats.incomplete=true;
             return stats;      // marker deliberately NOT written
           }
-          return supaUpsertSetting('PRICEDB_MATERIALS_COUNT',{count:stats.materials,at:new Date().toISOString()})
+          var _keep={}; tableKeys.forEach(function(t){
+            var refused=stats.refused.some(function(x){ return x.table===t; });
+            if(!refused) _keep[t]=newHash[t];
+          });
+          var _now=new Date().toISOString();
+          if(stats.unchanged.length) console.log('[migrate] unchanged, not rewritten: '+stats.unchanged.join(', '));
+          supaUpsertSetting('PRICEDB_HASHES',Object.assign({},oldHash,_keep,{at:_now}));
+          // The mirror now matches the sheet as of this moment, even where nothing was rewritten.
+          if(!stats.refused.length) supaUpsertSetting('PRICEDB_VERIFIED',{at:_now});   // only when every table matched
+          return supaUpsertSetting('PRICEDB_MATERIALS_COUNT',{count:stats.materials,at:_now})
             .then(function(){ console.log('[migrate] Price DB backfill done:',stats); return stats; },
                   function(){ console.log('[migrate] Price DB backfill done (marker not saved):',stats); return stats; });
         },function(){ console.log('[migrate] Price DB backfill done (count unverified):',stats); return stats; });
@@ -38619,13 +38660,19 @@ function _autoSyncPriceDb(){
     localStorage.setItem(_AUTOSYNC_KEY,String(new Date().getTime()));
   }catch(e){}
   if(typeof supaMigratePriceDb!=='function') return;
-  supaMigratePriceDb().then(function(r){
-    if(!r) return;
-    priceDbStale=false;
-    logActivity('Price catalogue re-synced automatically — the Google Sheet had been edited since '
-      +'the last sync.');
-    if(typeof renderPriceDbSettings==='function') try{ renderPriceDbSettings(); }catch(e){}
-  },function(){});
+  // One re-sync at a time for the whole company (the localStorage guard above is per browser only).
+  var _claim=(supa&&typeof supa.rpc==='function')?supa.rpc('pricedb_sync_claim',{p_minutes:15}).then(function(r){ return !!(r&&!r.error&&r.data===true); },function(){ return false; }):Promise.resolve(true);
+  _claim.then(function(mine){
+    if(!mine){ console.log('[pricedb] another person\u2019s browser is already re-syncing the price list'); return; }
+    return supaMigratePriceDb().then(function(r){
+      if(!r) return;
+      priceDbStale=false;
+      var changed=['price_materials','price_hardware','cabinet_templates','price_services'].filter(function(t){ return (r.unchanged||[]).indexOf(t)<0; });
+      logActivity('Price catalogue re-synced automatically — the Google Sheet had been edited since the last sync. '
+        +((r.unchanged||[]).length?'Unchanged and left as they were: '+r.unchanged.join(', ')+'.':'All tables rewritten.'));
+      if(typeof renderPriceDbSettings==='function') try{ renderPriceDbSettings(); }catch(e){}
+    },function(){}).then(function(){ try{ supa.rpc('pricedb_sync_release'); }catch(e){} });
+  });
 }
 function _loadPriceDbFromMirror(showFeedback){
     supaGetPriceDb().then(function(data){

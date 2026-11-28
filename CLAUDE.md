@@ -13992,3 +13992,14 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
 - `supaGetOrderCutListTotals(orderIds)` looks each order up once per session (`_cutTotKnown`) instead of reading the
   whole `order_cutting_lists` table on every 45 s check.
 - Audit item "polls re-download whole tables" is DONE for approvals, messages and orders. Not yet seen live with two users.
+
+### Same session — price-list re-sync no longer rewrites unchanged tables (migration `pricedb_sync_lock`)
+- `_pdbHash(rows)` fingerprints what a sync would write. `supaMigratePriceDb` reads settings `PRICEDB_HASHES` and
+  skips a table whose fingerprint matches AND whose row count is complete (`stats.unchanged`); afterwards stores the
+  new fingerprints and, if nothing was refused, `PRICEDB_VERIFIED {at}`. `_checkPriceDbFreshness` treats that
+  verified time as the mirror's time, so a sync that changed nothing doesn't leave everyone reading the slow Sheet.
+  The first sync after this release still rewrites everything once (no fingerprints stored yet).
+- `_autoSyncPriceDb` takes a company-wide lock (`pricedb_sync_claim(15 min)` / `pricedb_sync_release`) on top of
+  the per-browser one. Tested by impersonation: second claimer refused until released.
+- Still true (pre-existing, noticed): a re-sync writes `price_services` with name/unit/price only, dropping the
+  capacity/cost columns `_saveServicesToPriceDb` writes. Capacity now comes from PMES, so low impact.

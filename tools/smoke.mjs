@@ -7760,6 +7760,20 @@ const PROFILES = {
           () => ren, { r1: 'renamed', cleared: true, signedOut: 2, flag: 'allan.lagsao@x', bannerKind: 'renamed', bannerNames: true, noConnectAsMe: true,
                        popupClosed: 1, notInFlight: true, told: ['rommel@x'], urgent: true, tellsFix: true, r2: false, flagGone: true, bannerGone: true });
       }
+      /* 2026-11-28 price-list re-sync: unchanged tables are skipped. */
+      if (typeof window._pdbHash === 'function')
+        check('Price-list fingerprint: same rows give the same value, any change (price, order, count) a different one', () => {
+          const h = window._pdbHash;
+          const a = [{ name: 'X', unit: 'pc', price: 10 }, { name: 'Y', unit: 'pc', price: 5 }];
+          return { same: h(a) === h(a.map(r => Object.assign({}, r))), price: h(a) !== h([{ name: 'X', unit: 'pc', price: 11 }, a[1]]),
+                   order: h(a) !== h([a[1], a[0]]), count: h(a) !== h([a[0]]), keyOrder: h(a) === h([{ price: 10, unit: 'pc', name: 'X' }, a[1]]) };
+        }, { same: true, price: true, order: true, count: true, keyOrder: true });
+      if (typeof window.supaMigratePriceDb === 'function')
+        check('Price-list re-sync skips unchanged tables and records a verified time; auto re-sync takes a company-wide lock', () => {
+          const m = window.supaMigratePriceDb.toString(), a = window._autoSyncPriceDb.toString(), f = window._checkPriceDbFreshness.toString();
+          return { skips: /oldHash\[t\]===newHash\[t\]&&currentCount===incoming\.length/.test(m), verified: /PRICEDB_VERIFIED/.test(m) && /PRICEDB_VERIFIED/.test(f),
+                   lock: /pricedb_sync_claim/.test(a) && /pricedb_sync_release/.test(a) };
+        }, { skips: true, verified: true, lock: true });
       /* 2026-11-28 live messages + orders; cutting-list totals looked up once. */
       if (typeof window._tblLivePatch === 'function')
         check('Live messages/orders: a pushed row is patched in (raw Wufoo POST dropped), the kept copy is used while live', () => {
