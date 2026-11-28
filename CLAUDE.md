@@ -14028,3 +14028,12 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
   desktop:drawing / chat from several people, and that no "server relay failed" warnings were reported.
   The 5 never-connected users (Kathleen, Roniel, Michael, Noel, Rhodalyn) lose AI after R1 is cleared
   until they Connect once.
+
+### Same session — lighter Save Draft
+- Conflict check (`_saveConflictProbe`): asks the database for `state->>savedAt` only, plus the shared
+  4-column Sheet row read; downloads the full quotation (old `loadQuotationJson` path) only when the
+  timestamp differs, the Sheet row is newer, or the fast database isn't connected.
+- Backup files (`saveQuotationStateToDrive` → `_saveQuotationStateFiles`, Storage + Drive state.json):
+  skipped when unchanged (`_strHash`), at most every 10 min (`STATE_BACKUP_MIN_MS`), written at once
+  when lock/send/approval/void changes; a deferred edit is written when the 10 min are up (tab open).
+- Database + Sheet copies are written on every save exactly as before.

@@ -7831,6 +7831,40 @@ const PROFILES = {
         })().catch(e => ({ err: String(e) }));
         check('Desktop AI goes through the server; the browser key is only a fallback', () => rl, { calls: 'bearer:drawing bearer:chat key key', noKeyNoDb: 503, directLeft: 1 });
       }
+      /* 2026-11-28 lighter Save Draft: conflict check reads a timestamp; backup files throttled. */
+      if (typeof window._saveConflictProbe === 'function') {
+        const sp = await (async () => {
+          const w = window, keep = { r: w.supaReady, s: w.supa, l: w.loadQuotationJson, i: w._quotSheetRowInfo, a: w.qLoadedSavedAt };
+          try {
+            let dbAt = 'T1', full = 0;
+            w.supaReady = () => true;
+            w.supa = { from: () => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { savedAt: dbAt, updated_at: '2026-01-01T00:00:00Z' } }) }) }) }) };
+            w.loadQuotationJson = (s, cb) => { full++; cb({ savedAt: dbAt, full: true }); };
+            w._quotSheetRowInfo = () => Promise.resolve({ updatedAt: '2026-01-01T00:00:00Z' });
+            w.qLoadedSavedAt = 'T1';
+            const run = () => new Promise(res => w._saveConflictProbe('QT-1', res));
+            const a = await run();                     // same timestamp: no full read
+            dbAt = 'T2'; const b = await run();        // someone else saved: full read
+            w.supaReady = () => false; const c = await run();   // not connected: full read
+            return { sameNoFull: !a.full, otherFull: !!b.full, offlineFull: !!c.full, fullReads: full };
+          } finally { w.supaReady = keep.r; w.supa = keep.s; w.loadQuotationJson = keep.l; w._quotSheetRowInfo = keep.i; w.qLoadedSavedAt = keep.a; }
+        })().catch(e => ({ err: String(e) }));
+        check('Save Draft conflict check reads one timestamp, the full copy only when someone else saved', () => sp, { sameNoFull: true, otherFull: true, offlineFull: true, fullReads: 2 });
+      }
+      if (typeof window._saveQuotationStateFiles === 'function')
+        check('Backup files: an unchanged quotation is not rewritten; a lock change is written at once', () => {
+          const w = window, keep = { f: w._saveQuotationStateFiles, t: w.gToken }, writes = [];
+          try {
+            w._saveQuotationStateFiles = (s, j) => writes.push(j); w.gToken = 'x'; w._stateBackupLast = {};
+            w.saveQuotationStateToDrive('QT-9', '{"a":1}', 'L0');
+            w.saveQuotationStateToDrive('QT-9', '{"a":1}', 'L0');   // unchanged
+            w.saveQuotationStateToDrive('QT-9', '{"a":2}', 'L0');   // changed, within 10 min: deferred
+            const deferred = writes.length;
+            w.saveQuotationStateToDrive('QT-9', '{"a":3}', 'L1');   // locked: written now
+            clearTimeout(w._stateBackupLast['QT-9'].timer);
+            return { deferred, total: writes.length, last: writes[writes.length - 1] };
+          } finally { w._saveQuotationStateFiles = keep.f; w.gToken = keep.t; w._stateBackupLast = {}; }
+        }, { deferred: 1, total: 2, last: '{"a":3}' });
       /* 2026-11-28 bugs 8-9: retry time limit; background save failures are shown and logged. */
       if (typeof window.gApiFetch === 'function')
         check('A retry after renewing sign-in gets its own time limit', () => {

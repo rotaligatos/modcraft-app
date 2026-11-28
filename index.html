@@ -35277,8 +35277,32 @@ function _showDriveWarning(msg){
   t._timer=setTimeout(function(){t.style.display='none';},15000);
 }
 // Save a JSON state backup into Modcraft Quotations/{baseSerial}/ — belt-and-suspenders alongside Sheets.
-function saveQuotationStateToDrive(serial,json){
+// Every save also wrote the whole quotation as a backup file to Storage AND Drive — the third and
+// fourth copy of what the database and the Sheet already hold. Now (2026-11-28) an unchanged
+// quotation is not written again, and a changed one at most every 10 minutes, unless its lock,
+// send or approval state changed. The last edit still reaches the backup: it is written when the
+// 10 minutes are up.
+var STATE_BACKUP_MIN_MS=10*60*1000;
+var _stateBackupLast={};   // serial -> {h, sig, at, timer}
+function _strHash(str){
+  var h1=0xdeadbeef^str.length, h2=0x41c6ce57^str.length;
+  for(var i=0;i<str.length;i++){ var c=str.charCodeAt(i); h1=Math.imul(h1^c,2654435761); h2=Math.imul(h2^c,1597334677); }
+  return (h1>>>0).toString(36)+(h2>>>0).toString(36);
+}
+function saveQuotationStateToDrive(serial,json,sig){
   if(!gToken) return;
+  var L=_stateBackupLast[serial], h=_strHash(json);
+  if(L&&L.h===h) return;   // nothing changed since the last backup
+  if(L&&L.sig===sig&&Date.now()-L.at<STATE_BACKUP_MIN_MS){
+    clearTimeout(L.timer);
+    L.timer=setTimeout(function(){ L.at=0; saveQuotationStateToDrive(serial,json,sig); },STATE_BACKUP_MIN_MS-(Date.now()-L.at));
+    return;
+  }
+  if(L) clearTimeout(L.timer);
+  _stateBackupLast[serial]={h:h,sig:sig,at:Date.now(),timer:null};
+  _saveQuotationStateFiles(serial,json);
+}
+function _saveQuotationStateFiles(serial,json){
   var baseSerial=(serial.match(/^(QT-(?:[WCMTX]\d{8}|\d{6}-\d{4}))/)||[,''])[1]||serial;
   var cn=driveClientName();
   var fileName=baseSerial+' — '+cn+' — state.json';
@@ -40647,7 +40671,7 @@ function gSaveQuotation(opts){
   if(opts.checkConflict && qLoadedSavedAt && qSerialCommitted){
     var _serial=qBaseSerial||qSerial;
     _saveConflictCheckPending=true;
-    loadQuotationJson(_serial,function(remote){
+    _saveConflictProbe(_serial,function(remote){
       _saveConflictCheckPending=false;
       var w=_conflictWaiters; _conflictWaiters=[];
       if(remote && remote.savedAt && remote.savedAt!==qLoadedSavedAt){
@@ -40657,10 +40681,30 @@ function gSaveQuotation(opts){
         _gSaveQuotationCore();
         w.forEach(function(f){ _afterPendingSave(f); });
       }
-    },{quiet:true});
+    });
     return;
   }
   _gSaveQuotationCore();
+}
+// Save Draft's conflict check used to download the whole saved quotation (often hundreds of KB,
+// plus the Sheet copy) just to read one timestamp. Now it asks the database for that timestamp
+// only, and the Project List row's Last Updated (the small shared four-column read). Only when
+// one of them says someone else saved in between is the full copy downloaded, to show what they
+// changed (2026-11-28). Not connected to the fast database: the full read, as before.
+function _saveConflictProbe(serial,cb){
+  var full=function(){ loadQuotationJson(serial,cb,{quiet:true}); };
+  if(typeof supaReady!=='function'||!supaReady()||!supa) return full();
+  try{
+    supa.from('quotation_states').select('savedAt:state->>savedAt,updated_at').eq('serial',serial).maybeSingle().then(function(r){
+      if(!r||r.error||!r.data||!r.data.savedAt) return full();
+      var dbAt=r.data.savedAt;
+      if(dbAt!==qLoadedSavedAt) return full();   // someone else saved: fetch it to show them
+      return _quotSheetRowInfo(serial).then(function(info){
+        if(info&&_sheetIsNewer(info.updatedAt,dbAt,r.data.updated_at)) return full();   // a Sheet-only save
+        cb({savedAt:dbAt});
+      });
+    }).catch(function(){ full(); });
+  }catch(e){ full(); }
 }
 // Changing the client's company moves a quotation to another numbering series: a new serial is
 // claimed and the quotation carries on under it. What was never done was removing the Project List
@@ -41413,7 +41457,7 @@ function saveQuotationJson(callback){
     if(rowIdx>0){return sheetsUpdate('Quotation State!A'+rowIdx+':K'+rowIdx,[row]);}
     else{return sheetsAppend('Quotation State!A:K',[row]).then(function(){ delete _qStateRowCache[serial]; }); } // new row — position unknown; next load will re-scan
   }).then(function(){
-    saveQuotationStateToDrive(serial,json); // belt-and-suspenders Drive backup — non-blocking
+    saveQuotationStateToDrive(serial,json,[state.locked,state.fqLocked,state.sentStatus,state.fqSentStatus,state.clientApproved,state.fqClientApproved,state.voided].join('|')); // backup files — non-blocking, throttled
     if(callback)callback();
   })
   .catch(function(e){
