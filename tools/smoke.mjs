@@ -6909,6 +6909,28 @@ const PROFILES = {
         } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
         return res;
       }, true);
+      check('An unsigned Final Quotation is flagged in Lock & send and by Lami; a signed one is not', () => {
+        const w = window;
+        if (typeof w._lockSigNote !== 'function' || typeof w._sigMissing !== 'function') return 'missing';
+        const keep = { st: w._sigState, of: w._sigOf, ctx: w.modalCtx, stage: w.qStage, fl: w.fqLocked, ser: w.qSerial, dk: w.qDraftKey, nav: w.chipAuditNudges };
+        let signed = false;
+        w._sigState = () => ({ needNoted: true, checked: signed, noted: signed, complete: signed, pending: null });
+        w._sigOf = () => signed ? { name: 'X' } : null;
+        try {
+          w.modalCtx = 'fq'; w._lockSigNote();
+          const warnFq = (document.getElementById('ov-lock-sig') || {}).innerHTML || '';
+          w.modalCtx = 's1'; w._lockSigNote();
+          const warnS1 = (document.getElementById('ov-lock-sig') || {}).innerHTML || '';
+          const pg = document.querySelector('.page.active'); document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+          const pq = document.getElementById('page-quotation'); pq.classList.add('active');
+          w.qStage = 2; w.fqLocked = true; w.qSerial = 'QT-W00000999'; w.qDraftKey = '';
+          w._chipRunAudit(); const nudge = (w.chipAuditNudges || []).some(n => /Not signed yet/.test(n.text));
+          signed = true; w._chipRunAudit(); const nudgeSigned = (w.chipAuditNudges || []).some(n => /Not signed yet/.test(n.text));
+          w.modalCtx = 'fq'; w._lockSigNote(); const warnSigned = (document.getElementById('ov-lock-sig') || {}).innerHTML || '';
+          pq.classList.remove('active'); if (pg) pg.classList.add('active');
+          return { fq: /not signed yet/.test(warnFq) && /Checked by and Noted by/.test(warnFq), s1: warnS1 === '', nudge, nudgeSigned, warnSigned: warnSigned === '' };
+        } finally { w._sigState = keep.st; w._sigOf = keep.of; w.modalCtx = keep.ctx; w.qStage = keep.stage; w.fqLocked = keep.fl; w.qSerial = keep.ser; w.qDraftKey = keep.dk; w.chipAuditNudges = keep.nav; }
+      }, { fq: true, s1: true, nudge: true, nudgeSigned: false, warnSigned: true });
       check('Lami never says HTML codes, tags, links or file names aloud', () => {
         const w = window;
         if (typeof w._chipCleanText !== 'function' || typeof w._chipDecodeEntities !== 'function') return 'missing';
