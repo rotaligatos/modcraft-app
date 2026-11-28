@@ -3673,7 +3673,7 @@ function _lockedTotalForStage(){
 function _capturePricingRates(){
   var cp=function(o){ try{ return JSON.parse(JSON.stringify(o)); }catch(e){ return null; } };
   return {at:new Date().toISOString(), by:(gUser&&(gUser.name||gUser.email))||'',
-          cf:cp(CF), carcassPrices:cp(typeof CARCASS_PRICES!=='undefined'?CARCASS_PRICES:{}),
+          cf:cp(_pbCF()||CF), carcassPrices:cp(_pbCarcass()||(typeof CARCASS_PRICES!=='undefined'?CARCASS_PRICES:{})),
           mobLocations:cp(typeof MOB_LOCATIONS!=='undefined'?MOB_LOCATIONS:[]),
           instCost:cp(typeof INST_COST!=='undefined'?INST_COST:{})};
 }
@@ -3681,7 +3681,12 @@ function _capturePricingRates(){
 // instead of threading a rate object through every pricing function. try/finally matters: if
 // anything inside throws, the app must not be left running on a dead quotation's rates.
 function _withFrozenRates(fn){
-  if(!qLockedRates||!qLockedRates.cf) return fn();
+  if(!qLockedRates||!qLockedRates.cf){
+    var pcf=_pbCF(), pcp=_pbCarcass(); if(!pcf&&!pcp) return fn();
+    var oCF=CF, oCP=(typeof CARCASS_PRICES!=='undefined')?CARCASS_PRICES:null;
+    try{ if(pcf) CF=pcf; if(pcp&&oCP!==null) CARCASS_PRICES=pcp; return fn(); }
+    finally { CF=oCF; if(oCP!==null) CARCASS_PRICES=oCP; }
+  }
   var sCF=CF, sCP=(typeof CARCASS_PRICES!=='undefined')?CARCASS_PRICES:null,
       sML=(typeof MOB_LOCATIONS!=='undefined')?MOB_LOCATIONS:null,
       sIC=(typeof INST_COST!=='undefined')?INST_COST:null;
@@ -5544,6 +5549,128 @@ function _mergeLamiFlags(){
     if(ch) renderUsers();
   });
 }
+// ── Company price layer in quotations (phase 3, Rommel 2026-11-28) ──────────────────────────
+// A C-series quotation (its company is Cebu World Laminate — usually MSSI/WCL quoting a CWLI
+// client) uses CWLI's own list from the Company prices page, layered on the shared one:
+// a CWLI price replaces the shared price for that item, CWLI-only products are added, CWLI
+// pricing settings replace those cost factors; everything else stays shared.
+// Kept inert unless ALL of these hold — this is what protects every other quotation:
+//   1. the CWLI switch is ON (company_pricing.enabled), and
+//   2. the quotation is C-series, and
+//   3. it was STARTED after the switch went on (a draft already in progress keeps today's prices;
+//      saved quotations carry their choice in state.priceBook, older saves have none = shared).
+// Locked quotations keep the rates frozen at lock, as before. Switching OFF returns new picks and
+// cost factors to shared; prices already entered on a line stay until the line is re-picked.
+var cpbLayer={}, cpbLayerVer=0, cpbLayerLoaded=false;
+var qPriceBook=null;          // null = unsaved draft (decided live); '' = shared; 'C' = CWLI list
+var qDraftStartedAt='';       // when this draft was started — a draft older than the switch stays shared
+function _cpbBuildLayer(pricing,prices){
+  var L={};
+  (pricing||[]).forEach(function(p){ L[p.company_key]={enabled:!!p.enabled, enabledAt:p.enabled_at||'', cf:p.cost_factors||{}, carcass:p.carcass_prices||{}, items:{material:{},hardware:{},service:{}}, only:{material:[],hardware:[],service:[]}}; });
+  (prices||[]).forEach(function(r){
+    if(r.active===false) return;
+    var Lc=L[r.company_key]; if(!Lc||!Lc.items[r.kind]) return;
+    var nm=String(r.name||'').trim().toLowerCase(), un=String(r.unit||'').trim().toLowerCase();
+    Lc.items[r.kind][nm+'|'+un]=+r.price;
+    if(!Lc.items[r.kind][nm+'|*']) Lc.items[r.kind][nm+'|*']=+r.price;   // name-only match when the line has no unit
+    if(r.company_only) Lc.only[r.kind].push({name:r.name,unit:r.unit||'',price:+r.price,company:r.company_key});
+  });
+  return L;
+}
+function _loadPriceLayer(tries,cb){
+  tries=tries||0;
+  if(typeof supaReady!=='function'||!supaReady()){ if(tries<20) setTimeout(function(){ _loadPriceLayer(tries+1,cb); },3000); return; }
+  Promise.all([
+    supa.from('company_pricing').select('company_key,enabled,enabled_at,cost_factors,carcass_prices'),
+    supa.from('company_prices').select('company_key,kind,name,unit,price,company_only,active').eq('active',true)
+  ]).then(function(rs){
+    if(rs[0].error||rs[1].error){ console.warn('[price layer] not loaded',rs[0].error||rs[1].error); return; }
+    cpbLayer=_cpbBuildLayer(rs[0].data,rs[1].data); cpbLayerVer++; cpbLayerLoaded=true;
+    try{ localStorage.setItem('mc_cpb_layer',JSON.stringify({pricing:rs[0].data,prices:rs[1].data})); }catch(e){}
+    // The open quotation may now price differently — only if it actually uses a company list.
+    if(_quotPriceBook()){ try{ recalc(); if(qStage===2) recalcFQ(); }catch(e){} }
+    if(cb) cb();
+  }).catch(function(e){ console.warn('[price layer]',e); });
+}
+// The last layer seen on this browser, so a C quotation opened before the read lands is priced
+// the same way it will be once it does.
+(function(){ try{ var c=JSON.parse(localStorage.getItem('mc_cpb_layer')||'null'); if(c){ cpbLayer=_cpbBuildLayer(c.pricing,c.prices); cpbLayerVer++; } }catch(e){} })();
+function _cpbQuotPrefixNow(){
+  var s=String(qSerial||'');
+  if(s&&!qDraftKey){ var m=/^QT-([WMC])/.exec(s); if(m) return m[1]; }
+  try{ var type=el('cl-type')?el('cl-type').value:'Direct'; return _seriesPrefixFor(getCompanyName(type)||currentUserCompany); }catch(e){ return ''; }
+}
+// Which list the OPEN quotation uses: '' (shared) or a company key.
+function _quotPriceBook(){
+  if(!qSerial&&!qDraftKey) return '';   // no quotation open: Settings, Designers Support on its own etc. use the shared list
+  var book;
+  if(qPriceBook!==null) book=qPriceBook;
+  else {
+    var k=_cpbQuotPrefixNow(), L=cpbLayer[k];
+    book=(L&&L.enabled&&(!L.enabledAt||!qDraftStartedAt||qDraftStartedAt>=L.enabledAt))?k:'';
+  }
+  var Lb=book?cpbLayer[book]:null;
+  return (Lb&&Lb.enabled)?book:'';
+}
+function _pbItemPrice(kind,name,unit,fallback){
+  var b=_quotPriceBook(); if(!b) return fallback;
+  var it=cpbLayer[b].items[kind]; if(!it) return fallback;
+  var nm=String(name||'').trim().toLowerCase(), un=String(unit||'').trim().toLowerCase();
+  var v=it[nm+'|'+un]; if(v==null&&!un) v=it[nm+'|*'];
+  return v==null?fallback:v;
+}
+// The search/pick list for a kind, with the company's prices and own products applied.
+// Built once per (shared list, layer version, company) — same array every call otherwise, so
+// the lookup index cached by array identity is reused.
+var _pbSrcCache=new WeakMap();
+function _pbAdjust(kind,base){
+  var b=_quotPriceBook(); if(!b||!base) return base;
+  var Lc=cpbLayer[b], it=Lc.items[kind]||{}, only=Lc.only[kind]||[];
+  if(!Object.keys(it).length&&!only.length) return base;
+  var c=_pbSrcCache.get(base); if(c&&c.ver===cpbLayerVer&&c.book===b) return c.arr;
+  var arr=new Array(base.length), seen={};
+  for(var i=0;i<base.length;i++){
+    var r=base[i]; if(!r){ arr[i]=r; continue; }
+    var nm=String(r.name||'').trim().toLowerCase(), un=String(r.unit||'').trim().toLowerCase();
+    seen[nm]=1;
+    var v=it[nm+'|'+un]; if(v==null&&!un) v=it[nm+'|*'];
+    arr[i]=(v==null)?r:Object.assign({},r,{price:v,companyPrice:b});
+  }
+  only.forEach(function(o){ if(!seen[String(o.name).trim().toLowerCase()]) arr.push({name:o.name,unit:o.unit,price:o.price,companyOnly:b}); });
+  _pbSrcCache.set(base,{ver:cpbLayerVer,book:b,arr:arr});
+  return arr;
+}
+// A catalogue service (SERVICES[svcIdx]) at the open quotation's price.
+function _pbSvcPrice(svc){ return svc?_pbItemPrice('service',svc.name,svc.unit,svc.price||0):0; }
+// Cost factors / carcass prices with the company's pricing settings applied (shared otherwise).
+function _pbCF(){
+  var b=_quotPriceBook(); if(!b) return null;
+  var cf=cpbLayer[b].cf||{}; if(!Object.keys(cf).length) return null;
+  return Object.assign({},CF,cf);
+}
+function _pbCarcass(){
+  var b=_quotPriceBook(); if(!b||typeof CARCASS_PRICES==='undefined') return null;
+  var cp=cpbLayer[b].carcass||{}; if(!Object.keys(cp).length) return null;
+  return Object.assign({},CARCASS_PRICES,cp);
+}
+// The switch (Company prices page). Turning ON stamps the moment, so only quotations started
+// from now on use the list.
+function _cpbSetEnabled(on){
+  if(!_cpbCanEdit()){ showToast('You do not have access to change this.'); return; }
+  var co=cpbState.co, name=co==='C'?'CWLI':'company';
+  var msg=on?('Switch ON the '+name+' price list?\n\nOnly C-series quotations STARTED from now on will use it. Drafts already in progress and locked quotations keep their prices.')
+            :('Switch OFF the '+name+' price list?\n\nNew picks and pricing settings go back to the shared list. Prices already entered on quotation lines stay until a line is re-picked.');
+  if(!confirm(msg)) return;
+  var patch={company_key:co,enabled:!!on}; if(on) patch.enabled_at=new Date().toISOString();
+  supa.from('company_pricing').upsert(patch,{onConflict:'company_key'}).select('*').then(function(x){
+    if(x&&x.error){ showToast('Could not change it: '+(x.error.message||x.error)); return; }
+    cpbState.pricing=x.data[0];
+    logActivity(name.toUpperCase()+' price list switched '+(on?'ON — C-series quotations started from now use it.':'OFF — back to the shared list.'),'');
+    showToast(name.toUpperCase()+' price list switched '+(on?'on.':'off.'));
+    _loadPriceLayer(); renderCompanyPrices();
+  });
+}
+
 // ── Company price lists (Rommel, 2026-11-28) ──────────────────────────────────────────────
 // CWLI's own selling prices, pricing settings and costs, kept as a LAYER on top of the shared
 // price list — never a copy. Anything a company has not set falls back to the shared figure, so
@@ -5670,8 +5797,13 @@ function renderCompanyPrices(){
   h+='<div class="card" style="margin-bottom:14px"><div class="card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">'
     +'<div style="flex:1;min-width:260px"><div style="font-weight:600">'+escHtml(coShow(CPB_COMPANIES[cpbState.co]))+' — own price list</div>'
     +'<div style="font-size:12px;color:var(--text2);margin-top:3px">Only what differs from the shared price list goes here. Anything not set uses the shared price.</div></div>'
-    +'<span class="pill pill-navy" title="Quotations keep today\'s prices until this is switched on">'+(pr.enabled?'In use':'Not in use yet')+'</span></div>'
-    +'<div style="font-size:12px;color:var(--text2);padding:0 16px 12px">Not used for pricing yet: every quotation, including C-series, keeps today\'s prices. When it is switched on later, only C-series quotations created after that moment use this list; drafts in progress and locked quotations are not affected.</div></div>';
+    +'<span class="pill '+(pr.enabled?'pill-teal':'pill-navy')+'">'+(pr.enabled?'ON — in use':'OFF — not in use')+'</span>'
+    +(ed?'<button class="btn'+(pr.enabled?'':' btn-primary')+'" onclick="_cpbSetEnabled('+(!pr.enabled)+')">'+(pr.enabled?'Switch off':'Switch on')+'</button>':'')+'</div>'
+    +'<div style="font-size:12px;color:var(--text2);padding:0 16px 12px">'
+    +(pr.enabled
+      ?'In use since '+escHtml(fmtDT(pr.enabled_at||''))+': C-series quotations started since then use this list. Quotations started before, other companies\' quotations and locked quotations are not affected.'
+      :'Off: every quotation, including C-series, uses the shared prices. When switched on, only C-series quotations started from that moment use this list; drafts in progress and locked quotations are not affected.')
+    +'</div></div>';
 
   // prices
   var tabs=[['material','Materials'],['hardware','Hardware'],['service','Services']];
@@ -5769,7 +5901,7 @@ function _cpbAdd(){
     if(r&&r.error){ showToast('Could not add: '+(r.error.message||r.error)); return; }
     cpbState.prices.push(r.data[0]);
     logActivity((cpbState.co==='C'?'CWLI':'Company')+' price list: added '+name+(unit?' ('+unit+')':'')+' at '+fmtMoney(price)+(exact?'':' — own product')+'.','');
-    renderCompanyPrices(); showToast('Added.');
+    renderCompanyPrices(); showToast('Added.'); _loadPriceLayer();
   });
 }
 function _cpbSetPrice(id,v){
@@ -5779,7 +5911,7 @@ function _cpbSetPrice(id,v){
   supa.from('company_prices').update({price:n}).eq('id',id).select('id').then(function(r){
     if(r&&r.error||!(r&&r.data&&r.data.length)){ showToast('Could not save: '+((r&&r.error&&r.error.message)||'no access')); renderCompanyPrices(); return; }
     p.price=n; logActivity((cpbState.co==='C'?'CWLI':'Company')+' price list: '+p.name+' '+fmtMoney(was)+' → '+fmtMoney(n)+'.','');
-    showToast('Saved.');
+    showToast('Saved.'); _loadPriceLayer();
   });
 }
 function _cpbRemove(id){
@@ -5789,7 +5921,7 @@ function _cpbRemove(id){
     if(r&&r.error||!(r&&r.data&&r.data.length)){ showToast('Could not remove: '+((r&&r.error&&r.error.message)||'no access')); return; }
     cpbState.prices=cpbState.prices.filter(function(x){ return x.id!==id; });
     logActivity((cpbState.co==='C'?'CWLI':'Company')+' price list: removed '+p.name+' (was '+fmtMoney(+p.price)+').','');
-    renderCompanyPrices();
+    renderCompanyPrices(); _loadPriceLayer();
   });
 }
 function _cpbReadNums(attr){
@@ -5808,7 +5940,7 @@ function _cpbSavePricing(){
     if(x&&x.error){ showToast('Could not save: '+(x.error.message||x.error)); return; }
     cpbState.pricing=x.data[0];
     logActivity((cpbState.co==='C'?'CWLI':'Company')+' pricing settings saved ('+Object.keys(r.vals).length+' set, the rest use the shared values).','');
-    showToast('Pricing settings saved.');
+    showToast('Pricing settings saved.'); _loadPriceLayer();
   });
 }
 function _cpbSaveCosts(){
@@ -7173,6 +7305,7 @@ function initQuotation() {
   // to the staff member's own company).
   if(el('cl-type'))el('cl-type').value='Direct';
   qHomeCompany='';   // a new quotation belongs to whoever makes it — fixed at its first save
+  qPriceBook=null; qDraftStartedAt=new Date().toISOString();   // its price list is decided live until the first save
   if(typeof renderClientCompanyField==='function') renderClientCompanyField();
   qSerial=''; qDraftKey=_newDraftKey(); // no number until one is claimed, at first save
   qTestDraft=false;                     // a new quotation is never a test unless an Admin says so
@@ -8454,7 +8587,7 @@ function removeItemFromArea(a,i) {
   renderItems();
 }
 function addSvcItem(a) {
-  qAreas[a].svcItems.push({svcIdx:0,qty:1,price:(SERVICES[0]&&SERVICES[0].price)||0});
+  qAreas[a].svcItems.push({svcIdx:0,qty:1,price:_pbSvcPrice(SERVICES[0])});
   renderItems();
 }
 function removeSvcItem(a,i) {
@@ -8959,7 +9092,7 @@ function onSvcSearch(inp,a,i){
     // Picking a (different) service resets the price to that service's catalog rate — same
     // behavior as materials/hardware's datalist pick, which always overwrites with the freshly
     // matched item's price rather than keeping a stale override from whatever was there before.
-    qAreas[a].svcItems[i].price=SERVICES[j].price||0;
+    qAreas[a].svcItems[i].price=_pbSvcPrice(SERVICES[j]);
     recalc();return;
   }}
 }
@@ -8970,7 +9103,7 @@ function onSvcPick(inp,a,i){onSvcSearch(inp,a,i);renderItems();}
 // back to SERVICES/Price DB — purely a per-quotation override, exactly like materials/hardware.
 function _svcEffectivePrice(si){
   if(si&&si.price!=null) return si.price;
-  var svc=SERVICES[si&&si.svcIdx]; return svc?(svc.price||0):0;
+  var svc=SERVICES[si&&si.svcIdx]; return svc?_pbSvcPrice(svc):0;
 }
 // What a service line is actually billed at, and what it adds to the area.
 //
@@ -9173,7 +9306,8 @@ function _minChargeTopUps(){
 }
 function _svcLineTotal(si){ return _svcUnitPrice(si)*(si&&si.qty||0); }
 // ── Mat/Hw source helpers — DB when loaded, local catalog as fallback ─────
-function getMatSource(){
+function getMatSource(){ return _pbAdjust('material',_getMatSourceBase()); }
+function _getMatSourceBase(){
   if(!dbMaterials.length) return MAT_CATALOG;
   var key=_srcKey(dbMaterials,MAT_CATALOG);
   // Same list AND same length: a reload with the same row count (a price or name changed) is a
@@ -9185,7 +9319,8 @@ function getMatSource(){
   _matSrcCache=r; _matSrcKey=key; _matSrcFor=dbMaterials;
   return r;
 }
-function getHwSource(){
+function getHwSource(){ return _pbAdjust('hardware',_getHwSourceBase()); }
+function _getHwSourceBase(){
   if(!dbHardware.length) return HW_CATALOG;
   var key=_srcKey(dbHardware,HW_CATALOG);
   if(_hwSrcCache&&_hwSrcKey===key&&_hwSrcFor===dbHardware) return _hwSrcCache;
@@ -9706,7 +9841,7 @@ function removeBOMItem(a,ci) {
   qAreas[a].bomItems.splice(ci,1);
   renderItems();
 }
-function _dbForCat(cat){ return cat==='services'?dbServices:cat==='materials'?dbMaterials:cat==='hardware'?dbHardware:[]; }
+function _dbForCat(cat){ return cat==='services'?_pbAdjust('service',dbServices):cat==='materials'?_pbAdjust('material',dbMaterials):cat==='hardware'?_pbAdjust('hardware',dbHardware):[]; }
 function addBOMRow(a,ci,cat) {
   var db=_dbForCat(cat);
   if(db.length) qAreas[a].bomItems[ci][cat].push({name:db[0].name,unit:db[0].unit,qty:1,price:db[0].price});
@@ -33688,6 +33823,7 @@ function gCheckRole(){
       gShowApp();
       setTimeout(_loadMySkuAccess,2500);
       setTimeout(_loadMyCpbAccess,2600);
+      setTimeout(_loadPriceLayer,1500);
       setTimeout(_loadMyOrderAssign,2700);
       setTimeout(_loadProfiles,2900);
       setTimeout(_shadowUserCheck,3000); // phase 3: compare the Sheet with the database copy, record only
@@ -39879,6 +40015,7 @@ function _serialClaimSettled(){
 function _gSaveQuotationCore(){
   if(!gToken||!gUser) return;
   if(!qHomeCompany) qHomeCompany=currentUserCompany;   // the first save fixes whose quotation this is
+  if(qPriceBook===null) qPriceBook=_quotPriceBook();     // ...and which price list it uses
   if(!qSerialCommitted){
     // ── Refuse to claim a number this base serial already has ──────────────────────────────
     // qSerialCommitted=false is supposed to mean "this quotation has never been through a save,
@@ -40408,6 +40545,7 @@ function getFullQuotationState(){
     delivery:(el('cl-delivery')?el('cl-delivery').value:''),
     type:(el('cl-type')?el('cl-type').value:'Direct'),
     homeCompany:_quotHomeCompany(), // whose quotation this is — Direct means this company (see qHomeCompany)
+    priceBook:(qPriceBook===null?_quotPriceBook():qPriceBook),  // '' shared, 'C' CWLI's own list (Company prices)
     company:(el('cl-company-sel')?el('cl-company-sel').value:''), // subsidiary company selection — was never persisted before 2026-07-04
     service:(el('cl-service')?el('cl-service').value:'Fabrication only'),
     segment:(el('cl-segment')?el('cl-segment').value:''),
@@ -40895,6 +41033,8 @@ function restoreFullQuotationState(state){
   if(el('cl-delivery')) el('cl-delivery').value=c.delivery||'';
   if(el('cl-type')) el('cl-type').value=c.type||'Direct';
   qHomeCompany=_homeCompanyFromState(state);  // BEFORE the company field renders — it reads it
+  qPriceBook=(state.client&&typeof state.client.priceBook==='string')?state.client.priceBook:'';   // saved before company lists existed = shared
+  qDraftStartedAt='';
   if(typeof renderClientCompanyField==='function') renderClientCompanyField(); // rebuilds cl-company-sel per the restored type
   if(c.company&&el('cl-company-sel')){
     var _cs=el('cl-company-sel'), _cv=_canonCompany(c.company)||c.company;
@@ -50678,7 +50818,7 @@ function _prodReflectFill(sum,startNew,stageLabel,rep){
     if(mt.outsource) area.outsourceMaterials.push({name:mt.name,unit:mt.unit||'pc',qty:mt.qty,price:mt.price||0,saved:false});
     // MTO items land in the regular matItems list (normal cost rates), never outsourceMaterials —
     // the whole point of MTO vs Outsource is that MTO stays on standard material pricing.
-    else area.matItems.push({name:mt.name,qty:mt.qty,unit:mt.unit||'pc',price:mt.price||0,custom:mt.custom!==false,mto:!!mt.mto,mtoLeadDays:mt.mto?(mt.mtoLeadDays||0):0});
+    else area.matItems.push({name:mt.name,qty:mt.qty,unit:mt.unit||'pc',price:(mt.custom===false?_pbItemPrice('material',mt.name,mt.unit||'pc',mt.price||0):(mt.price||0)),custom:mt.custom!==false,mto:!!mt.mto,mtoLeadDays:mt.mto?(mt.mtoLeadDays||0):0});
     var _ml=mt.outsource?area.outsourceMaterials:area.matItems; _reflectNewMark(_ml[_ml.length-1]);
   }
   // Hardware — same catalog-match/outsource split as materials
@@ -50686,7 +50826,7 @@ function _prodReflectFill(sum,startNew,stageLabel,rep){
     var hw=sum.hardware[h];
     if(!hw.include||!hw.name||!(hw.qty>0)) continue;
     if(hw.outsource) area.outsourceHardware.push({name:hw.name,unit:hw.unit||'pcs',qty:hw.qty,price:hw.price||0,saved:false});
-    else area.hwItems.push({name:hw.name,qty:hw.qty,unit:hw.unit||'pcs',price:hw.price||0,custom:hw.custom!==false});
+    else area.hwItems.push({name:hw.name,qty:hw.qty,unit:hw.unit||'pcs',price:(hw.custom===false?_pbItemPrice('hardware',hw.name,hw.unit||'pcs',hw.price||0):(hw.price||0)),custom:hw.custom!==false});
     var _hl=hw.outsource?area.outsourceHardware:area.hwItems; _reflectNewMark(_hl[_hl.length-1]);
   }
   // Services

@@ -6909,6 +6909,52 @@ const PROFILES = {
         } finally { w.recalc = keep.r; w.recalcFQ = keep.f; w.showToast = keep.t; w.logActivity = keep.l; w._renderFrozenRatePill = keep.p; w._pCalc = keep.c; w.qLockedRates = keep.q; }
         return res;
       }, true);
+      check('Company price layer: only C-series quotations started after the switch use CWLI prices', () => {
+        const w = window;
+        if (typeof w._quotPriceBook !== 'function' || typeof w._pbAdjust !== 'function') return 'missing';
+        const keep = { L: w.cpbLayer, v: w.cpbLayerVer, pb: w.qPriceBook, ds: w.qDraftStartedAt, s: w.qSerial, dk: w.qDraftKey,
+                       m: w.dbMaterials, sv: w.SERVICES, gcn: w.getCompanyName, lr: w.qLockedRates, mc: w._matSrcCache };
+        try {
+          const T0 = '2026-11-28T00:00:00.000Z';
+          w.dbMaterials = [{ name: 'Real White PB 4x8 2F (18mm, Matte)', unit: 'pc', price: 1450 }, { name: 'Other Board', unit: 'pc', price: 900 }];
+          w._matSrcCache = null;
+          w.SERVICES = [{ name: 'Panel cutting', unit: 'lm', price: 35 }].concat((keep.sv || []).slice(1));
+          w.cpbLayer = w._cpbBuildLayer(
+            [{ company_key: 'C', enabled: true, enabled_at: T0, cost_factors: { fabContingency: 7 }, carcass_prices: {} }],
+            [{ company_key: 'C', kind: 'material', name: 'Real White PB 4x8 2F (18mm, Matte)', unit: 'pc', price: 1300, company_only: false, active: true },
+             { company_key: 'C', kind: 'service', name: 'Panel cutting', unit: 'lm', price: 30, company_only: false, active: true },
+             { company_key: 'C', kind: 'material', name: 'CWLI Stone 18mm', unit: 'pc', price: 999, company_only: true, active: true }]);
+          w.cpbLayerVer++;
+          let co = 'Cebu World Laminate, Inc.';
+          w.getCompanyName = () => co;
+          const look = () => { const f = w.lookupInSource(w.getMatSource(), 'Real White PB 4x8 2F (18mm, Matte)'); return f && f.price; };
+          const r = {};
+          // new C draft started after the switch
+          w.qSerial = ''; w.qDraftKey = 'DRAFT-test01'; w.qPriceBook = null; w.qDraftStartedAt = '2026-11-28T05:00:00.000Z';
+          r.cBook = w._quotPriceBook(); r.cMat = look(); r.cSvc = w._svcEffectivePrice({ svcIdx: 0 });
+          r.cOnly = !!w.lookupInSource(w.getMatSource(), 'CWLI Stone 18mm');
+          r.cCF = w._withFrozenRates(() => w.CF.fabContingency);
+          r.capCF = w._capturePricingRates().cf.fabContingency;
+          // same draft but started before the switch
+          w.qDraftStartedAt = '2026-11-27T05:00:00.000Z'; r.oldDraft = w._quotPriceBook(); r.oldMat = look();
+          // a WCL / MSSI draft
+          w.qDraftStartedAt = '2026-11-28T05:00:00.000Z'; co = 'Module Systems and Services, Inc.';
+          r.mBook = w._quotPriceBook(); r.mMat = look(); r.mSvc = w._svcEffectivePrice({ svcIdx: 0 }); r.mCF = w._withFrozenRates(() => w.CF.fabContingency);
+          // saved quotations: fixed at save, older saves have no list
+          w.qDraftKey = ''; w.qSerial = 'QT-C00000999'; w.qPriceBook = 'C'; r.savedC = w._quotPriceBook();
+          w.qPriceBook = ''; r.savedOld = w._quotPriceBook();
+          // switch off: a C quotation goes back to shared
+          w.qPriceBook = 'C'; w.cpbLayer.C.enabled = false; r.off = w._quotPriceBook(); r.offMat = look();
+          // nothing open: shared
+          w.cpbLayer.C.enabled = true; w.qSerial = ''; w.qDraftKey = ''; r.none = w._quotPriceBook();
+          r.sharedCF = w.CF.fabContingency;
+          return r;
+        } finally {
+          w.cpbLayer = keep.L; w.cpbLayerVer = keep.v + 2; w.qPriceBook = keep.pb; w.qDraftStartedAt = keep.ds; w.qSerial = keep.s; w.qDraftKey = keep.dk;
+          w.dbMaterials = keep.m; w.SERVICES = keep.sv; w.getCompanyName = keep.gcn; w.qLockedRates = keep.lr; w._matSrcCache = keep.mc;
+        }
+      }, { cBook: 'C', cMat: 1300, cSvc: 30, cOnly: true, cCF: 7, capCF: 7, oldDraft: '', oldMat: 1450,
+           mBook: '', mMat: 1450, mSvc: 35, mCF: 0, savedC: 'C', savedOld: '', off: '', offMat: 1450, none: '', sharedCF: 0 });
       check('Company price lists: only Admin/Director or ticked people open them; nothing touches shared prices', () => {
         const w = window;
         if (typeof w._cpbCanOpen !== 'function') return 'missing';
