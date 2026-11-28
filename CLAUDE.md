@@ -14021,3 +14021,10 @@ Rule (Rommel): **only the assigned person, or their delegate, decides. Admin/Dir
 - NEXT (Rommel to agree): once desktop use shows in the usage table, blank the key in User Roles col R (and
   Settings → Designers Support) so browsers no longer hold it, then rotate the key at Anthropic and update
   the ANTHROPIC_API_KEY secret.
+- 2026-11-28 later: relay proven live (Rommel's "Test the AI" in Settings → Lami → desktop:test, 1 call).
+  A blank User Roles R1 now also erases the copy saved in each browser (`mc_prod`).
+  **Decision (Rommel): keep the key in R1 for one week of real team use as a stress test, then clear R1
+  next weekend (~2026-12-05/06). No new key for now.** Before clearing: check Settings → Lami usage shows
+  desktop:drawing / chat from several people, and that no "server relay failed" warnings were reported.
+  The 5 never-connected users (Kathleen, Roniel, Michael, Noel, Rhodalyn) lose AI after R1 is cleared
+  until they Connect once.
