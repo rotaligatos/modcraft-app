@@ -13804,3 +13804,23 @@ All live, each with a smoke check.
   CWLI's set including `ppic`, so later edits never move an issued price. Switch still OFF, no data entered.
   **Parked by Rommel ("we will get back on this").** Next when resumed: Phase 4 — Cost Report / Dashboard
   margin reading `company_costs` for C quotations; first real test with the switch on.
+
+## What was changed on 2026-11-28 (session 4 — photo frames, sideways scroll, Company prices into Settings)
+All live, each with a smoke check.
+- **Bigger profile photo** went live at 4:48pm instead of 5pm (`PROFILE_BIG_FROM` moved to 16:00).
+- **Holiday photo frames**: `holiday-theme.js` gained `HolidayTheme.frame(html,size)` + `setFrame(h)` (called
+  in `apply`): sets `html[data-hol-frame]` and CSS vars `--hol-ring` (conic gradient of the occasion's
+  light colours, else its strip colours), `--hol-badge` (the occasion's hat/first emoji), `--hol-badge2`
+  (second emoji, shown on photos ≥80px). Outer size never changes (inner shrinks by the ring width);
+  no badge under 22px; no occasion or theme switched off = plain. Modcraft wraps photos via `_holFrame`
+  in `_avatarHtml`, the top-bar pill and the Dashboard tile. Other apps can call it once they show photos.
+- **Sideways scroll on every page**: windows 1500–~1760px wide made the page 1764px — the top-bar tab row
+  could only shrink below 1500px (`@media (max-width:1500px)`), and the extra tab + bigger pill outgrew
+  the window. The shrink/scroll rule now applies at ALL widths. Dashboard grid columns are
+  `minmax(0,1fr)` (a plain 1fr will not shrink below content); the Dashboard photo tile shows only on
+  windows ≥1300px. Lesson: offline tests miss this because the icon font is blocked (tabs measure
+  narrower) — pad the nav buttons in the test to stand in for the icons.
+- **Company prices moved into Settings** (Rommel: not checked regularly): Settings tab `st-tab-compprices`
+  (shown when `_cpbCanOpen()`); the single `#cpb-wrap` box is moved into whichever host opens it
+  (`_cpbMount`) so its ids exist once. The top-menu entry stays only for ticked people without
+  Settings access (same pattern as "Can add SKUs").
